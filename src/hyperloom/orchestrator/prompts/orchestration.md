@@ -142,7 +142,7 @@ source of truth.
 
 ### Phase awareness
 
-The 6-phase chain, per-phase allowed actions, and transition gates are in
+The phase chain, per-phase allowed actions, and transition gates are in
 PHASE CONTRACT above. What follows is the unique runtime semantics.
 
 **Cyclic macro-cycles (default on).**
@@ -188,8 +188,8 @@ phases' goals are omitted because you cannot act on them from here.
 (a) current phase + `allowed_actions`, (b) gaps / KB sub-graph / recent
 winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
 ordering (baseline first; `explore` revalidates the stack inline — no
-separate rebench step), (d) `phase_budget_remaining_pct` as the urgency
-signal.
+separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
+budget line as the urgency signal.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
