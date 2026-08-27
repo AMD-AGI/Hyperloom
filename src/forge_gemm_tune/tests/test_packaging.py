@@ -109,7 +109,7 @@ def test_wheel_builds_twice_without_recursion(tmp_path):
     assert any(n.startswith(f"{_PKG_NAME}/") and n.endswith(".py") for n in names), "no package modules in wheel"
 
 
-def test_standalone_wheel_imports_without_kernel_agents(tmp_path):
+def test_standalone_wheel_imports_without_kernelforge(tmp_path):
     """Install the subpackage wheel alone and import its knowledge-store path."""
     src = tmp_path / _PKG_NAME
     shutil.copytree(
@@ -163,7 +163,7 @@ def test_standalone_wheel_imports_without_kernel_agents(tmp_path):
             "-c",
             (
                 "import importlib.util;"
-                "assert importlib.util.find_spec('kernel_agents') is None;"
+                "assert importlib.util.find_spec('kernelforge') is None;"
                 "from forge_gemm_tune.router import resolve_gpu_type;"
                 "from forge_gemm_tune.artifact_manifest import build_artifact_manifest;"
                 "assert resolve_gpu_type('mi300x') == 'mi300x'"

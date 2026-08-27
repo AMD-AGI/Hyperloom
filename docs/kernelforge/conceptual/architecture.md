@@ -8,7 +8,7 @@ myst:
 # Architecture
 
 KernelForge is organized around one **iteration loop** per kernel. A campaign
-(`kernel-agents forge-loop`) owns a git workspace, the kernel it optimizes and
+(`kernelforge forge-loop`) owns a git workspace, the kernel it optimizes and
 the driver that measures it, and drives a single writable agent — an
 **implementer** carrying one backend fellow's expertise — through repeated
 plan → edit → validate → benchmark cycles. The agent works through the Bash tool

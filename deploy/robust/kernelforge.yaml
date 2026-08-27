@@ -312,13 +312,13 @@ body: |
                 "$KF_PY" -m pip install --quiet -e ".[claude,dev]"
                 "$KF_PY" -c "import triton" >/dev/null 2>&1 || "$KF_PY" -m pip install --quiet triton || true
 
-                if ! command -v kernel-agents >/dev/null 2>&1; then
-                  KF_BIN="$("$KF_PY" -c 'import os,sys; print(os.path.join(os.path.dirname(sys.executable), "kernel-agents"))')"
+                if ! command -v kernelforge >/dev/null 2>&1; then
+                  KF_BIN="$("$KF_PY" -c 'import os,sys; print(os.path.join(os.path.dirname(sys.executable), "kernelforge"))')"
                   if [ -x "$KF_BIN" ]; then
-                    ln -sf "$KF_BIN" /usr/local/bin/kernel-agents
+                    ln -sf "$KF_BIN" /usr/local/bin/kernelforge
                   fi
                 fi
-                command -v kernel-agents >/dev/null 2>&1 || { echo "[kf] ERROR: kernel-agents not on PATH" >&2; exit 4; }
+                command -v kernelforge >/dev/null 2>&1 || { echo "[kf] ERROR: kernelforge not on PATH" >&2; exit 4; }
 
                 ensure_claude
 

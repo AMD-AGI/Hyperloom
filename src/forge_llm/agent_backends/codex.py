@@ -348,7 +348,7 @@ def _load_codex_sdk() -> Any:
         import openai_codex
     except ImportError as exc:
         raise CodexUnavailableError(
-            "Codex Python SDK is not installed; install kernel-agents[codex]"
+            "Codex Python SDK is not installed; install kernelforge[codex]"
         ) from exc
     return openai_codex
 
@@ -416,7 +416,7 @@ class CodexBackend:
             codex_home = Path(configured).expanduser().resolve()
         else:
             if not self._codex_home:
-                root = Path.home() / ".cache" / "kernel-agents" / "codex_home"
+                root = Path.home() / ".cache" / "kernelforge" / "codex_home"
                 root.mkdir(parents=True, exist_ok=True)
                 self._codex_home_owner = tempfile.TemporaryDirectory(
                     prefix="run-",

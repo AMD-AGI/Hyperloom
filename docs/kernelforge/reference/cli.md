@@ -1,22 +1,22 @@
 ---
 myst:
   html_meta:
-    "description": "KernelForge CLI reference: the kernel-agents forge-loop, forge-rewrite-by-flydsl and forge-fuse commands, plus the forge-gemm-tune entry point."
-    "keywords": "KernelForge, CLI, kernel-agents, forge-loop, forge-rewrite-by-flydsl, forge-fuse, forge-gemm-tune, FlyDSL"
+    "description": "KernelForge CLI reference: the kernelforge forge-loop, forge-rewrite-by-flydsl and forge-fuse commands, plus the forge-gemm-tune entry point."
+    "keywords": "KernelForge, CLI, kernelforge, forge-loop, forge-rewrite-by-flydsl, forge-fuse, forge-gemm-tune, FlyDSL"
 ---
 
 # CLI reference
 
-KernelForge installs the `kernel-agents` CLI (plus the companion
+KernelForge installs the `kernelforge` CLI (plus the companion
 `forge-gemm-tune` entry point).
 
 ## Core
 
 ```bash
-kernel-agents forge-loop --workspace <W> --kernel <f> --driver <f> [options]
-kernel-agents forge-rewrite-by-flydsl --source-kernel <f> --driver <f> \
+kernelforge forge-loop --workspace <W> --kernel <f> --driver <f> [options]
+kernelforge forge-rewrite-by-flydsl --source-kernel <f> --driver <f> \
     --logical-op-name <op> --workspace <W> --experiments-dir <D> [options]
-kernel-agents forge-fuse --trace <t> --model-path <d> --framework sglang \
+kernelforge forge-fuse --trace <t> --model-path <d> --framework sglang \
     --output-dir <d> [options]
 ```
 

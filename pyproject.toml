@@ -364,7 +364,7 @@ extend-exclude = [
     # forge packages are still formatted for KernelForge's line-length 100.
     # P3 reflows them at 120 and deletes these three entries; only
     # ``src/kernelforge/data`` stays excluded permanently.
-    "src/kernel_agents",
+    "src/kernelforge",
     "src/forge_gemm_tune",
     "src/forge_llm",
 ]

@@ -26,7 +26,7 @@ ahead of the subscription token.
 ## Autonomous loop — overnight optimization
 
 ```bash
-kernel-agents forge-loop --workspace <W> \
+kernelforge forge-loop --workspace <W> \
     --kernel <f> --driver <f> --snr-threshold 30 --max-hours 8
 ```
 

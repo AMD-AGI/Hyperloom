@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "Fuse launch-bound decode chains in sglang or vLLM with kernel-agents forge-fuse, from trace diagnosis through the serving smoke."
+    "description": "Fuse launch-bound decode chains in sglang or vLLM with kernelforge forge-fuse, from trace diagnosis through the serving smoke."
     "keywords": "KernelForge, kernel fusion, forge-fuse, decode, launch-bound, sglang, vLLM, CUDA graph, Triton, ROCm"
 ---
 
 # Fuse a launch-bound decode path
 
-`kernel-agents forge-fuse` attacks a different bottleneck from the rest of
+`kernelforge forge-fuse` attacks a different bottleneck from the rest of
 KernelForge. The other fellows make one kernel faster. Fusion assumes the
 kernels are already fast and goes after what is left: a long tail of tiny
 operations -- residual adds, RMSNorm, RoPE, activations, cache writes -- each
@@ -32,7 +32,7 @@ clearly fusible chain beats a large share with nothing fusible in it.
 ## Running it
 
 ```bash
-kernel-agents forge-fuse \
+kernelforge forge-fuse \
     --trace decode.trace.json.gz \
     --model-path /models/LFM2-8B \
     --framework sglang \
@@ -42,7 +42,7 @@ kernel-agents forge-fuse \
 Diagnose without touching a GPU or an agent first:
 
 ```bash
-kernel-agents forge-fuse ... --dry-run
+kernelforge forge-fuse ... --dry-run
 ```
 
 That writes the manifest with the localized recipe skeleton so you can see which

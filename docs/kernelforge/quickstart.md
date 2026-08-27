@@ -12,7 +12,7 @@ This guide walks through a complete kernel development workflow — from install
 | GPU | MI300X / MI355X | `rocm-smi --showproductname` |
 | Claude auth | API key, subscription token, **or** Claude Code Max | `echo $ANTHROPIC_API_KEY` / `echo $CLAUDE_CODE_OAUTH_TOKEN` **or** `claude --version` |
 
-**Billing choice.** `kernel-agents forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
+**Billing choice.** `kernelforge forge-loop` drives its agent sessions through `claude-agent-sdk.query()`, which spawns the `claude` CLI as a subprocess, so whatever that CLI authenticates with is what gets billed. A `claude` logged in with Claude Code Max bills against your Max subscription and needs **no `ANTHROPIC_API_KEY`**. Where a login cannot persist — a container, CI — `CLAUDE_CODE_OAUTH_TOKEN` reaches the same subscription. Set `ANTHROPIC_API_KEY` only if you want API-credit billing instead; the CLI reads it ahead of the subscription token, so setting both bills the key.
 
 Optional but recommended:
 - [RTK](https://github.com/rtk-ai/rtk) for 60-90% token savings: `cargo install rtk`
@@ -32,8 +32,8 @@ For rocprof-compute hardware profiling (System Speed-of-Light + roofline), add t
 Verify:
 
 ```bash
-kernel-agents --version
-kernel-agents forge-loop --help
+kernelforge --version
+kernelforge forge-loop --help
 ```
 
 ## Step 2: Configure
@@ -113,7 +113,7 @@ Or create a `.env` file (see `.env.example`).
 
 ## Step 3: Run your first campaign
 
-`kernel-agents forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The `examples/` directory ships runnable tasks — the Triton softmax one is the smallest task that exercises the whole loop:
+`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The `examples/` directory ships runnable tasks — the Triton softmax one is the smallest task that exercises the whole loop:
 
 ```bash
 cd examples/triton-softmax-forge-loop
@@ -123,7 +123,7 @@ MAX_HOURS=1 ./run_example.sh /tmp/forge_softmax
 `run_example.sh` copies the task into a scratch git workspace, commits it, and launches the loop — the isolate-then-run pattern every caller should follow, because forge-loop git-inits its workspace and edits the kernel **in place**. Underneath it is a plain CLI call:
 
 ```bash
-kernel-agents forge-loop \
+kernelforge forge-loop \
     --kernel /tmp/forge_softmax/softmax_kernel.py \
     --driver /tmp/forge_softmax/driver.py \
     --workspace /tmp/forge_softmax \
@@ -244,7 +244,7 @@ For overnight optimization of a specific kernel, point the loop at the kernel an
 
 ```bash
 # Run one campaign (8-hour time budget)
-kernel-agents forge-loop \
+kernelforge forge-loop \
     --workspace /work/aiter-amd \
     --kernel csrc/hk_sla/vsa_sparse_attention_bwd.cpp \
     --driver op_tests/test_sla_bwd.py \
@@ -254,13 +254,13 @@ kernel-agents forge-loop \
     --max-hours 8
 
 # Resume an interrupted campaign in the same workspace
-kernel-agents forge-loop --workspace /work/aiter-amd --resume
+kernelforge forge-loop --workspace /work/aiter-amd --resume
 ```
 
 An operator that spans several files, or lives in an existing checkout such as AITER, is the same command plus the paths that seed orientation and profiling — `--kernel` stays the anchor, and the agent may edit any tracked implementation file outside the protected measurement surface:
 
 ```bash
-kernel-agents forge-loop \
+kernelforge forge-loop \
     --workspace /work/aiter-amd \
     --kernel csrc/include/custom_all_reduce.cuh \
     --driver op_tests/multigpu_tests/forge_all_reduce_driver.py \
@@ -302,7 +302,7 @@ calls only while stuck; bench remains the final gate on every accepted edit.
 | `examples/triton2flydsl-softmax-flydsl-rewrite/` | Triton → FlyDSL | Correctness-first port followed by FlyDSL optimization |
 | `examples/triton2flydsl-mxfp8-grouped-gemm/` | Triton → FlyDSL | SGLang MXFP8 grouped GEMM for MoE decode and prefill |
 
-The two rewrite tasks use the other command, `kernel-agents forge-rewrite-by-flydsl`: it ports a source kernel to FlyDSL correctness-first, then hands the correct FlyDSL kernel to the same optimization loop and reports source vs. FlyDSL speedup.
+The two rewrite tasks use the other command, `kernelforge forge-rewrite-by-flydsl`: it ports a source kernel to FlyDSL correctness-first, then hands the correct FlyDSL kernel to the same optimization loop and reports source vs. FlyDSL speedup.
 
 ## Writing Your Own Task
 
@@ -343,7 +343,7 @@ pip install rtk
 
 Set the workspace to the repo root that owns the kernel, and give `--kernel` and `--driver` paths inside it:
 ```bash
-kernel-agents forge-loop --workspace /work/aiter-amd \
+kernelforge forge-loop --workspace /work/aiter-amd \
     --kernel csrc/hk_sla/vsa_sparse_attention_bwd.cpp \
     --driver op_tests/test_sla_bwd.py
 ```

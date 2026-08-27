@@ -12,18 +12,18 @@ are a new fellow, a new GPU tool, and new knowledge.
 
 ## Add a new fellow agent
 
-1. Create `src/kernel_agents/fellows/mybackend/` with:
+1. Create `src/kernelforge/fellows/mybackend/` with:
    - `__init__.py`
    - `prompts.py` (defining `build_system_prompt(gpu_target, knowledge_content)`)
 2. Add backend knowledge under `local_knowledge/languages/mybackend/`.
 3. Register the backend in
-   `src/kernel_agents/fellows/constants.py:FELLOW_PROMPT_MODULES`.
+   `src/kernelforge/fellows/constants.py:FELLOW_PROMPT_MODULES`.
 
 `--fellow mybackend-fellow` then selects it.
 
 ## Add a GPU toolchain helper
 
-1. Create `src/kernel_agents/mcp_server/tools/mytool.py`.
+1. Create `src/kernelforge/mcp_server/tools/mytool.py`.
 2. Call it from the loop stage that needs it — the tools are plain functions,
    invoked directly rather than through a protocol.
 

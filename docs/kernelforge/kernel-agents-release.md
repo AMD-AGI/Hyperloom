@@ -38,7 +38,7 @@ Kernel Agents deploys 8 backend fellow agents, each with domain-specific knowled
 ### Architecture
 
 ```
-                   Campaign — kernel-agents forge-loop
+                   Campaign — kernelforge forge-loop
               One kernel, one driver, one change per iteration
                               |
         Backend fellows (8) — domain knowledge for the kernel at hand
@@ -155,7 +155,7 @@ Unlike single-framework tools, Kernel Agents works across CK (C++ templates), Fl
 | **Claude Code in-session** | Interactive campaigns from a Claude Code session | The campaign runs as a background command whose build, bench, PMC read, and KEEP/REVERT decision stream into the session; bills against Claude Code Max |
 | **Autonomous Loop** | Overnight optimization campaigns | Evidence-planned working-tree candidates with driver-owned validation and measured KEEP/REVERT |
 
-The autonomous loop mode (`kernel-agents forge-loop`) is particularly valuable
+The autonomous loop mode (`kernelforge forge-loop`) is particularly valuable
 for overnight campaigns. It keeps candidates in the working tree, runs the
 driver-owned complete correctness suite, and commits only candidates that pass
 three independent benchmarks. It is TIME-driven via `--max-hours`; stalled

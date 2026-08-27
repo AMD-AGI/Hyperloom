@@ -5,7 +5,7 @@
 
 ``forge_llm`` is imported inside the call, never at module scope. The standalone
 wheel is meant to be the only thing a GPU box has to install to tune, and a test
-asserts it imports with no ``kernel_agents`` present; pulling an agent provider
+asserts it imports with no ``kernelforge`` present; pulling an agent provider
 in at import time would quietly make the LLM stack a tuning dependency. Absent,
 this returns "unavailable" and the caller carries on without a generated tuner,
 which is the same outcome as the gate being closed.

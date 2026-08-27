@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "How to run the KernelForge autonomous overnight optimization loop with specialist plan synthesis, canonical validation, git keep/revert, and stalled-search supervision."
-    "keywords": "KernelForge, autonomous loop, overnight optimization, kernel-agents forge-loop, supervisor, validation pipeline, git commit revert"
+    "keywords": "KernelForge, autonomous loop, overnight optimization, kernelforge forge-loop, supervisor, validation pipeline, git commit revert"
 ---
 
 # Autonomous overnight loop
@@ -13,7 +13,7 @@ iteration and keeping only measured improvements.
 ## Run the loop
 
 ```bash
-kernel-agents forge-loop \
+kernelforge forge-loop \
     --workspace /work/aiter-amd \
     --kernel csrc/hk_sla/vsa_sparse_attention_bwd.cpp \
     --driver op_tests/test_sla_bwd.py \
@@ -269,7 +269,7 @@ exception summary. Apply decisions remain separate in `reference_reason`.
 When the search plateaus, `forge-loop` escalates to a supervisor backend:
 
 ```bash
-kernel-agents forge-loop --workspace /work/aiter-amd --resume \
+kernelforge forge-loop --workspace /work/aiter-amd --resume \
     --supervisor-backend codex
 ```
 

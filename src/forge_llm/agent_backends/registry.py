@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import warnings
 from dataclasses import dataclass, replace
 from importlib import metadata, util
 from typing import Callable
@@ -21,11 +22,14 @@ from forge_llm.agent_backends.base import (
 
 log = logging.getLogger(__name__)
 
-# Keeps the ``kernel_agents`` prefix even though this module now lives in
+# Keeps a package-style prefix even though this module now lives in
 # ``forge_llm``: the group name is the published contract third-party providers
 # register against, and renaming it would drop every existing plugin without a
 # word -- a plugin that fails to load is recorded as one log line, not raised.
-PROVIDER_ENTRY_POINT_GROUP = "kernel_agents.agent_providers"
+# Which is exactly why the pre-rename group is still read: plugins published
+# against ``kernel_agents.agent_providers`` keep loading, with one warning.
+PROVIDER_ENTRY_POINT_GROUP = "kernelforge.agent_providers"
+LEGACY_PROVIDER_ENTRY_POINT_GROUP = "kernel_agents.agent_providers"
 _PROVIDER_NAME = re.compile(r"^[a-z][a-z0-9_-]*$")
 
 
@@ -103,11 +107,23 @@ def discover_agent_providers(*, force: bool = False) -> None:
         _plugins_loaded = True
         try:
             discovered = metadata.entry_points()
-            entries = (
-                discovered.select(group=PROVIDER_ENTRY_POINT_GROUP)
-                if hasattr(discovered, "select")
-                else discovered.get(PROVIDER_ENTRY_POINT_GROUP, [])
-            )
+
+            def _select(group: str):
+                if hasattr(discovered, "select"):
+                    return list(discovered.select(group=group))
+                return list(discovered.get(group, []))
+
+            entries = _select(PROVIDER_ENTRY_POINT_GROUP)
+            legacy = [e for e in _select(LEGACY_PROVIDER_ENTRY_POINT_GROUP) if e.name not in {x.name for x in entries}]
+            if legacy:
+                warnings.warn(
+                    f"Agent provider entry-point group {LEGACY_PROVIDER_ENTRY_POINT_GROUP!r} is deprecated; "
+                    f"republish under {PROVIDER_ENTRY_POINT_GROUP!r}. Loading "
+                    + ", ".join(sorted(e.name for e in legacy)),
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
+                entries = entries + legacy
         except Exception as exc:  # noqa: BLE001 - plugin discovery is optional
             _plugin_errors["<discovery>"] = f"{type(exc).__name__}: {exc}"
             return
@@ -208,7 +224,7 @@ def select_default_agent_provider(preferred_model: str = "") -> AgentProvider:
     detail = f"; checks: {'; '.join(failures)}" if failures else ""
     raise AgentProviderUnavailableError(
         "no Agent provider is available; install the 'claude' or 'codex' extra "
-        "of the distribution you installed (kernel-agents provides both), or "
+        "of the distribution you installed (kernelforge provides both), or "
         "configure an external provider"
         f"{detail}"
     )

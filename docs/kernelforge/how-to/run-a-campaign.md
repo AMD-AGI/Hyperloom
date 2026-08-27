@@ -1,13 +1,13 @@
 ---
 myst:
   html_meta:
-    "description": "How to run a KernelForge optimization campaign: prepare a git workspace, launch kernel-agents forge-loop on a kernel and its driver, and review the measured result."
-    "keywords": "KernelForge, run campaign, kernel-agents forge-loop, workspace, driver, fellow, gfx950, forge_experiments"
+    "description": "How to run a KernelForge optimization campaign: prepare a git workspace, launch kernelforge forge-loop on a kernel and its driver, and review the measured result."
+    "keywords": "KernelForge, run campaign, kernelforge forge-loop, workspace, driver, fellow, gfx950, forge_experiments"
 ---
 
 # Run a campaign
 
-A campaign is one `kernel-agents forge-loop` run over one kernel. Each iteration
+A campaign is one `kernelforge forge-loop` run over one kernel. Each iteration
 proposes a change, measures it against the task's driver, and keeps it only if
 the measurement improves.
 
@@ -44,7 +44,7 @@ way to start a new task.
 ```bash
 W=/tmp/forge_run
 
-kernel-agents forge-loop \
+kernelforge forge-loop \
     --kernel "$W/softmax_kernel.py" \
     --driver "$W/driver.py" \
     --workspace "$W" \
@@ -100,7 +100,7 @@ The loop prints its per-iteration progress to stdout, so a headless run is
 usually launched with the output redirected to a log:
 
 ```bash
-kernel-agents forge-loop --workspace "$W" ... > /tmp/forge.log 2>&1
+kernelforge forge-loop --workspace "$W" ... > /tmp/forge.log 2>&1
 tail -F /tmp/forge.log
 ```
 
@@ -110,7 +110,7 @@ interrupted that way — or by a crash — continues from the same workspace:
 
 ```bash
 touch "$W/.stop"                                     # stop at the next iteration boundary
-kernel-agents forge-loop --workspace "$W" --resume   # continue the campaign in that workspace
+kernelforge forge-loop --workspace "$W" --resume   # continue the campaign in that workspace
 ```
 
 Only the existence of `.stop` is checked, so removing it before resuming
