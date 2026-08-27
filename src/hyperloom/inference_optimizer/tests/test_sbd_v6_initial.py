@@ -1,0 +1,1437 @@
+"""Focused coverage for the additive SBD V6 bootstrap fields and stages."""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import pytest
+
+from hyperloom.inference_optimizer.breakdown import exporter
+from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
+from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V5
+from hyperloom.inference_optimizer.session.sbd_v6 import (
+    SCHEMA_VERSION_V6,
+    read_timeline_event,
+    write_timeline_event,
+)
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _gate_args(model: Path, **overrides) -> argparse.Namespace:
+    values = {
+        "model": str(model),
+        "model_display_name": model.name,
+        "framework": "sglang",
+        "gpu_type": "MI300X",
+        "isl": 1024,
+        "osl": 1024,
+        "allow_mm_text_fallback": True,
+    }
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def _seed_state(session_dir: Path, monkeypatch, model: Path) -> None:
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR", str(session_dir))
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "reports").mkdir(parents=True, exist_ok=True)
+    SharedState(session_id="sbd-v6-test", model_name=model.name, model_path=str(model)).save(session_dir)
+
+
+def _write_model_config(model: Path, payload: dict) -> None:
+    _write_json(model / "config.json", payload)
+    (model / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+
+
+def _model_gate_from_breakdown(session_dir: Path) -> dict:
+    breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
+    assert breakdown["schema_version"] == SCHEMA_VERSION_V5
+    assert breakdown["metadata"]["versions"]["schema_version"] == SCHEMA_VERSION_V6
+    assert breakdown["outcome"]["status"] == "failed"
+    assert breakdown["outcome"]["stage_reached"] == "model_gate"
+    return next(event for event in breakdown["timeline"] if event["type"] == "model_gate")
+
+
+def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
+    state = {
+        "session_id": "session-v6",
+        "model_name": "Qwen-Test",
+        "model_path": "/models/qwen-test",
+        "framework": "sglang",
+        "gpu_type": "MI300X",
+        "phase": "CLOSE",
+        "start_ts": "2026-08-27T01:00:00+00:00",
+        "stop_ts": "2026-08-27T02:00:00+00:00",
+        "stop_reason": "target_reached",
+        "tick": 9,
+        "baseline_tput": 100.0,
+        "baseline_accuracy": 0.75,
+        "current_best": {
+            "tput": 125.0,
+            "extra_envs": {"SGLANG_USE_AITER": "1"},
+            "extra_server_args": "--watchdog-timeout 1800",
+        },
+        "cumulative_gain_validated": 25.0,
+        "operator_extra_env": {"TP": "8"},
+        "operator_server_args": "--context-length 11264",
+        "model_info": {
+            "model_type": "qwen3",
+            "num_hidden_layers": 36,
+            "attention_type": "GQA",
+            "num_experts": None,
+        },
+    }
+    manifest = {
+        "session_id": "session-v6",
+        "created_at_utc": "2026-08-27T01:00:00+00:00",
+        "host": "test-host",
+        "code_revision": "abc1234",
+        "pid": 42,
+        "max_minutes": 180,
+        "model_name": "Qwen-Test",
+        "model_path": "/models/qwen-test",
+        "framework": "sglang",
+        "framework_version": "0.5.17",
+        "gpu_type": "MI300X",
+        "tp": 8,
+        "workload": {
+            "conc": 64,
+            "isl": 1024,
+            "osl": 1024,
+            "precision": "bf16",
+            "max_model_len": 11264,
+        },
+        "objective": {"kind": "throughput", "value": 120.0},
+    }
+    _write_json(tmp_path / "state.json", state)
+    _write_json(tmp_path / "manifest.json", manifest)
+
+    before = exporter.build(tmp_path)
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T00:58:00+00:00",
+            "end_time": "2026-08-27T00:59:00+00:00",
+            "ext": {"run_kind": "fresh", "hard_fail_step_id": None, "runtime_snapshot": {}, "steps": []},
+        },
+    )
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "model_gate",
+            "kind": "model_gate",
+            "status": "succeeded",
+            "start_time": "2026-08-27T00:59:00+00:00",
+            "end_time": "2026-08-27T01:00:00+00:00",
+            "ext": {"run_kind": "fresh", "checks": []},
+        },
+    )
+
+    after = exporter.build(tmp_path)
+
+    assert after["schema_version"] == SCHEMA_VERSION_V5
+    v6_keys = {"metadata", "outcome", "timeline", "close"}
+    assert {key: value for key, value in after.items() if key not in v6_keys} == {
+        key: value for key, value in before.items() if key not in v6_keys
+    }
+    assert after["metadata"]["versions"]["schema_version"] == SCHEMA_VERSION_V6
+    assert after["metadata"]["versions"]["hyperloom"] == "abc1234"
+    assert after["metadata"]["task_config"]["launch_env"] == {"TP": "8"}
+    assert after["outcome"]["status"] == "completed"
+    assert after["outcome"]["stage_reached"] == "close"
+    assert "token_usage" not in after["outcome"]
+    assert [event["type"] for event in after["timeline"]] == ["install", "model_gate"]
+    assert after["close"] == {}
+    assert all(event["type"] != "close" for event in after["timeline"])
+
+
+def test_invalid_v6_event_does_not_change_v5_warnings(tmp_path):
+    before = exporter.build(tmp_path)
+    path = tmp_path / "reports" / "sbd_v6" / "install.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{invalid", encoding="utf-8")
+
+    after = exporter.build(tmp_path)
+
+    assert after["warnings"] == before["warnings"]
+    assert any("timeline.install" in warning for warning in after["metadata"]["warnings"])
+    assert after["timeline"] == []
+
+
+def test_install_event_stays_pending_until_session_creation(tmp_path):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    args = argparse.Namespace(resume_from=None, no_kernel=True, enable_roofline=False)
+    event = preflight._begin_install_event(args)
+    preflight._run_install_step(
+        event,
+        step_id="load_dotenv",
+        category="normalize",
+        action=lambda: {
+            "status": "already_present",
+            "skip_reason": None,
+            "detail": {"vars_loaded": 0, "source": "/repo/.env"},
+        },
+    )
+    preflight._run_install_step(
+        event,
+        step_id="check_shm_disk",
+        category="check",
+        action=lambda: {
+            "status": "warned",
+            "skip_reason": None,
+            "detail": {"shm_free_gib": 8.0, "min_gib": 16},
+        },
+    )
+    preflight._finish_install_event(
+        event,
+        args=args,
+        benchmark_backend="bypass",
+        benchmark_python="python",
+        magpie_python="python",
+        inferencex_path="/opt/InferenceX",
+        resolved_urls=("", "https://api.openai.com/v1"),
+    )
+
+    assert not (tmp_path / "reports" / "sbd_v6" / "install.json").exists()
+    preflight._persist_install_event(args, tmp_path)
+
+    persisted = read_timeline_event(tmp_path, "install")
+    assert persisted is not None
+    assert persisted["status"] == "degraded"
+    assert [step["step_id"] for step in persisted["ext"]["steps"]] == [
+        "load_dotenv",
+        "check_shm_disk",
+    ]
+    assert persisted["ext"]["runtime_snapshot"]["provider_mode"] == "openai"
+
+
+def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
+    from hyperloom.agents.framework import kb as framework_kb
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.sbd_v6 import pending_install_event
+    from hyperloom.orchestrator.actions.executors import benchmark_backend
+
+    inferencex = tmp_path / "InferenceX"
+    inferencex.mkdir()
+    monkeypatch.setenv("INFERENCEX_PATH", str(inferencex))
+    monkeypatch.setattr(benchmark_backend, "resolve_backend_name", lambda: "bypass")
+    monkeypatch.setattr(benchmark_backend, "resolve_benchmark_interpreter", lambda: "python")
+    monkeypatch.setattr(preflight, "_provider_only_mode", lambda: "")
+    monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
+    monkeypatch.setattr(preflight, "_derive_runtime_paths", lambda: None)
+    monkeypatch.setattr(preflight, "_restore_provider_only_mode", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_normalize_legacy_deepseek_env", lambda: None)
+    monkeypatch.setattr(preflight, "_validate_credentials", lambda: None)
+    monkeypatch.setattr(framework_kb, "prepare_kb_environment", lambda: None)
+    monkeypatch.setattr(preflight, "_ensure_python_sdks", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_resolve_llm_endpoints", lambda: ("", ""))
+    monkeypatch.setattr(preflight, "_unset_hip_visible_devices", lambda: None)
+    monkeypatch.setattr(preflight, "_check_gpu_visibility", lambda: None)
+    monkeypatch.setattr(preflight, "_check_shm_disk", lambda: None)
+    monkeypatch.setattr(preflight, "_check_platform_tuning", lambda: None)
+    monkeypatch.setattr(preflight, "_ensure_ray", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_ensure_bench_serving_deps", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_ensure_lm_eval_dep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(preflight, "_ensure_framework_deps", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_check_serving_framework", lambda *_args: None)
+    monkeypatch.setattr(preflight, "_inferencex_checkout_ok", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(preflight, "_inferencex_head_sha", lambda *_args: "abc123")
+    monkeypatch.setattr(preflight, "_report_inferencex_patch_anchors", lambda *_args: True)
+    monkeypatch.setattr(preflight, "_check_node_claude_cli", lambda: None)
+    monkeypatch.setattr(preflight.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(
+        preflight,
+        "_run_ir3_preflight",
+        lambda _args: {"status": "applied", "skip_reason": None},
+    )
+    monkeypatch.setattr(
+        preflight,
+        "_emit_preflight_diagnostics",
+        lambda **_kwargs: {"status": "applied", "skip_reason": None},
+    )
+    args = argparse.Namespace(
+        resume_from=None,
+        degraded_kb=True,
+        framework="sglang",
+        no_eval=True,
+        no_kernel=True,
+        enable_roofline=False,
+    )
+
+    preflight._preflight(args)
+
+    event = pending_install_event(args)
+    assert event is not None
+    assert [step["step_id"] for step in event["ext"]["steps"]] == [
+        "load_dotenv",
+        "load_kernel_agent_env",
+        "normalize_legacy_deepseek_env",
+        "validate_credentials",
+        "prepare_kb_environment",
+        "ensure_python_sdks",
+        "check_gpu_visibility",
+        "check_shm_disk",
+        "check_platform_tuning",
+        "ensure_ray",
+        "ensure_bench_serving_deps",
+        "ensure_lm_eval",
+        "framework_deps",
+        "check_serving_framework",
+        "ensure_magpie",
+        "clone_inferencex",
+        "patch_magpie_eval_concurrency",
+        "check_tracelens_cli",
+        "check_tracelens_root",
+        "ir3_pr_monitor_probe",
+        "diagnostics_snapshot",
+    ]
+    steps = {step["step_id"]: step for step in event["ext"]["steps"]}
+    assert steps["prepare_kb_environment"]["status"] == "skipped"
+    assert steps["prepare_kb_environment"]["skip_reason"] == "explicit_flag"
+    assert steps["ensure_magpie"]["message"] == "benchmark backend is 'bypass'"
+
+
+def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setattr(preflight, "_workspace_root_resolve", lambda: tmp_path)
+    monkeypatch.setattr(preflight.subprocess, "run", lambda *_args, **_kwargs: None)
+    args = argparse.Namespace(degraded_kb=False, degraded_pr=False, pr_monitor_url="")
+
+    outcome = preflight._run_ir3_preflight(args)
+
+    assert args.pr_degraded_reason == "ir3_auto"
+    assert outcome["status"] == "warned"
+    assert outcome["skip_reason"] == "ir3_unreachable"
+    assert outcome["detail"]["pr_monitor"] == {
+        "enabled": False,
+        "reason": "ir3_unreachable",
+    }
+
+
+@pytest.mark.parametrize(
+    ("scenario", "failed_gate_id", "expected_statuses"),
+    [
+        ("unsupported", "unsupported_model_arch", ["failed", "skipped", "skipped"]),
+        ("config", "model_config_compat", ["passed", "failed", "skipped"]),
+        ("context", "context_window", ["passed", "passed", "failed"]),
+    ],
+)
+def test_each_model_gate_failure_is_written_to_final_sbd(
+    tmp_path,
+    monkeypatch,
+    scenario,
+    failed_gate_id,
+    expected_statuses,
+):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    monkeypatch.setattr(model_gate, "_emit_breakdown_to_langfuse", lambda _session_dir: None)
+    model = tmp_path / scenario
+    if scenario == "unsupported":
+        _write_model_config(
+            model,
+            {
+                "architectures": ["Gemma3ForConditionalGeneration"],
+                "model_type": "gemma3",
+            },
+        )
+    elif scenario == "config":
+        _write_model_config(
+            model,
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "rope_scaling": {"factor": 2.0},
+            },
+        )
+    else:
+        _write_model_config(
+            model,
+            {
+                "architectures": ["LlamaForCausalLM"],
+                "model_type": "llama",
+                "max_position_embeddings": 2048,
+            },
+        )
+    session_dir = tmp_path / f"session-{scenario}"
+    _seed_state(session_dir, monkeypatch, model)
+    args = _gate_args(model)
+    model_gate._start_model_gate(args, session_dir)
+
+    if scenario == "unsupported":
+        assert model_gate._preflight_unsupported_model_arch(args, session_dir) is True
+    else:
+        assert model_gate._preflight_unsupported_model_arch(args, session_dir) is False
+        if scenario == "config":
+            assert model_gate._preflight_model_config_compat(args, session_dir) is True
+        else:
+            assert model_gate._preflight_model_config_compat(args, session_dir) is False
+            assert model_gate._preflight_context_window(args, session_dir) is True
+
+    event = _model_gate_from_breakdown(session_dir)
+    assert event["status"] == "failed"
+    assert event["ext"]["failed_gate_id"] == failed_gate_id
+    assert [check["gate_id"] for check in event["ext"]["checks"]] == [
+        "unsupported_model_arch",
+        "model_config_compat",
+        "context_window",
+    ]
+    assert [check["status"] for check in event["ext"]["checks"]] == expected_statuses
+    assert event["ext"]["failure"]["artifacts"]["breakdown_written"] is True
+
+
+def test_resume_model_gate_records_three_explicit_skips(tmp_path):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    args = _gate_args(tmp_path / "model")
+    model_gate._record_resumed_model_gate(
+        args,
+        tmp_path,
+        workload_overrides={
+            "model_path": "/models/resumed",
+            "model_name": "resumed-model",
+            "framework": "vllm",
+            "gpu_type": "MI355X",
+        },
+    )
+
+    event = read_timeline_event(tmp_path, "model_gate")
+    assert event is not None
+    assert event["status"] == "skipped"
+    assert event["ext"]["run_kind"] == "resume"
+    assert event["ext"]["skip_reason"] == "resume"
+    assert event["ext"]["workload"]["model_path"] == "/models/resumed"
+    assert event["ext"]["workload"]["model_name"] == "resumed-model"
+    assert event["ext"]["workload"]["framework"] == "vllm"
+    assert event["ext"]["workload"]["gpu_type"] == "MI355X"
+    assert [check["skip_reason"] for check in event["ext"]["checks"]] == [
+        "resume",
+        "resume",
+        "resume",
+    ]
+
+
+def test_model_gate_event_write_failure_does_not_change_gate_result(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import model_gate
+    from hyperloom.inference_optimizer.session import sbd_v6
+
+    model = tmp_path / "healthy"
+    _write_model_config(
+        model,
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "max_position_embeddings": 8192,
+        },
+    )
+    monkeypatch.setattr(
+        sbd_v6,
+        "write_timeline_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
+    )
+
+    args = _gate_args(model)
+    model_gate._start_model_gate(args, tmp_path)
+
+    assert model_gate._preflight_unsupported_model_arch(args, tmp_path) is False
+
+
+def test_model_gate_projection_failure_does_not_change_gate_result(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    model = tmp_path / "healthy"
+    _write_model_config(
+        model,
+        {
+            "architectures": ["LlamaForCausalLM"],
+            "model_type": "llama",
+            "max_position_embeddings": 8192,
+        },
+    )
+    monkeypatch.setattr(
+        model_gate,
+        "_load_model_gate_event",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad V6 projection")),
+    )
+
+    assert model_gate._preflight_unsupported_model_arch(_gate_args(model), tmp_path) is False
+
+
+def test_install_projection_failure_does_not_change_step_result(monkeypatch):
+    from hyperloom.inference_optimizer.cli import preflight
+
+    monkeypatch.setattr(
+        preflight,
+        "_record_install_step",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("bad V6 projection")),
+    )
+
+    assert (
+        preflight._run_install_step(
+            {"ext": {"steps": []}},
+            step_id="unchanged",
+            category="check",
+            action=lambda: "original-result",
+        )
+        == "original-result"
+    )
+
+
+def test_corrupt_model_gate_event_is_safely_normalized(tmp_path):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    path = tmp_path / "reports" / "sbd_v6" / "model_gate.json"
+    _write_json(
+        path,
+        {
+            "type": "model_gate",
+            "ext": {
+                "checks": [{"gate_id": "legacy", "order": "invalid", "status": "unknown"}],
+                "degraded": [],
+            },
+        },
+    )
+    args = _gate_args(tmp_path / "model")
+
+    model_gate._record_model_gate_check(
+        args,
+        tmp_path,
+        {
+            "gate_id": "unsupported_model_arch",
+            "order": 1,
+            "status": "passed",
+            "skip_reason": None,
+            "detail": {},
+        },
+    )
+
+    event = read_timeline_event(tmp_path, "model_gate")
+    assert event is not None
+    assert event["status"] == "degraded"
+    assert event["ext"]["checks"][0]["gate_id"] == "unsupported_model_arch"
+    assert event["ext"]["degraded"] == {"active": False, "warnings": []}
+
+
+def test_fresh_model_gate_with_only_soft_skips_succeeds(tmp_path):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    args = _gate_args(tmp_path / "model")
+    model_gate._start_model_gate(args, tmp_path)
+    for order, gate_id in enumerate(model_gate._MODEL_GATE_ORDER, start=1):
+        model_gate._record_model_gate_check(
+            args,
+            tmp_path,
+            {
+                "gate_id": gate_id,
+                "order": order,
+                "status": "skipped",
+                "skip_reason": "soft_pass",
+                "detail": {},
+            },
+        )
+    model_gate._finish_model_gate(args, tmp_path)
+
+    event = read_timeline_event(tmp_path, "model_gate")
+    assert event is not None
+    assert event["status"] == "succeeded"
+    assert event["ext"]["skip_reason"] is None
+
+
+def test_framework_timeline_merges_legacy_framework_and_explore(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "framework_agent_phase_done": True,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "prelude_complete",
+                "ts": "2026-08-27T01:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "EXPLORE",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T01:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "EXPLORE",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "explore_no_more_leverage",
+                "ts": "2026-08-27T01:20:00+00:00",
+                "cycle": 0,
+                "evidence": {
+                    "recent_keep_gain_pct": 5.0,
+                    "keep_gain_threshold_pct": 6.0,
+                    "empty_streak": 2,
+                    "empty_streak_threshold": 2,
+                    "lookback": 6,
+                    "tested_this_cycle": 1,
+                    "config_arm_plateaued": True,
+                    "source_consecutive_no_keep": 1,
+                    "source_threshold": 3,
+                    "source_candidates_exhausted": True,
+                    "source_arm_plateaued": True,
+                    "switch_bottleneck": True,
+                    "evidence": "both_arms_plateaued",
+                },
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "spec-config-1",
+                "task_id": "spec-config-task",
+                "domain": "serving_specialist",
+                "cycle": 0,
+                "completed_at": "2026-08-27T01:04:00+00:00",
+                "proposal_set": [
+                    {
+                        "name": "chunked-prefill",
+                        "fingerprint": "fp-config-1",
+                    }
+                ],
+            }
+        ],
+        "explore_search": {
+            "tested": {
+                "fp-config-1": {
+                    "fingerprint": "fp-config-1",
+                    "name": "chunked-prefill",
+                    "outcome": "KEEP",
+                    "tput": 105.0,
+                    "base_tput": 100.0,
+                    "gain_pct": 5.0,
+                    "round_id": "config-round-1",
+                    "cycle": 0,
+                    "workload_signature": "qwen-tp8-c64",
+                    "framework": "sglang",
+                    "stack_rebench_tput": 104.0,
+                    "stack_rebench_workspace": "runs/config-round-1/rebench",
+                }
+            },
+            "winners_history": [{"gain_pct": 5.0, "cycle": 0}],
+        },
+        "framework_agent_batches": [
+            {
+                "batch_id": "legacy-batch",
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/7",
+                        "route": "direct_framework",
+                        "audit": {"verdict": "worth_a_bench"},
+                    }
+                ],
+            }
+        ],
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": "https://example.test/pr/7",
+                "status": "kept",
+                "kept": True,
+                "pre_tput": 105.0,
+                "post_tput": 108.0,
+                "gain_pct": 2.857,
+                "cycle": 0,
+                "ts": "2026-08-27T01:08:00+00:00",
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-source-1",
+            "name": "framework_agent",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T01:08:00+00:00",
+            "outputs": {
+                "status": "kept",
+                "candidate": {
+                    "pr_url": "https://example.test/pr/7",
+                    "route": "direct_framework",
+                    "changed_files": ["python/server.py"],
+                },
+                "base_tput": 105.0,
+                "output_throughput": 108.0,
+                "delta_pct": 2.857,
+                "accuracy_pass": True,
+                "keep_threshold_pct": 1.0,
+                "patches_applied": ["patches/pr-7.patch"],
+                "target_files": ["python/server.py"],
+                "workspace": "runs/framework/pr-7",
+            },
+            "extensions": {"task_id": "source-task-1"},
+        },
+        {
+            "operation_id": "op-config-1",
+            "name": "explore",
+            "phase": "EXPLORE",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T01:16:00+00:00",
+            "outputs": {
+                "status": "succeeded",
+                "round_id": "config-round-1",
+                "framework": "sglang",
+                "base_tput": 100.0,
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "chunked-prefill",
+                        "outcome": "KEEP",
+                        "fingerprint": "fp-config-1",
+                        "provenance": "specialist:serving_specialist",
+                        "scope": "domain",
+                        "metrics": {"tput": 105.0, "gain_pct": 5.0},
+                        "variant": {
+                            "extra_server_args": "--enable-chunked-prefill",
+                            "extra_envs": {"SGLANG_CHUNKED_PREFILL": "1"},
+                        },
+                    }
+                ],
+                "explore_search_update": {
+                    "tested": state["explore_search"]["tested"],
+                    "last_round": {
+                        "round_id": "config-round-1",
+                        "base_tput": 100.0,
+                        "base_extra_args": "--base-flag",
+                    },
+                },
+            },
+            "extensions": {"task_id": "config-task-1"},
+        },
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [event["type"] for event in timeline] == ["framework_agent"]
+    event = timeline[0]
+    assert event["start_time"] == "2026-08-27T01:00:00+00:00"
+    assert event["end_time"] == "2026-08-27T01:20:00+00:00"
+    assert "summary" not in event
+    assert event["ext"]["policy"]["stack_rebench_enabled"] is None
+    assert event["ext"]["config_arm"]["rounds"][0]["workload_signature"] == "qwen-tp8-c64"
+    assert event["ext"]["config_arm"]["rounds"][0]["input_stack"]["extra_server_args"] == "--base-flag"
+    variant = event["ext"]["config_arm"]["rounds"][0]["variants"][0]
+    assert variant["stack_rebench"] == {"ran": True, "tput": 104.0, "stable": True}
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+    assert attempt["patch_source"] == "upstream_pr"
+    assert attempt["lever_kind"] == "upstream_pr"
+    assert attempt["route"] == "direct_framework"
+    assert attempt["status"] == "KEEP"
+    assert event["ext"]["exit"] == {
+        "reason": "optimize_no_more_leverage",
+        "trigger": "both_arms_plateaued",
+        "hint": None,
+        "switch_bottleneck": True,
+    }
+
+
+def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 2,
+        "framework_agent_authoring_enabled": True,
+        "framework_agent_phase_done": False,
+        "phase_history": [
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "cycle_reloop",
+                "ts": "2026-08-27T02:00:00+00:00",
+                "cycle": 2,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_phase_budget_exhausted",
+                "ts": "2026-08-27T02:20:00+00:00",
+                "cycle": 2,
+                "evidence": {
+                    "source_consecutive_no_keep": 0,
+                    "source_threshold": 3,
+                    "source_candidates_exhausted": False,
+                    "source_arm_plateaued": False,
+                    "recent_keep_gain_pct": 0.0,
+                    "keep_gain_threshold_pct": 1.0,
+                    "empty_streak": 0,
+                    "empty_streak_threshold": 3,
+                    "lookback": 6,
+                    "tested_this_cycle": 0,
+                    "config_arm_plateaued": False,
+                    "switch_bottleneck": False,
+                },
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "discover-round",
+                "task_id": "discover-task-1234",
+                "domain": "candidate_discovery_specialist",
+                "cycle": 2,
+                "completed_at": "2026-08-27T02:04:00+00:00",
+                "proposal_set": [
+                    {
+                        "pr_url": "https://example.test/pr/9",
+                        "title": "Fuse host copies",
+                        "verdict": "worth_a_bench",
+                        "route": "author_via_specialist",
+                    },
+                    {
+                        "pr_url": "https://example.test/pr/10",
+                        "title": "Unrelated backend",
+                        "verdict": "not_applicable",
+                        "reason": "wrong framework",
+                    },
+                ],
+            },
+            {
+                "round_id": "author-round",
+                "task_id": "author-task-1",
+                "domain": "serving_specialist",
+                "cycle": 2,
+                "completed_at": "2026-08-27T02:08:00+00:00",
+                "proposal_set": [{"patches_written": ["patches/pr-9.patch"]}],
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0-discover",
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/9",
+                        "route": "author_via_specialist",
+                        "audit": {"verdict": "worth_a_bench"},
+                    }
+                ],
+            }
+        ],
+        "framework_agent_specialist_candidate_map": {
+            "author-task-1": "https://example.test/pr/9",
+        },
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": "https://example.test/pr/9",
+                "batch_id": "discovery-0-discover",
+                "status": "kept",
+                "kept": True,
+                "gain_pct": 4.0,
+                "pre_tput": 100.0,
+                "post_tput": 104.0,
+                "specialist_task_id": "author-task-1",
+                "integrate_task_id": "integrate-task-1",
+                "cycle": 2,
+                "ts": "2026-08-27T02:15:00+00:00",
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-integrate-1",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "agent": "framework_agent",
+            "macro_cycle": 2,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T02:15:00+00:00",
+            "outputs": {
+                "status": "kept",
+                "framework_agent_authoring": True,
+                "specialist_task_id": "author-task-1",
+                "base_tput": 100.0,
+                "output_throughput": 104.0,
+                "delta_pct": 4.0,
+                "accuracy_pass": True,
+                "keep_threshold_pct": 1.0,
+                "patches_applied": ["patches/pr-9.patch"],
+                "target_files": ["python/worker.py"],
+                "source_snapshot": "optimization_stack/src/author-task-1",
+                "source_manifest": "optimization_stack/src/author-task-1/manifest.json",
+                "workspace": "runs/integrate-task-1",
+                "switch_off_parity": {"ran": True, "ok": True},
+                "stack_rebench": {"stable": True},
+                "framework_levers": [{"switch": "SGLANG_FAST_COPY", "default_on": True}],
+            },
+            "extensions": {"task_id": "integrate-task-1"},
+        }
+    ]
+    critic_dir = tmp_path / "critic-workdir" / "000000"
+    _write_json(
+        critic_dir / "judge_bundle.json",
+        {
+            "merged_context": {"macro_cycle": 2},
+            "proposals": [
+                {
+                    "msg_id": "proposal-1",
+                    "action_name": "integrate_patch",
+                    "payload": {
+                        "params": {
+                            "framework_agent_candidate_id": "https://example.test/pr/9",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    _write_json(
+        critic_dir / "review.json",
+        {
+            "review_verdicts": [
+                {
+                    "target_proposal_msg_id": "proposal-1",
+                    "verdict": "needs_review",
+                    "source": "critic",
+                    "reasoning": "needs parity evidence",
+                    "confidence": "high",
+                    "required_evidence": ["switch-off parity"],
+                    "risks": [{"severity": "major", "risk": "default behavior may change"}],
+                }
+            ]
+        },
+    )
+    _write_json(
+        critic_dir / "emit.json",
+        {
+            "intent_envelope": {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": "proposal-1",
+                            "verdict": "approve",
+                            "advice_text": "retain the switch-off check",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    event = timeline[0]
+    discovery = event["ext"]["source_arm"]["candidate_discovery_runs"][0]
+    assert discovery["task_id"] == "discover-task-1234"
+    assert [candidate["verdict"] for candidate in discovery["candidates"]] == [
+        "worth_a_bench",
+        "not_applicable",
+    ]
+    authoring = event["ext"]["source_arm"]["authoring_runs"][0]
+    assert authoring["candidate_id"] == "https://example.test/pr/9"
+    assert authoring["patch_refs"] == ["patches/pr-9.patch"]
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+    assert attempt["patch_source"] == "specialist_authored"
+    assert attempt["lever_kind"] == "source_patch"
+    assert attempt["route"] == "author_via_specialist"
+    assert attempt["status"] == "KEEP"
+    assert attempt["gates"] == {
+        "accuracy_passed": True,
+        "keep_threshold_pct": 1.0,
+        "switch_off_parity_passed": True,
+        "stack_rebench_passed": True,
+    }
+    review = event["ext"]["critic_reviews"][0]
+    assert review["arm"] == "source"
+    assert review["target_action"] == "integrate_patch"
+    assert review["verdict"] == "needs_review"
+    assert review["effective_verdict"] == "approve"
+    assert "token" not in json.dumps(event).lower()
+
+
+def test_framework_timeline_keeps_config_serving_specialist_out_of_source_arm(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "config-round",
+                "task_id": "config-task",
+                "domain": "serving_specialist",
+                "source_phase": "FRAMEWORK_AGENT",
+                "cycle": 0,
+                "proposal_set": [
+                    {
+                        "name": "larger-page-size",
+                        "extra_server_args": "--page-size 32",
+                    }
+                ],
+            }
+        ],
+    }
+    critic_dir = tmp_path / "critic-workdir" / "000000"
+    _write_json(
+        critic_dir / "request.json",
+        {
+            "context": {"phase": "FRAMEWORK_AGENT"},
+            "raw_prompt": "=== Shared session state ===\nmacro_cycle=0\n",
+        },
+    )
+    _write_json(
+        critic_dir / "judge_bundle.json",
+        {
+            "phase": "FRAMEWORK_AGENT",
+            "proposals": [
+                {
+                    "msg_id": "config-proposal",
+                    "action_name": "specialist",
+                    "payload": {
+                        "params": {
+                            "domain": "serving_specialist",
+                            "source_phase": "FRAMEWORK_AGENT",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    _write_json(
+        critic_dir / "review.json",
+        {
+            "review_verdicts": [
+                {
+                    "target_proposal_msg_id": "config-proposal",
+                    "verdict": "approve",
+                }
+            ]
+        },
+    )
+    _write_json(
+        critic_dir / "emit.json",
+        {
+            "intent_envelope": {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": "config-proposal",
+                            "verdict": "approve",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+
+    assert [row["task_id"] for row in event["ext"]["config_arm"]["specialist_runs"]] == ["config-task"]
+    assert event["ext"]["source_arm"]["authoring_runs"] == []
+    assert event["ext"]["critic_reviews"][0]["arm"] == "config"
+
+
+def test_framework_timeline_recovers_direct_upstream_patch_source(tmp_path):
+    candidate_id = "https://example.test/pr/11"
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0",
+                "candidates": [
+                    {
+                        "pr_url": candidate_id,
+                        "route": "direct_framework",
+                    }
+                ],
+            }
+        ],
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": candidate_id,
+                "integrate_task_id": "integrate-direct-1",
+                "status": "kept",
+                "kept": True,
+                "cycle": 0,
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-integrate-direct",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "outputs": {
+                "status": "kept",
+                "framework_agent_authoring": True,
+                "specialist_task_id": "integrate-direct-1",
+            },
+            "extensions": {"task_id": "integrate-direct-1"},
+        }
+    ]
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)[0]
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+
+    assert attempt["candidate_id"] == candidate_id
+    assert attempt["patch_source"] == "upstream_pr"
+    assert attempt["lever_kind"] == "upstream_pr"
+    assert attempt["route"] == "direct_framework"
+
+
+def test_framework_timeline_keeps_macro_cycles_isolated(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "prelude_complete",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_no_more_leverage",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "cycle_reloop",
+                "ts": "2026-08-27T04:00:00+00:00",
+                "cycle": 1,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_no_more_leverage",
+                "ts": "2026-08-27T04:10:00+00:00",
+                "cycle": 1,
+            },
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "cycle-0",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "outputs": {"status": "succeeded", "round_id": "round-0"},
+        },
+        {
+            "operation_id": "cycle-1",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "status": "succeeded",
+            "outputs": {"status": "succeeded", "round_id": "round-1"},
+        },
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [event["ext"]["macro_cycle"] for event in timeline] == [0, 1]
+    assert [event["ext"]["config_arm"]["rounds"][0]["round_id"] for event in timeline] == [
+        "round-0",
+        "round-1",
+    ]
+
+
+def test_framework_timeline_projects_discovery_history_outcomes_in_order(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 1,
+                    "limit": 3,
+                    "error": "TimeoutError('upstream unavailable')",
+                },
+                "ts": "2026-08-27T03:01:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "discover_empty_payload",
+                "evidence": {
+                    "event": "framework_agent_phase_done",
+                    "failure_count": 0,
+                    "retry_limit": 3,
+                },
+                "ts": "2026-08-27T03:03:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T03:04:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0",
+                "ts": "2026-08-27T03:02:00+00:00",
+                "cycle": 0,
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/12",
+                        "route": "direct_framework",
+                    }
+                ],
+            }
+        ],
+    }
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+    runs = event["ext"]["source_arm"]["candidate_discovery_runs"]
+
+    assert [run["status"] for run in runs] == ["failed", "succeeded", "empty"]
+    assert runs[0]["reason"] == "TimeoutError('upstream unavailable')"
+    assert runs[1]["batch_id"] == "discovery-0"
+    assert runs[1]["candidates"][0]["candidate_id"] == "https://example.test/pr/12"
+    assert runs[2]["reason"] == "discover_empty_payload"
+    assert event["status"] == "succeeded"
+    assert event["ext"]["failure"] == {
+        "failed_task_id": None,
+        "error_class": None,
+        "error": None,
+    }
+
+
+def test_framework_timeline_marks_exhausted_discovery_retries_failed(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 1,
+                    "limit": 3,
+                    "error": "TimeoutError('first')",
+                },
+                "ts": "2026-08-27T03:01:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 3,
+                    "limit": 3,
+                    "error": "TimeoutError('last')",
+                },
+                "ts": "2026-08-27T03:02:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "discover_retries_exhausted",
+                "evidence": {
+                    "event": "framework_agent_phase_done",
+                    "failure_count": 3,
+                    "retry_limit": 3,
+                },
+                "ts": "2026-08-27T03:03:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T03:04:00+00:00",
+                "cycle": 0,
+            },
+        ],
+    }
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+    runs = event["ext"]["source_arm"]["candidate_discovery_runs"]
+
+    assert [run["status"] for run in runs] == ["failed", "failed"]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"] == {
+        "failed_task_id": None,
+        "error_class": None,
+        "error": "TimeoutError('last')",
+    }
+
+
+def test_framework_timeline_assigns_critic_reviews_from_request_cycle(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T04:00:00+00:00",
+                "cycle": 1,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T04:10:00+00:00",
+                "cycle": 1,
+            },
+        ],
+    }
+    for cycle in (0, 1):
+        proposal_id = f"proposal-cycle-{cycle}"
+        critic_dir = tmp_path / "critic-workdir" / f"{cycle:06d}"
+        _write_json(
+            critic_dir / "request.json",
+            {
+                "context": {"phase": "FRAMEWORK_AGENT"},
+                "raw_prompt": (
+                    f"=== Shared session state ===\nmacro_cycle={cycle}\n"
+                    if cycle == 0
+                    else "=== Shared session state ===\n"
+                ),
+            },
+        )
+        _write_json(
+            critic_dir / "judge_bundle.json",
+            {
+                "phase": "FRAMEWORK_AGENT",
+                "proposals": [
+                    {
+                        "msg_id": proposal_id,
+                        "action_name": "integrate_patch",
+                        "payload": {
+                            "framework_agent_candidate_id": f"candidate-{cycle}",
+                        },
+                    }
+                ],
+            },
+        )
+        _write_json(
+            critic_dir / "review.json",
+            {
+                "review_verdicts": [
+                    {
+                        "target_proposal_msg_id": proposal_id,
+                        "verdict": "approve",
+                    }
+                ]
+            },
+        )
+        _write_json(
+            critic_dir / "emit.json",
+            {
+                "intent_envelope": {
+                    "intents": [
+                        {
+                            "intent_type": "review_verdict",
+                            "payload": {
+                                "target_proposal_msg_id": proposal_id,
+                                "verdict": "approve",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+    _write_json(
+        tmp_path / "reports" / "trace" / "proposal_task_map.jsonl",
+        {
+            "proposal_msg_id": "proposal-cycle-1",
+            "task_id": "integrate-cycle-1",
+        },
+    )
+    operations = [
+        {
+            "operation_id": "op-cycle-1",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "extensions": {"task_id": "integrate-cycle-1"},
+            "outputs": {"status": "reverted"},
+        }
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [[review["proposal_msg_id"] for review in event["ext"]["critic_reviews"]] for event in timeline] == [
+        ["proposal-cycle-0"],
+        ["proposal-cycle-1"],
+    ]

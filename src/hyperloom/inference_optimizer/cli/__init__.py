@@ -43,11 +43,14 @@ from .model_gate import (
     _autodetect_gpu_type,
     _gpu_runner_type,
     _load_model_max_position_embeddings,
+    _finish_model_gate,
     _preflight_context_window,
     _preflight_model_config_compat,
     _preflight_unsupported_model_arch,
+    _record_resumed_model_gate,
     _resolve_gpu_type,
     _resolve_max_model_len,
+    _start_model_gate,
 )
 from ..model_config_utils import (
     summarize_model_config,
@@ -126,6 +129,7 @@ from .parser import (
 )
 from .preflight import (
     _check_gfx_arch_resolvable,
+    _persist_install_event,
     _preflight as _preflight,
 )
 
@@ -1778,7 +1782,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         claude_follows_codex=claude_follows_codex,
         codex_follows_claude=codex_follows_claude,
     )
-
     # Before either session branch: these are read by the fresh-launch seeding
     # AND by the resume path, so this is the one place that covers both.
     _preflight_agentx_backend(args)
@@ -1821,6 +1824,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Single-optimizer guard: take the session lock before any state.json /
         # lease access. Held for the whole run.
         session_lock = _acquire_session_lock_or_exit(session_dir)
+        _persist_install_event(args, session_dir)
 
         try:
             manifest = load_manifest(session_dir)
@@ -2034,6 +2038,16 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         reanchor_budget = bool(prior_stop or prior_crash >= 3)
         _begin_resume_leg(state, reanchor_budget=reanchor_budget)
         state.save(session_dir)
+        _record_resumed_model_gate(
+            args,
+            session_dir,
+            workload_overrides={
+                "model_path": str(state.model_path or manifest.get("model_path") or ""),
+                "model_name": str(state.model_name or manifest.get("model_name") or ""),
+                "framework": str(state.framework or manifest.get("framework") or ""),
+                "gpu_type": str(state.gpu_type or manifest.get("gpu_type") or ""),
+            },
+        )
         if reanchor_budget:
             override_note = " (--force-resume override)" if force_resume and prior_stop in gated_terminal else ""
             print(f"  → cleared stop_reason and reset crash_count (was {prior_crash}) for fresh resume{override_note}")
@@ -2202,6 +2216,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # and the owner pid is published for the robustness monitor.
         session_lock = _acquire_session_lock_or_exit(session_dir)
         manifest = write_manifest(session_dir, args=args)
+        _persist_install_event(args, session_dir)
         # One-shot Langfuse startup marker so a run killed before a breakdown
         # still leaves a correlatable trace. Best-effort, never fatal.
         try:
@@ -2230,6 +2245,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             args,
             session_id=manifest["session_id"],
         )
+        _start_model_gate(args, session_dir)
         # Unsupported-model preflight: reject multimodal/vision configs (runs after seed, before heavy bring-up).
         if _preflight_unsupported_model_arch(args, session_dir):
             sys.exit(2)
@@ -2240,6 +2256,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         # Context-window preflight: reject when ISL+OSL+headroom exceeds max_position_embeddings (no stretch by policy).
         if _preflight_context_window(args, session_dir):
             sys.exit(2)
+        _finish_model_gate(args, session_dir)
         # Recipe KB T0 anchor (after seed for recipe_canonical_id, before Coordinator); skipped when --degraded-kb.
         recipe_kb_client = _bootstrap_recipe_kb(
             args,
