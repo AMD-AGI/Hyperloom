@@ -2126,8 +2126,13 @@ def test_127_splitter_cli_uses_positional_trace_path_and_find_steady_state(
 
 # Splitter must receive --R (from --split-r or $RANDOM_RANGE_RATIO) so mixed-window
 # selection uses the analytic PD ratio instead of an empirical heuristic.
-def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
-    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs."""
+def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None, trace_factory=None):
+    """Helper: stage a TraceLens-ish tree, stub subprocess.run, drive tla.main() once, return captured argvs.
+
+    ``trace_factory`` builds the input trace from the staging directory when the
+    default single-kernel stub is not enough (for example a step-annotated trace
+    the pretrimmer can act on); it returns the path it wrote.
+    """
     import gzip
     import json as _json
     import os as _os
@@ -2141,16 +2146,19 @@ def _drive_main_capturing_subprocess(tmp_path, extra_argv, env_overrides=None):
     workspace.mkdir()
     capture = tmp_path / "capture_traces"
     capture.mkdir()
-    trace = tmp_path / "trace.json.gz"
-    with gzip.open(trace, "wt") as f:
-        _json.dump(
-            {
-                "traceEvents": [
-                    {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
-                ]
-            },
-            f,
-        )
+    if trace_factory is not None:
+        trace = trace_factory(tmp_path)
+    else:
+        trace = tmp_path / "trace.json.gz"
+        with gzip.open(trace, "wt") as f:
+            _json.dump(
+                {
+                    "traceEvents": [
+                        {"cat": "kernel", "name": "void some_real_kernel<...>", "dur": 5.0},
+                    ]
+                },
+                f,
+            )
 
     captured: list[list[str]] = []
 
@@ -5443,12 +5451,29 @@ def test_graph_coverage_from_raw_trace_never_raises():
 # --- pretrim_startup_transient (#profiler-start transient) -------------------
 
 
-def _write_trace(path: Path, step_durs, *, step_us_gap=0.0, host_lead_us=30_000.0, extra_events=None):
+def _write_trace(
+    path: Path,
+    step_durs,
+    *,
+    step_us_gap=0.0,
+    host_lead_us=30_000.0,
+    phases=None,
+    unique_names=True,
+    omit_host_steps=(),
+    extra_events=None,
+):
     """Build a minimal torch-profiler trace with GPU step annotations.
 
     ``step_durs`` are microsecond durations laid end to end; each becomes one
-    ``step[DECODE bs=64]`` gpu_user_annotation plus a kernel inside it, so the
-    trimmer has both something to measure and something to drop.
+    ``step[<phase> ...]`` gpu_user_annotation, its host-side twin, and a kernel
+    inside it, so the trimmer has both something to measure and something to
+    drop. ``phases`` supplies a per-step phase token (default ``DECODE`` for
+    every step).
+
+    ``unique_names=False`` omits the per-step ``g_sk`` field, reproducing the
+    framework builds whose step annotations repeat verbatim; the two timelines
+    then cannot be paired by name. ``omit_host_steps`` drops the host-side
+    annotation for the given step indices.
     """
     # torch stamps metadata with the profiler-open ts, i.e. always before any
     # cut point -- reproduce that, it is what made a naive ts filter drop it.
@@ -5458,14 +5483,17 @@ def _write_trace(path: Path, step_durs, *, step_us_gap=0.0, host_lead_us=30_000.
     ]
     ts = 1_000_000.0
     for i, dur in enumerate(step_durs):
-        name = f"step[DECODE bs=64 g_sk={i}]"
+        phase = (phases or ["DECODE"] * len(step_durs))[i]
+        name = f"step[{phase} bs=64 g_sk={i}]" if unique_names else f"step[{phase} bs=64]"
         # The host runs a step ahead: step N's launches are issued while step
-        # N-1 still owns the GPU. Reproduce that offset -- it is what makes a
+        # N-1 still owns the GPU, so the lead is bounded by the *previous*
+        # step's duration. Reproduce that offset -- it is what makes a
         # single-timestamp cut unable to separate the two.
-        host_ts = ts - min(host_lead_us, dur) if i else ts - 1.0
-        events.append(
-            {"ph": "X", "cat": "user_annotation", "name": name, "pid": 1, "tid": 1, "ts": host_ts, "dur": 3.0}
-        )
+        host_ts = ts - min(host_lead_us, step_durs[i - 1]) if i else ts - 1.0
+        if i not in omit_host_steps:
+            events.append(
+                {"ph": "X", "cat": "user_annotation", "name": name, "pid": 1, "tid": 1, "ts": host_ts, "dur": 3.0}
+            )
         events.append(
             {"ph": "X", "cat": "cpu_op", "name": f"launch_{i}", "pid": 1, "tid": 1, "ts": host_ts + 0.1, "dur": 1.0}
         )
@@ -5530,7 +5558,7 @@ def test_pretrim_noop_on_clean_trace(tmp_path):
     trimmed, report = tla.pretrim_startup_transient(src, dst)
 
     assert trimmed is False
-    assert report["reason"] == "clean"
+    assert report["reason"] == "no_leading_outlier"
     assert not dst.exists()
 
 
@@ -5543,7 +5571,7 @@ def test_pretrim_keeps_midstream_outlier(tmp_path):
     trimmed, report = tla.pretrim_startup_transient(src, dst)
 
     assert trimmed is False
-    assert report["reason"] == "clean"
+    assert report["reason"] == "no_leading_outlier"
 
 
 def test_pretrim_refuses_when_too_many_leading_outliers(tmp_path):
@@ -5627,7 +5655,9 @@ def test_pretrim_keeps_host_side_of_first_surviving_step(tmp_path):
 
     trimmed, report = tla.pretrim_startup_transient(src, dst)
     assert trimmed is True
-    assert report["cpu_cut_ts"] < report["gpu_cut_ts"]  # two cuts, host earlier
+    # Two cuts, host earlier -- and by the full lead, not a value clamped down
+    # to the kept step's own duration.
+    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
 
     ev = tla.open_json(dst)["traceEvents"]
     kept_host = {e["name"] for e in ev if e.get("cat") == "user_annotation"}
@@ -5670,3 +5700,212 @@ def test_pretrim_leaves_enough_steps_for_the_splitter(tmp_path):
 
     assert report["remaining_steps"] == 127
     assert report["remaining_steps"] >= 32  # the default --split-num-steps
+
+
+def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
+    """Repeated step names must still cut both timelines at the right place.
+
+    Framework builds that omit the cumulative-sequence-length fields emit the
+    same ``step[DECODE bs=64]`` for every step. Pairing the timelines by name
+    resolves the surviving step to the *first* occurrence, which puts the host
+    cut at the head of the capture and leaves the dropped step's entire host
+    side in the trimmed trace.
+    """
+    src = _write_trace(
+        tmp_path / "r.trace.json.gz",
+        [15_781_320.0] + [32_944.0] * 40,
+        host_lead_us=839_000.0,
+        unique_names=False,
+    )
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+    assert trimmed is True
+    assert report["gpu_cut_ts"] - report["cpu_cut_ts"] == pytest.approx(839_000.0)
+
+    ev = tla.open_json(dst)["traceEvents"]
+    # One host annotation per surviving device step, and no more: the dropped
+    # step's host side went with its device side.
+    assert len(tla._step_annotation_spans(ev)) == 40
+    assert sum(1 for e in ev if e.get("cat") == "user_annotation") == 40
+    # launch_0 is the dropped step's host op; it must not survive on the
+    # strength of a name it shares with every other step.
+    launches = {e["name"] for e in ev if e.get("cat") == "cpu_op"}
+    assert "launch_0" not in launches
+    assert "launch_1" in launches
+
+
+def test_pretrim_refuses_when_host_step_annotations_are_missing(tmp_path):
+    """Without a host annotation per device step the timelines cannot be paired.
+
+    Falling back to a single cut is the outcome the split-cut design exists to
+    avoid, so the trim is refused and the reason recorded instead.
+    """
+    src = _write_trace(
+        tmp_path / "r.trace.json.gz",
+        [15_781_320.0] + [32_944.0] * 20,
+        omit_host_steps=(1, 2),
+    )
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "host_steps_missing"
+    assert report["steps"] == 21
+    assert report["host_steps"] == 19
+    assert not dst.exists()
+
+
+def test_pretrim_keeps_leading_prefill_steps(tmp_path):
+    """Prefill steps are not transients just because decode dominates the trace.
+
+    A mixed capture's EXTEND steps run one to two orders of magnitude longer
+    than its DECODE steps. Measured against a whole-trace median they all read
+    as outliers, and the leading ones -- the window
+    ``--steady-state-mode=prefilldecode`` exists to analyse -- get trimmed away.
+    """
+    durs = [1_200_000.0, 880_000.0, 1_530_000.0] + [32_944.0] * 30
+    phases = ["EXTEND"] * 3 + ["DECODE"] * 30
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "no_leading_outlier"
+    # Each phase gets its own baseline rather than one median for the trace.
+    assert set(report["phase_medians_ms"]) == {"EXTEND", "DECODE"}
+    assert report["first_step_phase"] == "EXTEND"
+    assert report["first_step_ratio"] < tla._PRETRIM_OUTLIER_FACTOR
+    assert not dst.exists()
+
+
+def test_pretrim_drops_a_prefill_transient_against_its_own_phase(tmp_path):
+    """The guard still fires when the transient lands on a prefill step.
+
+    Per-phase baselines must not amount to exempting prefill: a barrier that
+    opens on an EXTEND step is as fatal to the window as one on a DECODE step.
+    """
+    durs = [15_781_320.0, 1_200_000.0, 1_150_000.0, 1_180_000.0] + [32_944.0] * 30
+    phases = ["EXTEND"] * 4 + ["DECODE"] * 30
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is True
+    assert report["dropped_steps"] == 1
+    assert report["dropped_phase"] == "EXTEND"
+    # Measured against EXTEND's 1.2 s median (13x) rather than decode's 33 ms,
+    # which would have made it 479x and swept the healthy prefill steps with it.
+    assert report["outlier_ratio"] == pytest.approx(15_781_320.0 / 1_200_000.0, rel=1e-3)
+    assert report["phase_medians_ms"]["EXTEND"] == pytest.approx(1_200.0)
+    assert report["remaining_steps"] == 33
+
+
+def test_pretrim_leaves_a_phase_without_a_baseline_alone(tmp_path):
+    """A leading step whose phase is too rare to have a median is not dropped.
+
+    With no population of its own to compare against there is no evidence the
+    step is abnormal, so it stays and the window keeps it.
+    """
+    durs = [9_000_000.0] + [32_944.0] * 30
+    phases = ["EXTEND"] + ["DECODE"] * 30
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs, phases=phases)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "no_leading_outlier"
+    assert "EXTEND" not in report["phase_medians_ms"]
+    assert report["first_step_ratio"] is None
+
+
+def test_pretrim_reports_the_worst_ratio_across_dropped_steps(tmp_path):
+    """``outlier_ratio`` covers the whole dropped run, not just its first step."""
+    durs = [500_000.0, 5_000_000.0] + [32_944.0] * 20
+    src = _write_trace(tmp_path / "r.trace.json.gz", durs)
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is True
+    assert report["dropped_steps"] == 2
+    assert report["outlier_ratio"] == pytest.approx(5_000_000.0 / 32_944.0, rel=1e-3)
+
+
+def test_pretrim_write_failure_is_reported_as_a_failure(tmp_path, monkeypatch):
+    """A failed write must not be reported with the ``trimmed`` reason.
+
+    The caller keys its log line and the pretrim artifact off ``reason``; a
+    report that still says ``trimmed`` after the write failed makes a full-disk
+    run look like a successful trim that simply was not applied.
+    """
+    src = _write_trace(tmp_path / "r.trace.json.gz", [15_781_320.0] + [32_944.0] * 40)
+    dst = tmp_path / "out" / "r.pretrimmed.trace.json.gz"
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("No space left on device")
+
+    # Fails after the output file is opened, so a partial one is on disk.
+    monkeypatch.setattr(tla.json, "dump", _boom)
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "write_failed"
+    assert "No space left on device" in report["error"]
+    # The step accounting is kept for diagnosis, but no partial file is left
+    # behind for a later step to mistake for a usable trace.
+    assert report["dropped_steps"] == 1
+    assert not dst.exists()
+
+
+def test_pretrim_redirects_only_the_splitter_input(tmp_path):
+    """The splitter reads the trimmed copy; nothing else is repointed at it.
+
+    ``analysis_trace_path`` is what capture-folder discovery and the split
+    warnings resolve against, so reassigning it to the derived file under
+    ``trace_split/`` moves both onto a directory that holds neither the capture
+    nor its graph-capture sidecar.
+    """
+    captured, trace = _drive_main_capturing_subprocess(
+        tmp_path,
+        [],
+        trace_factory=lambda root: _write_trace(root / "trace.trace.json.gz", [15_781_320.0] + [32_944.0] * 40),
+    )
+
+    splitter_cmd = _find_splitter_cmd(captured)
+    assert splitter_cmd is not None, f"splitter never invoked; cmds={captured}"
+    positional = splitter_cmd[3]
+    assert positional.endswith(".pretrimmed.trace.json.gz"), splitter_cmd
+    assert str(trace) not in splitter_cmd, splitter_cmd
+
+    # The trim ran, and the raw capture is still on disk and unmodified.
+    pretrim_files = list((tmp_path / "ws").rglob("pretrim.json"))
+    assert len(pretrim_files) == 1, pretrim_files
+    pretrim = json.loads(pretrim_files[0].read_text())
+    assert pretrim["applied"] is True
+    assert pretrim["source"] == str(trace)
+    assert len(tla._step_annotation_spans(tla.open_json(trace)["traceEvents"])) == 41
+
+
+def test_capture_folder_is_not_discoverable_from_the_split_directory(tmp_path):
+    """Why the splitter's input has to stay separate from the analysed path.
+
+    Discovery searches the trace file's own directory and its parent. A trimmed
+    copy lives in ``tracelens/trace_split/``, whose neighbourhood is the run's
+    output tree -- the capture's sidecar is not in it.
+    """
+    capture_dir = tmp_path / "torch_trace"
+    (capture_dir / "graph_capture_profile").mkdir(parents=True)
+    raw = capture_dir / "r.trace.json.gz"
+    raw.write_bytes(b"")
+    split_dir = tmp_path / "tracelens" / "trace_split"
+    split_dir.mkdir(parents=True)
+    trimmed = split_dir / "r.pretrimmed.trace.json.gz"
+    trimmed.write_bytes(b"")
+
+    assert tlr.discover_capture_folder(raw, [raw]) == capture_dir / "graph_capture_profile"
+    assert tlr.discover_capture_folder(raw, [trimmed]) is None

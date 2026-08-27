@@ -11,6 +11,7 @@ capture directories, and has a dry-run path that works without TraceLens install
 import argparse
 import ast
 import asyncio
+import contextlib
 import csv
 import functools
 import gzip
@@ -523,6 +524,53 @@ def _build_trace_split_warning(
     }
 
 
+def _build_pretrim_no_steady_state_warning(
+    *,
+    trace_input: Path,
+    steps: int,
+    leading_outliers: int,
+    max_dropped_steps: int,
+    outlier_factor: float,
+) -> dict[str, Any]:
+    """Build the ``pretrim_no_steady_state`` trace-health warning.
+
+    Emitted when so many leading steps exceed their phase median that the
+    capture cannot be said to have reached steady state. One such step is the
+    profiler-start transient and gets trimmed; a run of them is a workload still
+    warming up, which trimming cannot fix and which every percentage derived
+    from the window has to be read against.
+
+    Args:
+        trace_input (Path): The capture the pretrimmer inspected.
+        steps (int): Total step annotations in the capture.
+        leading_outliers (int): Leading steps found over the outlier threshold.
+        max_dropped_steps (int): The ceiling that was exceeded.
+        outlier_factor (float): Multiple of the phase median used as threshold.
+
+    Returns:
+        dict[str, Any]: A structured warning entry with code
+            ``pretrim_no_steady_state`` and the supporting counts/message.
+    """
+    return {
+        "code": "pretrim_no_steady_state",
+        "severity": "warning",
+        "trace_input": str(trace_input),
+        "steps": steps,
+        "leading_outliers": leading_outliers,
+        "max_dropped_steps": max_dropped_steps,
+        "outlier_factor": outlier_factor,
+        "message": (
+            f"{leading_outliers} of {steps} leading steps run more than "
+            f"{outlier_factor:g}x their phase median, past the "
+            f"{max_dropped_steps} a profiler-start transient accounts for, so "
+            "the capture never reached steady state and the head of the window "
+            "was left in place. Compute%/Comm% and every kernel's gpu_pct below "
+            "are computed over a window that includes the warm-up. Re-profile "
+            "with more warm-up steps before acting on them."
+        ),
+    }
+
+
 def _check_selected_chunk_has_gpu_events(
     *,
     split_dir: Path,
@@ -978,17 +1026,24 @@ def count_gpu_kernel_events(trace_file: Path, max_events: int = 1_000_000) -> in
     return count
 
 
-#: How many times the median step a leading step must exceed before it counts as
-#: a profiler-start transient rather than real work. Observed transients run
-#: two-to-three orders of magnitude over the median (479x on the reference
-#: capture) while healthy decode steps hold inside 2% of it, so anything in this
-#: range separates them with a wide margin either way.
+#: How many times the median step *of its own phase* a leading step must exceed
+#: before it counts as a profiler-start transient rather than real work. Observed
+#: transients run two-to-three orders of magnitude over the median (479x on the
+#: reference capture) while healthy decode steps hold inside 2% of it, so
+#: anything in this range separates them with a wide margin either way.
 _PRETRIM_OUTLIER_FACTOR = 10.0
 
 #: Fewest step annotations a trace must carry before the median is worth
 #: trusting. Below this a single slow step skews the median enough that the
 #: comparison stops meaning anything, so the trim is skipped rather than guessed.
 _PRETRIM_MIN_STEPS = 8
+
+#: Fewest steps of the *same phase* before that phase's median is used as a
+#: baseline. Prefill and decode differ by one to two orders of magnitude, so a
+#: phase has to recur often enough for its own median to mean something; a
+#: leading step whose phase is rarer than this is left alone rather than measured
+#: against a population it does not belong to.
+_PRETRIM_MIN_PHASE_STEPS = 3
 
 #: Ceiling on how many leading steps may be dropped. A transient is one step in
 #: every capture examined; needing more than a handful means the run never
@@ -1030,21 +1085,30 @@ def _step_annotation_spans(events: list[Any]) -> list[tuple[float, float, str]]:
     return spans
 
 
-def _host_step_starts(events: list[Any]) -> dict[str, float]:
-    """Earliest host-side start for each ``step[...]`` annotation, keyed by name.
+def _host_step_starts(events: list[Any]) -> list[float]:
+    """Host-timeline start of every ``step[...]`` annotation, ordered by start.
 
     The host runs ahead of the device -- a step's launches are issued while the
     previous step is still executing -- so a step's host span begins before its
-    device span. Step names embed the cumulative sequence length, so they pair
-    the two timelines exactly.
+    device span, and the two have to be paired to cut them at the right places.
+
+    Returned positionally rather than keyed by annotation name, because the
+    names are the framework's and are not unique: a build that omits the
+    cumulative-sequence-length fields repeats ``step[DECODE bs=36]`` for every
+    step at that batch size, and keying on it silently pairs the surviving step
+    with the *first* step of the capture. Both timelines carry one annotation per
+    step in execution order, so the Nth host entry is the Nth device step
+    whatever the names say. Indexing from the front also tolerates the host's
+    trailing extras: a capture can stop with launches already issued for a step
+    whose device span never landed.
 
     Args:
         events (list[Any]): ``traceEvents`` from a torch-profiler trace.
 
     Returns:
-        dict[str, float]: Step annotation name to its host-timeline start.
+        list[float]: Host-timeline start timestamps, ascending.
     """
-    starts: dict[str, float] = {}
+    starts: list[float] = []
     for ev in events:
         if not isinstance(ev, dict):
             continue
@@ -1056,10 +1120,62 @@ def _host_step_starts(events: list[Any]) -> dict[str, float]:
             continue
         if not isinstance(ts, (int, float)):
             continue
-        prev = starts.get(name)
-        if prev is None or ts < prev:
-            starts[name] = float(ts)
+        starts.append(float(ts))
+    starts.sort()
     return starts
+
+
+def _step_phase(name: str) -> str:
+    """The phase token of a ``step[...]`` annotation name.
+
+    ``step[DECODE bs=64 g_sk=580480]`` gives ``DECODE`` and
+    ``step[EXTEND bs=1 toks=16384]`` gives ``EXTEND``.
+
+    Args:
+        name (str): A ``step[...]`` annotation name.
+
+    Returns:
+        str: The leading token inside the brackets, or ``""`` when the name
+            carries none.
+    """
+    return name[len("step[") :].split(" ", 1)[0].rstrip("]")
+
+
+def _phase_step_medians(
+    spans: list[tuple[float, float, str]],
+    min_phase_steps: int = _PRETRIM_MIN_PHASE_STEPS,
+) -> dict[str, float]:
+    """Median step duration per phase, for phases that recur often enough.
+
+    A single median over the whole trace is not a usable baseline for a mixed
+    capture: decode dominates the population at tens of milliseconds while a
+    prefill step runs for the better part of a second, so every prefill step
+    reads as an outlier against it and the leading ones -- exactly the window
+    ``--steady-state-mode=prefilldecode`` exists to analyse -- would be trimmed
+    as start-up noise. Grouping by phase keeps each step measured against work
+    of its own kind.
+
+    Args:
+        spans (list[tuple[float, float, str]]): ``(ts, dur, name)`` per step.
+        min_phase_steps (int): Samples a phase needs before its median is used.
+
+    Returns:
+        dict[str, float]: Phase to median step duration in microseconds. Phases
+            below the sample floor, and phases whose median is not positive, are
+            omitted -- callers treat a missing phase as "no baseline".
+    """
+    by_phase: dict[str, list[float]] = {}
+    for _, dur, name in spans:
+        by_phase.setdefault(_step_phase(name), []).append(dur)
+    medians: dict[str, float] = {}
+    for phase, durs in by_phase.items():
+        if len(durs) < min_phase_steps:
+            continue
+        durs.sort()
+        median = durs[len(durs) // 2]
+        if median > 0:
+            medians[phase] = median
+    return medians
 
 
 def pretrim_startup_transient(
@@ -1068,6 +1184,7 @@ def pretrim_startup_transient(
     *,
     outlier_factor: float = _PRETRIM_OUTLIER_FACTOR,
     min_steps: int = _PRETRIM_MIN_STEPS,
+    min_phase_steps: int = _PRETRIM_MIN_PHASE_STEPS,
     max_dropped_steps: int = _PRETRIM_MAX_DROPPED_STEPS,
 ) -> tuple[bool, dict[str, Any]]:
     """Drop the profiler-start transient from the head of a torch trace.
@@ -1091,14 +1208,19 @@ def pretrim_startup_transient(
 
     Detection is on step duration, not on any kernel name, so the same guard
     catches other head-of-window transients (first-replay JIT, KV-pool growth)
-    without knowing what they are. Only a *leading* run of outliers is cut: a
-    slow step in the middle is real behaviour the splitter and the health gates
-    should still see.
+    without knowing what they are. Durations are compared against the median of
+    the step's *own phase*: a mixed capture's prefill steps run one to two orders
+    of magnitude longer than its decode steps, and against a whole-trace median
+    the leading prefill steps -- the window
+    ``--steady-state-mode=prefilldecode`` exists to analyse -- would all read as
+    start-up noise. Only a *leading* run of outliers is cut: a slow step in the
+    middle is real behaviour the splitter and the health gates should still see.
 
     The cut is applied per timeline rather than as one timestamp, because the
     host runs a step ahead of the device and the two spans interleave across the
     boundary. See the comment at the cut for what each single-point alternative
-    loses.
+    loses. The two timelines are paired by position, never by annotation name;
+    ``_host_step_starts`` has the reasoning.
 
     Step count is unaffected downstream: the splitter is invoked with
     ``--num-steps`` and caps its window there, so it still hands TraceLens
@@ -1109,16 +1231,18 @@ def pretrim_startup_transient(
         src (Path): Raw per-rank trace, JSON or ``.gz``.
         dst (Path): Where the trimmed trace is written. Untouched when no trim
             is performed.
-        outlier_factor (float): Multiple of the median step duration above
-            which a leading step is treated as a transient.
+        outlier_factor (float): Multiple of the phase median above which a
+            leading step is treated as a transient.
         min_steps (int): Fewest step annotations required before trimming.
+        min_phase_steps (int): Samples a phase needs before its median is
+            trusted as a baseline.
         max_dropped_steps (int): Refuse to trim when more than this many leading
             steps look like transients.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(trimmed, report)``. ``report`` always
             carries a ``reason``; when ``trimmed`` is True it also carries the
-            step counts and durations for the run log and status file.
+            step counts and durations for the run log and the pretrim artifact.
     """
     factor = outlier_factor
     try:
@@ -1135,20 +1259,36 @@ def pretrim_startup_transient(
     if len(spans) < min_steps:
         return False, {"reason": "too_few_steps", "steps": len(spans), "min_steps": min_steps}
 
-    durations = sorted(dur for _, dur, _ in spans)
-    median_us = durations[len(durations) // 2]
-    if median_us <= 0:
-        return False, {"reason": "degenerate_median", "steps": len(spans)}
+    medians = _phase_step_medians(spans, min_phase_steps)
+    if not medians:
+        # No phase recurs often enough to be a baseline; there is nothing to
+        # call a step abnormal against.
+        return False, {
+            "reason": "no_phase_baseline",
+            "steps": len(spans),
+            "min_phase_steps": min_phase_steps,
+        }
+    phase_medians_ms = {phase: round(med / 1000.0, 3) for phase, med in sorted(medians.items())}
 
     dropped = 0
-    while dropped < len(spans) and spans[dropped][1] > factor * median_us:
+    ratios: list[float] = []
+    while dropped < len(spans):
+        _, dur, name = spans[dropped]
+        # A step whose phase has no baseline stops the run rather than being
+        # dropped on a comparison that does not hold.
+        median_us = medians.get(_step_phase(name))
+        if median_us is None or dur <= factor * median_us:
+            break
+        ratios.append(dur / median_us)
         dropped += 1
     if dropped == 0:
+        first_median_us = medians.get(_step_phase(spans[0][2]))
         return False, {
-            "reason": "clean",
+            "reason": "no_leading_outlier",
             "steps": len(spans),
-            "median_step_ms": round(median_us / 1000.0, 3),
-            "first_step_ratio": round(spans[0][1] / median_us, 2),
+            "phase_medians_ms": phase_medians_ms,
+            "first_step_phase": _step_phase(spans[0][2]),
+            "first_step_ratio": (round(spans[0][1] / first_median_us, 2) if first_median_us else None),
         }
     if dropped > max_dropped_steps:
         # Not a start-up blip. Leave it visible so the health gates can act.
@@ -1157,7 +1297,8 @@ def pretrim_startup_transient(
             "steps": len(spans),
             "leading_outliers": dropped,
             "max_dropped_steps": max_dropped_steps,
-            "median_step_ms": round(median_us / 1000.0, 3),
+            "outlier_factor": factor,
+            "phase_medians_ms": phase_medians_ms,
         }
 
     remaining = len(spans) - dropped
@@ -1172,7 +1313,28 @@ def pretrim_startup_transient(
     # dropped step's post-barrier kernels behind as orphans.
     gpu_cut = spans[dropped][0]
     host_starts = _host_step_starts(events)
-    cpu_cut = min(host_starts.get(spans[dropped][2], gpu_cut), gpu_cut)
+    if len(host_starts) < len(spans):
+        # Without one host annotation per device step the two timelines cannot be
+        # paired positionally, and pairing by name is not an alternative (see
+        # `_host_step_starts`). Refuse rather than fall back to a single cut,
+        # which is the outcome this split exists to avoid.
+        return False, {
+            "reason": "host_steps_missing",
+            "steps": len(spans),
+            "host_steps": len(host_starts),
+        }
+    cpu_cut = host_starts[dropped]
+    if cpu_cut > gpu_cut:
+        # The host issues a step's launches before the device runs it, so a host
+        # start later than the paired device start means the two lists are not
+        # aligned and the cut points cannot be trusted.
+        return False, {
+            "reason": "timeline_pairing_unreliable",
+            "steps": len(spans),
+            "host_steps": len(host_starts),
+            "gpu_cut_ts": gpu_cut,
+            "cpu_cut_ts": cpu_cut,
+        }
 
     def _survives(ev: Any) -> bool:
         if not isinstance(ev, dict):
@@ -1187,6 +1349,11 @@ def pretrim_startup_transient(
         ts = ev.get("ts")
         if not isinstance(ts, (int, float)):
             return True
+        # Trace-level spans and markers (cat:"Trace", the ph:"i" iteration-start
+        # instant) are deliberately *not* given the ph:"M" treatment: unlike
+        # metadata their ts/dur describe the untrimmed window, so carrying them
+        # over unchanged would have the artifact state a start and a duration
+        # the events no longer support. They fall through the ts filter below.
         ph = ev.get("ph")
         if ph == "s":  # flow start: sits on the host timeline
             return ts >= cpu_cut
@@ -1196,14 +1363,20 @@ def pretrim_startup_transient(
 
     kept = [ev for ev in events if _survives(ev)]
 
+    dropped_phase = _step_phase(spans[0][2])
     report = {
         "reason": "trimmed",
         "dropped_steps": dropped,
         "dropped_ms": round(sum(dur for _, dur, _ in spans[:dropped]) / 1000.0, 3),
-        "median_step_ms": round(median_us / 1000.0, 3),
-        "outlier_ratio": round(spans[0][1] / median_us, 2),
+        "dropped_phase": dropped_phase,
+        "median_step_ms": phase_medians_ms[dropped_phase],
+        "phase_medians_ms": phase_medians_ms,
+        # The worst of the dropped steps, not the first: with more than one
+        # dropped the first is not necessarily the transient.
+        "outlier_ratio": round(max(ratios), 2),
         "outlier_factor": factor,
         "remaining_steps": remaining,
+        "host_steps": len(host_starts),
         "events_before": len(events),
         "events_after": len(kept),
         "gpu_cut_ts": gpu_cut,
@@ -1219,7 +1392,14 @@ def pretrim_startup_transient(
         with opener(dst, "wt", encoding="utf-8") as fh:
             json.dump(payload, fh)
     except Exception as exc:  # noqa: BLE001 - fall back to the raw trace rather than fail the run
-        return False, {"reason": "write_failed", "error": str(exc)[:200], **report}
+        # Drop the partial write. The caller keeps the untrimmed trace, and a
+        # truncated file left in the split directory is only something for a
+        # later step to mistake for a usable one. ``reason`` goes last so the
+        # failure is what the caller reads, not the "trimmed" this report was
+        # built with.
+        with contextlib.suppress(OSError):
+            dst.unlink(missing_ok=True)
+        return False, {**report, "reason": "write_failed", "error": str(exc)[:200]}
     return True, report
 
 
@@ -7845,38 +8025,63 @@ def main() -> int:
                 # percentage is then computed against that inflated denominator.
                 # Trimming here keeps the splitter and TraceLens untouched.
                 trimmed_trace = split_dir / (analysis_trace_path.name.replace(".trace.json", ".pretrimmed.trace.json"))
-                min_remaining = max(8, int(args.split_num_steps or 32))
+                split_num_steps = max(8, int(args.split_num_steps or 32))
                 did_trim, pretrim_report = pretrim_startup_transient(
                     analysis_trace_path,
                     trimmed_trace,
                 )
                 pretrim_summary = dict(pretrim_report)
                 pretrim_summary["applied"] = False
-                if did_trim and pretrim_report["remaining_steps"] < min_remaining:
+                # Only the splitter's input moves to the trimmed copy.
+                # analysis_trace_path stays on the real capture: capture-folder
+                # discovery resolves the graph-capture sidecar from the trace
+                # file's own directory, and the split warnings name it as the
+                # capture the operator profiled. Both would point into
+                # trace_split/ if this were reassigned.
+                split_input_path = analysis_trace_path
+                if did_trim and pretrim_report["remaining_steps"] < split_num_steps:
                     # Trimming would leave the splitter fewer steps than it
                     # was asked for. A silently short window reads as a clean
                     # measurement; the untrimmed one at least shows the damage.
                     append_log(
                         log_path,
                         f"pretrim: only {pretrim_report['remaining_steps']} step(s) would "
-                        f"remain < --split-num-steps {min_remaining}; keeping untrimmed trace",
+                        f"remain < --split-num-steps {split_num_steps}; keeping untrimmed trace",
                     )
                     pretrim_summary["reason"] = "insufficient_remaining_steps"
-                    pretrim_summary["min_remaining_steps"] = min_remaining
+                    pretrim_summary["min_remaining_steps"] = split_num_steps
+                    # The rejected copy is nearly the size of the capture; it is
+                    # not the input to anything now, so do not leave it behind.
+                    with contextlib.suppress(OSError):
+                        trimmed_trace.unlink(missing_ok=True)
                 elif did_trim:
                     append_log(
                         log_path,
-                        f"pretrim: dropped {pretrim_report['dropped_steps']} leading step(s), "
+                        f"pretrim: dropped {pretrim_report['dropped_steps']} leading "
+                        f"{pretrim_report['dropped_phase']} step(s), "
                         f"{pretrim_report['dropped_ms']:.1f} ms, "
-                        f"{pretrim_report['outlier_ratio']:.0f}x median "
+                        f"{pretrim_report['outlier_ratio']:.0f}x phase median "
                         f"{pretrim_report['median_step_ms']:.1f} ms; "
                         f"{pretrim_report['remaining_steps']} step(s) remain",
                     )
                     pretrim_summary["applied"] = True
-                    analysis_trace_path = trimmed_trace
+                    split_input_path = trimmed_trace
                     artifacts["tracelens_pretrimmed_trace"] = str(trimmed_trace)
-                elif pretrim_report.get("reason") != "clean":
+                elif pretrim_report.get("reason") != "no_leading_outlier":
                     append_log(log_path, f"pretrim: not applied ({pretrim_report.get('reason')})")
+                if pretrim_report.get("reason") == "too_many_leading_outliers":
+                    # A run of leading outliers is not a transient to trim but a
+                    # workload that never settled. Route it to the health
+                    # warnings so it reaches the report, not just the run log.
+                    trace_health_warnings.append(
+                        _build_pretrim_no_steady_state_warning(
+                            trace_input=analysis_trace_path,
+                            steps=int(pretrim_report["steps"]),
+                            leading_outliers=int(pretrim_report["leading_outliers"]),
+                            max_dropped_steps=int(pretrim_report["max_dropped_steps"]),
+                            outlier_factor=float(pretrim_report["outlier_factor"]),
+                        )
+                    )
                 # Persist as an artifact, not just a log line: the status
                 # file is rewritten by every later step, so a diagnostic
                 # parked there is gone by the time anyone reads the report.
@@ -7888,12 +8093,12 @@ def main() -> int:
                     sys.executable,
                     "-m",
                     "TraceLens.TraceUtils.split_inference_trace_annotation",
-                    str(analysis_trace_path),
+                    str(split_input_path),
                     "-o",
                     str(split_dir),
                     "--find-steady-state",
                     "--num-steps",
-                    str(max(8, int(args.split_num_steps or 32))),
+                    str(split_num_steps),
                 ]
                 conc = args.split_conc or os.environ.get("CONC", "").strip()
                 if str(conc).strip():
