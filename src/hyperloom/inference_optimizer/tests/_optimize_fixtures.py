@@ -94,16 +94,11 @@ def optimize_state(
 class FakeCoordinator:
     """Answers the Coordinator's state surface; resolves the rest for real.
 
-    Replaces the hand-written stub classes that bound one Coordinator method
-    per line. Those are a transitive closure of an implementation detail: a
-    method that starts calling one more sibling kills every test that built
-    such a stub, naming a helper the test never heard of.
-
-    Here anything not set as state is looked up in ``Coordinator._DELEGATED``
-    and served by the real collaborator, so moving a method between
-    collaborators costs one table edit and no test edits. An attribute in
-    neither place raises with an explanation, rather than an ``AttributeError``
-    from three frames down.
+    Anything not passed as state is looked up in ``Coordinator._DELEGATED``,
+    then on ``Coordinator`` itself, then among the collaborators, and served by
+    the real object. Moving a method between collaborators costs one table edit
+    and no test edits, where a stub binding one method per line had to be
+    re-derived every time the call chain grew.
     """
 
     def __init__(self, session_dir: Any, **state: Any) -> None:

@@ -7,7 +7,7 @@ The Coordinator's ``_compose_prompt`` emits blocks separated by ``=== X ===``
 headers. For the robustness role the expected blocks are:
 
     === Phase ===
-    phase     : EXPLORE
+    phase     : FRAMEWORK_AGENT
     ...
 
     === Shared session state ===
@@ -19,7 +19,7 @@ headers. For the robustness role the expected blocks are:
 
     === Phase budget telemetry ===
       PRELUDE: elapsed=123s cap=456s used=27%
-      EXPLORE: elapsed=789s cap=unlimited used=0%
+      FRAMEWORK_AGENT: elapsed=789s cap=unlimited used=0%
 
     === Conversation progress ===
     ticks_without_progress=3 threshold=12 severity=ok last_progress_tick=45

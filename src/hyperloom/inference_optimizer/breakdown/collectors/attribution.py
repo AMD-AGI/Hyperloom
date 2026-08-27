@@ -82,9 +82,9 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # instead of vanishing into the non-emitted ``other`` family. The label may
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
-    # FRAMEWORK: exact legacy action label. ``integrate_patch`` is phase-generic
-    # (FRAMEWORK_AGENT, EXPLORE, and pre-baseline enablement), so it is resolved
-    # from entry metadata by ``_entry_family`` rather than blanket-credited here.
+    # FRAMEWORK: exact legacy action label. ``integrate_patch`` serves both
+    # levers and pre-baseline enablement, so ``_entry_family`` resolves it from
+    # entry metadata rather than blanket-crediting it here.
     (lambda s: s == "framework", "framework"),
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
@@ -318,11 +318,11 @@ def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
 def _entry_family(entry: dict[str, Any]) -> str:
     """Resolve attribution family using phase/ownership metadata when needed.
 
-    ``integrate_patch`` is not intrinsically a Framework action. Framework
-    authoring owns explicitly marked or FRAMEWORK_AGENT entries; EXPLORE owns
-    its own patch applications; PRELUDE baseline-enablement entries are
-    configuration prerequisites and remain non-attributable. Missing ownership
-    stays unattributed instead of being inferred from execution phase.
+    ``integrate_patch`` lands every patch source, so the action name says
+    nothing about which lever moved. The source arm owns explicitly marked
+    entries; the config arm owns its own patch applications; PRELUDE
+    baseline-enablement entries are prerequisites and remain non-attributable.
+    Missing ownership stays unattributed rather than inferred from the phase.
     """
 
     action = str(entry.get("action") or "").strip().lower()
@@ -638,10 +638,8 @@ def _collect_phase_breakdown(
         phase = _phase_at(_entry_ts(e), timeline).lower()
         action = str(e.get("action") or "").lower()
         fam = _entry_family(e)
-        # Both levers run inside FRAMEWORK_AGENT, so being active when a KEEP
-        # landed no longer says which one moved it. The entry's own family
-        # does; without this every config win in the merged phase would be
-        # reported as an upstream PR.
+        # Both levers run inside FRAMEWORK_AGENT, so the live phase no longer
+        # says which one moved a KEEP. The entry's own family does.
         if phase == "framework_agent":
             phase = "framework" if fam == "framework" else "explore"
         if action.startswith("integrate_patch"):

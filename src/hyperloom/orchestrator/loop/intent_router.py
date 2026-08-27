@@ -126,12 +126,9 @@ class IntentRouter:
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
-            # Layer first, phase last. Both lanes run inside the one
-            # optimisation phase, so being active when a specialist was
-            # dispatched no longer says which lever it moves -- reading the
-            # phase first would credit every config specialist to the source
-            # arm. The phase remains the fallback for a mandate that named
-            # neither a layer nor a domain.
+            # Layer first, phase last: both lanes share one phase, so the live
+            # phase no longer says which lever a specialist moves. The phase
+            # stays as the fallback when the mandate named neither.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):

@@ -1134,11 +1134,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             "domain": domain,
             "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
-            # No ``lever_kind``: this arm asks for a gap to be closed, not for a
-            # particular lever, and the mandate never reaches the specialist
-            # prompt anyway. Declaring one here only pre-committed the
-            # attribution to a source patch, which the deliverable is free to
-            # not be. ``patch_lever_kind`` reads what actually came back.
+            # No ``lever_kind``: this arm names a gap, not a lever, and its
+            # specialist returns either. ``patch_lever_kind`` reads what came back.
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
             "framework": framework,
@@ -1350,48 +1347,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "learnings": learnings,
             "pending": [r for r in pending if r],
         }
-
-    def _render_framework_memory_for_prompt(memory: dict[str, Any] | None) -> str:
-        """Render the FRAMEWORK working memory into prompt text (mirror of ``render_memory_for_seed``).
-
-        Emits a bounded ``tried_and_why`` / ``learnings`` bullet block framed as
-        "already tried this session — avoid proposing the same or equivalent".
-        Returns ``""`` when there is nothing tried yet (fresh phase), so callers
-        can skip the section cleanly.
-
-        Args:
-            memory: A record from :meth:`_build_framework_working_memory`.
-
-        Returns:
-            The rendered prompt text, or ``""`` when empty.
-        """
-        if not isinstance(memory, dict) or not memory:
-            return ""
-        tried = memory.get("tried_and_why") or []
-        learnings = memory.get("learnings") or []
-        if not tried and not learnings:
-            return ""
-        lines: list[str] = [
-            "Already tried THIS session (avoid proposing the same PR or an "
-            "equivalent change — prefer a candidate that attacks a different "
-            "bottleneck):",
-        ]
-        for t in tried:
-            if not isinstance(t, dict):
-                continue
-            ref = str(t.get("ref") or "").strip()
-            if not ref:
-                continue
-            status = str(t.get("status") or "").strip() or "?"
-            gain = t.get("gain_pct")
-            gain_str = f" gain={float(gain):+.2f}%" if isinstance(gain, (int, float)) else ""
-            why = str(t.get("why") or "").strip()
-            why_str = f" — {why}" if why else ""
-            lines.append(f"  - {ref} [{status}]{gain_str}{why_str}")
-        if learnings:
-            lines.append("Learnings (avoid these dead ends):")
-            lines.extend(f"  - {str(x)}" for x in learnings)
-        return "\n".join(lines)
 
     def _framework_agent_discover_repo_urls(self, framework: str) -> list[str]:
         """Repo URLs to query for the FRAMEWORK batch: framework's own repo + global PR_QUERY_REPOS allowlist, dedup preserving order.
@@ -2495,10 +2450,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
-            # The empty-result count is part of the key: the registry hands
-            # back whatever row a key already names, so a fixed key would make
-            # every retry a no-op re-fetch of the finished first attempt, and
-            # the streak this method declines on could never reach its limit.
+            # The empty-result count is part of the key: the registry returns
+            # the row a key already names, so a fixed key would re-fetch the
+            # finished first attempt and the streak could never advance.
             idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}:r{empties}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,

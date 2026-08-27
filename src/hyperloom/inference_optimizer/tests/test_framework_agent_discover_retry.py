@@ -100,10 +100,6 @@ class _CoordinatorStub:
         return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
-async def _call_discover(stub: _CoordinatorStub) -> bool:
-    return await Coordinator._discover_next_framework_batch(stub)  # type: ignore[arg-type]
-
-
 class _TasksStub:
     """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""
 
