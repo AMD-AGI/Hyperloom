@@ -75,19 +75,24 @@ post_status() { # leg state(pending|success|failure|error) description
 }
 
 # ---- sticky PR/commit report comment ---------------------------------------
-# This CI runs on push to main, which carries no PR number. Resolve the PR that
-# the triggering commit was merged from (GET /commits/{sha}/pulls); if none is
-# found, fall back to a commit comment. Then upsert ONE sticky comment (matched
+# This CI runs on pull_request, so the PR number is passed in directly via PR_NUMBER
+# (github.event.pull_request.number). If it's absent (e.g. a workflow_dispatch run),
+# fall back to resolving the PR from the triggering commit (GET /commits/{sha}/pulls),
+# and if that too fails, comment on the commit. Then upsert ONE sticky comment (matched
 # by an HTML marker) and PATCH it in place as legs finish -- so a single comment
 # updates incrementally (design §10, point C). Mirrors ci-e2e-dispatch.sh.
 REPORT_MARKER="<!-- pre-release-e2e-report:${CI_VERSION} -->"
-PR_NUMBER=""; COMMENT_TARGET=""   # COMMENT_TARGET: "pr" | "commit" | "" (disabled)
+PR_NUMBER="${PR_NUMBER:-}"; COMMENT_TARGET=""   # COMMENT_TARGET: "pr" | "commit" | "" (disabled)
 
 gh_report_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [ -n "${GH_STATUS_SHA:-}" ]; }
 
 resolve_comment_target() {
   gh_report_on || { COMMENT_TARGET=""; return 0; }
-  # A merged commit usually belongs to exactly one PR; take the first.
+  # Preferred: the pull_request event handed us the PR number directly.
+  if [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+    COMMENT_TARGET="pr"; echo "[report] commenting on PR #$PR_NUMBER (from event)"; return 0
+  fi
+  # Fallback (workflow_dispatch etc.): a commit usually belongs to one PR; take the first.
   PR_NUMBER="$(curl -sS \
     -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
     -H "Accept: application/vnd.github+json" \

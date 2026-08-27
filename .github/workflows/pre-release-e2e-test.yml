@@ -8,11 +8,13 @@ name: Pre-release E2E test
 # the Claude CLI + setup/demo skills -- the same path a user takes. Independent of the
 # per-PR smoke test (ci-e2e.yml). See hyperloom-pre-release-e2e-ci-design.md.
 #
-# Triggers:
-#   * push to main that changes pyproject.toml's `version` field -> FULL run (all 8 legs)
-#   * push to main that changes this CI's scripts/prompts/workflow (version unchanged)
-#     -> SCRIPTS-ONLY run (the 4 fast 3h legs, to validate the logic change)
+# Triggers (gate BEFORE merge, on the PR -- not after merge to main):
+#   * PR targeting main that bumps pyproject.toml's `version` field   -> FULL run (all 8 legs)
+#   * PR targeting main that only touches this CI's scripts/prompts/  -> SCRIPTS-ONLY run
+#     workflow (version unchanged)                                       (the 4 fast 3h legs)
 #   * manual workflow_dispatch (reuse a wheel, run a leg subset; default all 8)
+# NOTE: there is deliberately NO push-to-main trigger -- the gate runs while the PR is
+# open so a bad release is blocked before it lands, and merging does not re-run it.
 #
 # ── Environment values to fill in (repo Secrets/Variables) ──────────────────
 # All names carry a PRE_E2E_ prefix so they never collide with the existing per-PR
@@ -28,11 +30,11 @@ name: Pre-release E2E test
 # `${{ vars.* }}` references. TODO(owner): populate these before first real run.
 
 on:
-  push:
+  pull_request:
     branches: [main]
-    # A push must touch one of these to even start the workflow; `resolve` then
-    # classifies it into a FULL run (version bump) or a SCRIPTS-ONLY run (CI logic
-    # changed but version unchanged).
+    # A PR must touch one of these to even start the workflow; `resolve` then
+    # classifies it into a FULL run (version bump vs the base branch) or a
+    # SCRIPTS-ONLY run (CI logic changed but version unchanged).
     paths:
       - "pyproject.toml"                              # version bump -> full release gate
       - ".github/workflows/pre-release-e2e-test.yml"  # the workflow itself
@@ -60,7 +62,7 @@ permissions:
   issues: write          # PR comments go through the issues API
 
 jobs:
-  # 1. resolve: gate on a real version bump (push) or manual input; compute CI_VERSION.
+  # 1. resolve: gate on a real version bump (PR vs base) or manual input; compute CI_VERSION.
   resolve:
     runs-on: Hyperloom-e2e-ci
     outputs:
@@ -76,7 +78,9 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          fetch-depth: 2   # need HEAD~1 to diff the version field on push
+          # For a PR, actions/checkout checks out the merge ref; fetch-depth 0 gives us
+          # the base branch too so we can compare the version field against base.
+          fetch-depth: 0
 
       - name: Decide + compute CI_VERSION
         id: decide
@@ -84,6 +88,8 @@ jobs:
           EVENT: ${{ github.event_name }}
           REUSE_IN: ${{ inputs.reuse_ci_version }}
           TASKS_IN: ${{ inputs.tasks }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
           # The 4 fast 3h legs used when only CI logic (scripts/prompts/workflow)
@@ -102,27 +108,31 @@ jobs:
                 gsub(/.*=[[:space:]]*"|".*/,""); print; exit
               }'
           }
+          # `base_version` here means the version in the PR head (this branch's
+          # pyproject.toml) -- confusingly it is also compared against the PR *base*
+          # branch below. Keep the name for downstream outputs (it feeds CI_VERSION).
           base_version="$(read_version < pyproject.toml)"
           if [ "$EVENT" = "workflow_dispatch" ]; then
             # Manual runs are full-scope; tasks default to all 8 (empty = all in dispatch).
             run=true; run_scope="full"; reuse="${REUSE_IN:-}"
           else
-            # push to main. Classify: version bump -> full; else CI logic changed -> scripts-only.
-            prev="$(git show HEAD~1:pyproject.toml 2>/dev/null | read_version || true)"
+            # pull_request targeting main. Classify against the PR BASE branch (not HEAD~1:
+            # actions/checkout gives us the merge ref, whose first parent is the base tip,
+            # and fetch-depth:0 pulled the base commit BASE_SHA). version bump vs base ->
+            # FULL; else the PR only touched CI logic -> SCRIPTS-ONLY.
+            prev="$(git show "${BASE_SHA}:pyproject.toml" 2>/dev/null | read_version || true)"
             if [ "$base_version" != "$prev" ] && [ -n "$base_version" ]; then
               run=true; run_scope="full"
-              echo "version bump: '${prev}' -> '${base_version}' -> FULL run (all 8 legs)"
+              echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 8 legs)"
             else
-              # Version unchanged. on.push.paths already guaranteed this push touched one
-              # of the watched paths, and it wasn't the version -> it changed the CI's own
-              # scripts/prompts/workflow. Run the fast scripts-only scope. (The diff is
-              # best-effort logging; across a multi-commit push HEAD~1 may not show every
-              # changed file, so we do NOT gate on it -- the path filter already did.)
+              # Version unchanged vs base. on.pull_request.paths already guaranteed this PR
+              # touched one of the watched paths, and it wasn't the version -> it changed
+              # the CI's own scripts/prompts/workflow. Run the fast scripts-only scope.
               run=true; run_scope="scripts-only"
-              changed="$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -E \
+              changed="$(git diff --name-only "${BASE_SHA}" HEAD 2>/dev/null | grep -E \
                 '^\.github/(workflows/pre-release-e2e-test\.yml|scripts/pre-release-e2e-.*\.sh|pre-release/)' \
                 | paste -sd',' - || true)"
-              echo "version unchanged; CI logic changed (${changed:-see path filter}) -> SCRIPTS-ONLY run (4 fast 3h legs)"
+              echo "version unchanged vs base ${BASE_REF}; CI logic changed (${changed:-see path filter}) -> SCRIPTS-ONLY run (4 fast 3h legs)"
             fi
           fi
 
@@ -234,7 +244,11 @@ jobs:
       # per-leg GitHub commit status
       GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_STATUS_REPO: ${{ github.repository }}
-      GH_STATUS_SHA: ${{ github.sha }}
+      # On pull_request, github.sha is the ephemeral merge commit; per-leg commit
+      # statuses must land on the PR HEAD sha so they surface on the PR checks tab.
+      GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
+      # PR number is known directly from the event -- no commit->PR reverse lookup.
+      PR_NUMBER: ${{ github.event.pull_request.number }}
       GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       POLL_INTERVAL_S: "120"
       GLOBAL_TIMEOUT_S: "50400"
