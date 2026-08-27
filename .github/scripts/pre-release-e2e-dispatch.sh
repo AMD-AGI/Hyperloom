@@ -121,6 +121,49 @@ fi
 
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 
+# ---- reclaim stale pre-release workloads BEFORE dispatching -----------------
+# The concurrency.cancel-in-progress GitHub knob only cancels the JOB; it does NOT
+# reliably stop the SaFE PyTorchJob pods a superseded/failed run already created (the
+# `if: cancelled()` cleanup gets a short grace window, and a job that FAILS -- not
+# cancels -- after dispatch skips it entirely). Verified 2026-08-27: three `Running`
+# e2e workloads (incl. an 8-GPU docker host) leaked from a dead run and idle-held their
+# cards. So the correct, self-healing order is the reverse of "cancel job -> hope the
+# pod stops": a NEW run STOPS every stale e2e-* workload up front, frees the GPUs, then
+# dispatches its own. The old run's poll then sees phase=Stopped and judges those legs
+# FAIL -- the GitHub job ends naturally as a consequence of stopping the pod, not the
+# other way round.
+#
+# Scope: only workloads whose displayName starts `e2e-` (this CI's own), in THIS
+# workspace, that are NOT already terminal, and NOT this run's own tag (VERSION_TAG,
+# whose workloads don't exist yet anyway -- a belt-and-suspenders guard).
+reap_stale_workloads() {
+  local resp
+  resp="$(curl -sS "${tls[@]}" --max-time 30 "$API" "${auth[@]}" 2>/dev/null || true)"
+  [ -n "$resp" ] || { echo "[reap] could not list workloads; skipping reclaim" >&2; return 0; }
+  # Terminal phases we must NOT re-stop; anything else (Running/Pending/Queued/
+  # Creating/Unknown/...) is a live pod holding resources.
+  local stale
+  stale="$(printf '%s' "$resp" | jq -r --arg ws "$SAFE_WORKSPACE_ID" --arg tag "$VERSION_TAG" '
+      (.items // .workloads // .)[]?
+      | select(((.displayName // .name // "") | startswith("e2e-")))
+      | select((.workspaceId // $ws) == $ws)
+      | select(((.displayName // .name // "") | contains($tag)) | not)
+      | select((.phase // .status // "") as $p
+               | (["Stopped","Failed","Succeeded","Completed","Deleted"] | index($p)) | not)
+      | (.workloadId // .id)' 2>/dev/null || true)"
+  [ -n "$stale" ] || { summary "• no stale e2e workloads to reclaim"; return 0; }
+  local wid code n=0
+  while IFS= read -r wid; do
+    [ -n "$wid" ] || continue
+    code="$(curl -sS "${tls[@]}" --max-time 20 -o /dev/null -w '%{http_code}' \
+      -X POST "$API/$wid/stop" "${auth[@]}" 2>/dev/null || echo 000)"
+    summary "• reclaimed stale workload \`$wid\` (stop HTTP $code)"
+    n=$((n+1))
+  done <<< "$stale"
+  summary "• reclaimed $n stale e2e workload(s) before dispatch"
+}
+reap_stale_workloads
+
 # All 8 legs. Fields: mode backend hours model_path -- gpu index within the docker host
 ALL_LEGS="baremetal-vllm-3h baremetal-vllm-12h baremetal-sglang-3h baremetal-sglang-12h \
 docker-vllm-3h docker-vllm-12h docker-sglang-3h docker-sglang-12h"

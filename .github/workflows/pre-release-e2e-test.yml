@@ -302,8 +302,16 @@ jobs:
           chmod +x .github/scripts/pre-release-e2e-poll.sh
           .github/scripts/pre-release-e2e-poll.sh
 
-      - name: Stop workloads on job cancel
-        if: cancelled()
+      - name: Stop workloads on abnormal job end
+        # cancel OR failure OR a crash mid-dispatch/poll all leak pods: the poll step
+        # stops workloads only when IT runs to completion, so a job that is cancelled
+        # (superseded push) or fails (dispatch/poll error, runner death) after dispatch
+        # would idle-hold its GPUs. This idempotent cleanup fires on every abnormal end
+        # and stops whatever landed in DISPATCH_MAP (stopping an already-terminal
+        # workload is a harmless no-op). The next run's pre-dispatch reap is the
+        # backstop for anything even this misses (e.g. the runner dying before this
+        # step). Success path is handled by the poll script's own stop_workloads().
+        if: cancelled() || failure()
         env:
           SAFE_API_BASE: ${{ vars.PRE_E2E_SAFE_API_BASE }}
           SAFE_API_KEY: ${{ secrets.PRE_E2E_SAFE_API_KEY }}
