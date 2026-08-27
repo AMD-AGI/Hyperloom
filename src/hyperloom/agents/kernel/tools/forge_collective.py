@@ -162,7 +162,7 @@ def _build_cmd(
 
     resuming = _campaign_is_resumable(workspace)
     cli = args.get("cli")
-    cmd = [str(cli), "forge-loop"] if cli else [sys.executable, "-m", "kernel_agents.cli", "forge-loop"]
+    cmd = [str(cli), "forge-loop"] if cli else [sys.executable, "-m", "kernelforge.cli", "forge-loop"]
     _add_opt(cmd, workspace, "--workspace")
     if resuming:
         # forge-loop owns the campaign's immutable configuration once it has

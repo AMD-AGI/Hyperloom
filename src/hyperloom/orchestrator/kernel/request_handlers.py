@@ -4356,13 +4356,13 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 def _forge_fusion_available() -> bool:
     """Check that KernelForge's fusion pipeline is importable.
 
-    Probes the subpackage rather than ``kernel_agents``: a KernelForge predating
-    the fusion absorption would satisfy the parent import and only fail once the
-    subprocess rejected ``forge-fuse``. PATH is not consulted because the tool is
-    invoked through ``sys.executable -m``.
+    Probes the subpackage rather than ``kernelforge``: a $FORGE_PATH checkout
+    predating the fusion absorption would satisfy the parent import and only
+    fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
+    because the tool is invoked through ``sys.executable -m``.
     """
     try:
-        return importlib.util.find_spec("kernel_agents.fusion") is not None
+        return importlib.util.find_spec("kernelforge.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
 
@@ -4841,20 +4841,34 @@ def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
 
     A local copy of the number drifts the moment upstream changes it, and the
     lane then plans against a budget the campaign will not honour.
+
+    The fallback is logged rather than taken silently. KernelForge now ships in
+    this distribution, so a failed import means a renamed module or a broken
+    install, not an optional dependency -- and the symptom otherwise is a
+    campaign quietly planned against the wrong wall-clock budget, which no run
+    ever reports.
     """
     try:
         return float(getattr(importlib.import_module(module), name))
-    except (ImportError, AttributeError, TypeError, ValueError):
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        log.warning(
+            "forge-loop constant %s.%s unreadable (%s); planning against the fallback %s. "
+            "KernelForge ships with Hyperloom, so this is a rename or a broken install.",
+            module,
+            name,
+            exc,
+            fallback,
+        )
         return fallback
 
 
 # Session time held back for the E2E integrate round plus reporting.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
+_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernelforge.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
 # Wrapper grace to export the patch and restore the repository.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
 # forge-loop rejects a campaign shorter than its own minimum.
-_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600)
+_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernelforge.cli", "MIN_MAX_HOURS", 1.0) * 3600)
 # Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
 _COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 

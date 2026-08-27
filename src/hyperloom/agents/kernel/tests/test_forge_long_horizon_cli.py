@@ -699,7 +699,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     assert command[:5] == [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
     ]
@@ -2194,7 +2194,7 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
 def _capabilities_payload(**overrides) -> dict:
     """One capability payload, spelled exactly as the producer emits it.
 
-    Copied from ``kernel_agents.rewrite_by_flydsl.protocol.capabilities()``.
+    Copied from ``kernelforge.rewrite_by_flydsl.protocol.capabilities()``.
     ``test_capability_payload_matches_the_installed_producer`` re-derives it from
     a real producer when one is on disk, so a rename on either side cannot leave
     these tests passing against a payload nobody emits.
@@ -2310,7 +2310,7 @@ def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
 def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
     captured = _stub_capability_process(
         monkeypatch,
-        stdout="loading kernel_agents...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
+        stdout="loading kernelforge...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
     )
 
     capabilities = _flydsl_rewrite.probe_capabilities(forge_root="/forge/src")
@@ -2322,7 +2322,7 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
     assert captured["command"] == [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-rewrite-by-flydsl",
         "--capabilities-json",
     ]
@@ -2406,7 +2406,7 @@ def _installed_producer_root() -> str:
         [
             sys.executable,
             "-m",
-            "kernel_agents.cli",
+            "kernelforge.cli",
             _flydsl_rewrite.REWRITE_COMMAND,
             _flydsl_rewrite.CAPABILITIES_FLAG,
         ],
@@ -2447,7 +2447,7 @@ def test_capability_payload_matches_the_installed_producer():
         [
             sys.executable,
             "-m",
-            "kernel_agents.cli",
+            "kernelforge.cli",
             _flydsl_rewrite.REWRITE_COMMAND,
             _flydsl_rewrite.CAPABILITIES_FLAG,
         ],
@@ -3200,7 +3200,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     )
 
     command = captured["command"]
-    assert command[:4] == [sys.executable, "-m", "kernel_agents.cli", "forge-rewrite-by-flydsl"]
+    assert command[:4] == [sys.executable, "-m", "kernelforge.cli", "forge-rewrite-by-flydsl"]
     expected = {
         "--source-kernel": str(kernel),
         "--driver": str(driver),

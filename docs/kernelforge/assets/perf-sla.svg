@@ -32,7 +32,7 @@
   <rect x="340" y="64" width="14" height="14" rx="3" fill="url(#tritonBar)"/>
   <text x="360" y="75" fill="#94a3b8" font-size="11">Triton (Published Autotuned Baseline)</text>
   <rect x="580" y="64" width="14" height="14" rx="3" fill="url(#ckBar)"/>
-  <text x="600" y="75" fill="#94a3b8" font-size="11">CK (Kernel Agents Optimized)</text>
+  <text x="600" y="75" fill="#94a3b8" font-size="11">CK (KernelForge Optimized)</text>
 
   <!-- ═══ Config B Section ═══ -->
   <text x="60" y="115" fill="#e2e8f0" font-size="14" font-weight="700">Config B</text>

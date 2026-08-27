@@ -328,18 +328,17 @@ def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
 
 
 def test_install_sh_installs_the_codex_extra():
-    """install.sh must install kernel_agents with the codex SDK extra.
+    """install.sh must install kernelforge with the codex SDK extra.
 
     Without it ``FORGE_AGENT_BACKEND=codex`` raises CodexUnavailableError
-    ("Codex Python SDK is not installed; install kernel-agents[codex]"), which
+    ("Codex Python SDK is not installed; install kernelforge[codex]"), which
     the provider fallback then converts into a silent Claude run.
     """
     install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
     assert "[claude,codex]" in text, (
-        "kernel_agents must be installed with both provider extras so either "
-        "credential shape has a working forge fellow"
+        "kernelforge must be installed with both provider extras so either credential shape has a working forge fellow"
     )
 
 
@@ -350,12 +349,12 @@ def test_forge_loop_cli_accepts_the_provider_flags():
     so a KernelForge upgrade that renames them must fail here, not in a session.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "kernel_agents.cli", "forge-loop", "--help"],
+        [sys.executable, "-m", "kernelforge.cli", "forge-loop", "--help"],
         capture_output=True,
         text=True,
         timeout=120,
     )
     if proc.returncode != 0:
-        pytest.skip(f"kernel_agents CLI unavailable (rc={proc.returncode})")
+        pytest.skip(f"kernelforge CLI unavailable (rc={proc.returncode})")
     for flag in ("--agent-backend", "--model", "--agent-fallback-provider"):
         assert flag in proc.stdout, flag

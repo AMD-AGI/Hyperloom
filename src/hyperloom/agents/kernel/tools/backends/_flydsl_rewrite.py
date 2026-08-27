@@ -52,7 +52,7 @@ RESULT_SENTINEL = "__FORGE_RESULT__"
 # arrives through the capability handshake rather than living here.
 SUPPORTED_FRAMEWORKS = frozenset({"aiter", "vllm", "sglang"})
 
-# Mirrors kernel_agents.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
+# Mirrors kernelforge.cli MIN_MAX_HOURS (1.0h): the producer rejects a shorter
 # --max-hours outright, so a budget that cannot reach it is ineligible rather
 # than a child-process hard failure.
 PRODUCER_MIN_BUDGET_SEC = 3600
@@ -301,7 +301,7 @@ def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
     failure here is reported as-is and never re-tried with guessed arguments.
 
     Args:
-        forge_root: Directory holding ``kernel_agents``, prepended to the child
+        forge_root: Directory holding ``kernelforge``, prepended to the child
             ``PYTHONPATH``; empty relies on an installed package.
 
     Returns:
@@ -315,7 +315,7 @@ def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
     child_env = dict(os.environ)
     if forge_root:
         child_env["PYTHONPATH"] = forge_root + os.pathsep + child_env.get("PYTHONPATH", "")
-    cmd = [sys.executable, "-m", "kernel_agents.cli", REWRITE_COMMAND, CAPABILITIES_FLAG]
+    cmd = [sys.executable, "-m", "kernelforge.cli", REWRITE_COMMAND, CAPABILITIES_FLAG]
     try:
         proc = subprocess.run(
             cmd,
@@ -509,7 +509,7 @@ def evaluate_rewrite_route(
         timeout_s: Remaining wall-clock budget for the attempt.
         invocation_spec_file: Recorded invocation evidence the producer's
             driver-preparation stage authors the measurement driver from.
-        forge_root: Directory holding ``kernel_agents`` for the probe child.
+        forge_root: Directory holding ``kernelforge`` for the probe child.
         capability_probe: Injection point for the capability probe.
 
     Returns:

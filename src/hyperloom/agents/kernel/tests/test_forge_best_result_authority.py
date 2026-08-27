@@ -380,7 +380,7 @@ def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
         [
             sys.executable,
             "-m",
-            "kernel_agents.cli",
+            "kernelforge.cli",
             "forge-rewrite-by-flydsl",
             "--applyback-contract-json",
         ],

@@ -1,4 +1,4 @@
-# Kernel Agents: AI-Powered GPU Kernel Development
+# KernelForge: AI-Powered GPU Kernel Development
 
 **Automated kernel optimization for AMD Instinct GPUs using multi-agent AI**
 
@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-Kernel Agents is an agentic AI system that automates the full GPU kernel development cycle -- build, test, benchmark, profile, and optimize -- on AMD Instinct MI300X/MI355X accelerators. It replaces weeks of manual expert iteration with autonomous, measurement-driven optimization loops powered by 8 backend-specialized AI agents built on the Claude Agent SDK.
+KernelForge is an agentic AI system that automates the full GPU kernel development cycle -- build, test, benchmark, profile, and optimize -- on AMD Instinct MI300X/MI355X accelerators. It replaces weeks of manual expert iteration with autonomous, measurement-driven optimization loops powered by 8 backend-specialized AI agents built on the Claude Agent SDK.
 
 The system is born from production kernel work (Sparse Linear Attention, MoE mxfp4, Flash Attention) where every rule, pitfall, and validation gate comes from real engineering incidents. It captures and compounds institutional knowledge so that each optimization campaign makes the system smarter for the next.
 
@@ -33,7 +33,7 @@ This work is done by a small number of domain experts, creating a critical bottl
 
 ## The Solution
 
-Kernel Agents deploys 8 backend fellow agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
+KernelForge deploys 8 backend fellow agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
 
 ### Architecture
 
@@ -83,7 +83,7 @@ Kernel Agents deploys 8 backend fellow agents, each with domain-specific knowled
 
 Full forward + backward attention kernel, optimized from scratch to beat the published Triton autotuned baseline.
 
-| Metric | Triton (Published) | CK (Kernel Agents) | Speedup |
+| Metric | Triton (Published) | CK (KernelForge) | Speedup |
 |--------|-------------------|---------------------|---------|
 | Config B total | 60.85 ms | 44.97 ms | **1.35x** |
 | Config C total | 58.12 ms | 42.68 ms | **1.33x** |
@@ -95,7 +95,7 @@ The backward kernel alone went through 6 optimization phases -- split pipeline, 
 
 FlyDSL replacement for CK mxfp4 MoE kernels across all decode and prefill shapes.
 
-| Token Count | CK Baseline | FlyDSL (Kernel Agents) | Speedup |
+| Token Count | CK Baseline | FlyDSL (KernelForge) | Speedup |
 |-------------|-------------|------------------------|---------|
 | 64 (decode) | 287 us | 268 us | 1.08x |
 | 2048 | 823 us | 620 us | **1.33x** |
@@ -134,7 +134,7 @@ The system gets stronger with every campaign:
 
 Every validation gate exists because of a real incident:
 
-| Pitfall | Consequence Without Detection | How Kernel Agents Prevents It |
+| Pitfall | Consequence Without Detection | How KernelForge Prevents It |
 |---------|-------------------------------|-------------------------------|
 | Stale .so artifacts | Benchmarks measure old code; hours wasted | Build tool auto-cleans and verifies deployment |
 | BLOCK_M=64 with sparse attention | Silent data corruption across workgroups | Hard constraint in knowledge base |
@@ -144,7 +144,7 @@ Every validation gate exists because of a real incident:
 
 ### Multi-Backend Flexibility
 
-Unlike single-framework tools, Kernel Agents works across CK (C++ templates), FlyDSL (MLIR DSL), Triton (JIT Python), and AITER (pre-built operators). Each campaign runs with the fellow knowledge for the backend it is optimizing, and the driver contract is backend-agnostic -- when one backend plateaus, the same correctness oracle and benchmark carry straight over to a campaign on another, including a FlyDSL rewrite of the plateaued kernel.
+Unlike single-framework tools, KernelForge works across CK (C++ templates), FlyDSL (MLIR DSL), Triton (JIT Python), and AITER (pre-built operators). Each campaign runs with the fellow knowledge for the backend it is optimizing, and the driver contract is backend-agnostic -- when one backend plateaus, the same correctness oracle and benchmark carry straight over to a campaign on another, including a FlyDSL rewrite of the plateaued kernel.
 
 ---
 
@@ -194,7 +194,7 @@ searches invoke Supervisor guidance while measurement remains authoritative.
 
 ## Summary
 
-Kernel Agents transforms GPU kernel development from a scarce-expert, weeks-long process into an automated, measurement-driven system that delivers production-quality speedups overnight. It compounds institutional knowledge across campaigns, making each optimization faster than the last. The system has already delivered 1.24-1.38x speedups on production kernels for AMD Instinct MI355X -- and it gets smarter with every run.
+KernelForge transforms GPU kernel development from a scarce-expert, weeks-long process into an automated, measurement-driven system that delivers production-quality speedups overnight. It compounds institutional knowledge across campaigns, making each optimization faster than the last. The system has already delivered 1.24-1.38x speedups on production kernels for AMD Instinct MI355X -- and it gets smarter with every run.
 
 ---
 

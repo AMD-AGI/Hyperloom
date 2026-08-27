@@ -489,16 +489,16 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", spec)
         assert krh._forge_fusion_available() is True
-        # Probing kernel_agents alone would pass on a KernelForge predating the
+        # Probing kernelforge alone would pass on a KernelForge predating the
         # fusion absorption and only fail once the subprocess rejected forge-fuse.
-        assert probed == ["kernel_agents.fusion"]
+        assert probed == ["kernelforge.fusion"]
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
         assert krh._forge_fusion_available() is False
 
     def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
         def boom(_name):
-            raise ModuleNotFoundError("kernel_agents")
+            raise ModuleNotFoundError("kernelforge")
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", boom)
         assert krh._forge_fusion_available() is False

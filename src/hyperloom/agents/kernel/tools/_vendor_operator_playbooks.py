@@ -173,14 +173,17 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     downstream tooling (``kernel_optimization.py``'s CLI, in particular)
     still gates on a non-empty, path-shaped ``source_file`` before it will
     dispatch to a backend at all. Point that field at the task bundle's
-    ``kernel_anchor`` file instead of leaving it empty -- resolved to an
-    absolute path under ``$FORGE_PATH`` when that's set (regardless of
-    whether the file exists on this host yet), else an absolute path under a
-    fixed, obviously-synthetic root so the value is still path-shaped (it
-    survives ``looks_like_source_path`` even when this analysis runs on a
-    host without the KernelForge checkout) without ever being a bare
-    relative string a later ``Path(...).resolve()`` could reinterpret
-    against an unrelated CWD.
+    ``kernel_anchor`` file instead of leaving it empty.
+
+    The bundle now ships inside the installed ``kernelforge`` package, so the
+    resolved path is a real file on this host rather than a placeholder. The
+    previous fallback -- an absolute path under a synthetic
+    ``/nonexistent-forge-path`` root -- existed only to keep the value
+    path-shaped when no checkout was around; it dressed "the env var is unset"
+    up as "the file is missing", which is a different and much quieter failure.
+    A ``$FORGE_PATH`` checkout still wins when it is set, regardless of whether
+    the file exists there yet, so a developer can point the analysis at a
+    work-in-progress bundle.
 
     Args:
         playbook: A matched playbook entry (as returned by
@@ -207,7 +210,7 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
         # a real, known root rather than silently falling through to a
         # bare relative string.
         return str(candidate)
-    # FORGE_PATH unset: still shape-check as path-like (needed to clear
-    # looks_like_source_path) without letting a bare relative string survive
-    # to be misresolved against an unrelated CWD later in the pipeline.
-    return str(Path("/nonexistent-forge-path") / relative)
+    # No checkout: the bundle is packaged, so this resolves to a real file.
+    from kernelforge.resources import resource_path
+
+    return str(resource_path(relative, missing_ok=True))

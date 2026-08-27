@@ -66,19 +66,24 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"^(kernel-agents = |# Deprecated alias kept for one release)",
         "Deprecated console-script alias (and the comment above it), kept one release so existing scripts and shell history keep working.",
     ),
-    # TEMPORARY -- delete this entry in P7, when the Hyperloom-side call sites
-    # (subprocess argv, find_spec probes, $FORGE_PATH package sniffing) are
-    # rewired. Until then the orchestrator still speaks the old module name on
-    # purpose, so the two halves stay runnable between commits.
+    # TEMPORARY -- delete both entries in P8, which removes install.sh's
+    # ensure_kernel_agents() outright (kernelforge now installs with the wheel).
+    # Narrowed to these two paths on purpose: the rest of the Hyperloom tree is
+    # already rewired, so anything new that regresses still fails here.
     (
-        "src/hyperloom/*",
+        "src/hyperloom/inference_optimizer/assets/install.sh",
         r"kernel_agents|kernel-agents",
-        "P7 rewires the orchestrator side; not yet done.",
+        "P8 deletes ensure_kernel_agents(); not yet done.",
     ),
     (
-        "docs/*",
+        "src/hyperloom/inference_optimizer/tests/test_install_kernel_agents_idempotent.py",
         r"kernel_agents|kernel-agents",
-        "P7 rewires the orchestrator side, including the docs that describe it.",
+        "Covers ensure_kernel_agents(); deleted along with it in P8.",
+    ),
+    (
+        "src/hyperloom/inference_optimizer/tests/test_install_rocprof_compute.py",
+        r"kernel_agents|kernel-agents",
+        "Its fixture builds a fake KernelForge checkout to drive the _kernel_forge_root() gate; P8 replaces that gate.",
     ),
     (
         "CHANGELOG.md",

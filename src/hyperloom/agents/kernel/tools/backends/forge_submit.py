@@ -100,7 +100,7 @@ def _knowledge_config_for_forge():
 
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
-# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
+# Mirrors kernelforge.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.
 _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
@@ -155,18 +155,22 @@ class _RetainedWorkspaceCollision(FileExistsError):
 
 
 def _ensure_forge_on_path() -> str:
-    """Make `kernel_agents` (Kernel-Forge) importable from $FORGE_PATH.
+    """Prepend a $FORGE_PATH checkout of `kernelforge` to sys.path (dev override).
 
-    Reads $FORGE_PATH, resolves the dir that contains the `kernel_agents`
-    package (the repo root, its `src/`, or the package dir itself) and prepends
-    it to sys.path. When the env var is unset, does nothing and relies on an
-    installed `kernel_agents`. Returns the path inserted, or "".
+    KernelForge ships inside this distribution, so the installed package is the
+    normal path and the env var being unset is the normal case -- this function
+    then does nothing and returns "". $FORGE_PATH survives as a developer
+    override for running the orchestrator against a working checkout of forge
+    without reinstalling; it resolves the dir containing the `kernelforge`
+    package (a repo root, its `src/`, or the package dir itself).
+
+    Returns the path inserted, or "".
     """
     root = (os.environ.get("FORGE_PATH") or "").strip()
     if not root:
         return ""
     for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
-        if os.path.isfile(os.path.join(cand, "kernel_agents", "__init__.py")):
+        if os.path.isfile(os.path.join(cand, "kernelforge", "__init__.py")):
             if cand not in sys.path:
                 sys.path.insert(0, cand)
             return cand
@@ -2762,14 +2766,15 @@ def _run_loop_via_cli(
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
-    Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
+    Shells out to ``kernelforge forge-loop`` (like the GEAK backend shells
     out to its CLI) so the LLM-driven loop runs in a hard-killable child
     process. A hung fellow can no longer freeze the orchestrator: the timeout
     terminates the whole process group, then returns any persisted best
     checkpoint for recovery.
 
-    The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
-    PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
+    The child runs ``python -m kernelforge.cli forge-loop`` against the
+    installed package; a $FORGE_PATH checkout, when set, is prepended to its
+    PYTHONPATH as a developer override.
     """
     import json as _json
 
@@ -2808,7 +2813,7 @@ def _run_loop_via_cli(
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
         worktree_kernel,
@@ -3088,7 +3093,7 @@ def _run_rewrite_via_cli(
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         _flydsl_rewrite.REWRITE_COMMAND,
         "--source-kernel",
         source_kernel,
@@ -3620,7 +3625,7 @@ def _read_vendor_playbook_cached_result(lock_dir: Path, *, max_failure_age_s: fl
     the intended dedup behavior. A cached FAILURE is only returned while it
     is younger than ``max_failure_age_s``; once it ages out it is treated as
     absent so a fresh submission actually retries instead of one transient
-    failure (FORGE_PATH momentarily unset, a flaky bundle copy, etc.)
+    failure (a flaky bundle copy, a transient git failure, etc.)
     permanently wedging the whole playbook group for the rest of the session
     (PR #1191 review finding #2).
     """
@@ -3924,7 +3929,7 @@ def _run_vendor_playbook_loop_via_cli(
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
         kernel_anchor,
@@ -4055,6 +4060,33 @@ def _run_vendor_playbook_loop_via_cli(
     )
 
 
+def _resolve_vendor_task_bundle(relative: str) -> Path | None:
+    """Locate a vendor playbook's task bundle under KernelForge's ``examples/``.
+
+    The bundle ships inside the installed ``kernelforge`` package, so the normal
+    path needs no environment at all -- this used to hard-fail with "FORGE_PATH
+    is not set", which is no longer a precondition. A $FORGE_PATH checkout still
+    wins when it is set and actually holds the bundle: that is the developer
+    override for iterating on a playbook without reinstalling.
+
+    Returns ``None`` for an empty ``relative``. ``missing_ok`` keeps a bundle
+    the package does not carry reportable as a concrete path, which the caller
+    turns into ``skipped`` rather than a failure.
+    """
+    if not relative:
+        return None
+
+    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
+    if forge_root:
+        override = Path(forge_root) / relative
+        if override.is_dir():
+            return override
+
+    from kernelforge.resources import resource_path
+
+    return resource_path(relative, missing_ok=True)
+
+
 def _run_claimed_vendor_playbook(
     *,
     candidate: dict[str, Any],
@@ -4076,25 +4108,12 @@ def _run_claimed_vendor_playbook(
     here leaves ``claimed.lock`` in place forever with no result for any
     waiting sibling or later retry to find.
     """
-    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if not forge_root:
+    task_bundle_root = _resolve_vendor_task_bundle(str(playbook.get("task_bundle") or ""))
+    if task_bundle_root is None or not task_bundle_root.is_dir():
         result = _normalized(
             2,
             "",
-            "forge: FORGE_PATH is not set; cannot locate the KernelForge "
-            f"examples/ task bundle for vendor playbook {group_id!r}",
-            time.time() - started,
-            skipped=True,
-        )
-        _write_vendor_playbook_result(lock_dir, result)
-        return result
-
-    task_bundle_root = Path(forge_root) / str(playbook.get("task_bundle") or "")
-    if not task_bundle_root.is_dir():
-        result = _normalized(
-            2,
-            "",
-            f"forge: vendor playbook task bundle not found: {task_bundle_root}",
+            f"forge: vendor playbook task bundle not found: {task_bundle_root} (playbook {group_id!r})",
             time.time() - started,
             skipped=True,
         )
@@ -4386,7 +4405,7 @@ def submit(
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
     Hyperloom prepares an isolated git worktree / in-place edit, then runs the
-    Forge IterationLoop in a hard-killable CLI subprocess (`kernel-agents
+    Forge IterationLoop in a hard-killable CLI subprocess (`kernelforge
     forge-loop`) so a hung fellow can never freeze the orchestrator. Returns a
     normalized result dict and writes optimized_versions/ +
     optimization_report.md under output_dir.
@@ -4523,8 +4542,9 @@ def submit(
     # the value reaches the caller, so mutating it there is visible to them.
     finalized_result: dict[str, Any] = {}
     try:
-        # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
-        # subprocess, so kernel_agents need not be importable in this process).
+        # Honour a $FORGE_PATH dev checkout, if any. Empty is the normal case:
+        # the loop runs in a subprocess against the installed kernelforge, which
+        # need not be importable in this process.
         forge_root = _ensure_forge_on_path()
 
         shapes = _shapes_from_candidate(candidate)

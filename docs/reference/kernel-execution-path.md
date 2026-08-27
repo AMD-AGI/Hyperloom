@@ -227,7 +227,7 @@ Required env vars:
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
-| `FORGE_PATH` | operator | KernelForge checkout root; required whenever forge is enabled. `forge_submit.py` resolves the `kernel_agents` package from it and locates the vendor-playbook task bundles under it |
+| `FORGE_PATH` | operator (optional) | Developer override pointing at a KernelForge checkout. KernelForge ships inside Hyperloom, so forge works with this unset; when set, `forge_submit.py` prepends it to `sys.path` and prefers its vendor-playbook task bundles over the packaged ones |
 
 Optional:
 

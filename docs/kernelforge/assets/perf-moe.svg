@@ -36,7 +36,7 @@
   <rect x="330" y="66" width="14" height="14" rx="3" fill="url(#ckBarM)"/>
   <text x="350" y="77" fill="#94a3b8" font-size="11">CK Baseline</text>
   <rect x="480" y="66" width="14" height="14" rx="3" fill="url(#flyBarM)"/>
-  <text x="500" y="77" fill="#94a3b8" font-size="11">FlyDSL (Kernel Agents)</text>
+  <text x="500" y="77" fill="#94a3b8" font-size="11">FlyDSL (KernelForge)</text>
 
   <!-- Chart area -->
   <!-- Y-axis labels and grid -->
