@@ -5,6 +5,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
+  Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
+  `85264fc6` into `src/kernelforge/`, and that repository is archived read-only;
+  Hyperloom is the sole source from here on. The three former top-level
+  packages collapsed into one: `kernel_agents` -> `kernelforge`, `forge_llm` ->
+  `kernelforge.llm` / `kernelforge.agent_backends`, `forge_gemm_tune` ->
+  `kernelforge.gemm_tune`. forge keeps its own CLI (`kernelforge`, invoked as
+  `python -m kernelforge.cli`), and the orchestrator's kernel-agent dispatch
+  path is unchanged, including `KERNEL_OPT_BACKEND_ORDER`, which still selects
+  between the forge and geak backends exactly as before.
+
+  Its knowledge base, examples and serving patches moved inside the package as
+  `kernelforge/data/` and now ship in the wheel, so `resource_path()` resolves
+  them from an installed distribution rather than from a checkout. It raises
+  `FileNotFoundError` on a missing resource instead of returning a path that
+  does not exist, and runtime state that used to be written next to those
+  resources goes to a writable root instead of into `site-packages`.
+
+### Changed
+
+- **`$FORGE_PATH` is a development override, not a prerequisite.** Installing
+  Hyperloom installs forge, so there is no checkout to point at and nothing to
+  clone: `local_setup.sh` no longer clones the private KernelForge repo (and the
+  quick-start Dockerfile no longer needs an SSH mount for it), and `install.sh`
+  no longer pip-installs forge as a separate distribution from a checkout — it
+  verifies that `kernelforge.cli` and `kernelforge.fusion` import instead.
+  `$FORGE_PATH` still works when an operator sets it deliberately, and is
+  validated rather than silently ignored. Vendor-playbook resolution, the
+  serving-patch root and the gemm-tune root all fall back to the packaged copy
+  when it is unset, where they previously failed or skipped.
+
+### Fixed
+
+- **rocprof-compute's Python dependencies were never installed.** `install.sh`
+  claimed they arrived with the KernelForge root install; they were in that
+  project's `profiling` extra, which the install never requested. They now ship
+  as the `forge-profiling` extra and are installed explicitly. The same step was
+  gated on the presence of a KernelForge checkout, which after vendoring would
+  have become a permanent skip — it is unconditional and fail-soft now.
+
+- **`COVERAGE_RELAX_FAIL_UNDER` never did anything.** `tests-coverage.yml` read
+  the variable in two scripts but never mapped `vars.*` into their step
+  environments, so the coverage gate was always strict regardless of the
+  setting. Both steps now map it.
+
+- **Test trees were shipping in the wheel.** setuptools defaults
+  `include-package-data` to true for `pyproject.toml` config, which sweeps every
+  file under a package directory — so `packages.find.exclude` dropped `*.tests`
+  from the package list and the sweep re-added the same files as package data
+  (627 test entries before this change). Explicit `package-data` declarations
+  are now the only source of shipped non-module files.
+
+
 ## [v1.0.0] - 2026-08-26
 Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
