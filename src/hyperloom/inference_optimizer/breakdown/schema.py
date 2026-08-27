@@ -1379,6 +1379,10 @@ class Attribution(TypedDict, total=False):
             ``single_source`` / ``reconstructed`` / ``missing``).
         source_breakdown (SourceBreakdown): Gain split by contributing source.
         phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
+        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``
+            (``config`` / ``source_patch`` / ``upstream_pr`` / ``enablement``,
+            plus ``unattributed`` when some gain carried no stamp). Both arms
+            share one phase, so the lever is what says which one earned it.
         notes (list[str]): Human-readable caveats about the attribution.
     """
 
@@ -1387,6 +1391,7 @@ class Attribution(TypedDict, total=False):
     method: str
     source_breakdown: SourceBreakdown
     phase_breakdown: PhaseBreakdown
+    lever_breakdown: dict[str, float]
     notes: list[str]  # human-readable caveats
 
 
