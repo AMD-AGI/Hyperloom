@@ -208,7 +208,6 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
-        "optimize_force_exit_low_budget",  # OPTIMIZE → next phase below operator force-exit thresholds
         "optimize_no_more_leverage",  # OPTIMIZE → KERNEL_AGENT (non-terminal): both arms plateaued, or skip_to_sweep
         "kernel_no_more_leverage",  # KERNEL_AGENT → SWEEP (non-terminal) via skip_to_sweep
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
@@ -274,7 +273,6 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "sweep_done",
         "conc_sweep_done",
         "conc_sweep_failed",
-        "optimize_force_exit_low_budget",
         "framework_agent_phase_done",
         "framework_agent_plateau",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
@@ -390,10 +388,6 @@ DEFAULT_PLATEAU_KERNEL_REVERT_STREAK: int = 3
 DEFAULT_PLATEAU_KERNEL_KEEP_GAIN_PCT: float = 0.5
 DEFAULT_PLATEAU_KERNEL_LOOKBACK: int = 5
 
-# EXPLORE hard force-exit (overrides plateau). Fires on the unspent fraction of
-# EXPLORE's own charge-back budget, which already reserves the later phases'
-# share, so no session-remaining floor belongs beside it.
-DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT: float = 0.20
 
 import os as _os_env  # noqa: E402
 
@@ -1371,45 +1365,6 @@ def session_remaining_seconds(
     except (ValueError, TypeError):
         return None
     return max(0.0, mm * 60.0 - elapsed_sec)
-
-
-def should_force_exit_optimize(
-    state: Any,
-    *,
-    budget_pct_threshold: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-    budget_pct: dict[str, float] | None = None,
-    now_unix: float | None = None,
-) -> tuple[bool, dict[str, Any]]:
-    """Return ``(True, evidence)`` when the HARD optimisation force-exit fires.
-
-    Fires when the unspent fraction of the phase's charge-back budget drops
-    to ``budget_pct_threshold`` or below. A freshly entered phase always reads
-    1.0, however little of the session is left.
-
-    Args:
-        state (Any): Frozen SharedState view.
-        budget_pct_threshold (float): Phase-budget-fraction gate; non-positive
-            disables the force-exit entirely.
-        budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
-            to ``state.phase_budget_pct`` when None.
-        now_unix (float | None): Override for the current time.
-
-    Returns:
-        tuple[bool, dict[str, Any]]: ``(fired, evidence)`` — whether HARD
-        force-exit fires, and the measurements behind that verdict.
-    """
-    evidence: dict[str, Any] = {"budget_pct_threshold": float(budget_pct_threshold)}
-    phase_total_sec = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
-    if not phase_total_sec:
-        evidence["fired_reasons"] = []
-        return False, evidence
-    phase_remaining = max(0.0, phase_total_sec - phase_cumulative_seconds(state, now_unix=now_unix))
-    remaining_pct = phase_remaining / phase_total_sec
-    evidence["phase_remaining_pct"] = round(remaining_pct, 4)
-    evidence["phase_remaining_seconds"] = round(phase_remaining, 2)
-    fired = float(budget_pct_threshold) > 0.0 and remaining_pct <= float(budget_pct_threshold)
-    evidence["fired_reasons"] = ["phase_remaining_pct"] if fired else []
-    return fired, evidence
 
 
 # plateau pure functions
@@ -2730,7 +2685,6 @@ def exit_normal_optimize(
     plateau_lookback: int = DEFAULT_PLATEAU_EXPLORE_LOOKBACK,
     plateau_keep_gain_threshold_pct: float = DEFAULT_PLATEAU_EXPLORE_KEEP_GAIN_PCT,
     plateau_empty_streak_threshold: int = DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK,
-    force_exit_budget_pct: float = DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
 ) -> tuple[str, dict[str, Any]] | None:
     """OPTIMIZE normal exit.
 
@@ -2743,8 +2697,8 @@ def exit_normal_optimize(
     ``switch_bottleneck`` rides out whenever either arm plateaued, so the next
     macro-cycle steers off the bottleneck this one exhausted.
 
-    Priority: 0. IR-6 force exit; 1. an explicit escalate hint; 2. both arms
-    plateaued; 3. phase budget exhausted; 4. absolute phase cap.
+    Priority: 1. an explicit escalate hint; 2. both arms plateaued; 3. phase
+    budget exhausted; 4. absolute phase cap.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -2753,18 +2707,11 @@ def exit_normal_optimize(
         plateau_lookback (int): Config-arm trailing rounds inspected.
         plateau_keep_gain_threshold_pct (float): Config-arm KEEP-gain floor.
         plateau_empty_streak_threshold (int): Config-arm empty-round streak.
-        force_exit_budget_pct (float): IR-6 remaining-budget fraction.
 
     Returns:
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)``, or ``None``
         when the phase should continue.
     """
-    forced, force_ev = should_force_exit_optimize(
-        state,
-        budget_pct_threshold=force_exit_budget_pct,
-        budget_pct=budget_pct,
-        now_unix=now_unix,
-    )
     source_dry, source_ev = source_arm_plateaued(state)
     config_dry, config_ev = compute_plateau_explore(
         state,
@@ -2780,9 +2727,6 @@ def exit_normal_optimize(
         # Either arm running dry is enough to redirect the next cycle.
         "switch_bottleneck": bool(source_dry or config_dry),
     }
-
-    if forced:
-        return "optimize_force_exit_low_budget", {**arms, **force_ev, "evidence": "force_exit"}
 
     hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
@@ -2912,9 +2856,6 @@ def compute_next_phase(
             ),
             plateau_empty_streak_threshold=int(
                 overrides.get("explore_empty_streak", DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK),
-            ),
-            force_exit_budget_pct=float(
-                overrides.get("force_exit_budget_pct", DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT),
             ),
         )
         if norm is not None:
@@ -3394,7 +3335,6 @@ def record_lifecycle_event(
 
 
 __all__ = [
-    "DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT",
     "DEFAULT_PHASE_BUDGET_PCT",
     "OPTIMIZATION_RESERVE_PCT",
     "DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK",
@@ -3486,6 +3426,5 @@ __all__ = [
     "phase_elapsed_totals_from_history",
     "phase_index",
     "session_remaining_seconds",
-    "should_force_exit_optimize",
     "warm_replay_in_flight",
 ]

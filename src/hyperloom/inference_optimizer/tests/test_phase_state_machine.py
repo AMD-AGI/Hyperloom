@@ -443,10 +443,7 @@ def test_exit_normal_optimize_uses_budget_exhaustion():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(
-        state,
-        force_exit_budget_pct=0.0,
-    )
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None and out[0] == "optimize_phase_budget_exhausted"
 
 
@@ -491,10 +488,7 @@ def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(
-        state,
-        force_exit_budget_pct=0.0,
-    )
+    out = phase_state.exit_normal_optimize(state)
     assert out is None
 
 
@@ -511,10 +505,7 @@ def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_optimize(
-        state,
-        force_exit_budget_pct=0.0,
-    )
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     reason, evidence = out
     assert reason == "optimize_no_more_leverage"
