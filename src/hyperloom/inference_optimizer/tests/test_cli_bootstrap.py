@@ -47,7 +47,6 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_force_exit_budget_pct=0.2,
         explore_overtime_kill_ratio="bad",
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",

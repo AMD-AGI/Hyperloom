@@ -411,12 +411,8 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     ),
     "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
     "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
-    "optimize_force_exit_low_budget": (
-        "OPTIMIZE force-exited: it had spent its own phase budget down to the force-exit threshold."
-    ),
     # Retired reason names, kept so a report over an archived session still
     # explains what it is reading.
-    "explore_force_exit_low_budget": "EXPLORE force-exited: it had spent its own phase budget down to the force-exit threshold.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",

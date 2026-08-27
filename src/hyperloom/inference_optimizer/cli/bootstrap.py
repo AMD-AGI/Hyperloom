@@ -244,9 +244,6 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback
     # default when unset. Inherited env is NOT a config source (issue #903); the

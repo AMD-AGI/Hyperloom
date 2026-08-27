@@ -171,7 +171,7 @@ see Hard rules). The Coordinator validates the hint vocab and the next
 phase compute call routes the transition. Emitting this hint is the
 **correct, expected** move when the current phase has no remaining
 actionable lever — it is strictly better than idling on heartbeats until
-the budget cap force-exits, because it returns the wasted budget to later
+the budget cap is reached, because it returns the unspent budget to later
 phases / macro-cycles. Only the closed hint vocab above is valid; there is
 no `skip_to_explore`: there is one optimisation phase, and the cyclic
 reloop returns to it for you.

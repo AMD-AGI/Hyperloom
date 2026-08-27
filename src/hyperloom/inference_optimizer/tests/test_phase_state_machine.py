@@ -432,7 +432,7 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
 
 
 def test_exit_normal_optimize_uses_budget_exhaustion():
-    # Elapsed exceeds budget; IR-6 force-exit disabled to isolate the budget path.
+    # Elapsed exceeds the phase budget.
     state = SimpleNamespace(
         phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1.0,

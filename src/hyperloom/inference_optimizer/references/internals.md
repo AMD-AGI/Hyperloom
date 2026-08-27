@@ -25,7 +25,7 @@ off too, the source arm reports itself dry.
 `patch_source` naming where it came from. KEEP commits to the live tree (the
 next candidate stacks on top); REVERT does `git reset --hard`.
 
-## IR-4 / IR-6 — optimisation-phase contracts
+## IR-4 — optimisation-phase contracts
 
 These govern the optimizer, not the launcher; the full contract lives in
 `orchestrator/prompts/orchestration.md`. In brief:
@@ -50,18 +50,13 @@ These govern the optimizer, not the launcher; the full contract lives in
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: the phase exits the moment the unspent fraction of
-  its own budget drops to `--explore-force-exit-budget-pct` (default 20%).
-  Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is already
-  inside that fraction, since charge-back rebuilds the allotment from the time
-  left at phase entry; there is no session-remaining arm.
 - **Plateau advisory**: both arms' signals and KERNEL_AGENT's are computed every
   tick and rendered as advisory in the orchestration prompt. One arm dry is not
   a plateau; the prompt says so. They do NOT drive phase advance — the LLM may
   emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. IR-6 force-exit and the per-phase
-  budget remain the only hard advance gates.
+  when it judges further effort unproductive. The per-phase budget and the
+  absolute cap remain the only hard advance gates.
 
 ## Retired modules and rules (do not re-introduce)
 

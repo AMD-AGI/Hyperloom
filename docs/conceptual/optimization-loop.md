@@ -124,8 +124,8 @@ candidate discovery are all dispatches of the one specialist action.
 The phase advances to KERNEL_AGENT only when **both** levers are dry
 (`optimize_no_more_leverage`). Either arm going quiet raises
 `switch_bottleneck` so the next macro-cycle steers off this bottleneck,
-without abandoning the lever that is still paying. It also exits on the IR-6
-force-exit, the phase budget, and the absolute phase cap.
+without abandoning the lever that is still paying. It also exits when its
+phase budget is spent, and at the absolute phase cap.
 
 After each KEEP the runtime revalidates the full stack end to end, so the
 reported `cumulative_gain_validated` always comes from a measurement taken

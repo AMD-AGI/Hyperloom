@@ -1338,16 +1338,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # IR-6 — EXPLORE hard force-exit threshold (locked at start).
-    opt.add_argument(
-        "--explore-force-exit-budget-pct",
-        dest="explore_force_exit_budget_pct",
-        type=float,
-        default=None,
-        help="EXPLORE force-exit: phase-budget remaining fraction "
-        "(0..1) below which EXPLORE exits immediately. Default "
-        "0.20 (IR-6).",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock
     # budget (caps; may exit earlier). Both ``--max-minutes-*-pct`` and
     # ``--phase-budget-*-pct`` spellings are accepted.

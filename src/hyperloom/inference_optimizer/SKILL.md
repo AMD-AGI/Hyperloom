@@ -205,7 +205,7 @@ round-trip saved); `manifest.json` then records `reason=explicit_flag`.
 Pass `--degraded-kb` and `--degraded-pr` together to short-circuit the entire
 IR-3 step.
 
-### IR-4 / IR-6 — OPTIMIZE phase contracts (Coordinator-internal)
+### IR-4 — OPTIMIZE phase contracts (Coordinator-internal)
 
 These govern the optimizer's OPTIMIZE phase, not the launcher; the full
 contract lives in `src/hyperloom/orchestrator/prompts/orchestration.md`. In
@@ -234,11 +234,6 @@ brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: OPTIMIZE exits the moment the unspent fraction of
-  its own phase budget drops to `--explore-force-exit-budget-pct` (default
-  20%). Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is
-  already inside that fraction, since charge-back rebuilds the allotment from
-  the time left at phase entry; there is no session-remaining arm.
 - **Plateau**: both arms' signals and KERNEL_AGENT's are computed every tick
   and rendered in the orchestration prompt. One arm dry is advisory — the
   phase stays open on the other lever. **Both arms dry advances the phase**
@@ -269,8 +264,8 @@ it came from. KEEP commits to the live tree so the next candidate stacks on
 top; REVERT does `git reset --hard`. Resume skips completed candidates by
 idempotency key.
 
-The phase exits when both arms are dry, on the per-phase budget cap, or on the
-IR-6 force-exit gate.
+The phase exits when both arms are dry, when its budget is spent, or at the
+absolute per-phase cap.
 
 ### IR-8 — `--framework atom` is single-node only
 

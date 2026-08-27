@@ -949,9 +949,9 @@ class ConversationCollaborator:
             )
         else:
             lines.append(
-                "Phase advance is driven only by hard limits (IR-6 force-exit, "
-                "phase budget, terminal stop_reason) or explicit "
-                "escalate_strategy_change hints; this block is informational."
+                "Phase advance is driven only by hard limits (phase budget, "
+                "terminal stop_reason) or explicit escalate_strategy_change "
+                "hints; this block is informational."
             )
         return "\n".join(lines)
 

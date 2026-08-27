@@ -330,8 +330,7 @@ def is_valid_phase_exit_reason(value: str) -> bool:
     return (value or "").strip() in PHASE_EXIT_REASONS
 
 
-# Default phase budgets (% of wall-clock). IR-6 force-exit is the hard backstop
-# for the optimisation phase; KERNEL_AGENT uses a time wall.
+# Default phase budgets (% of wall-clock).
 DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share. Rotation between them
@@ -2323,7 +2322,7 @@ def exit_time_exhausted_prelude(
     burns its whole budget preparing then read as an ordinary exit.
 
     Only fires while PRELUDE is still incomplete. Once a baseline exists the
-    later phases have their own force-exits, and reporting the run as "never
+    later phases carry their own budgets, and reporting the run as "never
     began optimizing" would be false.
 
     Args:

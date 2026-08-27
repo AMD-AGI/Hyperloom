@@ -167,7 +167,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing the budget fraction left before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -178,11 +178,9 @@ class _RenderMixin:
             str: The compact ``=== Phase ===`` block.
         """
         from ...phases.machine_state import (
-            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
-            _phase_budget_total_seconds,
             llm_proposable_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
@@ -222,27 +220,6 @@ class _RenderMixin:
             budget_line,
             allowed_line,
         ]
-        # EXPLORE-only: distance to hard force-exit alongside the soft budget.
-        if phase == PHASE_FRAMEWORK_AGENT:
-            overrides = self.plateau_overrides or {}
-            pct_thresh = float(
-                overrides.get(
-                    "force_exit_budget_pct",
-                    DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-                )
-            )
-            # Same effective-total helper as `remaining` so the fraction stays in
-            # one unit (charge-back against the session for short runs, against
-            # the cycle-window-capped base for long bounded runs).
-            phase_total_sec = _phase_budget_total_seconds(self, budget_pct=budget, now_unix=now_unix)
-            if remaining is not None and phase_total_sec and phase_total_sec > 0:
-                phase_remaining_pct = remaining / phase_total_sec
-            else:
-                phase_remaining_pct = None
-            force_line = f"force_exit: pct_thresh={pct_thresh:.2f}"
-            if phase_remaining_pct is not None:
-                force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
-            lines.append(force_line)
         # Whether deferring work to a later cycle is still a real option. Mirrors
         # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
         if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
