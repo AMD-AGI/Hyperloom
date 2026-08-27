@@ -333,6 +333,27 @@ def test_build_prompt_forge_keeps_the_target_arch_and_the_harness_paths(tmp_path
     assert "optimized_versions/" not in prompt
 
 
+def test_build_prompt_forge_falls_back_to_the_full_analysis(tmp_path):
+    """The forge shape keeps "the trace evidence forge cannot derive".
+
+    The hypothesis block is built from TraceLens p-items, so a kernel the trace
+    ranked without one renders it empty and ``analysis.md`` is the only place
+    that evidence exists. Building the fallback after the forge early return
+    dropped it for exactly those rows -- the ones with the least other context.
+    """
+    report = tmp_path / "analysis.md"
+    report.write_text("# Analysis\n\nMemory bound on the sparse path.\n", encoding="utf-8")
+    candidate = _candidate(trace_report_path=str(report))
+    candidate.pop("tracelens_hypothesis", None)
+
+    forge = ko.build_prompt(candidate, _args(), backend="forge")
+    geak = ko.build_prompt(candidate, _args())
+
+    assert "Memory bound on the sparse path." in forge
+    assert "TraceLens Context" in forge
+    assert "Memory bound on the sparse path." in geak
+
+
 def test_build_prompt_forge_multinode_states_the_constraint_without_the_geak_recipe(monkeypatch):
     """The GPU-less constraint is shared; the procedure under it is not.
 

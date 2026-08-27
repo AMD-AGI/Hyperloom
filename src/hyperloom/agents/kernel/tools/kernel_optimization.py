@@ -1840,6 +1840,30 @@ def build_prompt(
             "rank's slice of the algorithm (e.g. local reduce + memcpy) so you can "
             "still measure compute/IO improvements.\n"
         )
+    tracelens_context_block = ""
+    # Fall back to the full analysis.md only when no hypothesis_block was rendered.
+    if not hypothesis_block.strip():
+        report_path_str = str(candidate.get("trace_report_path") or "")
+        report_path = Path(report_path_str) if report_path_str else None
+        if report_path and report_path.exists():
+            try:
+                full_report = report_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                full_report = ""
+            if full_report:
+                from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
+
+                full_report = strip_base64_data_urls(full_report)
+                rank = candidate.get("tracelens_pitem_rank")
+                title = candidate.get("tracelens_pitem_title", "")
+                if rank:
+                    focus_line = (
+                        f"Focus on **P{rank}: {title}** in the report below. "
+                        "Other P-items are context only — do not optimize them.\n"
+                    )
+                else:
+                    focus_line = "Use the report below as full context for this kernel.\n"
+                tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
     if (backend or "").strip().lower() == "forge":
         # Forge already owns everything the sections below describe, and two of
         # them fight it. The deliverables (``optimization_report.md``, a copy
@@ -1878,34 +1902,18 @@ def build_prompt(
             "Preserve function name, signature, decorators, and numerical behavior.",
             repo_block,
             multinode_notice,
+            # The same fallback GEAK gets, for the same reason: the hypothesis
+            # block is built from TraceLens p-items, and a kernel the trace
+            # ranked without one renders it empty. Building it after the forge
+            # return meant those kernels reached forge with no trace context at
+            # all -- so the shape that keeps "the trace evidence forge cannot
+            # derive" dropped exactly the rows where that evidence only exists
+            # in analysis.md.
+            tracelens_context_block,
         ]
         # Most of these blocks render empty for any given kernel; joining them
         # unfiltered leaves runs of blank lines where a section was skipped.
         return "\n\n".join(part.strip() for part in forge_sections if part.strip())
-    tracelens_context_block = ""
-    # Fall back to the full analysis.md only when no hypothesis_block was rendered.
-    if not hypothesis_block.strip():
-        report_path_str = str(candidate.get("trace_report_path") or "")
-        report_path = Path(report_path_str) if report_path_str else None
-        if report_path and report_path.exists():
-            try:
-                full_report = report_path.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                full_report = ""
-            if full_report:
-                from hyperloom.inference_optimizer.tracelens_md import strip_base64_data_urls
-
-                full_report = strip_base64_data_urls(full_report)
-                rank = candidate.get("tracelens_pitem_rank")
-                title = candidate.get("tracelens_pitem_title", "")
-                if rank:
-                    focus_line = (
-                        f"Focus on **P{rank}: {title}** in the report below. "
-                        "Other P-items are context only — do not optimize them.\n"
-                    )
-                else:
-                    focus_line = "Use the report below as full context for this kernel.\n"
-                tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
     # Use GEAK task_parser field names so its parser can extract them.
     return "\n".join(
         [
