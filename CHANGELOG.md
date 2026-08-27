@@ -5,25 +5,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-### Fixed
-
-- **Unreadable sweep `benchmark_report.json` files are now `failed`, not `ok`.**
-  `_shape_sweep_point` previously defaulted `status="ok"` and only overrode it
-  when a report was missing or `success is False`. A truncated, empty, or
-  non-object report hit neither branch, so `session_breakdown.json` stamped
-  the variant as success with null metrics. Status is now derived: unreadable
-  report → `failed`; `success is False` → `failed` (reason from singular
-  `error`, Magpie `errors[]`, or a fixed fallback); no report but
-  `abort_reason.json` present → `failed`; neither file → `skipped`.
-  `error` is emitted on every `SweepPoint` row (`null` when there is no
-  failure). The sweep renderer counts `ok` / `failed` / `skipped` separately
-  so `session_report.md` no longer folds skipped variants into the failed
-  tally.<br/>
-  **Schema version is not bumped.** No field is renamed or removed; `error`
-  is additive; the `status` value set is unchanged. The change restores the
-  documented rule that missing measurements are represented as `null` / not
-  fabricated as success, rather than redefining the wire contract.
-
 ### Changed
 
 - **`canonical_fingerprint` now uses pair-aware arg normalization.**
