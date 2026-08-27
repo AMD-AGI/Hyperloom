@@ -185,8 +185,10 @@ DURATION="${AGENTX_DURATION:-3600}"
 # period for them to drain before profiling starts. This replaces the old
 # --warmup-duration / --num-warmup-sessions pair, which the scenario does not
 # use and which measured a different thing entirely.
-WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-10}"
-WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-1800}"
+CANON_WARMUP_PER_LANE=10
+CANON_WARMUP_GRACE=1800
+WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-$CANON_WARMUP_PER_LANE}"
+WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-$CANON_WARMUP_GRACE}"
 
 # Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
 # whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
@@ -263,8 +265,8 @@ CANON_DURATION=3600
 # reduced-warmup round came back submission_valid=true and looked publishable.
 # On a 743B model the canonical 10/lane is a ~2h warmup, which is exactly when
 # an operator reaches for this knob, so the hole was reachable in practice.
-CANON_WARMUP_PER_LANE=10
-CANON_WARMUP_GRACE=1800
+# (CANON_WARMUP_PER_LANE/CANON_WARMUP_GRACE are declared above, alongside
+# WARMLANE/WARMGRACE, so the canonical value and the default can't drift apart.)
 # The corpus this model family canonically replays, before any operator pin.
 # CANON_DS is resolved with the corpus above. The family whitelist behind it is
 # a derivation, not a registry -- a model upstream runs on the full corpus but
@@ -284,9 +286,14 @@ NONCANON=()
 [ "$DURATION" != "$CANON_DURATION" ] && NONCANON+=("duration=${DURATION}s(canonical ${CANON_DURATION}s)")
 [ -n "${AGENTX_MAX_CTX:-}" ] && NONCANON+=("client_context_cap=${AGENTX_MAX_CTX}")
 [ "${AGENTX_UNSAFE_OVERRIDE:-false}" = "true" ] && NONCANON+=("unsafe_override_forced")
-[ "$WARMLANE" != "$CANON_WARMUP_PER_LANE" ] && \
+# `-lt`, not `!=`: only a *smaller* value under-pressures the cache or risks
+# truncating the drain before it finishes. A larger value is strictly more
+# warmup than canonical -- e.g. an operator raising the grace period so a
+# large model's warmup has room to drain -- and does not change what gets
+# replayed, so it must not be flagged as a deviation.
+[ "$WARMLANE" -lt "$CANON_WARMUP_PER_LANE" ] && \
   NONCANON+=("warmup_per_lane=${WARMLANE}(canonical ${CANON_WARMUP_PER_LANE})")
-[ "$WARMGRACE" != "$CANON_WARMUP_GRACE" ] && \
+[ "$WARMGRACE" -lt "$CANON_WARMUP_GRACE" ] && \
   NONCANON+=("warmup_grace=${WARMGRACE}s(canonical ${CANON_WARMUP_GRACE}s)")
 
 SMOKE_ARGS=()
@@ -370,11 +377,16 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # spends ~2.5h in the agentic warmup, so a delay tuned on a 35B round lands
   # either mid-warmup or past the end depending on which way the estimate erred.
   #
-  # So clamp toward "early". The round cannot outlast the measurement window plus
-  # the warmup that precedes it, and the only number known here is the window, so
-  # cap the delay at DURATION - PWIN - margin and say when the cap bites. A
-  # capture inside warmup is a usable trace; a capture that never happens is not.
-  _pmax=$(( DURATION - PWIN - 60 ))
+  # So clamp toward "early". The round cannot outlast the warmup drain plus the
+  # measurement window that follows it -- WARMGRACE bounds the former, DURATION
+  # the latter -- so cap the delay at WARMGRACE + DURATION - PWIN - margin and
+  # say when the cap bites. Omitting WARMGRACE would treat DURATION as if it
+  # were the whole round's clock instead of just the measurement phase, and
+  # clamp an operator-tuned PWARM (e.g. ~2.5h for a 743B model's warmup) down to
+  # a fraction of that -- forcing the capture to fire mid-warmup, the exact
+  # failure this self-bracketing exists to avoid. A capture inside warmup is a
+  # usable trace; a capture that never happens is not.
+  _pmax=$(( WARMGRACE + DURATION - PWIN - 60 ))
   [ "$_pmax" -lt 0 ] && _pmax=0
   if [ "$PWARM" -gt "$_pmax" ]; then
     log "WARN profile delay ${PWARM}s exceeds the safe bound for a ${DURATION}s window; clamping to ${_pmax}s so the capture cannot land after the round ends"

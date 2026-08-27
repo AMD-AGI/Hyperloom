@@ -485,6 +485,54 @@ def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
     assert "-d" not in argv
 
 
+def test_profile_delay_safe_bound_accounts_for_warmup_grace(tmp_path):
+    """The `_pmax` clamp must not treat DURATION as the whole round's clock.
+
+    A large model's warmup drain is bounded by WARMGRACE, not DURATION, and
+    happens *before* the measurement window opens. With WARMGRACE=65,
+    DURATION=5, PWIN=0: the old DURATION-only bound (5 - 0 - 60 = -55, clamped
+    to 0) would force *any* positive PWARM to clamp to 0 and fire immediately
+    -- squarely inside warmup. The WARMGRACE-inclusive bound (65 + 5 - 0 - 60
+    = 10) correctly leaves room for a delay that clears the drain first.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        AGENTX_PROFILE_WARMUP_S="8",
+        AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_DURATION="5",
+        AGENTX_WARMUP_GRACE_PERIOD="65",
+        FAKE_AIPERF_SLEEP="0.2",
+        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "clamping to" not in (r.stdout + r.stderr)
+
+
+def test_profile_delay_is_still_clamped_when_it_exceeds_the_full_bound(tmp_path):
+    """A PWARM that exceeds even WARMGRACE + DURATION is still clamped early."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        AGENTX_PROFILE_WARMUP_S="30",
+        AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_DURATION="5",
+        AGENTX_WARMUP_GRACE_PERIOD="65",
+        FAKE_AIPERF_SLEEP="0.2",
+        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "clamping to 10s" in (r.stdout + r.stderr)
+
+
 def test_agentx_server_script_override_without_framework(tmp_path):
     """An explicit AGENTX_SERVER_SCRIPT still resolves when FRAMEWORK is unset."""
     bench, bind, res = _sandbox(tmp_path, make_builtin=False)
@@ -630,6 +678,32 @@ def test_canonical_warmup_is_not_flagged(tmp_path):
         AGENTX_WARMUP_REQUESTS_PER_LANE="10",
         AGENTX_WARMUP_GRACE_PERIOD="1800",
     )
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_raised_warmup_grace_is_not_flagged_non_canonical(tmp_path):
+    """A *longer* grace period is more warmup, not less, and must not be flagged.
+
+    An operator raising this so a large model's warmup has room to fully drain
+    (e.g. 4h for Kimi-K3-scale warmup) does not change what gets replayed --
+    only how long the client is willing to wait for it. Flagging it the same
+    as a truncated drain would make the correct run non-submittable.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_GRACE_PERIOD="14400")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_raised_warmup_per_lane_is_not_flagged_non_canonical(tmp_path):
+    """Symmetric with the grace period: more warmup requests is not a deviation."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_REQUESTS_PER_LANE="20")
     assert r.returncode == 0, r.stderr
     out = _result(res)
     assert not out["submission_invalid_reasons"]
