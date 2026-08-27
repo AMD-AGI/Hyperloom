@@ -53,14 +53,22 @@ SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gathe
 #: readers depend on the same answer -- the dispatcher reports such a skip
 #: instead of falling through to its validation guards, and
 #: :func:`record_kernel_opt` leaves the attempt ledger alone -- so they read one
-#: table. ``not_live`` is deliberately absent: it covers in-flight, rejected,
-#: terminal and attempt-cap-exhausted alike, and only the first of those is
-#: unattempted.
+#: table.
+#:
+#: ``not_live_in_flight`` is here and its two siblings are not, which is the
+#: whole reason the liveness check reports which of them applies: a kernel held
+#: back because a sibling dispatch is in flight has had no backend look at it,
+#: while ``not_live_rejected`` and ``not_live_attempts_exhausted`` describe a
+#: kernel that spent its attempts. A single ``not_live`` covered all three, so
+#: this exemption could not take the first without also retiring the last two --
+#: which left the in-flight case charging a kernel for a dispatch that never
+#: happened.
 _UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
     "below_min_gpu_pct",
     "group_exhausted",
     "group_in_flight",
     "group_task_complete",
+    "not_live_in_flight",
     "opfanout_merged_into",
 )
 

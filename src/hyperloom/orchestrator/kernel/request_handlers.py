@@ -6294,12 +6294,20 @@ def _batch_kernel_candidates(
                 return src_attempts < attempt_cap
         return int(entry.get("attempts", 0)) < attempt_cap
 
-    def _is_live(
+    def _liveness_reason(
         kid: str,
         current_source: str = "",
         current_task_group_key: str = "",
-    ) -> bool:
-        """A kernel_id is live (batch-eligible) when it is not in-flight and is under the attempt cap for the current source_file; liveness is scoped per (kernel_id, source_file, task_group_key).
+    ) -> str:
+        """Return ``""`` when the kernel is batch-eligible, else why it is not.
+
+        The distinction the bare boolean could not draw: a kernel held back
+        because a sibling dispatch is in flight has had no backend look at it,
+        while one held back for a rejection or an exhausted attempt cap has. A
+        single ``not_live`` reason conflated the two, so the "a gate rejection is
+        not a failed attempt" exemption could not cover the first without also
+        covering the last two -- and covering those would retire a kernel that
+        really did spend its attempts.
 
         Two task-group escapes relax the rejection check: a ledger entry
         recorded under a *different* ``task_group_key`` leaves the kernel live
@@ -6313,21 +6321,30 @@ def _batch_kernel_candidates(
                 empty when the caller has no group identity.
 
         Returns:
-            ``True`` when the kernel is batch-eligible, else ``False``.
+            ``""``, ``"not_live_in_flight"``, ``"not_live_rejected"`` or
+            ``"not_live_attempts_exhausted"``.
         """
         if kid in in_flight:
-            return False
+            return "not_live_in_flight"
         entry = attempts_by_kid.get(kid) or {}
         recorded_group_key = str(entry.get("task_group_key") or "")
         if current_task_group_key and recorded_group_key and recorded_group_key != current_task_group_key:
-            return True
+            return ""
         recorded_source = str(entry.get("last_source_file") or "")
         same_source = not current_source or not recorded_source or recorded_source == current_source
         if kid in rejected_kernel_ids and same_source and not (current_task_group_key and not recorded_group_key):
-            return False
+            return "not_live_rejected"
         if not _entry_allows_dispatch(entry, current_source):
-            return False
-        return True
+            return "not_live_attempts_exhausted"
+        return ""
+
+    def _is_live(
+        kid: str,
+        current_source: str = "",
+        current_task_group_key: str = "",
+    ) -> bool:
+        """Whether ``kid`` is batch-eligible; see :func:`_liveness_reason`."""
+        return not _liveness_reason(kid, current_source, current_task_group_key)
 
     # Collapse kernels sharing a source function into one dispatch via
     # ``task_groups[]``; ungrouped kernels fall through below.
@@ -6487,8 +6504,9 @@ def _batch_kernel_candidates(
             continue
         if not item.get("source_file"):
             continue
-        if not _is_live(kernel_id, str(item.get("source_file") or "")):
-            skipped[kernel_id] = "not_live"
+        liveness = _liveness_reason(kernel_id, str(item.get("source_file") or ""))
+        if liveness:
+            skipped[kernel_id] = liveness
             continue
         try:
             row_pct = float(item.get("gpu_pct") or 0.0)

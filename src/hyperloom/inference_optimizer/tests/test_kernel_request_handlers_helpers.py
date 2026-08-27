@@ -464,6 +464,30 @@ def test_the_breakdown_records_which_gate_declined(tmp_path: Path) -> None:
         assert entry["dispatch"]["skip_reason"] == reason, reason
 
 
+def test_an_in_flight_hold_is_unattempted_but_a_spent_one_is_not() -> None:
+    """One ``not_live`` covered three states that need different answers.
+
+    A kernel held back because a sibling dispatch is in flight has had no
+    backend look at it, so charging it an attempt retires it from the phase's
+    own work list for a dispatch that never happened. A kernel held back for a
+    rejection or an exhausted attempt cap really did spend its attempts, so
+    exempting those would let it be retried forever.
+    """
+    assert krh.unattempted_skip_reason("not_live_in_flight")
+    assert not krh.unattempted_skip_reason("not_live_rejected")
+    assert not krh.unattempted_skip_reason("not_live_attempts_exhausted")
+    # The old undifferentiated reason must not read as unattempted either.
+    assert not krh.unattempted_skip_reason("not_live")
+
+    state = _state_owing_one_attempt()
+    krh.record_kernel_opt(
+        state,
+        {"status": "skipped", "reason": "not_live_in_flight", "kernel_id": "k001"},
+    )
+    assert state.kernel_opt_task_attempts == {}
+    assert state.untried_hot_reusable_kernels() == ["k001"]
+
+
 def test_a_real_failure_still_spends_its_attempt() -> None:
     """The exemption is scoped to skips; a backend that ran and failed counts."""
     state = _state_owing_one_attempt()
