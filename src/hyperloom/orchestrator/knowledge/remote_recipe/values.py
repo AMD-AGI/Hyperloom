@@ -430,7 +430,7 @@ def _entry_files(
             if ref:
                 (patches if kind == "patches" else artifacts).append(ref)
                 if kind == "patches" and entry_framework_root:
-                    patch_roots[ref] = entry_framework_root
+                    patch_roots.setdefault(ref, entry_framework_root)
         for key in _PATH_LIST_KEYS:
             raw_values = entry.get(key) or []
             if isinstance(raw_values, (str, Path)):
@@ -443,7 +443,9 @@ def _entry_files(
                 if ref:
                     (patches if kind == "patches" else artifacts).append(ref)
                     if kind == "patches" and entry_framework_root:
-                        patch_roots[ref] = entry_framework_root
+                        patch_roots.setdefault(ref, entry_framework_root)
+    # first-wins, matching the dedupe below: a ref shared by two entries keeps
+    # the root of the one whose position it also keeps.
     return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts)), patch_roots
 
 
