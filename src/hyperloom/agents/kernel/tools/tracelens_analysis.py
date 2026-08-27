@@ -6803,22 +6803,6 @@ def _with_demangled_symbol(candidate: dict[str, Any]) -> dict[str, Any]:
     return row
 
 
-class CandidateSourceTampered(RuntimeError):
-    """The code under optimization changed while the review session ran.
-
-    Not a fault in the audit, so it is not contained like one. The session has
-    no tool that may write to the framework tree, so drift means something wrote
-    where nothing was granted permission to, and every measurement taken after
-    this point would be against a tree nothing recorded. Discarding the
-    revisions was never enough on its own: the edit stays on disk, and the
-    benchmark that follows would credit it to the kernel rewrite.
-
-    Raised out of the stage and out of ``main()``, which marks the analysis
-    failed. That is what stops the dispatch: no reviewed candidate table is
-    published, so nothing downstream has a kernel to hand to a backend.
-    """
-
-
 def run_candidate_review_stage(
     run_dir: Path,
     *,
@@ -6831,11 +6815,7 @@ def run_candidate_review_stage(
 
     The stage is advisory by construction, and it sits at the end of an
     analysis that a multi-hour benchmark paid for. An unforeseen fault in it
-    must cost the audit, not the run, so nothing escapes this boundary --
-    except :class:`CandidateSourceTampered`, which reports that the tree the
-    benchmark measures is no longer the tree the trace described. Containing
-    that one would turn the check into a log line and let the run continue on
-    exactly the evidence it exists to refuse.
+    must cost the audit, not the run, so nothing escapes this boundary.
     """
     try:
         return _run_candidate_review_stage(
@@ -6845,8 +6825,6 @@ def run_candidate_review_stage(
             log_path=log_path,
             trace_health_warnings=trace_health_warnings,
         )
-    except CandidateSourceTampered:
-        raise
     except Exception as exc:  # noqa: BLE001 - never let the audit fail the run
         log.warning("candidate review stage failed (%r); keeping the deterministic table", exc)
         if trace_health_warnings is not None:
@@ -7035,11 +7013,7 @@ def _run_candidate_review_stage(
             RAW_CANDIDATES_FILENAME,
             REVISIONS_FILENAME,
             apply_revisions,
-            directory_fingerprint,
-            fingerprint_drift,
             run_candidate_review,
-            source_fingerprint,
-            unfingerprinted_sources,
         )
     except ImportError as exc:  # pragma: no cover - packaging fault
         warnings.append(
@@ -7077,34 +7051,6 @@ def _run_candidate_review_stage(
     )
     artifacts["kernel_candidates_raw"] = str(raw_path)
 
-    # Two prints, because they catch different things: the files answer "was the
-    # traced source edited", their directories answer "was something new put
-    # beside it". An empty print is reported rather than inferred -- it reads
-    # downstream exactly like an untouched tree, which is how a tamper check that
-    # covered nothing could pass.
-    source_paths = [str(c.get("source_file") or "") for c in candidates if isinstance(c, dict)]
-    before = source_fingerprint(source_paths)
-    before_dirs = directory_fingerprint(source_paths)
-    uncovered = unfingerprinted_sources(source_paths, before)
-    if uncovered and not before:
-        warnings.append(
-            {
-                "code": "candidate_review_tamper_check_uncovered",
-                "severity": "warning",
-                "paths": uncovered[:16],
-                "message": (
-                    f"No candidate source could be fingerprinted ({len(uncovered)} "
-                    "path(s) named, none readable on this host), so a review that "
-                    "edited the framework tree would not be detected. The reviewed "
-                    "table is still produced; treat a later benchmark gain on these "
-                    "kernels as unverified against tampering."
-                ),
-            }
-        )
-        _note(f"candidate review tamper check covers no source ({len(uncovered)} path(s) unreadable)")
-    elif uncovered:
-        _note(f"candidate review tamper check skipped {len(uncovered)} unreadable source path(s)")
-
     # Only ``analysis.md`` is a supported TraceLens output; everything else in
     # that directory is internal and may be removed without notice. The rest of
     # the list is Hyperloom's own or the model's, so it is ours to offer.
@@ -7127,41 +7073,6 @@ def _run_candidate_review_stage(
         context_block=_source_context_block(),
         log=_forward_to_log,
     )
-
-    # Before the outcome is even read. A session that crashed, timed out or
-    # returned unparseable JSON can have written first, and returning on
-    # ``not outcome.ok`` ahead of this check meant exactly the failures most
-    # likely to have left something behind were the ones never inspected.
-    drifted = fingerprint_drift(before, source_fingerprint(source_paths))
-    drifted_dirs = fingerprint_drift(before_dirs, directory_fingerprint(source_paths))
-    if drifted or drifted_dirs:
-        warnings.append(
-            {
-                "code": "candidate_review_touched_source",
-                "severity": "error",
-                "paths": (drifted + drifted_dirs)[:16],
-                "files_changed": len(drifted),
-                "directories_changed": len(drifted_dirs),
-                "review_status": outcome.status,
-                "message": (
-                    "The candidate review session modified the code under "
-                    f"optimization ({len(drifted)} file(s), {len(drifted_dirs)} "
-                    "directory listing(s)) despite holding no tool that may "
-                    "write there. The analysis is failed rather than reported: "
-                    "the edit is on disk, so every measurement after this point "
-                    "would be against a tree nothing recorded. Restore the "
-                    "framework tree before re-running."
-                ),
-            }
-        )
-        _note(
-            f"candidate review changed {len(drifted)} source file(s) and "
-            f"{len(drifted_dirs)} directory listing(s); failing the analysis"
-        )
-        raise CandidateSourceTampered(
-            f"the candidate review session modified {len(drifted)} source file(s) "
-            f"and {len(drifted_dirs)} directory listing(s) under optimization"
-        )
 
     if not outcome.ok:
         warnings.append(

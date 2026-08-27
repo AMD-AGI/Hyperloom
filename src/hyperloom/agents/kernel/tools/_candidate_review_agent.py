@@ -42,27 +42,25 @@ Three properties keep the added freedom bounded:
   ``previous_method``, and the pre-review table is kept beside the reviewed one,
   so a bad review is auditable and reversible.
 
-The session gets no tool that can write outside its own run directory: reading
-and searching are pre-approved, ``Write`` is refused outside ``run_dir``, and
-everything else -- a shell included -- is denied. The code under optimization is
-still fingerprinted before and after, as a tripwire rather than as the boundary:
-the candidate source files, and every file in the directories holding them, so a
-sibling helper edited in place is caught alongside one that was created. Drift
-means something wrote where nothing was granted permission to, so the analysis
-fails instead of handing on a table measured against an unrecorded edit. The
-check runs on every outcome, including a session that failed or returned
-nothing -- a session can write and then crash (see :data:`_GATED_TOOLS` and
-:data:`_DENIED_TOOLS`).
+The session gets no tool that can write to the code under optimization, and that
+is the whole of the guarantee -- there is no detection layer behind it, because
+one is only worth its false positives if the thing it watches for is reachable.
+
+On the Claude backend: reading and searching are pre-approved, ``Write`` is
+refused outside ``run_dir``, and everything else -- a shell included -- is
+denied by a default-deny callback, so a tool added by a later SDK arrives
+refused rather than pre-authorised. On the Codex backend the containment is the
+OS sandbox: this stage pins ``workspace-write`` rather than inheriting the
+deployment's mode, so it cannot run under ``bypass``. The two are not
+equivalent and :func:`_run_codex_session` says where they differ.
 """
 
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import inspect
 import json
 import os
-import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
@@ -161,13 +159,10 @@ _DENIED_TOOLS: tuple[str, ...] = (
     # A shell writes wherever the process can, and reading the command string to
     # guess whether it will is the guard that fails quietly on the first
     # construction nobody predicted -- ``python3 -c`` alone defeats any
-    # allowlist. So the boundary cannot be enforced per call, which left the
-    # framework tree guarded by a fingerprint over the candidate files and their
-    # directories: a sibling helper edited in place, or any file in a directory
-    # no candidate names, drifted nothing and was applied. The one job that
-    # wanted a shell was demangling a vendor symbol, and the host now does that
-    # before the session starts -- see ``device_kernel_name_demangled`` in the
-    # candidate table -- so the capability buys nothing it costs.
+    # allowlist. So the boundary cannot be enforced per call, and the one job
+    # that wanted a shell was demangling a vendor symbol, which the host now
+    # does before the session starts -- see ``device_kernel_name_demangled`` in
+    # the candidate table. The capability buys nothing it costs.
     "Bash",
     "BashOutput",
     "KillShell",
@@ -238,194 +233,6 @@ def _safe_exception_label(exc: BaseException) -> str:
         if isinstance(value, int):
             return f"{label} ({attribute}={value})"
     return label
-
-
-# ---------------------------------------------------------------------------
-# Framework-tree tamper check
-# ---------------------------------------------------------------------------
-
-
-#: ``/repo/moe.py(247): _grouped_gemm`` -> ``/repo/moe.py``. Mirrors
-#: :func:`kernel_source_contract.strip_line_suffix` for standalone invocation,
-#: where that module is not importable.
-_LINE_SUFFIX_RE = re.compile(r"^(?P<path>.+?)\(\d+\)\s*:\s*\S.*$")
-
-
-def _bare_source_path(raw: str) -> str:
-    """Return a stat-able path from a possibly line-annotated candidate source.
-
-    A resolved source frequently arrives as ``path(line): function`` -- the
-    contract module measured 29 of 36 entries carrying that suffix on one real
-    session. ``os.stat`` cannot open such a string, and the caller below swallows
-    the resulting ``OSError``, so leaving the suffix on turns the tamper check
-    into a silent no-op for exactly the rows that carry the most evidence.
-
-    Args:
-        raw (str): A candidate ``source_file`` value.
-
-    Returns:
-        str: The bare path, or ``""`` when nothing path-shaped is left.
-    """
-    text = str(raw or "").strip()
-    if not text:
-        return ""
-    if _KSC is not None:
-        return str(_KSC.strip_line_suffix(text) or "").strip()
-    match = _LINE_SUFFIX_RE.match(text)
-    return match.group("path").strip() if match else text
-
-
-def source_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
-    """Record size and mtime for each readable candidate source.
-
-    Scoped to the files the candidates actually name rather than the whole
-    framework tree: those are the ones a source-resolution session has reason
-    to open, and hashing gigabytes of installed packages to guard a few dozen
-    files would cost more than the session it protects.
-    :func:`directory_fingerprint` covers what a file-only print cannot see.
-
-    Args:
-        paths (Sequence[str]): Candidate source paths, absolute, with or
-            without a ``(line): function`` suffix.
-
-    Returns:
-        dict[str, list[Any]]: ``{bare_path: [size, mtime_ns]}`` for readable
-            paths. A path that could not be stat'd is absent; use
-            :func:`unfingerprinted_sources` to tell that apart from coverage.
-    """
-    out: dict[str, list[Any]] = {}
-    for raw in paths:
-        path = _bare_source_path(raw)
-        if not path or path in out:
-            continue
-        try:
-            stat = os.stat(path)
-        except OSError:
-            continue
-        out[path] = [stat.st_size, stat.st_mtime_ns]
-    return out
-
-
-#: Left out of the print entirely. Python creates this directory for any module
-#: the tree imports, and its own mtime moves on every file written inside it, so
-#: counting it would report drift for a serving process doing its job -- and a
-#: false positive here now fails the analysis. Bytecode cannot shadow the source
-#: it was compiled from, so nothing is given up.
-_IGNORED_ENTRY_NAMES: frozenset[str] = frozenset({"__pycache__"})
-
-#: Tracked by name but not by content: a host rewrites these on its own, and a
-#: rebuild is not an edit. The name is still recorded, so one of them *appearing*
-#: where it was not before is still drift -- that is the case where a planted
-#: file shadows a real module, and it does not depend on reading the content.
-_REBUILT_ENTRY_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".lock", ".log", ".tmp", ".swp")
-
-
-def directory_fingerprint(paths: Sequence[str]) -> dict[str, list[Any]]:
-    """Record the contents of every directory holding a candidate source.
-
-    A file-only print can only ever report a change to a file the table already
-    named. Two things escape it, and both are reachable:
-
-    * A file the session *creates* -- a patched copy beside the kernel, a
-      ``sitecustomize`` module, any name that shadows a real one on
-      ``sys.path``. Those have to land in one of these directories to be
-      imported in the traced source's place.
-    * A file that was already there and got edited: a helper the traced kernel
-      calls, in the same package, named by no candidate. Recording names alone
-      missed this entirely, which made "the tree is fingerprinted" a weaker
-      claim than it read as.
-
-    So every entry contributes its name, and a regular file also contributes its
-    size and mtime. Two exemptions keep a healthy host from tripping a check
-    that now fails the analysis: :data:`_IGNORED_ENTRY_NAMES` is left out
-    entirely, and :data:`_REBUILT_ENTRY_SUFFIXES` is tracked by name without its
-    content. A subdirectory is name-only for the same reason -- its mtime moves
-    whenever anything is written inside it. One ``scandir`` plus one ``lstat``
-    per entry, over the handful of directories a candidate table names.
-
-    Symlinks are not followed: a link repointed at another file changes the
-    link's own signature, and following it would print the target instead.
-
-    Args:
-        paths (Sequence[str]): Candidate source paths, as above.
-
-    Returns:
-        dict[str, list[Any]]: ``{directory: [entry_count, digest]}`` for
-            readable directories.
-    """
-    out: dict[str, list[Any]] = {}
-    for raw in paths:
-        path = _bare_source_path(raw)
-        if not path:
-            continue
-        directory = os.path.dirname(path)
-        if not directory or directory in out:
-            continue
-        try:
-            entries = list(os.scandir(directory))
-        except OSError:
-            continue
-        signatures: list[str] = []
-        for entry in entries:
-            name = entry.name
-            if name in _IGNORED_ENTRY_NAMES:
-                continue
-            if name.endswith(_REBUILT_ENTRY_SUFFIXES):
-                signatures.append(name)
-                continue
-            try:
-                if entry.is_file(follow_symlinks=False):
-                    stat = entry.stat(follow_symlinks=False)
-                    signatures.append(f"{name}\0{stat.st_size}\0{stat.st_mtime_ns}")
-                else:
-                    signatures.append(name)
-            except OSError:
-                # Vanished between the scan and the stat. Recorded by name so
-                # the two prints still disagree if it comes back changed.
-                signatures.append(name)
-        signatures.sort()
-        digest = hashlib.sha256("\0\0".join(signatures).encode("utf-8", "surrogateescape")).hexdigest()
-        out[directory] = [len(signatures), digest]
-    return out
-
-
-def unfingerprinted_sources(
-    paths: Sequence[str],
-    fingerprint: dict[str, list[Any]],
-) -> list[str]:
-    """Return the named sources no signature could be taken for.
-
-    An empty fingerprint and an unmodified tree produce the same empty drift
-    list, which is what let a broken tamper check read as a passing one. Naming
-    the uncovered paths lets the caller report coverage instead of inferring it.
-
-    Args:
-        paths (Sequence[str]): The candidate source paths that were offered.
-        fingerprint (dict[str, list[Any]]): The result of
-            :func:`source_fingerprint` over the same paths.
-
-    Returns:
-        list[str]: Bare paths that were named but carry no signature.
-    """
-    missing: list[str] = []
-    for raw in paths:
-        path = _bare_source_path(raw)
-        if path and path not in fingerprint and path not in missing:
-            missing.append(path)
-    return sorted(missing)
-
-
-def fingerprint_drift(before: dict[str, list[Any]], after: dict[str, list[Any]]) -> list[str]:
-    """Return the paths whose recorded signature changed between two prints.
-
-    Both directions count. A key only in ``before`` was deleted; a key only in
-    ``after`` came into existence during the session -- which is how a directory
-    print reports an added file, and how a source that was absent when the first
-    print was taken reports being written. Iterating ``before`` alone reports
-    neither.
-    """
-    drifted = [path for path in set(before) | set(after) if before.get(path) != after.get(path)]
-    return sorted(drifted)
 
 
 # ---------------------------------------------------------------------------
@@ -602,7 +409,7 @@ def _write_boundary_guard(
     upgrade nobody reviewed.
 
     Two decisions, and only two. Nothing else this stage grants can write, so
-    the boundary is a refusal rather than a fingerprint:
+    the boundary is a refusal and there is nothing behind it:
 
     * ``Write`` is the answer channel and is confined to ``run_dir``. A target
       outside it, or one that cannot be read off the tool input at all, is
@@ -685,13 +492,12 @@ async def _run_claude_session(
     )
     # ``cwd`` may be dropped: it orders relative paths and carries none of the
     # boundary, so an SDK that does not know it still gets a confined session.
-    # ``can_use_tool`` may not. It *is* the boundary, so an SDK that rejects it
-    # gets no session at all -- widening ``allowed_tools`` to keep going would
-    # trade a refusal this stage can report for a silent, host-shaped hole, and
-    # the fingerprint does not cover it: drift is only checked for the candidate
-    # sources and their directories, so a write anywhere else would be neither
-    # prevented nor detected. The stage is advisory, so refusing costs the audit
-    # and leaves the deterministic table standing, which is a reported outcome.
+    # ``can_use_tool`` may not. It *is* the boundary, and nothing sits behind
+    # it, so an SDK that rejects it gets no session at all -- widening
+    # ``allowed_tools`` to keep going would trade a refusal this stage can
+    # report for a silent, host-shaped hole. The stage is advisory, so refusing
+    # costs the audit and leaves the deterministic table standing, which is a
+    # reported outcome.
     options = None
     for variant in (kwargs, {key: value for key, value in kwargs.items() if key != "cwd"}):
         try:
@@ -1265,11 +1071,7 @@ __all__ = [
     "ReviewOutcome",
     "apply_revisions",
     "build_review_prompt",
-    "directory_fingerprint",
-    "fingerprint_drift",
     "load_revisions",
     "run_candidate_review",
     "run_candidate_review_async",
-    "source_fingerprint",
-    "unfingerprinted_sources",
 ]
