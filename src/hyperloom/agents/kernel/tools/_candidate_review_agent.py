@@ -476,7 +476,13 @@ async def _run_claude_session(
 
     from hyperloom.common.llm_config import claude_sdk_env_options  # noqa: PLC0415
 
-    kwargs: dict[str, Any] = dict(claude_sdk_env_options(model=model))
+    kwargs: dict[str, Any] = dict(
+        claude_sdk_env_options(
+            model=model,
+            component="kernel_agent",
+            operation="review_candidates",
+        )
+    )
     kwargs.update(
         {
             "model": model,
@@ -638,6 +644,8 @@ async def _run_codex_session(
             timeout_sec=max(60.0, timeout_sec),
             writable_roots=(run_dir,),
             sandbox_mode="workspace-write",
+            component="kernel_agent",
+            operation="review_candidates",
         )
     except CodexSessionError as exc:
         return _safe_exception_label(exc)

@@ -2752,6 +2752,8 @@ class FrameworkPhase(PhaseHandler):
         async def _read_stream() -> str:
             text, _ = await astream_chat_completion_text(
                 client,
+                component="framework",
+                operation="rank_candidates",
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
                 max_completion_tokens=400,

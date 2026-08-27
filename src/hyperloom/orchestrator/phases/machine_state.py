@@ -3440,6 +3440,11 @@ def record_phase_transition(
     state.phase = row["to_phase"]
     state.phase_started_ts = now_ts
     state.phase_started_unix = now_unix
+    # Publish the phase for LLM attribution: the spawn sites that tag outbound
+    # calls sit in specialists and kernel tools and cannot reach SharedState.
+    from hyperloom.common.llm_attribution import set_current_phase
+
+    set_current_phase(str(row["to_phase"] or ""))
     try:
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
