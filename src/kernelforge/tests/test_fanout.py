@@ -17,7 +17,7 @@ import pytest
 from kernelforge import cli
 from kernelforge.config import Config
 from kernelforge.loop import fanout
-from forge_llm.process_reaping import ReapReport
+from kernelforge.llm.process_reaping import ReapReport
 from kernelforge.loop.fanout import (
     SERIALIZED_DRIVER_NAME,
     DeviceBenchmarkLock,

@@ -443,11 +443,11 @@ def _extract_json(text: str) -> dict[str, Any]:
 
 async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
     """Run one no-edit query through the globally configured agent backend."""
-    from forge_llm.agent_backends.base import (
+    from kernelforge.agent_backends.base import (
         AgentRunSpec,
         AgentToolPolicy,
     )
-    from forge_llm.agent_backends.registry import (
+    from kernelforge.agent_backends.registry import (
         create_registered_backend,
     )
 

@@ -9,7 +9,7 @@ import json
 import shutil
 from pathlib import Path
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.loop.reporting import (
     MANIFEST_SCHEMA_VERSION,

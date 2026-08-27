@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.process_reaping import ReapReport
+from kernelforge.llm.process_reaping import ReapReport
 
 from kernelforge.orchestrator import orchestration as orchestration_module
 from kernelforge.agent_backends import (

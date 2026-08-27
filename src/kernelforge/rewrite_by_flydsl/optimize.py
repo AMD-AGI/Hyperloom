@@ -24,7 +24,7 @@ import threading
 import time
 from pathlib import Path
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 

@@ -62,13 +62,13 @@ import stat
 import sys
 from typing import Any
 
-from forge_llm.workspace_policy import (
+from kernelforge.llm.workspace_policy import (
     PROTECTED_DIRS,
     PROTECTED_GLOBS,
     is_protected_path,
     protected_path_inventory,
 )
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.loop.jit_rebuild import force_jit_rebuild_for_changes
 from kernelforge.loop.scoring import (
     KEEP_MEASUREMENT_COUNT,
@@ -620,7 +620,7 @@ class InSessionGate:
 
         The protection hooks are the same in both modes, and both read the one
         protected-path rule this instance was built with (:meth:`_is_protected`,
-        which delegates to :func:`forge_llm.workspace_policy.is_protected_path`).
+        which delegates to :func:`kernelforge.llm.workspace_policy.is_protected_path`).
 
         ``stop_check=False`` omits the Stop hook, so nothing in the session runs
         correctness or a benchmark. A caller whose sessions run concurrently
@@ -629,7 +629,7 @@ class InSessionGate:
         back to keep improving -- the gate has no say in when it ends -- so its
         candidate is judged only by whoever measures it afterwards.
         """
-        from forge_llm.agent_backends.base import AgentHook, AgentHooks
+        from kernelforge.agent_backends.base import AgentHook, AgentHooks
 
         return AgentHooks(
             pre_tool_use=[

@@ -51,7 +51,7 @@ def _payload() -> dict:
 def test_build_cmd_maps_all_options():
     cmd = forge_gemm_tuning._build_cmd(_payload())
 
-    assert cmd[:4] == [forge_gemm_tuning.sys.executable, "-m", "forge_gemm_tune.cli", "run"]
+    assert cmd[:5] == [forge_gemm_tuning.sys.executable, "-m", "kernelforge.cli", "gemm-tune", "run"]
     assert cmd[cmd.index("--model-path") + 1] == "/models/qwen"
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--precision") + 1] == "bf16"

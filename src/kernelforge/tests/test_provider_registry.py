@@ -6,9 +6,9 @@ from dataclasses import dataclass
 
 import pytest
 
-import forge_llm.agent_backends.codex as codex_backend
-import forge_llm.agent_backends.registry as registry
-from forge_llm.agent_backends import (
+import kernelforge.agent_backends.codex as codex_backend
+import kernelforge.agent_backends.registry as registry
+from kernelforge.agent_backends import (
     AgentCapabilities,
     AgentProvider,
     AgentProviderUnavailableError,

@@ -11,7 +11,7 @@ one local/remote store contract. This store is separate from the packaged
 `local_knowledge` prompt tree; `local_knowledge` stays read-only in its existing
 location and is never copied into the experience store.
 
-`forge-gemm-tune` has no knowledge base: every run tunes or
+`kernelforge gemm-tune` has no knowledge base: every run tunes or
 authors from scratch and writes only its own output directory.
 
 ## Environment contract

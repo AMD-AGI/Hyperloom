@@ -11,13 +11,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentHook,
     AgentHooks,
     AgentRunSpec,
     AgentRuntimeConfig,
 )
-from forge_llm.agent_backends.claude import (
+from kernelforge.agent_backends.claude import (
     ClaudeBackend,
     ClaudeUnavailableError,
     _prepare_claude_environment,
@@ -118,7 +118,7 @@ def test_claude_probe_checks_selected_model_with_configured_gateway(
         )
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.claude.subprocess.run",
+        "kernelforge.agent_backends.claude.subprocess.run",
         fake_run,
     )
     result = backend.probe(cwd=str(tmp_path))
@@ -137,7 +137,7 @@ def test_claude_probe_rejects_unsupported_model(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(backend, "preflight", lambda: None)
     monkeypatch.setattr(
-        "forge_llm.agent_backends.claude.subprocess.run",
+        "kernelforge.agent_backends.claude.subprocess.run",
         lambda *_args, **_kwargs: SimpleNamespace(
             returncode=1,
             stdout="",

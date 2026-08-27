@@ -21,7 +21,7 @@ from kernelforge.loop.campaign_config import (
     resolve_fellow_override,
     validate_pending_campaign_head,
 )
-from forge_llm.git import GitError
+from kernelforge.llm.git import GitError
 
 
 def _git_workspace(tmp_path, name="workspace"):

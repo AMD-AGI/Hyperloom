@@ -72,7 +72,7 @@ _TIMEOUT_MARKERS = ("timed out", "timeout")
 # redeclared: it is published with the provider base classes that have to set it,
 # where a backend outside this repository can find it, and one spelling means the
 # producer and the consumer cannot drift apart.
-from forge_llm.agent_backends.base import AGENT_SAFETY_REJECTION_ATTR
+from kernelforge.agent_backends.base import AGENT_SAFETY_REJECTION_ATTR
 
 
 class LlmUnavailableError(RuntimeError):

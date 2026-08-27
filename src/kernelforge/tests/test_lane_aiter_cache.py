@@ -22,18 +22,18 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentRuntimeConfig,
     AgentToolPolicy,
 )
-from forge_llm.agent_backends.claude import ClaudeBackend
-from forge_llm.agent_backends.codex import CodexBackend
+from kernelforge.agent_backends.claude import ClaudeBackend
+from kernelforge.agent_backends.codex import CodexBackend
 from kernelforge import cli
 from kernelforge.config import Config
 from kernelforge.loop import aiter_cache
 from kernelforge.loop.fanout import SERIALIZED_DRIVER_NAME
-from forge_llm.git import git
+from kernelforge.llm.git import git
 
 
 @pytest.fixture(autouse=True)

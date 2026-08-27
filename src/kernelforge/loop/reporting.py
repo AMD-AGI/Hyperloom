@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.loop.scoring import aggregate_regression_detail
 from kernelforge.durable_io import atomic_write_text, fsync_directory
 

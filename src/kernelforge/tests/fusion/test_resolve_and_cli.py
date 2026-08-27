@@ -13,12 +13,12 @@ from types import SimpleNamespace
 import click
 import pytest
 from click.testing import CliRunner
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
     AgentRuntimeConfig,
 )
-from forge_llm.agent_backends.workspace_guard import WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
 
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module

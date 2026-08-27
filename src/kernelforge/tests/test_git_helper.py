@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from forge_llm.git import DEFAULT_TIMEOUT_SEC, GitError, git, git_async
+from kernelforge.llm.git import DEFAULT_TIMEOUT_SEC, GitError, git, git_async
 
 
 def _repo(tmp_path: Path) -> Path:

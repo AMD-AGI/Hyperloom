@@ -12,14 +12,14 @@ from pathlib import Path
 from typing import Callable, Awaitable
 
 
-from forge_llm.agent_backends import (
+from kernelforge.agent_backends import (
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
     resolve_agent_runtime,
     StdioMcpServer,
 )
-from forge_llm.agent_backends.session_resume import run_session_with_api_resume
+from kernelforge.agent_backends.session_resume import run_session_with_api_resume
 from kernelforge.config import Config
 from kernelforge.mcp_server.pr_stdio_server import TOOL_NAMES as PR_TOOL_NAMES
 from kernelforge.loop.scoring import (

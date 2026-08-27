@@ -26,7 +26,7 @@ def _isolate_aiter_root_dir():
     ``force_jit_rebuild`` writes ``AITER_ROOT_DIR`` DIRECTLY into ``os.environ``
     (via the aiter-cache isolation helper), not through ``monkeypatch``, so
     monkeypatch's teardown does not undo it. Without this, the value set here
-    leaks into later tests (e.g. ``resolve_aiter_root`` in the forge_gemm_tune
+    leaks into later tests (e.g. ``resolve_aiter_root`` in the kernelforge.gemm_tune
     suite reads it and resolves a bogus root).
     """
     original = os.environ.get("AITER_ROOT_DIR")

@@ -16,7 +16,7 @@ import subprocess
 import time
 from pathlib import Path
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.knowledge.experience_integration import git_checkout_branch
 from kernelforge.knowledge.experience_reader import sanitize_read_error

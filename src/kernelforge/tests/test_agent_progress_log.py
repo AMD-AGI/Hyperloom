@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends import claude as claude_backend
+from kernelforge.agent_backends import claude as claude_backend
 from kernelforge.loop.task_preparer import summarize_agent_progress
 
 

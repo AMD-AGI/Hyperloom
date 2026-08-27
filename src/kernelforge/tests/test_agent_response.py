@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 
-from forge_llm.agent_backends.base import AgentRunResult
+from kernelforge.agent_backends.base import AgentRunResult
 from kernelforge.orchestrator.agent_response import (
     AgentResponseIncompleteError,
     validated_agent_text,

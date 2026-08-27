@@ -21,8 +21,8 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from forge_llm.agent_backends import AgentRunSpec
-from forge_llm.agent_backends.session_resume import is_api_failure
+from kernelforge.agent_backends import AgentRunSpec
+from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
 
@@ -224,8 +224,8 @@ def make_supervisor_fn(
     config: Config | None = None,
 ) -> Callable[..., Awaitable[str]]:
     """Build a read-only Supervisor through the selected provider registry."""
-    from forge_llm.agent_backends import AgentToolPolicy
-    from forge_llm.agent_backends.registry import (
+    from kernelforge.agent_backends import AgentToolPolicy
+    from kernelforge.agent_backends.registry import (
         create_registered_backend,
         resolve_agent_runtime,
     )

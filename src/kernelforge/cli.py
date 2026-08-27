@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Iterable
 
 import click
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.cli_forward_compat import (
     TolerantCommand,
     ignored_cli_options,
@@ -385,7 +385,7 @@ def _validate_agent_provider(ctx, param, value):
     """Validate a dynamic built-in or entry-point provider name."""
     if value is None:
         return None
-    from forge_llm.agent_backends import get_agent_provider
+    from kernelforge.agent_backends import get_agent_provider
 
     try:
         return get_agent_provider(value).name
@@ -594,7 +594,7 @@ def _require_lane_provider_capabilities(provider: str, lanes: int) -> None:
     """
     if lanes < 2:
         return
-    from forge_llm.agent_backends.registry import get_agent_provider
+    from kernelforge.agent_backends.registry import get_agent_provider
 
     capabilities = get_agent_provider(provider).capabilities
     missing = [
@@ -642,7 +642,7 @@ def _make_lane_agent_factory(
     candidate is measured once by the loop instead, under the ordinary KEEP
     protocol.
     """
-    from forge_llm.agent_backends.base import session_environment
+    from kernelforge.agent_backends.base import session_environment
     from kernelforge.loop.aiter_cache import child_cache_environment
 
     def factory(lane_dir: str, serialized_driver: str | None):
@@ -2564,6 +2564,21 @@ def _register_forge_fuse() -> None:
 
 
 _register_forge_fuse()
+
+
+def _register_gemm_tune() -> None:
+    """Attach the deterministic GEMM tuner under `gemm-tune`.
+
+    It used to be a separate distribution with its own `forge-gemm-tune`
+    console script; folding it in means forge ships exactly one CLI, and this
+    is where its subcommands (`run`, `plan`, `evidence`) join it.
+    """
+    from kernelforge.gemm_tune.cli import gemm_tune
+
+    main.add_command(gemm_tune, name="gemm-tune")
+
+
+_register_gemm_tune()
 
 
 if __name__ == "__main__":

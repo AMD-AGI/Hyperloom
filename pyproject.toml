@@ -136,7 +136,6 @@ quantization-agent = "hyperloom.agents.quantization.cli:main"
 # Built-in kernel-opt agent. The orchestrator dispatches
 # ``python -m kernelforge.cli`` directly; these are for interactive use.
 kernelforge = "kernelforge.cli:main"
-forge-gemm-tune = "forge_gemm_tune.cli:main"
 # Deprecated alias kept for one release: the standalone ``kernel-agents``
 # distribution is gone, and operator scripts still reference this name.
 kernel-agents = "kernelforge.cli:main"
@@ -279,7 +278,7 @@ kernelforge = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 # One recursive glob covers every per-package tests/ dir under src/ --
-# hyperloom, kernelforge and forge_gemm_tune alike.
+# hyperloom and kernelforge alike.
 # ``scripts/tests`` is listed separately because the operator scripts sit
 # outside the package on purpose -- they have to run on hosts with no Hyperloom
 # install -- so the glob above cannot reach them, and without this line their
@@ -293,7 +292,6 @@ markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
-    "standalone_wheel_e2e: builds forge_gemm_tune's nested pyproject into a wheel and installs it into a throwaway venv, proving the sub-package still stands alone (FORGE_GEMM_TUNE_ROOT dev override). Tens of seconds; deselect with '-m \"not standalone_wheel_e2e\"' on a sharded matrix.",
 ]
 
 [tool.coverage.run]
@@ -304,8 +302,6 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
-    "src/forge_gemm_tune",
-    "src/forge_llm",
     "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -379,7 +375,7 @@ omit = [
     "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
     # CLI entry points (argument plumbing; exercised via the CLIs themselves).
     "src/kernelforge/cli.py",
-    "src/forge_gemm_tune/cli.py",
+    "src/kernelforge/gemm_tune/cli.py",
     "src/kernelforge/fusion/command.py",
     # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
     # ninja / the build system and require real hardware.
@@ -390,16 +386,16 @@ omit = [
     "src/kernelforge/orchestrator/agent.py",
     # Filesystem index walker over the curated knowledge tree.
     "src/kernelforge/knowledge/local_index.py",
-    # forge-gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
-    "src/forge_gemm_tune/tuners/sglang_dense_bf16.py",
-    "src/forge_gemm_tune/tuners/vllm_moe_triton.py",
-    "src/forge_gemm_tune/tuners/fmoe_ck.py",
-    "src/forge_gemm_tune/tuners/a4w4_blockscale.py",
-    "src/forge_gemm_tune/tuners/a8w8.py",
-    "src/forge_gemm_tune/tuners/a8w8_blockscale.py",
-    "src/forge_gemm_tune/tuners/a8w8_bpreshuffle.py",
-    "src/forge_gemm_tune/tuners/vllm_dense_tunableop.py",
-    "src/forge_gemm_tune/tuners/_aiter_dense_common.py",
+    # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
+    "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
+    "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
+    "src/kernelforge/gemm_tune/tuners/fmoe_ck.py",
+    "src/kernelforge/gemm_tune/tuners/a4w4_blockscale.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8_blockscale.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8_bpreshuffle.py",
+    "src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py",
+    "src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py",
 ]
 
 [tool.coverage.report]
@@ -485,7 +481,7 @@ ignore = ["E501", "E741"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
 # The import sits under the comment block explaining why the attribute name is
-# shared with forge_llm rather than redeclared here.
+# shared with kernelforge.llm rather than redeclared here.
 "src/kernelforge/fusion/llm_failure.py" = ["E402"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``

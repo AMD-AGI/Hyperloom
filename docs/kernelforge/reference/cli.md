@@ -1,14 +1,14 @@
 ---
 myst:
   html_meta:
-    "description": "KernelForge CLI reference: the kernelforge forge-loop, forge-rewrite-by-flydsl and forge-fuse commands, plus the forge-gemm-tune entry point."
-    "keywords": "KernelForge, CLI, kernelforge, forge-loop, forge-rewrite-by-flydsl, forge-fuse, forge-gemm-tune, FlyDSL"
+    "description": "KernelForge CLI reference: the kernelforge forge-loop, forge-rewrite-by-flydsl, forge-fuse and gemm-tune commands."
+    "keywords": "KernelForge, CLI, kernelforge, forge-loop, forge-rewrite-by-flydsl, forge-fuse, gemm-tune, FlyDSL"
 ---
 
 # CLI reference
 
-KernelForge installs the `kernelforge` CLI (plus the companion
-`forge-gemm-tune` entry point).
+KernelForge installs exactly one CLI, `kernelforge`; everything below is a
+subcommand of it.
 
 ## Core
 
@@ -100,12 +100,12 @@ against the framework's own eager op.
 
 Writes `fusion_manifest.json` and exits 3 when no fusion is found.
 
-## Companion entry points
+## GEMM tuning
 
 ```bash
-forge-gemm-tune run --model-path <M> --framework sglang|vllm|vllm-aiter \
+kernelforge gemm-tune run --model-path <M> --framework sglang|vllm|vllm-aiter \
     --precision <p> --output-dir <D>       # Tune vendor GEMM libraries for a model
-forge-gemm-tune plan --model-path <M> --framework <F> --precision <p>
+kernelforge gemm-tune plan --model-path <M> --framework <F> --precision <p>
                                            # Show which tuners would run, without running them
 ```
 

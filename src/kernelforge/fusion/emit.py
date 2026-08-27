@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 
 from .models import FusionArtifacts
-from forge_llm.git import git
+from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 

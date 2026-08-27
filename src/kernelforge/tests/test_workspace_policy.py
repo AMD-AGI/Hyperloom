@@ -3,7 +3,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from forge_llm.workspace_policy import (
+from kernelforge.llm.workspace_policy import (
     is_protected_path,
     protected_path_inventory,
     tracked_editable_paths,

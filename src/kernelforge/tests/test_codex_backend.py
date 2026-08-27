@@ -16,8 +16,8 @@ from unittest import mock
 
 import pytest
 
-from forge_llm.agent_backends import create_registered_backend
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends import create_registered_backend
+from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderUnavailableError,
     AgentRole,
@@ -27,16 +27,16 @@ from forge_llm.agent_backends.base import (
     AgentToolPolicy,
     StdioMcpServer,
 )
-from forge_llm.agent_backends.registry import resolve_agent_runtime
-from forge_llm.agent_backends.session_resume import (
+from kernelforge.agent_backends.registry import resolve_agent_runtime
+from kernelforge.agent_backends.session_resume import (
     is_api_failure,
     resumable_session_id,
 )
-from forge_llm.agent_backends.workspace_guard import (
+from kernelforge.agent_backends.workspace_guard import (
     WorkspaceGuard,
     WorkspaceSafetyError,
 )
-from forge_llm.agent_backends.codex import (
+from kernelforge.agent_backends.codex import (
     CodexBackend,
     CodexExecutionError,
     CodexUnavailableError,
@@ -405,7 +405,7 @@ def _install_fake_codex_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
         return _FakeCodexSdk
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.codex._load_codex_sdk",
+        "kernelforge.agent_backends.codex._load_codex_sdk",
         load_sdk,
     )
 
@@ -767,11 +767,11 @@ def test_backend_factory_falls_back_only_when_enabled(
         return object(), object()
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.codex._load_codex_sdk",
+        "kernelforge.agent_backends.codex._load_codex_sdk",
         missing_codex_sdk,
     )
     monkeypatch.setattr(
-        "forge_llm.agent_backends.claude._load_claude_sdk",
+        "kernelforge.agent_backends.claude._load_claude_sdk",
         fake_claude_sdk,
     )
 
@@ -1831,7 +1831,7 @@ def test_codex_dirty_baseline_rejects_an_undone_inherited_stage(
     accepted. An index that no longer matches the one the turn inherited is a
     violation wherever the file itself went.
     """
-    from forge_llm.agent_backends import codex as codex_module
+    from kernelforge.agent_backends import codex as codex_module
 
     repo, kernel, driver = _make_repo(tmp_path)
     inherited = repo / "caller_staged.py"
@@ -1893,7 +1893,7 @@ def test_codex_safety_error_marks_a_verdict_and_not_a_failed_query(
     recognise one by class name -- so a ``git`` call that timed out on NFS
     abandoned the recipe exactly like a session that edited a protected file.
     """
-    from forge_llm.agent_backends import workspace_guard as guard_module
+    from kernelforge.agent_backends import workspace_guard as guard_module
 
     repo, _kernel, _driver = _make_repo(tmp_path)
 

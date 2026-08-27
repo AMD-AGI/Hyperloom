@@ -1040,7 +1040,7 @@ def serving_smoke_verdict(
     env["HIP_VISIBLE_DEVICES"] = _hip_visible_devices(gpu, tp)
     # AITER is opt-in per framework contract: ``vllm-aiter`` := vLLM with AITER on;
     # plain ``vllm`` keeps vLLM's own default (do NOT force AITER, or a plain-vLLM
-    # smoke silently runs a non-target path -> false PASS/FAIL). Matches forge_gemm_tune.
+    # smoke silently runs a non-target path -> false PASS/FAIL). Matches kernelforge.gemm_tune.
     if fw == "vllm-aiter":
         env.setdefault("VLLM_ROCM_USE_AITER", "1")
     elif not is_vllm:

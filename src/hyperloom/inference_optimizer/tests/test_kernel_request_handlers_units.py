@@ -181,11 +181,9 @@ class TestForgeGemmHelperCoverage:
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
-    def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
-        assert krh._forge_gemm_tune_available() is True
-
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+    def test_forge_gemm_tune_available_tracks_importability(self, monkeypatch):
+        # Importability is the whole test now: the tuner ships inside this
+        # distribution, so there is no console script to find on PATH.
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
         assert krh._forge_gemm_tune_available() is True
 
@@ -212,8 +210,6 @@ class TestForgeGemmHelperCoverage:
         assert result["backend"] == "forge"
 
     def test_forge_gemm_tune_available_swallows_find_spec_error(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
-
         def _boom(_name):
             raise ValueError("ambiguous spec")
 

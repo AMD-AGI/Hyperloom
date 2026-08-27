@@ -28,7 +28,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from forge_llm.git import git
+from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 

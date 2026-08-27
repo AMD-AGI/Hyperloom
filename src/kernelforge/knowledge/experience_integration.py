@@ -17,11 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from forge_llm.workspace_policy import (
+from kernelforge.llm.workspace_policy import (
     is_protected_path,
     tracked_editable_paths,
 )
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.knowledge.implementation_identity import (
     canonical_owner_framework,
 )

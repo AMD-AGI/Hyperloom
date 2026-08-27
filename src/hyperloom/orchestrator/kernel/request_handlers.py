@@ -1914,11 +1914,17 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
 
 
 def _forge_gemm_tune_available() -> bool:
-    """Check if forge-gemm-tune CLI is importable or on PATH."""
-    if shutil.which("forge-gemm-tune"):
-        return True
+    """Report whether the ``kernelforge gemm-tune`` tuner can be run.
+
+    Importability is the whole question now: the tuner is a subpackage of the
+    kernelforge that ships in this distribution, invoked as
+    ``python -m kernelforge.cli gemm-tune``. It used to also answer yes to a
+    ``forge-gemm-tune`` console script on PATH, from the era when it was its own
+    wheel -- that probe is dropped rather than repointed, because a stale script
+    left behind by an old standalone install would resolve to an unrelated tree.
+    """
     try:
-        spec = importlib.util.find_spec("forge_gemm_tune")
+        spec = importlib.util.find_spec("kernelforge.gemm_tune")
         return spec is not None
     except (ModuleNotFoundError, ValueError):
         return False
@@ -3127,7 +3133,7 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
     if not flags.get("aiter_fused_moe"):
         return
     try:
-        from forge_gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
         return
     try:
@@ -3710,7 +3716,7 @@ async def _run_forge_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Deterministic GEMM tuning via forge-gemm-tune CLI.
+    """Deterministic GEMM tuning via the ``kernelforge gemm-tune`` CLI.
 
     Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
     returns recommended_env for Hyperloom E2E validation.
@@ -3727,14 +3733,13 @@ async def _run_forge_gemm_tuning(
     state = SharedState.load_or_init(session_dir)
 
     if not _forge_gemm_tune_available():
-        forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")
         return {
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "forge-gemm-tune CLI not found. Install via "
-                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
-                f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
+                "kernelforge.gemm_tune is not importable. It ships with this "
+                "distribution, so this means a partial install: reinstall with "
+                "'pip install -e .[forge]'."
             ),
             "backend": "forge",
         }
@@ -4166,7 +4171,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             base_sha=None,
             rel_paths=rel_paths,
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
-            provenance="forge_gemm_tune",
+            provenance="kernelforge.gemm_tune",
             extra={
                 "env_keys": [env_key for env_key, _, _ in pending],
                 "model": slug,

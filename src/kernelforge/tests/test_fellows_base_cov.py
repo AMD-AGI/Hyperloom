@@ -95,7 +95,7 @@ def test_build_single_fellow_prompt_aiter_operator():
 
 def test_prompt_build_does_not_probe_provider_sdks(monkeypatch):
     """Prompt assembly must not resolve an agent provider."""
-    from forge_llm.agent_backends import registry
+    from kernelforge.agent_backends import registry
 
     def reject(*_args, **_kwargs):
         raise AssertionError("provider selection must not run")

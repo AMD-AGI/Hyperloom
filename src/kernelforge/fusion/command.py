@@ -32,7 +32,7 @@ from typing import Optional
 
 import click
 
-from forge_llm.agent_backends.registry import (
+from kernelforge.agent_backends.registry import (
     create_registered_backend,
     get_agent_provider,
     resolve_agent_runtime,
@@ -79,7 +79,7 @@ from .vllm_passes import (
     resolve_target_runtime,
     verify_pass_enabled,
 )
-from forge_llm.git import git
+from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 

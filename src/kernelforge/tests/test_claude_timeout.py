@@ -27,11 +27,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends import claude as claude_mod
-from forge_llm.agent_backends.base import AgentRunSpec, AgentToolPolicy
-from forge_llm.agent_backends.claude import ClaudeBackend
-from forge_llm.git import git
-from forge_llm.process_reaping import ReapReport
+from kernelforge.agent_backends import claude as claude_mod
+from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+from kernelforge.agent_backends.claude import ClaudeBackend
+from kernelforge.llm.git import git
+from kernelforge.llm.process_reaping import ReapReport
 
 
 class _FakeOptions:
@@ -169,7 +169,7 @@ def test_a_workspace_the_reaper_could_not_clear_is_reported_on_the_result(
 
 def test_timeout_reports_a_terminal_reason_not_sdk_error(monkeypatch):
     """``timeout`` is in TERMINAL_END_REASONS; ``sdk_error`` would be retried."""
-    from forge_llm.agent_backends.session_resume import (
+    from kernelforge.agent_backends.session_resume import (
         TERMINAL_END_REASONS,
         is_api_failure,
     )

@@ -777,65 +777,27 @@ PY
   fi
 }
 
-# --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
-_forge_gemm_tune_candidates() {
-  # Explicit gemm-tune override first.
-  [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root (single canonical var: FORGE_PATH).
-  [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-}
-
-_resolve_forge_gemm_tune_root() {
-  local cand
-  while IFS= read -r cand; do
-    [ -n "$cand" ] || continue
-    if [ -f "${cand%/}/pyproject.toml" ] && { [ -f "${cand%/}/forge_gemm_tune/cli.py" ] || [ -f "${cand%/}/cli.py" ]; }; then
-      realpath "$cand" 2>/dev/null || printf '%s\n' "$cand"
-      return 0
-    fi
-  done < <(_forge_gemm_tune_candidates)
-  return 1
-}
-
+# --- 1b. forge GEMM tuning (`kernelforge gemm-tune`) ---
+# Nothing to install: the tuner is a subpackage of the kernelforge that ships in
+# this distribution, so `pip install -e "${REPO_ROOT}[test]"` above already put
+# it in place. It used to be its own wheel, resolved from a checkout via
+# FORGE_GEMM_TUNE_ROOT / FORGE_PATH and pip-installed editable on the side; that
+# whole resolver is gone with the separate distribution. What remains is worth
+# keeping as a probe, because a partial install shows up here rather than in the
+# middle of a tuning run.
 ensure_forge_gemm_tune() {
-  local root resolved
-  if root="$(_resolve_forge_gemm_tune_root)"; then
-    log "ensuring forge-gemm-tune from ${root}"
-    if [ "$CHECK_ONLY" -eq 1 ]; then
-      "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1 \
-        && log "forge-gemm-tune import OK" \
-        || warn "forge-gemm-tune not importable (check-only; would install from ${root})"
-      return 0
-    fi
-    if [ "$DRY_RUN" -eq 1 ]; then
-      log "would run: ${PYTHON} -m pip install -e ${root}"
-      return 0
-    fi
-    resolved="$("$PYTHON" -c 'import forge_gemm_tune, os; print(os.path.realpath(os.path.dirname(forge_gemm_tune.__file__)))' 2>/dev/null || true)"
-    case "$resolved" in
-      "$root" | "$root"/*)
-        log "forge-gemm-tune already installed from ${root}; skipping editable reinstall"
-        ;;
-      *)
-        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$root"
-        "$PYTHON" -c "import forge_gemm_tune; import forge_gemm_tune.cli" >/dev/null
-        log "forge-gemm-tune installed OK from ${root}"
-        ;;
-    esac
+  if "$PYTHON" -c "import kernelforge.gemm_tune.cli" >/dev/null 2>&1; then
+    log "kernelforge gemm-tune import OK"
   else
-    if "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1; then
-      log "forge-gemm-tune import OK"
-    else
-      log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
-    fi
+    warn "kernelforge.gemm_tune not importable; forge GEMM tuning will be unavailable"
   fi
 }
 
 # --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
 # forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike forge_gemm_tune — which has a standalone sub-pyproject and gets
-# pip-installed by the carrier from its sub-package dir — `kernel_agents` is only
-# packaged by the KernelForge *root* pyproject and was never installed here. So
+# Unlike kernelforge.gemm_tune — which ships inside this distribution —
+# `kernel_agents` was only packaged by the KernelForge *root* pyproject and was
+# never installed here. So
 # forge-loop relied entirely on $FORGE_PATH being present and prepended to the
 # child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
 # unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
@@ -858,8 +820,8 @@ _kernel_forge_root() {
 }
 
 ensure_kernel_agents() {
-  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
-  # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
+  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER.
+  # install.sh frequently runs at setup time under the
   # default geak backend, so a backend gate here would skip the install; a later
   # forge session whose child has no FORGE_PATH would then still hit
   # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
@@ -892,9 +854,9 @@ ensure_kernel_agents() {
   # KernelForge checkout used by concurrent sessions. A non-editable install
   # builds in a temp dir and never writes egg-info/build artifacts back into the
   # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own forge_gemm_tune install (see _incontainer.sh: "Non-editable installs
+  # own kernelforge.gemm_tune install (see _incontainer.sh: "Non-editable installs
   # build in a temp dir and never write to the read-only shared checkout").
-  # Installing the root also provides forge_gemm_tune and the fusion pipeline.
+  # Installing the root also provides kernelforge.gemm_tune and the fusion pipeline.
   # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
   # that directory and its sub-pyproject were removed when fusion was absorbed.
   #

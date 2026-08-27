@@ -14,12 +14,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentProviderUnavailableError,
     AgentRunResult,
     AgentRunSpec,
 )
-from forge_llm.agent_backends.session_resume import (
+from kernelforge.agent_backends.session_resume import (
     EXHAUSTED_END_REASON,
     is_api_failure,
     is_retryable_api_error,

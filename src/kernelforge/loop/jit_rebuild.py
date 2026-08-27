@@ -25,7 +25,7 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.loop.aiter_cache import activate_aiter_cache_for_sources
 
 log = logging.getLogger(__name__)

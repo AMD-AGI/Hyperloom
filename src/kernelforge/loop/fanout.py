@@ -29,9 +29,9 @@ import tempfile
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from forge_llm.git import git, git_async
+from kernelforge.llm.git import git, git_async
 
-from forge_llm.process_reaping import (
+from kernelforge.llm.process_reaping import (
     ReapReport,
     install_child_subreaper,
     reap_processes_under,

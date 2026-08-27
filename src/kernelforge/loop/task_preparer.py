@@ -64,13 +64,13 @@ from dataclasses import asdict, dataclass, field
 from typing import NamedTuple
 from pathlib import Path
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentToolPolicy,
     with_writable_sandbox,
 )
-from forge_llm.agent_backends.registry import create_registered_backend
-from forge_llm.git import git
+from kernelforge.agent_backends.registry import create_registered_backend
+from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.loop.external_artifacts import (
     ExternalArtifactError,
@@ -311,7 +311,7 @@ atexit.register(_dump)
 # a conforming driver within the budget") before the loop even starts — even
 # though the driver is fine and just needs to compile once. Give first-run JIT
 # real headroom; override via env if a build farm is unusually slow/fast. Same
-# root-cause family as forge_gemm_tune's FORGE_TUNE_TASK_TIMEOUT (7200s), a
+# root-cause family as kernelforge.gemm_tune's FORGE_TUNE_TASK_TIMEOUT (7200s), a
 # different knob on the same JIT-latency problem.
 PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800")
 PREFLIGHT_BENCH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800")

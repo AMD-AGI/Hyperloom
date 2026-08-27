@@ -69,9 +69,9 @@ class ApplyVerdict:
 def _parse(server_log: Path) -> dict | None:
     """Parse the serving log with forge's evidence module, if it is installed."""
     try:
-        from forge_gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
-        log.info("forge_gemm_tune not importable; apply verification unavailable")
+        log.info("kernelforge.gemm_tune not importable; apply verification unavailable")
         return None
     try:
         return parse_log_file(server_log)

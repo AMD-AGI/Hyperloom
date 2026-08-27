@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import pytest
 from click.testing import CliRunner
 
-from forge_llm.agent_backends.base import AgentRuntimeConfig
+from kernelforge.agent_backends.base import AgentRuntimeConfig
 from kernelforge.cli import main
 from kernelforge.loop import task_preparer
 

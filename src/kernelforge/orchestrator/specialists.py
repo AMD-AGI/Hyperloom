@@ -22,8 +22,8 @@ from kernelforge.agent_backends import (
     AgentToolPolicy,
     StdioMcpServer,
 )
-from forge_llm.agent_backends.session_resume import is_api_failure
-from forge_llm.process_reaping import ReapReport, reap_processes_under
+from kernelforge.agent_backends.session_resume import is_api_failure
+from kernelforge.llm.process_reaping import ReapReport, reap_processes_under
 from kernelforge.mcp_server.probe_stdio_server import (
     ANALYSIS_RESERVE_SEC,
     BUDGET_EXHAUSTED,

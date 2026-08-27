@@ -31,7 +31,7 @@ def _src_root_on_child_pythonpath() -> None:
     """Extend pytest's in-process ``pythonpath`` to subprocesses.
 
     Roughly 250 call sites in this tree spawn ``sys.executable`` and expect to
-    import ``kernelforge`` / ``forge_llm`` there. Upstream KernelForge got away
+    import ``kernelforge`` / ``kernelforge.llm`` there. Upstream KernelForge got away
     with it because its CI always ran against ``pip install -e``; run the suite
     from a bare checkout instead -- which the ``pythonpath = ["src", "."]`` ini
     setting makes work for the *parent* -- and every one of those children dies

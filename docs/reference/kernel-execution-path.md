@@ -39,7 +39,7 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or forge-gemm-tune |
+| `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or kernelforge gemm-tune |
 | `run_collective` | `run_collective_handler` | forge-collective (collective rewrite) |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |

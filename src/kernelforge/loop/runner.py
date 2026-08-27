@@ -40,10 +40,10 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import NamedTuple
 
-from forge_llm.agent_backends.session_resume import EXHAUSTED_END_REASON
-from forge_llm.process_reaping import processes_under
-from forge_llm.workspace_policy import is_protected_path
-from forge_llm.git import git
+from kernelforge.agent_backends.session_resume import EXHAUSTED_END_REASON
+from kernelforge.llm.process_reaping import processes_under
+from kernelforge.llm.workspace_policy import is_protected_path
+from kernelforge.llm.git import git
 from kernelforge.config import Config
 from kernelforge.learning.auto_evolve import AutoEvolver
 from kernelforge.loop.canonical_correctness import accept_candidate

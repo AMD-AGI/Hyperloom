@@ -17,10 +17,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from forge_llm import process_reaping
-from forge_llm.process_reaping import ReapReport
+from kernelforge.llm import process_reaping
+from kernelforge.llm.process_reaping import ReapReport
 from kernelforge.agent_backends import AgentRunResult
-from forge_llm.git import GitError
+from kernelforge.llm.git import GitError
 from kernelforge.loop import analysis_evidence
 from kernelforge.loop import fanout
 from kernelforge.loop import runner as runner_module

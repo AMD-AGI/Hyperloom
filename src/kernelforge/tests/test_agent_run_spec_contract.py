@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from dataclasses import fields
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AGENT_SAFETY_REJECTION_ATTR,
     AgentProviderError,
     AgentRunSpec,

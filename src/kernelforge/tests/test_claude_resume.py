@@ -16,14 +16,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from forge_llm.agent_backends.base import AgentRunSpec, AgentToolPolicy
-from forge_llm.agent_backends.claude import (
+from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+from kernelforge.agent_backends.claude import (
     DEFAULT_CLAUDE_MODEL,
     ClaudeBackend,
     ClaudeBackendError,
     _supports_adaptive_thinking,
 )
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.orchestrator.agent import _make_session_summarizer
 
 
@@ -154,7 +154,7 @@ def test_sdk_error_after_session_id_warns_and_preserves_resume(
 
     with caplog.at_level(
         "WARNING",
-        logger="forge_llm.agent_backends.claude",
+        logger="kernelforge.agent_backends.claude",
     ):
         result = asyncio.run(backend.run(_spec()))
 

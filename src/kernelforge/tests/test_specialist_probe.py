@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from forge_llm.process_reaping import ReapReport
+from kernelforge.llm.process_reaping import ReapReport
 
 from kernelforge.agent_backends import AgentCapabilities, AgentRunResult
 from kernelforge.config import Config

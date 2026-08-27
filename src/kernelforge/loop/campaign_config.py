@@ -14,7 +14,7 @@ import subprocess
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
-from forge_llm.git import git
+from kernelforge.llm.git import git
 from kernelforge.fellows.constants import FELLOW_BACKENDS
 from kernelforge.knowledge.experience_sink import (
     infer_source_owner_framework,

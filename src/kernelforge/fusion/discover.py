@@ -42,12 +42,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from forge_llm import (
+from kernelforge.llm import (
     normalize_anthropic_base_url,
     resolve_anthropic_gateway,
     resolve_openai_gateway,
 )
-from forge_llm.agent_backends.base import AgentRunSpec, AgentToolPolicy
+from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
 from kernelforge.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
@@ -1596,7 +1596,7 @@ def default_llm_fn(
     Discovery only READS (the source and retrieved operator evidence are embedded
     in the prompt) and RETURNS JSON, so a single chat completion suffices.
     Endpoint, credential and headers come from the OpenAI line via
-    :func:`~forge_llm.resolve_openai_gateway`, and ``ANTHROPIC_SKIP_TLS_VERIFY``
+    :func:`~kernelforge.llm.resolve_openai_gateway`, and ``ANTHROPIC_SKIP_TLS_VERIFY``
     / ``NODE_TLS_REJECT_UNAUTHORIZED`` are honored for the gateway's
     self-signed cert.
 

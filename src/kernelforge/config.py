@@ -122,7 +122,7 @@ class Config:
 
     def __post_init__(self):
         """Derive paths and validate provider-specific runtime settings."""
-        from forge_llm.agent_backends.registry import get_agent_provider
+        from kernelforge.agent_backends.registry import get_agent_provider
 
         self.project_root = Path(self.project_root)
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
@@ -172,7 +172,7 @@ class Config:
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
-        from forge_llm.agent_backends.registry import (
+        from kernelforge.agent_backends.registry import (
             resolve_agent_runtime,
             select_default_agent_provider,
         )

@@ -11,7 +11,7 @@ import stat
 import subprocess
 
 import pytest
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
     AgentRuntimeConfig,

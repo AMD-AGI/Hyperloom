@@ -1658,7 +1658,7 @@ class DispatcherCollaborator:
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using the forge-gemm-tune backend: eligible on any supported
+        When using the kernelforge gemm-tune backend: eligible on any supported
         framework (sglang / vllm / vllm-aiter), with no precision or MoE
         pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
 
@@ -1677,7 +1677,7 @@ class DispatcherCollaborator:
         backend = _resolve_gemm_tuning_backend({})
 
         if backend == "forge":
-            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
             # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
             # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
             # precision/MoE here, or a category that can optimize gets silently

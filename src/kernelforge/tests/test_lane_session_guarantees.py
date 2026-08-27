@@ -28,15 +28,15 @@ from pathlib import Path
 import click
 import pytest
 
-import forge_llm.agent_backends.registry as registry
+import kernelforge.agent_backends.registry as registry
 import kernelforge.loop.insession_gate as gate_module
 import kernelforge.orchestrator.agent as agent_module
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
     AgentRunSpec,
 )
-from forge_llm.agent_backends.registry import AgentProvider, register_agent_provider
+from kernelforge.agent_backends.registry import AgentProvider, register_agent_provider
 from kernelforge import cli
 from kernelforge.config import Config
 from kernelforge.loop import fanout

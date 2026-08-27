@@ -8,13 +8,13 @@ import asyncio
 
 import pytest
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentProviderUnavailableError,
     AgentRunResult,
     AgentRunSpec,
 )
-from forge_llm.agent_backends.codex import resolve_codex_gateway
+from kernelforge.agent_backends.codex import resolve_codex_gateway
 from kernelforge.config import Config
 from kernelforge.orchestrator.supervisor import (
     make_supervisor_fn,
@@ -81,8 +81,8 @@ def test_empty_gateway_override_defers_to_the_environment(monkeypatch, override)
     LlmGateway has no truthiness, so `self.gateway or _resolve_gateway()` treated
     an empty override as configured and stopped reading OPENAI_*.
     """
-    from forge_llm.agent_backends.base import AgentRuntimeConfig
-    from forge_llm.agent_backends.codex import CodexBackend
+    from kernelforge.agent_backends.base import AgentRuntimeConfig
+    from kernelforge.agent_backends.codex import CodexBackend
 
     for k in _GATEWAY_ENV:
         monkeypatch.delenv(k, raising=False)
@@ -101,8 +101,8 @@ def test_empty_gateway_override_defers_to_the_environment(monkeypatch, override)
 
 
 def test_complete_gateway_override_wins(monkeypatch):
-    from forge_llm.agent_backends.base import AgentRuntimeConfig
-    from forge_llm.agent_backends.codex import CodexBackend
+    from kernelforge.agent_backends.base import AgentRuntimeConfig
+    from kernelforge.agent_backends.codex import CodexBackend
 
     monkeypatch.setenv("OPENAI_BASE_URL", "https://from-env/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "openai")
@@ -124,7 +124,7 @@ def test_provider_overrides_forwards_every_header(monkeypatch):
     An APIM subscription key is as mandatory as ``user``; forwarding only the
     latter silently dropped it and the gateway answered 401.
     """
-    from forge_llm.agent_backends.codex import _provider_overrides
+    from kernelforge.agent_backends.codex import _provider_overrides
 
     for k in _GATEWAY_ENV:
         monkeypatch.delenv(k, raising=False)
@@ -158,7 +158,7 @@ def test_supervisor_backend_initialization_is_best_effort(
         raise AgentProviderUnavailableError("codex unavailable; fallback claude unavailable")
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.registry.create_registered_backend",
+        "kernelforge.agent_backends.registry.create_registered_backend",
         unavailable_factory,
     )
     config = Config(
@@ -212,7 +212,7 @@ def test_supervisor_api_failure_is_not_parsed_or_repaired(
         return backend
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.registry.create_registered_backend",
+        "kernelforge.agent_backends.registry.create_registered_backend",
         fake_factory,
     )
     supervisor_fn = make_supervisor_fn(
@@ -267,7 +267,7 @@ def test_supervisor_provider_switch_clears_backend_specific_runtime(
         return backend
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.registry.create_registered_backend",
+        "kernelforge.agent_backends.registry.create_registered_backend",
         fake_factory,
     )
     config = Config(
@@ -331,7 +331,7 @@ def test_codex_supervisor_uses_shared_backend_config_and_usage(
         return backend
 
     monkeypatch.setattr(
-        "forge_llm.agent_backends.registry.create_registered_backend",
+        "kernelforge.agent_backends.registry.create_registered_backend",
         fake_factory,
     )
     config = Config(

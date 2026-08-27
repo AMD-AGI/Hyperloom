@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import forge_llm.agent_backends.registry as agent_registry
+import kernelforge.agent_backends.registry as agent_registry
 from kernelforge.config import Config
 from kernelforge.rewrite_by_flydsl import applyback, protocol
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec

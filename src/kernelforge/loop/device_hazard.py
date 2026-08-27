@@ -17,7 +17,7 @@ So the finding is recorded here and re-checked before every measurement, and
 two things decide when it stops blocking:
 
 * **What clears it is the device, not the clock.** The re-check asks
-  :func:`~forge_llm.process_reaping.still_holding_device` whether the processes
+  :func:`~kernelforge.llm.process_reaping.still_holding_device` whether the processes
   that made the finding still have a device node open, keyed on the identity
   they were recorded under so a recycled pid cannot answer for them. That is a
   narrower question than "did the reap succeed", and deliberately so: re-running
@@ -43,7 +43,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from forge_llm.process_reaping import device_holders, still_holding_device
+from kernelforge.llm.process_reaping import device_holders, still_holding_device
 
 log = logging.getLogger(__name__)
 

@@ -36,9 +36,9 @@ from pathlib import Path
 
 import pytest
 
-from forge_llm import process_reaping
-from forge_llm.agent_backends.claude import _reap_workspace_processes
-from forge_llm.process_reaping import (
+from kernelforge.llm import process_reaping
+from kernelforge.agent_backends.claude import _reap_workspace_processes
+from kernelforge.llm.process_reaping import (
     _read_proc,
     _Survey,
     install_child_subreaper,
@@ -68,7 +68,7 @@ _EXITS_WITH_7 = _READY + "raise SystemExit(7)"
 # a single word so the assertion is on what happened, not on a duration.
 _COLLECTS_AN_ORPHAN_OFF_THE_MAIN_THREAD = """
 import os, signal, subprocess, sys, threading, time
-from forge_llm.process_reaping import _read_proc, install_child_subreaper
+from kernelforge.llm.process_reaping import _read_proc, install_child_subreaper
 
 armed = []
 worker = threading.Thread(target=lambda: armed.append(install_child_subreaper()))

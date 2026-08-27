@@ -18,7 +18,7 @@ def _isolate_aiter_env():
     ``configure_aiter_cache_isolation`` writes ``os.environ`` directly (its job
     is to steer aiter's build trees for child processes). We snapshot and restore
     those keys around each test so the temp paths it sets do not pollute later
-    tests (e.g. resolve_aiter_root in forge_gemm_tune). monkeypatch cannot cover
+    tests (e.g. resolve_aiter_root in kernelforge.gemm_tune). monkeypatch cannot cover
     this: it only rolls back keys it recorded, and delenv on an absent key
     records nothing.
     """
@@ -328,8 +328,8 @@ def test_profiler_droppings_do_not_fail_a_session(tmp_path):
     """
     import subprocess
 
-    from forge_llm.agent_backends.base import AgentRunSpec
-    from forge_llm.agent_backends.workspace_guard import (
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import (
         WorkspaceGuard,
         WorkspaceSafetyError,
     )
@@ -381,8 +381,8 @@ def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
     """
     import subprocess
 
-    from forge_llm.agent_backends.base import AgentRunSpec
-    from forge_llm.agent_backends.workspace_guard import WorkspaceGuard
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import WorkspaceGuard
 
     ws = tmp_path / "nested"
     nested = ws / "aiter" / "ops" / "triton"
@@ -424,8 +424,8 @@ def test_an_undeclared_stray_file_is_still_refused(tmp_path):
     """The allowance is per-path, not a blanket one."""
     import subprocess
 
-    from forge_llm.agent_backends.base import AgentRunSpec
-    from forge_llm.agent_backends.workspace_guard import (
+    from kernelforge.agent_backends.base import AgentRunSpec
+    from kernelforge.agent_backends.workspace_guard import (
         WorkspaceGuard,
         WorkspaceSafetyError,
     )

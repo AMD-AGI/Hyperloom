@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from forge_llm.agent_backends.base import (
+from kernelforge.agent_backends.base import (
     AgentHook,
     AgentHooks,
     AgentRunSpec,
@@ -44,7 +44,7 @@ from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_modul
 from .llm_failure import is_agent_safety_error, is_agent_timeout_error
 from .harness_contract import harness_contract
 from .validate import DEFAULT_TARGET_SPEEDUP
-from forge_llm.git import git
+from kernelforge.llm.git import git
 
 log = logging.getLogger("forge_fusion")
 
