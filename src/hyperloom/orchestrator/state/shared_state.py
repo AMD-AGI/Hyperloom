@@ -579,6 +579,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Baseline perf triple (input/output tput + intvty p90) for composite grading.
+    baseline_perf: dict[str, Any] = field(default_factory=dict)
     # Internal-only baseline cold+hot double-run switch; default-on keeps EXPLORE
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True

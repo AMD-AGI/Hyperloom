@@ -234,6 +234,9 @@ class VariantResult:
         ttft_mean_ms (float | None): Mean time-to-first-token (ms).
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
+        input_throughput (float | None): Input tokens/sec (prefill), if measured.
+        tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
+        intvty_p90 (float | None): p90 output tok/s/user (interactivity), if measured.
         workspace (str | None): Path to the located ``benchmark_*`` workspace.
         report_path (str | None): Path to ``benchmark_report.json`` if present.
         raw_result_path (str | None): Path to the raw result JSON, if salvaged.
@@ -269,6 +272,9 @@ class VariantResult:
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
+    input_throughput: float | None = None
+    tpot_p90_ms: float | None = None
+    intvty_p90: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None

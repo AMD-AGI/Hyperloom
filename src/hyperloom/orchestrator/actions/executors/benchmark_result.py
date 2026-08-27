@@ -712,6 +712,12 @@ def _merge_raw_result(
         measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
         measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
+    if measurement.get("input_throughput") is None:
+        measurement["input_throughput"] = to_float(raw.get("input_throughput"))
+    if measurement.get("tpot_p90_ms") is None:
+        measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
+    if measurement.get("intvty_p90") is None:
+        measurement["intvty_p90"] = to_float(raw.get("intvty_p90_tok_s_user"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
