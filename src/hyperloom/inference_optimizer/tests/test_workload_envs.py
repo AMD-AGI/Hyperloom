@@ -679,5 +679,39 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
 
 
 # ---------------------------------------------------------------------------
+# agentx_active: persisted benchmark_mode as a fallback for a missing env var
+# ---------------------------------------------------------------------------
+
+
+def test_agentx_active_true_from_env_var(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert we.agentx_active() is True
+
+
+def test_agentx_active_false_with_neither_signal(monkeypatch):
+    _clear_env(monkeypatch)
+    assert we.agentx_active() is False
+    assert we.agentx_active(SimpleNamespace(benchmark_mode="")) is False
+
+
+def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
+    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still
+    # be recognized as AgentX-active from the session's persisted mode.
+    _clear_env(monkeypatch)
+    assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
+
+
+def test_agentx_kb_write_blocked_matches_agentx_active(monkeypatch):
+    # agentx_kb_write_blocked delegates to agentx_active; both signals still work.
+    _clear_env(monkeypatch)
+    assert we.agentx_kb_write_blocked() is False
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert we.agentx_kb_write_blocked() is True
+    _clear_env(monkeypatch)
+    assert we.agentx_kb_write_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
+
+
+# ---------------------------------------------------------------------------
 # Scriptable baseline sampling cost (measurement contract values)
 # ---------------------------------------------------------------------------

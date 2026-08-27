@@ -863,6 +863,31 @@ def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
     assert any("steady-state floor" in r.message for r in caplog.records)
 
 
+def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden.
+
+    Without this, an operator who explicitly raised the cap (e.g. to widen the
+    profiler's steady-state window) would see it clamped back to 8 by the
+    AgentX branch with no indication their override had no effect.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=64" in r.message for r in caplog.records)
+
+
 def test_materialize_persists_inferencex_path_for_magpie(
     tmp_path,
     monkeypatch,

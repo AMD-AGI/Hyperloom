@@ -7532,7 +7532,7 @@ def _grade_integrate_accuracy(
     }
 
 
-def _agentx_rebaseline_timeout(resolved_sec: int) -> int:
+def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -> int:
     """Raise a re-baseline timeout to what an AgentX round needs.
 
     Same shape, and the same root cause, as
@@ -7556,13 +7556,16 @@ def _agentx_rebaseline_timeout(resolved_sec: int) -> int:
 
     Args:
         resolved_sec: The timeout the payload/contract resolved to.
+        shared_state: Session state, so a persisted ``benchmark_mode`` still
+            triggers the raise when this integrate call runs in a subprocess
+            that did not inherit ``HYPERLOOM_AGENTX``.
 
     Returns:
         int: ``resolved_sec``, or the AgentX-derived cap when that is larger.
     """
-    from ..actions.executors._workload_envs import agentx_enabled
+    from ..actions.executors._workload_envs import agentx_active
 
-    if not agentx_enabled():
+    if not agentx_active(shared_state):
         return resolved_sec
     from ..actions.executors.baseline import agentx_baseline_timeout_sec
 
@@ -7824,13 +7827,16 @@ async def integrate_handler(
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
+    from ..state.shared_state import SharedState
+
     rebaseline_timeout_sec = _agentx_rebaseline_timeout(
         _cold_start_rebaseline_timeout(
             _integrate_rebaseline_timeout_sec(
                 payload,
                 default_timeout_sec=baseline_executor.default_timeout_sec,
             )
-        )
+        ),
+        shared_state=SharedState.load_or_init(session_dir),
     )
     fake_task = Task(
         task_id=fake_task_id,

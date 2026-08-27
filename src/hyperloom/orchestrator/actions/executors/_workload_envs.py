@@ -135,6 +135,27 @@ def agentx_enabled(env: dict[str, str] | None = None) -> bool:
     return str(raw).strip().lower() in _AGENTX_TRUE_VALUES
 
 
+def agentx_active(shared_state: Any = None) -> bool:
+    """Whether AgentX is enabled, preferring persisted state over the ambient env var.
+
+    ``benchmark_mode`` is stamped at seed precisely so it survives a restart,
+    while ``HYPERLOOM_AGENTX`` only describes the shell that happens to be
+    running -- an SDK caller, or a re-baseline/variant round driven from a
+    subprocess that did not inherit it, would otherwise miss the AgentX-sized
+    timeout or publish the agentic number under a synthetic tag. Either saying
+    "agentx" is enough.
+
+    Args:
+        shared_state: Session state, when the caller has one.
+
+    Returns:
+        True when AgentX is enabled for this session, by either signal.
+    """
+    if agentx_enabled():
+        return True
+    return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+
+
 def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     """Whether an agentic measurement must stay out of the cross-session KB.
 
@@ -151,21 +172,13 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     finalize, the runtime amend, and the T0 anchor), they were not all found at
     once, and a fourth should have something obvious to call.
 
-    Prefers the persisted mode over the ambient env var. ``benchmark_mode`` is
-    stamped at seed precisely so it survives a restart, while ``HYPERLOOM_AGENTX``
-    only describes the shell that happens to be running -- an SDK caller, or a
-    CLOSE re-driven in a subprocess that did not inherit it, would otherwise
-    publish the agentic number. Either saying "agentx" is enough.
-
     Args:
         shared_state: Session state, when the caller has one.
 
     Returns:
         True when the caller must skip its Recipe KB write.
     """
-    if agentx_enabled():
-        return True
-    return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+    return agentx_active(shared_state)
 
 
 def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> None:
@@ -1005,8 +1018,10 @@ def materialize_config_with_envs(
         safe_conc = max(conc_val, 1)
         # Cap captured decode steps at a serialization-safe default so the
         # torch-profiler trace can be written without starving the engine RPC.
+        _cap_raw = os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip()
+        cap_explicit = _cap_raw.isdigit() and int(_cap_raw) >= 1
         try:
-            cap = int(os.environ.get("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "").strip() or _DEFAULT_PROFILE_MAX_STEPS)
+            cap = int(_cap_raw or _DEFAULT_PROFILE_MAX_STEPS)
         except (TypeError, ValueError):
             cap = _DEFAULT_PROFILE_MAX_STEPS
         if cap < 1:
@@ -1088,14 +1103,29 @@ def materialize_config_with_envs(
             # extra steps buy nothing and only inflate the in-memory event
             # buffer. HYPERLOOM_PROFILE_MAX_ITERS still overrides this below.
             if max_iters > _AGENTX_PROFILE_MAX_ITERS:
-                log.info(
-                    "AgentX: lowering captured profile steps %d -> %d. The cap is "
-                    "calibrated on the synthetic ISL/OSL shape; an agentic step "
-                    "carries orders of magnitude more, and the torch profiler "
-                    "buffers events in host RAM until the OOM killer arrives.",
-                    max_iters,
-                    _AGENTX_PROFILE_MAX_ITERS,
-                )
+                if cap_explicit:
+                    # The operator asked for this cap explicitly (e.g. to widen
+                    # the steady-state window); silently overriding it with no
+                    # trace of the original value would hide why a deliberate
+                    # HYPERLOOM_PROFILE_MAX_STEPS_CAP setting had no effect.
+                    log.warning(
+                        "AgentX: explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=%d is "
+                        "being overridden to %d. The cap is calibrated on the "
+                        "synthetic ISL/OSL shape; an agentic step carries orders "
+                        "of magnitude more, and the torch profiler buffers "
+                        "events in host RAM until the OOM killer arrives.",
+                        max_iters,
+                        _AGENTX_PROFILE_MAX_ITERS,
+                    )
+                else:
+                    log.info(
+                        "AgentX: lowering captured profile steps %d -> %d. The cap is "
+                        "calibrated on the synthetic ISL/OSL shape; an agentic step "
+                        "carries orders of magnitude more, and the torch profiler "
+                        "buffers events in host RAM until the OOM killer arrives.",
+                        max_iters,
+                        _AGENTX_PROFILE_MAX_ITERS,
+                    )
                 max_iters = _AGENTX_PROFILE_MAX_ITERS
                 if max_iters < steady_floor:
                     log.warning(

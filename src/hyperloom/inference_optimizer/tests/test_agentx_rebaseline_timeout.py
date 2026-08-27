@@ -20,6 +20,8 @@ could no longer connect. aiperf reports the cancelled warmup credit as
 ``warmup_failure``, so nothing in the abort reason names the timeout.
 """
 
+from types import SimpleNamespace
+
 from hyperloom.orchestrator.kernel.request_handlers import (
     _agentx_rebaseline_timeout,
 )
@@ -70,3 +72,23 @@ def test_tracks_the_baseline_derivation(monkeypatch):
 
     monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "44000")
     assert _agentx_rebaseline_timeout(7200) == 44000
+
+
+def test_persisted_benchmark_mode_raises_without_the_env_var(monkeypatch):
+    """A re-baseline driven from a subprocess that never inherited
+    ``HYPERLOOM_AGENTX`` must still get the raise from the session's
+    persisted ``benchmark_mode`` -- otherwise it reproduces the exact
+    mid-warmup kill this function exists to prevent.
+    """
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("AGENTX_DURATION", "3600")
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "28800")
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    shared_state = SimpleNamespace(benchmark_mode="agentx")
+    assert _agentx_rebaseline_timeout(7200, shared_state=shared_state) == 32400
+
+
+def test_unrelated_benchmark_mode_does_not_raise(monkeypatch):
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    shared_state = SimpleNamespace(benchmark_mode="synthetic")
+    assert _agentx_rebaseline_timeout(7200, shared_state=shared_state) == 7200
