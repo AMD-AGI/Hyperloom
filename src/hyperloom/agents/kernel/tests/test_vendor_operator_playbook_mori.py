@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -368,55 +369,36 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
     assert "source_file_superseded_by_playbook" not in out[0]
 
 
-def test_a_playbook_without_an_anchor_does_not_blank_a_resolved_source(monkeypatch):
-    """``resolve_kernel_anchor_path`` returns "" for an entry with no anchor.
+def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog):
+    """The anchorless entry is kept out of the pipeline, not guarded against.
 
-    Taking the override anyway substitutes nothing for a path a deterministic
-    tier resolved correctly, and the candidate lands as ``missing_native_source``
-    -- the exact outcome the override exists to avoid.
+    Every consumer of a match overrides ``source_file`` with the anchor, so an
+    entry without one substitutes nothing for whatever tier resolved the path
+    and lands the candidate as ``missing_native_source``. Guarding each consumer
+    was tried and went wrong in a way the data never justified: the guard's
+    marker gated on ``source_file``, so a row with neither anchor nor path read
+    as anchor-backed, went into ``protected_ids``, and the row most in need of
+    the review was refused it. Refusing the entry at load makes the shape
+    unreachable instead.
     """
-    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
-    candidates = [_mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE)]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+    import _vendor_operator_playbooks as vop
 
-    assert out[0]["source_file"] == _MORI_SITE_PACKAGES_FILE
-    assert out[0]["vendor_playbook_without_kernel_anchor"] is True
-    assert "source_file_superseded_by_playbook" not in out[0]
+    registry = {
+        "playbooks": [
+            {"id": "with-anchor", "kernel_anchor": "mori_ep_config.py"},
+            {"id": "no-anchor", "role": "dispatch"},
+            {"id": "blank-anchor", "kernel_anchor": "   "},
+        ]
+    }
+    monkeypatch.setattr(vop.Path, "read_text", lambda _self, **_kw: json.dumps(registry))
+    vop._reset_vendor_operator_playbooks_cache()
+    with caplog.at_level(logging.WARNING, logger=vop.log.name):
+        loaded = vop.load_vendor_operator_playbooks()
+    vop._reset_vendor_operator_playbooks_cache()
 
-
-def test_a_playbook_row_holding_no_anchor_stays_open_to_review(monkeypatch):
-    """Protection is scoped to the anchor it exists for.
-
-    With no anchor the field holds whatever tier resolved it, and a grep guess
-    is precisely what the review is here to correct.
-    """
-    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
-    candidates = [_mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE)]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
-
-    assert out[0]["patch_strategy"] == "vendor_playbook"
-    assert tla._is_curated_resolution(out[0]) is False
-
-
-def test_a_playbook_row_with_no_anchor_and_no_source_stays_open_to_review(monkeypatch):
-    """The unresolved row is the one that most needs the review.
-
-    Marking only rows that kept a path left this one looking anchor-backed to
-    ``_is_curated_resolution``, so it went into ``protected_ids`` and every
-    rewrite and unresolve the review proposed for it was refused. A row with no
-    source at all was therefore excluded from the one stage that could find one,
-    and reported ``missing_native_source`` every round without ever becoming
-    dispatchable -- a state nothing in the pipeline could leave.
-    """
-    monkeypatch.setattr(tla, "resolve_kernel_anchor_path", lambda _playbook: "")
-    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
-    candidates = [_mori_dispatch_candidate(source_file="")]
-    out = tla._finalize_candidates(candidates, total_dur=1000.0)
-
-    assert out[0]["patch_strategy"] == "vendor_playbook"
-    assert not str(out[0].get("source_file") or "")
-    assert out[0]["vendor_playbook_without_kernel_anchor"] is True
-    assert tla._is_curated_resolution(out[0]) is False
+    assert [entry["id"] for entry in loaded] == ["with-anchor"]
+    assert "no-anchor" in caplog.text
+    assert "blank-anchor" in caplog.text
 
 
 def test_a_playbook_candidate_is_not_open_to_review_rewriting():

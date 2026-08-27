@@ -4280,31 +4280,20 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         # the guess found it -- and the guess can just as easily be a same-word
         # collision (``mori::EpDispatchCombineOp::dispatch`` reduces to the
         # keyword "dispatch" and lands on an unrelated vendor header).
+        # Unconditional, and safe to be: the registry refuses an entry with no
+        # ``kernel_anchor``, so ``resolve_kernel_anchor_path`` cannot come back
+        # empty for a playbook that matched. Guarding it here instead cost two
+        # commits and produced a real deadlock -- the guard's marker gated on
+        # ``source_file``, so a row with neither anchor nor path read as
+        # anchor-backed, went into ``protected_ids``, and the row most in need of
+        # the review was the one refused it. The shape it defended against does
+        # not occur in the data; the shape it created did.
         anchor = resolve_kernel_anchor_path(playbook)
-        if anchor:
-            if source_file and source_file != anchor:
-                # Keep the displaced path for triage: an unconditional override
-                # is only auditable if the value it replaced is still recorded.
-                item["source_file_superseded_by_playbook"] = source_file
-            item["source_file"] = anchor
-        else:
-            # ``resolve_kernel_anchor_path`` returns "" for a playbook entry
-            # that declares no ``kernel_anchor``, so the override has nothing to
-            # point the field at. Taking it anyway would blank a path the
-            # curated or trace-launcher tier resolved correctly and land the
-            # candidate as missing_native_source -- the outcome the override
-            # exists to avoid. Whether the surviving path is trustworthy is
-            # classify_patchability's question, not a second gate's.
-            #
-            # Marked whether or not a path survived. The flag says "this row's
-            # source_file is not a playbook anchor", and that is just as true of
-            # a row no tier resolved: gating it on ``source_file`` left the
-            # empty-path row looking anchor-backed to _is_curated_resolution(),
-            # which protected it from the review -- so a row with no source at
-            # all was refused the one stage that could have found one, and
-            # reported missing_native_source every round without ever being
-            # dispatchable.
-            item["vendor_playbook_without_kernel_anchor"] = True
+        if source_file and source_file != anchor:
+            # Keep the displaced path for triage: an unconditional override is
+            # only auditable if the value it replaced is still recorded.
+            item["source_file_superseded_by_playbook"] = source_file
+        item["source_file"] = anchor
     item["benchmark_files"] = find_benchmark_files(
         item["name"], item.get("kernel_repo", ""), item.get("source_file", "")
     )
@@ -4919,14 +4908,12 @@ def _is_curated_resolution(item: dict[str, Any]) -> bool:
     the field back at framework source and route the candidate to a backend
     that has nothing to rewrite there.
 
-    That protection is scoped to the anchor it exists for. A playbook entry
-    declaring no ``kernel_anchor`` leaves ``source_file`` holding whatever tier
-    resolved it, and a grep guess is exactly what the review is here to correct,
-    so such a row stays open to revision.
+    Unconditional for a playbook match, because a matched playbook always has
+    an anchor: :func:`load_vendor_operator_playbooks` refuses an entry without
+    one. Scoping this on a per-row marker instead is what let a row with no
+    anchor and no path read as protected.
     """
-    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook" and not item.get(
-        "vendor_playbook_without_kernel_anchor"
-    ):
+    if str(item.get("patch_strategy") or "").strip() == "vendor_playbook":
         return True
     status = str(item.get("op_to_source_status") or "").strip()
     method = str(item.get("source_resolution_method") or "").strip()

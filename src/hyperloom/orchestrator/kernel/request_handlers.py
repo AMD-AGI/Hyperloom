@@ -6186,12 +6186,6 @@ def _kernel_dispatch_attempt_cap(entry: dict[str, Any], *, max_failures: int) ->
     return _DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
 
 
-#: ``skipped_out`` key for a reason that is about the candidate table rather than
-#: any one kernel. Not a kernel_id, so the per-kernel lookups cannot collide with
-#: it, and an empty map now means "read the table, everything was eligible".
-TABLE_LEVEL_SKIP_KEY = "*"
-
-
 def _batch_kernel_candidates(
     payload: dict,
     *,
@@ -6220,26 +6214,16 @@ def _batch_kernel_candidates(
             the artifact is missing/unreadable or nothing is eligible.
     """
 
-    # Each of these returns before the per-kernel loop, so ``skipped_out`` came
-    # back empty -- which the caller cannot tell from "the artifact was read and
-    # every kernel was eligible". Filed under ``TABLE_LEVEL_SKIP_KEY`` because no
-    # kernel was ever read to name: the reason is about the artifact. The
-    # per-kernel lookup keys on a kernel_id and so is unaffected.
-    def _no_table(reason: str) -> list[dict[str, Any]]:
-        if skipped_out is not None:
-            skipped_out[TABLE_LEVEL_SKIP_KEY] = reason
-        return []
-
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
-        return _no_table("no_candidates_path")
+        return []
     try:
         data = json.loads(Path(candidates_path).read_text(encoding="utf-8"))
     except Exception:
-        return _no_table("candidates_unreadable")
+        return []
     kernels = data.get("hot_kernels") or data.get("hot_kernels_top15") or []
     if not isinstance(kernels, list):
-        return _no_table("candidates_malformed")
+        return []
     # Drop geometry-only kernels (bypass path tags shape_dispatchable=False) up
     # front so both the grouped and legacy passes agree: they resolve a source
     # yet fail the kernel-opt gate on untrusted shape provenance. Absent field
