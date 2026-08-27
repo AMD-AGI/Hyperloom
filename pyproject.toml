@@ -293,6 +293,7 @@ markers = [
     "critic_agent_e2e: end-to-end tests that shell out to the real critic-agent runtime; skip with '-m \"not critic_agent_e2e\"' if critic-agent is not on disk.",
     "robustness_agent_e2e: end-to-end tests that shell out to the real robustness-agent runtime; skip with '-m \"not robustness_agent_e2e\"' if robustness-agent is not on disk.",
     "targeted_build_e2e: end-to-end tests that run a real AITER compile on a ROCm host; skip with '-m \"not targeted_build_e2e\"' in CI.",
+    "standalone_wheel_e2e: builds forge_gemm_tune's nested pyproject into a wheel and installs it into a throwaway venv, proving the sub-package still stands alone (FORGE_GEMM_TUNE_ROOT dev override). Tens of seconds; deselect with '-m \"not standalone_wheel_e2e\"' on a sharded matrix.",
 ]
 
 [tool.coverage.run]

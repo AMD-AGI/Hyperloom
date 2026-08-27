@@ -28,15 +28,22 @@ from pathlib import Path
 
 import pytest
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT = _REPO_ROOT / ".github" / "scripts" / "ci-e2e-dispatch.sh"
+from .conftest import REPO_ROOT, requires_repo_root
+
+_SCRIPT = (REPO_ROOT or Path()) / ".github" / "scripts" / "ci-e2e-dispatch.sh"
 
 _REQUIRED_TOOLS = ("bash", "jq", "git", "tar", "base64", "install", "timeout", "mktemp")
 
-pytestmark = pytest.mark.skipif(
-    any(shutil.which(tool) is None for tool in _REQUIRED_TOOLS),
-    reason="needs a POSIX toolchain (bash, jq, git, coreutils)",
-)
+# The dispatch script is repository infrastructure, not a packaged resource:
+# under a wheel install there is no .github/ to point at, so skip rather than
+# resolve to a path that does not exist and read as "nothing to check".
+pytestmark = [
+    requires_repo_root,
+    pytest.mark.skipif(
+        any(shutil.which(tool) is None for tool in _REQUIRED_TOOLS),
+        reason="needs a POSIX toolchain (bash, jq, git, coreutils)",
+    ),
+]
 
 _FAKE_SSH = """#!/usr/bin/env bash
 # Record the invocation, drain any tarball on stdin, then honour SSH_EXIT.

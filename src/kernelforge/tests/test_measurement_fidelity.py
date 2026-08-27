@@ -14,6 +14,7 @@ from kernelforge.loop.scoring import (
     required_keep_speedup,
 )
 from kernelforge.mcp_server.tools import bench as bench_module
+from kernelforge.resources import resource_path
 from kernelforge.mcp_server.tools.bench import (
     bench_wallclock,
     measure_wallclock,
@@ -199,7 +200,7 @@ def _load_driver_module():
     import types
     import importlib.util
 
-    path = pathlib.Path(__file__).parent.parent / "examples/aiter-allreduce-forge-loop/driver.py"
+    path = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     # The driver imports torch at module scope purely for dtype/element_size; the
     # suite definitions under test need none of it.
     stub = types.ModuleType("torch")
@@ -279,7 +280,7 @@ def test_driver_aggregates_repeats_by_median():
     The driver needs torch+torchrun to execute, so this asserts on the source
     of the aggregation step rather than running it.
     """
-    src = pathlib.Path(__file__).parent.parent / "examples/aiter-allreduce-forge-loop/driver.py"
+    src = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     text = src.read_text()
     assert "statistics.median(" in text
     assert "import statistics" in text

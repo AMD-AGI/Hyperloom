@@ -54,16 +54,22 @@ def forge_loop_prompts(monkeypatch):
 # backend is served (``resolve_language_dirs``) leaves every hash here alone --
 # which makes an unexpected diff in this table a precise signal that prompt text
 # moved, not that knowledge assembly did.
+# Every hash below was re-snapshotted in the KernelForge -> Hyperloom merge.
+# The rename rewrote one runnable command in a shared knowledge card that all
+# nine backends are served -- the old package name in
+# ``python3 -m <pkg>.mcp_server.tools.bench ...``. Each prompt was diffed
+# against its pre-rename rendering and that single line is the only
+# difference; see test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "3f0b7ebcdaa71aeed07863b6ebe4b5e6616c28589ab59938f30577c1fab49a53",
-    "ck": "7e6794a4dd0b17a087896083248bc7040c4c22a08985ea5bbdcca514cd731570",
-    "flydsl": "356c429f55c796de99790f653a8cd16b549f0aca8dd9365081e6affeca109f2e",
-    "fusion": "f461db9611095eb9a8c423bde73c9012985eae9d2cbc6afa93a508d09cc291b3",
-    "gluon": "d8a4f4cfc9aa4ce32958d44e51f637f040e13d7c35165160f2d78fdf9efcdf59",
-    "hip": "5217b3f51175ce13024d97d907a7bb63c786e09f14f69b78a6b515615984e32b",
-    "hipblaslt": "4a6be121500463f42bb82d78656e7d03de80917fb2c15dd3da9226605b9524c9",
-    "intellikit": "26d3e33deaebe7a741059427a8e676e85eec2a52c3c1b5fa7136d4780bcc93a7",
-    "triton": "bca0355881da2717dcddde7f1c0ad3daf5e5f5978f54735e79f6b5a7502c9a9b",
+    "aiter": "21e407f8969e570c0920cb19e2f972eaefbcbe7913e9540a7f38e4c6e16e2d81",
+    "ck": "c7df9abb80c02da6c5b25d5f4f33a7227beb160f85f8d276e2ee4e85ad0447cc",
+    "flydsl": "5f51d9da2c1a2a5583d87a746aec0088bcc6330964e226ddc050281d17f8ece1",
+    "fusion": "18858f840a0e5daedf9a9320f4e18d004755bd00582d8661ace9c5736051d29b",
+    "gluon": "0a7dcf8fac6f30f0fb1356c456dc98a0702ad3382e0b4eaef16d69c192cdd706",
+    "hip": "4549a4a79b078681bebd00a512efe8ae80f536e0a3e4059e99362635c6ea333b",
+    "hipblaslt": "3c49702ede01c6328d85de068db70474b77361308ea92bc4302ee770ae9b3664",
+    "intellikit": "75a463326ba5db29fd1ac1320fa14a6c5a21a9306848f1c6119a90efed94b0ef",
+    "triton": "36c0b55aa3a3b73ca9c0acc22870d65b698bff149b3823fdff786ff31fb4e288",
 }
 
 

@@ -113,6 +113,7 @@ def test_wheel_builds_twice_without_recursion(tmp_path):
     assert any(n.startswith(f"{_PKG_NAME}/") and n.endswith(".py") for n in names), "no package modules in wheel"
 
 
+@pytest.mark.standalone_wheel_e2e
 def test_standalone_wheel_imports_without_kernelforge(tmp_path):
     """Install the subpackage wheel alone and import its knowledge-store path."""
     src = tmp_path / _PKG_NAME

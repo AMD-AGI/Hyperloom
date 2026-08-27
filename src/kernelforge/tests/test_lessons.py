@@ -8,10 +8,10 @@ path are all exercised without an agent backend.
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
 
 import pytest
 
+from kernelforge.resources import resource_path
 from kernelforge.loop.lessons import (
     CLAIM_DISPROVED,
     DEFAULT_RECENT_LESSONS,
@@ -600,7 +600,7 @@ def test_prompt_asks_for_the_premise_behind_a_negative():
 
 # ── reading a constant out of a real kernel ───────────────────────────────────
 
-_EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+_EXAMPLES = resource_path("examples")
 _MXFP8_KERNEL = _EXAMPLES / "triton2flydsl-mxfp8-grouped-gemm" / "mxfp8_grouped_gemm.py"
 _SOFTMAX_KERNEL = _EXAMPLES / "triton-softmax-forge-loop" / "softmax_kernel.py"
 

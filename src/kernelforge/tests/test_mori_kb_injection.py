@@ -10,36 +10,11 @@ False-vs-env-var precedence, or wheel packaging of ``framework/mori/``.
 
 from __future__ import annotations
 
-import re
-from pathlib import Path
 
 from kernelforge.config import Config
 from kernelforge.fellows.base import build_single_fellow_prompt
 from kernelforge.knowledge.local_index import build_forge_knowledge
 from kernelforge.resources import resource_path
-
-
-def _wheel_force_include() -> dict[str, str]:
-    """``[tool.hatch.build.targets.wheel.force-include]``, via TOML parse or a raw-text
-    fallback on py3.10 CI runners that ship neither ``tomllib`` (3.11+) nor ``tomli``."""
-    raw = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    try:
-        import tomllib  # py3.11+
-    except ModuleNotFoundError:
-        try:
-            import tomli as tomllib  # type: ignore
-        except ModuleNotFoundError:
-            tomllib = None
-    if tomllib is not None:
-        pyproject = tomllib.loads(raw)
-        return pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
-    section = re.search(
-        r"\[tool\.hatch\.build\.targets\.wheel\.force-include\]\n(.*?)(?:\n\[|\Z)",
-        raw,
-        re.DOTALL,
-    )
-    assert section, "no [tool.hatch.build.targets.wheel.force-include] section found"
-    return dict(re.findall(r'"([^"]+)"\s*=\s*"([^"]+)"', section.group(1)))
 
 
 def _mori_prompt(config: Config) -> str:
@@ -96,10 +71,16 @@ def test_explicit_false_beats_env_var(monkeypatch):
     assert config.include_mori_kb is False
 
 
-def test_wheel_includes_mori_kb():
-    force_include = _wheel_force_include()
-    assert force_include.get("local_knowledge") == "kernelforge/data/local_knowledge"
+def test_mori_kb_ships_with_the_package():
+    """The MoRI cards must resolve through the packaged data tree.
 
+    This used to parse ``[tool.hatch.build.targets.wheel.force-include]`` out of
+    KernelForge's own pyproject. Inside Hyperloom the trees live under
+    ``src/kernelforge/data`` and ship as setuptools package-data; that the glob
+    covers them is proven by ``test_packaging_lint.py`` against the declaration
+    and by ``packaging.yml`` against a real wheel. What is left for this test is
+    the behavioural half: the cards resolve, and there are some.
+    """
     mori_kb_dir = resource_path("local_knowledge") / "framework" / "mori"
     assert mori_kb_dir.is_dir()
     assert any(mori_kb_dir.rglob("*.md")), "framework/mori/ has no .md cards to ship"

@@ -8,9 +8,10 @@ import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 import pytest
+
+from .conftest import SRC_ROOT
 
 import kernelforge.loop.runner as runner_module
 from kernelforge.loop.archive import CandidateArchive
@@ -720,9 +721,8 @@ async def main():
 
 asyncio.run(main())
 """
-    repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(path for path in (str(repo_root / "src"), env.get("PYTHONPATH", "")) if path)
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (str(SRC_ROOT), env.get("PYTHONPATH", "")) if path)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -733,7 +733,7 @@ asyncio.run(main())
             str(driver),
             str(validation_started),
         ],
-        cwd=repo_root,
+        cwd=workspace,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

@@ -8,11 +8,12 @@ import json
 import os
 import subprocess
 import sys
-from pathlib import Path
 
 import pytest
 
 from kernelforge.mcp_server import pr_stdio_server as server
+
+from .conftest import SRC_ROOT
 
 
 def _call(method, params=None):
@@ -337,7 +338,7 @@ def _backend_like_env() -> dict[str, str]:
     """
     env = os.environ.copy()
     env["PATH"] = "/usr/bin:/bin"
-    src = str(Path(__file__).resolve().parents[1] / "src")
+    src = str(SRC_ROOT)
     prefix = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = os.pathsep.join(p for p in (prefix, src) if p)
     return env

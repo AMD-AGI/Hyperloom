@@ -29,7 +29,13 @@ from pathlib import Path
 
 import pytest
 
-TEMPLATE = Path(__file__).resolve().parents[1] / "deploy" / "robust" / "kernelforge.yaml"
+from .conftest import REPO_ROOT, requires_repo_root
+
+# The template is repository metadata, not a packaged resource: it is the
+# operator-facing robust-deployment manifest, so it has no home inside the
+# wheel. Skip rather than guess a depth when there is no checkout.
+pytestmark = requires_repo_root
+TEMPLATE = (REPO_ROOT or Path()) / "deploy" / "robust" / "kernelforge.yaml"
 
 _GATE_FIRST_LINE = "_kf_has_gateway_pair() {"
 _GATE_STOP_LINE = "# OPENAI_BASE_URL + OPENAI_API_KEY are the separate line"

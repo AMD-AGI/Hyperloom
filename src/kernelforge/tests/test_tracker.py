@@ -13,6 +13,8 @@ import pytest
 
 from kernelforge.tracker import ExperimentTracker, Experiment
 
+from .conftest import SRC_ROOT
+
 
 def _log_iterations_worker(
     experiments_dir,
@@ -668,7 +670,7 @@ else:
 """
     operations = ["usage", "kb", "baseline", "complete", "complete", "complete", "segment"]
     env = os.environ.copy()
-    src_dir = Path(__file__).resolve().parents[1] / "src"
+    src_dir = SRC_ROOT
     env["PYTHONPATH"] = os.pathsep.join(path for path in (str(src_dir), env.get("PYTHONPATH", "")) if path)
     ready_paths = [tmp_path / f"ready-{index}" for index in range(len(operations))]
     processes = [
@@ -684,7 +686,7 @@ else:
                 str(gate),
                 str(callback_log),
             ],
-            cwd=Path(__file__).resolve().parents[1],
+            cwd=tmp_path,
             env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

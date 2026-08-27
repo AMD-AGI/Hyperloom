@@ -7,9 +7,9 @@ supported version.
 
 from __future__ import annotations
 
-from pathlib import Path
+from kernelforge.resources import resource_path
 
-SERVING_PATCHES = Path(__file__).resolve().parent.parent / "serving_patches"
+SERVING_PATCHES = resource_path("serving_patches")
 SGLANG_DIR = SERVING_PATCHES / "sglang"
 MANIFEST = SGLANG_DIR / "SUPPORTED_VERSIONS.txt"
 

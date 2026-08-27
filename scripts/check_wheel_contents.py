@@ -30,9 +30,23 @@ def _excluded_dir_names(cfg: dict) -> set[str]:
 
     Derived rather than hardcoded so this cannot narrow while the exclude list
     widens: ``*.testing.*`` contributes ``testing``, the ``*`` segments nothing.
+
+    Patterns under a package-data key are skipped. ``kernelforge.data`` is
+    excluded from *package* discovery -- its resource trees contain .py sample
+    kernels that must not be handed out as importable modules -- but its files
+    do ship, declared as ``kernelforge = ["data/**/*"]``. Reading its segments
+    literally would put "kernelforge" and "data" in the leak vocabulary and
+    flag the entire package as a test tree.
     """
     patterns = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
-    return {segment for pattern in patterns for segment in pattern.split(".") if segment != "*"}
+    shipped = tuple(cfg["tool"]["setuptools"].get("package-data", {}))
+    return {
+        segment
+        for pattern in patterns
+        if not any(pattern == key or pattern.startswith(f"{key}.") for key in shipped)
+        for segment in pattern.split(".")
+        if segment != "*"
+    }
 
 
 def _check_no_test_packages(cfg: dict, names: list[str]) -> list[str]:
@@ -52,7 +66,8 @@ def _check_declared_package_data_is_present(cfg: dict, names: list[str]) -> list
     for package, patterns in cfg["tool"]["setuptools"]["package-data"].items():
         package_dir = _REPO_ROOT / "src" / package.replace(".", "/")
         for pattern in patterns:
-            matches = sorted(package_dir.glob(pattern))
+            # ``data/**/*`` matches directories too; only files are wheel entries.
+            matches = sorted(match for match in package_dir.glob(pattern) if match.is_file())
             if not matches:
                 errors.append(f"{package}: '{pattern}' matches no file on disk (dead declaration)")
                 continue
@@ -72,6 +87,28 @@ def _check_data_files_are_present(cfg: dict, names: list[str]) -> list[str]:
             expected = f"{dest}/{Path(source).name}"
             if expected not in data_entries:
                 errors.append(f"data-files: '{expected}' is missing from the wheel .data/data/ tree")
+    return errors
+
+
+#: Resource trees that must never ship empty. A ``package-data`` glob that
+#: silently matches nothing is caught above as a dead declaration, but a tree
+#: that lost all but one file would still pass -- and forge-loop running against
+#: an empty knowledge base produces no error, just worse kernels. Absorbed from
+#: KernelForge's deleted ``test_wheel_content.py``, which built its own wheel.
+_NON_EMPTY_TREES = {
+    "kernelforge/data/knowledge_base/": 100,
+    "kernelforge/data/local_knowledge/": 700,
+    "kernelforge/data/examples/": 40,
+    "kernelforge/data/serving_patches/": 3,
+}
+
+
+def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
+    errors = []
+    for prefix, floor in sorted(_NON_EMPTY_TREES.items()):
+        count = sum(1 for n in names if n.startswith(prefix) and not n.endswith("/"))
+        if count < floor:
+            errors.append(f"{prefix} ships {count} files, below the floor of {floor}")
     return errors
 
 
@@ -97,6 +134,7 @@ def main() -> int:
             *_check_no_test_packages(cfg, names),
             *_check_declared_package_data_is_present(cfg, names),
             *_check_data_files_are_present(cfg, names),
+            *_check_resource_trees_are_populated(names),
             *_check_license_metadata(zf, names),
         ]
 

@@ -19,7 +19,7 @@ from click.testing import CliRunner
 from kernelforge.cli import main
 from kernelforge.rewrite_by_flydsl import protocol
 
-_SOURCE_ROOT = Path(__file__).resolve().parents[1] / "src"
+from .conftest import SRC_ROOT
 
 
 def _rewrite_command():
@@ -50,7 +50,7 @@ def test_capabilities_answer_over_a_real_subprocess():
         cwd=Path(__file__).resolve().parent,
         env={
             **os.environ,
-            "PYTHONPATH": (str(_SOURCE_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
+            "PYTHONPATH": (str(SRC_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
         },
     )
 

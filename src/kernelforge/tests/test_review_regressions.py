@@ -10,11 +10,14 @@ the verdict actually changes.
 from __future__ import annotations
 
 import ast
-import pathlib
 
 import pytest
 
-RUNNER = pathlib.Path(__file__).resolve().parents[1] / "src/kernelforge/loop/runner.py"
+from kernelforge.resources import resource_path
+
+from .conftest import PACKAGE_ROOT
+
+RUNNER = PACKAGE_ROOT / "loop" / "runner.py"
 
 
 def _calls_in_runner(name: str) -> int:
@@ -48,7 +51,7 @@ def _load_example_driver(monkeypatch, ranks: str = "8"):
     for var in ("WORLD_SIZE", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("FORGE_NPROC_PER_NODE", ranks)
-    path = pathlib.Path(__file__).resolve().parents[1] / "examples/aiter-allreduce-forge-loop/driver.py"
+    path = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     spec = importlib.util.spec_from_file_location("_example_driver", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["_example_driver"] = module
@@ -257,7 +260,7 @@ def test_a_self_relaunching_driver_stays_in_the_callers_group():
     detached launcher would survive the caller's group kill with its GPUs still
     allocated -- and no handler in the driver would ever run to release them.
     """
-    driver = pathlib.Path(__file__).resolve().parents[1] / ("examples/aiter-allreduce-forge-loop/driver.py")
+    driver = resource_path("examples") / "aiter-allreduce-forge-loop" / "driver.py"
     src = driver.read_text()
     start = src.index("def self_launch(")
     launch = src[start : start + 2000]

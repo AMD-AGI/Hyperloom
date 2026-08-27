@@ -21,6 +21,32 @@ import kernelforge
 PACKAGE_ROOT = Path(kernelforge.__file__).resolve().parent
 _PACKAGE_PREFIX = str(PACKAGE_ROOT) + os.sep
 
+#: The directory ``kernelforge`` is importable from -- ``src/`` in a checkout,
+#: ``site-packages`` under a wheel install.
+SRC_ROOT = PACKAGE_ROOT.parent
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _src_root_on_child_pythonpath() -> None:
+    """Extend pytest's in-process ``pythonpath`` to subprocesses.
+
+    Roughly 250 call sites in this tree spawn ``sys.executable`` and expect to
+    import ``kernelforge`` / ``forge_llm`` there. Upstream KernelForge got away
+    with it because its CI always ran against ``pip install -e``; run the suite
+    from a bare checkout instead -- which the ``pythonpath = ["src", "."]`` ini
+    setting makes work for the *parent* -- and every one of those children dies
+    with ModuleNotFoundError. Setting it once here is the same statement pytest
+    already makes in-process, extended to what the tests fork.
+
+    Session-scoped and deliberately not undone: children are spawned from every
+    scope, and under a wheel install this prepends site-packages, which is a
+    no-op.
+    """
+    existing = os.environ.get("PYTHONPATH", "")
+    parts = [part for part in existing.split(os.pathsep) if part]
+    if str(SRC_ROOT) not in parts:
+        os.environ["PYTHONPATH"] = os.pathsep.join([str(SRC_ROOT), *parts])
+
 
 def _find_repo_root() -> Path | None:
     """Walk up for the pyproject.toml; returns None when installed from a wheel."""
