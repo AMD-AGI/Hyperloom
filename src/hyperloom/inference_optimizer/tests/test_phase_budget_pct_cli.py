@@ -110,15 +110,14 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     The two literals below MUST stay in lockstep with the flags documented in
     ``examples/hyperloom-qwen3-8b-3h/SKILL.md``: they are chosen so the demo's
     overrides plus the *defaults* for the phases it does not override still sum
-    to exactly 1.0. The optimisation share is 0.59 -- the merged phase carries
-    what FRAMEWORK's default (0.20) and EXPLORE's override (0.39) used to split.
+    to exactly 1.0, so they move whenever a default they lean on moves.
     """
     args = _parse_optimize(
         [
             "--max-hours",
             "3",
             "--max-minutes-framework-pct",
-            "0.59",
+            "0.44",
             "--max-minutes-sweep-pct",
             "0.01",
             "--no-framework-agent",
