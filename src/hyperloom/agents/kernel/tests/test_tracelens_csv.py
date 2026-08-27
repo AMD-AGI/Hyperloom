@@ -308,6 +308,67 @@ def test_agent_dry_run_initializes_route_and_writes_resolution_artifact(
     assert _json.loads(resolution_path.read_text(encoding="utf-8"))["entries"][0]["source_file"] == str(source)
 
 
+def test_agent_dry_run_does_not_spend_a_candidate_review_session(monkeypatch, tmp_path, capsys):
+    """A dry run plans the analysis; it must not run the review agent.
+
+    The stage costs an agent session, waits out a 900-second bound when the
+    stream stalls, and reads the framework tree -- all to audit a table a dry
+    run publishes for inspection and never dispatches from.
+    """
+    import json as _json
+
+    trace = tmp_path / "trace.json"
+    trace.write_text('{"traceEvents": []}', encoding="utf-8")
+    source = tmp_path / "kernel.py"
+    source.write_text("def kernel():\n    pass\n", encoding="utf-8")
+    monkeypatch.setattr(
+        tla,
+        "analyze_trace_files",
+        lambda *_args, **_kwargs: [
+            {
+                "kernel_id": "k001",
+                "name": "kernel",
+                "gpu_pct": 100.0,
+                "duration_us": 1.0,
+                "source_file": str(source),
+                "source_type": "python",
+                "source_resolution_method": "name_grep",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        tla,
+        "write_reports",
+        lambda *_a, **_kw: {"trace_report_path": str(tmp_path / "trace_report.json")},
+    )
+
+    ran: list[str] = []
+    monkeypatch.setattr(
+        tla,
+        "run_candidate_review_stage",
+        lambda *_a, **_kw: ran.append("called") or {},
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tracelens_analysis.py",
+            "--trace-input",
+            str(trace),
+            "--workspace-path",
+            str(tmp_path / "workspace"),
+            "--analysis-route",
+            "agent",
+            "--dry-run",
+        ],
+    )
+
+    assert tla.main() == 0
+    assert ran == []
+    result = _json.loads(capsys.readouterr().out)
+    assert "kernel_candidates_raw" not in result["artifact_paths"]
+
+
 # A path — is_kernel_event strict cat == 'kernel'
 def test_a_filters_python_function_synchronize():
     """The exact event that ranked first in the buggy resume trace."""
@@ -505,13 +566,37 @@ def test_unknown_source_root_is_not_reusable_native():
     assert tla.recommend_backends(candidate) == []
 
 
-def test_known_rmsnorm_harness_is_registered_without_repo_root():
+def test_known_rmsnorm_harness_is_registered_without_repo_root(monkeypatch, tmp_path):
+    """A curated harness is found from the kernel name alone, with no repo root.
+
+    The hint is checkout-relative, so it is resolved against the search roots
+    rather than a pinned ``/sgl-workspace`` path, and only a file that is really
+    there is reported: a harness list naming paths nobody can open reads
+    downstream as a runnable harness.
+    """
+    harness = tmp_path / "aiter" / "op_tests" / "test_rmsnorm2d.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text("def test_rmsnorm2d(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
+    tla._harness_search_bases.cache_clear()
+
     files = tla.find_benchmark_files(
         "_ZN5aiter24add_rmsnorm_quant_kernelIDF16bDF16bLi256EEEv",
         "",
         "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
     )
-    assert any("rmsnorm" in path.lower() for path in files)
+    tla._harness_search_bases.cache_clear()
+
+    assert files == [str(harness)]
+
+
+def test_absent_curated_harness_is_not_reported(monkeypatch, tmp_path):
+    """A hint that resolves nowhere yields nothing, not an unopenable path."""
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "aiter"),))
+    tla._harness_search_bases.cache_clear()
+    files = tla.find_benchmark_files("kernel_paged_attention_2d", "", "/pkg/attention.py")
+    tla._harness_search_bases.cache_clear()
+    assert files == []
 
 
 def test_125_finalize_adds_kernel_category_for_attention():

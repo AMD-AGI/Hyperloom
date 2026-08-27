@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -91,6 +91,6 @@ class EnablementRound:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
         """Construct from a raw mapping; unknown keys dropped, missing keys default."""
-        known = set(cls.__dataclass_fields__)
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
         return cls(**filtered)

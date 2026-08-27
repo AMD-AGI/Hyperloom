@@ -32,6 +32,21 @@ for the user-facing summary.
   `valid_env_key` shape check applied here. The pass dropped nothing in
   production and its warning log could never fire.
 
+- **BREAKING — the two tool-free LLM source tiers are gone**, along with
+  `HYPERLOOM_LLM_SOURCE_PROVIDER` and `HYPERLOOM_LLM_SOURCE_PREVIEW` and the
+  `llm_fallback_*` reason codes they produced. A per-kernel fallback picking a
+  path off a grep shortlist and a whole-table pass auditing the result were both
+  shown a prompt assembled in advance, so neither could see what a kernel
+  actually is — and the deterministic tiers' failure mode is not coming up empty
+  but coming up confidently wrong, which ranking paths by keyword cannot tell
+  apart. One tool-enabled review session on the agent analysis route replaces
+  both: it is handed locations rather than contents and opens what the evidence
+  leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
+  **Operators on `--analysis-route deterministic` should note that route now has
+  no model assistance of any kind** — it keeps its no-model guarantee by not
+  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
+  miss stays unresolved instead of being completed by a model.
+
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
   `forge-rewrite-by-flydsl` argv. KernelForge deleted the option: its campaigns
@@ -84,6 +99,24 @@ for the user-facing summary.
   the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
   stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
   timestamped logging shim pipes through.
+
+- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
+  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
+  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
+  so the old name described a dependency that does not exist and read as a no-op
+  on a run that never tunes GEMM. The old spelling still works and still opts
+  out, with a `DeprecationWarning`; the current flag wins when both are passed.
+  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
+  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
+  The switch covers that dispatch only: orchestration can still request
+  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
+
+- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
+  decode trace with a flat kernel distribution nothing but a graph-launch
+  wrapper reaches double digits, so the 10% floor admitted no real kernel and
+  left the batch dispatcher idle while the orchestrator picked candidates one at
+  a time. Expect more candidates dispatched per run, and correspondingly more
+  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
 
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
