@@ -430,16 +430,23 @@ class TestModeResult:
         assert pms.ModeResult(mode="DPX", runs=runs).worst_latency_ms() is None
 
 
-class TestAsFloat:
+class TestToFloat:
+    """The canonical coercion from hyperloom.common.coerce, not a local copy.
+
+    Pinned here because the aggregation depends on its rejections: a stray bool
+    becoming 1.0, or an inf reaching the sum, produces a throughput comparison
+    that is wrong rather than absent.
+    """
+
     def test_a_bool_is_not_a_measurement(self):
-        assert pms._as_float(True) is None
+        assert pms.to_float(True) is None
 
     @pytest.mark.parametrize("bad", ["", "abc", None, float("inf"), float("nan")])
     def test_unusable_values_are_none(self, bad):
-        assert pms._as_float(bad) is None
+        assert pms.to_float(bad) is None
 
     def test_a_numeric_string_is_accepted(self):
-        assert pms._as_float("12.5") == pytest.approx(12.5)
+        assert pms.to_float("12.5") == pytest.approx(12.5)
 
 
 class TestCardTotalGib:

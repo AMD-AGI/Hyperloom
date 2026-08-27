@@ -88,6 +88,7 @@ _SRC = _REPO_ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from hyperloom.common.coerce import to_float  # noqa: E402
 from hyperloom.common.gpu_partition import (  # noqa: E402
     MODE_PARTITION_COUNTS,
     PARTITION_COUNT_ENV,
@@ -215,7 +216,7 @@ class ModeResult:
     def total(self, fields: Sequence[str] = _THROUGHPUT_FIELDS) -> float | None:
         """Sum the first available throughput field across partitions."""
         for name in fields:
-            values = [_as_float(run.measurement.get(name)) for run in self.runs]
+            values = [to_float(run.measurement.get(name)) for run in self.runs]
             if values and all(v is not None for v in values):
                 return sum(v for v in values if v is not None)
         return None
@@ -227,22 +228,11 @@ class ModeResult:
         landing on the slow one is not consoled by the mean.
         """
         for name in _LATENCY_FIELDS:
-            values = [_as_float(run.measurement.get(name)) for run in self.runs]
+            values = [to_float(run.measurement.get(name)) for run in self.runs]
             present = [v for v in values if v is not None]
             if present and len(present) == len(values):
                 return max(present)
         return None
-
-
-def _as_float(value: Any) -> float | None:
-    """Coerce a reported number, returning ``None`` rather than raising."""
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        out = float(value)
-    except (TypeError, ValueError):
-        return None
-    return out if out == out and out not in (float("inf"), float("-inf")) else None
 
 
 # ------------------------------------------------------------------ amd-smi
@@ -896,8 +886,8 @@ def summary_json(results: Sequence[ModeResult], *, entry_mode: str, gpu_id: int)
                         "hsa_device": run.hsa_device,
                         "returncode": run.returncode,
                         "error": run.error,
-                        "output_throughput": _as_float(run.measurement.get("output_throughput")),
-                        "e2el_mean_ms": _as_float(run.measurement.get("e2el_mean_ms")),
+                        "output_throughput": to_float(run.measurement.get("output_throughput")),
+                        "e2el_mean_ms": to_float(run.measurement.get("e2el_mean_ms")),
                     }
                     for run in r.runs
                 ],
