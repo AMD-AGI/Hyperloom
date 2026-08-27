@@ -99,53 +99,6 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
-def test_build_emits_attribution_split_by_lever(tmp_path):
-    """``attribution`` must reach the file, split by the lever that earned it.
-
-    ``collect_attribution`` existed and was exported for a long time without
-    ever being called, so the key was absent from every session ever written
-    and the two report sections that read it rendered empty. The split is
-    asserted here rather than only its presence: with both arms inside one
-    phase, a config win credited to the source arm is the failure this is
-    guarding, and an empty dict would satisfy a presence-only check.
-    """
-    (tmp_path / "state.json").write_text(
-        json.dumps(
-            {
-                "session_id": "s",
-                "baseline_tput": 1000.0,
-                "cumulative_gain_validated": 20.0,
-                "optimization_stack": [
-                    {
-                        "action": "explore",
-                        "variant_name": "kv-fp8",
-                        "lever_kind": "config",
-                        "source_phase": "FRAMEWORK_AGENT",
-                        "tput": 1200.0,
-                    }
-                ],
-                "gain_per_stack_entry": [
-                    {"action": "explore", "variant_name": "kv-fp8", "delta_pct": 20.0, "ts_unix": 100.0}
-                ],
-                "phase_history": [
-                    {"to_phase": "PRELUDE", "ts_unix": 0.0, "reason": "phase_entered"},
-                    {"to_phase": "FRAMEWORK_AGENT", "ts_unix": 50.0, "reason": "prelude_done"},
-                ],
-            }
-        )
-    )
-
-    out = ex.build(tmp_path)
-
-    attribution = out["attribution"]
-    assert attribution["lever_breakdown"] == {"config": 20.0}
-    # The KEEP landed inside FRAMEWORK_AGENT but moved a config lever, so the
-    # upstream-PR bucket stays empty.
-    phases = attribution["phase_breakdown"]
-    assert phases["explore"]["total_gain_pct"] == 20.0
-    assert phases["framework"]["total_gain_pct"] == 0.0
-
-
 def test_build_include_transcripts_process_default(tmp_path):
     ex.set_default_include_transcripts(True)
     try:

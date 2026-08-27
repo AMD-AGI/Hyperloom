@@ -1633,14 +1633,10 @@ async def test_enablement_keep_forwards_captured_effective_config(tmp_path: Path
 # --------------------------------------------------------------------------- #
 # Structural vetting of an untrusted diff, before it reaches ``git apply``.
 #
-# ``specialists.patch_safety.vet_patches`` runs at authoring time inside the
-# specialist runner. A patch from anywhere else -- an explicit ``params.patches``
-# entry, and every ``upstream_pr`` diff, fetched from a remote host -- reaches
-# the executor unvetted. Two gates stand in front of ``git apply``: patch-root
-# resolution rejects a blob whose headers do not resolve, and ``_stage_apply``
-# rejects one that is not a unified diff or escapes the tree. What is asserted
-# here is the invariant they jointly hold, plus one input that only the second
-# gate can catch, so neither can be deleted unnoticed.
+# ``vet_patches`` only runs at authoring time, so an explicit ``params.patches``
+# entry and every fetched ``upstream_pr`` diff reach the executor unvetted. Two
+# gates cover them: patch-root resolution, and ``_stage_apply``'s unified-diff
+# and path checks. The invariant asserted here is the one they jointly hold.
 # --------------------------------------------------------------------------- #
 
 _NOT_A_DIFF = "#!/bin/sh\nrm -rf /\n"

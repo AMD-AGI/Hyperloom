@@ -537,7 +537,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
             "flags plus the exports the denylist allows seed the baseline "
-            "server args at lowest priority (EXPLORE can override); shell-unsafe, "
+            "server args at lowest priority (the config arm can override); shell-unsafe, "
             "credential-shaped and optimizer-owned workload variables are "
             "dropped. The recipe is applied as given — there is no model gate "
             "and no auto-discovery — so a path that cannot be read, or that "
@@ -757,13 +757,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-framework-agent",
         action="store_true",
         default=False,
-        help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
-        "directly). The phase pre-scans upstream sglang/"
-        "vllm PRs via framework-agent and lands KEPT "
-        "patches before EXPLORE starts. Disable when "
-        "the framework-agent toolchain is unavailable "
-        "or you want a faster cold start. "
-        "Default: framework phase enabled.",
+        help="Skip the optimisation phase (PRELUDE → KERNEL_AGENT "
+        "directly). The phase runs both levers: configuration grids, and "
+        "upstream PRs plus specialist-authored source patches. Disable "
+        "when the framework-agent toolchain is unavailable or you want a "
+        "faster cold start. Default: enabled.",
     )
     opt.add_argument(
         "--enablement",
@@ -936,7 +934,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "in manifest.json). Default: lenient (M1 records the flag "
         "in manifest only; consumed by M5 specialist assembly).",
     )
-    # Warm-recipe replay: PRELUDE auto-applies KB best_config before EXPLORE.
+    # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
         "--no-warm-replay",
         dest="no_warm_replay",
@@ -970,7 +968,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "the warm config onto the optimization stack. Default "
         "0.8 — a recipe claiming +25%% counts if we measure "
         "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular EXPLORE "
+        "``status=drift`` and continue with the regular optimisation "
         "flow without inheriting the warm config.",
     )
     # PR Monitor REST + MCP.

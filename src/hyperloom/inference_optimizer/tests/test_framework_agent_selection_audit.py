@@ -214,11 +214,6 @@ class _FakeClient:
         self.chat = type("_C", (), {"completions": _FakeCompletions(content, raise_exc)})()
 
 
-def _install_ranker(coord: Coordinator, monkeypatch, client) -> None:
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: client)
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_model", lambda: "m")
-
-
 def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, worktree_add_ok: bool = True):
     def _fake(args, timeout=None):  # noqa: ANN001
         sub = args[2] if len(args) > 2 else ""

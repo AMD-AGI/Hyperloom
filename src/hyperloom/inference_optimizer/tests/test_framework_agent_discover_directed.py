@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +59,6 @@ class _CoordinatorStub:
 
     def _framework_tried_refs(self) -> list[str]:
         return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
-
-
-def _call_discover(stub: _CoordinatorStub) -> bool:
-    return asyncio.run(
-        Coordinator._discover_next_framework_batch(stub)  # type: ignore[arg-type]
-    )
 
 
 def test_repo_urls_cover_global_allowlist_with_framework_primary():

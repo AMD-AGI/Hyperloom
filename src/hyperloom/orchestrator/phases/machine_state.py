@@ -320,9 +320,8 @@ def is_valid_stop_reason(value: str) -> bool:
 def is_valid_phase_exit_reason(value: str) -> bool:
     """Return True when ``value`` is a member of :data:`PHASE_EXIT_REASONS`.
 
-    Every ``phase_history.reason`` write is checked against this closed
-    vocabulary, so an unrecognised reason is a bug in the writer, not a value
-    the reader must interpret. The value is stripped before comparison.
+    Closed by test, not at runtime: a reason outside it is a bug in the
+    writer. The value is stripped before comparison.
 
     Args:
         value (str): Candidate phase-exit reason string.
@@ -2626,40 +2625,6 @@ def _resolve_plateau_overrides(state: Any) -> dict[str, Any]:
     return dict(overrides) if isinstance(overrides, dict) else {}
 
 
-def _framework_agent_pending_candidate_count(state: Any) -> int:
-    """Count candidates discovered into a batch but missing a progress row.
-
-    Args:
-        state (Any): Frozen SharedState view exposing ``framework_agent_batches``
-            and ``framework_agent_phase_progress``.
-
-    Returns:
-        int: Total candidates across all batches that lack a progress row.
-    """
-    batches = getattr(state, "framework_agent_batches", None) or []
-    if not isinstance(batches, list) or not batches:
-        return 0
-    progress = getattr(state, "framework_agent_phase_progress", None) or []
-    progress_by_batch: dict[str, int] = {}
-    for row in progress:
-        if isinstance(row, dict):
-            bid = str(row.get("batch_id") or "")
-            progress_by_batch[bid] = progress_by_batch.get(bid, 0) + 1
-    pending = 0
-    for batch in batches:
-        if not isinstance(batch, dict):
-            continue
-        candidates = batch.get("candidates") or []
-        if not isinstance(candidates, list):
-            continue
-        total = sum(1 for c in candidates if isinstance(c, dict))
-        bid = str(batch.get("batch_id") or "")
-        done = int(progress_by_batch.get(bid, 0))
-        pending += max(0, total - done)
-    return pending
-
-
-# Terminal row for a candidate whose specialist never ran. It exists so the pump
 # stops re-selecting the candidate, and is skipped by the plateau streak because
 # an infrastructure failure is not evidence that the search is exhausted.
 _FRAMEWORK_DISPATCH_FAILED_STATUS = "dispatch_failed"
@@ -3335,11 +3300,6 @@ def append_phase_history_event(
         ts_unix=now_unix,
         cycle=int(getattr(state, "macro_cycle", 0) or 0),
     )
-    if not is_valid_phase_exit_reason(row["reason"]):
-        # A reason outside the vocabulary reaches the report and the recipe KB
-        # as an uninterpretable string. Loud, not fatal: losing the marker row
-        # would cost more than carrying an unknown one.
-        log.warning("phase_history: marker row carries unrecognised reason=%r", row["reason"])
     history = list(state.phase_history or [])
     history.append(row)
     if len(history) > _PHASE_HISTORY_CAP:

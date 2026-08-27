@@ -1399,7 +1399,7 @@ class PhaseSegment(TypedDict, total=False):
 
     Attributes:
         phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_AGENT`` /
-            ``EXPLORE`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
+            ``FRAMEWORK_AGENT`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
         from_phase (str): Previous phase (empty for the first segment).
         entered_ts (str): ISO UTC timestamp of entry.
         entered_unix (float | None): Unix time of entry, or None.
@@ -1410,7 +1410,7 @@ class PhaseSegment(TypedDict, total=False):
         elapsed_seconds (float | None): Segment duration in seconds, or None.
     """
 
-    phase: str  # PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE
+    phase: str  # PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE
     from_phase: str  # previous phase (empty for first segment)
     entered_ts: str  # iso UTC of entry
     entered_unix: float | None
@@ -2389,7 +2389,7 @@ class TokenUsage(TypedDict, total=False):
         by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
             (orchestration / kernel / critic / specialist / proposal_scorer / ...).
         by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
-            (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / ...).
+            (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...).
         attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
         timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
             their token spend joined on ``task_id``.

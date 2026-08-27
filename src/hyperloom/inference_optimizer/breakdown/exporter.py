@@ -561,30 +561,6 @@ def build(
         default={},
     )
 
-    # Gain attributed to the lever each stack entry moved. Two report sections
-    # read ``breakdown["attribution"]``; until this was wired the key was never
-    # emitted, so both rendered empty on every session ever exported.
-    adopted_kernels = [
-        row
-        for row in (assembled.get("adoptions") or [])
-        if isinstance(row, dict) and row.get("kernel_id") and str(row.get("decision") or "").upper() == "KEEP"
-    ]
-    attribution = _pick(
-        "attribution",
-        _safe_collect(
-            "attribution",
-            lambda: collectors.collect_attribution(
-                state,
-                geak_invocations,
-                adopted_kernels,
-                warnings,
-                forge_invocations=forge_invocations,
-            ),
-            warnings,
-            default={},
-        ),
-    )
-
     breakdown = {
         "schema_version": schema_version,
         "exported_at_utc": exported_at,
@@ -612,8 +588,6 @@ def build(
         "telemetry": telemetry,
         # Canonical downstream optimization API.
         "optimizations": optimizations,
-        # Validated gain split by the lever that moved it, then by phase.
-        "attribution": attribution,
         # Recipe KB integration audit.
         "kb_provenance": kb_provenance,
         "specialist_runs": specialist_runs,
