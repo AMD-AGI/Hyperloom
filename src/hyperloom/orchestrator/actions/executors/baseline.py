@@ -645,9 +645,27 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
     if explicit:
         return explicit
-    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
-        "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
-    )
+
+    overhead_explicit = (src.get("AGENTX_BASELINE_OVERHEAD_SEC") or "").strip()
+    overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
+    if not overhead_explicit:
+        # AGENTX_BASELINE_OVERHEAD_SEC's default is calibrated on GLM-5.2/Qwen3.8
+        # (measured 4774s/6676s warmup+compile). A raw aiperf run against
+        # Kimi-K3 (conc=64, ISL ~115k avg) measured warmup alone draining in
+        # ~12075s -- already past this whole cap before profiling even starts.
+        # Nothing here can tell long-context/slow-prefill models apart from the
+        # ones this constant was measured on, so surface it instead of letting
+        # the round run untimed-out until the flat cap kills it mid-warmup.
+        log.warning(
+            "agentx_baseline_timeout_sec: using default AGENTX_BASELINE_OVERHEAD_SEC=%ds "
+            "(no explicit override set). This default is calibrated on GLM-5.2/Qwen3.8 "
+            "and may be far too small for long-context or slow-prefill models -- a raw "
+            "aiperf run against Kimi-K3 at concurrency=64 measured warmup alone taking "
+            "~12075s. If this round is for such a model, set AGENTX_BASELINE_OVERHEAD_SEC "
+            "explicitly.",
+            overhead,
+        )
+    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + overhead
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported

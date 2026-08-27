@@ -83,6 +83,27 @@ def test_overhead_budget_is_tunable(monkeypatch):
     assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
 
 
+def test_default_overhead_warns_it_may_not_fit_every_model(monkeypatch, caplog):
+    """A raw aiperf run against Kimi-K3 (conc=64) measured warmup alone taking
+    ~12075s -- longer than this whole default cap. Nothing here can tell a
+    long-context/slow-prefill model apart from GLM-5.2/Qwen3.8, the models this
+    constant was measured on, so the gap must be surfaced instead of silently
+    assumed to fit every model.
+    """
+    _clear(monkeypatch)
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+def test_explicit_overhead_override_suppresses_the_warning(monkeypatch, caplog):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "20000")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
 def test_explicit_cap_wins_outright(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_DURATION", "7200")
