@@ -462,21 +462,38 @@ class TestApplyRevisions:
         assert "reusable_native_kernel" not in row
 
 
-# --- harnesses the session claims must be openable --------------------------
+# --- harnesses the session claims must be openable, and in the tree ---------
 
 
 class TestVerifiedHarnesses:
     def test_absent_paths_are_dropped(self, tree):
-        _, defines = tree
-        assert cra._verified_harnesses(["/gone/test_pa.py", str(defines)]) == [str(defines)]
+        root, defines = tree
+        assert cra._verified_harnesses(["/gone/test_pa.py", str(defines)], (str(root),)) == [str(defines)]
 
-    def test_an_explicit_empty_list_is_honoured(self):
+    def test_a_real_path_outside_every_root_is_refused(self, tree, tmp_path):
+        """Existence is not containment, and this list is what a backend runs.
+
+        Checking ``isfile`` alone accepted any readable path on the host, so a
+        proposal could point the measurement at a file outside the tree under
+        optimization -- and this list is the only channel by which anything the
+        session says about harnesses reaches a backend.
+        """
+        root, _ = tree
+        elsewhere = tmp_path / "outside" / "bench.py"
+        elsewhere.parent.mkdir(parents=True)
+        elsewhere.write_text("def bench(): pass\n", encoding="utf-8")
+        assert elsewhere.is_file()
+        assert cra._verified_harnesses([str(elsewhere)], (str(root),)) == []
+
+    def test_an_explicit_empty_list_is_honoured(self, tree):
         """ "This kernel has no harness" is an answer worth keeping."""
-        assert cra._verified_harnesses([]) == []
+        root, _ = tree
+        assert cra._verified_harnesses([], (str(root),)) == []
 
     @pytest.mark.parametrize("proposed", [None, "not-a-list", 42])
-    def test_no_proposal_leaves_the_field_alone(self, proposed):
-        assert cra._verified_harnesses(proposed) is None
+    def test_no_proposal_leaves_the_field_alone(self, proposed, tree):
+        root, _ = tree
+        assert cra._verified_harnesses(proposed, (str(root),)) is None
 
     def test_a_verified_list_reaches_the_candidate(self, tree):
         root, defines = tree

@@ -680,20 +680,32 @@ def load_revisions(revisions_path: Path) -> tuple[list[dict[str, Any]], str]:
     return [r for r in revisions if isinstance(r, dict)], ""
 
 
-def _verified_harnesses(proposed: Any) -> list[str] | None:
-    """Keep the proposed harness paths that exist, or ``None`` when unset.
+def _verified_harnesses(proposed: Any, roots: Sequence[str]) -> list[str] | None:
+    """Keep the proposed harness paths that resolve under a root, else ``None``.
 
     The curated harness table is keyed by coarse name markers, so it offers a
     plausible file for a whole family of kernels rather than the one that
     exercises this kernel. The session can look, which is worth more than the
     marker match -- but only files it can name and that are really there
     survive, since a non-empty list reads downstream as a runnable harness.
+
+    Held to the same containment as a revised ``source_file``, and for a
+    stronger reason: this list is the only channel by which anything the session
+    says about harnesses reaches a backend, and the backend runs what it names.
+    Checking existence alone would accept any readable path on the host, so a
+    proposal could point the measurement at a file outside the tree under
+    optimization -- which then scores a rewrite against something unrelated.
     """
     if not isinstance(proposed, list):
         return None
-    return [
-        str(entry) for entry in proposed if isinstance(entry, str) and entry.strip() and os.path.isfile(entry.strip())
-    ]
+    verified: list[str] = []
+    for entry in proposed:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        canonical = _acceptable_path(entry, roots)
+        if canonical and canonical not in verified:
+            verified.append(canonical)
+    return verified
 
 
 def _acceptable_path(picked: str, roots: Sequence[str]) -> str:
@@ -761,6 +773,7 @@ def _record_judgement_proposals(
     *,
     kernel_id: str,
     notes: list[str],
+    roots: Sequence[str],
 ) -> None:
     """Stage the routability hint and the verified harness list.
 
@@ -786,7 +799,7 @@ def _record_judgement_proposals(
             entry["review_reusable_hint"] = proposed_reusable
         else:
             notes.append(f"{kernel_id}: veto ignored, no skip_reason given (a refusal has to say why)")
-    harnesses = _verified_harnesses(revision.get("benchmark_files"))
+    harnesses = _verified_harnesses(revision.get("benchmark_files"), roots)
     if harnesses is not None:
         entry["review_benchmark_files"] = harnesses
         notes.append(f"{kernel_id}: benchmark_files -> {len(harnesses)} verified path(s)")
@@ -848,7 +861,7 @@ def apply_revisions(
         # correctly resolved kernel can still arrive with no shape at all.
         if action == _ACTION_KEEP:
             _record_shape_proposal(entry, revision, kernel_id=kernel_id, notes=notes)
-            _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes)
+            _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes, roots=framework_roots)
             continue
 
         previous_file = str(entry.get("source_file") or "")
@@ -890,7 +903,7 @@ def apply_revisions(
             notes.append(f"{kernel_id}: {previous_file or '(none)'} -> {canonical}")
 
         _record_shape_proposal(entry, revision, kernel_id=kernel_id, notes=notes)
-        _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes)
+        _record_judgement_proposals(entry, revision, kernel_id=kernel_id, notes=notes, roots=framework_roots)
     return notes
 
 
