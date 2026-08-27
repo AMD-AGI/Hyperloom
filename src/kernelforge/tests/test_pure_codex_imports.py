@@ -46,15 +46,21 @@ print("PURE_CODEX_IMPORT_OK")
     assert "PURE_CODEX_IMPORT_OK" in process.stdout
 
 
-def test_provider_sdks_are_not_core_dependencies() -> None:
-    """Keep Claude and Codex SDKs in provider-specific optional extras."""
-    project_root = Path(__file__).resolve().parents[1]
-    pyproject = (project_root / "pyproject.toml").read_text()
+def test_provider_sdks_are_not_core_dependencies(repo_root: Path) -> None:
+    """Keep Claude and Codex SDKs in provider-specific optional extras.
+
+    KernelForge used to declare its own ``codex = ["openai-codex==0.144.4"]``
+    extra. Inside Hyperloom there is a single distribution, and an exact pin
+    alongside Hyperloom's ``openai-codex>=0.144`` would be two contradictory
+    specifiers in one metadata file -- an install-time resolution error rather
+    than anything a test could catch later. The floor is what matters here.
+    """
+    pyproject = (repo_root / "pyproject.toml").read_text()
     core_section = pyproject.split("[project.optional-dependencies]", 1)[0]
 
     assert "claude-agent-sdk" not in core_section
     assert "openai-codex" not in core_section
-    assert "claude = [" in pyproject
-    assert '"claude-agent-sdk>=0.1.0"' in pyproject
-    assert "codex = [" in pyproject
-    assert '"openai-codex==0.144.4"' in pyproject
+    assert '"claude-agent-sdk>=0.2.110"' in pyproject
+    assert '"openai-codex>=0.144"' in pyproject
+    # No exact pin may creep back in: it would conflict with the floor above.
+    assert "openai-codex==" not in pyproject

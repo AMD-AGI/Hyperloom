@@ -63,8 +63,8 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "pyproject.toml",
-        r"^kernel-agents = ",
-        "Deprecated console-script alias, kept one release so existing scripts and shell history keep working.",
+        r"^(kernel-agents = |# Deprecated alias kept for one release)",
+        "Deprecated console-script alias (and the comment above it), kept one release so existing scripts and shell history keep working.",
     ),
     # TEMPORARY -- delete this entry in P7, when the Hyperloom-side call sites
     # (subprocess argv, find_spec probes, $FORGE_PATH package sniffing) are
