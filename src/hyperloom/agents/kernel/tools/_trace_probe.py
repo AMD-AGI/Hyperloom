@@ -806,6 +806,97 @@ def probe_rank_set(results: dict[Any, TraceProbeResult]) -> TraceProbeResult:
     return TraceProbeResult(target=target, findings=findings, metrics=metrics)
 
 
+def first_event_ts(path: str | Path) -> float | None:
+    """Timestamp of the first event carrying one, or ``None``.
+
+    Reads only until that event, so this costs a few KB per file rather than a
+    full decode. That matters because the skew check below is the one cross-rank
+    signal worth paying for on every analysis, and paying for it the way
+    :func:`probe_paths` does -- a complete pass over every rank -- would add
+    minutes to a run for two numbers per file.
+
+    Args:
+        path: The trace file to peek at.
+
+    Returns:
+        The first ``ts`` seen, or ``None`` when the file is unreadable or holds
+        no timestamped event.
+    """
+    try:
+        reader = _reader()
+        fobj = reader._open_trace_binary(Path(path))
+        try:
+            for ev in reader.stream_events(fobj):
+                ts = ev.get("ts")
+                if isinstance(ts, (int, float)):
+                    return float(ts)
+        finally:
+            fobj.close()
+    except Exception:  # noqa: BLE001 - the probe must never break its caller
+        return None
+    return None
+
+
+def probe_start_skew(paths: Iterable[str | Path]) -> TraceProbeResult:
+    """Check whether per-rank captures opened together, reading only file heads.
+
+    The cheap half of the cross-rank story. Ranks decide to start profiling in
+    the same instant but call into the profiler independently, and on the
+    reference incident the calls landed 30.88 s apart while the stops landed
+    within 0.5 s. Every rank that opened early spends the difference inside the
+    window's first collective, which is recorded as GPU-busy time and dilutes
+    every share taken over that window.
+
+    Unlike :func:`probe_rank_set` this needs no kernel counts, so it compares
+    the skew against the *shortest* window rather than the median: with only
+    head timestamps the span of each rank is unknown, and the earliest-opening
+    rank's window is the one the skew consumes the largest fraction of.
+
+    Args:
+        paths: Trace files belonging to one capture, one per rank.
+
+    Returns:
+        A result carrying at most the :data:`RANK_PROFILER_START_SKEW` finding.
+    """
+    starts: dict[str, float] = {}
+    for path in paths:
+        ts = first_event_ts(path)
+        if ts is not None:
+            starts[Path(path).name] = ts
+    metrics: dict[str, Any] = {"rank_count": len(starts)}
+    target = f"start_skew[{len(starts)} rank(s)]"
+    if len(starts) < 2:
+        return TraceProbeResult(target=target, metrics=metrics)
+
+    latest_name = max(starts, key=lambda k: starts[k])
+    skew_ms = (starts[latest_name] - min(starts.values())) / 1000.0
+    metrics["rank_start_skew_ms"] = round(skew_ms, 3)
+    metrics["last_rank_to_open"] = latest_name
+    findings: list[TraceFinding] = []
+    # Absolute floor: sub-second skew is start-up jitter on any real capture and
+    # cannot swallow a decode window. The reference healthy case measured under
+    # 5 ms; the incident measured 30,884 ms.
+    if skew_ms >= 1000.0:
+        findings.append(
+            TraceFinding(
+                code=RANK_PROFILER_START_SKEW,
+                severity=SEVERITY_BLOCKING,
+                message=(
+                    f"per-rank captures opened {skew_ms:.1f} ms apart ({latest_name} opened last). "
+                    "Every earlier rank waits out the difference inside the window's first collective, "
+                    "which the profiler records as GPU-busy time: idle% stays near zero while compute% "
+                    "and every per-kernel GPU% are diluted by the stall."
+                ),
+                evidence={
+                    "rank_start_skew_ms": round(skew_ms, 3),
+                    "last_rank_to_open": latest_name,
+                    "rank_first_event_ts": {k: round(v, 1) for k, v in sorted(starts.items())},
+                },
+            )
+        )
+    return TraceProbeResult(target=target, findings=findings, metrics=metrics)
+
+
 def probe_paths(paths: Iterable[str | Path], *, max_events: int | None = None) -> TraceProbeResult:
     """Probe several per-rank traces and fold in the cross-rank checks.
 
@@ -859,8 +950,10 @@ __all__ = [
     "VERDICT_USABLE",
     "TraceFinding",
     "TraceProbeResult",
+    "first_event_ts",
     "probe_enabled",
     "probe_file",
     "probe_paths",
     "probe_rank_set",
+    "probe_start_skew",
 ]

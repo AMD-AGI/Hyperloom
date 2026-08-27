@@ -278,6 +278,39 @@ def test_profiler_start_skew(tmp_path):
     assert finding.evidence["rank_start_skew_share"] > 0.10
 
 
+def test_start_skew_reads_only_file_heads(tmp_path):
+    """The cheap skew check finds the same gap without decoding whole traces."""
+    early = _write(tmp_path, healthy_graph_trace(), "rank_0.trace.json.gz")
+    late_events = [{**ev, "ts": ev["ts"] + 30_000_000.0} for ev in healthy_graph_trace()]
+    late = _write(tmp_path, late_events, "rank_1.trace.json.gz")
+    result = probe.probe_start_skew([early, late])
+    assert [f.code for f in result.findings] == [probe.RANK_PROFILER_START_SKEW]
+    # 30 s expressed in ms, from the head of each file.
+    assert result.metrics["rank_start_skew_ms"] == pytest.approx(30_000.0)
+    assert result.metrics["last_rank_to_open"] == "rank_1.trace.json.gz"
+
+
+def test_start_skew_tolerates_startup_jitter(tmp_path):
+    """Sub-second skew is start-up jitter and must not fire."""
+    a = _write(tmp_path, healthy_graph_trace(), "rank_0.trace.json.gz")
+    shifted = [{**ev, "ts": ev["ts"] + 900.0} for ev in healthy_graph_trace()]
+    b = _write(tmp_path, shifted, "rank_1.trace.json.gz")
+    result = probe.probe_start_skew([a, b])
+    assert result.findings == []
+    assert result.metrics["rank_start_skew_ms"] == pytest.approx(0.9)
+
+
+def test_first_event_ts_survives_a_missing_file(tmp_path):
+    """A head peek at a file that is not there returns None rather than raising."""
+    assert probe.first_event_ts(tmp_path / "absent.trace.json.gz") is None
+
+
+def test_start_skew_needs_two_ranks(tmp_path):
+    """One rank cannot be skewed against itself."""
+    only = _write(tmp_path, healthy_graph_trace())
+    assert probe.probe_start_skew([only]).findings == []
+
+
 def test_single_rank_skips_cross_rank_checks(tmp_path):
     """One rank cannot disagree with itself."""
     result = probe.probe_rank_set({"rank_0": probe.probe_file(_write(tmp_path, healthy_graph_trace()))})
