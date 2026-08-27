@@ -1723,6 +1723,42 @@ class TestSessionBudgetAdmission:
         assert recorded == []
         assert [r.status for r in results] == ["skipped"]
 
+    @pytest.mark.asyncio
+    async def test_without_an_estimate_agentx_gates_on_its_raised_cap(self, tmp_path, monkeypatch):
+        """The AgentX-raised cap, not the declared one, must gate admission.
+
+        Gating on the declared ``variant_timeout_sec`` (600) would admit this
+        variant with 700s left on the clock; the round is then handed the
+        AgentX-raised cap (10800s) by ``_round_timeout_sec``, which
+        ``session_clamped_timeout_sec`` immediately clamps back down to the
+        ~700s actually remaining -- reproducing the mid-warmup kill this
+        AgentX cap-raise exists to prevent.
+        """
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        monkeypatch.setenv("AGENTX_DURATION", "3600")
+        monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
+        monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 700.0,
+                variant_expected_sec=None,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
 
 class TestSessionBudgetTimeoutClamp:
     """A granted cap never exceeds what the session can still pay for.

@@ -838,6 +838,31 @@ def test_materialize_profile_window_sglang_skill_formula(
     assert body["num_steps"] == 128
 
 
+def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor.
+
+    CONC=32/OSL=1024/R=1.0 -> steady_floor=ceil(1024*2/64)=32, far above the
+    AgentX cap of 8. The manual HYPERLOOM_PROFILE_MAX_ITERS override already
+    warns in this situation; the AgentX auto-clamp must match it instead of
+    silently capturing a trace with no steady-state window.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("steady-state floor" in r.message for r in caplog.records)
+
+
 def test_materialize_persists_inferencex_path_for_magpie(
     tmp_path,
     monkeypatch,

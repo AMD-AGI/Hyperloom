@@ -1764,11 +1764,17 @@ async def run_grid(
             return False
         remaining_sec = session_deadline_sec - time.monotonic()
         # Falls back to a single ``variant_timeout_sec`` when no estimate was
-        # given, which is what callers that cannot estimate already got.
+        # given, which is what callers that cannot estimate already got. Must
+        # be the AgentX-raised cap, not the declared one: the declared cap
+        # understates what the round will actually be granted, so this check
+        # would admit a variant it cannot fit, which then gets its timeout
+        # clamped down to the (too-small) remaining budget by
+        # ``session_clamped_timeout_sec`` -- reproducing the mid-warmup kill
+        # this module's AgentX cap-raise exists to prevent.
         required_sec = (
             float(variant_expected_sec) * rounds_left
             if variant_expected_sec is not None
-            else float(variant_timeout_sec)
+            else float(agentx_variant_timeout_sec(variant_timeout_sec))
         )
         if remaining_sec >= required_sec:
             return False
@@ -2291,6 +2297,7 @@ async def run_grid(
         # leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
+        measure_cap_sec = _round_timeout_sec(i, variant.name, round_label="measure")
         try:
             rc, stdout, stderr = await _reported_magpie(
                 i,
@@ -2298,7 +2305,7 @@ async def run_grid(
                 magpie_python=magpie_python,
                 config_path=cfg_path,
                 output_dir=slot,
-                timeout_sec=_round_timeout_sec(i, variant.name, round_label="measure"),
+                timeout_sec=measure_cap_sec,
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
@@ -2319,7 +2326,7 @@ async def run_grid(
                 i + 1,
                 len(grid),
                 variant.name,
-                variant_timeout_sec,
+                measure_cap_sec,
                 exc,
             )
             _write_variant_abort_marker(

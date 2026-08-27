@@ -642,13 +642,23 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
             return default
         return value if value > 0 else default
 
+    def _is_valid_override(name: str) -> bool:
+        raw = (src.get(name) or "").strip()
+        try:
+            return int(raw) > 0
+        except ValueError:
+            return False
+
     explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
     if explicit:
         return explicit
 
-    overhead_explicit = (src.get("AGENTX_BASELINE_OVERHEAD_SEC") or "").strip()
     overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
-    if not overhead_explicit:
+    # Same validity bar as `_int` itself (parses to a positive int) rather than
+    # "non-empty string" -- otherwise an invalid override (e.g. "abc" or "-1")
+    # both silently falls back to the default AND suppresses the warning meant
+    # to flag exactly that case.
+    if not _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
         # AGENTX_BASELINE_OVERHEAD_SEC's default is calibrated on GLM-5.2/Qwen3.8
         # (measured 4774s/6676s warmup+compile). A raw aiperf run against
         # Kimi-K3 (conc=64, ISL ~115k avg) measured warmup alone draining in

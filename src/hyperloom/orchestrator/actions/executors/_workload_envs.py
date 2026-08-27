@@ -1097,6 +1097,14 @@ def materialize_config_with_envs(
                     _AGENTX_PROFILE_MAX_ITERS,
                 )
                 max_iters = _AGENTX_PROFILE_MAX_ITERS
+                if max_iters < steady_floor:
+                    log.warning(
+                        "AgentX: capped profile steps %d is below the steady-state "
+                        "floor of %d; the trace may lack a steady-state window "
+                        "(trace_split_no_steady_state).",
+                        max_iters,
+                        steady_floor,
+                    )
         # Operator hard-override of captured steps (e.g. a small eager FlyDSL
         # profile). Honored verbatim; warn when outside the safe band rather
         # than silently clamping.
