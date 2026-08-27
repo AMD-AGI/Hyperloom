@@ -789,13 +789,40 @@ async def _run_codex_session(
     run_dir: Path,
     model: str,
     timeout_sec: float,
+    log: Callable[[str], None] | None = None,
 ) -> str:
-    """Drive one Codex Agent SDK turn scoped to ``run_dir``; return any error."""
+    """Drive one Codex Agent SDK turn scoped to ``run_dir``; return any error.
+
+    Not the same guarantee as the Claude path, and worth stating because the
+    backend is chosen by which credentials are present -- so an operator does
+    not pick between these and cannot see which one ran.
+
+    What is equivalent: writes to the framework tree are refused. What differs:
+    the refusal is the OS sandbox rather than a per-call callback, so this
+    session has a shell and Codex's own file tools where the Claude one has
+    Read/Grep/Glob and nothing else. That is acceptable only because the
+    sandbox holds, which is why ``sandbox_mode`` is pinned here instead of
+    inherited: ``writable_roots`` *widens* ``workspace-write``, it does not
+    impose it, and under a deployment-level ``bypass`` it goes unread entirely
+    -- which would leave this stage with no containment at all while the
+    docstrings claimed otherwise. Stating the mode outranks the environment, so
+    a ``bypass`` deployment still gets a contained review.
+
+    Also bounded only on total wall clock. The Claude path additionally bounds
+    each wait for the next message, which catches a stalled gateway stream in
+    minutes rather than at the overall timeout; the one-shot Codex entry point
+    exposes no stream to bound. A stalled Codex review therefore costs the full
+    ``timeout_sec``.
+    """
     from hyperloom.common.codex_session import (  # noqa: PLC0415
         CodexSessionError,
         run_codex_turn,
     )
 
+    # Recorded because the backend is chosen by credentials, not by an
+    # operator, so which containment was in force is otherwise invisible.
+    if log is not None:
+        log(f"[review-agent] codex session: sandbox_mode=workspace-write writable_roots=({run_dir},) model={model}")
     try:
         result = await run_codex_turn(
             prompt=prompt,
@@ -804,6 +831,7 @@ async def _run_codex_session(
             model=model,
             timeout_sec=max(60.0, timeout_sec),
             writable_roots=(run_dir,),
+            sandbox_mode="workspace-write",
         )
     except CodexSessionError as exc:
         return _safe_exception_label(exc)
@@ -1147,6 +1175,7 @@ async def run_candidate_review_async(
                     run_dir=Path(run_dir),
                     model=model,
                     timeout_sec=timeout_sec,
+                    log=log,
                 )
             else:
                 error = await _run_claude_session(
