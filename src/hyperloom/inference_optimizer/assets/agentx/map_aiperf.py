@@ -59,9 +59,11 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
+        intvty_p90 = _stat(m, "output_token_throughput_per_user", "p90", default=0.0)
         return {
             "request_throughput": _stat(m, "request_throughput"),
             "output_throughput": out_tput,
+            "input_throughput": in_tput,
             "total_token_throughput": total_tput,
             "completed": rc,
             "total_input_tokens": int(_stat(m, "total_isl") or (isl * max(1, rc)) or 0),
@@ -73,8 +75,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "std_ttft_ms": _stat(m, "time_to_first_token", "std"),
             "mean_tpot_ms": _stat(m, "inter_token_latency", "avg"),
             "median_tpot_ms": _stat(m, "inter_token_latency", "p50"),
+            "p90_tpot_ms": _stat(m, "inter_token_latency", "p90"),
             "p99_tpot_ms": _stat(m, "inter_token_latency", "p99"),
             "std_tpot_ms": _stat(m, "inter_token_latency", "std"),
+            "intvty_p90_tok_s_user": intvty_p90,
             "mean_itl_ms": _stat(m, "inter_token_latency", "avg"),
             "median_itl_ms": _stat(m, "inter_token_latency", "p50"),
             "p99_itl_ms": _stat(m, "inter_token_latency", "p99"),

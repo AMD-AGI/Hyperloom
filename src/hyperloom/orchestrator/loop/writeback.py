@@ -2572,7 +2572,41 @@ class WritebackCollaborator:
             for not beating the current anchor.
         """
         anchor = resolve_grading_anchor_tput(self.shared_state)
-        if anchor > 0 and float(best_tput) <= anchor:
+        framework = str(getattr(self.shared_state, "framework", "") or "")
+        from hyperloom.common.perf_metric import (
+            composite_grading_enabled,
+            composite_score,
+            passes_intvty_gate,
+            perf_snapshot_from_mapping,
+            resolve_baseline_perf,
+        )
+
+        baseline_perf = resolve_baseline_perf(self.shared_state)
+        use_composite = composite_grading_enabled(framework) and bool(baseline_perf)
+        previous = self.shared_state.current_best or {}
+        cand_snap = perf_snapshot_from_mapping(bv) if isinstance(bv, dict) else None
+        anchor_snap = perf_snapshot_from_mapping(previous) or baseline_perf
+        if use_composite and cand_snap and anchor_snap:
+            if not passes_intvty_gate(cand_snap, anchor_snap):
+                log.info(
+                    "current_best held: %s winner failed intvty gate "
+                    "(anchor intvty=%.1f candidate intvty=%.1f)",
+                    task_kind,
+                    float(anchor_snap.get("intvty_p90") or 0.0),
+                    float(cand_snap.get("intvty_p90") or 0.0),
+                )
+                return False
+            cand_score = composite_score(cand_snap, baseline_perf)
+            anchor_score = composite_score(anchor_snap, baseline_perf)
+            if cand_score <= anchor_score:
+                log.info(
+                    "current_best held at score %.4f: %s winner scored %.4f (no lift)",
+                    anchor_score,
+                    task_kind,
+                    cand_score,
+                )
+                return False
+        elif anchor > 0 and float(best_tput) <= anchor:
             log.info(
                 "current_best held at %.1f: %s winner measured %.1f (no lift)",
                 anchor,
@@ -2580,7 +2614,8 @@ class WritebackCollaborator:
                 float(best_tput),
             )
             return False
-        previous = self.shared_state.current_best or {}
+        if not isinstance(previous, dict):
+            previous = {}
         base_args = ""
         if isinstance(previous, dict):
             base_args = strip_benchmark_harness_flags(previous.get("extra_server_args"))
@@ -2785,8 +2820,13 @@ class WritebackCollaborator:
             "ttft_mean_ms": bv.get("ttft_mean_ms") if isinstance(bv, dict) else None,
             "e2el_mean_ms": bv.get("e2el_mean_ms") if isinstance(bv, dict) else None,
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
+            "input_throughput": (bv.get("input_throughput") if isinstance(bv, dict) else None),
+            "tpot_p90_ms": (bv.get("tpot_p90_ms") if isinstance(bv, dict) else None),
+            "intvty_p90": (bv.get("intvty_p90") if isinstance(bv, dict) else None),
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
+        if use_composite and cand_snap and baseline_perf:
+            current_best["perf_score"] = composite_score(cand_snap, baseline_perf)
         if isinstance(bv, dict):
             for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                 if bv.get(_ctrl_key):
@@ -3089,9 +3129,11 @@ class WritebackCollaborator:
         # must not reset it back to the bare reference config.
         if anchor_accepted and not (getattr(self.shared_state, "optimization_stack", None) or []):
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
-            self.shared_state.current_best = {
+            current_best = {
                 "action": "baseline",
-                "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
+                "tput": (
+                    anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)
+                ),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
                 "cold_tput": (
                     float(warmup_anchor) if isinstance(warmup_anchor, (int, float)) and warmup_anchor > 0 else None
@@ -3099,8 +3141,22 @@ class WritebackCollaborator:
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
+                "input_throughput": result.get("input_throughput"),
+                "tpot_p90_ms": result.get("tpot_p90_ms"),
+                "intvty_p90": result.get("intvty_p90"),
                 "workspace": result.get("workspace"),
             }
+            from hyperloom.common.perf_metric import composite_score, perf_snapshot_from_mapping
+
+            snap = perf_snapshot_from_mapping(result)
+            if snap:
+                self.shared_state.baseline_perf = dict(snap)
+                current_best["input_throughput"] = snap["input_throughput"]
+                current_best["intvty_p90"] = snap["intvty_p90"]
+                if snap.get("tpot_p90_ms") is not None:
+                    current_best["tpot_p90_ms"] = snap["tpot_p90_ms"]
+                current_best["perf_score"] = composite_score(snap, snap)
+            self.shared_state.current_best = current_best
             changed = True
         if anchor_accepted:
             audit_decision = "promoted"

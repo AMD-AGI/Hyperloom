@@ -38,6 +38,13 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
+from hyperloom.common.perf_metric import (
+    composite_grading_enabled,
+    passes_intvty_gate,
+    perf_snapshot_from_mapping,
+    resolve_baseline_perf,
+    score_gain_pct,
+)
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -1088,6 +1095,13 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
+        use_composite = composite_grading_enabled(framework)
+        baseline_perf = resolve_baseline_perf(ss) if use_composite else None
+        running_base_perf = (
+            perf_snapshot_from_mapping(getattr(ss, "current_best", None)) or baseline_perf
+            if use_composite
+            else None
+        )
         # In-batch KEEP'd entries (for full vs incremental stack recompose).
         in_batch_keeps: list[dict[str, Any]] = []
 
@@ -1513,15 +1527,39 @@ class ExploreExecutor:
                     # Decision-round gain is the cost gate: only variants that
                     # clear keep_threshold (and the accuracy gate) earn a warm
                     # stack-rebench round.
-                    gain = gain_pct(r.output_throughput, running_base_tput)
-                    outcome = "FAILED"
-                    reason: str = ""
-                    if r.status != "succeeded" or gain is None:
-                        reason = (r.error or "")[-1200:] or "no_measurement"
-                    elif gain < keep_threshold_pct:
-                        outcome = "REVERT"
-                        reason = "gain_below_threshold"
+                    cand_snap = perf_snapshot_from_mapping(
+                        {
+                            "output_throughput": r.output_throughput,
+                            "input_throughput": r.input_throughput,
+                            "intvty_p90": r.intvty_p90,
+                            "tpot_p90_ms": r.tpot_p90_ms,
+                        }
+                    )
+                    gain: float | None
+                    if use_composite and baseline_perf and running_base_perf and cand_snap:
+                        if not passes_intvty_gate(cand_snap, running_base_perf):
+                            gain = None
+                            outcome = "REVERT"
+                            reason = "intvty_regression"
+                        else:
+                            gain = score_gain_pct(cand_snap, running_base_perf, baseline_perf)
+                            outcome = "FAILED"
+                            reason = ""
+                            if r.status != "succeeded" or gain is None:
+                                reason = (r.error or "")[-1200:] or "no_measurement"
+                            elif gain < keep_threshold_pct:
+                                outcome = "REVERT"
+                                reason = "gain_below_threshold"
                     else:
+                        gain = gain_pct(r.output_throughput, running_base_tput)
+                        outcome = "FAILED"
+                        reason = ""
+                        if r.status != "succeeded" or gain is None:
+                            reason = (r.error or "")[-1200:] or "no_measurement"
+                        elif gain < keep_threshold_pct:
+                            outcome = "REVERT"
+                            reason = "gain_below_threshold"
+                    if outcome == "FAILED" and not reason:
                         # Accuracy gate. For serving it runs only for high-risk
                         # variants. For scriptable frameworks the image-quality
                         # gate is the sole correctness signal, so every variant is
@@ -1579,6 +1617,9 @@ class ExploreExecutor:
                         "status": r.status,
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
+                        "input_throughput": r.input_throughput,
+                        "intvty_p90": r.intvty_p90,
+                        "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
                         "base_tput": running_base_tput,
                         "round_id": round_id,
@@ -1663,6 +1704,9 @@ class ExploreExecutor:
                             "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
+                            "input_throughput": r.input_throughput,
+                            "intvty_p90": r.intvty_p90,
+                            "tpot_p90_ms": r.tpot_p90_ms,
                             "single_workspace": r.workspace,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
@@ -1799,6 +1843,8 @@ class ExploreExecutor:
                                 stack_unset_envs = list(run_unset_envs)
                                 stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
+                                if use_composite and cand_snap:
+                                    running_base_perf = cand_snap
                                 keep_entry["gain_pct"] = gain
                                 keep_entry["tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
@@ -1818,6 +1864,8 @@ class ExploreExecutor:
                             stack_unset_envs = list(run_unset_envs)
                             stack_base_args_mode = "replace" if persist_effective_args else "append"
                             running_base_tput = decision_tput or running_base_tput
+                            if use_composite and cand_snap:
+                                running_base_perf = cand_snap
 
                         winners.append(keep_entry)
                         winners_history_update.append(

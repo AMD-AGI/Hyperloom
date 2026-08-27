@@ -90,9 +90,12 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
+    intvty_p90 = stat(m, "output_token_throughput_per_user", "p90", default=0.0)
+
     return {
         "request_throughput": stat(m, "request_throughput"),
         "output_throughput": out_tput,
+        "input_throughput": in_tput,
         "total_token_throughput": total_tput,
         "completed": rc,
         "total_input_tokens": int(stat(m, "total_isl") or (isl * max(1, rc)) or 0),
@@ -104,8 +107,10 @@ def map_aiperf(
         "std_ttft_ms": stat(m, "time_to_first_token", "std"),
         "mean_tpot_ms": stat(m, "inter_token_latency", "avg"),
         "median_tpot_ms": stat(m, "inter_token_latency", "p50"),
+        "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
+        "intvty_p90_tok_s_user": intvty_p90,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),

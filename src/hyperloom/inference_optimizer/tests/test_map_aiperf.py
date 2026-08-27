@@ -32,7 +32,8 @@ def _sample():
         "total_output_tokens": {"unit": "tok", "avg": 2100.0},
         "benchmark_duration": {"unit": "s", "avg": 14.0},
         "time_to_first_token": _metric(120.0, p50=110.0, p99=200.0, std=15.0),
-        "inter_token_latency": _metric(20.0, p50=18.0, p99=40.0, std=5.0),
+        "inter_token_latency": _metric(20.0, p50=18.0, p90=34.3, p99=40.0, std=5.0),
+        "output_token_throughput_per_user": _metric(745.19, p50=700.0, p99=800.0, std=10.0),
         "request_latency": _metric(900.0, p50=850.0, p99=1500.0, std=120.0),
         "theoretical_prefix_cache_hit": {"unit": "%", "avg": 0.73},
     }
@@ -50,6 +51,7 @@ def test_map_core_throughput_and_counts():
     r = map_aiperf(_sample())
     assert r["request_throughput"] == 3.0
     assert r["output_throughput"] == 500.0
+    assert r["input_throughput"] == 1500.0
     assert r["total_token_throughput"] == 2000.0
     assert r["completed"] == 42
     assert r["total_input_tokens"] == 4200
@@ -67,6 +69,8 @@ def test_map_latency_fields():
     assert r["p99_itl_ms"] == 40.0
     # tpot mirrors inter_token_latency in the aiperf schema
     assert r["mean_tpot_ms"] == 20.0
+    assert r["p90_tpot_ms"] == 34.3
+    assert r["intvty_p90_tok_s_user"] == 745.19
     assert r["mean_e2el_ms"] == 900.0
     assert r["p99_e2el_ms"] == 1500.0
 
