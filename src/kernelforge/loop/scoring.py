@@ -179,6 +179,7 @@ the error it raised is the only thing that tells you what to fix. The
 `compile_command` may build a different, smaller shape than the one you measure,
 so a guard you add for the shape you tested can still reject it there."""
 
+
 def measurement_sigma(measurement_scores: Sequence[float]) -> float | None:
     """Return the spread of one candidate's independent pristine-relative scores.
 
@@ -249,11 +250,7 @@ def attribute_sigma(
     which is the whole no-op guarantee: attribution never *replaces* the
     measured sigma, it only says whether one case is worth re-measuring.
     """
-    scored = [
-        case_id
-        for case_id in sorted(baseline_case_times)
-        if case_id in case_series
-    ]
+    scored = [case_id for case_id in sorted(baseline_case_times) if case_id in case_series]
     if not scored or len(scored) != len(baseline_case_times):
         return None
     count = len(scored)
@@ -280,22 +277,14 @@ def attribute_sigma(
     if total_variance <= 0.0 or total_time <= 0.0:
         return None
 
-    variance_shares = {
-        case_id: (sigma * sigma) / total_variance
-        for case_id, sigma in case_sigmas.items()
-    }
-    wall_shares = {
-        case_id: mean_times[case_id] / total_time for case_id in scored
-    }
+    variance_shares = {case_id: (sigma * sigma) / total_variance for case_id, sigma in case_sigmas.items()}
+    wall_shares = {case_id: mean_times[case_id] / total_time for case_id in scored}
     equal_share = min(
         SIGMA_DOMINANCE_WALL_SHARE_OF_EQUAL / count,
         SIGMA_DOMINANCE_WALL_SHARE_CAP,
     )
     dominant = max(variance_shares, key=lambda case_id: variance_shares[case_id])
-    if (
-        variance_shares[dominant] <= SIGMA_DOMINANCE_VARIANCE_SHARE
-        or wall_shares[dominant] >= equal_share
-    ):
+    if variance_shares[dominant] <= SIGMA_DOMINANCE_VARIANCE_SHARE or wall_shares[dominant] >= equal_share:
         dominant = None
     return SigmaAttribution(
         case_sigmas=case_sigmas,
@@ -465,10 +454,7 @@ def warm_start_improvement_flags(
         best_ms=best_ms,
         mean_case_speedup=mean_case_speedup,
     )
-    improved = (
-        bool(mean_case_speedup and float(mean_case_speedup) > 1.0)
-        and not aggregate_regression
-    )
+    improved = bool(mean_case_speedup and float(mean_case_speedup) > 1.0) and not aggregate_regression
     return {
         "aggregate_regression": aggregate_regression,
         "improved": improved,

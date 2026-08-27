@@ -28,16 +28,24 @@ class TestMixedDispatch:
     def test_both_stages_means_there_is_ck_work_to_tune(self, tmp_path):
         # The regression: 2-stage covers small tokens, 1-stage covers large ones.
         # Skipping here forfeits every token 2-stage serves.
-        path = _log(tmp_path, [
-            *[_2STAGE.format(tok=t) for t in (1, 8, 16, 32)],
-            *[_1STAGE.format(tok=t) for t in (64, 128, 256)],
-        ])
+        path = _log(
+            tmp_path,
+            [
+                *[_2STAGE.format(tok=t) for t in (1, 8, 16, 32)],
+                *[_1STAGE.format(tok=t) for t in (64, 128, 256)],
+            ],
+        )
         assert _detect_1stage_from_log(path) is False
 
     def test_coverage_reports_tokens_per_stage(self, tmp_path):
-        path = _log(tmp_path, [
-            _2STAGE.format(tok=1), _2STAGE.format(tok=32), _1STAGE.format(tok=256),
-        ])
+        path = _log(
+            tmp_path,
+            [
+                _2STAGE.format(tok=1),
+                _2STAGE.format(tok=32),
+                _1STAGE.format(tok=256),
+            ],
+        )
         cov = moe_stage_coverage(path)
         assert cov["tunable_ck_2stage"] is True
         assert sorted(cov["stages_seen"]) == ["1stage", "2stage"]

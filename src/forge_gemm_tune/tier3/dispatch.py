@@ -63,8 +63,9 @@ def adapters_for(table: str) -> Any | None:
     if table == "bf16_tuned_gemm.csv":
         return _Bf16DenseAdapter()
     log.info(
-        "tier3: no dispatch adapter for %s, so a generated tuner for it could "
-        "not be re-timed; supported today: %s", table, ", ".join(SUPPORTED_TABLES),
+        "tier3: no dispatch adapter for %s, so a generated tuner for it could not be re-timed; supported today: %s",
+        table,
+        ", ".join(SUPPORTED_TABLES),
     )
     return None
 
@@ -155,9 +156,7 @@ class _Bf16DenseAdapter:
         a, b = self._ops(key)  # type: ignore[arg-type]
         return self.as_graph(lambda: torch.matmul(a, b.t()))
 
-    def make_dispatch(
-        self, shape: str
-    ) -> Callable[[dict[str, Any]], Callable[[], Any] | None]:
+    def make_dispatch(self, shape: str) -> Callable[[dict[str, Any]], Callable[[], Any] | None]:
         key = shape_key(shape)
 
         def dispatch(cand: dict[str, Any]) -> Callable[[], Any] | None:
@@ -170,9 +169,7 @@ class _Bf16DenseAdapter:
 
         return dispatch
 
-    def make_correctness(
-        self, shape: str
-    ) -> Callable[[Callable[[], Any]], bool]:
+    def make_correctness(self, shape: str) -> Callable[[Callable[[], Any]], bool]:
         key = shape_key(shape)
 
         def check(_dispatched: Callable[[], Any]) -> bool:
@@ -194,13 +191,10 @@ class _Bf16DenseAdapter:
         import aiter
 
         torch = self._torch()
-        aiter.hipb_findallsols(
-            a, bt, None, torch.bfloat16, None, None, None, False, False)
+        aiter.hipb_findallsols(a, bt, None, torch.bfloat16, None, None, None, False, False)
         self._hipb_ready = True
 
-    def _build(
-        self, key: tuple[int, int, int], cand: dict[str, Any]
-    ) -> Callable[[], Any] | None:
+    def _build(self, key: tuple[int, int, int], cand: dict[str, Any]) -> Callable[[], Any] | None:
         """One candidate as a callable, or None when we cannot dispatch it.
 
         None is recorded by the referee as "not dispatchable", which is a
@@ -224,8 +218,7 @@ class _Bf16DenseAdapter:
                     return None
                 bt = b.t()
                 self._hipb_once(a, bt)
-                return lambda: aiter.hipb_mm(
-                    a, bt, sol, None, torch.bfloat16, None, None, None, False, False)
+                return lambda: aiter.hipb_mm(a, bt, sol, None, torch.bfloat16, None, None, None, False, False)
 
             if backend == "aiter_asm":
                 name = cfg.get("kernelName")
@@ -233,8 +226,7 @@ class _Bf16DenseAdapter:
                     return None
                 split_k = cfg.get("splitK", 0)
                 out = torch.empty(m, n, device="cuda", dtype=torch.bfloat16)
-                return lambda: aiter.gemm_a16w16_asm(
-                    a, b, out, None, split_k, name, False)
+                return lambda: aiter.gemm_a16w16_asm(a, b, out, None, split_k, name, False)
 
             if backend == "aiter_opus":
                 from aiter.ops.opus import gemm_op_a16w16 as opus
@@ -248,23 +240,30 @@ class _Bf16DenseAdapter:
                 a3, b3 = a.unsqueeze(0), b.unsqueeze(0)
                 y = torch.empty(1, m, n, device="cuda", dtype=torch.bfloat16)
                 return lambda: opus.opus_gemm_a16w16_tune(
-                    a3, b3, y, bias=None,
-                    kernelId=kernel_id, splitK=cfg.get("splitK", 1))
+                    a3, b3, y, bias=None, kernelId=kernel_id, splitK=cfg.get("splitK", 1)
+                )
 
             if backend == "aiter_flydsl":
                 import aiter.ops.flydsl.gemm_kernels as fly
 
                 return lambda: fly.flydsl_hgemm(
-                    a, b, bias=None, kernel_family="hgemm",
-                    tile_m=cfg.get("tile_m"), tile_n=cfg.get("tile_n"),
-                    tile_k=cfg.get("tile_k"), split_k=cfg.get("split_k", 1),
+                    a,
+                    b,
+                    bias=None,
+                    kernel_family="hgemm",
+                    tile_m=cfg.get("tile_m"),
+                    tile_n=cfg.get("tile_n"),
+                    tile_k=cfg.get("tile_k"),
+                    split_k=cfg.get("split_k", 1),
                     block_m_warps=cfg.get("block_m_warps", 1),
                     block_n_warps=cfg.get("block_n_warps", 1),
                     block_k_warps=cfg.get("block_k_warps", 1),
                     stages=cfg.get("stages", 4),
                     async_copy=cfg.get("async_copy", True),
                     b_to_lds=cfg.get("b_to_lds", True),
-                    b_preshuffle=False, c_to_lds=False)
+                    b_preshuffle=False,
+                    c_to_lds=False,
+                )
         except Exception as exc:  # noqa: BLE001 - undispatchable is data
             log.info("tier3: cannot dispatch %s: %r", backend, exc)
             return None
@@ -304,10 +303,12 @@ class _Bf16DenseAdapter:
 
         if worst > MAX_RELATIVE_ERROR:
             log.error(
-                "tier3: rejecting %s %s -- worst error over %d fresh inputs was "
-                "%.4g, above the %.3g limit",
-                cand.get("backend"), str(cand.get("config"))[:60],
-                CORRECTNESS_TRIALS, worst, MAX_RELATIVE_ERROR,
+                "tier3: rejecting %s %s -- worst error over %d fresh inputs was %.4g, above the %.3g limit",
+                cand.get("backend"),
+                str(cand.get("config"))[:60],
+                CORRECTNESS_TRIALS,
+                worst,
+                MAX_RELATIVE_ERROR,
             )
             return False
         return True

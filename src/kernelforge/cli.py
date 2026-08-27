@@ -171,11 +171,7 @@ def _remote_publication_view(state: dict, best_commit: str) -> dict:
             "local_best_commit": local_best,
             "pending_commit": pending,
             "published_commit": published,
-            "latest_best_published": bool(
-                local_best
-                and published == local_best
-                and not pending
-            ),
+            "latest_best_published": bool(local_best and published == local_best and not pending),
         }.items()
         if key != "last_result"
     }
@@ -220,8 +216,8 @@ def _validate_max_hours(ctx, param, value):
     """
     if value is not None and value < MIN_MAX_HOURS:
         raise click.BadParameter(
-            f"must be >= {MIN_MAX_HOURS} (a forge run needs at least "
-            f"{MIN_MAX_HOURS:g} hour to be productive)")
+            f"must be >= {MIN_MAX_HOURS} (a forge run needs at least {MIN_MAX_HOURS:g} hour to be productive)"
+        )
     return value
 
 
@@ -243,7 +239,10 @@ def _pr_kb_enabled(flag: bool | None) -> bool:
     if flag is not None:
         return bool(flag)
     return os.environ.get("PR_KB_ENABLE", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -251,8 +250,12 @@ def _git_remote_url(workspace: Path) -> str:
     """Return the origin URL, or ``""`` when it cannot be read."""
     try:
         result = git(
-            "remote", "get-url", "origin",
-            cwd=workspace, check=False, timeout=10,
+            "remote",
+            "get-url",
+            "origin",
+            cwd=workspace,
+            check=False,
+            timeout=10,
         )
     except (OSError, subprocess.SubprocessError) as error:
         click.echo(f"Warning: failed to read git origin: {error}", err=True)
@@ -338,6 +341,7 @@ def _write_pr_provenance(
         PR_KB_RECOVERABLE,
         write_provenance,
     )
+
     try:
         write_provenance(
             workspace_dir,
@@ -479,9 +483,7 @@ def _agent_runtime_overrides(
         "agent_fallback_provider": agent_fallback_provider,
         "agent_precheck": agent_precheck,
     }
-    overrides = {
-        key: value for key, value in values.items() if value is not None
-    }
+    overrides = {key: value for key, value in values.items() if value is not None}
     if agent_options_json is not None:
         try:
             options = json.loads(agent_options_json)
@@ -506,10 +508,6 @@ def main():
     pass
 
 
-
-
-
-
 def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label: str) -> str:
     """Rebind one canonical workspace path onto a lane's own copy of it.
 
@@ -525,11 +523,7 @@ def _lane_workspace_path(value: str, *, lane_dir: str, workspace_dir: str, label
     """
     workspace_root = Path(workspace_dir).resolve()
     value_path = Path(value)
-    resolved = (
-        value_path.resolve()
-        if value_path.is_absolute()
-        else (workspace_root / value_path).resolve()
-    )
+    resolved = value_path.resolve() if value_path.is_absolute() else (workspace_root / value_path).resolve()
     try:
         relative = resolved.relative_to(workspace_root)
     except ValueError as error:
@@ -563,10 +557,7 @@ def _assert_lane_session_cwd(*, kernel_path: str, workspace: str, lane_dir: str)
         if candidate != lane_root and lane_root not in candidate.parents
     )
     if outside:
-        raise ValueError(
-            f"lane session would run outside its lane {lane_root}: "
-            + "; ".join(outside)
-        )
+        raise ValueError(f"lane session would run outside its lane {lane_root}: " + "; ".join(outside))
 
 
 # What a lane needs its provider to do, and what a provider that does not do it
@@ -695,9 +686,7 @@ def _make_lane_agent_factory(
         # last write would be every lane's -- so it is handed to the lane's own
         # provider subprocess instead. Raises rather than returning a lane that
         # would compile into the shared cache.
-        lane_env = child_cache_environment(
-            lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX)
-        )
+        lane_env = child_cache_environment(lane_root.with_name(lane_root.name + _LANE_AITER_CACHE_SUFFIX))
 
         async def session(kernel_path: str, plan: str) -> str:
             _assert_lane_session_cwd(
@@ -720,31 +709,44 @@ def _make_lane_agent_factory(
 @click.option("--kernel", default=None, help="Fresh campaign: kernel file to optimize")
 @click.option("--driver", default=None, help="Fresh campaign: validation/bench driver")
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
-@click.option("--snr-threshold", default=DEFAULT_SNR_THRESHOLD_DB, type=float,
-              help="Fresh campaign: SNR pre-filter threshold in dB (stored "
-                   "immutably in the campaign config; ignored on --resume). A "
-                   "KEEP is decided by the task's own correctness_command, not "
-                   "by this value.")
-@click.option("--max-hours", default=1.0, type=float, callback=_validate_max_hours,
-              help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
-                   ">2 hours enable Analysis profiling and, for single-lane "
-                   "rounds, Plan Critic review.")
+@click.option(
+    "--snr-threshold",
+    default=DEFAULT_SNR_THRESHOLD_DB,
+    type=float,
+    help="Fresh campaign: SNR pre-filter threshold in dB (stored "
+    "immutably in the campaign config; ignored on --resume). A "
+    "KEEP is decided by the task's own correctness_command, not "
+    "by this value.",
+)
+@click.option(
+    "--max-hours",
+    default=1.0,
+    type=float,
+    callback=_validate_max_hours,
+    help="Max runtime hours (default: 1.0, minimum 1.0). Budgets "
+    ">2 hours enable Analysis profiling and, for single-lane "
+    "rounds, Plan Critic review.",
+)
 @click.option(
     "--session-timeout-sec",
     default=None,
     type=click.IntRange(min=1),
     help="Wall-clock budget for one implementer session (seconds). Overrides "
-         "the value computed from --max-hours; the claude backend cuts a "
-         "session at this deadline and the session is told about it.")
+    "the value computed from --max-hours; the claude backend cuts a "
+    "session at this deadline and the session is told about it.",
+)
 @click.option(
     "--deadline-unix",
     default=0.0,
     type=float,
     help="Absolute UNIX deadline shared by preparation and optimization.",
 )
-@click.option("--git-branch", default=None,
-              help="Fresh campaign: development branch to optimize on (checked out "
-                   "before the immutable campaign config is snapshotted).")
+@click.option(
+    "--git-branch",
+    default=None,
+    help="Fresh campaign: development branch to optimize on (checked out "
+    "before the immutable campaign config is snapshotted).",
+)
 @click.option(
     "--gpu-target",
     default=None,
@@ -759,22 +761,21 @@ def _make_lane_agent_factory(
 @click.option(
     "--fellow",
     default=None,
-    help=(
-        "Fresh campaign: backend fellow override. Unsupported fellows fall back "
-        "to flydsl-fellow."
-    ),
+    help=("Fresh campaign: backend fellow override. Unsupported fellows fall back to flydsl-fellow."),
 )
-@click.option("--program-md-file", default=None,
-              help="Fresh campaign: optional task context copied into the campaign")
+@click.option("--program-md-file", default=None, help="Fresh campaign: optional task context copied into the campaign")
 @click.option(
     "--invocation-spec-file",
     default=None,
     help="Path to a Hyperloom invocation-spec JSON used by task preparation.",
 )
-@click.option("--experiments-dir", default=None,
-              help="Diagnostics/checkpoint root (profiles, optimization_potential, "
-                   "tracker checkpoint). Defaults to <workspace>/forge_experiments. "
-                   "Resume artifacts always live under the workspace regardless.")
+@click.option(
+    "--experiments-dir",
+    default=None,
+    help="Diagnostics/checkpoint root (profiles, optimization_potential, "
+    "tracker checkpoint). Defaults to <workspace>/forge_experiments. "
+    "Resume artifacts always live under the workspace regardless.",
+)
 @click.option(
     "--aiter-cache-max-gb",
     default=4.0,
@@ -796,111 +797,158 @@ def _make_lane_agent_factory(
 )
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
 @_agent_runtime_options
-@click.option("--permission-mode", default=None,
-              help="Provider permission mode when supported")
-@click.option("--profile-timeout-sec", default=ANALYSIS_TIMEOUT_SEC, type=int,
-              help="Ceiling (seconds) for the single complete Analysis Agent "
-                   "session. The Agent persists phase and case artifacts for "
-                   "resume when the deadline is reached. Default 7200 (2 hours).")
-@click.option("--supervisor-backend", default="",
-              callback=_validate_optional_agent_provider,
-              help="Registered provider for the AVO supervisor. Omit to follow "
-                   "the effectively resolved Implementer provider, so one "
-                   "--agent-backend value controls every local agent.")
-@click.option("--profiling/--no-profiling", default=True,
-              help="Allow Analysis hardware profiling and Implementer "
-                   "self-profiling guidance for long-horizon runs (>2 hours). "
-                   "Shorter runs keep Analysis static-only and omit that guidance. "
-                   "--no-profiling disables collection for every duration.")
-@click.option("--nproc-per-node", default=1, type=click.IntRange(min=1),
-              help="Ranks the driver self-launches via torchrun (collective tasks "
-                   "such as all-reduce). >1 profiles EVERY rank in its own "
-                   "rocprofv3 session, because wrapping the driver would only "
-                   "profile the launcher process, which runs no kernel. Default 1 "
-                   "(single-GPU, unchanged behavior).")
-@click.option("--lanes", default=3, type=click.IntRange(min=1, max=8),
-              help="Implementer lanes per round. Above 1 the round's analysis is "
-                   "partitioned into that many non-overlapping plans, each run "
-                   "concurrently in its own workspace copy, and each candidate is "
-                   "measured on its own. Default 3: the lanes of a round run "
-                   "concurrently, so a lane costs a session rather than a share "
-                   "of the round's wall clock, and three is what the three "
-                   "specialist analyses can be divided into. The partition "
-                   "returns fewer when the evidence supports fewer. Above 1 "
-                   "needs a provider that declares stop_hooks and session_env, "
-                   "and is refused on one that does not.")
-@click.option("--merge-stacking/--no-merge-stacking", default=True,
-              help="Once consecutive iterations stop producing a new best, spend "
-                   "one iteration measuring two archived rejected gains applied "
-                   "together, chosen for winning on different cases. Costs a "
-                   "measurement but no Implementer session. Default on; this "
-                   "applies at every --lanes setting, so turn it off to compare "
-                   "against a run that predates it.")
-@click.option("--bench-repeat", default=1, type=click.IntRange(min=1),
-              help="How many times each bench repeats its measurement in-process, "
-                   "reporting the per-case median. Default 1 (single shot). >1 "
-                   "shrinks run-to-run spread. Requires a driver that accepts "
-                   "--repeat; the flag is omitted entirely when this is 1.")
-@click.option("--commit-new-path", "commit_new_paths", multiple=True,
-              help="Workspace-relative path or glob naming a file the agent may "
-                   "CREATE and still have committed with a KEEP (repeatable, e.g. "
-                   "--commit-new-path configs/*.json). Untracked files are "
-                   "otherwise never staged and never removed by a REVERT. A '*' "
-                   "does not cross a directory separator and '**' is rejected; "
-                   "name each level instead. Protected measurement paths are "
-                   "never admitted however they are spelled. Immutable per "
-                   "campaign: it is snapshotted into campaign_config.json and "
-                   "read back on --resume.")
-@click.option("--prepare-task/--no-prepare-task", default=True,
-              help="Pre-loop task preparation (default on, fresh campaigns only). "
-                   "Before the loop, run a deterministic preflight of the driver "
-                   "against the loop's stdout contract; if it fails invoke ONE agent "
-                   "that authors/repairs the graph-timed measurement driver (never "
-                   "the kernel/source), then re-check. Skipped on --resume, whose "
-                   "driver contract is already fixed by the campaign.")
-@click.option("--task-type", default="",
-              help="Task type (e.g. flydsl2flydsl, repository, image_kernel). "
-                   "'repository'/'image_kernel' enable multi-file / whole-repo "
-                   "handling; anything else keeps the single-file behavior.")
-@click.option("--source-files", default="",
-              help="Comma/newline-separated implementation entry points used for "
-                   "orientation, profiling, JIT hints, and KB identity. This is not "
-                   "an edit allowlist; --kernel remains the anchor.")
-@click.option("--target-functions", default="",
-              help="Comma-separated target kernel/function hints. Used for PMC "
-                   "filtering, source mapping, and agent orientation; it does not "
-                   "restrict which functions may be edited.")
-@click.option("--framework", default="",
-              help="Explicit framework identity for the experience KB slug "
-                   "(vllm/sglang/aiter, or 'standalone' for a framework-less "
-                   "file). Authoritative when given; otherwise inferred from the "
-                   "file that defines the target operation, falling back to "
-                   "'unknown' when no known owner is found.")
-@click.option("--operator-name", default="",
-              help="Logical operator identity used by profiling and the "
-                   "experience page key (for example, the traced operation name).")
+@click.option("--permission-mode", default=None, help="Provider permission mode when supported")
+@click.option(
+    "--profile-timeout-sec",
+    default=ANALYSIS_TIMEOUT_SEC,
+    type=int,
+    help="Ceiling (seconds) for the single complete Analysis Agent "
+    "session. The Agent persists phase and case artifacts for "
+    "resume when the deadline is reached. Default 7200 (2 hours).",
+)
+@click.option(
+    "--supervisor-backend",
+    default="",
+    callback=_validate_optional_agent_provider,
+    help="Registered provider for the AVO supervisor. Omit to follow "
+    "the effectively resolved Implementer provider, so one "
+    "--agent-backend value controls every local agent.",
+)
+@click.option(
+    "--profiling/--no-profiling",
+    default=True,
+    help="Allow Analysis hardware profiling and Implementer "
+    "self-profiling guidance for long-horizon runs (>2 hours). "
+    "Shorter runs keep Analysis static-only and omit that guidance. "
+    "--no-profiling disables collection for every duration.",
+)
+@click.option(
+    "--nproc-per-node",
+    default=1,
+    type=click.IntRange(min=1),
+    help="Ranks the driver self-launches via torchrun (collective tasks "
+    "such as all-reduce). >1 profiles EVERY rank in its own "
+    "rocprofv3 session, because wrapping the driver would only "
+    "profile the launcher process, which runs no kernel. Default 1 "
+    "(single-GPU, unchanged behavior).",
+)
+@click.option(
+    "--lanes",
+    default=3,
+    type=click.IntRange(min=1, max=8),
+    help="Implementer lanes per round. Above 1 the round's analysis is "
+    "partitioned into that many non-overlapping plans, each run "
+    "concurrently in its own workspace copy, and each candidate is "
+    "measured on its own. Default 3: the lanes of a round run "
+    "concurrently, so a lane costs a session rather than a share "
+    "of the round's wall clock, and three is what the three "
+    "specialist analyses can be divided into. The partition "
+    "returns fewer when the evidence supports fewer. Above 1 "
+    "needs a provider that declares stop_hooks and session_env, "
+    "and is refused on one that does not.",
+)
+@click.option(
+    "--merge-stacking/--no-merge-stacking",
+    default=True,
+    help="Once consecutive iterations stop producing a new best, spend "
+    "one iteration measuring two archived rejected gains applied "
+    "together, chosen for winning on different cases. Costs a "
+    "measurement but no Implementer session. Default on; this "
+    "applies at every --lanes setting, so turn it off to compare "
+    "against a run that predates it.",
+)
+@click.option(
+    "--bench-repeat",
+    default=1,
+    type=click.IntRange(min=1),
+    help="How many times each bench repeats its measurement in-process, "
+    "reporting the per-case median. Default 1 (single shot). >1 "
+    "shrinks run-to-run spread. Requires a driver that accepts "
+    "--repeat; the flag is omitted entirely when this is 1.",
+)
+@click.option(
+    "--commit-new-path",
+    "commit_new_paths",
+    multiple=True,
+    help="Workspace-relative path or glob naming a file the agent may "
+    "CREATE and still have committed with a KEEP (repeatable, e.g. "
+    "--commit-new-path configs/*.json). Untracked files are "
+    "otherwise never staged and never removed by a REVERT. A '*' "
+    "does not cross a directory separator and '**' is rejected; "
+    "name each level instead. Protected measurement paths are "
+    "never admitted however they are spelled. Immutable per "
+    "campaign: it is snapshotted into campaign_config.json and "
+    "read back on --resume.",
+)
+@click.option(
+    "--prepare-task/--no-prepare-task",
+    default=True,
+    help="Pre-loop task preparation (default on, fresh campaigns only). "
+    "Before the loop, run a deterministic preflight of the driver "
+    "against the loop's stdout contract; if it fails invoke ONE agent "
+    "that authors/repairs the graph-timed measurement driver (never "
+    "the kernel/source), then re-check. Skipped on --resume, whose "
+    "driver contract is already fixed by the campaign.",
+)
+@click.option(
+    "--task-type",
+    default="",
+    help="Task type (e.g. flydsl2flydsl, repository, image_kernel). "
+    "'repository'/'image_kernel' enable multi-file / whole-repo "
+    "handling; anything else keeps the single-file behavior.",
+)
+@click.option(
+    "--source-files",
+    default="",
+    help="Comma/newline-separated implementation entry points used for "
+    "orientation, profiling, JIT hints, and KB identity. This is not "
+    "an edit allowlist; --kernel remains the anchor.",
+)
+@click.option(
+    "--target-functions",
+    default="",
+    help="Comma-separated target kernel/function hints. Used for PMC "
+    "filtering, source mapping, and agent orientation; it does not "
+    "restrict which functions may be edited.",
+)
+@click.option(
+    "--framework",
+    default="",
+    help="Explicit framework identity for the experience KB slug "
+    "(vllm/sglang/aiter, or 'standalone' for a framework-less "
+    "file). Authoritative when given; otherwise inferred from the "
+    "file that defines the target operation, falling back to "
+    "'unknown' when no known owner is found.",
+)
+@click.option(
+    "--operator-name",
+    default="",
+    help="Logical operator identity used by profiling and the "
+    "experience page key (for example, the traced operation name).",
+)
 @click.option(
     "--experience-kb/--no-experience-kb",
     default=True,
     help="Read and publish forge-loop experience KB entries (default on). "
-         "Internal callers with their own KB lifecycle, such as "
-         "forge-rewrite-by-flydsl, disable this explicitly.",
+    "Internal callers with their own KB lifecycle, such as "
+    "forge-rewrite-by-flydsl, disable this explicitly.",
 )
 @click.option(
     "--kb-warmstart/--no-kb-warmstart",
     "kb_warmstart_enabled",
     default=True,
     help="Apply the best matching KB solution before iteration 1 (default on, "
-         "and only with --experience-kb). A caller that prepares the workspace "
-         "itself, such as forge-fuse, turns this off to keep publishing while "
-         "never replaying a stored patch over a tree it already staged.",
+    "and only with --experience-kb). A caller that prepares the workspace "
+    "itself, such as forge-fuse, turns this off to keep publishing while "
+    "never replaying a stored patch over a tree it already staged.",
 )
 @click.option(
-    "--producer", default="",
+    "--producer",
+    default="",
     help="System owning the candidate stream these records belong to (default: "
-         "the forge-loop's own). A producer has its own index in the KB "
-         "identity scheme, so a pipeline driving this command as a subprocess "
-         "can keep its records out of the kernel campaigns' ranking.",
+    "the forge-loop's own). A producer has its own index in the KB "
+    "identity scheme, so a pipeline driving this command as a subprocess "
+    "can keep its records out of the kernel campaigns' ranking.",
 )
 @click.option(
     "--return-after-read-kb",
@@ -909,73 +957,107 @@ def _make_lane_agent_factory(
     is_flag=True,
     default=False,
     help="Return before Iteration 1 when a KB solution applies cleanly, passes "
-         "current correctness, and improves current performance.",
+    "current correctness, and improves current performance.",
 )
 @click.option(
     "--pr-kb/--no-pr-kb",
     default=None,
     help="Inject upstream pull-request references from the Primus Cortex PR "
-         "Monitor as Implementer prior knowledge (default off). Falls back to "
-         "PR_KB_ENABLE when unset.",
+    "Monitor as Implementer prior knowledge (default off). Falls back to "
+    "PR_KB_ENABLE when unset.",
 )
 @click.option(
     "--specialist-probe/--no-specialist-probe",
     default=None,
     help="Let the read-only planning specialists measure one variant per probe "
-         "in a scratch tree, instead of only arguing about a dispatch constant "
-         "(default on). Each probe re-runs the workspace driver for one case "
-         "with declared constants overridden; it queues on the same device lock "
-         "the fan-out lanes take, and never touches the canonical tree. Falls "
-         "back to FORGE_SPECIALIST_PROBE when unset.",
+    "in a scratch tree, instead of only arguing about a dispatch constant "
+    "(default on). Each probe re-runs the workspace driver for one case "
+    "with declared constants overridden; it queues on the same device lock "
+    "the fan-out lanes take, and never touches the canonical tree. Falls "
+    "back to FORGE_SPECIALIST_PROBE when unset.",
 )
 @click.option(
     "--specialist-probe-max",
     default=None,
     type=click.IntRange(min=1),
     help="Probes ONE analysis round may make in total, shared by every "
-         "specialist it dispatches (default 6). Every call counts, including "
-         "one that is refused. Falls back to FORGE_SPECIALIST_PROBE_MAX when "
-         "unset.",
+    "specialist it dispatches (default 6). Every call counts, including "
+    "one that is refused. Falls back to FORGE_SPECIALIST_PROBE_MAX when "
+    "unset.",
 )
 @click.option(
     "--specialist-probe-budget-sec",
     default=None,
     type=click.FloatRange(min=1.0),
     help="Seconds on the device ONE analysis round may spend probing, shared by "
-         "every specialist it dispatches (default 600). Cut down further at "
-         "call time so no probe can leave a specialist without the time to "
-         "write its analysis. Falls back to FORGE_SPECIALIST_PROBE_BUDGET_SEC "
-         "when unset.",
+    "every specialist it dispatches (default 600). Cut down further at "
+    "call time so no probe can leave a specialist without the time to "
+    "write its analysis. Falls back to FORGE_SPECIALIST_PROBE_BUDGET_SEC "
+    "when unset.",
 )
 @click.option(
     "--specialist-probe-scratch-root",
     default=None,
     help="Where the round scratch trees are created. Must be absolute and lie "
-         "outside the workspace. Default: <experiments-dir>/specialist_probe, "
-         "or a sibling of the workspace when that would land inside it. Falls "
-         "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
+    "outside the workspace. Default: <experiments-dir>/specialist_probe, "
+    "or a sibling of the workspace when that would land inside it. Falls "
+    "back to FORGE_SPECIALIST_PROBE_SCRATCH_ROOT when unset.",
 )
-@click.option("--resume", is_flag=True,
-              help="Resume the campaign stored in the exact workspace")
-def forge_loop(kernel, driver, workspace_dir, snr_threshold,
-               max_hours, session_timeout_sec, deadline_unix,
-               git_branch, gpu_target, gpu_type,
-               fellow, program_md_file,
-               invocation_spec_file,
-               experiments_dir, aiter_cache_max_gb, experiment_id, experience_id,
-               result_json, model, agent_backend,
-               agent_cli, agent_timeout_sec, agent_reasoning_effort,
-               agent_sandbox_mode, agent_fallback_provider, agent_precheck,
-               agent_options_json, permission_mode, supervisor_backend,
-               profile_timeout_sec, profiling, prepare_task,
-               task_type, source_files,
-               target_functions, framework,
-               operator_name, experience_kb, kb_warmstart_enabled, producer,
-               return_after_read_kb, pr_kb, resume,
-               nproc_per_node, bench_repeat, lanes, merge_stacking,
-               specialist_probe, specialist_probe_max,
-               specialist_probe_budget_sec, specialist_probe_scratch_root,
-               commit_new_paths):
+@click.option("--resume", is_flag=True, help="Resume the campaign stored in the exact workspace")
+def forge_loop(
+    kernel,
+    driver,
+    workspace_dir,
+    snr_threshold,
+    max_hours,
+    session_timeout_sec,
+    deadline_unix,
+    git_branch,
+    gpu_target,
+    gpu_type,
+    fellow,
+    program_md_file,
+    invocation_spec_file,
+    experiments_dir,
+    aiter_cache_max_gb,
+    experiment_id,
+    experience_id,
+    result_json,
+    model,
+    agent_backend,
+    agent_cli,
+    agent_timeout_sec,
+    agent_reasoning_effort,
+    agent_sandbox_mode,
+    agent_fallback_provider,
+    agent_precheck,
+    agent_options_json,
+    permission_mode,
+    supervisor_backend,
+    profile_timeout_sec,
+    profiling,
+    prepare_task,
+    task_type,
+    source_files,
+    target_functions,
+    framework,
+    operator_name,
+    experience_kb,
+    kb_warmstart_enabled,
+    producer,
+    return_after_read_kb,
+    pr_kb,
+    resume,
+    nproc_per_node,
+    bench_repeat,
+    lanes,
+    merge_stacking,
+    specialist_probe,
+    specialist_probe_max,
+    specialist_probe_budget_sec,
+    specialist_probe_scratch_root,
+    commit_new_paths,
+):
     """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized fellow).
 
     This is the subprocess entry the Hyperloom forge backend shells out to, so
@@ -1001,20 +1083,14 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
     import hashlib as _hashlib
 
     if return_after_read_kb and not experience_kb:
-        raise click.UsageError(
-            "--return-after-read-kb cannot be used with --no-experience-kb"
-        )
+        raise click.UsageError("--return-after-read-kb cannot be used with --no-experience-kb")
     if return_after_read_kb and not kb_warmstart_enabled:
-        raise click.UsageError(
-            "--return-after-read-kb cannot be used with --no-kb-warmstart"
-        )
+        raise click.UsageError("--return-after-read-kb cannot be used with --no-kb-warmstart")
     if producer:
         from kernelforge.knowledge.kernel_identity import KERNEL_RECIPE_PRODUCERS
 
         if producer not in KERNEL_RECIPE_PRODUCERS:
-            raise click.UsageError(
-                f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}"
-            )
+            raise click.UsageError(f"--producer must be one of: {', '.join(sorted(KERNEL_RECIPE_PRODUCERS))}")
 
     from kernelforge.knowledge.experience_integration import git_head
     from kernelforge.loop.campaign_config import (
@@ -1040,17 +1116,13 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
 
     def _require_time(phase: str, minimum: float = 1.0) -> None:
         if _remaining(reserve=finalize_reserve_sec) < minimum:
-            raise click.ClickException(
-                f"absolute Forge deadline exhausted before {phase}"
-            )
+            raise click.ClickException(f"absolute Forge deadline exhausted before {phase}")
 
     if profile_timeout_sec <= 0:
         raise click.ClickException("--profile-timeout-sec must be positive")
 
     workspace = Path(workspace_dir).resolve()
-    workspace_lock = WorkspaceLock(
-        workspace / "forge_experiments" / "workspace.lock"
-    )
+    workspace_lock = WorkspaceLock(workspace / "forge_experiments" / "workspace.lock")
     try:
         workspace_lock.acquire()
     except WorkspaceLockError as error:
@@ -1068,17 +1140,11 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         or any((campaign_root / "candidates").glob("iter_*"))
     )
     if resume and not state_path.is_file():
-        raise click.ClickException(
-            "--resume requires <workspace>/forge_experiments/run_state.json"
-        )
+        raise click.ClickException("--resume requires <workspace>/forge_experiments/run_state.json")
     if resume and not campaign_store.exists():
-        raise click.ClickException(
-            "--resume requires <workspace>/forge_experiments/campaign_config.json"
-        )
+        raise click.ClickException("--resume requires <workspace>/forge_experiments/campaign_config.json")
     if not resume and has_run_artifacts:
-        raise click.ClickException(
-            "workspace already contains a Forge campaign; pass --resume to continue it"
-        )
+        raise click.ClickException("workspace already contains a Forge campaign; pass --resume to continue it")
 
     try:
         resolution = resolve_campaign(
@@ -1120,17 +1186,13 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         try:
             profile_timeout_sec = int(_env_timeout)
         except ValueError as error:
-            raise click.ClickException(
-                "FORGE_PROFILE_TIMEOUT_SEC must be an integer"
-            ) from error
+            raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be an integer") from error
         if profile_timeout_sec <= 0:
             raise click.ClickException("FORGE_PROFILE_TIMEOUT_SEC must be positive")
 
     kernel = str((workspace / campaign.kernel_path).resolve())
     driver = str((workspace / campaign.driver_path).resolve())
-    source_files_list = [
-        str((workspace / path).resolve()) for path in campaign.source_files
-    ]
+    source_files_list = [str((workspace / path).resolve()) for path in campaign.source_files]
     target_functions_list = list(campaign.target_functions)
     snr_threshold = campaign.snr_threshold
     gpu_target = campaign.gpu_target
@@ -1191,9 +1253,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
     # live under <workspace>/forge_experiments (campaign_root); diagnostics and
     # the external-recovery checkpoint go to --experiments-dir when the caller
     # supplies a distinct one (e.g. Hyperloom's output dir), else campaign_root.
-    config.experiments_dir = (
-        Path(experiments_dir).resolve() if experiments_dir else campaign_root
-    )
+    config.experiments_dir = Path(experiments_dir).resolve() if experiments_dir else campaign_root
     config.experiments_dir.mkdir(parents=True, exist_ok=True)
 
     # AITER cache isolation: give this attempt its own runtime-build cache so
@@ -1208,10 +1268,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         config.experiments_dir,
         max_cache_bytes=int(aiter_cache_max_gb * 1024**3),
     )
-    print(
-        "  [aiter-cache] isolated runtime builds under "
-        f"{aiter_cache.cache_root}"
-    )
+    print(f"  [aiter-cache] isolated runtime builds under {aiter_cache.cache_root}")
     baseline_cache = activate_aiter_cache_for_sources(source_files_list)
 
     # Seed the pristine BASELINE shard with the package's prebuilt .so so the
@@ -1361,14 +1418,23 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 float(_tp.PREPARE_MAX_WALL_SEC),
                 max(0.0, deadline_unix - finalize_reserve_sec - time.time()),
             )
-            print(f"  [prepare] budget: wall={_prep_wall:.0f}s "
-                  f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
-                  f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}")
+            print(
+                f"  [prepare] budget: wall={_prep_wall:.0f}s "
+                f"attempt_cap={_tp.PER_ATTEMPT_CAP_SEC}s "
+                f"max_attempts={_tp.PREPARE_MAX_ATTEMPTS}"
+            )
             prep = prepare_task_sync(
-                config=config, workspace_dir=workspace_dir, kernel=kernel, driver=driver,
-                program_md=program_md, target_functions=target_functions_list,
-                source_files=source_files_list, fellow=fellow, snr_threshold=snr_threshold,
-                preflight=pf, invocation_spec_file=invocation_spec_file or "",
+                config=config,
+                workspace_dir=workspace_dir,
+                kernel=kernel,
+                driver=driver,
+                program_md=program_md,
+                target_functions=target_functions_list,
+                source_files=source_files_list,
+                fellow=fellow,
+                snr_threshold=snr_threshold,
+                preflight=pf,
+                invocation_spec_file=invocation_spec_file or "",
                 expected_case_ids=expected_case_ids,
                 # Let the default PREPARE_MAX_WALL_SEC (3000s, sized for a cold-JIT
                 # preflight) apply; prepare_task clamps it to the per-kernel
@@ -1378,11 +1444,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 # A collective task needs a driver that launches its own ranks;
                 # the preparer cannot infer that from the kernel source.
                 nproc_per_node=nproc_per_node,
-                read_only_files=[
-                    path
-                    for path in (program_md_file, invocation_spec_file)
-                    if path
-                ],
+                read_only_files=[path for path in (program_md_file, invocation_spec_file) if path],
                 usage=usage,
             )
             if prep.ok:
@@ -1391,21 +1453,19 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 # through the operator's log for a 3-file change.
                 _shown = prep.wrote_files[:12]
                 _extra = len(prep.wrote_files) - len(_shown)
-                print(f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
-                      f"wrote {', '.join(_shown) or '(none)'}"
-                      + (f" (+{_extra} more)" if _extra > 0 else ""))
+                print(
+                    f"  [prepare] prepared measurement driver in {prep.attempts} attempt(s); "
+                    f"wrote {', '.join(_shown) or '(none)'}" + (f" (+{_extra} more)" if _extra > 0 else "")
+                )
                 # Telemetry only: never let a missing field break a good prep.
                 _pf_sec = getattr(prep.final_preflight, "duration_sec", 0.0) or 0.0
                 if _pf_sec:
                     _stages = ", ".join(
                         f"{name}={detail['seconds']:.0f}s"
-                        for name, detail in (
-                            getattr(prep.final_preflight, "details", {}) or {}
-                        ).items()
+                        for name, detail in (getattr(prep.final_preflight, "details", {}) or {}).items()
                         if isinstance(detail, dict) and "seconds" in detail
                     )
-                    print(f"  [prepare] preflight: {_pf_sec:.0f}s"
-                          + (f" ({_stages})" if _stages else ""))
+                    print(f"  [prepare] preflight: {_pf_sec:.0f}s" + (f" ({_stages})" if _stages else ""))
                 if prep.audit_dir:
                     print(f"  [prepare] audit: {prep.audit_dir}")
             else:
@@ -1417,10 +1477,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 if prep.message and prep.final_preflight:
                     detail = f"{prep.message} | preflight: {prep.final_preflight.summary()}"
                 disposition = "rolled back" if prep.rolled_back else "workspace preserved"
-                print(
-                    f"  [prepare] FAILED after {prep.attempts} attempt(s); "
-                    f"{disposition}. {detail}"
-                )
+                print(f"  [prepare] FAILED after {prep.attempts} attempt(s); {disposition}. {detail}")
                 err_result = {
                     "error": "task_preparation_failed",
                     "detail": detail,
@@ -1445,18 +1502,14 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
     # its solution diff is measured against. When prep made no changes, the digest
     # and base are simply re-confirmed.
     if campaign_save_deferred:
-        prepared_driver_sha256 = _hashlib.sha256(
-            Path(driver).read_bytes()
-        ).hexdigest()
+        prepared_driver_sha256 = _hashlib.sha256(Path(driver).read_bytes()).hexdigest()
         prepared_base_commit = git_head(str(workspace)) or campaign.base_commit
-        prepared_signature, prepared_identity = (
-            derive_campaign_implementation_contract(
-                workspace_dir=str(workspace),
-                kernel_path=campaign.kernel_path,
-                source_files=campaign.source_files,
-                framework=campaign.framework,
-                base_commit=prepared_base_commit,
-            )
+        prepared_signature, prepared_identity = derive_campaign_implementation_contract(
+            workspace_dir=str(workspace),
+            kernel_path=campaign.kernel_path,
+            source_files=campaign.source_files,
+            framework=campaign.framework,
+            base_commit=prepared_base_commit,
         )
         campaign = _dataclasses.replace(
             campaign,
@@ -1468,9 +1521,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         iter_config.canonical_driver_sha256 = campaign.driver_sha256
         iter_config.campaign_base_commit = campaign.base_commit
         iter_config.implementation_signature = campaign.implementation_signature
-        iter_config.implementation_identity = dict(
-            campaign.implementation_identity
-        )
+        iter_config.implementation_identity = dict(campaign.implementation_identity)
         try:
             campaign_store.save(campaign, program_md=program_text)
         except (OSError, ValueError) as error:
@@ -1502,30 +1553,24 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         "read_error": "",
     }
     warm_start_result = None
-    if (
-        experience_kb
-        and kb_warmstart_enabled
-        and not resume
-        and _remaining(reserve=finalize_reserve_sec) >= 600
-    ):
+    if experience_kb and kb_warmstart_enabled and not resume and _remaining(reserve=finalize_reserve_sec) >= 600:
         try:
-            warm = kb_warmstart(config=config, kernel=kernel, driver=driver,
-                                workspace_dir=workspace_dir, fellow=fellow,
-                                target_functions=target_functions_list,
-                                framework=framework,
-                                snr_threshold=snr_threshold,
-                                source_files=source_files_list,
-                                operator_name=operator_name,
-                                bench_repeat=bench_repeat,
-                                canonical_timeout_cap_sec=(
-                                    iter_config.validate_stage_timeout_sec
-                                ),
-                                )
-        except WarmStartRollbackError as error:
-            failure = click.ClickException(
-                "warm-start rollback failed; workspace may be inconsistent: "
-                f"{error}"
+            warm = kb_warmstart(
+                config=config,
+                kernel=kernel,
+                driver=driver,
+                workspace_dir=workspace_dir,
+                fellow=fellow,
+                target_functions=target_functions_list,
+                framework=framework,
+                snr_threshold=snr_threshold,
+                source_files=source_files_list,
+                operator_name=operator_name,
+                bench_repeat=bench_repeat,
+                canonical_timeout_cap_sec=(iter_config.validate_stage_timeout_sec),
             )
+        except WarmStartRollbackError as error:
+            failure = click.ClickException(f"warm-start rollback failed; workspace may be inconsistent: {error}")
             failure.exit_code = 2
             raise failure from error
         warm.setdefault(
@@ -1587,17 +1632,14 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                     int(warm.get("applied_rank") or 0),
                     "publication_failed",
                 )
-                warm["program_md_addition"] = (
-                    kb_reference_program_md(
-                        workspace_dir,
-                        detect_applied=False,
-                    )
-                    or warm.get(
-                        "reference_program_md_addition",
-                        "## Warm-start reference only\n"
-                        "The prior patch could not be published durably and was "
-                        "removed before optimization.",
-                    )
+                warm["program_md_addition"] = kb_reference_program_md(
+                    workspace_dir,
+                    detect_applied=False,
+                ) or warm.get(
+                    "reference_program_md_addition",
+                    "## Warm-start reference only\n"
+                    "The prior patch could not be published durably and was "
+                    "removed before optimization.",
                 )
                 iter_config.publication_baseline_wall_ms = None
                 print(
@@ -1612,12 +1654,8 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         if warm.get("pristine_ms"):
             iter_config.baseline_wall_ms = warm["pristine_ms"]
         if warm.get("baseline_case_times"):
-            iter_config.baseline_case_times = dict(
-                warm["baseline_case_times"]
-            )
-        iter_config.preloop_baseline_unscored_cases = list(
-            warm.get("baseline_unscored_cases") or []
-        )
+            iter_config.baseline_case_times = dict(warm["baseline_case_times"])
+        iter_config.preloop_baseline_unscored_cases = list(warm.get("baseline_unscored_cases") or [])
         if warm.get("applied"):
             iter_config.pristine_baseline_wall_ms = warm.get("pristine_ms")
             iter_config.warm_start_wall_ms = warm.get("keep_baseline_ms")
@@ -1631,9 +1669,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
 
     if return_after_read_kb and warm.get("applied"):
         if not isinstance(warm_start_result, dict):
-            raise click.ClickException(
-                "validated KB warm-start has no recoverable result"
-            )
+            raise click.ClickException("validated KB warm-start has no recoverable result")
         pristine_ms = float(warm["pristine_ms"])
         best_ms = float(warm["keep_baseline_ms"])
         mean_case_speedup = float(warm["mean_case_speedup"])
@@ -1731,9 +1767,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 source_files=campaign.source_files,
                 operator_name=operator_name or "",
                 target_functions=target_functions_list,
-                budget_sec=min(
-                    PR_KB_BUDGET_SEC, _remaining(reserve=finalize_reserve_sec)
-                ),
+                budget_sec=min(PR_KB_BUDGET_SEC, _remaining(reserve=finalize_reserve_sec)),
             )
             if pr_result is None:
                 iter_config.pr_kb_event = _pr_refs_event_fields(
@@ -1745,12 +1779,9 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 pr_kb_repo = pr_result.repo
                 iter_config.pr_reference_context = pr_task_context
                 iter_config.pr_reference_labels = tuple(
-                    f"{reference.repo}#{reference.number}"
-                    for reference in pr_result.references
+                    f"{reference.repo}#{reference.number}" for reference in pr_result.references
                 )
-                iter_config.pr_kb_event = _pr_refs_event_fields(
-                    pr_result.reason, pr_result.stats
-                )
+                iter_config.pr_kb_event = _pr_refs_event_fields(pr_result.reason, pr_result.stats)
                 iter_config.pr_kb_snapshot = pr_result.pending_snapshot
                 if pr_result.injected:
                     print(
@@ -1837,11 +1868,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         timeout_sec=profile_timeout_sec,
         profiling_enabled=profiling_enabled,
     )
-    analysis_mode = (
-        "profiled"
-        if profiling_enabled
-        else "static-only"
-    )
+    analysis_mode = "profiled" if profiling_enabled else "static-only"
     print("  Analysis Agent: " + analysis_mode)
 
     from kernelforge.orchestrator.orchestration import (
@@ -1856,17 +1883,10 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         definitions=specialist_definitions,
         enable_plan_critic=critic_enabled,
     )
-    print(
-        "  Orchestration: enabled with parallel specialists "
-        f"({', '.join(sorted(specialist_definitions))})"
-    )
+    print(f"  Orchestration: enabled with parallel specialists ({', '.join(sorted(specialist_definitions))})")
     print(
         "  Plan Critic: "
-        + (
-            "enabled (long-horizon, same backend/model)"
-            if critic_enabled
-            else "disabled (requires --max-hours > 2)"
-        )
+        + ("enabled (long-horizon, same backend/model)" if critic_enabled else "disabled (requires --max-hours > 2)")
     )
 
     # AVO supervisor (always on): reviews the trajectory on a stall and injects
@@ -1874,6 +1894,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
     # --agent-backend value controls every local agent; --supervisor-backend stays
     # available for callers that need a heterogeneous reviewer.
     from kernelforge.orchestrator.supervisor import make_supervisor_fn
+
     sup_backend = supervisor_backend or effective_implementer
     supervisor_fn = make_supervisor_fn(
         program_md=program_md,
@@ -1901,14 +1922,10 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         final write (full kb_experience). Reading live state means an interim call
         always reflects the latest VERIFIED best.
         """
-        search_start_ms = (
-            getattr(loop_runner.ic, "warm_start_wall_ms", None)
-            or getattr(loop_runner.ic, "baseline_wall_ms", None)
+        search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
+            loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = (
-            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
-            or 1.0
-        )
+        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
         pristine_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -1931,31 +1948,16 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         # iteration KEEP supersedes it.
         if not best_commit:
             try:
-                published = json.loads(
-                    (campaign_root / "best_result.json").read_text()
-                )
+                published = json.loads((campaign_root / "best_result.json").read_text())
             except Exception:
                 published = {}
-            if (
-                published.get("correctness_passed") is True
-                and int(published.get("iteration", -1)) == 0
-            ):
-                pristine_ms = (
-                    published.get("pristine_baseline_ms")
-                    or published.get("baseline_wall_ms")
-                    or pristine_ms
-                )
-                search_start_ms = (
-                    published.get("search_start_ms")
-                    or published.get("best_wall_ms")
-                    or search_start_ms
-                )
+            if published.get("correctness_passed") is True and int(published.get("iteration", -1)) == 0:
+                pristine_ms = published.get("pristine_baseline_ms") or published.get("baseline_wall_ms") or pristine_ms
+                search_start_ms = published.get("search_start_ms") or published.get("best_wall_ms") or search_start_ms
                 best = published.get("best_wall_ms")
                 total_speedup = published.get("mean_case_speedup")
                 search_start_mean_case_speedup = (
-                    published.get("search_start_mean_case_speedup")
-                    or total_speedup
-                    or search_start_mean_case_speedup
+                    published.get("search_start_mean_case_speedup") or total_speedup or search_start_mean_case_speedup
                 )
                 incremental_speedup = 1.0
                 best_iteration = 0
@@ -1975,22 +1977,12 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
             "search_start_ms": search_start_ms,
             "best_ms": best,
             "mean_case_speedup": total_speedup,
-            "search_start_mean_case_speedup": (
-                search_start_mean_case_speedup
-            ),
+            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
             "aggregate_regression": aggregate_regression,
-            "improved": bool(total_speedup and total_speedup > 1.0)
-            and not aggregate_regression,
-            "total_improved": bool(total_speedup and total_speedup > 1.0)
-            and not aggregate_regression,
-            "incremental_improved": bool(
-                total_speedup
-                and total_speedup > search_start_mean_case_speedup
-            ),
-            "improved_during_search": bool(
-                total_speedup
-                and total_speedup > search_start_mean_case_speedup
-            ),
+            "improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
+            "total_improved": bool(total_speedup and total_speedup > 1.0) and not aggregate_regression,
+            "incremental_improved": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
+            "improved_during_search": bool(total_speedup and total_speedup > search_start_mean_case_speedup),
             # Reported so a consumer can tell a faster transfer from a cheaper
             # barrier; wall time alone cannot say which one a kept kernel bought.
             "case_bandwidth": dict(getattr(loop_runner, "last_case_bandwidth", {}) or {}),
@@ -2010,12 +2002,8 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
             "best_manifest": str(campaign_root / "best" / "manifest.json"),
             "optimization_report": str(campaign_root / "optimization_report.md"),
             "optimization_history": str(campaign_root / "optimization_history.md"),
-            "persistence_degraded": bool(
-                getattr(loop_runner, "persistence_degraded", False)
-            ),
-            "persistence_errors": list(
-                getattr(loop_runner, "persistence_errors", [])
-            ),
+            "persistence_degraded": bool(getattr(loop_runner, "persistence_degraded", False)),
+            "persistence_errors": list(getattr(loop_runner, "persistence_errors", [])),
             "iteration_count": 0,
             "kb_experience": kb_experience,
             "agent_backend": effective_implementer,
@@ -2072,12 +2060,17 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
         remote_publication["source"] = "campaign_publication"
         try:
             status = write_experience_to_kb(
-                config=config, loop_runner=loop_runner, workspace_dir=workspace_dir,
-                kernel=kernel, fellow=fellow, gpu_target=config.gpu_target,
+                config=config,
+                loop_runner=loop_runner,
+                workspace_dir=workspace_dir,
+                kernel=kernel,
+                fellow=fellow,
+                gpu_target=config.gpu_target,
                 base_sha=base_sha,
                 pristine_baseline_ms=kb_pristine_baseline_ms,
                 reused_speedup=kb_reused_speedup,
-                source_files=source_files_list, target_functions=target_functions_list,
+                source_files=source_files_list,
+                target_functions=target_functions_list,
                 framework=framework,
                 experience_id=experience_id,
                 operator_name=operator_name,
@@ -2100,17 +2093,13 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
     def _publish_remote_best(result) -> None:
         if not getattr(result, "kept", False):
             return
-        commit = str(
-            getattr(result, "commit_hash", "") or git_head(workspace_dir)
-        )
+        commit = str(getattr(result, "commit_hash", "") or git_head(workspace_dir))
         _attempt_remote_publication(
             commit=commit,
             llm_summary=False,
             incremental_summary={
                 "category": "",
-                "strategy": str(
-                    getattr(loop_runner.run_state.best, "plan", "") or ""
-                ),
+                "strategy": str(getattr(loop_runner.run_state.best, "plan", "") or ""),
                 "recipe": "",
                 "lessons": "",
             },
@@ -2128,14 +2117,10 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
             return
         experiment = loop_runner.experiment
         best_commit = str(getattr(result, "commit_hash", "") or git_head(workspace_dir))
-        search_start_ms = (
-            getattr(loop_runner.ic, "warm_start_wall_ms", None)
-            or getattr(loop_runner.ic, "baseline_wall_ms", None)
+        search_start_ms = getattr(loop_runner.ic, "warm_start_wall_ms", None) or getattr(
+            loop_runner.ic, "baseline_wall_ms", None
         )
-        search_start_mean_case_speedup = (
-            getattr(loop_runner.ic, "warm_start_mean_case_speedup", None)
-            or 1.0
-        )
+        search_start_mean_case_speedup = getattr(loop_runner.ic, "warm_start_mean_case_speedup", None) or 1.0
         baseline_ms = (
             getattr(loop_runner.ic, "pristine_baseline_wall_ms", None)
             or getattr(loop_runner.ic, "publication_baseline_wall_ms", None)
@@ -2152,10 +2137,7 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
             "schema_version": 1,
             "state": "best_committed",
             "decision": "KEEP",
-            "experiment_id": (
-                caller_experiment_id
-                or (experiment.experiment_id if experiment is not None else "")
-            ),
+            "experiment_id": (caller_experiment_id or (experiment.experiment_id if experiment is not None else "")),
             "base_commit": base_sha,
             "best_commit": best_commit,
             "best_iteration": int(getattr(result, "iteration", 0) or 0),
@@ -2164,22 +2146,12 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
             "search_start_ms": search_start_ms,
             "best_ms": best_ms,
             "mean_case_speedup": mean_case_speedup,
-            "search_start_mean_case_speedup": (
-                search_start_mean_case_speedup
-            ),
+            "search_start_mean_case_speedup": (search_start_mean_case_speedup),
             "aggregate_regression": aggregate_regression,
-            "improved": bool(mean_case_speedup and mean_case_speedup > 1.0)
-            and not aggregate_regression,
-            "total_improved": bool(mean_case_speedup and mean_case_speedup > 1.0)
-            and not aggregate_regression,
-            "incremental_improved": bool(
-                mean_case_speedup
-                and mean_case_speedup > search_start_mean_case_speedup
-            ),
-            "improved_during_search": bool(
-                mean_case_speedup
-                and mean_case_speedup > search_start_mean_case_speedup
-            ),
+            "improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
+            "total_improved": bool(mean_case_speedup and mean_case_speedup > 1.0) and not aggregate_regression,
+            "incremental_improved": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
+            "improved_during_search": bool(mean_case_speedup and mean_case_speedup > search_start_mean_case_speedup),
             "total_speedup": mean_case_speedup,
             "incremental_speedup": (
                 float(mean_case_speedup) / float(search_start_mean_case_speedup)
@@ -2202,24 +2174,24 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 print(f"  [checkpoint] skipped ({e})", flush=True)
         _write_result_json(_build_result(kb_experience=None))
 
-    asyncio.run(loop_runner.run(
-        agent_fn=agent_fn,
-        agent_factory=_lane_agent_factory if lanes > 1 else None,
-        analysis_service=analysis_service,
-        orchestration_service=orchestration_service,
-        supervisor_fn=supervisor_fn,
-        on_best_committed=_checkpoint_on_best_committed,
-        on_best_ready=_publish_remote_best,
-        usage=usage,
-        workspace_lock_held=True,
-    ))
+    asyncio.run(
+        loop_runner.run(
+            agent_fn=agent_fn,
+            agent_factory=_lane_agent_factory if lanes > 1 else None,
+            analysis_service=analysis_service,
+            orchestration_service=orchestration_service,
+            supervisor_fn=supervisor_fn,
+            on_best_committed=_checkpoint_on_best_committed,
+            on_best_ready=_publish_remote_best,
+            usage=usage,
+            workspace_lock_held=True,
+        )
+    )
 
     # Final graceful write: upgrade the (possibly interim) per-run solution page
     # with the precise LLM-generated summary. Always attempted; fully best-effort
     # (never affects the run's result or exit code).
-    final_best_commit = str(
-        getattr(loop_runner.run_state.best, "commit_hash", "") or ""
-    )
+    final_best_commit = str(getattr(loop_runner.run_state.best, "commit_hash", "") or "")
     kb_write = _attempt_remote_publication(
         commit=final_best_commit,
         llm_summary=_remaining(reserve=30.0) >= 60.0,
@@ -2246,16 +2218,14 @@ def forge_loop(kernel, driver, workspace_dir, snr_threshold,
                 tracker.set_llm_usage(experiment_id, loop_runner.llm_usage)
         except Exception as exc:
             click.echo(
-                f"Warning: failed to record LLM usage for experiment "
-                f"{experiment_id}: {exc}",
+                f"Warning: failed to record LLM usage for experiment {experiment_id}: {exc}",
                 err=True,
             )
         try:
             tracker.set_kb_experience(experiment_id, kb_experience)
         except Exception as exc:
             click.echo(
-                f"Warning: failed to record KB experience for experiment "
-                f"{experiment_id}: {exc}",
+                f"Warning: failed to record KB experience for experiment {experiment_id}: {exc}",
                 err=True,
             )
 
@@ -2281,10 +2251,7 @@ def _validate_rewrite_framework(_ctx, _param, value):
 
     cleaned = (value or "").strip().lower()
     if cleaned and cleaned not in SUPPORTED_FRAMEWORKS:
-        raise click.BadParameter(
-            f"unsupported framework {value!r}; expected one of "
-            + ", ".join(SUPPORTED_FRAMEWORKS)
-        )
+        raise click.BadParameter(f"unsupported framework {value!r}; expected one of " + ", ".join(SUPPORTED_FRAMEWORKS))
     return cleaned
 
 
@@ -2325,12 +2292,16 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     callback=_emit_rewrite_applyback_contract,
     help="Print producer-authored apply-back manifest and outer-result examples.",
 )
-@click.option("--source-kernel", required=True,
-              help="Path to the source kernel to rewrite (e.g. a Triton .py or a .hip)")
-@click.option("--driver", required=True,
-              help="Path to the rewrite measurement driver. A conforming driver is "
-                   "used unchanged; otherwise --prepare-driver authors or repairs "
-                   "this self-contained file.")
+@click.option(
+    "--source-kernel", required=True, help="Path to the source kernel to rewrite (e.g. a Triton .py or a .hip)"
+)
+@click.option(
+    "--driver",
+    required=True,
+    help="Path to the rewrite measurement driver. A conforming driver is "
+    "used unchanged; otherwise --prepare-driver authors or repairs "
+    "this self-contained file.",
+)
 @click.option(
     "--prepare-driver/--no-prepare-driver",
     default=True,
@@ -2342,31 +2313,45 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     default="",
     help="Optional invocation evidence JSON used only by rewrite driver preparation.",
 )
-@click.option("--logical-op-name", "--op-name", "op_name", required=True,
-              help="Stable logical identity of the workload (a namespace or "
-                   "punctuation is allowed). KernelForge derives the FlyDSL factory "
-                   "symbol from it and reports the symbol in the result; never "
-                   "re-derive it downstream. --op-name is a deprecated alias.")
+@click.option(
+    "--logical-op-name",
+    "--op-name",
+    "op_name",
+    required=True,
+    help="Stable logical identity of the workload (a namespace or "
+    "punctuation is allowed). KernelForge derives the FlyDSL factory "
+    "symbol from it and reports the symbol in the result; never "
+    "re-derive it downstream. --op-name is a deprecated alias.",
+)
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
 @click.option("--experiments-dir", required=True, help="Where to write forge_experiments")
-@click.option("--target-functions", default="",
-              help="Comma-separated source kernel entry names (the @triton.jit name, "
-                   "or the __global__ function name for HIP/CUDA)")
-@click.option("--source-language", default="",
-              help="Language the source kernel is written in; one of the "
-                   "source_languages reported by --capabilities-json. Inferred "
-                   "from the file when omitted, but a caller whose profiler saw "
-                   "the kernel run should state it: a traced Triton kernel lives "
-                   "in a .py that names no language.")
-@click.option("--source-entry", default="",
-              help="Host callable in the source that runs the kernel, used as the "
-                   "live correctness oracle + baseline: ref(x)->y. Auto-discovered "
-                   "if omitted.")
-@click.option("--shapes-json", default="[]",
-              help="JSON list of {M,N,dtype} shapes driving correctness + benchmark")
+@click.option(
+    "--target-functions",
+    default="",
+    help="Comma-separated source kernel entry names (the @triton.jit name, "
+    "or the __global__ function name for HIP/CUDA)",
+)
+@click.option(
+    "--source-language",
+    default="",
+    help="Language the source kernel is written in; one of the "
+    "source_languages reported by --capabilities-json. Inferred "
+    "from the file when omitted, but a caller whose profiler saw "
+    "the kernel run should state it: a traced Triton kernel lives "
+    "in a .py that names no language.",
+)
+@click.option(
+    "--source-entry",
+    default="",
+    help="Host callable in the source that runs the kernel, used as the "
+    "live correctness oracle + baseline: ref(x)->y. Auto-discovered "
+    "if omitted.",
+)
+@click.option("--shapes-json", default="[]", help="JSON list of {M,N,dtype} shapes driving correctness + benchmark")
 @click.option("--snr-threshold", default=DEFAULT_SNR_THRESHOLD_DB, type=float)
-@click.option("--flydsl-kernel-name", default="kernel.py",
-              help="Filename of the produced FlyDSL kernel in the workspace")
+@click.option(
+    "--flydsl-kernel-name", default="kernel.py", help="Filename of the produced FlyDSL kernel in the workspace"
+)
 @click.option(
     "--gpu-target",
     default=None,
@@ -2386,8 +2371,7 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
 )
 @click.option("--model", default=None, help="LLM model (overrides KERNEL_AGENTS_MODEL)")
 @click.option("--permission-mode", default=None, help="Claude permission mode (default: acceptEdits)")
-@click.option("--max-port-attempts", default=3, type=int,
-              help="Max correctness-only port sessions before giving up")
+@click.option("--max-port-attempts", default=3, type=int, help="Max correctness-only port sessions before giving up")
 @click.option(
     "--max-applyback-attempts",
     default=2,
@@ -2395,8 +2379,13 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     type=click.IntRange(min=1),
     help="Maximum clean-room framework integration sessions.",
 )
-@click.option("--max-hours", default=1.0, type=float, callback=_validate_max_hours,
-              help="Total rewrite runtime budget (hours, minimum 1.0)")
+@click.option(
+    "--max-hours",
+    default=1.0,
+    type=float,
+    callback=_validate_max_hours,
+    help="Total rewrite runtime budget (hours, minimum 1.0)",
+)
 @click.option(
     "--deadline-unix",
     default=0.0,
@@ -2408,35 +2397,57 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     default="",
     callback=_validate_rewrite_framework,
     help="Target framework for the apply-back patch (aiter, vllm, or sglang). "
-         "Inferred from the source path when omitted.",
+    "Inferred from the source path when omitted.",
 )
 @click.option(
     "--applyback-import-module",
     "applyback_import_modules",
     multiple=True,
     help="Import target required to load before and after apply-back. Repeat for "
-         "multiple modules; defaults to the source module inferred from its package.",
+    "multiple modules; defaults to the source module inferred from its package.",
 )
 @click.option(
     "--git-branch",
     default="forge-rewrite-optimize",
     help="Development branch used by the nested FlyDSL forge-loop.",
 )
-@click.option("--supervisor-backend", default="codex",
-              help="OPTIMIZE supervisor backend on stall: 'codex' (default) or 'claude'")
-@click.option("--profile-timeout-sec", default=3600, type=int,
-              help="OPTIMIZE: ceiling for the complete Analysis Agent workflow")
+@click.option(
+    "--supervisor-backend", default="codex", help="OPTIMIZE supervisor backend on stall: 'codex' (default) or 'claude'"
+)
+@click.option(
+    "--profile-timeout-sec", default=3600, type=int, help="OPTIMIZE: ceiling for the complete Analysis Agent workflow"
+)
 @click.option("--result-json", default=None, help="Write the result dict here (also printed)")
-def forge_rewrite(source_kernel, driver, prepare_driver, invocation_spec_file,
-                  op_name, workspace_dir, experiments_dir,
-                  target_functions, source_language, source_entry, shapes_json,
-                  snr_threshold, flydsl_kernel_name, gpu_target, gpu_type,
-                  rewrite_kb, model,
-                  permission_mode, max_port_attempts, max_applyback_attempts,
-                  max_hours,
-                  deadline_unix, framework, applyback_import_modules,
-                  git_branch, supervisor_backend,
-                  profile_timeout_sec, result_json):
+def forge_rewrite(
+    source_kernel,
+    driver,
+    prepare_driver,
+    invocation_spec_file,
+    op_name,
+    workspace_dir,
+    experiments_dir,
+    target_functions,
+    source_language,
+    source_entry,
+    shapes_json,
+    snr_threshold,
+    flydsl_kernel_name,
+    gpu_target,
+    gpu_type,
+    rewrite_kb,
+    model,
+    permission_mode,
+    max_port_attempts,
+    max_applyback_attempts,
+    max_hours,
+    deadline_unix,
+    framework,
+    applyback_import_modules,
+    git_branch,
+    supervisor_backend,
+    profile_timeout_sec,
+    result_json,
+):
     """Rewrite a source kernel into FlyDSL and optimize it via forge-loop.
 
     Ports the source kernel (Triton, HIP, CUDA or C++) into an equivalent FlyDSL kernel

@@ -97,13 +97,23 @@ def git_checkout_branch(workspace_dir: str, branch: str) -> str:
     if not branch:
         return ""
     try:
-        exists = git(
-            "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}",
-            cwd=workspace_dir, check=False,
-        ).returncode == 0
+        exists = (
+            git(
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+                cwd=workspace_dir,
+                check=False,
+            ).returncode
+            == 0
+        )
         r = git(
-            "checkout", *(() if exists else ("-b",)), branch,
-            cwd=workspace_dir, check=False,
+            "checkout",
+            *(() if exists else ("-b",)),
+            branch,
+            cwd=workspace_dir,
+            check=False,
         )
         return (r.stdout + "\n" + r.stderr).strip()
     except OSError as e:
@@ -189,8 +199,11 @@ def _editable_workspace_paths(
 def _tracked_workspace_clean(workspace_dir: str) -> bool:
     """Return whether warm-start can exclusively own tracked workspace edits."""
     result = git(
-        "status", "--porcelain=v1", "--untracked-files=no",
-        cwd=workspace_dir, check=False,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+        cwd=workspace_dir,
+        check=False,
     )
     return result.returncode == 0 and not result.stdout.strip()
 
@@ -223,15 +236,8 @@ def _match_canonical_patch_path(
     matches: list[str] = []
     for candidate in sorted(canonical_paths):
         candidate_parts = Path(candidate).parts
-        direct = (
-            raw == candidate
-            or raw.endswith(f"/{candidate}")
-            or candidate.endswith(f"/{raw}")
-        )
-        normalized_raw = tuple(
-            canonical_owner_framework(part)
-            for part in raw_parts
-        )
+        direct = raw == candidate or raw.endswith(f"/{candidate}") or candidate.endswith(f"/{raw}")
+        normalized_raw = tuple(canonical_owner_framework(part) for part in raw_parts)
         owner_match = False
         if candidate_parts:
             owner = candidate_parts[0]
@@ -259,11 +265,7 @@ def _rewrite_patch_to_consumer_paths(
     for raw in raw_paths:
         canonical = _match_canonical_patch_path(raw, canonical_source_paths)
         target = consumer_source_map.get(canonical or "")
-        if (
-            canonical is None
-            or not target
-            or target not in allowed_paths
-        ):
+        if canonical is None or not target or target not in allowed_paths:
             return None
         replacements[raw] = target
 
@@ -273,24 +275,17 @@ def _rewrite_patch_to_consumer_paths(
         if diff_match:
             left, right = diff_match.group(1), diff_match.group(2)
             ending = diff_match.group(3) or ""
-            lines.append(
-                f"diff --git a/{replacements[left]} "
-                f"b/{replacements[right]}{ending}"
-            )
+            lines.append(f"diff --git a/{replacements[left]} b/{replacements[right]}{ending}")
             continue
         header_match = re.match(r"^(--- a/|\+\+\+ b/)(\S+)(\r?\n)?$", line)
         if header_match:
             prefix, raw = header_match.group(1), header_match.group(2)
-            lines.append(
-                f"{prefix}{replacements[raw]}{header_match.group(3) or ''}"
-            )
+            lines.append(f"{prefix}{replacements[raw]}{header_match.group(3) or ''}")
             continue
         rename_match = re.match(r"^(rename from |rename to )(\S+)(\r?\n)?$", line)
         if rename_match:
             prefix, raw = rename_match.group(1), rename_match.group(2)
-            lines.append(
-                f"{prefix}{replacements[raw]}{rename_match.group(3) or ''}"
-            )
+            lines.append(f"{prefix}{replacements[raw]}{rename_match.group(3) or ''}")
             continue
         lines.append(line)
     return "".join(lines)
@@ -313,12 +308,20 @@ def _git_apply(
     always ``--check``s a depth before applying it, so the working tree is never
     left half-patched by a wrong depth.
     """
+
     def _run(extra: list[str]) -> bool:
         # A depth that does not apply is the question being asked, not a failure.
-        return git(
-            "apply", *extra, "-",
-            cwd=workspace_dir, input=patch, check=False,
-        ).returncode == 0
+        return (
+            git(
+                "apply",
+                *extra,
+                "-",
+                cwd=workspace_dir,
+                input=patch,
+                check=False,
+            ).returncode
+            == 0
+        )
 
     depths = _GIT_APPLY_STRIP_DEPTHS
     if allowed_paths is not None:
@@ -362,14 +365,10 @@ def _git_commit_all(
         raise RuntimeError("could not resolve HEAD before warm-start commit")
     if allowed_paths is None:
         changed = git("diff", "--name-only", "HEAD", cwd=workspace_dir)
-        allowed_paths = {
-            line.strip() for line in changed.stdout.splitlines() if line.strip()
-        }
+        allowed_paths = {line.strip() for line in changed.stdout.splitlines() if line.strip()}
     git("add", "-A", "--", *sorted(allowed_paths), cwd=workspace_dir)
     staged = git("diff", "--cached", "--name-only", cwd=workspace_dir)
-    staged_paths = {
-        line.strip() for line in staged.stdout.splitlines() if line.strip()
-    }
+    staged_paths = {line.strip() for line in staged.stdout.splitlines() if line.strip()}
     if not staged_paths or not staged_paths.issubset(allowed_paths):
         raise RuntimeError("warm-start staged files escape the approved path set")
     commit = git("commit", "-m", message, cwd=workspace_dir, check=False)
@@ -377,21 +376,18 @@ def _git_commit_all(
         after_failed_commit = git_head(workspace_dir)
         if after_failed_commit and after_failed_commit != before:
             git("reset", "--mixed", before, cwd=workspace_dir, check=False)
-        raise RuntimeError(
-            f"git commit failed: {(commit.stderr or commit.stdout).strip()}"
-        )
+        raise RuntimeError(f"git commit failed: {(commit.stderr or commit.stdout).strip()}")
     after = git_head(workspace_dir)
     if not after or after == before:
         raise RuntimeError("warm-start commit did not advance HEAD")
-    committed = git(
-        "diff", "--name-only", before, after, cwd=workspace_dir, check=False
-    )
-    committed_paths = {
-        line.strip() for line in committed.stdout.splitlines() if line.strip()
-    }
+    committed = git("diff", "--name-only", before, after, cwd=workspace_dir, check=False)
+    committed_paths = {line.strip() for line in committed.stdout.splitlines() if line.strip()}
     dirty = git(
-        "status", "--porcelain=v1", "--untracked-files=no",
-        cwd=workspace_dir, check=False,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=no",
+        cwd=workspace_dir,
+        check=False,
     )
     if (
         committed.returncode != 0
@@ -402,9 +398,7 @@ def _git_commit_all(
     ):
         git("reset", "--mixed", before, cwd=workspace_dir, check=False)
         _git_discard_worktree(workspace_dir)
-        raise RuntimeError(
-            "warm-start commit verification failed or left tracked changes"
-        )
+        raise RuntimeError("warm-start commit verification failed or left tracked changes")
     return after
 
 
@@ -418,14 +412,8 @@ def _untracked_files(workspace_dir: str) -> set[str]:
     for command in commands:
         result = git(*command, cwd=workspace_dir, check=False, text=False)
         if result.returncode != 0:
-            raise WarmStartRestoreError(
-                "failed to snapshot pre-existing untracked files"
-            )
-        paths.update(
-            item.decode(errors="surrogateescape")
-            for item in result.stdout.split(b"\0")
-            if item
-        )
+            raise WarmStartRestoreError("failed to snapshot pre-existing untracked files")
+        paths.update(item.decode(errors="surrogateescape") for item in result.stdout.split(b"\0") if item)
     return paths
 
 
@@ -439,9 +427,7 @@ def _remove_new_untracked(
     for relative in sorted(additions, key=lambda value: len(Path(value).parts), reverse=True):
         rel_path = Path(relative)
         if rel_path.is_absolute() or ".." in rel_path.parts:
-            raise WarmStartRestoreError(
-                f"unsafe untracked path reported by git: {relative}"
-            )
+            raise WarmStartRestoreError(f"unsafe untracked path reported by git: {relative}")
         target = workspace / rel_path
         if target.is_symlink() or target.is_file():
             target.unlink()
@@ -463,33 +449,29 @@ def _git_discard_worktree(
     """Restore staged and unstaged tracked changes after a rejected candidate."""
     try:
         restored = git(
-            "restore", "--source=HEAD", "--staged", "--worktree", "--", ".",
-            cwd=workspace_dir, check=False,
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            ".",
+            cwd=workspace_dir,
+            check=False,
         )
         status = git(
-            "status", "--porcelain=v1", "--untracked-files=no",
-            cwd=workspace_dir, check=False,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=no",
+            cwd=workspace_dir,
+            check=False,
         )
         if pre_untracked is not None:
             _remove_new_untracked(workspace_dir, pre_untracked)
     except Exception as error:
-        raise WarmStartRestoreError(
-            f"failed to restore rejected warm-start: {error}"
-        ) from error
-    if (
-        restored.returncode != 0
-        or status.returncode != 0
-        or bool(status.stdout.strip())
-    ):
-        detail = (
-            restored.stderr
-            or restored.stdout
-            or status.stderr
-            or status.stdout
-        ).strip()
-        raise WarmStartRestoreError(
-            f"failed to restore rejected warm-start: {detail or 'workspace remains dirty'}"
-        )
+        raise WarmStartRestoreError(f"failed to restore rejected warm-start: {error}") from error
+    if restored.returncode != 0 or status.returncode != 0 or bool(status.stdout.strip()):
+        detail = (restored.stderr or restored.stdout or status.stderr or status.stdout).strip()
+        raise WarmStartRestoreError(f"failed to restore rejected warm-start: {detail or 'workspace remains dirty'}")
     return True
 
 
@@ -509,13 +491,8 @@ def _bench_once(driver: str, bench_repeat: int = 1) -> dict | None:
 
     try:
         repeat_kwargs = {"repeat": bench_repeat} if bench_repeat > 1 else {}
-        res = asyncio.run(bench_wallclock(driver_script=driver, driver_args=[],
-                                          **repeat_kwargs))
-        if (
-            not isinstance(res, dict)
-            or not res.get("success")
-            or not res.get("case_times")
-        ):
+        res = asyncio.run(bench_wallclock(driver_script=driver, driver_args=[], **repeat_kwargs))
+        if not isinstance(res, dict) or not res.get("success") or not res.get("case_times"):
             return None
         return res
     except Exception as e:  # noqa: BLE001 - a failed probe just disables warm-start
@@ -535,36 +512,26 @@ def _correctness_once(driver: str, snr_threshold: float) -> bool:
     from kernelforge.mcp_server.tools.test import test_correctness
 
     try:
-        res = asyncio.run(test_correctness(
-            driver_script=driver,
-            driver_args=[],
-            snr_threshold=snr_threshold,
-        ))
+        res = asyncio.run(
+            test_correctness(
+                driver_script=driver,
+                driver_args=[],
+                snr_threshold=snr_threshold,
+            )
+        )
         return bool(res.get("passed")) if isinstance(res, dict) else False
     except Exception as e:  # noqa: BLE001 - a failed probe just rejects warm-start
         print(f"  [kb] correctness probe failed: {e}", flush=True)
         return False
 
 
-
-
 def _reference_markdown(sol: dict, rank: int) -> str:
     """Render one complete historical solution reference."""
     speedup = sol.get("speedup")
-    speedup_text = (
-        f"{float(speedup):.6g}x"
-        if isinstance(speedup, (int, float))
-        else "unknown"
-    )
+    speedup_text = f"{float(speedup):.6g}x" if isinstance(speedup, (int, float)) else "unknown"
     candidate_signature = str(sol.get("implementation_signature") or "")
-    consumer_signature = str(
-        sol.get("consumer_implementation_signature") or ""
-    )
-    identity = (
-        sol.get("implementation_identity")
-        if isinstance(sol.get("implementation_identity"), dict)
-        else {}
-    )
+    consumer_signature = str(sol.get("consumer_implementation_signature") or "")
+    identity = sol.get("implementation_identity") if isinstance(sol.get("implementation_identity"), dict) else {}
     consumer_identity = (
         sol.get("consumer_implementation_identity")
         if isinstance(sol.get("consumer_implementation_identity"), dict)
@@ -608,11 +575,7 @@ def _reference_index_markdown(
     ]
     for index, sol in enumerate(sols):
         speedup = sol.get("speedup")
-        speedup_text = (
-            f"{float(speedup):.6g}x"
-            if isinstance(speedup, (int, float))
-            else "unknown"
-        )
+        speedup_text = f"{float(speedup):.6g}x" if isinstance(speedup, (int, float)) else "unknown"
         status = statuses[index] if index < len(statuses) else "not_attempted"
         lines.append(
             f"- Rank {index + 1}: "
@@ -722,10 +685,7 @@ def kb_reference_program_md(
         + "this search; their full metadata and diffs are stored there.",
     ]
     if applied_rank is not None:
-        parts.append(
-            f"Rank {applied_rank} solution `{solution_slug}` is already applied "
-            "and is the search start."
-        )
+        parts.append(f"Rank {applied_rank} solution `{solution_slug}` is already applied and is the search start.")
     return "\n".join(parts)
 
 
@@ -769,20 +729,10 @@ def _apply_candidate_patch(
     if not patch.strip():
         return "empty_patch"
     implementation_identity = (
-        sol.get("implementation_identity")
-        if isinstance(sol.get("implementation_identity"), dict)
-        else {}
+        sol.get("implementation_identity") if isinstance(sol.get("implementation_identity"), dict) else {}
     )
-    canonical_source_paths = {
-        str(path)
-        for path in implementation_identity.get("source_paths", [])
-        if str(path)
-    }
-    consumer_source_map = (
-        sol.get("consumer_source_map")
-        if isinstance(sol.get("consumer_source_map"), dict)
-        else {}
-    )
+    canonical_source_paths = {str(path) for path in implementation_identity.get("source_paths", []) if str(path)}
+    consumer_source_map = sol.get("consumer_source_map") if isinstance(sol.get("consumer_source_map"), dict) else {}
     if not _git_apply(
         workspace_dir,
         patch,
@@ -847,8 +797,7 @@ def _adopt_measured_candidate(
     )
     if reject_reason:
         print(
-            f"  [kb] warm-start candidate rejected: re-apply failed "
-            f"({reject_reason})",
+            f"  [kb] warm-start candidate rejected: re-apply failed ({reject_reason})",
             flush=True,
         )
         return "", reject_reason
@@ -868,24 +817,20 @@ def _adopt_measured_candidate(
             accept_candidate(
                 workspace_dir,
                 timeout_cap_sec=canonical_timeout_cap_sec,
-                candidate_label=(
-                    f"KB warm-start {sol.get('solution_slug', '')}".strip()
-                ),
+                candidate_label=(f"KB warm-start {sol.get('solution_slug', '')}".strip()),
             )
         )
     except Exception as error:  # noqa: BLE001 - a suite forge cannot run rejects
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
-            "  [kb] warm-start candidate rejected: the canonical correctness "
-            f"suite could not be run ({error})",
+            f"  [kb] warm-start candidate rejected: the canonical correctness suite could not be run ({error})",
             flush=True,
         )
         return "", "canonical_correctness_failed"
     if not canonical.passed:
         _git_discard_worktree(workspace_dir, pre_untracked=pre_untracked)
         print(
-            "  [kb] warm-start candidate rejected: the task's own correctness "
-            f"suite failed ({canonical.detail})",
+            f"  [kb] warm-start candidate rejected: the task's own correctness suite failed ({canonical.detail})",
             flush=True,
         )
         return "", "canonical_correctness_failed"
@@ -995,15 +940,10 @@ def _record_measured_speedup(
                     secrets=kb_store_secrets(config),
                 ),
             }
-        reason = (
-            ""
-            if outcome.get("recorded")
-            else str(outcome.get("reason") or "write_failed")
-        )
+        reason = "" if outcome.get("recorded") else str(outcome.get("reason") or "write_failed")
     if reason:
         print(
-            f"  [kb] warm-start measured write-back failed for {solution_slug}: "
-            f"{reason}",
+            f"  [kb] warm-start measured write-back failed for {solution_slug}: {reason}",
             flush=True,
         )
     return {
@@ -1081,10 +1021,19 @@ class _CandidateTrial:
         return cls(applied_ms, mean_case_speedup, bench, "", mean_case_speedup)
 
 
-def _try_apply_candidate(sol: dict, *, kernel, driver, workspace_dir,
-                         snr_threshold, source_files, pristine_bench,
-                         allowed_paths, pre_untracked,
-                         bench_repeat=1) -> _CandidateTrial:
+def _try_apply_candidate(
+    sol: dict,
+    *,
+    kernel,
+    driver,
+    workspace_dir,
+    snr_threshold,
+    source_files,
+    pristine_bench,
+    allowed_paths,
+    pre_untracked,
+    bench_repeat=1,
+) -> _CandidateTrial:
     """Measure one candidate solution as a possible starting point.
 
     Applies the candidate's diff to the working tree, rebuilds JIT sources, and
@@ -1133,10 +1082,7 @@ def _try_apply_candidate(sol: dict, *, kernel, driver, workspace_dir,
                 "correctness_failed",
                 measured_mean_case_speedup=None,
             )
-        applied_runs = [
-            _bench_once(driver, bench_repeat)
-            for _ in range(KEEP_MEASUREMENT_COUNT)
-        ]
+        applied_runs = [_bench_once(driver, bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
         applied_bench = aggregate_benchmark_measurements(applied_runs)
         try:
             measurement_scores = calculate_measurement_case_speedups(
@@ -1156,11 +1102,7 @@ def _try_apply_candidate(sol: dict, *, kernel, driver, workspace_dir,
         mean_case_speedup = keep_score(measurement_scores)
         applied_bench["measurement_mean_case_speedups"] = measurement_scores
         applied_bench["mean_case_speedup"] = mean_case_speedup
-        applied_ms = (
-            applied_bench.get("median_ms")
-            if isinstance(applied_bench, dict)
-            else None
-        )
+        applied_ms = applied_bench.get("median_ms") if isinstance(applied_bench, dict) else None
         pristine_ms = pristine_bench.get("median_ms")
     except WarmStartRestoreError:
         raise
@@ -1255,13 +1197,22 @@ def _try_apply_candidate(sol: dict, *, kernel, driver, workspace_dir,
     )
 
 
-def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
-                 target_functions=None, framework="",
-                 snr_threshold=DEFAULT_SNR_THRESHOLD_DB, source_files=None,
-                 operator_name="",
-                 resume=False, bench_repeat=1,
-                 canonical_timeout_cap_sec=_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC,
-                 ) -> dict:
+def kb_warmstart(
+    *,
+    config,
+    kernel,
+    driver,
+    workspace_dir,
+    fellow,
+    target_functions=None,
+    framework="",
+    snr_threshold=DEFAULT_SNR_THRESHOLD_DB,
+    source_files=None,
+    operator_name="",
+    resume=False,
+    bench_repeat=1,
+    canonical_timeout_cap_sec=_WARMSTART_CANONICAL_TIMEOUT_CAP_SEC,
+) -> dict:
     """Look up + apply the best prior solution as the loop's starting point.
 
     ``target_functions`` and framework identity are forwarded so the read
@@ -1331,12 +1282,8 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
                 "operator_name": operator_name,
             }
             reader_parameters = inspect.signature(read_top_solutions).parameters
-            if (
-                "read_status" in reader_parameters
-                or any(
-                    parameter.kind == inspect.Parameter.VAR_KEYWORD
-                    for parameter in reader_parameters.values()
-                )
+            if "read_status" in reader_parameters or any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in reader_parameters.values()
             ):
                 read_kwargs["read_status"] = read_status
             sols = read_top_solutions(**read_kwargs)
@@ -1389,10 +1336,7 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
         # One entry per candidate that reached a measurement, in rank order.
         measurements: list[dict] = []
         measured_writebacks: list[dict] = []
-        pristine_runs = [
-            _bench_once(driver, bench_repeat)
-            for _ in range(KEEP_MEASUREMENT_COUNT)
-        ]
+        pristine_runs = [_bench_once(driver, bench_repeat) for _ in range(KEEP_MEASUREMENT_COUNT)]
         pristine_bench = aggregate_benchmark_measurements(pristine_runs)
         pristine_ms = (
             pristine_bench.get("median_ms")
@@ -1408,8 +1352,7 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
             statuses = [f"rejected:{reference_reason}" for _ in sols]
             _persist_kb_references(workspace_dir, sols, statuses)
             print(
-                "  [kb] warm-start reference-only: baseline_unavailable; "
-                "injecting top solutions as reference",
+                "  [kb] warm-start reference-only: baseline_unavailable; injecting top solutions as reference",
                 flush=True,
             )
         else:
@@ -1425,9 +1368,13 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
                     continue
                 pre_untracked = _untracked_files(workspace_dir)
                 trial = _try_apply_candidate(
-                    sol, kernel=kernel, driver=driver, workspace_dir=workspace_dir,
+                    sol,
+                    kernel=kernel,
+                    driver=driver,
+                    workspace_dir=workspace_dir,
                     snr_threshold=snr_threshold,
-                    source_files=source_files, pristine_bench=pristine_bench,
+                    source_files=source_files,
+                    pristine_bench=pristine_bench,
                     allowed_paths=allowed_paths,
                     pre_untracked=pre_untracked,
                     bench_repeat=bench_repeat,
@@ -1481,7 +1428,7 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
                 )
                 measured_now = float(trial.adoptable_mean_case_speedup)
                 if _measurement_confirms_rank(sol, measured_now) and (
-                    _outranks_remaining(measured_now, sols[idx + 1:])
+                    _outranks_remaining(measured_now, sols[idx + 1 :])
                 ):
                     for later_index in range(idx + 1, len(statuses)):
                         statuses[later_index] = "not_attempted_after_apply"
@@ -1511,28 +1458,29 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
                 keep_baseline_ms = measurement["ms"]
                 mean_case_speedup = measurement["mean_case_speedup"]
                 applied_bench = dict(measurement["bench"])
-                base_txt = (f"{pristine_ms:.4f} ms" if pristine_ms is not None
-                            else "unmeasured")
-                print(f"  [kb] warm-start applied: {sol.get('solution_slug')} "
-                      f"(rank {idx + 1}, prior speedup {sol.get('speedup')}, "
-                      f"measured mean case speedup "
-                      f"{measurement['mean_case_speedup']:.6f}x, "
-                      f"raw mean {measurement['ms']:.4f} ms vs baseline {base_txt})",
-                      flush=True)
+                base_txt = f"{pristine_ms:.4f} ms" if pristine_ms is not None else "unmeasured"
+                print(
+                    f"  [kb] warm-start applied: {sol.get('solution_slug')} "
+                    f"(rank {idx + 1}, prior speedup {sol.get('speedup')}, "
+                    f"measured mean case speedup "
+                    f"{measurement['mean_case_speedup']:.6f}x, "
+                    f"raw mean {measurement['ms']:.4f} ms vs baseline {base_txt})",
+                    flush=True,
+                )
                 break
 
             if applied:
                 for measurement in measurements:
                     other = measurement["index"]
                     if other != applied_idx and statuses[other] == "not_attempted":
-                        statuses[other] = (
-                            f"rejected:outperformed_by_rank_{applied_idx + 1}"
-                        )
+                        statuses[other] = f"rejected:outperformed_by_rank_{applied_idx + 1}"
             else:
                 reference_reason = reference_reason or "no_candidate_applied"
-                print("  [kb] warm-start reference-only: no candidate applied "
-                      "cleanly + faster; injecting top solutions as reference",
-                      flush=True)
+                print(
+                    "  [kb] warm-start reference-only: no candidate applied "
+                    "cleanly + faster; injecting top solutions as reference",
+                    flush=True,
+                )
 
         _persist_kb_references(workspace_dir, sols, statuses)
         chosen = sols[applied_idx] if applied else best
@@ -1549,14 +1497,10 @@ def kb_warmstart(*, config, kernel, driver, workspace_dir, fellow,
             "reference_reason": "" if applied else reference_reason,
             "pristine_ms": pristine_ms,
             "baseline_case_times": (
-                dict(pristine_bench.get("case_times") or {})
-                if isinstance(pristine_bench, dict)
-                else {}
+                dict(pristine_bench.get("case_times") or {}) if isinstance(pristine_bench, dict) else {}
             ),
             "baseline_unscored_cases": (
-                list(pristine_bench.get("unscored_cases") or [])
-                if isinstance(pristine_bench, dict)
-                else []
+                list(pristine_bench.get("unscored_cases") or []) if isinstance(pristine_bench, dict) else []
             ),
             "keep_baseline_ms": keep_baseline_ms,
             "mean_case_speedup": mean_case_speedup,
@@ -1610,8 +1554,7 @@ def _cheap_summary(archive: Any) -> dict:
             keeps = [
                 entry
                 for entry in index
-                if entry.get("decision") == "KEEP"
-                and entry.get("mean_case_speedup") is not None
+                if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
             ]
             if keeps:
                 best = max(keeps, key=lambda entry: entry["mean_case_speedup"])
@@ -1621,16 +1564,29 @@ def _cheap_summary(archive: Any) -> dict:
     return {"category": "", "strategy": strategy, "recipe": "", "lessons": ""}
 
 
-def write_experience_to_kb(*, config, loop_runner: Any, workspace_dir, kernel, fellow,
-                           gpu_target, base_sha,
-                           pristine_baseline_ms=None, source_files=None,
-                           target_functions=None, framework="",
-                           experience_id="", operator_name="",
-                           implementation_signature_value="",
-                           implementation_identity_value=None,
-                           llm_summary=True, incremental_summary=None,
-                           snr_db_override=None, reused_speedup=None,
-                           usage=None) -> dict:
+def write_experience_to_kb(
+    *,
+    config,
+    loop_runner: Any,
+    workspace_dir,
+    kernel,
+    fellow,
+    gpu_target,
+    base_sha,
+    pristine_baseline_ms=None,
+    source_files=None,
+    target_functions=None,
+    framework="",
+    experience_id="",
+    operator_name="",
+    implementation_signature_value="",
+    implementation_identity_value=None,
+    llm_summary=True,
+    incremental_summary=None,
+    snr_db_override=None,
+    reused_speedup=None,
+    usage=None,
+) -> dict:
     """Gather the run's outcome and mirror the best solution into the KB Store.
 
     ``source_files`` and ``target_functions`` make the identity correct for
@@ -1647,9 +1603,7 @@ def write_experience_to_kb(*, config, loop_runner: Any, workspace_dir, kernel, f
     try:
         from kernelforge.knowledge.experience_sink import write_run_experience
 
-        checkpoint_experiment_id = (
-            getattr(loop_runner.experiment, "experiment_id", "") or ""
-        )
+        checkpoint_experiment_id = getattr(loop_runner.experiment, "experiment_id", "") or ""
         kb_experience_id = experience_id or checkpoint_experiment_id
         baseline_ms = (
             pristine_baseline_ms
@@ -1665,16 +1619,8 @@ def write_experience_to_kb(*, config, loop_runner: Any, workspace_dir, kernel, f
         archive = getattr(loop_runner, "archive", None)
         if archive is not None:
             with contextlib.suppress(Exception):
-                keeps = [
-                    entry
-                    for entry in archive.load_index()
-                    if entry.get("decision") == "KEEP"
-                ]
-                scored_keeps = [
-                    entry
-                    for entry in keeps
-                    if entry.get("mean_case_speedup") is not None
-                ]
+                keeps = [entry for entry in archive.load_index() if entry.get("decision") == "KEEP"]
+                scored_keeps = [entry for entry in keeps if entry.get("mean_case_speedup") is not None]
                 if scored_keeps:
                     best_entry = max(
                         scored_keeps,
@@ -1689,28 +1635,26 @@ def write_experience_to_kb(*, config, loop_runner: Any, workspace_dir, kernel, f
         with contextlib.suppress(Exception):
             kernel_source = Path(kernel).read_text(errors="replace")
 
-        summary_override = (
-            None
-            if llm_summary
-            else incremental_summary or _cheap_summary(archive)
-        )
-        pristine_signature = (
-            implementation_signature_value
-            or getattr(loop_runner.ic, "implementation_signature", "")
-        )
-        pristine_identity = (
-            implementation_identity_value
-            or getattr(loop_runner.ic, "implementation_identity", None)
-        )
+        summary_override = None if llm_summary else incremental_summary or _cheap_summary(archive)
+        pristine_signature = implementation_signature_value or getattr(loop_runner.ic, "implementation_signature", "")
+        pristine_identity = implementation_identity_value or getattr(loop_runner.ic, "implementation_identity", None)
 
         status = write_run_experience(
-            config=config, workspace=workspace_dir, kernel_path=kernel,
-            kernel_source=kernel_source, fellow=fellow, gpu_target=gpu_target,
-            experiment_id=kb_experience_id, baseline_wall_ms=baseline_ms,
-            best_wall_ms=best_ms, mean_case_speedup=mean_case_speedup,
+            config=config,
+            workspace=workspace_dir,
+            kernel_path=kernel,
+            kernel_source=kernel_source,
+            fellow=fellow,
+            gpu_target=gpu_target,
+            experiment_id=kb_experience_id,
+            baseline_wall_ms=baseline_ms,
+            best_wall_ms=best_ms,
+            mean_case_speedup=mean_case_speedup,
             cumulative_diff=cumulative_diff,
-            digest=digest, snr_db=snr_db,
-            source_files=source_files, target_functions=target_functions,
+            digest=digest,
+            snr_db=snr_db,
+            source_files=source_files,
+            target_functions=target_functions,
             operator_name=operator_name,
             implementation_signature_override=pristine_signature,
             implementation_identity_override=pristine_identity,
@@ -1720,8 +1664,9 @@ def write_experience_to_kb(*, config, loop_runner: Any, workspace_dir, kernel, f
             usage=usage,
         )
         if status.get("written"):
-            print(f"  [kb] experience written: {status.get('solution')} "
-                  f"(speedup {status.get('speedup'):.3f})", flush=True)
+            print(
+                f"  [kb] experience written: {status.get('solution')} (speedup {status.get('speedup'):.3f})", flush=True
+            )
         else:
             print(f"  [kb] experience not written: {status.get('reason')}", flush=True)
         return status
@@ -1742,9 +1687,7 @@ def kb_read_status(warm: dict) -> dict:
     return {
         "measured_writebacks": len(writebacks),
         "measured_writeback_failures": [
-            str(item.get("reason") or "write_failed")
-            for item in writebacks
-            if not item.get("recorded")
+            str(item.get("reason") or "write_failed") for item in writebacks if not item.get("recorded")
         ],
         "candidate": bool(warm.get("candidate")),
         "read_reason": warm.get("read_reason", ""),

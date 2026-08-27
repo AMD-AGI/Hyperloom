@@ -100,15 +100,8 @@ elif args.bench_mode:
 
 def test_preparation_is_independent_from_forge_loop():
     tree = ast.parse(inspect.getsource(driver_preparation))
-    imported_modules = {
-        alias.name
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Import)
-        for alias in node.names
-    }
-    imported_modules.update(
-        node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-    )
+    imported_modules = {alias.name for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
+    imported_modules.update(node.module or "" for node in ast.walk(tree) if isinstance(node, ast.ImportFrom))
 
     assert not any(name.startswith("kernelforge.loop") for name in imported_modules)
 

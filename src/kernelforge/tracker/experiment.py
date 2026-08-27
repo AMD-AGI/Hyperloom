@@ -76,9 +76,7 @@ class ExperimentTracker:
 
     def _path(self, experiment_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", experiment_id):
-            raise ValueError(
-                f"invalid experiment_id path component: {experiment_id!r}"
-            )
+            raise ValueError(f"invalid experiment_id path component: {experiment_id!r}")
         return self.dir / f"{experiment_id}.json"
 
     @contextlib.contextmanager
@@ -111,10 +109,7 @@ class ExperimentTracker:
                 continue
             if not isinstance(payload, dict):
                 continue
-            if (
-                payload.get("campaign_id") == campaign_id
-                and payload.get("segment_index") == segment_index
-            ):
+            if payload.get("campaign_id") == campaign_id and payload.get("segment_index") == segment_index:
                 return Experiment.from_dict(payload)
         return None
 
@@ -200,16 +195,10 @@ class ExperimentTracker:
                 with self._experiment_lock(parent_experiment_id):
                     parent = self._load(parent_experiment_id)
                     if parent.campaign_id != campaign_id:
-                        raise ValueError(
-                            "campaign mismatch: parent belongs to "
-                            f"{parent.campaign_id or 'unknown'}"
-                        )
+                        raise ValueError(f"campaign mismatch: parent belongs to {parent.campaign_id or 'unknown'}")
                     expected_index = parent.segment_index + 1
                     if segment_index != expected_index:
-                        raise ValueError(
-                            f"segment index must be {expected_index} after parent "
-                            f"{parent_experiment_id}"
-                        )
+                        raise ValueError(f"segment index must be {expected_index} after parent {parent_experiment_id}")
                     if parent.status == EXPERIMENT_RUNNING:
                         self._mark_interrupted_locked(parent)
             elif segment_index != 1:
@@ -289,11 +278,7 @@ class ExperimentTracker:
             try:
                 with open(path) as f:
                     payload = json.load(f)
-                if (
-                    not isinstance(payload, dict)
-                    or not payload.get("experiment_id")
-                    or not payload.get("created_at")
-                ):
+                if not isinstance(payload, dict) or not payload.get("experiment_id") or not payload.get("created_at"):
                     continue
                 experiments.append(Experiment.from_dict(payload))
             except (

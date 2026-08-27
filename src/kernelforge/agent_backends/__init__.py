@@ -35,8 +35,6 @@ for _name in _SUBMODULES:
     # Importing the provider modules here is safe: each one defers its agent SDK
     # to the call that needs it, so this costs nothing on an install that has
     # neither.
-    sys.modules[f"{__name__}.{_name}"] = importlib.import_module(
-        f"forge_llm.agent_backends.{_name}"
-    )
+    sys.modules[f"{__name__}.{_name}"] = importlib.import_module(f"forge_llm.agent_backends.{_name}")
 
 __all__ = [*_FORGE_LLM_ALL, *_SUBMODULES]

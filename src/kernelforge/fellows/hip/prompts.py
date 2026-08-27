@@ -9,6 +9,7 @@ from kernelforge.fellows.prompt_utils import (
 )
 from kernelforge.loop.scoring import CANONICAL_GATE_PROMPT
 
+
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,

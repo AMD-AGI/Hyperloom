@@ -39,11 +39,7 @@ class TestExtractQuantInfo:
         config = {
             "quantization_config": {
                 "quant_method": "compressed-tensors",
-                "config_groups": {
-                    "group_0": {
-                        "weights": {"num_bits": 8, "group_size": 32}
-                    }
-                }
+                "config_groups": {"group_0": {"weights": {"num_bits": 8, "group_size": 32}}},
             }
         }
         assert _extract_quant_info(config) == ("compressed-tensors", 8, 32)
@@ -52,11 +48,7 @@ class TestExtractQuantInfo:
         config = {
             "quantization_config": {
                 "quant_method": "compressed-tensors",
-                "config_groups": {
-                    "group_0": {
-                        "weights": {"num_bits": None, "group_size": None}
-                    }
-                }
+                "config_groups": {"group_0": {"weights": {"num_bits": None, "group_size": None}}},
             }
         }
         assert _extract_quant_info(config) == ("compressed-tensors", 0, 0)

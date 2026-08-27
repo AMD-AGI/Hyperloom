@@ -91,13 +91,15 @@ def run_generated_tuner(
             log.warning("could not clear %s before the sandbox run: %s", path, exc)
 
     env = dict(os.environ)
-    env.update({
-        "HIP_VISIBLE_DEVICES": gpu_id,
-        "CUDA_VISIBLE_DEVICES": gpu_id,
-        # A generated script has no business reaching the network, and saying so
-        # costs nothing even though it is not enforcement.
-        "no_proxy": "*",
-    })
+    env.update(
+        {
+            "HIP_VISIBLE_DEVICES": gpu_id,
+            "CUDA_VISIBLE_DEVICES": gpu_id,
+            # A generated script has no business reaching the network, and saying so
+            # costs nothing even though it is not enforcement.
+            "no_proxy": "*",
+        }
+    )
     env.update(env_overrides or {})
 
     log_path = work_dir / "sandbox.log"
@@ -120,8 +122,9 @@ def run_generated_tuner(
         timed_out = True
         log.warning("tier3: generated tuner exceeded %ds; keeping what it wrote", timeout_s)
     except OSError as exc:
-        return SandboxResult(False, None, time.perf_counter() - started,
-                             stderr_tail=f"could not start the script: {exc}")
+        return SandboxResult(
+            False, None, time.perf_counter() - started, stderr_tail=f"could not start the script: {exc}"
+        )
 
     elapsed = time.perf_counter() - started
     tail = ""
@@ -138,8 +141,11 @@ def run_generated_tuner(
     if not ok:
         missing = [p.name for p in expect if not p.is_file()]
         log.warning(
-            "tier3: generated tuner produced %d of %d expected files (rc=%s, "
-            "timed_out=%s); missing %s",
-            len(produced), len(expect), rc, timed_out, missing,
+            "tier3: generated tuner produced %d of %d expected files (rc=%s, timed_out=%s); missing %s",
+            len(produced),
+            len(expect),
+            rc,
+            timed_out,
+            missing,
         )
     return SandboxResult(ok, rc, elapsed, timed_out, tail, tail, produced)

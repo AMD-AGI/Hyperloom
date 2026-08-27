@@ -55,6 +55,7 @@ def resolve_aiter_root() -> Path | None:
         return Path(root_env)
     with contextlib.suppress(ImportError):
         import aiter
+
         pkg_dir = Path(aiter.__file__).parent
         # Source installs keep csrc beside the aiter package. Some wheel
         # layouts split metadata and tuner scripts into a sibling aiter_meta

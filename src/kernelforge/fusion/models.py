@@ -55,9 +55,7 @@ class Diagnosis:
             "predicted_e2e_gain": round(self.predicted_e2e_gain, 4),
             "category_bytes_share": {k: round(v, 4) for k, v in self.category_bytes_share.items()},
             "busy_fraction_of_wall": (
-                round(self.busy_fraction_of_wall, 4)
-                if self.busy_fraction_of_wall is not None
-                else None
+                round(self.busy_fraction_of_wall, 4) if self.busy_fraction_of_wall is not None else None
             ),
             "dominant_categories": list(self.dominant_categories),
             "kernels_per_step": round(self.kernels_per_step, 2),

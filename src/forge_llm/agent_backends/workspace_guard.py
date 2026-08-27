@@ -91,9 +91,7 @@ class WorkspaceGuard:
         """Initialize guard state from one run specification."""
         self.spec = spec
         self.allow_dirty_baseline = (
-            dirty_baseline_default
-            if spec.allow_dirty_baseline is None
-            else bool(spec.allow_dirty_baseline)
+            dirty_baseline_default if spec.allow_dirty_baseline is None else bool(spec.allow_dirty_baseline)
         )
         self.root = Path(spec.cwd).resolve()
         self.head = ""
@@ -212,8 +210,7 @@ class WorkspaceGuard:
             policy = self.spec.tool_policy
             if self.spec.writable or policy is None or policy.write or policy.shell:
                 raise WorkspaceSafetyError(
-                    "a read-only resume requires writable=False and a "
-                    "tool policy with write=False and shell=False"
+                    "a read-only resume requires writable=False and a tool policy with write=False and shell=False"
                 )
         elif self._guards_dirty_baseline():
             # Nothing to validate up front: this state was inherited, not produced
@@ -222,9 +219,7 @@ class WorkspaceGuard:
             pass
         elif self.spec.allow_dirty_targets:
             unexpected = [
-                relative
-                for relative in unstaged
-                if (self.root / relative).resolve() not in self.target_paths
+                relative for relative in unstaged if (self.root / relative).resolve() not in self.target_paths
             ]
             violations: list[str] = []
             if staged:
@@ -291,11 +286,7 @@ class WorkspaceGuard:
         patterns = list(self.spec.ignored_untracked_globs)
         if not patterns:
             return untracked
-        return [
-            relative
-            for relative in untracked
-            if not any(fnmatch(relative, pattern) for pattern in patterns)
-        ]
+        return [relative for relative in untracked if not any(fnmatch(relative, pattern) for pattern in patterns)]
 
     def _current_changes(self) -> tuple[list[str], list[str], list[str]]:
         """Return unstaged, staged, and new non-ignored repository paths."""
@@ -438,9 +429,7 @@ class WorkspaceGuard:
         self.baseline_tracked_paths = set(_nul_paths(_git_output(self.root, "ls-files", "-z")))
         self.baseline_dirty_paths = set([*unstaged, *staged, *untracked])
         for relative in self.baseline_dirty_paths:
-            self.baseline_path_snapshots[relative] = self._filesystem_snapshot(
-                self.root / relative
-            )
+            self.baseline_path_snapshots[relative] = self._filesystem_snapshot(self.root / relative)
         self.baseline_index_entries = self._index_entries()
         self.baseline_refs = self._current_refs()
 
@@ -635,16 +624,11 @@ class WorkspaceGuard:
 
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [
-            str(path)
-            for path, snapshot in self.snapshots.items()
-            if self._filesystem_snapshot(path) != snapshot
+            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
         ]
         new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
         if changed_snapshots or new_protected:
-            violations.append(
-                "protected ignored files changed: "
-                + ", ".join([*changed_snapshots, *new_protected])
-            )
+            violations.append("protected ignored files changed: " + ", ".join([*changed_snapshots, *new_protected]))
         return violations
 
     def _read_only_state(self) -> tuple:
@@ -697,8 +681,7 @@ class WorkspaceGuard:
                 remaining = self._read_only_violations()
             except Exception as exc:
                 raise WorkspaceSafetyError(
-                    "the read-only session changed the workspace and automatic "
-                    f"restoration failed: {exc}"
+                    f"the read-only session changed the workspace and automatic restoration failed: {exc}"
                 ) from exc
             if remaining:
                 raise WorkspaceSafetyError(
@@ -706,8 +689,7 @@ class WorkspaceGuard:
                     "restore the pre-run state; remaining changes: " + "; ".join(remaining)
                 )
             raise WorkspaceSafetyError(
-                "the read-only session changed the workspace; restored the "
-                "pre-run Git-visible state"
+                "the read-only session changed the workspace; restored the pre-run Git-visible state"
             )
         if self.allow_dirty_baseline:
             # Resetting to HEAD here would delete the caller's inherited dirty
@@ -723,8 +705,7 @@ class WorkspaceGuard:
                 # expired clock as a deterministic safety stop and abandoned work
                 # a retry could have finished.
                 raise WorkspaceSafetyError(
-                    "the session ended and the inherited workspace state "
-                    f"could not be restored: {exc}",
+                    f"the session ended and the inherited workspace state could not be restored: {exc}",
                     rejection=False,
                 ) from exc
             return
@@ -819,9 +800,7 @@ class WorkspaceGuard:
         protected_untracked = [path for path in untracked if self._is_protected(path)]
         current_protected = self._ignored_protected_paths()
         changed_snapshots = [
-            str(path)
-            for path, snapshot in self.snapshots.items()
-            if self._filesystem_snapshot(path) != snapshot
+            str(path) for path, snapshot in self.snapshots.items() if self._filesystem_snapshot(path) != snapshot
         ]
         new_protected = [str(path) for path in current_protected - self.baseline_protected_ignored]
 

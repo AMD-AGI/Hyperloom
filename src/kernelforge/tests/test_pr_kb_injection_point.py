@@ -43,8 +43,11 @@ def build_agent_fn(monkeypatch):
         backend.name = "claude"
         backend.runtime = runtime
         backend.capabilities = AgentCapabilities(
-            writable=True, resumable=True, stop_hooks=True,
-            native_subagents=True, mcp=mcp,
+            writable=True,
+            resumable=True,
+            stop_hooks=True,
+            native_subagents=True,
+            mcp=mcp,
         )
         original = agent_mod.create_registered_backend
         agent_mod.create_registered_backend = lambda *a, **k: backend
@@ -133,8 +136,11 @@ def system_prompt_for(monkeypatch):
         backend.name = "claude"
         backend.runtime = runtime
         backend.capabilities = AgentCapabilities(
-            writable=True, resumable=True, stop_hooks=True,
-            native_subagents=True, mcp=True,
+            writable=True,
+            resumable=True,
+            stop_hooks=True,
+            native_subagents=True,
+            mcp=True,
         )
         original = agent_mod.create_registered_backend
         agent_mod.create_registered_backend = lambda *a, **k: backend
@@ -177,27 +183,30 @@ class _HostileClient:
         outcomes = []
         for path, params in requests:
             if "/prs/" in path:
-                outcomes.append(FetchOutcome(path, payload={
-                    "summary": {
-                        "title": HOSTILE_TITLE,
-                        "is_merged": True,
-                        "pr_updated_at": "2026-08-01T00:00:00Z",
-                    },
-                    "files": [{"path": "a.py"}],
-                    "distill": {
-                        "status": "ok",
-                        "worth_trying": 0.9,
-                        "components": ["rmsnorm", "```fence```"],
-                        "summary": HOSTILE_SUMMARY,
-                        "risk_notes": HOSTILE_RISK,
-                        "head_sha": "sha1",
-                        "schema_version": "1",
-                    },
-                }))
-            else:
                 outcomes.append(
-                    FetchOutcome(path, payload={"items": [{"number": 1}]})
+                    FetchOutcome(
+                        path,
+                        payload={
+                            "summary": {
+                                "title": HOSTILE_TITLE,
+                                "is_merged": True,
+                                "pr_updated_at": "2026-08-01T00:00:00Z",
+                            },
+                            "files": [{"path": "a.py"}],
+                            "distill": {
+                                "status": "ok",
+                                "worth_trying": 0.9,
+                                "components": ["rmsnorm", "```fence```"],
+                                "summary": HOSTILE_SUMMARY,
+                                "risk_notes": HOSTILE_RISK,
+                                "head_sha": "sha1",
+                                "schema_version": "1",
+                            },
+                        },
+                    )
                 )
+            else:
+                outcomes.append(FetchOutcome(path, payload={"items": [{"number": 1}]}))
         return outcomes
 
     def list_recent_prs(self, repo, *, state="merged", limit=5, timeout_sec=None):
@@ -218,9 +227,7 @@ def test_empty_context_adds_no_prior_knowledge_section(system_prompt_for):
 
 
 def test_rendered_block_reaches_the_prompt_with_its_disclaimer(system_prompt_for):
-    block = render_reference_set([
-        PRReference(repo="ROCm/aiter", number=1, title="t", worth_trying=0.5)
-    ])
+    block = render_reference_set([PRReference(repo="ROCm/aiter", number=1, title="t", worth_trying=0.5)])
 
     prompt = system_prompt_for(block)
 

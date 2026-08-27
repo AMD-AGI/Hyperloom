@@ -100,9 +100,11 @@ class TestClassifiers:
 # ── validate_recipe orchestration ────────────────────────────────────────────
 class TestValidateRecipe:
     def test_compile_failure_fails_loudly_with_cuda_lesson(self):
-        runner = _FakeRunner(compile_out=CompileOutcome(
-            ok=False, is_triton=False,
-            error="fatal error: cuda_bf16.h not found (fused_qk_norm_rope)"))
+        runner = _FakeRunner(
+            compile_out=CompileOutcome(
+                ok=False, is_triton=False, error="fatal error: cuda_bf16.h not found (fused_qk_norm_rope)"
+            )
+        )
         vr = validate_recipe(_recipe(), runner)
         assert vr.correctness_passed is False
         assert vr.kept is False
@@ -129,7 +131,8 @@ class TestValidateRecipe:
     def test_kept_when_parity_and_speedup_pass(self):
         runner = _FakeRunner(
             parity=[ParitySample(snr_db=42.0), ParitySample(snr_db=38.0)],
-            bench=BenchOutcome(eager_us=120.0, fused_us=90.0))
+            bench=BenchOutcome(eager_us=120.0, fused_us=90.0),
+        )
         vr = validate_recipe(_recipe(), runner, target_speedup=1.03)
         assert vr.correctness_passed is True
         assert vr.kept is True
@@ -144,10 +147,9 @@ class TestValidateRecipe:
         assert vr.kernel_speedup is not None
 
     def test_microbench_skipped_for_mamba_hybrid(self):
-        runner = _FakeRunner(bench=BenchOutcome(
-            skipped=True, skip_reason="mamba backend cannot init on ROCm"))
+        runner = _FakeRunner(bench=BenchOutcome(skipped=True, skip_reason="mamba backend cannot init on ROCm"))
         vr = validate_recipe(_recipe(), runner)
-        assert vr.correctness_passed is True   # parity still counts
+        assert vr.correctness_passed is True  # parity still counts
         assert vr.kept is False
         assert vr.kernel_speedup is None
         assert "SKIPPED" in vr.note and "Mamba" in vr.note
@@ -180,9 +182,14 @@ class TestHarnessKernelRunner:
     def test_parses_harness_json(self, tmp_path):
         harness = tmp_path / "kernel_harness.py"
         payload = {
-            "compiled": True, "is_triton": True, "error": "",
+            "compiled": True,
+            "is_triton": True,
+            "error": "",
             "parity": [{"snr_db": 41.0, "max_abs_err": 1e-3, "label": "T16"}],
-            "eager_us": 100.0, "fused_us": 70.0, "skipped": False, "skip_reason": "",
+            "eager_us": 100.0,
+            "fused_us": 70.0,
+            "skipped": False,
+            "skip_reason": "",
         }
         # Emit the JSON payload verbatim on stdout (avoid embedding JSON true/false
         # literals in Python source, which are not valid Python identifiers).

@@ -44,9 +44,9 @@ _SUPERVISOR_ROLE = (
 # reasoning budget and generous exploration turns. These are ceilings — a review
 # that needs less finishes early, regardless of whether the primary or fallback
 # provider model serves the request.
-SUPERVISOR_THINKING_BUDGET = 64000   # deep reasoning budget for the trajectory review
-SUPERVISOR_MAX_TURNS = 40            # room to Read many prior kernels/profiles/diffs
-SUPERVISOR_DIRECTIONS = 3            # how many new directions to propose
+SUPERVISOR_THINKING_BUDGET = 64000  # deep reasoning budget for the trajectory review
+SUPERVISOR_MAX_TURNS = 40  # room to Read many prior kernels/profiles/diffs
+SUPERVISOR_DIRECTIONS = 3  # how many new directions to propose
 
 
 class SupervisorBackendFailure(RuntimeError):
@@ -55,20 +55,13 @@ class SupervisorBackendFailure(RuntimeError):
 
 def latest_supervisor_ruling_path(workspace: str) -> Path:
     """Canonical path containing the latest non-empty Supervisor ruling."""
-    return (
-        Path(workspace)
-        / "forge_experiments"
-        / "supervisor"
-        / "latest.md"
-    )
+    return Path(workspace) / "forge_experiments" / "supervisor" / "latest.md"
 
 
 def load_latest_supervisor_ruling(workspace: str) -> str:
     """Load the latest free-form ruling, returning empty text when unavailable."""
     try:
-        return latest_supervisor_ruling_path(workspace).read_text(
-            errors="replace"
-        )
+        return latest_supervisor_ruling_path(workspace).read_text(errors="replace")
     except OSError:
         return ""
 
@@ -83,11 +76,9 @@ def clear_latest_supervisor_ruling(workspace: str) -> bool:
     return True
 
 
-
-
-def _persist_interaction(workspace: str, iteration: int, reason: str,
-                         system: str, user: str, reply: str,
-                         *, backend: str, model: str) -> None:
+def _persist_interaction(
+    workspace: str, iteration: int, reason: str, system: str, user: str, reply: str, *, backend: str, model: str
+) -> None:
     """Save one supervisor intervention (prompt + reply) for later inspection.
 
     Written to ``<workspace>/forge_experiments/supervisor/intervention_iter_NNN.md``.
@@ -100,8 +91,11 @@ def _persist_interaction(workspace: str, iteration: int, reason: str,
         d = Path(workspace) / "forge_experiments" / "supervisor"
         d.mkdir(parents=True, exist_ok=True)
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
-        reply_txt = reply if reply and reply.strip() else \
-            "(empty — the supervisor returned no directions, e.g. a backend failure)"
+        reply_txt = (
+            reply
+            if reply and reply.strip()
+            else "(empty — the supervisor returned no directions, e.g. a backend failure)"
+        )
         body = (
             f"# Supervisor intervention — iteration {iteration}\n\n"
             f"- timestamp: {ts}\n"
@@ -121,11 +115,9 @@ def _persist_interaction(workspace: str, iteration: int, reason: str,
             )
         else:
             clear_latest_supervisor_ruling(workspace)
-        print(f"  [supervisor] saved interaction -> "
-              f"forge_experiments/supervisor/{path.name}", flush=True)
+        print(f"  [supervisor] saved interaction -> forge_experiments/supervisor/{path.name}", flush=True)
     except Exception as e:
-        log.debug("supervisor: failed to persist interaction for iter %s: %s",
-                  iteration, e)
+        log.debug("supervisor: failed to persist interaction for iter %s: %s", iteration, e)
 
 
 def persist_supervisor_ruling(
@@ -144,12 +136,7 @@ def persist_supervisor_ruling(
     """
     if not reply or not reply.strip():
         return None, None
-    interaction = (
-        Path(workspace)
-        / "forge_experiments"
-        / "supervisor"
-        / f"intervention_iter_{iteration:03d}.md"
-    )
+    interaction = Path(workspace) / "forge_experiments" / "supervisor" / f"intervention_iter_{iteration:03d}.md"
     latest = latest_supervisor_ruling_path(workspace)
     persisted_interaction: Path | None = None
     persisted_latest: Path | None = None
@@ -175,9 +162,9 @@ def persist_supervisor_ruling(
     return persisted_interaction, persisted_latest
 
 
-def _build_task_prompt(program_md: str, digest: str, reason: str,
-                       gpu_target: str, directions: int,
-                       evidence_context: str = "") -> str:
+def _build_task_prompt(
+    program_md: str, digest: str, reason: str, gpu_target: str, directions: int, evidence_context: str = ""
+) -> str:
     """Build the bounded evidence prompt shown to the supervisor."""
     source_note = (
         "You MAY read the exact analysis, profile, orchestration, lesson, and "
@@ -256,16 +243,12 @@ def make_supervisor_fn(
             fallback_provider=config.agent_fallback_provider,
             options={},
         )
-    supervisor_model = str(
-        runtime.options.get("supervisor_model") or runtime.model
-    )
+    supervisor_model = str(runtime.options.get("supervisor_model") or runtime.model)
     if supervisor_model != runtime.model:
         from dataclasses import replace
 
         runtime = replace(runtime, model=supervisor_model)
-    timeout_sec = int(
-        runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec
-    )
+    timeout_sec = int(runtime.options.get("supervisor_timeout_sec") or runtime.timeout_sec)
     selected_backend = None
 
     async def supervisor_fn(
@@ -316,9 +299,7 @@ def make_supervisor_fn(
                                 write=False,
                                 shell=False,
                                 max_turns=SUPERVISOR_MAX_TURNS,
-                                thinking_budget_tokens=(
-                                    SUPERVISOR_THINKING_BUDGET
-                                ),
+                                thinking_budget_tokens=(SUPERVISOR_THINKING_BUDGET),
                             ),
                             protected_globs=["*"],
                         ),
@@ -337,28 +318,15 @@ def make_supervisor_fn(
 
             reply = await run_once(task)
         except Exception as exc:  # noqa: BLE001 - supervisor is best-effort
-            backend_name = (
-                selected_backend.name
-                if selected_backend is not None
-                else runtime.provider
-            )
+            backend_name = selected_backend.name if selected_backend is not None else runtime.provider
             reply = ""
             print(
-                f"  [supervisor] {backend_name} call failed "
-                f"({exc}) — skipping",
+                f"  [supervisor] {backend_name} call failed ({exc}) — skipping",
                 file=sys.stderr,
                 flush=True,
             )
-        backend_name = (
-            selected_backend.name
-            if selected_backend is not None
-            else runtime.provider
-        )
-        backend_model = (
-            selected_backend.runtime.model
-            if selected_backend is not None
-            else runtime.model
-        )
+        backend_name = selected_backend.name if selected_backend is not None else runtime.provider
+        backend_model = selected_backend.runtime.model if selected_backend is not None else runtime.model
         _persist_interaction(
             workspace,
             iteration,

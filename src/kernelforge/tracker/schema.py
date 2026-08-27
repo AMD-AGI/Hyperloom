@@ -49,14 +49,13 @@ class Iteration:
     spill_bytes: int = 0
 
     # Decision made after this iteration
-    decision: str = ""                        # "KEEP" / "REVERT" / ""
+    decision: str = ""  # "KEEP" / "REVERT" / ""
     notes: str = ""
 
     def to_dict(self) -> dict:
         # Keep existing semantics: skip falsy/empty fields for compactness, but
         # preserve the new ones explicitly when populated.
-        return {k: v for k, v in self.__dict__.items()
-                if v is not None and v != "" and v != {} and v != []}
+        return {k: v for k, v in self.__dict__.items() if v is not None and v != "" and v != {} and v != []}
 
     @classmethod
     def from_dict(cls, d: dict) -> Iteration:
@@ -68,10 +67,7 @@ class Iteration:
         wall = f"{self.wall_ms:.3f}" if self.wall_ms is not None else "?"
         ratio = f"{self.wait_mfma_ratio:.1f}" if self.wait_mfma_ratio is not None else "?"
         vgpr_s = str(self.vgpr) if self.vgpr is not None else "?"
-        return (
-            f"| {self.iteration_id:4d} | {snr:>8s} | {wall:>9s} | "
-            f"{ratio:>8s} | {vgpr_s:>5s} | {self.decision} |"
-        )
+        return f"| {self.iteration_id:4d} | {snr:>8s} | {wall:>9s} | {ratio:>8s} | {vgpr_s:>5s} | {self.decision} |"
 
 
 @dataclass(frozen=True)
@@ -90,8 +86,8 @@ class Experiment:
 
     experiment_id: str
     task_id: str = ""
-    backend: str = ""          # ck, flydsl, triton, aiter
-    fellow: str = ""           # which backend fellow prompt drove this
+    backend: str = ""  # ck, flydsl, triton, aiter
+    fellow: str = ""  # which backend fellow prompt drove this
     description: str = ""
     target_wall_ms: float | None = None
     baseline_wall_ms: float | None = None
@@ -168,10 +164,7 @@ class Experiment:
         baseline = self.effective_baseline_ms()
         speedup = (
             baseline / best.wall_ms
-            if best is not None
-            and baseline is not None
-            and best.wall_ms is not None
-            and best.wall_ms > 0
+            if best is not None and baseline is not None and best.wall_ms is not None and best.wall_ms > 0
             else None
         )
         return KernelScoringView(
@@ -219,11 +212,7 @@ class Experiment:
     ) -> bool:
         """Check the wall target for the authoritative selected iteration."""
         view = scoring or self.scoring_view()
-        if (
-            not view.authoritative
-            or view.best is None
-            or self.target_wall_ms is None
-        ):
+        if not view.authoritative or view.best is None or self.target_wall_ms is None:
             return False
         return view.best.wall_ms <= self.target_wall_ms
 
@@ -261,7 +250,7 @@ class Experiment:
     def summary_table(self) -> str:
         """Markdown table of all iterations."""
         header = "| Iter |   SNR dB |  wall_ms |  variance | vgpr | Decision |"
-        sep    = "|------|----------|----------|-----------|------|----------|"
+        sep = "|------|----------|----------|-----------|------|----------|"
         rows = [it.summary_row() for it in self.iterations]
         lines = [header, sep] + rows
 
@@ -269,24 +258,13 @@ class Experiment:
         scoring = self.scoring_view()
         best_k = scoring.best
         if best_k:
-            prefix = (
-                "Best kernel iter"
-                if scoring.authoritative
-                else "Legacy raw best (display only)"
-            )
-            lines.append(
-                f"\n{prefix}: {best_k.iteration_id} @ {best_k.wall_ms:.3f} ms"
-            )
+            prefix = "Best kernel iter" if scoring.authoritative else "Legacy raw best (display only)"
+            lines.append(f"\n{prefix}: {best_k.iteration_id} @ {best_k.wall_ms:.3f} ms")
         if scoring.speedup is not None:
-            lines.append(
-                f"{scoring.speedup_label}: {scoring.speedup:.3f}x"
-            )
+            lines.append(f"{scoring.speedup_label}: {scoring.speedup:.3f}x")
         if scoring.authoritative and self.target_wall_ms:
             gate_met = self.is_gate_met(scoring)
-            lines.append(
-                f"Gate ({self.target_wall_ms} ms): "
-                f"{'MET' if gate_met else 'NOT MET'}"
-            )
+            lines.append(f"Gate ({self.target_wall_ms} ms): {'MET' if gate_met else 'NOT MET'}")
         if self.is_plateaued():
             lines.append("Status: PLATEAUED (last 3 kernel iters <2% improvement)")
 

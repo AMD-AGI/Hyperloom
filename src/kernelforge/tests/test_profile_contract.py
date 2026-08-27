@@ -16,11 +16,7 @@ def test_profile_contract_exposes_only_profile_run_flag():
 
 def test_bench_case_times_remain_available_for_scoring(tmp_path):
     driver = tmp_path / "driver.py"
-    driver.write_text(
-        "print('mean_ms: 5.0')\n"
-        "print('case_ms: small 2.0')\n"
-        "print('case_ms: dominant 8.0')\n"
-    )
+    driver.write_text("print('mean_ms: 5.0')\nprint('case_ms: small 2.0')\nprint('case_ms: dominant 8.0')\n")
 
     result = asyncio.run(bench_wallclock(driver_script=str(driver)))
 

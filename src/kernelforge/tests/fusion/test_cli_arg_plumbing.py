@@ -29,17 +29,14 @@ def _functions_missing_binding(tree: ast.Module, name: str) -> list[str]:
     missing = []
     for fn in functions:
         reads = any(
-            isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
-            for node in ast.walk(fn)
+            isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load) for node in ast.walk(fn)
         )
         if not reads:
             continue
         enclosing = [fn] + [
             outer
             for outer in functions
-            if outer is not fn
-            and outer.lineno < fn.lineno
-            and (outer.end_lineno or 0) >= (fn.end_lineno or 0)
+            if outer is not fn and outer.lineno < fn.lineno and (outer.end_lineno or 0) >= (fn.end_lineno or 0)
         ]
         bound = False
         for scope in enclosing:
@@ -96,9 +93,7 @@ def test_pristine_snapshot_is_threaded_through_the_autoloop() -> None:
         return [
             {keyword.arg for keyword in node.keywords if keyword.arg}
             for node in ast.walk(tree)
-            if isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == callee
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == callee
         ]
 
     assert any("pristine_dir" in names for names in _call_keywords("_run_fusion_autoloop"))

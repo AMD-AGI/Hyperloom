@@ -59,24 +59,28 @@ _FLAG_RE = re.compile(r"(?<![\w-])(--?[A-Za-z][\w-]*)")
 #                                  never evaluates split-K>0 at all.
 #   --mxfp4-flydsl               : the only way into the FlyDSL dtype path; the
 #                                  CK path rejects b16 x fp4x2 outright.
-REQUIRED_FLAGS = frozenset({
-    "--libtype",
-    "--with-hipblaslt",
-    "--splitK",
-    "--mxfp4-flydsl",
-})
+REQUIRED_FLAGS = frozenset(
+    {
+        "--libtype",
+        "--with-hipblaslt",
+        "--splitK",
+        "--mxfp4-flydsl",
+    }
+)
 
 # Safe to drop: these change how long the run takes or how much it prints, not
 # what it searches.
-DROPPABLE_FLAGS = frozenset({
-    "-v",
-    "--verbose",
-    "--iters",
-    "--warmup",
-    "--mp",
-    "--timeout",
-    "--min_improvement_pct",
-})
+DROPPABLE_FLAGS = frozenset(
+    {
+        "-v",
+        "--verbose",
+        "--iters",
+        "--warmup",
+        "--mp",
+        "--timeout",
+        "--min_improvement_pct",
+    }
+)
 
 _PROBE_TIMEOUT_S = 120
 
@@ -285,7 +289,8 @@ def filter_args(args: list[str], surface: ScriptSurface) -> ArgFilter:
     if dropped:
         log.warning(
             "%s does not accept %s; dropped (affects speed/verbosity only)",
-            surface.script, ", ".join(dropped),
+            surface.script,
+            ", ".join(dropped),
         )
     return ArgFilter(kept, rejected_required, dropped)
 

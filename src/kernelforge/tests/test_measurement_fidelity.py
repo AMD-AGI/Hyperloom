@@ -129,9 +129,7 @@ def test_the_published_pristine_score_is_monotonic_across_keeps():
         scores,
         best_mean_case_speedup=current_best,
     )
-    assert keep_score(scores) >= required_keep_speedup(
-        current_best, scores
-    )
+    assert keep_score(scores) >= required_keep_speedup(current_best, scores)
 
 
 def _gate(**kwargs) -> InSessionGate:
@@ -201,10 +199,7 @@ def _load_driver_module():
     import types
     import importlib.util
 
-    path = (
-        pathlib.Path(__file__).parent.parent
-        / "examples/aiter-allreduce-forge-loop/driver.py"
-    )
+    path = pathlib.Path(__file__).parent.parent / "examples/aiter-allreduce-forge-loop/driver.py"
     # The driver imports torch at module scope purely for dtype/element_size; the
     # suite definitions under test need none of it.
     stub = types.ModuleType("torch")
@@ -284,20 +279,14 @@ def test_driver_aggregates_repeats_by_median():
     The driver needs torch+torchrun to execute, so this asserts on the source
     of the aggregation step rather than running it.
     """
-    src = pathlib.Path(
-        __file__
-    ).parent.parent / "examples/aiter-allreduce-forge-loop/driver.py"
+    src = pathlib.Path(__file__).parent.parent / "examples/aiter-allreduce-forge-loop/driver.py"
     text = src.read_text()
     assert "statistics.median(" in text
     assert "import statistics" in text
     assert "min(r[case.case_id] for r in rounds)" not in text
 
     tree = ast.parse(text)
-    functions = {
-        node.name: node
-        for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-    }
+    functions = {node.name: node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
     bench_case = functions["bench_case"]
     sample_loop = next(
         node
@@ -311,9 +300,7 @@ def test_driver_aggregates_repeats_by_median():
         and node.iter.args[0].value == 5
     )
     assert any(
-        isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "_reduce_max"
+        isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_reduce_max"
         for node in ast.walk(sample_loop)
     ), "each timing sample must be reduced across ranks"
 
@@ -323,9 +310,7 @@ def test_driver_aggregates_repeats_by_median():
         for node in ast.walk(worker_main)
         if isinstance(node, ast.Assign)
         and any(
-            isinstance(target, ast.Subscript)
-            and isinstance(target.value, ast.Name)
-            and target.value.id == "this_round"
+            isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == "this_round"
             for target in node.targets
         )
     )
@@ -354,7 +339,7 @@ def test_cli_can_actually_call_kb_warmstart():
 
     accepted = set(inspect.signature(kb_warmstart).parameters)
     src = inspect.getsource(cli.forge_loop.callback)
-    call = src[src.index("kb_warmstart(") + len("kb_warmstart("):]
+    call = src[src.index("kb_warmstart(") + len("kb_warmstart(") :]
     call = call[: call.index(")\n")]
     passed = set(re.findall(r"(?:^|[\s,(])([a-z_][a-z0-9_]*)\s*=", call))
     assert passed, "could not read the CLI call site"

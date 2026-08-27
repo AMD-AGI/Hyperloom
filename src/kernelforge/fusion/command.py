@@ -96,13 +96,8 @@ _EXTERNAL_SANDBOX_CONFIRMATION = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 
 def _credential_shape() -> tuple[bool, bool]:
     """Return whether OpenAI-side and Anthropic-side credentials are configured."""
-    openai = any(
-        os.environ.get(name, "").strip()
-        for name in ("OPENAI_API_KEY", "SAFE_API_KEY", "FORGE_API_KEY")
-    )
-    anthropic = any(
-        os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
-    ) or any(
+    openai = any(os.environ.get(name, "").strip() for name in ("OPENAI_API_KEY", "SAFE_API_KEY", "FORGE_API_KEY"))
+    anthropic = any(os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) or any(
         os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
         for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
     )
@@ -137,11 +132,7 @@ def _resolve_agent_choice(
 
     registration = get_agent_provider(provider)
     provider_env = "CODEX_MODEL" if provider == "codex" else "CLAUDE_MODEL"
-    model = (
-        str(llm_model or "").strip()
-        or os.environ.get(provider_env, "").strip()
-        or registration.default_model
-    )
+    model = str(llm_model or "").strip() or os.environ.get(provider_env, "").strip() or registration.default_model
     return provider, model
 
 
@@ -157,8 +148,7 @@ def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
         raise click.UsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
     if mode == "bypass" and os.environ.get(_EXTERNAL_SANDBOX_CONFIRMATION, "").strip() != "1":
         raise click.UsageError(
-            "--agent-sandbox-mode bypass requires "
-            f"{_EXTERNAL_SANDBOX_CONFIRMATION}=1 to confirm an external sandbox"
+            f"--agent-sandbox-mode bypass requires {_EXTERNAL_SANDBOX_CONFIRMATION}=1 to confirm an external sandbox"
         )
     return mode
 
@@ -179,8 +169,7 @@ def _agent_timeout_sec() -> int:
         value = int(raw)
     except ValueError as exc:
         raise click.UsageError(
-            "FORGE_FUSION_AGENT_TIMEOUT_SEC must be an integer number of seconds, "
-            f"got {raw!r}"
+            f"FORGE_FUSION_AGENT_TIMEOUT_SEC must be an integer number of seconds, got {raw!r}"
         ) from exc
     if value <= 0:
         raise click.UsageError("FORGE_FUSION_AGENT_TIMEOUT_SEC must be greater than zero")
@@ -298,9 +287,9 @@ def _finish_author_harness(
             if not target.is_file() or not final.is_file():
                 ok = False
                 reason = "inherited harness disappeared during authoring"
-            elif target.read_bytes() != final.read_bytes() or stat.S_IMODE(
-                target.stat().st_mode
-            ) != stat.S_IMODE(final.stat().st_mode):
+            elif target.read_bytes() != final.read_bytes() or stat.S_IMODE(target.stat().st_mode) != stat.S_IMODE(
+                final.stat().st_mode
+            ):
                 ok = False
                 reason = "author modified the inherited harness"
         elif author_ok and target.is_file():
@@ -369,9 +358,7 @@ def _author_baseline_harness(
     """
     Path(harness_path).unlink(missing_ok=True)
     staging = _author_harness_target(repo_root, out)
-    ready, reason, _deterministic = _prepare_author_harness(
-        staging, harness_path, inherited=False
-    )
+    ready, reason, _deterministic = _prepare_author_harness(staging, harness_path, inherited=False)
     if not ready:
         return False, reason
     target = staging or harness_path
@@ -394,9 +381,7 @@ def _author_baseline_harness(
         target_files=[target],
         new_module_dirs=[],
     )
-    published, error = _finish_author_harness(
-        staging, harness_path, inherited=False, author_ok=rc == 0
-    )
+    published, error = _finish_author_harness(staging, harness_path, inherited=False, author_ok=rc == 0)
     if rc != 0:
         return False, f"harness author exited {rc}"
     return published, error
@@ -456,9 +441,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     type=click.Path(),
     help="Decode kineto trace (*.trace.json[.gz]), captured with CUDA graphs disabled.",
 )
-@click.option(
-    "--model-path", default="", help="Path to the model directory (must contain config.json)."
-)
+@click.option("--model-path", default="", help="Path to the model directory (must contain config.json).")
 @click.option(
     "--framework",
     default=None,
@@ -479,11 +462,17 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     help="Diagnostic: repeat one kernel-validation harness and report its variance.",
 )
 @click.option(
-    "--harness-noise-repeat", default=20, type=int, hidden=True,
+    "--harness-noise-repeat",
+    default=20,
+    type=int,
+    hidden=True,
     help="Diagnostic: how many times to repeat the harness.",
 )
 @click.option(
-    "--harness-noise-env", "harness_noise_env", multiple=True, hidden=True,
+    "--harness-noise-env",
+    "harness_noise_env",
+    multiple=True,
+    hidden=True,
     help="Diagnostic: env flag to set for each harness run (repeatable).",
 )
 @click.option(
@@ -491,9 +480,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     default="",
     help="Explicit framework source root (else auto-detect the installed package).",
 )
-@click.option(
-    "--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes."
-)
+@click.option("--decode-batch", default=16, type=int, help="Representative decode batch size (T) for shapes.")
 @click.option(
     "--decode-steps",
     default=0,
@@ -512,18 +499,14 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     is_flag=True,
     help="Diagnose + locate only; emit manifest with recipe skeleton (no author/validate).",
 )
-@click.option(
-    "--author/--no-author", default=True, help="Author the fused kernel via the LLM (non-dry-run)."
-)
-@click.option(
-    "--validate/--no-validate", default=True, help="Run the A/B decode validation (non-dry-run)."
-)
+@click.option("--author/--no-author", default=True, help="Author the fused kernel via the LLM (non-dry-run).")
+@click.option("--validate/--no-validate", default=True, help="Run the A/B decode validation (non-dry-run).")
 @click.option(
     "--fuse-all-confirmed",
     is_flag=True,
     help="Author ALL source-confirmed patterns together (not just the top), and "
-         "A/B all their flags. A compile-pass candidate cannot be authored with "
-         "them, so it is claimed alone and the rest wait for a later round.",
+    "A/B all their flags. A compile-pass candidate cannot be authored with "
+    "them, so it is claimed alone and the rest wait for a later round.",
 )
 @click.option("--gpu", default="0", help="HIP device id for author + A/B.")
 @click.option(
@@ -570,8 +553,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     "--gpu-target",
     "gpu_arch",
     default="",
-    help="Canonical GPU arch the author writes for (e.g. gfx950); "
-    "auto-detected via rocminfo when omitted.",
+    help="Canonical GPU arch the author writes for (e.g. gfx950); auto-detected via rocminfo when omitted.",
 )
 @click.option(
     "--tp",
@@ -628,21 +610,28 @@ def run(
 ) -> None:
     """Diagnose a decode trace and locate a fusion opportunity for the model."""
     if harness_noise_path:
-        click.echo(json.dumps(measure_harness_noise(
-            harness=harness_noise_path,
-            repeat=harness_noise_repeat,
-            gpu=gpu,
-            env_flags=harness_noise_env,
-        ), indent=2))
+        click.echo(
+            json.dumps(
+                measure_harness_noise(
+                    harness=harness_noise_path,
+                    repeat=harness_noise_repeat,
+                    gpu=gpu,
+                    env_flags=harness_noise_env,
+                ),
+                indent=2,
+            )
+        )
         return
 
     missing = [
-        name for name, value in (
+        name
+        for name, value in (
             ("--trace", trace_path),
             ("--model-path", model_path),
             ("--framework", framework),
             ("--output-dir", output_dir),
-        ) if not value
+        )
+        if not value
     ]
     if missing:
         raise click.UsageError(f"Missing option(s): {', '.join(missing)}.")
@@ -667,9 +656,7 @@ def run(
         except click.ClickException:
             raise
         except Exception as exc:
-            raise click.ClickException(
-                f"agent backend configuration failed: {type(exc).__name__}: {exc}"
-            ) from exc
+            raise click.ClickException(f"agent backend configuration failed: {type(exc).__name__}: {exc}") from exc
         llm_model = selected_agent.runtime.model
         log.info(
             "selected Agent backend=%s model=%s",
@@ -780,7 +767,8 @@ def run(
         fuse_all_confirmed = False
         log.info(
             "claiming compile pass %s first; deferring %s",
-            top_recipe.pattern_id, ", ".join(r.pattern_id for r in deferred),
+            top_recipe.pattern_id,
+            ", ".join(r.pattern_id for r in deferred),
         )
 
     if not dry_run and top_recipe is not None:
@@ -940,9 +928,7 @@ def run(
         # must NOT leave an exported patch behind. The compile-pass branch already
         # exported and restored inside its own transaction.
         if repo_root and exported_ok and compile_pass_outcome is None:
-            artifacts = export_artifacts(
-                repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir
-            )
+            artifacts = export_artifacts(repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir)
 
         # The exported patch is taken back out of the framework. Gated on the
         # patch rather than on how the run reached it, so neither branch above
@@ -956,12 +942,7 @@ def run(
         # A compile_pass claim runs inside its own restore transaction and authors
         # no modules, so this rollback has nothing to do there and would only file
         # a bogus ".failed" attempt.
-        if (
-            repo_root
-            and pristine_dir
-            and compile_pass_outcome is None
-            and _needs_discard(exported_ok, artifacts)
-        ):
+        if repo_root and pristine_dir and compile_pass_outcome is None and _needs_discard(exported_ok, artifacts):
             # Nothing usable came out, so leave the framework exactly as found
             # rather than carrying unvalidated code into whatever runs next.
             _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
@@ -1019,9 +1000,7 @@ def run(
     if (
         loop_result is not None
         and not loop_result.kept
-        and loop_result.termination_reason in (
-            "no_git_workspace", "harness_author_failed", "serving_unconfirmed"
-        )
+        and loop_result.termination_reason in ("no_git_workspace", "harness_author_failed", "serving_unconfirmed")
     ):
         # Infrastructure failure: the pipeline never had a chance to fuse anything.
         # Distinct from 0 (no_opportunity / exhausted) and EXIT_LLM_UNAVAILABLE.
@@ -1118,11 +1097,13 @@ def _run_fusion_autoloop(
         )
         if shadow is None:
             log.error(
-                "no git workspace over %s: the forge-loop cannot keep or revert "
-                "a candidate there", repo_root,
+                "no git workspace over %s: the forge-loop cannot keep or revert a candidate there",
+                repo_root,
             )
             return LoopResult(
-                kept=False, best=None, best_recipe=None,
+                kept=False,
+                best=None,
+                best_recipe=None,
                 termination_reason="no_git_workspace",
             )
 
@@ -1150,8 +1131,13 @@ def _run_fusion_autoloop(
         # because run_fusion_loop returns the instant a campaign KEEPs.
         if not shadow.reset_to_base():
             return ValidationResult(
-                correctness_passed=False, max_abs_err=None, rtol=None,
-                kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
+                correctness_passed=False,
+                max_abs_err=None,
+                rtol=None,
+                kernel_speedup=None,
+                eager_us=None,
+                fused_us=None,
+                kept=False,
                 note="CAMPAIGN FAILED: could not restore the unfused baseline",
             )
         # After the reset, so the loop's anchor bench measures the unfused tree.
@@ -1220,7 +1206,9 @@ def _run_fusion_autoloop(
     except FusionAbort as exc:
         log.error("fusion run aborted (infrastructure failure): %s", exc)
         result = LoopResult(
-            kept=False, best=None, best_recipe=None,
+            kept=False,
+            best=None,
+            best_recipe=None,
             termination_reason="harness_author_failed",
         )
     finally:
@@ -1280,7 +1268,9 @@ def apply_serving_gate(
     # checkpoint is written only once the patch is on disk: it is the completion
     # marker Hyperloom salvages on, so it must never point at a missing patch.
     exported = _export_salvage_patch(
-        out, getattr(recipe, "source_file", ""), repo_root=repo_root,
+        out,
+        getattr(recipe, "source_file", ""),
+        repo_root=repo_root,
         pristine_dir=pristine_dir,
     )
     if exported:
@@ -1334,7 +1324,9 @@ def apply_serving_gate(
     result.termination_reason = "serving_unconfirmed"
     log.warning(
         "serving smoke unconfirmed for %s at stage %s (keeping micro KEEP): %s",
-        recipe.pattern_id, verdict.stage, reason,
+        recipe.pattern_id,
+        verdict.stage,
+        reason,
     )
 
 
@@ -1362,7 +1354,11 @@ def _serving_check_enabled() -> bool:
 
 
 def _export_salvage_patch(
-    out: Path, source_file: str, *, repo_root: str = "", pristine_dir: str = "",
+    out: Path,
+    source_file: str,
+    *,
+    repo_root: str = "",
+    pristine_dir: str = "",
 ) -> bool:
     """Write ``fusion.patch`` for the edits made so far; report whether one exists.
 
@@ -1378,7 +1374,10 @@ def _export_salvage_patch(
     _clear_kernel_keep_checkpoint(out)
     try:
         artifacts = export_artifacts(
-            repo_root, source_file, out, pristine_dir=pristine_dir or None,
+            repo_root,
+            source_file,
+            out,
+            pristine_dir=pristine_dir or None,
         )
     except Exception as exc:  # noqa: BLE001 — export must never fail the gate.
         log.warning("fusion patch export failed: %s: %s", type(exc).__name__, exc)
@@ -1568,9 +1567,7 @@ def _serving_arm(
         metrics=metrics,
         log_path=str(out / f"compile_pass_{label}.log"),
     )
-    log.info(
-        "compile pass %s arm: ok=%s tok_s=%s reason=%s", label, ok, metrics.get("tok_s"), reason
-    )
+    log.info("compile pass %s arm: ok=%s tok_s=%s reason=%s", label, ok, metrics.get("tok_s"), reason)
     return ok, reason, metrics
 
 
@@ -1624,8 +1621,7 @@ def _run_compile_pass(
 
     if not enable_pass_in_source(recipe.source_file, flag):
         outcome.note = (
-            f"no disabled default to flip for {flag} in {recipe.source_file} "
-            f"(already enabled, or the flag is absent)"
+            f"no disabled default to flip for {flag} in {recipe.source_file} (already enabled, or the flag is absent)"
         )
         return outcome
     log.info("flipped native compile pass %s in %s", flag, recipe.source_file)
@@ -1645,10 +1641,7 @@ def _run_compile_pass(
 
     if not validate:
         outcome.kept = True
-        outcome.note = (
-            "validation disabled: edit confirmed to change the resolved "
-            "config, but NO serving A/B was run"
-        )
+        outcome.note = "validation disabled: edit confirmed to change the resolved config, but NO serving A/B was run"
         return outcome
 
     ok, reason, enabled = _serving_arm(
@@ -1673,8 +1666,7 @@ def _run_compile_pass(
     outcome.validated = True
     if outcome.pass_activated is False:
         outcome.note = (
-            "the pass ran but matched NOTHING in this model's graph "
-            "(0 sites fused): the flip buys nothing here"
+            "the pass ran but matched NOTHING in this model's graph (0 sites fused): the flip buys nothing here"
         )
         return outcome
     outcome.speedup = outcome.enabled_tok_s / float(outcome.baseline_tok_s or 0.0 or 1.0)
@@ -1798,9 +1790,7 @@ def _author_created_modules(source_file: str, pristine_dir: str) -> list[Path]:
     return found
 
 
-def _snapshot_fusion_source(
-    repo_root: str, source_file: str, out: Path, subdir: str = ".pristine"
-) -> str:
+def _snapshot_fusion_source(repo_root: str, source_file: str, out: Path, subdir: str = ".pristine") -> str:
     """Copy the pristine model source (pre-authoring) into ``out/<subdir>/<rel>``.
 
     Lets :func:`emit.export_artifacts` produce a patch by diffing snapshot-vs-live
@@ -1846,14 +1836,10 @@ def _snapshot_fusion_source(
     model_dir = src.parent
     if model_dir.is_dir():
         siblings = [
-            f
-            for f in sorted(model_dir.glob("*.py"))
-            if _is_fused_module_name(f.name) and f.resolve() != src.resolve()
+            f for f in sorted(model_dir.glob("*.py")) if _is_fused_module_name(f.name) and f.resolve() != src.resolve()
         ]
         with contextlib.suppress(OSError):
-            (pdir / _FUSED_INVENTORY).write_text(
-                "".join(f"{f.name}\n" for f in siblings), encoding="utf-8"
-            )
+            (pdir / _FUSED_INVENTORY).write_text("".join(f"{f.name}\n" for f in siblings), encoding="utf-8")
         for f in siblings:
             _snap(f)
     return str(pdir)
@@ -1899,16 +1885,20 @@ def _reset_fusion_source(repo_root: str, source_file: str, pristine_dir: str = "
             snap = Path(pristine_dir) / rel
             if snap.is_file():
                 with contextlib.suppress(OSError):
-                    Path(source_file).write_text(
-                        snap.read_text(encoding="utf-8", errors="replace"), encoding="utf-8"
-                    )
+                    Path(source_file).write_text(snap.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
         return  # untracked: nothing git can revert
     if not rel_is_repo_relative:
         return  # git checkout below needs a repo-relative path
     try:
         status = git(
-            "-C", repo_root, "status", "--porcelain", "--", rel,
-            check=False, timeout=30,
+            "-C",
+            repo_root,
+            "status",
+            "--porcelain",
+            "--",
+            rel,
+            check=False,
+            timeout=30,
         )
         src = Path(repo_root) / rel
         if status.returncode == 0 and status.stdout.strip() and src.is_file():
@@ -1967,8 +1957,12 @@ def _framework_repo_root(source_file: str, framework_root: str) -> str:
     start_dir = str(Path(start).parent if Path(start).suffix else start)
     with contextlib.suppress(OSError, subprocess.SubprocessError):
         r = git(
-            "-C", start_dir, "rev-parse", "--show-toplevel",
-            check=False, timeout=30,
+            "-C",
+            start_dir,
+            "rev-parse",
+            "--show-toplevel",
+            check=False,
+            timeout=30,
         )
         if r.returncode == 0:
             toplevel = r.stdout.strip()

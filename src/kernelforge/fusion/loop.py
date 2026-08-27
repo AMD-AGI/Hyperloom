@@ -58,9 +58,12 @@ class FusionAbort(Exception):
 # ROCm fusion failure modes are observed.
 _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
     (
-        re.compile(r"serving crashed|scheduler crashed|cuda-?graph|hsa_status|"
-                   r"hardware exception|illegal memory access|memory access fault|"
-                   r"device-side assert|not cuda-graph", re.IGNORECASE),
+        re.compile(
+            r"serving crashed|scheduler crashed|cuda-?graph|hsa_status|"
+            r"hardware exception|illegal memory access|memory access fault|"
+            r"device-side assert|not cuda-graph",
+            re.IGNORECASE,
+        ),
         "The kernel passed kernel-level parity but CRASHED real sglang serving inside "
         "the decode CUDA graph. Make it CUDA-graph-capture safe: use a STATIC launch "
         "grid (never size the grid from a runtime/host value), pre-allocate every "
@@ -70,14 +73,12 @@ _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
         "count so graph replay over varying batch sizes never goes out of bounds.",
     ),
     (
-        re.compile(r"cuda[_-]?bf16|cuda[_-]?fp16|cuda-only|fused_qk_norm_rope|nvcc|cutlass",
-                   re.IGNORECASE),
+        re.compile(r"cuda[_-]?bf16|cuda[_-]?fp16|cuda-only|fused_qk_norm_rope|nvcc|cutlass", re.IGNORECASE),
         "Do NOT reuse a framework CUDA-only fused op (e.g. fused_qk_norm_rope pulls "
         "in cuda_bf16.h): it will not build on ROCm. Author a ROCm-native Triton kernel.",
     ),
     (
-        re.compile(r"out of resource|shared memory|triton.*(compil|jit)|tl\.constexpr",
-                   re.IGNORECASE),
+        re.compile(r"out of resource|shared memory|triton.*(compil|jit)|tl\.constexpr", re.IGNORECASE),
         "Keep the Triton kernel within gfx942 limits: bound BLOCK size and "
         "shared-memory usage and fix tl.constexpr shapes so the kernel JIT-compiles.",
     ),
@@ -100,8 +101,20 @@ _RULE_WORDS = ("avoid", "must", "do not", "don't", "never", "author", "keep")
 
 # Heuristic markers for the single most informative line in an error blob.
 _ERR_MARKERS = (
-    "error", "failed", "compile", "parity", "snr", "speedup", "skipped",
-    "not fast", "cuda", "triton", "mamba", "serving", "crash", "hsa",
+    "error",
+    "failed",
+    "compile",
+    "parity",
+    "snr",
+    "speedup",
+    "skipped",
+    "not fast",
+    "cuda",
+    "triton",
+    "mamba",
+    "serving",
+    "crash",
+    "hsa",
 )
 
 
@@ -118,8 +131,8 @@ def _extract_signature(text: str) -> str:
 class ExperienceEntry:
     """One attempt's compressed record (no full transcript)."""
 
-    label: str          # e.g. "recipe 1 / attempt 2 (residual_add_rmsnorm)"
-    outcome: str        # KEPT / PARITY FAILED / COMPILE FAILED / ...
+    label: str  # e.g. "recipe 1 / attempt 2 (residual_add_rmsnorm)"
+    outcome: str  # KEPT / PARITY FAILED / COMPILE FAILED / ...
     error_sig: str = ""
     lesson: str = ""
     best_so_far: str = ""
@@ -145,9 +158,7 @@ class FusionExperienceLedger:
     ):
         self.path = Path(output_dir) / "fusion_experience.md" if output_dir else None
         self.keep_recent = keep_recent
-        self.memory = ConstraintMemory(
-            _CONSTRAINT_RULES, max_constraints=max_constraints
-        )
+        self.memory = ConstraintMemory(_CONSTRAINT_RULES, max_constraints=max_constraints)
         self.entries: list[ExperienceEntry] = []
 
     @property
@@ -169,13 +180,15 @@ class FusionExperienceLedger:
         lesson = (lesson or "").strip()
         if lesson and any(w in lesson.lower() for w in _RULE_WORDS):
             self.memory.add(f"(agent) {lesson[:_SIGNATURE_CHARS]}")
-        self.entries.append(ExperienceEntry(
-            label=label,
-            outcome=(outcome or "").strip(),
-            error_sig=_extract_signature(error_text),
-            lesson=lesson,
-            best_so_far=(best_so_far or "").strip(),
-        ))
+        self.entries.append(
+            ExperienceEntry(
+                label=label,
+                outcome=(outcome or "").strip(),
+                error_sig=_extract_signature(error_text),
+                lesson=lesson,
+                best_so_far=(best_so_far or "").strip(),
+            )
+        )
         self.flush()
 
     @staticmethod
@@ -199,7 +212,7 @@ class FusionExperienceLedger:
 
     def render_for_prompt(self, include_recent: bool = True) -> str:
         """Bounded experience text for the next author attempt's prompt."""
-        entries = self.entries[-self.keep_recent:] if include_recent else []
+        entries = self.entries[-self.keep_recent :] if include_recent else []
         return self._render(entries)
 
     def flush(self) -> None:
@@ -221,7 +234,7 @@ class FusionExperienceLedger:
 class LoopConfig:
     """Tunables for :func:`run_fusion_loop`."""
 
-    max_recipes: int = 3          # how many ranked recipes to try
+    max_recipes: int = 3  # how many ranked recipes to try
     target_speedup: float = DEFAULT_TARGET_SPEEDUP  # the campaign's KEEP gate
     output_dir: Optional[str] = None  # where fusion_experience.md is persisted
 
@@ -275,8 +288,7 @@ class LoopResult:
         best_experiment_id = ""
         if self.best_recipe is not None:
             best_experiment_id = next(
-                (it.experiment_id for it in reversed(self.history)
-                 if it.pattern_id == self.best_recipe.pattern_id),
+                (it.experiment_id for it in reversed(self.history) if it.pattern_id == self.best_recipe.pattern_id),
                 "",
             )
         return {
@@ -382,10 +394,12 @@ def run_fusion_loop(
 
     considered = [r for r in recipes if not getattr(r, "already_satisfied", False)]
     for ri, recipe in enumerate(considered[: cfg.max_recipes]):
-        label = (f"recipe {ri + 1}/{min(len(considered), cfg.max_recipes)} "
-                 f"({recipe.pattern_id})")
-        best_ctx = (f"best kept speedup so far = {global_best_speedup}x"
-                    if global_best_speedup is not None else "no kept fusion yet")
+        label = f"recipe {ri + 1}/{min(len(considered), cfg.max_recipes)} ({recipe.pattern_id})"
+        best_ctx = (
+            f"best kept speedup so far = {global_best_speedup}x"
+            if global_best_speedup is not None
+            else "no kept fusion yet"
+        )
 
         experience = ledger.render_for_prompt()
         try:
@@ -395,29 +409,40 @@ def run_fusion_loop(
         except Exception as e:  # noqa: BLE001 — a campaign crash costs one recipe.
             log.error(
                 "campaign for %s raised %s: %s",
-                recipe.pattern_id, type(e).__name__, e,
+                recipe.pattern_id,
+                type(e).__name__,
+                e,
             )
             vr = ValidationResult(
-                correctness_passed=False, max_abs_err=None, rtol=None,
-                kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
+                correctness_passed=False,
+                max_abs_err=None,
+                rtol=None,
+                kernel_speedup=None,
+                eager_us=None,
+                fused_us=None,
+                kept=False,
                 note=f"CAMPAIGN FAILED: {type(e).__name__}: {e}",
             )
 
         lesson = _default_lesson(vr)
         outcome = _outcome_label(vr)
-        ledger.record(label=label, outcome=outcome, error_text=vr.note,
-                      lesson=lesson, best_so_far=best_ctx)
-        history.append(LoopIteration(
-            recipe_index=ri, attempt=1, pattern_id=recipe.pattern_id,
-            env_flag=recipe.env_flag, kept=vr.kept,
-            correctness_passed=vr.correctness_passed,
-            kernel_speedup=vr.kernel_speedup, max_abs_err=vr.max_abs_err,
-            note=vr.note, lesson=lesson,
-        ))
+        ledger.record(label=label, outcome=outcome, error_text=vr.note, lesson=lesson, best_so_far=best_ctx)
+        history.append(
+            LoopIteration(
+                recipe_index=ri,
+                attempt=1,
+                pattern_id=recipe.pattern_id,
+                env_flag=recipe.env_flag,
+                kept=vr.kept,
+                correctness_passed=vr.correctness_passed,
+                kernel_speedup=vr.kernel_speedup,
+                max_abs_err=vr.max_abs_err,
+                note=vr.note,
+                lesson=lesson,
+            )
+        )
 
-        if vr.kernel_speedup is not None and (
-            global_best_speedup is None or vr.kernel_speedup > global_best_speedup
-        ):
+        if vr.kernel_speedup is not None and (global_best_speedup is None or vr.kernel_speedup > global_best_speedup):
             global_best_speedup = vr.kernel_speedup
 
         # EARLY EXIT: the loop stops the instant a campaign KEEPs.
@@ -425,7 +450,10 @@ def run_fusion_loop(
             log.info("fusion loop KEPT at %s: speedup=%s", label, vr.kernel_speedup)
             ledger.flush()
             return LoopResult(
-                kept=True, best=vr, best_recipe=recipe, history=history,
+                kept=True,
+                best=vr,
+                best_recipe=recipe,
+                history=history,
                 experience_path=str(ledger.path) if ledger.path else None,
                 termination_reason="kept",
             )
@@ -435,7 +463,10 @@ def run_fusion_loop(
 
     ledger.flush()
     return LoopResult(
-        kept=False, best=best_result, best_recipe=best_recipe, history=history,
+        kept=False,
+        best=best_result,
+        best_recipe=best_recipe,
+        history=history,
         experience_path=str(ledger.path) if ledger.path else None,
         termination_reason="exhausted",
     )

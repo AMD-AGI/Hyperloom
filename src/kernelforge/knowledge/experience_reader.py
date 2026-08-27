@@ -150,11 +150,15 @@ def read_best_solution(
     """
     try:
         return _read_best_solution_impl(
-            config=config, kernel_path=kernel_path, kernel_source=kernel_source,
-            fellow=fellow, target_functions=target_functions,
+            config=config,
+            kernel_path=kernel_path,
+            kernel_source=kernel_source,
+            fellow=fellow,
+            target_functions=target_functions,
             framework=framework,
             source_files=source_files,
-            workspace=workspace, operator_name=operator_name,
+            workspace=workspace,
+            operator_name=operator_name,
         )
     except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
         log.warning("experience read failed (cold start): %r", exc)
@@ -189,12 +193,16 @@ def read_top_solutions(
     _set_read_status(read_status, "read_error")
     try:
         return _read_top_solutions_impl(
-            config=config, kernel_path=kernel_path, kernel_source=kernel_source,
-            fellow=fellow, target_functions=target_functions,
+            config=config,
+            kernel_path=kernel_path,
+            kernel_source=kernel_source,
+            fellow=fellow,
+            target_functions=target_functions,
             framework=framework,
             top_k=max(1, int(top_k)),
             source_files=source_files,
-            workspace=workspace, operator_name=operator_name,
+            workspace=workspace,
+            operator_name=operator_name,
             read_status=read_status,
         )
     except Exception as exc:  # noqa: BLE001 - warm-start read must never break a run
@@ -214,28 +222,41 @@ def read_top_solutions(
         return []
 
 
-def _read_best_solution_impl(*, config, kernel_path, kernel_source, fellow,
-                             target_functions=None, framework="",
-                             source_files=None, workspace="", operator_name=""):
+def _read_best_solution_impl(
+    *,
+    config,
+    kernel_path,
+    kernel_source,
+    fellow,
+    target_functions=None,
+    framework="",
+    source_files=None,
+    workspace="",
+    operator_name="",
+):
     """Single highest-speedup solution — thin wrapper over the top-k impl."""
     top = _read_top_solutions_impl(
-        config=config, kernel_path=kernel_path, kernel_source=kernel_source,
-        fellow=fellow, target_functions=target_functions,
+        config=config,
+        kernel_path=kernel_path,
+        kernel_source=kernel_source,
+        fellow=fellow,
+        target_functions=target_functions,
         framework=framework,
-        top_k=1, source_files=source_files,
-        workspace=workspace, operator_name=operator_name,
+        top_k=1,
+        source_files=source_files,
+        workspace=workspace,
+        operator_name=operator_name,
     )
     return top[0] if top else None
 
 
-def _build_solution_dict(*, canonical_id, prior, patch, consumer_signature,
-                         consumer_identity, consumer_source_map) -> dict[str, Any]:
+def _build_solution_dict(
+    *, canonical_id, prior, patch, consumer_signature, consumer_identity, consumer_source_map
+) -> dict[str, Any]:
     """Assemble the warm-start payload for one recorded candidate."""
     attrs = dict(prior.value)
     candidate_signature = str(attrs.get("implementation_signature") or "")
-    implementation_match = bool(
-        candidate_signature and candidate_signature == consumer_signature
-    )
+    implementation_match = bool(candidate_signature and candidate_signature == consumer_signature)
     return {
         "kernel_slug": canonical_id,
         "session_id": prior.session_id,
@@ -246,9 +267,7 @@ def _build_solution_dict(*, canonical_id, prior, patch, consumer_signature,
         "implementation_signature": candidate_signature,
         "consumer_implementation_signature": consumer_signature,
         "implementation_identity": (
-            attrs.get("implementation_identity")
-            if isinstance(attrs.get("implementation_identity"), dict)
-            else {}
+            attrs.get("implementation_identity") if isinstance(attrs.get("implementation_identity"), dict) else {}
         ),
         "consumer_implementation_identity": consumer_identity,
         "consumer_source_map": consumer_source_map,
@@ -261,10 +280,20 @@ def _build_solution_dict(*, canonical_id, prior, patch, consumer_signature,
     }
 
 
-def _read_top_solutions_impl(*, config, kernel_path, kernel_source, fellow,
-                             target_functions=None, framework="",
-                             top_k=3, source_files=None, workspace="",
-                             operator_name="", read_status=None):
+def _read_top_solutions_impl(
+    *,
+    config,
+    kernel_path,
+    kernel_source,
+    fellow,
+    target_functions=None,
+    framework="",
+    top_k=3,
+    source_files=None,
+    workspace="",
+    operator_name="",
+    read_status=None,
+):
     # Must be the same dimension the write side addresses by, or the read
     # resolves to an address no run ever wrote to and every start looks cold.
     gpu_type = str(getattr(config, "gpu_type", "") or "").strip()
@@ -301,9 +330,7 @@ def _read_top_solutions_impl(*, config, kernel_path, kernel_source, fellow,
         _set_read_status(read_status, kb.reason or "not_configured")
         return []
 
-    consumer_workspace = workspace or str(
-        Path(kernel_path).resolve().parent
-    )
+    consumer_workspace = workspace or str(Path(kernel_path).resolve().parent)
     consumer_signature, consumer_identity = implementation_signature(
         workspace=consumer_workspace,
         kernel_path=kernel_path,

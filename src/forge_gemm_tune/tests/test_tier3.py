@@ -71,11 +71,13 @@ class TestCoverageGaps:
         assert not gap.warrants_generated_tuner
 
     def test_only_a_missing_capability_reaches_the_generated_tier(self):
-        report = {"demands": [
-            {"table": "none.csv", "tuner": None, "miss_count": 5},
-            {"table": "unrouted.csv", "tuner": "a8w8", "miss_count": 9},
-            {"table": "declined.csv", "tuner": "fmoe_ck", "miss_count": 7},
-        ]}
+        report = {
+            "demands": [
+                {"table": "none.csv", "tuner": None, "miss_count": 5},
+                {"table": "unrouted.csv", "tuner": "a8w8", "miss_count": 9},
+                {"table": "declined.csv", "tuner": "fmoe_ck", "miss_count": 7},
+            ]
+        }
         specs = [TunerSpec("fmoe_ck", skip_reason="script is missing")]
         gaps = coverage_gaps(report, specs)
         assert [g.table for g in gaps if g.warrants_generated_tuner] == ["none.csv"]
@@ -107,10 +109,12 @@ class TestCoverageGaps:
         assert coverage_gaps({"demands": []}, []) == []
 
     def test_gaps_are_ordered_by_how_much_was_asked_for(self):
-        report = {"demands": [
-            {"table": "small.csv", "tuner": None, "miss_count": 3},
-            {"table": "big.csv", "tuner": None, "miss_count": 900},
-        ]}
+        report = {
+            "demands": [
+                {"table": "small.csv", "tuner": None, "miss_count": 3},
+                {"table": "big.csv", "tuner": None, "miss_count": 900},
+            ]
+        }
         assert [g.table for g in coverage_gaps(report, [])] == ["big.csv", "small.csv"]
 
 
@@ -133,7 +137,14 @@ class TestMandate:
 
     def test_columns_are_keys_then_search_then_timings(self):
         assert self._mandate().output_columns == [
-            "M", "N", "K", "backend", "config", "default_us", "tuned_us", "improved",
+            "M",
+            "N",
+            "K",
+            "backend",
+            "config",
+            "default_us",
+            "tuned_us",
+            "improved",
         ]
 
     def test_the_brief_carries_the_constraints_that_were_learned_the_hard_way(self):
@@ -167,8 +178,7 @@ class TestMandate:
         assert "1.375" in text, "the reason has to travel with the rule"
 
     def test_the_definition_reaches_the_machine_readable_form(self):
-        assert "mean|ref|" in self._mandate().to_dict()[
-            "max_relative_error_definition"]
+        assert "mean|ref|" in self._mandate().to_dict()["max_relative_error_definition"]
 
 
 class TestContract:
@@ -205,10 +215,14 @@ class TestContract:
         assert any("have no row" in s for s in problems)
 
     def test_non_positive_and_non_numeric_times_are_rejected(self, tmp_path):
-        p = self._write(tmp_path, self._HDR, [
-            "16,1536,7168,x,c=1,0,8.2,True",
-            "17,1536,7168,x,c=1,abc,8.2,True",
-        ])
+        p = self._write(
+            tmp_path,
+            self._HDR,
+            [
+                "16,1536,7168,x,c=1,0,8.2,True",
+                "17,1536,7168,x,c=1,abc,8.2,True",
+            ],
+        )
         problems = [str(v) for v in validate_output_csv(p, self._mandate())]
         assert any("not a positive time" in s for s in problems)
         assert any("not a number" in s for s in problems)
@@ -231,11 +245,16 @@ class TestContract:
 
     def test_candidates_are_capped_and_sanitised(self, tmp_path):
         p = tmp_path / "c.json"
-        p.write_text(json.dumps({
-            "16x1536x7168": [{"backend": "a"}] * 9,
-            "bad": "not a list",
-            "one": {"backend": "solo"},
-        }), encoding="utf-8")
+        p.write_text(
+            json.dumps(
+                {
+                    "16x1536x7168": [{"backend": "a"}] * 9,
+                    "bad": "not a list",
+                    "one": {"backend": "solo"},
+                }
+            ),
+            encoding="utf-8",
+        )
         out = contract.load_candidates(p, self._mandate())
         assert len(out["16x1536x7168"]) == 5
         assert out["one"] == [{"backend": "solo"}]
@@ -256,6 +275,7 @@ class _Clock:
     def call(self, cost):
         def _fn():
             self.now += cost() if callable(cost) else cost
+
         return _fn
 
     def perf_counter(self):
@@ -311,7 +331,8 @@ class TestReferee:
         # Its claim is 100x; ours is what the clock says.
         cands = [{"config": "a", "tuned_us": 0.01, "self_reported_speedup": 100.0}]
         j = judge_candidates(
-            "16x1536x7168", cands,
+            "16x1536x7168",
+            cands,
             baseline=clock.call(2e-6),
             dispatch=lambda c: clock.call(1e-6),
         )
@@ -321,7 +342,8 @@ class TestReferee:
     def test_an_incorrect_candidate_is_rejected_before_being_timed(self, clock):
         cands = [{"config": "wrong"}, {"config": "right"}]
         j = judge_candidates(
-            "s", cands,
+            "s",
+            cands,
             baseline=clock.call(2e-6),
             dispatch=lambda c: clock.call(1e-6),
             is_correct=lambda call: True,
@@ -329,7 +351,8 @@ class TestReferee:
         assert j.rejected_incorrect == 0
 
         j2 = judge_candidates(
-            "s", cands,
+            "s",
+            cands,
             baseline=clock.call(2e-6),
             dispatch=lambda c: clock.call(1e-6),
             is_correct=lambda call: False,
@@ -339,7 +362,8 @@ class TestReferee:
 
     def test_an_undispatchable_candidate_is_recorded_not_dropped(self, clock):
         j = judge_candidates(
-            "s", [{"backend": "unknown"}],
+            "s",
+            [{"backend": "unknown"}],
             baseline=clock.call(1e-6),
             dispatch=lambda c: None,
         )
@@ -349,7 +373,8 @@ class TestReferee:
     def test_the_fastest_of_several_wins(self, clock):
         costs = {"a": 4e-6, "b": 1e-6, "c": 2e-6}
         j = judge_candidates(
-            "s", [{"n": k} for k in costs],
+            "s",
+            [{"n": k} for k in costs],
             baseline=clock.call(8e-6),
             dispatch=lambda c: clock.call(costs[c["n"]]),
         )
@@ -358,7 +383,8 @@ class TestReferee:
 
     def test_no_improvement_is_said_plainly(self, clock):
         j = judge_candidates(
-            "s", [{"n": "a"}],
+            "s",
+            [{"n": "a"}],
             baseline=clock.call(1e-6),
             dispatch=lambda c: clock.call(4e-6),
         )
@@ -367,7 +393,8 @@ class TestReferee:
 
     def test_the_judgement_serialises(self, clock):
         j = judge_candidates(
-            "s", [{"n": "a"}],
+            "s",
+            [{"n": "a"}],
             baseline=clock.call(2e-6),
             dispatch=lambda c: clock.call(1e-6),
         )

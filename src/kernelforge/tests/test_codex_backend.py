@@ -316,9 +316,7 @@ class _FakeAsyncTurn:
             cwd=self.config.cwd,
             env=self.config.env,
         )
-        stdout, stderr = await self.process.communicate(
-            _fake_prompt(self.prompt, self.options).encode()
-        )
+        stdout, stderr = await self.process.communicate(_fake_prompt(self.prompt, self.options).encode())
         if self.process.returncode != 0:
             detail = stderr.decode(errors="replace").strip()
             raise RuntimeError(detail or f"exit {self.process.returncode}")
@@ -554,9 +552,7 @@ def test_codex_backend_materializes_custom_agent_roles(
     overrides = backend._config_overrides(spec)
 
     assert "features.multi_agent=true" in overrides
-    config_value = next(
-        value for value in overrides if value.startswith("agents.forge_reviewer.config_file=")
-    )
+    config_value = next(value for value in overrides if value.startswith("agents.forge_reviewer.config_file="))
     role_path = Path(json.loads(config_value.split("=", 1)[1]))
     assert role_path.is_absolute()
     role_text = role_path.read_text()
@@ -624,9 +620,7 @@ def test_codex_role_sandbox_comes_from_the_role_not_the_parent(
 
     overrides = backend._agent_role_overrides(spec)
 
-    config_value = next(
-        value for value in overrides if value.startswith("agents.forge_reviewer.config_file=")
-    )
+    config_value = next(value for value in overrides if value.startswith("agents.forge_reviewer.config_file="))
     role_text = Path(json.loads(config_value.split("=", 1)[1])).read_text()
     assert f'sandbox_mode = "{expected}"' in role_text
 
@@ -1671,9 +1665,7 @@ def _read_only_spec(cwd: Path) -> AgentRunSpec:
         model="gpt-5.3-codex",
         timeout_sec=2,
         writable=False,
-        tool_policy=AgentToolPolicy(
-            read=False, search=False, write=False, shell=False, max_turns=1
-        ),
+        tool_policy=AgentToolPolicy(read=False, search=False, write=False, shell=False, max_turns=1),
         protected_globs=["*"],
     )
 
@@ -1947,8 +1939,7 @@ def test_codex_verify_rejection_survives_a_failing_second_rollback(
         if len(calls) == 1:
             return real_rollback(self)
         raise WorkspaceSafetyError(
-            "Codex run ended and the inherited workspace state could not be "
-            "restored: [Errno 30] Read-only file system",
+            "Codex run ended and the inherited workspace state could not be restored: [Errno 30] Read-only file system",
             rejection=False,
         )
 

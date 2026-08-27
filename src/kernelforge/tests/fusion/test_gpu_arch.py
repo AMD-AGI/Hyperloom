@@ -55,9 +55,7 @@ def test_an_unknown_arch_says_nothing_rather_than_guessing():
 
 
 def test_the_prompt_names_the_arch_it_was_given():
-    prompt = build_author_prompt(
-        RECIPE, framework="vllm", ab_hint="hint", gpu_arch="gfx950"
-    )
+    prompt = build_author_prompt(RECIPE, framework="vllm", ab_hint="hint", gpu_arch="gfx950")
     assert "MI355X (gfx950)" in prompt
     # Regression: this used to be hardcoded to another chip.
     assert "gfx942" not in prompt
@@ -66,7 +64,9 @@ def test_the_prompt_names_the_arch_it_was_given():
 def test_the_multi_prompt_names_the_arch_too():
     prompt = build_multi_author_prompt(
         [RECIPE, dict(RECIPE, pattern_id="qk_norm_rope", env_flag="QWEN3_FUSED_QK")],
-        framework="vllm", ab_hint="hint", gpu_arch="gfx950",
+        framework="vllm",
+        ab_hint="hint",
+        gpu_arch="gfx950",
     )
     assert "MI355X (gfx950)" in prompt
     assert "gfx942" not in prompt

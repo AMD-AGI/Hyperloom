@@ -69,9 +69,7 @@ class KnowledgeConfig:
             parsed_mode = KnowledgeStoreMode(normalized_mode)
         except ValueError as exc:
             supported = ", ".join(item.value for item in KnowledgeStoreMode)
-            raise ValueError(
-                f"KNOWLEDGE_STORE_MODE must be one of: {supported}; got {raw_mode!r}"
-            ) from exc
+            raise ValueError(f"KNOWLEDGE_STORE_MODE must be one of: {supported}; got {raw_mode!r}") from exc
 
         raw_root = local_root
         if raw_root is None:
@@ -83,9 +81,7 @@ class KnowledgeConfig:
             else:
                 user_data_path = env.get("USER_DATA_PATH", "").strip()
                 raw_root = (
-                    Path(user_data_path) / "knowledge"
-                    if user_data_path
-                    else Path("~/.cache/hyperloom/knowledge")
+                    Path(user_data_path) / "knowledge" if user_data_path else Path("~/.cache/hyperloom/knowledge")
                 )
         if not str(raw_root).strip():
             raise ValueError("KNOWLEDGE_LOCAL_ROOT must not be empty")
@@ -101,16 +97,10 @@ class KnowledgeConfig:
                 f"{REMOTE_BACKEND_GBRAIN}, {REMOTE_BACKEND_KB_STORE}; "
                 f"got {remote_backend!r}"
             )
-        base_url = (
-            env.get("GBRAIN_BASE_URL", "") if gbrain_base_url is None else str(gbrain_base_url)
-        ).strip()
+        base_url = (env.get("GBRAIN_BASE_URL", "") if gbrain_base_url is None else str(gbrain_base_url)).strip()
         token = (env.get("GBRAIN_TOKEN", "") if gbrain_token is None else str(gbrain_token)).strip()
-        store_url = (
-            env.get("KB_STORE_URL", "") if kb_store_url is None else str(kb_store_url)
-        ).strip()
-        store_token = (
-            env.get("KB_STORE_TOKEN", "") if kb_store_token is None else str(kb_store_token)
-        ).strip()
+        store_url = (env.get("KB_STORE_URL", "") if kb_store_url is None else str(kb_store_url)).strip()
+        store_token = (env.get("KB_STORE_TOKEN", "") if kb_store_token is None else str(kb_store_token)).strip()
         if parsed_mode is KnowledgeStoreMode.REMOTE:
             pairs = {
                 REMOTE_BACKEND_GBRAIN: (
@@ -125,20 +115,12 @@ class KnowledgeConfig:
             for backend, pair in pairs.items():
                 missing = [name for name, value in pair if not value]
                 if missing and len(missing) < len(pair):
-                    raise ValueError(
-                        f"{backend} requires both of its variables; missing "
-                        + " and ".join(missing)
-                    )
+                    raise ValueError(f"{backend} requires both of its variables; missing " + " and ".join(missing))
             if remote_backend is not None:
                 missing = [name for name, value in pairs[remote_backend] if not value]
                 if missing:
-                    raise ValueError(
-                        "KNOWLEDGE_STORE_MODE=remote requires "
-                        + " and ".join(missing)
-                    )
-            elif not any(
-                all(value for _, value in pair) for pair in pairs.values()
-            ):
+                    raise ValueError("KNOWLEDGE_STORE_MODE=remote requires " + " and ".join(missing))
+            elif not any(all(value for _, value in pair) for pair in pairs.values()):
                 raise ValueError(
                     "KNOWLEDGE_STORE_MODE=remote requires credentials for at "
                     f"least one backend: {REMOTE_BACKEND_GBRAIN} "

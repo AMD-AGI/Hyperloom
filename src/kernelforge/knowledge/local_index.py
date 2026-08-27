@@ -192,8 +192,7 @@ _MANDATORY_PILLARS = ("hardware", "common_methodology")
 def _flat_listing(folder: Path) -> str:
     """Flat ``<relative path> — <descriptor>`` listing for a folder (INDEX-less fallback)."""
     files = sorted(
-        (p for p in folder.rglob("*")
-         if p.is_file() and p.suffix.lower() in _INDEX_EXT),
+        (p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in _INDEX_EXT),
         key=lambda p: p.relative_to(folder).as_posix(),
     )
     out: list[str] = []
@@ -272,19 +271,21 @@ def build_forge_knowledge(
     if not sections:
         return ""
 
-    preamble = "\n".join([
-        "# Knowledge base (maps for this task; full cards on disk — Read on demand)",
-        "",
-        f"Knowledge root (KB): {root_path}",
-        "",
-        "The curated knowledge maps for this kernel task are below. Open a card with the",
-        "`Read` tool using an ABSOLUTE path — a bare relative path resolves against the",
-        "kernel's working directory (NOT the KB) and will miss. Build the absolute path:",
-        "- a path a map lists relative to its own folder (e.g. `shared/…`,",
-        "  `operators/<op>/…`) → prepend that section's `base:` shown below;",
-        "- a cross-reference written as `<pillar>/…` or `local_knowledge/<pillar>/…`",
-        f"  (e.g. `hardware/…`, `framework/aiter/…`) → it lives at `{root_path}/<pillar>/…`.",
-        "Read a card only when it is relevant — decide for yourself what to read.",
-        "",
-    ])
+    preamble = "\n".join(
+        [
+            "# Knowledge base (maps for this task; full cards on disk — Read on demand)",
+            "",
+            f"Knowledge root (KB): {root_path}",
+            "",
+            "The curated knowledge maps for this kernel task are below. Open a card with the",
+            "`Read` tool using an ABSOLUTE path — a bare relative path resolves against the",
+            "kernel's working directory (NOT the KB) and will miss. Build the absolute path:",
+            "- a path a map lists relative to its own folder (e.g. `shared/…`,",
+            "  `operators/<op>/…`) → prepend that section's `base:` shown below;",
+            "- a cross-reference written as `<pillar>/…` or `local_knowledge/<pillar>/…`",
+            f"  (e.g. `hardware/…`, `framework/aiter/…`) → it lives at `{root_path}/<pillar>/…`.",
+            "Read a card only when it is relevant — decide for yourself what to read.",
+            "",
+        ]
+    )
     return preamble + "\n" + "\n\n".join(sections)

@@ -79,11 +79,7 @@ def _worktree_workspace(tmp_path: Path, *, detached: bool = False) -> Path:
     ):
         subprocess.run(command, cwd=main, check=True, capture_output=True)
     workspace = tmp_path / "workspace"
-    checkout = (
-        ["--detach", str(workspace)]
-        if detached
-        else ["-b", "campaign", str(workspace)]
-    )
+    checkout = ["--detach", str(workspace)] if detached else ["-b", "campaign", str(workspace)]
     subprocess.run(
         ["git", "worktree", "add", *checkout],
         cwd=main,
@@ -245,7 +241,7 @@ async def test_a_lane_that_staged_its_edit_still_reports_a_candidate(tmp_path):
 
 
 async def test_a_lane_whose_diff_cannot_be_read_is_reported_as_lost(tmp_path):
-    """"git failed" and "the agent changed nothing" must not read the same."""
+    """ "git failed" and "the agent changed nothing" must not read the same."""
     workspace = _workspace(tmp_path)
 
     async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> None:
@@ -485,8 +481,7 @@ async def _wait_for_every_lane(barrier: Path, lane_id: str, *, lanes: int) -> No
     while len(list(barrier.iterdir())) < lanes:
         if time.monotonic() > deadline:
             raise RuntimeError(
-                f"lane {lane_id} waited for {lanes} concurrent sessions and "
-                f"saw {len(list(barrier.iterdir()))}"
+                f"lane {lane_id} waited for {lanes} concurrent sessions and saw {len(list(barrier.iterdir()))}"
             )
         await asyncio.sleep(0.01)
 
@@ -540,9 +535,7 @@ async def test_the_serialized_driver_runs_the_lane_s_own_driver(tmp_path):
     seen: dict[str, object] = {}
 
     async def session(_lane: LanePlan, lane_dir: Path, driver: Path) -> None:
-        (lane_dir / DRIVER_NAME).write_text(
-            _recording_driver(log, hold_sec=0.0).replace("start", "lane-start")
-        )
+        (lane_dir / DRIVER_NAME).write_text(_recording_driver(log, hold_sec=0.0).replace("start", "lane-start"))
         seen["exit"] = await _run(str(driver), "--bench-mode", cwd=lane_dir)
 
     await run_lanes(
@@ -571,9 +564,7 @@ async def test_the_serialized_driver_stays_out_of_the_lane_candidate(tmp_path):
 
     async def session(_lane: LanePlan, lane_dir: Path, _driver: Path) -> None:
         (lane_dir / "kernel.py").write_text("VALUE = 9\n")
-        subprocess.run(
-            ["git", "add", "-A"], cwd=lane_dir, check=True, capture_output=True
-        )
+        subprocess.run(["git", "add", "-A"], cwd=lane_dir, check=True, capture_output=True)
 
     results = await run_lanes(
         workspace_dir=str(workspace),
@@ -688,16 +679,9 @@ async def test_four_lanes_sharing_one_lock_run_the_driver_one_at_a_time(tmp_path
     lock = DeviceBenchmarkLock(tmp_path / "sentinel")
     wrappers = []
     for lane_id in ("1", "2", "3", "4"):
-        lane_dir = _lane_repository(
-            tmp_path, lane_id, _recording_driver(log, hold_sec=0.2)
-        )
-        wrappers.append(
-            await lock.install(lane_dir=lane_dir, driver=lane_dir / DRIVER_NAME)
-        )
-    processes = [
-        subprocess.Popen([sys.executable, str(wrapper)], cwd=str(wrapper.parent))
-        for wrapper in wrappers
-    ]
+        lane_dir = _lane_repository(tmp_path, lane_id, _recording_driver(log, hold_sec=0.2))
+        wrappers.append(await lock.install(lane_dir=lane_dir, driver=lane_dir / DRIVER_NAME))
+    processes = [subprocess.Popen([sys.executable, str(wrapper)], cwd=str(wrapper.parent)) for wrapper in wrappers]
 
     for process in processes:
         assert process.wait(timeout=120) == 0
@@ -775,9 +759,7 @@ def test_a_lane_session_gets_its_own_workspace_configuration(tmp_path):
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
-    _lane_factory(config, workspace, implementer)(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    _lane_factory(config, workspace, implementer)(str(lane_dir), _serialized_driver(lane_dir))
 
     assert implementer.calls[0]["config"].workspace == str(lane_dir)
     assert config.workspace == str(workspace)
@@ -786,9 +768,7 @@ def test_a_lane_session_gets_its_own_workspace_configuration(tmp_path):
 async def test_a_lane_session_outside_its_lane_is_refused(tmp_path):
     """An edit outside the lane is an edit no lane diff would ever report."""
     config, workspace, lane_dir = _campaign(tmp_path)
-    lane_agent = _lane_factory(config, workspace, _RecordingImplementer())(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    lane_agent = _lane_factory(config, workspace, _RecordingImplementer())(str(lane_dir), _serialized_driver(lane_dir))
 
     with pytest.raises(ValueError) as error:
         await lane_agent(str(workspace / "src" / "kernel.py"), "tune it")
@@ -806,22 +786,16 @@ def test_a_lane_is_pointed_at_its_own_copy_of_every_source_file(tmp_path):
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
-    _lane_factory(config, workspace, implementer)(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    _lane_factory(config, workspace, implementer)(str(lane_dir), _serialized_driver(lane_dir))
 
-    assert implementer.calls[0]["source_files"] == [
-        str(lane_dir / "src" / "kernel.py")
-    ]
+    assert implementer.calls[0]["source_files"] == [str(lane_dir / "src" / "kernel.py")]
 
 
 def test_a_lane_is_given_its_own_copy_of_the_driver(tmp_path):
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
-    _lane_factory(config, workspace, implementer)(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    _lane_factory(config, workspace, implementer)(str(lane_dir), _serialized_driver(lane_dir))
 
     assert implementer.calls[0]["driver_script"] == str(lane_dir / DRIVER_NAME)
 
@@ -847,9 +821,7 @@ def test_a_relative_path_is_read_against_the_workspace_it_names(tmp_path):
     factory(str(lane_dir), _serialized_driver(lane_dir))
 
     assert implementer.calls[0]["driver_script"] == str(lane_dir / DRIVER_NAME)
-    assert implementer.calls[0]["source_files"] == [
-        str(lane_dir / "src" / "kernel.py")
-    ]
+    assert implementer.calls[0]["source_files"] == [str(lane_dir / "src" / "kernel.py")]
 
 
 def test_a_lane_is_told_to_run_the_driver_through_its_serialized_copy(tmp_path):
@@ -861,9 +833,7 @@ def test_a_lane_is_told_to_run_the_driver_through_its_serialized_copy(tmp_path):
     config, workspace, lane_dir = _campaign(tmp_path)
     implementer = _RecordingImplementer()
 
-    _lane_factory(config, workspace, implementer)(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    _lane_factory(config, workspace, implementer)(str(lane_dir), _serialized_driver(lane_dir))
 
     assert implementer.calls[0]["interposed_driver_path"] == _serialized_driver(lane_dir)
 
@@ -914,9 +884,7 @@ def test_a_source_file_outside_the_workspace_stops_the_lane(tmp_path):
 
 async def test_a_lane_session_inside_its_lane_runs(tmp_path):
     config, workspace, lane_dir = _campaign(tmp_path)
-    lane_agent = _lane_factory(config, workspace, _RecordingImplementer())(
-        str(lane_dir), _serialized_driver(lane_dir)
-    )
+    lane_agent = _lane_factory(config, workspace, _RecordingImplementer())(str(lane_dir), _serialized_driver(lane_dir))
     kernel = lane_dir / "src" / "kernel.py"
 
     assert await lane_agent(str(kernel), "tune it") == f"{kernel}:tune it"

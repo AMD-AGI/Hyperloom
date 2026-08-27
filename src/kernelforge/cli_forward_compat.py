@@ -53,8 +53,7 @@ class TolerantCommand(click.Command):
         # Shell completion parses the same argv; warning there would corrupt it.
         if ignored and not ctx.resilient_parsing:
             print(
-                f"warning: ignoring {len(ignored)} unrecognized command-line "
-                f"token(s): {' '.join(ignored)}",
+                f"warning: ignoring {len(ignored)} unrecognized command-line token(s): {' '.join(ignored)}",
                 file=sys.stderr,
             )
             print(

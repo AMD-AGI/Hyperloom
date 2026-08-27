@@ -46,8 +46,7 @@ def normalize_commit_new_paths(patterns) -> list[str]:
         candidate = PurePosixPath(pattern)
         if candidate.is_absolute() or ".." in candidate.parts:
             raise AllowlistPatternError(
-                "commit_new_paths entries must be workspace-relative paths "
-                f"without '..': {pattern}"
+                f"commit_new_paths entries must be workspace-relative paths without '..': {pattern}"
             )
         posix = candidate.as_posix()
         if posix not in normalized:
@@ -75,8 +74,7 @@ def matches_commit_new_paths(path: str, patterns) -> bool:
         text = str(pattern).strip()
         if not text or "**" in text:
             raise AllowlistPatternError(
-                "commit_new_paths reached matching unnormalized: "
-                f"{pattern!r}; normalize_commit_new_paths first"
+                f"commit_new_paths reached matching unnormalized: {pattern!r}; normalize_commit_new_paths first"
             )
         if target.match(str(PurePosixPath("/") / PurePosixPath(text))):
             return True

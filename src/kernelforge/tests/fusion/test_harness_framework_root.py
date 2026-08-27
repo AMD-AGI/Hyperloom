@@ -51,9 +51,7 @@ def test_framework_root_reaches_the_harness(tmp_path: Path) -> None:
     harness = out / "kernel_harness.py"
     harness.write_text(HARNESS, encoding="utf-8")
 
-    runner = HarnessKernelRunner(
-        harness_path=str(harness), workdir=str(tree), framework_root=str(tree)
-    )
+    runner = HarnessKernelRunner(harness_path=str(harness), workdir=str(tree), framework_root=str(tree))
     runner.compile_check(_recipe())
 
     assert json.loads(json.dumps(runner._cache))["seen_root"] == str(tree)

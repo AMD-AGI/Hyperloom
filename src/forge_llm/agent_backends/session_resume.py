@@ -41,14 +41,16 @@ log = logging.getLogger(__name__)
 # Backends prefix a provider-side failure with ``sdk_`` (see ClaudeBackend).
 API_FAILURE_PREFIX = "sdk_"
 # The session reached a limit or an answer. Never retried, whatever it cost.
-TERMINAL_END_REASONS = frozenset({
-    "agent_stopped",
-    "budget_exhausted",
-    "candidate_submitted",
-    "gate_met",
-    "timeout",
-    "turn_cap",
-})
+TERMINAL_END_REASONS = frozenset(
+    {
+        "agent_stopped",
+        "budget_exhausted",
+        "candidate_submitted",
+        "gate_met",
+        "timeout",
+        "turn_cap",
+    }
+)
 # End reason for a session the API killed and that could not be recovered. It
 # is deliberately NOT one of the reasons above: nothing was measured, so no
 # downstream reader may treat it as a verdict about the kernel.
@@ -66,27 +68,29 @@ DEFAULT_DEADLINE_SEC = 3600.0
 # Exception types that mean "this request never got an answer, and the next one
 # might". Matched by name because the SDKs wrap httpx/aiohttp/openai errors and
 # importing those to isinstance-check them would make optional deps mandatory.
-_TRANSIENT_TYPE_NAMES = frozenset({
-    "APIConnectionError",
-    "APITimeoutError",
-    "ClientConnectorError",
-    "ClientOSError",
-    "ClientPayloadError",
-    "ConnectError",
-    "ConnectTimeout",
-    "IncompleteRead",
-    "InternalServerError",
-    "OverloadedError",
-    "PoolTimeout",
-    "RateLimitError",
-    "ReadError",
-    "ReadTimeout",
-    "RemoteProtocolError",
-    "ServerDisconnectedError",
-    "ServiceUnavailableError",
-    "WriteError",
-    "WriteTimeout",
-})
+_TRANSIENT_TYPE_NAMES = frozenset(
+    {
+        "APIConnectionError",
+        "APITimeoutError",
+        "ClientConnectorError",
+        "ClientOSError",
+        "ClientPayloadError",
+        "ConnectError",
+        "ConnectTimeout",
+        "IncompleteRead",
+        "InternalServerError",
+        "OverloadedError",
+        "PoolTimeout",
+        "RateLimitError",
+        "ReadError",
+        "ReadTimeout",
+        "RemoteProtocolError",
+        "ServerDisconnectedError",
+        "ServiceUnavailableError",
+        "WriteError",
+        "WriteTimeout",
+    }
+)
 # Substrings that identify the same failures once a backend has flattened them
 # into a message (CodexExecutionError does this), keyed to what gateways and
 # proxies actually emit. A local turn timeout is deliberately absent: it means
@@ -222,10 +226,7 @@ def _delay_for(
 
 def _supports_resume(backend: Any) -> bool:
     """Whether this provider can continue an existing session."""
-    return bool(
-        getattr(backend.capabilities, "resumable", False)
-        and hasattr(backend, "resume")
-    )
+    return bool(getattr(backend.capabilities, "resumable", False) and hasattr(backend, "resume"))
 
 
 def _merged(
@@ -314,8 +315,7 @@ async def _start(
             session_id = resumable_session_id(exc)
             if session_id and _supports_resume(backend):
                 log.warning(
-                    "agent session %s failed after its handle existed (%s: %s); "
-                    "resuming it instead of starting over",
+                    "agent session %s failed after its handle existed (%s: %s); resuming it instead of starting over",
                     session_id,
                     type(exc).__name__,
                     exc,
@@ -367,24 +367,18 @@ async def run_session_with_api_resume(
     base = float(
         base_delay_sec
         if base_delay_sec is not None
-        else _env_number(
-            "FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float
-        )
+        else _env_number("FORGE_AGENT_API_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
     )
     ceiling = float(
         max_delay_sec
         if max_delay_sec is not None
-        else _env_number(
-            "FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float
-        )
+        else _env_number("FORGE_AGENT_API_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
     )
 
     budget_sec = float(
         deadline_sec
         if deadline_sec is not None
-        else _env_number(
-            "FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float
-        )
+        else _env_number("FORGE_AGENT_API_RETRY_DEADLINE_SEC", DEFAULT_DEADLINE_SEC, cast=float)
     )
     started_at = monotonic()
 
@@ -408,8 +402,7 @@ async def run_session_with_api_resume(
         session_id = str(result.session_id or "").strip()
         if not session_id or not _supports_resume(backend):
             log.error(
-                "agent session ended on an API failure with no resumable "
-                "handle (provider=%s session=%r): %s",
+                "agent session ended on an API failure with no resumable handle (provider=%s session=%r): %s",
                 getattr(backend, "name", "?"),
                 session_id,
                 result.stderr_tail or result.end_reason,

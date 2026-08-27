@@ -58,9 +58,7 @@ _GFX_TO_CANONICAL_GPU = {
 # Architectures that cannot run FP4/MXFP4 GEMM (aiter requires gfx950).
 _FP4_UNSUPPORTED_GFX = {"gfx942"}
 
-_FP4_GFX942_SKIP_REASON = (
-    "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
-)
+_FP4_GFX942_SKIP_REASON = "FP4/MXFP4 GEMM unsupported on gfx942 (aiter requires gfx950)"
 
 
 def _detect_local_gfx_arch() -> str:
@@ -167,9 +165,7 @@ def _detect_1stage_from_log(log_path: str | None) -> bool:
     stages = (moe_stage_coverage(log_path) or {}).get("stages_seen") or []
     if stages:
         # 2-stage present anywhere => there is CK work to tune, so do not skip.
-        return not any(s.startswith("2stage") for s in stages) and any(
-            s.startswith("1stage") for s in stages
-        )
+        return not any(s.startswith("2stage") for s in stages) and any(s.startswith("1stage") for s in stages)
     # Nothing structured to read (older log format, unreadable file): fall back
     # to the substring probe so behaviour never regresses to "always tune".
     path = Path(log_path) if log_path else None
@@ -211,10 +207,7 @@ def _normalize_quant_type(quant_type_arg: str) -> str:
 
 def _profile_can_derive_dense(profile: ModelProfile) -> bool:
     """True when the config carries enough dims to derive dense GEMM shapes."""
-    return (
-        int(getattr(profile, "hidden_size", 0) or 0) >= 1
-        and int(getattr(profile, "intermediate_size", 0) or 0) >= 1
-    )
+    return int(getattr(profile, "hidden_size", 0) or 0) >= 1 and int(getattr(profile, "intermediate_size", 0) or 0) >= 1
 
 
 def _resolve_quant_type(
@@ -245,10 +238,7 @@ def _resolve_quant_type(
             if path.is_file():
                 text = path.read_text(encoding="utf-8", errors="replace")
                 lowered = text.lower()
-                if (
-                    "a8w8_blockscale_bpreshuffle" in lowered
-                    or "blockscale_bpreshuffle" in lowered
-                ):
+                if "a8w8_blockscale_bpreshuffle" in lowered or "blockscale_bpreshuffle" in lowered:
                     return "blockscale_bpreshuffle"
                 if "QuantType.per_Token" in text:
                     return "per_token"
@@ -304,20 +294,30 @@ def select_tuners(
     if framework in ("sglang", "vllm-aiter"):
         tuners.extend(
             _select_sglang_tuners(
-                profile, precision, resolved_qt, kernel_signature_log,
-                has_untuned_csv, has_shapes_json, gfx_arch,
+                profile,
+                precision,
+                resolved_qt,
+                kernel_signature_log,
+                has_untuned_csv,
+                has_shapes_json,
+                gfx_arch,
             )
         )
     elif framework == "vllm":
         tuners.extend(
             _select_vllm_tuners(
-                profile, precision, resolved_qt,
-                has_shapes_json, has_tunableop_input,
+                profile,
+                precision,
+                resolved_qt,
+                has_shapes_json,
+                has_tunableop_input,
             )
         )
         tuners.extend(
             _moe_tuners_the_log_says_are_needed(
-                kernel_signature_log, tuners, profile,
+                kernel_signature_log,
+                tuners,
+                profile,
             )
         )
     else:
@@ -349,7 +349,7 @@ def _moe_tuners_the_log_says_are_needed(
     """
     if not profile.is_moe or not kernel_signature_log:
         return []
-    moe = (moe_stage_coverage(kernel_signature_log) or {})
+    moe = moe_stage_coverage(kernel_signature_log) or {}
     if not moe.get("tunable_ck_2stage"):
         return []
     if any(t.name == "fmoe_ck" for t in already):
@@ -357,20 +357,20 @@ def _moe_tuners_the_log_says_are_needed(
     # Only the tokens CK actually served. The rest of the range is Triton's, and
     # a CK table keyed on those token counts is one nothing ever reads.
     by_stage = moe.get("tokens_by_stage") or {}
-    ck_tokens = sorted({
-        int(tok)
-        for stage, tokens in by_stage.items()
-        if stage.startswith("2stage")
-        for tok in (tokens or [])
-    })
+    ck_tokens = sorted(
+        {int(tok) for stage, tokens in by_stage.items() if stage.startswith("2stage") for tok in (tokens or [])}
+    )
     log.info(
         "Serving log shows aiter CK 2-stage MoE (stages=%s, tokens=%s) on a vLLM "
         "run; adding fmoe_ck, which owns the table that path reads",
-        moe.get("stages_seen"), by_stage,
+        moe.get("stages_seen"),
+        by_stage,
     )
     return [
         TunerSpec(
-            "fmoe_ck", priority=10, estimated_minutes=15,
+            "fmoe_ck",
+            priority=10,
+            estimated_minutes=15,
             token_hint=ck_tokens or None,
         )
     ]
@@ -395,28 +395,32 @@ def _select_sglang_tuners(
             # 1-stage ASM already optimal (validated in experiments)
             is_1stage = _detect_1stage_from_log(kernel_signature_log)
             if is_1stage or precision == "fp8":
-                tuners.append(TunerSpec(
-                    "fmoe_ck",
-                    skip_reason=(
-                        "FP8 per_Token MoE uses 1-stage ASM kernels that are "
-                        "already at peak performance. CK 2-stage tuning cannot "
-                        "improve and may fail correctness checks."
-                    ),
-                    priority=10,
-                    estimated_minutes=0,
-                ))
+                tuners.append(
+                    TunerSpec(
+                        "fmoe_ck",
+                        skip_reason=(
+                            "FP8 per_Token MoE uses 1-stage ASM kernels that are "
+                            "already at peak performance. CK 2-stage tuning cannot "
+                            "improve and may fail correctness checks."
+                        ),
+                        priority=10,
+                        estimated_minutes=0,
+                    )
+                )
             else:
                 tuners.append(TunerSpec("fmoe_ck", priority=10, estimated_minutes=15))
         elif precision in ("bf16", "fp16") and quant_type == "none":
             tuners.append(TunerSpec("fmoe_ck", priority=10, estimated_minutes=15))
         elif precision in ("fp4", "mxfp4") or quant_type in ("fp4", "mxfp4"):
             if fp4_unsupported:
-                tuners.append(TunerSpec(
-                    "fmoe_ck",
-                    skip_reason=_FP4_GFX942_SKIP_REASON,
-                    priority=10,
-                    estimated_minutes=0,
-                ))
+                tuners.append(
+                    TunerSpec(
+                        "fmoe_ck",
+                        skip_reason=_FP4_GFX942_SKIP_REASON,
+                        priority=10,
+                        estimated_minutes=0,
+                    )
+                )
             else:
                 tuners.append(TunerSpec("fmoe_ck", priority=10, estimated_minutes=15))
         elif precision == "fp8" and quant_type in (
@@ -426,12 +430,14 @@ def _select_sglang_tuners(
         ):
             tuners.append(TunerSpec("fmoe_ck", priority=10, estimated_minutes=15))
         else:
-            tuners.append(TunerSpec(
-                "fmoe_ck",
-                skip_reason=f"Unsupported MoE precision/quant combo: {precision}/{quant_type}",
-                priority=10,
-                estimated_minutes=0,
-            ))
+            tuners.append(
+                TunerSpec(
+                    "fmoe_ck",
+                    skip_reason=f"Unsupported MoE precision/quant combo: {precision}/{quant_type}",
+                    priority=10,
+                    estimated_minutes=0,
+                )
+            )
 
     # --- Dense GEMM tuning ---
     # Dense fp8/fp4 tuners no longer require an externally-recorded CSV: when
@@ -471,40 +477,46 @@ def _select_sglang_tuners(
                 # table (AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE) that the
                 # per-token bpreshuffle serving op never reads — tuning it is
                 # silently ineffective. Skip honestly rather than fake success.
-                tuners.append(TunerSpec(
-                    "a8w8_bpreshuffle",
-                    skip_reason=(
-                        "Per-token bpreshuffle GEMM tuning is unavailable on "
-                        "gfx950: the CK a8w8_bpreshuffle tuner fails on the "
-                        "FNUZ/OCP fp8 dtype mismatch, and the "
-                        "blockscale+bpreshuffle tuner writes a config table the "
-                        "per-token bpreshuffle serving op does not read."
-                    ),
-                    priority=20,
-                    estimated_minutes=0,
-                ))
+                tuners.append(
+                    TunerSpec(
+                        "a8w8_bpreshuffle",
+                        skip_reason=(
+                            "Per-token bpreshuffle GEMM tuning is unavailable on "
+                            "gfx950: the CK a8w8_bpreshuffle tuner fails on the "
+                            "FNUZ/OCP fp8 dtype mismatch, and the "
+                            "blockscale+bpreshuffle tuner writes a config table the "
+                            "per-token bpreshuffle serving op does not read."
+                        ),
+                        priority=20,
+                        estimated_minutes=0,
+                    )
+                )
             else:
                 tuners.append(_dense_spec("a8w8_bpreshuffle"))
         elif quant_type == "blockscale_bpreshuffle":
             tuners.append(_dense_spec("a8w8_blockscale_bpreshuffle"))
     elif precision in ("fp4", "mxfp4"):
         if fp4_unsupported:
-            tuners.append(TunerSpec(
-                "a4w4_blockscale",
-                skip_reason=_FP4_GFX942_SKIP_REASON,
-                priority=20,
-                estimated_minutes=0,
-            ))
+            tuners.append(
+                TunerSpec(
+                    "a4w4_blockscale",
+                    skip_reason=_FP4_GFX942_SKIP_REASON,
+                    priority=20,
+                    estimated_minutes=0,
+                )
+            )
         else:
             tuners.append(_dense_spec("a4w4_blockscale"))
     elif precision in ("bf16", "fp16") and quant_type == "none":
         # Dense BF16/FP16 tuning via aiter's GemmTuner (hipblaslt search).
         # Shapes are computed from config.json (no --untuned-csv needed).
-        tuners.append(TunerSpec(
-            "sglang_dense_bf16",
-            priority=20,
-            estimated_minutes=10,
-        ))
+        tuners.append(
+            TunerSpec(
+                "sglang_dense_bf16",
+                priority=20,
+                estimated_minutes=10,
+            )
+        )
 
     return tuners
 
@@ -527,15 +539,17 @@ def _select_vllm_tuners(
         tuners.append(TunerSpec("vllm_dense_tunableop", priority=20, estimated_minutes=45))
     elif not profile.is_moe:
         # Dense-only model without shape input
-        tuners.append(TunerSpec(
-            "vllm_dense_tunableop",
-            skip_reason=(
-                "vLLM dense TunableOp requires --tunableop-input or --shapes-json "
-                "from actual GEMM shape recording (PYTORCH_TUNABLEOP_RECORD_UNTUNED=1). "
-                "Cannot reliably infer all shapes from config.json alone."
-            ),
-            priority=20,
-            estimated_minutes=0,
-        ))
+        tuners.append(
+            TunerSpec(
+                "vllm_dense_tunableop",
+                skip_reason=(
+                    "vLLM dense TunableOp requires --tunableop-input or --shapes-json "
+                    "from actual GEMM shape recording (PYTORCH_TUNABLEOP_RECORD_UNTUNED=1). "
+                    "Cannot reliably infer all shapes from config.json alone."
+                ),
+                priority=20,
+                estimated_minutes=0,
+            )
+        )
 
     return tuners

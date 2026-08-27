@@ -92,13 +92,7 @@ class UsageAccumulator:
         than "zero spend").
         """
         cost_available = self.calls > 0 and self._priced_calls == self.calls
-        cost_source = (
-            "provider"
-            if cost_available
-            else "partial"
-            if self._priced_calls
-            else "unavailable"
-        )
+        cost_source = "provider" if cost_available else "partial" if self._priced_calls else "unavailable"
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,

@@ -411,9 +411,7 @@ def test_profiler_droppings_are_forgiven_below_the_git_toplevel(tmp_path):
     guard = WorkspaceGuard(spec, dirty_baseline_default=True)
     guard.prepare()
     (nested / ".rocprofv3").mkdir()
-    (nested / ".rocprofv3" / "101-102-counter_values.dat").write_text(
-        "", encoding="utf-8"
-    )
+    (nested / ".rocprofv3" / "101-102-counter_values.dat").write_text("", encoding="utf-8")
     # The observed layout: a hash-named directory holding <pid>_results.db.
     hashed = nested / "4f1679f7dae9"
     hashed.mkdir()

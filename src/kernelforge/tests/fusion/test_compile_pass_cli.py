@@ -49,8 +49,7 @@ def _trace(path, add_dur: int = 4):
             {"cat": "kernel", "name": "Cijk_gemm", "ts": ts, "dur": 30},
             {"cat": "kernel", "name": "rms_norm_kernel", "ts": ts + 4000, "dur": 14},
             {"cat": "kernel", "name": "rotary_embedding_kernel", "ts": ts + 8000, "dur": 9},
-            {"cat": "kernel", "name": "vectorized_elementwise add", "ts": ts + 12000,
-             "dur": add_dur},
+            {"cat": "kernel", "name": "vectorized_elementwise add", "ts": ts + 12000, "dur": add_dur},
         ]
         ts += 20000
     path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
@@ -74,8 +73,8 @@ class Harness:
         self.model = tmp_path / "model"
         self.model.mkdir()
         (self.model / "config.json").write_text(
-            json.dumps({"model_type": "qwen3", "hidden_size": 4096,
-                        "num_attention_heads": 32}), encoding="utf-8")
+            json.dumps({"model_type": "qwen3", "hidden_size": 4096, "num_attention_heads": 32}), encoding="utf-8"
+        )
         self.trace = tmp_path / "decode.trace.json"
         _trace(self.trace)
         self.out = tmp_path / "out"
@@ -89,8 +88,7 @@ class Harness:
     # -- stubs ------------------------------------------------------------
     def probe(self, flags, **kw):
         return {
-            f: PassState(flag=f, present=True, enabled=False, source="default",
-                         config_file=str(self.config_file))
+            f: PassState(flag=f, present=True, enabled=False, source="default", config_file=str(self.config_file))
             for f in flags
         }
 
@@ -107,14 +105,21 @@ class Harness:
         return (ok, "ok" if ok else "server crashed at startup: boom")
 
     def verify(self, flag, **kw):
-        return PassState(flag=flag, present=True, enabled=self.enabled_after_edit,
-                         source="default", config_file=str(self.config_file))
+        return PassState(
+            flag=flag,
+            present=True,
+            enabled=self.enabled_after_edit,
+            source="default",
+            config_file=str(self.config_file),
+        )
 
     def install(self, monkeypatch):
         import kernelforge.fusion.command as cli
         import kernelforge.fusion.locate as locate
-        rt = cli.TargetRuntime(framework="vllm", python="/fake/python",
-                               launcher_exe="/fake/vllm", require_root=str(self.root))
+
+        rt = cli.TargetRuntime(
+            framework="vllm", python="/fake/python", launcher_exe="/fake/vllm", require_root=str(self.root)
+        )
         monkeypatch.setattr(locate, "probe_pass_states", self.probe)
         monkeypatch.setattr(locate, "resolve_target_runtime", lambda *a, **k: rt)
         monkeypatch.setattr(cli, "resolve_target_runtime", lambda *a, **k: rt)
@@ -126,19 +131,30 @@ class Harness:
         """Also surface an authoring candidate, so the run has BOTH kinds."""
         mdl = self.root / "vllm" / "model_executor" / "models" / "qwen3.py"
         mdl.write_text(
-            MODEL_BODY
-            + "        hidden_states = hidden_states + residual\n"
-              "        x = self.input_layernorm(hidden_states)\n",
-            encoding="utf-8")
+            MODEL_BODY + "        hidden_states = hidden_states + residual\n"
+            "        x = self.input_layernorm(hidden_states)\n",
+            encoding="utf-8",
+        )
         _trace(self.trace, add_dur=20)
         return self
 
     def run(self, *extra):
-        return CliRunner().invoke(main, [
-            "--trace", str(self.trace), "--model-path", str(self.model),
-            "--framework", "vllm", "--framework-root", str(self.root),
-            "--output-dir", str(self.out), *extra,
-        ])
+        return CliRunner().invoke(
+            main,
+            [
+                "--trace",
+                str(self.trace),
+                "--model-path",
+                str(self.model),
+                "--framework",
+                "vllm",
+                "--framework-root",
+                str(self.root),
+                "--output-dir",
+                str(self.out),
+                *extra,
+            ],
+        )
 
     # -- assertions -------------------------------------------------------
     @property
@@ -146,8 +162,7 @@ class Harness:
         return json.loads((self.out / "fusion_manifest.json").read_text())
 
     def assert_config_restored(self):
-        assert self.config_file.read_text(encoding="utf-8") == CONFIG_BODY, \
-            "the live framework file was left modified"
+        assert self.config_file.read_text(encoding="utf-8") == CONFIG_BODY, "the live framework file was left modified"
 
 
 @pytest.fixture
@@ -249,8 +264,7 @@ class TestPreExistingEdits:
         patch = (hz.out / "fusion.patch").read_text()
         # It may appear as diff CONTEXT, but must never be claimed as part of the
         # change (that is what would smuggle an unrelated edit downstream).
-        changed = [ln for ln in patch.splitlines()
-                   if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+        changed = [ln for ln in patch.splitlines() if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
         assert not any("operator's own local edit" in ln for ln in changed), changed
         assert f"+    {FLAG}: bool = True" in patch
         assert len(changed) == 2, changed  # exactly the one-line flip

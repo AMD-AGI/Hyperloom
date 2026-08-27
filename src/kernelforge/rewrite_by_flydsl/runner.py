@@ -56,11 +56,13 @@ PORT_FAILED = "port_failed"
 
 # An untimeable candidate only costs the interim best; one proving the two bench
 # paths measure different work invalidates every number the rewrite reports.
-_FATAL_CANDIDATE_FAILURES = frozenset({
-    driver_contract.CASE_COVERAGE_MISMATCH,
-    driver_contract.CANDIDATE_NOT_ISOLATED,
-    driver_contract.CANDIDATE_MODE_UNSUPPORTED,
-})
+_FATAL_CANDIDATE_FAILURES = frozenset(
+    {
+        driver_contract.CASE_COVERAGE_MISMATCH,
+        driver_contract.CANDIDATE_NOT_ISOLATED,
+        driver_contract.CANDIDATE_MODE_UNSUPPORTED,
+    }
+)
 
 
 def _git(workspace: str, *args: str) -> subprocess.CompletedProcess:
@@ -102,8 +104,7 @@ def _ensure_git_committed(
         # no-ops on an untracked kernel.
         r = _git(workspace, "add", "-f", "--", p)
         if r.returncode != 0:
-            log.warning("forge-rewrite: git add failed for %s: %s",
-                        p, (r.stderr or r.stdout).strip())
+            log.warning("forge-rewrite: git add failed for %s: %s", p, (r.stderr or r.stdout).strip())
             continue
         staged_ok = True
     if not staged_ok:
@@ -117,10 +118,15 @@ def _ensure_git_committed(
     _git(workspace, "commit", "-m", message)
     for p in paths:
         if p and _git(workspace, "ls-files", "--error-unmatch", "--", p).returncode != 0:
-            log.warning("forge-rewrite: %s is NOT git-tracked after commit "
-                        "(ignored / staging failed?); forge-loop keep/revert will no-op on it", p)
-            print(f"  [forge-rewrite] WARNING: {Path(p).name} is not git-tracked; "
-                  "forge-loop keep/revert may be a no-op", flush=True)
+            log.warning(
+                "forge-rewrite: %s is NOT git-tracked after commit "
+                "(ignored / staging failed?); forge-loop keep/revert will no-op on it",
+                p,
+            )
+            print(
+                f"  [forge-rewrite] WARNING: {Path(p).name} is not git-tracked; forge-loop keep/revert may be a no-op",
+                flush=True,
+            )
 
 
 def run_rewrite(
@@ -172,9 +178,7 @@ def run_rewrite(
     # before the standalone FlyDSL seed/PORT commits are introduced.
     base_result = _git(workspace, "rev-parse", "HEAD")
     rewrite_base_commit = (
-        base_result.stdout.strip().splitlines()[0]
-        if base_result.returncode == 0 and base_result.stdout.strip()
-        else ""
+        base_result.stdout.strip().splitlines()[0] if base_result.returncode == 0 and base_result.stdout.strip() else ""
     )
 
     # Producer-owned scratch the consumer may reclaim. Always reported, empty
@@ -186,9 +190,13 @@ def run_rewrite(
     def _setup_failed(reason: str, failure_class: str) -> dict:
         print(f"  [forge-rewrite] SETUP FAILED [{failure_class}]: {reason}", flush=True)
         result = report.build_result(
-            op_name=op_name, port_ok=False, port_attempts=0,
-            source_ms=None, optimize_result={},
-            failure_class=failure_class, failure_detail=reason,
+            op_name=op_name,
+            port_ok=False,
+            port_attempts=0,
+            source_ms=None,
+            optimize_result={},
+            failure_class=failure_class,
+            failure_detail=reason,
             temporary_paths=temporary_paths,
         )
         payload = report.emit_result(result, result_json, ignored_cli_options=ignored_cli_options)
@@ -201,9 +209,7 @@ def run_rewrite(
         attempt = create_attempt_workspace(workspace)
         export_import_path(attempt)
     except OSError as error:
-        return _setup_failed(
-            f"could not create the attempt directory: {error}", ATTEMPT_SETUP_FAILED
-        )
+        return _setup_failed(f"could not create the attempt directory: {error}", ATTEMPT_SETUP_FAILED)
     temporary_paths = attempt.temporary_paths
     print(f"  [forge-rewrite] attempt workspace {attempt.relative_root}", flush=True)
 
@@ -211,9 +217,7 @@ def run_rewrite(
     # yet when rewrite-specific preparation is enabled; it becomes the destination
     # for the isolated driver-authoring stage below.
     if not Path(source_kernel).is_file():
-        return _setup_failed(
-            f"source kernel not found: {source_kernel}", SOURCE_KERNEL_MISSING
-        )
+        return _setup_failed(f"source kernel not found: {source_kernel}", SOURCE_KERNEL_MISSING)
     driver_path = str(Path(driver).resolve())
     if time.time() >= search_stop_unix:
         return _setup_failed(
@@ -241,9 +245,12 @@ def run_rewrite(
     except Exception as e:  # noqa: BLE001 - any ingest error must still be scorable
         return _setup_failed(f"ingest error: {type(e).__name__}: {e}", INGEST_FAILED)
     driver_contract.export_driver_environment(spec)
-    print(f"  [forge-rewrite] op={spec.op_name} src={spec.source_kernel_name} "
-          f"entry={spec.source_entry or '<none>'} driver={Path(driver_path).name} "
-          f"-> {spec.flydsl_kernel_relpath}", flush=True)
+    print(
+        f"  [forge-rewrite] op={spec.op_name} src={spec.source_kernel_name} "
+        f"entry={spec.source_entry or '<none>'} driver={Path(driver_path).name} "
+        f"-> {spec.flydsl_kernel_relpath}",
+        flush=True,
+    )
 
     # (2) Seed the FlyDSL skeleton. The attempt directory is new, so this is
     # always a fresh stub — which is what the candidate probe below relies on.
@@ -279,19 +286,16 @@ def run_rewrite(
         if not prepared.ok or prepared.preflight is None:
             return _setup_failed(
                 prepared.error or "rewrite driver preparation failed",
-                prepared.failure_class
-                or flydsl_rewrite_driver_preparation.DRIVER_PREPARATION_FAILED,
+                prepared.failure_class or flydsl_rewrite_driver_preparation.DRIVER_PREPARATION_FAILED,
             )
         preflight = prepared.preflight
         print(
-            f"  [forge-rewrite] prepared driver {Path(driver_path).name} "
-            f"in {prepared.attempts} attempt(s)",
+            f"  [forge-rewrite] prepared driver {Path(driver_path).name} in {prepared.attempts} attempt(s)",
             flush=True,
         )
     elif preflight.ok:
         print(
-            f"  [forge-rewrite] supplied driver {Path(driver_path).name} "
-            "already conforms; preparation skipped",
+            f"  [forge-rewrite] supplied driver {Path(driver_path).name} already conforms; preparation skipped",
             flush=True,
         )
     if not preflight.ok:
@@ -305,20 +309,20 @@ def run_rewrite(
             "the conforming rewrite driver reported no source baseline",
             driver_contract.REF_TIMING_UNPARSEABLE,
         )
-    print(f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
-          f"cases={list(preflight.reference_case_ids) or 'unreported'})", flush=True)
-    print("  [forge-rewrite] driver contract OK: source timed, candidate mode "
-          "recognized and not yet runnable", flush=True)
+    print(
+        f"  [forge-rewrite] source baseline: {source_ms:.4f} ms (full suite, "
+        f"cases={list(preflight.reference_case_ids) or 'unreported'})",
+        flush=True,
+    )
+    print(
+        "  [forge-rewrite] driver contract OK: source timed, candidate mode recognized and not yet runnable", flush=True
+    )
 
     # (5) KB warm-start / PORT: an exact source+driver match may materialize a
     # prior standalone FlyDSL file, but it must pass today's FlyDSL-only and
     # correctness gates before PORT is skipped. Performance is measured for
     # ranking/reporting and does not prevent reuse of a correct port.
-    kb_seed = (
-        Path(spec.flydsl_kernel).read_bytes()
-        if Path(spec.flydsl_kernel).is_file()
-        else None
-    )
+    kb_seed = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
     if rewrite_kb_enabled:
         try:
             kb_read = asyncio.run(
@@ -360,24 +364,29 @@ def run_rewrite(
             snr_db=kb_read.snr_db,
         )
         print(
-            f"  [forge-rewrite] KB warm-start accepted: "
-            f"{kb_read.solution_slug} ({kb_read.best_ms} ms)",
+            f"  [forge-rewrite] KB warm-start accepted: {kb_read.solution_slug} ({kb_read.best_ms} ms)",
             flush=True,
         )
     else:
-        port = asyncio.run(run_port_loop(
-            spec, driver_path, config,
-            max_attempts=max_port_attempts,
-            permission_mode=permission_mode,
-            stop_at_unix=search_stop_unix,
-            pre_task_context=kb_read.reference_context,
-        ))
+        port = asyncio.run(
+            run_port_loop(
+                spec,
+                driver_path,
+                config,
+                max_attempts=max_port_attempts,
+                permission_mode=permission_mode,
+                stop_at_unix=search_stop_unix,
+                pre_task_context=kb_read.reference_context,
+            )
+        )
     if not port.ok:
         print(f"  [forge-rewrite] PORT FAILED after {port.attempts} attempts", flush=True)
         result = report.build_result(
             op_name=op_name,
-            port_ok=False, port_attempts=port.attempts,
-            source_ms=source_ms, optimize_result={},
+            port_ok=False,
+            port_attempts=port.attempts,
+            source_ms=source_ms,
+            optimize_result={},
             kb_experience={
                 "read": kb_read.to_dict(),
                 "write": {"written": False, "reason": "port_failed"},
@@ -394,7 +403,8 @@ def run_rewrite(
     # Commit the correct port so forge-loop starts from a clean committed state.
     # Stage ONLY the ported kernel — never the whole workspace (see helper).
     _ensure_git_committed(
-        workspace, "forge-rewrite: initial correct flydsl port",
+        workspace,
+        "forge-rewrite: initial correct flydsl port",
         [spec.flydsl_kernel],
         branch=optimize_git_branch,
     )
@@ -430,8 +440,7 @@ def run_rewrite(
             return _setup_failed(candidate.detail, candidate.failure_class)
         else:
             print(
-                f"  [forge-rewrite] candidate bench unavailable "
-                f"[{candidate.failure_class}]: {candidate.detail}",
+                f"  [forge-rewrite] candidate bench unavailable [{candidate.failure_class}]: {candidate.detail}",
                 flush=True,
             )
     # A newly produced correct port is independently reusable even when it is
@@ -450,8 +459,7 @@ def run_rewrite(
             allow_non_improving=True,
         )
         print(
-            "  [forge-rewrite] PORT KB publish: "
-            f"{port_kb_write.get('reason') or port_kb_write.get('solution')}",
+            f"  [forge-rewrite] PORT KB publish: {port_kb_write.get('reason') or port_kb_write.get('solution')}",
             flush=True,
         )
     elif rewrite_kb_enabled:
@@ -463,7 +471,8 @@ def run_rewrite(
         port_kb_write = {"written": False, "reason": "disabled"}
     interim = report.build_result(
         op_name=op_name,
-        port_ok=True, port_attempts=port.attempts,
+        port_ok=True,
+        port_attempts=port.attempts,
         source_ms=source_ms,
         optimize_result={"best_ms": flydsl_baseline_ms},
         applyback_result={"ok": False, "error": "apply-back pending"},
@@ -477,16 +486,21 @@ def run_rewrite(
     if result_json:
         report.emit_result(interim, result_json, ignored_cli_options=ignored_cli_options)
     sp0 = interim.speedup
-    print(f"  [forge-rewrite] interim (port only): flydsl={flydsl_baseline_ms} ms "
-          f"vs source={source_ms} ms -> speedup={f'{sp0:.3f}x' if sp0 else 'unknown'} "
-          f"(persisted; OPTIMIZE will improve)", flush=True)
+    print(
+        f"  [forge-rewrite] interim (port only): flydsl={flydsl_baseline_ms} ms "
+        f"vs source={source_ms} ms -> speedup={f'{sp0:.3f}x' if sp0 else 'unknown'} "
+        f"(persisted; OPTIMIZE will improve)",
+        flush=True,
+    )
 
     # (6) OPTIMIZE: reuse forge-loop over the FlyDSL kernel (unchanged).
     opt: dict = {}
     if time.time() < search_stop_unix:
         remaining_hours = max(1.0, (deadline_unix - time.time()) / 3600.0)
         opt = run_optimize(
-            spec, driver_path, config,
+            spec,
+            driver_path,
+            config,
             experiments_dir=experiments_dir,
             max_hours=remaining_hours,
             git_branch=optimize_git_branch,
@@ -498,8 +512,7 @@ def run_rewrite(
         )
     else:
         print(
-            "  [forge-rewrite] 20-minute finalization reserve reached after PORT; "
-            "skipping forge-loop",
+            "  [forge-rewrite] 20-minute finalization reserve reached after PORT; skipping forge-loop",
             flush=True,
         )
 
@@ -556,8 +569,10 @@ def run_rewrite(
         )
     result = report.build_result(
         op_name=op_name,
-        port_ok=True, port_attempts=port.attempts,
-        source_ms=source_ms, optimize_result=opt,
+        port_ok=True,
+        port_attempts=port.attempts,
+        source_ms=source_ms,
+        optimize_result=opt,
         applyback_result=applyback.to_dict(),
         applyback_required=bool(rewrite_base_commit),
         kb_experience={
@@ -568,7 +583,10 @@ def run_rewrite(
     )
     payload = report.emit_result(result, result_json, ignored_cli_options=ignored_cli_options)
     sp = result.speedup
-    print(f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
-          f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'}", flush=True)
+    print(
+        f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "
+        f"vs source={source_ms} ms -> speedup={f'{sp:.3f}x' if sp else 'unknown'}",
+        flush=True,
+    )
     print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
     return result.to_dict()

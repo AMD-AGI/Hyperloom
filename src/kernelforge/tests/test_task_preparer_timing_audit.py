@@ -6,6 +6,7 @@ used ``shutil.copy2``, which copies the SOURCE mtime onto the snapshot. Every
 driver snapshot therefore claimed the driver's own mtime instead of its capture
 time, and a timeline reconstructed from the directory was off by minutes.
 """
+
 from __future__ import annotations
 
 import asyncio

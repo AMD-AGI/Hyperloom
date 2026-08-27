@@ -176,8 +176,7 @@ def build_spec(
             source_language=language,
         )
         if entry:
-            log.info("rewrite: auto-discovered source entry '%s' in %s",
-                     entry, Path(source_kernel).name)
+            log.info("rewrite: auto-discovered source entry '%s' in %s", entry, Path(source_kernel).name)
     # The source host entry is only a HINT shown to the port agent — the supplied
     # or rewrite-prepared measurement driver owns how the reference/baseline is
     # invoked, so an unresolved entry does not block the pipeline (no fail-fast).
@@ -186,7 +185,8 @@ def build_spec(
             "rewrite: no source host entry for op '%s' (not provided, not "
             "auto-discovered from %s); the port prompt will omit it. The driver "
             "still defines the reference/baseline.",
-            op_name, Path(source_kernel).name,
+            op_name,
+            Path(source_kernel).name,
         )
 
     return RewriteSpec(

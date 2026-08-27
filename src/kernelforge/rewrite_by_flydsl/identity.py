@@ -90,9 +90,7 @@ def session_id(canonical_id: str, kernel_name: str, port_digest: str) -> str:
     """
     name = _UNSAFE_IN_SESSION_ID.sub("-", str(kernel_name or "")).strip("-.")
     legible = name[:_NAME_BUDGET].strip("-.") or UNKNOWN_SEGMENT
-    identity_fingerprint = hashlib.sha256(
-        str(canonical_id or "").encode()
-    ).hexdigest()[:_FINGERPRINT_LEN]
+    identity_fingerprint = hashlib.sha256(str(canonical_id or "").encode()).hexdigest()[:_FINGERPRINT_LEN]
     port = _UNSAFE_IN_SESSION_ID.sub("", str(port_digest or ""))[:_FINGERPRINT_LEN]
     return f"rewrite-{legible}-{identity_fingerprint}-{port}"
 

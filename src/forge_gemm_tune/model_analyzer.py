@@ -159,14 +159,10 @@ def analyze_model(model_path: str) -> ModelProfile:
 
     # MoE detection — check multiple field names across model families
     num_experts = int(
-        llm_cfg.get("num_local_experts", 0)
-        or llm_cfg.get("num_experts", 0)
-        or llm_cfg.get("n_routed_experts", 0)
+        llm_cfg.get("num_local_experts", 0) or llm_cfg.get("num_experts", 0) or llm_cfg.get("n_routed_experts", 0)
     )
     topk = int(
-        llm_cfg.get("num_experts_per_tok", 0)
-        or llm_cfg.get("num_selected_experts", 0)
-        or llm_cfg.get("top_k", 0)
+        llm_cfg.get("num_experts_per_tok", 0) or llm_cfg.get("num_selected_experts", 0) or llm_cfg.get("top_k", 0)
     )
     is_moe = num_experts > 1
 
@@ -180,15 +176,11 @@ def analyze_model(model_path: str) -> ModelProfile:
     hidden_act = str(llm_cfg.get("hidden_act", "silu")).lower()
 
     # Model dtype
-    model_dtype = str(
-        llm_cfg.get("torch_dtype", config.get("torch_dtype", "bfloat16"))
-    ).replace("torch.", "")
+    model_dtype = str(llm_cfg.get("torch_dtype", config.get("torch_dtype", "bfloat16"))).replace("torch.", "")
 
     # Attention heads
     num_attention_heads = int(llm_cfg.get("num_attention_heads", 0))
-    num_key_value_heads = int(
-        llm_cfg.get("num_key_value_heads", num_attention_heads)
-    )
+    num_key_value_heads = int(llm_cfg.get("num_key_value_heads", num_attention_heads))
 
     # Per-head dims. ``head_dim`` is the qk head dim (config-explicit or derived);
     # ``v_head_dim`` defaults to it when not separately specified.
@@ -242,9 +234,17 @@ def analyze_model(model_path: str) -> ModelProfile:
         "Model analysis: arch=%s, is_moe=%s, experts=%d, topk=%d, "
         "hidden=%d, inter=%d, moe_inter=%d, heads=%d, kv_heads=%d, "
         "quant=%s/%d-bit, dtype=%s",
-        arch, is_moe, num_experts, topk,
-        hidden_size, intermediate_size, moe_intermediate_size,
-        num_attention_heads, num_key_value_heads,
-        quant_method or "none", quant_bits, model_dtype,
+        arch,
+        is_moe,
+        num_experts,
+        topk,
+        hidden_size,
+        intermediate_size,
+        moe_intermediate_size,
+        num_attention_heads,
+        num_key_value_heads,
+        quant_method or "none",
+        quant_bits,
+        model_dtype,
     )
     return profile

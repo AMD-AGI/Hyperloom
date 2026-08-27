@@ -55,11 +55,7 @@ def is_protected_path(
 
     raw = Path(path).expanduser()
     root = Path(workspace).expanduser().resolve() if workspace else None
-    absolute = (
-        raw.resolve()
-        if raw.is_absolute()
-        else ((root / raw).resolve() if root else raw.resolve())
-    )
+    absolute = raw.resolve() if raw.is_absolute() else ((root / raw).resolve() if root else raw.resolve())
     protected_abs: set[Path] = set()
     for item in exact_paths:
         if not str(item or "").strip():
@@ -84,9 +80,7 @@ def is_protected_path(
     patterns = (*PROTECTED_GLOBS, *tuple(extra_globs))
     relative_posix = relative.as_posix()
     return any(
-        fnmatch.fnmatch(relative.name, pattern)
-        or fnmatch.fnmatch(relative_posix, pattern)
-        for pattern in patterns
+        fnmatch.fnmatch(relative.name, pattern) or fnmatch.fnmatch(relative_posix, pattern) for pattern in patterns
     )
 
 
@@ -148,10 +142,7 @@ def protected_path_inventory(
         for name in entries:
             candidate = parent / name
             metadata = candidate.lstat()
-            if not (
-                stat.S_ISREG(metadata.st_mode)
-                or stat.S_ISLNK(metadata.st_mode)
-            ):
+            if not (stat.S_ISREG(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode)):
                 continue
             if is_protected_path(
                 candidate,

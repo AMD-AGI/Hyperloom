@@ -5,6 +5,7 @@ from the deployed CSV's split-K content, so a split-K artifact is still promoted
 to e2e even when the microbench reports no improvement. Guards the exact
 regression the split-K fix exists to prevent (a refactor dropping the wiring).
 """
+
 from __future__ import annotations
 
 import types
@@ -18,10 +19,20 @@ _HDR = "gfx,cu_num,M,N,K,libtype,kernelId,splitK,us,kernelName,tflops,bw,errRati
 def _ctx(tmp_path):
     return TuneContext(
         profile=types.SimpleNamespace(),
-        framework="vllm-aiter", precision="fp8", quant_type="blockscale",
-        gpu_type="mi355x", tp=1, conc=64, tokens=[64], mp=1,
-        output_dir=tmp_path, iters=1, warmup=0, min_improvement_pct=3.0,
-        timeout_s=60, untuned_csv=tmp_path / "in.csv",
+        framework="vllm-aiter",
+        precision="fp8",
+        quant_type="blockscale",
+        gpu_type="mi355x",
+        tp=1,
+        conc=64,
+        tokens=[64],
+        mp=1,
+        output_dir=tmp_path,
+        iters=1,
+        warmup=0,
+        min_improvement_pct=3.0,
+        timeout_s=60,
+        untuned_csv=tmp_path / "in.csv",
     )
 
 
@@ -47,9 +58,12 @@ def _prep_and_mock(tmp_path, monkeypatch, splitk):
 
 def _run(tmp_path):
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8", script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ctx=_ctx(tmp_path),
-        work_dir=tmp_path, extra_args=["--libtype", "all", "--splitK"],
+        tuner_name="a8w8",
+        script_key="a8w8_blockscale",
+        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+        ctx=_ctx(tmp_path),
+        work_dir=tmp_path,
+        extra_args=["--libtype", "all", "--splitK"],
     )
 
 
@@ -67,9 +81,12 @@ def _run_no_splitk(tmp_path):
     # Same driver, but no --splitK, so a forced candidate can only come from the
     # new-shape path -- isolating the fix from the split-K force_candidate.
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8", script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ctx=_ctx(tmp_path),
-        work_dir=tmp_path, extra_args=["--libtype", "all"],
+        tuner_name="a8w8",
+        script_key="a8w8_blockscale",
+        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+        ctx=_ctx(tmp_path),
+        work_dir=tmp_path,
+        extra_args=["--libtype", "all"],
     )
 
 
@@ -77,10 +94,7 @@ def test_all_new_shapes_force_candidate(tmp_path, monkeypatch):
     # aiter reports every shape as NEW (no prior baseline). status=ok with
     # unverified_shapes>0 (bf16-aligned); candidate=True sends configs to E2E.
     _prep_and_mock(tmp_path, monkeypatch, splitk=0)
-    new_table = (
-        "--- Would update (1 shapes) ---\n"
-        "(64, 5120, 5120) | N/A | 16.0 | N/A | NEW\n"
-    )
+    new_table = "--- Would update (1 shapes) ---\n(64, 5120, 5120) | N/A | 16.0 | N/A | NEW\n"
     monkeypatch.setattr(ac, "run_subprocess", lambda cmd, **k: (0, new_table, ""))
     result = _run_no_splitk(tmp_path)
     assert result.candidate is True
@@ -96,12 +110,8 @@ def test_candidate_csv_fallback_forces_candidate(tmp_path, monkeypatch):
     # them out of the force path discarded a real tuned artifact as
     # no_improvement -- the reporting artefact behind fp8 bpreshuffle's "0/44".
     _prep_and_mock(tmp_path, monkeypatch, splitk=0)
-    (tmp_path / "candidate_a8w8.csv").write_text(
-        _HDR + "\ngfx950,256,64,5120,5120,ck,8,0,16.0,knl,100,1000,0.0\n"
-    )
-    monkeypatch.setattr(
-        ac, "run_subprocess", lambda cmd, **k: (0, "Successfully tuned 1 shapes\n", "")
-    )
+    (tmp_path / "candidate_a8w8.csv").write_text(_HDR + "\ngfx950,256,64,5120,5120,ck,8,0,16.0,knl,100,1000,0.0\n")
+    monkeypatch.setattr(ac, "run_subprocess", lambda cmd, **k: (0, "Successfully tuned 1 shapes\n", ""))
     result = _run_no_splitk(tmp_path)
     assert result.candidate is True
     assert result.status == "ok"
@@ -113,10 +123,7 @@ def test_all_update_shapes_do_not_force_candidate(tmp_path, monkeypatch):
     # A normal comparison with real speedups is promoted through has_improvement,
     # NOT the new-shape force path -- guards against over-forcing.
     _prep_and_mock(tmp_path, monkeypatch, splitk=0)
-    upd_table = (
-        "--- Would update (1 shapes) ---\n"
-        "(64, 5120, 5120) | 32.0 | 16.0 | 50.0% | UPDATE\n"
-    )
+    upd_table = "--- Would update (1 shapes) ---\n(64, 5120, 5120) | 32.0 | 16.0 | 50.0% | UPDATE\n"
     monkeypatch.setattr(ac, "run_subprocess", lambda cmd, **k: (0, upd_table, ""))
     result = _run_no_splitk(tmp_path)
     assert result.candidate is False  # not forced; promoted via micro improvement

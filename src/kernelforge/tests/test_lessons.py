@@ -44,6 +44,7 @@ def _store(tmp_path, **kwargs) -> LessonStore:
 
 # ── store round-trip ──────────────────────────────────────────────────────────
 
+
 def test_write_and_read_round_trip(tmp_path):
     store = _store(tmp_path)
     store.write(7, "swizzled the LDS tile\n\n- [better] xor swizzle | 1.11x")
@@ -65,6 +66,7 @@ def test_read_missing_iteration_is_empty(tmp_path):
 
 
 # ── the loop's machine-written half ───────────────────────────────────────────
+
 
 def test_append_outcome_preserves_the_narrative(tmp_path):
     store = _store(tmp_path)
@@ -99,10 +101,7 @@ def test_format_outcome_line_includes_available_measurements():
         snr_db=42.25,
         end_reason="turn_cap",
     )
-    assert line == (
-        "OUTCOME: REVERT_PERF | wall 1.2340 ms vs best 1.1980 ms | "
-        "snr 42.2 dB | session ended: turn_cap"
-    )
+    assert line == ("OUTCOME: REVERT_PERF | wall 1.2340 ms vs best 1.1980 ms | snr 42.2 dB | session ended: turn_cap")
 
 
 def test_format_outcome_line_tolerates_missing_measurements():
@@ -117,6 +116,7 @@ def test_format_outcome_line_tolerates_missing_measurements():
 
 
 # ── prompt rendering ──────────────────────────────────────────────────────────
+
 
 def test_render_is_empty_before_any_lesson(tmp_path):
     assert _store(tmp_path).render_for_prompt() == ""
@@ -182,6 +182,7 @@ def test_default_window_is_five(tmp_path):
 
 # ── summarizer prompt ─────────────────────────────────────────────────────────
 
+
 def test_prompt_demands_every_direction_and_its_result():
     prompt = build_summary_prompt(iteration=5, end_reason="candidate_submitted")
 
@@ -228,6 +229,7 @@ def test_cutoff_classification(end_reason, expected):
 
 # ── summarize_iteration ───────────────────────────────────────────────────────
 
+
 def test_summarize_writes_the_returned_text(tmp_path):
     store = _store(tmp_path)
     seen: list[str] = []
@@ -236,10 +238,14 @@ def test_summarize_writes_the_returned_text(tmp_path):
         seen.append(prompt)
         return "headline\n- [worse] bigger tile | 0.94x"
 
-    outcome = asyncio.run(summarize_iteration(
-        store=store, iteration=2, end_reason="turn_cap",
-        summarizer=fake_summarizer,
-    ))
+    outcome = asyncio.run(
+        summarize_iteration(
+            store=store,
+            iteration=2,
+            end_reason="turn_cap",
+            summarizer=fake_summarizer,
+        )
+    )
 
     assert outcome
     assert "bigger tile" in outcome.text
@@ -249,9 +255,14 @@ def test_summarize_writes_the_returned_text(tmp_path):
 
 def test_summarize_without_a_resumable_provider(tmp_path):
     store = _store(tmp_path)
-    outcome = asyncio.run(summarize_iteration(
-        store=store, iteration=2, end_reason="", summarizer=None,
-    ))
+    outcome = asyncio.run(
+        summarize_iteration(
+            store=store,
+            iteration=2,
+            end_reason="",
+            summarizer=None,
+        )
+    )
     assert not outcome
     assert "cannot resume" in outcome.reason
     assert store.existing_iterations() == []
@@ -264,9 +275,14 @@ def test_summarize_reports_why_a_failing_session_produced_nothing(tmp_path):
     async def broken(prompt: str) -> str:
         raise RuntimeError("backend exploded")
 
-    outcome = asyncio.run(summarize_iteration(
-        store=store, iteration=2, end_reason="", summarizer=broken,
-    ))
+    outcome = asyncio.run(
+        summarize_iteration(
+            store=store,
+            iteration=2,
+            end_reason="",
+            summarizer=broken,
+        )
+    )
     assert not outcome
     assert "RuntimeError" in outcome.reason
     assert "backend exploded" in outcome.reason
@@ -279,9 +295,14 @@ def test_summarize_ignores_an_empty_reply(tmp_path):
     async def empty(prompt: str) -> str:
         return "   \n "
 
-    outcome = asyncio.run(summarize_iteration(
-        store=store, iteration=2, end_reason="", summarizer=empty,
-    ))
+    outcome = asyncio.run(
+        summarize_iteration(
+            store=store,
+            iteration=2,
+            end_reason="",
+            summarizer=empty,
+        )
+    )
     assert not outcome
     assert "no text" in outcome.reason
     assert store.existing_iterations() == []
@@ -294,9 +315,14 @@ def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
         return "use wider vector loads\n- [better] vectorized loads | 1.04x"
 
     monkeypatch.setattr(store, "write", lambda _iteration, _text: None)
-    outcome = asyncio.run(summarize_iteration(
-        store=store, iteration=2, end_reason="", summarizer=summary,
-    ))
+    outcome = asyncio.run(
+        summarize_iteration(
+            store=store,
+            iteration=2,
+            end_reason="",
+            summarizer=summary,
+        )
+    )
 
     assert not outcome
     assert outcome.reason == "failed to persist lesson document"
@@ -304,6 +330,7 @@ def test_summarize_reports_a_lesson_store_write_failure(tmp_path, monkeypatch):
 
 
 # ── machine-written fallback ──────────────────────────────────────────────────
+
 
 def test_fallback_document_carries_the_gate_rejections():
     doc = build_fallback_document(
@@ -328,27 +355,37 @@ def test_fallback_document_carries_the_gate_rejections():
 
 def test_fallback_document_without_findings_still_records_the_diff():
     doc = build_fallback_document(
-        diff_summary="a.py | 1 +", findings="", end_reason="",
+        diff_summary="a.py | 1 +",
+        findings="",
+        end_reason="",
     )
     assert doc.splitlines()[0].startswith("(no agent summary)")
     assert "a.py | 1 +" in doc
 
 
 def test_fallback_document_is_empty_when_nothing_was_observed():
-    assert build_fallback_document(
-        diff_summary="", findings="", end_reason="turn_cap",
-    ) == ""
+    assert (
+        build_fallback_document(
+            diff_summary="",
+            findings="",
+            end_reason="turn_cap",
+        )
+        == ""
+    )
 
 
 def test_fallback_document_caps_the_rejection_list():
     findings = "\n---\n".join(f"rejection {i}" for i in range(20))
     doc = build_fallback_document(
-        diff_summary="", findings=findings, end_reason="", max_findings=3,
+        diff_summary="",
+        findings=findings,
+        end_reason="",
+        max_findings=3,
     )
     listed = [line for line in doc.splitlines() if line.startswith("- rejection")]
     assert len(listed) == 3
-    assert "- rejection 19" in doc      # newest kept
-    assert "- rejection 0" not in doc   # oldest dropped
+    assert "- rejection 19" in doc  # newest kept
+    assert "- rejection 0" not in doc  # oldest dropped
 
 
 # ── the scope a result was measured under ─────────────────────────────────────
@@ -402,11 +439,14 @@ def test_scan_constant_values_finds_every_assignment():
 
 
 def test_scope_holds_when_the_case_and_the_constants_still_match():
-    assert scope_conflicts(
-        _SPLIT_K,
-        current_cases=("decode-t1",),
-        kernel_source="BLOCK_N = 16\nnum_warps = 8\n",
-    ) == ()
+    assert (
+        scope_conflicts(
+            _SPLIT_K,
+            current_cases=("decode-t1",),
+            kernel_source="BLOCK_N = 16\nnum_warps = 8\n",
+        )
+        == ()
+    )
 
 
 def test_a_case_outside_the_measured_scope_reopens_the_negative():
@@ -429,24 +469,23 @@ def test_a_moved_held_fixed_value_reopens_the_negative():
 
 def test_a_held_fixed_constant_that_no_longer_exists_reopens_the_negative():
     reasons = scope_conflicts(
-        _SPLIT_K, current_cases=("decode-t1",), kernel_source="num_warps = 8\n",
+        _SPLIT_K,
+        current_cases=("decode-t1",),
+        kernel_source="num_warps = 8\n",
     )
-    assert reasons == (
-        "BLOCK_N is not assigned in the kernel source checked (pinned at 16 "
-        "when this was measured)",
-    )
+    assert reasons == ("BLOCK_N is not assigned in the kernel source checked (pinned at 16 when this was measured)",)
 
 
 def test_an_unchecked_kernel_source_is_reported_rather_than_assumed_clean():
     reasons = scope_conflicts(_SPLIT_K, current_cases=("decode-t1",))
-    assert reasons == (
-        "held-fixed values were not checked against the current kernel",
-    )
+    assert reasons == ("held-fixed values were not checked against the current kernel",)
 
 
 def test_a_scope_with_nothing_recorded_cannot_close_anything():
     reasons = scope_conflicts(
-        LessonScope(), current_cases=("decode-t1",), kernel_source="",
+        LessonScope(),
+        current_cases=("decode-t1",),
+        kernel_source="",
     )
     assert reasons == (
         "the cases it was measured on were not recorded",
@@ -477,6 +516,7 @@ def test_cases_named_in_recovers_a_lane_restriction():
 
 
 # ── the scope in the store and in the prompt ──────────────────────────────────
+
 
 def test_append_scope_preserves_the_narrative(tmp_path):
     store = _store(tmp_path)
@@ -561,9 +601,7 @@ def test_prompt_asks_for_the_premise_behind_a_negative():
 # ── reading a constant out of a real kernel ───────────────────────────────────
 
 _EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
-_MXFP8_KERNEL = (
-    _EXAMPLES / "triton2flydsl-mxfp8-grouped-gemm" / "mxfp8_grouped_gemm.py"
-)
+_MXFP8_KERNEL = _EXAMPLES / "triton2flydsl-mxfp8-grouped-gemm" / "mxfp8_grouped_gemm.py"
 _SOFTMAX_KERNEL = _EXAMPLES / "triton-softmax-forge-loop" / "softmax_kernel.py"
 
 
@@ -577,15 +615,15 @@ def test_a_constexpr_parameter_is_not_an_assignment_of_the_constant():
     at some BLOCK_N. Neither: the name is there, no literal was read for it.
     """
     source = _MXFP8_KERNEL.read_text()
-    assert "BLOCK_N: tl.constexpr" in source     # the annotation is there
-    assert "BLOCK_N=block_n" in source           # so is the call-site keyword
+    assert "BLOCK_N: tl.constexpr" in source  # the annotation is there
+    assert "BLOCK_N=block_n" in source  # so is the call-site keyword
 
     assert scan_constant_values(source, ["BLOCK_N"]) == {"BLOCK_N": ()}
 
 
 def test_a_call_site_keyword_is_not_an_assignment_of_the_constant():
     source = _SOFTMAX_KERNEL.read_text()
-    assert "num_warps=num_warps" in source       # the call-site keyword
+    assert "num_warps=num_warps" in source  # the call-site keyword
 
     assert scan_constant_values(source, ["num_warps"]) == {"num_warps": ("1",)}
 
@@ -601,8 +639,7 @@ def test_a_tuning_table_entry_counts_as_an_assignment():
 
 def test_an_annotated_assignment_records_the_value_not_the_annotation():
     """A bare declaration binds no value, but it is not an absent name either."""
-    found = scan_constant_values("BLOCK_N: int = 16\nSPLIT_K: int\n",
-                                 ["BLOCK_N", "SPLIT_K"])
+    found = scan_constant_values("BLOCK_N: int = 16\nSPLIT_K: int\n", ["BLOCK_N", "SPLIT_K"])
     assert found == {"BLOCK_N": ("16",), "SPLIT_K": ()}
 
 
@@ -618,22 +655,18 @@ def test_a_parameter_default_is_not_an_assignment_of_the_constant():
 
 
 def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_it():
-    """"Not assigned" and "could not be checked" are different facts."""
+    """ "Not assigned" and "could not be checked" are different facts."""
     assert scan_constant_values("def broken(:\n", ["BLOCK_N"]) is None
 
 
 def test_a_constant_is_looked_for_in_every_declared_source_file():
     """Tile and dispatch constants move to a sibling file; that is not gone."""
-    found = scan_sources_for_constants(
-        ["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"]
-    )
+    found = scan_sources_for_constants(["import config\n", "BLOCK_N = 16\n"], ["BLOCK_N"])
     assert found == {"BLOCK_N": ("16",)}
 
 
 def test_a_constant_absent_from_every_parsed_file_is_absent():
-    found = scan_sources_for_constants(
-        ["import config\n", "num_warps = 8\n"], ["BLOCK_N"]
-    )
+    found = scan_sources_for_constants(["import config\n", "num_warps = 8\n"], ["BLOCK_N"])
     assert found == {}
 
 
@@ -644,31 +677,37 @@ def test_nothing_is_known_when_no_source_file_could_be_parsed():
 
 def test_an_unparsable_source_is_reported_as_unchecked_not_as_moved():
     reasons = scope_conflicts(
-        _SPLIT_K, current_cases=("decode-t1",), kernel_source="def broken(:\n",
+        _SPLIT_K,
+        current_cases=("decode-t1",),
+        kernel_source="def broken(:\n",
     )
-    assert reasons == (
-        "held-fixed values were not checked: the declared source could not be "
-        "parsed",
-    )
+    assert reasons == ("held-fixed values were not checked: the declared source could not be parsed",)
 
 
 def test_a_pin_still_held_in_a_sibling_file_keeps_the_negative_in_scope():
-    assert scope_conflicts(
-        _SPLIT_K,
-        current_cases=("decode-t1",),
-        kernel_source=["BLOCK_N = 16\n", "num_warps = 8\n"],
-    ) == ()
+    assert (
+        scope_conflicts(
+            _SPLIT_K,
+            current_cases=("decode-t1",),
+            kernel_source=["BLOCK_N = 16\n", "num_warps = 8\n"],
+        )
+        == ()
+    )
 
 
 # ── a document with nothing negative in it has nothing to re-open ─────────────
 
+
 def test_a_document_with_no_negative_is_not_reopened_by_an_unrecorded_premise():
     """An all-positive iteration closed nothing, so there is nothing to re-open."""
-    assert scope_conflicts(
-        LessonScope(cases=("decode-t1",), carries_negative=False),
-        current_cases=("decode-t1",),
-        kernel_source="BLOCK_N = 16\n",
-    ) == ()
+    assert (
+        scope_conflicts(
+            LessonScope(cases=("decode-t1",), carries_negative=False),
+            current_cases=("decode-t1",),
+            kernel_source="BLOCK_N = 16\n",
+        )
+        == ()
+    )
 
 
 def test_a_recorded_negative_without_a_premise_still_reopens():
@@ -696,24 +735,19 @@ def test_the_negative_flag_round_trips_in_both_states():
 def test_a_positive_iteration_renders_in_scope(tmp_path):
     store = _store(tmp_path)
     store.write(1, "widened the tile; 1.14x on decode-t1")
-    store.append_scope(
-        1, LessonScope(cases=("decode-t1",), carries_negative=False)
-    )
+    store.append_scope(1, LessonScope(cases=("decode-t1",), carries_negative=False))
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: IN SCOPE" in rendered
     assert "VALIDITY: RE-OPENABLE" not in rendered
 
 
 # ── one case id must not swallow another ──────────────────────────────────────
 
+
 def test_a_case_id_inside_a_longer_id_is_not_named():
     """The dangerous direction: a scope wider than what was measured."""
-    assert cases_named_in(
-        "focus on decode-t16 only", ("decode-t1", "decode-t16", "prefill-t1")
-    ) == ("decode-t16",)
+    assert cases_named_in("focus on decode-t16 only", ("decode-t1", "decode-t16", "prefill-t1")) == ("decode-t16",)
 
 
 def test_a_case_id_is_named_next_to_ordinary_punctuation():
@@ -725,11 +759,10 @@ def test_a_case_id_is_named_next_to_ordinary_punctuation():
 
 # ── what the document itself says about its negatives ─────────────────────────
 
+
 def test_the_negatives_marker_reads_three_states():
-    """"None recorded" is not "none happened", and must not become one."""
-    assert parse_negatives_marker(
-        "tried three tiles\nNEGATIVES: BLOCK_N=128 measured 0.94x"
-    ) is True
+    """ "None recorded" is not "none happened", and must not become one."""
+    assert parse_negatives_marker("tried three tiles\nNEGATIVES: BLOCK_N=128 measured 0.94x") is True
     assert parse_negatives_marker("widened the tile\nNEGATIVES: none") is False
     assert parse_negatives_marker("widened the tile; 1.2x") is None
     assert parse_negatives_marker("") is None
@@ -738,9 +771,7 @@ def test_the_negatives_marker_reads_three_states():
 
 def test_a_named_negative_outweighs_a_none_line():
     """The marker is a presence check: one named negative means the document has one."""
-    assert parse_negatives_marker(
-        "NEGATIVES: none\nNEGATIVES: split-K=4 at 0.91x"
-    ) is True
+    assert parse_negatives_marker("NEGATIVES: none\nNEGATIVES: split-K=4 at 0.91x") is True
 
 
 def test_the_negatives_marker_survives_a_markdown_list_item():
@@ -772,15 +803,14 @@ def test_a_full_scope_line_round_trips_in_all_three_negative_states():
 
 # ── a premise that could only be checked in part ──────────────────────────────
 
+
 def test_a_pin_living_in_the_unparsable_file_is_not_reported_as_gone():
     """One broken file among several must not indict the constant it holds.
 
     Skipping it and reading the survivors as the whole declared set turns "the
     file I could not read" into "the task deleted this constant".
     """
-    mapping, complete = scan_sources_with_coverage(
-        ["def broken(:\n", "num_warps = 8\n"], ["BLOCK_N", "num_warps"]
-    )
+    mapping, complete = scan_sources_with_coverage(["def broken(:\n", "num_warps = 8\n"], ["BLOCK_N", "num_warps"])
     assert mapping == {"num_warps": ("8",)}
     assert complete is False
 
@@ -802,9 +832,7 @@ def test_a_pin_living_in_the_unparsable_file_is_not_reported_as_gone():
 
 def test_a_declared_file_that_could_not_be_read_travels_as_unchecked():
     """None INSIDE the list is one unreadable file, not a shorter source set."""
-    mapping, complete = scan_sources_with_coverage(
-        [None, "num_warps = 8\n"], ["BLOCK_N"]
-    )
+    mapping, complete = scan_sources_with_coverage([None, "num_warps = 8\n"], ["BLOCK_N"])
     assert mapping == {} and complete is False
     reasons = scope_conflicts(
         LessonScope(
@@ -822,7 +850,7 @@ def test_a_declared_file_that_could_not_be_read_travels_as_unchecked():
 
 
 def test_a_moved_value_is_still_reported_when_part_of_the_source_is_unchecked():
-    """"is now X" is an observation about a file that WAS read, not an inference."""
+    """ "is now X" is an observation about a file that WAS read, not an inference."""
     reasons = scope_conflicts(
         LessonScope(
             cases=("decode-t1",),
@@ -832,32 +860,31 @@ def test_a_moved_value_is_still_reported_when_part_of_the_source_is_unchecked():
         current_cases=("decode-t1",),
         kernel_source=["def broken(:\n", "BLOCK_N = 64\n"],
     )
-    assert reasons == (
-        "BLOCK_N is now 64 (pinned at 16 when this was measured)",
-    )
+    assert reasons == ("BLOCK_N is now 64 (pinned at 16 when this was measured)",)
 
 
 # ── a launch keyword is where a Triton constant is actually pinned ────────────
 
+
 def test_a_launch_keyword_holding_a_literal_keeps_the_pin_in_scope():
     """`num_warps=8` at the launch IS the pin; reporting it gone defeats the check."""
-    source = (
-        "def launch(x):\n"
-        "    kernel[(1,)](x, BLOCK_N=128, num_warps=8)\n"
-    )
+    source = "def launch(x):\n    kernel[(1,)](x, BLOCK_N=128, num_warps=8)\n"
     assert scan_constant_values(source, ["BLOCK_N", "num_warps"]) == {
         "BLOCK_N": ("128",),
         "num_warps": ("8",),
     }
-    assert scope_conflicts(
-        LessonScope(
-            cases=("decode-t1",),
-            held_fixed=(("BLOCK_N", "128"), ("num_warps", "8")),
-            carries_negative=True,
-        ),
-        current_cases=("decode-t1",),
-        kernel_source=source,
-    ) == ()
+    assert (
+        scope_conflicts(
+            LessonScope(
+                cases=("decode-t1",),
+                held_fixed=(("BLOCK_N", "128"), ("num_warps", "8")),
+                carries_negative=True,
+            ),
+            current_cases=("decode-t1",),
+            kernel_source=source,
+        )
+        == ()
+    )
 
 
 def test_an_autotune_config_entry_is_a_pin():
@@ -870,9 +897,7 @@ def test_an_autotune_config_entry_is_a_pin():
 
 def test_a_keyword_forwarding_a_local_is_a_value_that_was_not_checked():
     """`BLOCK_N=block_n` says the name is live and says nothing about its value."""
-    assert scan_constant_values("kernel(BLOCK_N=block_n)\n", ["BLOCK_N"]) == {
-        "BLOCK_N": ()
-    }
+    assert scan_constant_values("kernel(BLOCK_N=block_n)\n", ["BLOCK_N"]) == {"BLOCK_N": ()}
     reasons = scope_conflicts(
         LessonScope(
             cases=("decode-t1",),
@@ -889,61 +914,68 @@ def test_a_keyword_forwarding_a_local_is_a_value_that_was_not_checked():
 
 
 def test_a_walrus_binding_is_a_binding():
-    assert scan_constant_values("if (BLOCK_N := 16):\n    pass\n",
-                                ["BLOCK_N"]) == {"BLOCK_N": ("16",)}
+    assert scan_constant_values("if (BLOCK_N := 16):\n    pass\n", ["BLOCK_N"]) == {"BLOCK_N": ("16",)}
 
 
 # ── one right-hand side is not every name's value ─────────────────────────────
 
+
 def test_a_tuple_unpacking_pairs_each_name_with_its_own_element():
-    assert scan_constant_values("BLOCK_M, BLOCK_N = 64, 32\n",
-                                ["BLOCK_M", "BLOCK_N"]) == {
+    assert scan_constant_values("BLOCK_M, BLOCK_N = 64, 32\n", ["BLOCK_M", "BLOCK_N"]) == {
         "BLOCK_M": ("64",),
         "BLOCK_N": ("32",),
     }
-    assert scope_conflicts(
-        LessonScope(
-            cases=("decode-t1",),
-            held_fixed=(("BLOCK_N", "32"),),
-            carries_negative=True,
-        ),
-        current_cases=("decode-t1",),
-        kernel_source="BLOCK_M, BLOCK_N = 64, 32\n",
-    ) == ()
+    assert (
+        scope_conflicts(
+            LessonScope(
+                cases=("decode-t1",),
+                held_fixed=(("BLOCK_N", "32"),),
+                carries_negative=True,
+            ),
+            current_cases=("decode-t1",),
+            kernel_source="BLOCK_M, BLOCK_N = 64, 32\n",
+        )
+        == ()
+    )
 
 
 def test_an_unpairable_tuple_target_records_no_value_rather_than_a_wrong_one():
-    """"is now (64, 32)" is a false statement; "not checked" is a true one."""
-    assert scan_constant_values("BLOCK_M, BLOCK_N = shape()\n",
-                                ["BLOCK_N"]) == {"BLOCK_N": ()}
-    assert scan_constant_values("BLOCK_M, *rest = 64, 32, 16\n",
-                                ["BLOCK_M"]) == {"BLOCK_M": ()}
+    """ "is now (64, 32)" is a false statement; "not checked" is a true one."""
+    assert scan_constant_values("BLOCK_M, BLOCK_N = shape()\n", ["BLOCK_N"]) == {"BLOCK_N": ()}
+    assert scan_constant_values("BLOCK_M, *rest = 64, 32, 16\n", ["BLOCK_M"]) == {"BLOCK_M": ()}
 
 
 # ── the same number written two ways is the same pin ──────────────────────────
 
+
 def test_a_pin_recorded_as_an_int_matches_a_float_of_the_same_value():
-    assert scope_conflicts(
-        LessonScope(
-            cases=("decode-t1",),
-            held_fixed=(("BLOCK_N", "16"),),
-            carries_negative=True,
-        ),
-        current_cases=("decode-t1",),
-        kernel_source="BLOCK_N = 16.0\n",
-    ) == ()
+    assert (
+        scope_conflicts(
+            LessonScope(
+                cases=("decode-t1",),
+                held_fixed=(("BLOCK_N", "16"),),
+                carries_negative=True,
+            ),
+            current_cases=("decode-t1",),
+            kernel_source="BLOCK_N = 16.0\n",
+        )
+        == ()
+    )
 
 
 def test_a_pin_recorded_in_hex_matches_the_same_decimal_value():
-    assert scope_conflicts(
-        LessonScope(
-            cases=("decode-t1",),
-            held_fixed=(("BLOCK_N", "16"),),
-            carries_negative=True,
-        ),
-        current_cases=("decode-t1",),
-        kernel_source="BLOCK_N = 0x10\n",
-    ) == ()
+    assert (
+        scope_conflicts(
+            LessonScope(
+                cases=("decode-t1",),
+                held_fixed=(("BLOCK_N", "16"),),
+                carries_negative=True,
+            ),
+            current_cases=("decode-t1",),
+            kernel_source="BLOCK_N = 0x10\n",
+        )
+        == ()
+    )
 
 
 def test_a_genuinely_different_number_still_reopens_the_negative():
@@ -966,7 +998,7 @@ def test_a_long_value_is_marked_where_it_was_cut():
 
 
 def test_scanning_for_no_names_still_reports_an_unparsable_source():
-    """"Nothing was asked" and "nothing could be read" are different answers."""
+    """ "Nothing was asked" and "nothing could be read" are different answers."""
     assert scan_constant_values("def broken(:\n", []) is None
     assert scan_constant_values("BLOCK_N = 16\n", []) == {}
 
@@ -1008,16 +1040,10 @@ def test_every_disproof_state_round_trips():
 
 def test_a_disproved_claim_is_never_read_as_a_surviving_one():
     """The two verdicts are opposite, so neither may match inside the other."""
-    line = format_scope_line(
-        LessonScope(disproof=CLAIM_DISPROVED + "dir() lists the emitter method")
-    )
+    line = format_scope_line(LessonScope(disproof=CLAIM_DISPROVED + "dir() lists the emitter method"))
     assert parse_scope_line(line).disproof != UNDISPROVEN_CLAIM
     assert UNDISPROVEN_CLAIM not in line
-    assert (
-        parse_scope_line(format_scope_line(LessonScope(disproof=UNDISPROVEN_CLAIM)))
-        .disproof
-        == UNDISPROVEN_CLAIM
-    )
+    assert parse_scope_line(format_scope_line(LessonScope(disproof=UNDISPROVEN_CLAIM))).disproof == UNDISPROVEN_CLAIM
 
 
 def test_a_disproof_with_no_evidence_behind_it_reopens_instead():
@@ -1065,9 +1091,7 @@ def test_an_unrecorded_disproof_does_not_convict_a_document_by_itself(tmp_path):
         ),
     )
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: IN SCOPE" in rendered
     assert "whether a feasibility claim was disproved was not recorded" in rendered
     assert "feasibility claim tested by" not in rendered
@@ -1082,9 +1106,7 @@ def test_an_undisproven_cannot_claim_renders_reopenable(tmp_path):
     )
     store.append_scope(1, _UNREACHABLE)
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: RE-OPENABLE (undisproven feasibility claim)" in rendered
     assert "names no experiment" in rendered
     # Re-openable, not deleted: the record of what was tried is still there.
@@ -1107,9 +1129,7 @@ def test_a_cannot_claim_whose_experiment_was_run_stays_in_scope(tmp_path):
         ),
     )
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: IN SCOPE" in rendered
     assert "VALIDITY: RE-OPENABLE" not in rendered
     assert "feasibility claim tested by build-only ISA screen" in rendered
@@ -1141,9 +1161,7 @@ def test_a_claim_its_own_experiment_refuted_does_not_keep_suppressing(tmp_path):
         ),
     )
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: IN SCOPE" not in rendered
     assert "VALIDITY: RE-OPEN (feasibility claim disproved)" in rendered
     assert "feasibility claim disproved by an ISA screen" in rendered
@@ -1165,9 +1183,7 @@ def test_a_disproved_claim_outranks_the_scope_checks_it_passes(tmp_path):
         ),
     )
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1", "decode-t64"), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1", "decode-t64"), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: RE-OPEN (feasibility claim disproved)" in rendered
     assert "certifies no" in rendered
 
@@ -1190,9 +1206,7 @@ def test_a_measured_closure_without_a_disproof_is_still_reopenable(tmp_path):
     )
     store.append_scope(1, _UNREACHABLE)
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: RE-OPENABLE (undisproven feasibility claim)" in rendered
     assert "0.237 ms" in rendered
     # The measurement is intact and in scope; only the premise is re-opened.
@@ -1204,9 +1218,7 @@ def test_an_undisproven_claim_out_of_scope_reports_both_reasons(tmp_path):
     store.write(1, "split-K CANNOT be reached from this template")
     store.append_scope(1, _UNREACHABLE)
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1", "decode-t64"), kernel_source="BLOCK_N = 64\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1", "decode-t64"), kernel_source="BLOCK_N = 64\n")
     assert "VALIDITY: RE-OPENABLE (undisproven feasibility claim)" in rendered
     assert "not measured on decode-t64" in rendered
     assert "BLOCK_N is now 64" in rendered
@@ -1226,9 +1238,7 @@ def test_a_document_claiming_nothing_unreachable_is_not_reopened_by_this(tmp_pat
         ),
     )
 
-    rendered = store.render_for_prompt(
-        current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=("decode-t1",), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: IN SCOPE" in rendered
     assert "do not re-derive it" in rendered
 
@@ -1248,17 +1258,19 @@ def test_a_long_named_experiment_is_marked_where_it_was_cut():
 
 # ── what the document itself says it ran against its own "cannot" ─────────────
 
+
 def test_the_disproof_marker_reads_four_states():
-    assert parse_disproof_marker(
-        "the template CANNOT emit it\nDISPROOF: tested — a build-only screen "
-        "rejected the instruction"
-    ) == "a build-only screen rejected the instruction"
-    assert parse_disproof_marker(
-        "DISPROOF: untested — one dir() over the installed emitter would settle it"
-    ) == UNDISPROVEN_CLAIM
-    assert parse_disproof_marker(
-        "widened the tile\nDISPROOF: none"
-    ) == NO_FEASIBILITY_CLAIM
+    assert (
+        parse_disproof_marker(
+            "the template CANNOT emit it\nDISPROOF: tested — a build-only screen rejected the instruction"
+        )
+        == "a build-only screen rejected the instruction"
+    )
+    assert (
+        parse_disproof_marker("DISPROOF: untested — one dir() over the installed emitter would settle it")
+        == UNDISPROVEN_CLAIM
+    )
+    assert parse_disproof_marker("widened the tile\nDISPROOF: none") == NO_FEASIBILITY_CLAIM
     assert parse_disproof_marker("widened the tile; 1.2x") is None
     assert parse_disproof_marker("DISPROOF:") is None
 
@@ -1270,39 +1282,31 @@ def test_an_experiment_that_was_run_but_not_named_is_not_a_disproof():
 
 def test_an_unrecognized_disproof_answer_is_read_as_an_open_obligation():
     """Be wrong in the direction that re-opens an axis, never the one that closes it."""
-    assert parse_disproof_marker(
-        "DISPROOF: this would need a redesign of the whole template"
-    ) == UNDISPROVEN_CLAIM
+    assert parse_disproof_marker("DISPROOF: this would need a redesign of the whole template") == UNDISPROVEN_CLAIM
 
 
 def test_an_outstanding_obligation_outweighs_a_discharged_one():
-    assert parse_disproof_marker(
-        "DISPROOF: tested — the ISA screen rejected it\n"
-        "DISPROOF: untested — nothing was run on the second claim"
-    ) == UNDISPROVEN_CLAIM
-    assert parse_disproof_marker(
-        "DISPROOF: none\nDISPROOF: tested — the ISA screen rejected it"
-    ) == "the ISA screen rejected it"
+    assert (
+        parse_disproof_marker(
+            "DISPROOF: tested — the ISA screen rejected it\nDISPROOF: untested — nothing was run on the second claim"
+        )
+        == UNDISPROVEN_CLAIM
+    )
+    assert (
+        parse_disproof_marker("DISPROOF: none\nDISPROOF: tested — the ISA screen rejected it")
+        == "the ISA screen rejected it"
+    )
 
 
 def test_a_falsifying_result_is_not_an_obligation_discharged():
-    """"The experiment ran" and "the experiment won" are opposite answers."""
+    """ "The experiment ran" and "the experiment won" are opposite answers."""
     verdict = parse_disproof_marker(
-        "the template CANNOT emit it\n"
-        "DISPROOF: falsified — the ISA screen shows gfx950 accepts "
-        "ds_read_b64_tr_b16"
+        "the template CANNOT emit it\nDISPROOF: falsified — the ISA screen shows gfx950 accepts ds_read_b64_tr_b16"
     )
     assert is_claim_disproved(verdict)
-    assert verdict == (
-        CLAIM_DISPROVED
-        + "the ISA screen shows gfx950 accepts ds_read_b64_tr_b16"
-    )
-    assert is_claim_disproved(
-        parse_disproof_marker("DISPROOF: disproved — dir() lists the method")
-    )
-    assert not is_claim_disproved(
-        parse_disproof_marker("DISPROOF: tested — the ISA screen rejected it")
-    )
+    assert verdict == (CLAIM_DISPROVED + "the ISA screen shows gfx950 accepts ds_read_b64_tr_b16")
+    assert is_claim_disproved(parse_disproof_marker("DISPROOF: disproved — dir() lists the method"))
+    assert not is_claim_disproved(parse_disproof_marker("DISPROOF: tested — the ISA screen rejected it"))
     assert not is_claim_disproved(UNDISPROVEN_CLAIM)
     assert not is_claim_disproved(None)
 
@@ -1319,22 +1323,20 @@ def test_a_disproved_claim_outranks_every_other_answer():
         "DISPROOF: disproved — the installed module binds the symbol",
         "DISPROOF: disproved — the installed module binds the symbol\n"
         "DISPROOF: untested — nothing was run on the second claim",
-        "DISPROOF: tested — the ISA screen rejected it\n"
-        "DISPROOF: disproved — the installed module binds the symbol",
-        "DISPROOF: none\n"
-        "DISPROOF: disproved — the installed module binds the symbol",
+        "DISPROOF: tested — the ISA screen rejected it\nDISPROOF: disproved — the installed module binds the symbol",
+        "DISPROOF: none\nDISPROOF: disproved — the installed module binds the symbol",
     ):
-        assert parse_disproof_marker(document) == (
-            CLAIM_DISPROVED + "the installed module binds the symbol"
-        ), document
+        assert parse_disproof_marker(document) == (CLAIM_DISPROVED + "the installed module binds the symbol"), document
 
 
 def test_an_obligation_after_a_discharged_line_still_wins():
     """The scan reads every marker now; ranking must not become line order."""
-    assert parse_disproof_marker(
-        "DISPROOF: untested — one dir() would settle it\n"
-        "DISPROOF: tested — the ISA screen rejected it"
-    ) == UNDISPROVEN_CLAIM
+    assert (
+        parse_disproof_marker(
+            "DISPROOF: untested — one dir() would settle it\nDISPROOF: tested — the ISA screen rejected it"
+        )
+        == UNDISPROVEN_CLAIM
+    )
 
 
 def test_the_disproof_marker_survives_a_markdown_list_item():
@@ -1342,6 +1344,7 @@ def test_the_disproof_marker_survives_a_markdown_list_item():
 
 
 # ── what the summarizer is asked for ──────────────────────────────────────────
+
 
 def test_the_prompt_demands_the_cheapest_falsifying_experiment():
     prompt = build_summary_prompt(iteration=5, end_reason="converged")

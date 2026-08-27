@@ -45,7 +45,8 @@ def _wheel_force_include() -> dict[str, str]:
 def _mori_prompt(config: Config) -> str:
     """A prompt from a fellow whose backend actually has a framework/mori/ folder to inject."""
     return build_single_fellow_prompt(
-        config, "aiter-fellow",
+        config,
+        "aiter-fellow",
         task_type="repository",
         source_paths=["/work/mori_ep_dispatch_combine/driver.py"],
     )

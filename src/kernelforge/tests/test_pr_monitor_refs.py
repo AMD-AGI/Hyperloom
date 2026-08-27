@@ -395,8 +395,13 @@ class _StubClient:
         return [
             {"repo_name": name, "is_active": True}
             for name in (
-                "ROCm/aiter", "ROCm/ATOM", "ROCm/FlyDSL", "ROCm/hip",
-                "ROCm/vllm", "sgl-project/sglang", "triton-lang/triton",
+                "ROCm/aiter",
+                "ROCm/ATOM",
+                "ROCm/FlyDSL",
+                "ROCm/hip",
+                "ROCm/vllm",
+                "sgl-project/sglang",
+                "triton-lang/triton",
                 "vllm-project/vllm",
             )
         ]
@@ -420,9 +425,7 @@ class _StubClient:
             else:
                 self.searched.append(params.get("q", ""))
                 numbers = self.by_query.get(params.get("q", ""), [])
-            outcomes.append(
-                FetchOutcome(path, payload={"items": [{"number": n} for n in numbers]})
-            )
+            outcomes.append(FetchOutcome(path, payload={"items": [{"number": n} for n in numbers]}))
         return outcomes
 
     def list_recent_prs(self, repo, *, state="merged", limit=5, timeout_sec=None):
@@ -450,9 +453,7 @@ def _pr_payload(number: int, worth: float = 0.6) -> dict:
 
 
 def test_unreachable_service_with_no_cache_yields_an_empty_fragment(tmp_path):
-    result = collect_references(
-        workspace_dir=str(tmp_path), client=_StubClient(healthy=False), fellow="aiter"
-    )
+    result = collect_references(workspace_dir=str(tmp_path), client=_StubClient(healthy=False), fellow="aiter")
 
     assert result.reason == "service_unreachable"
     assert result.prompt_context == ""
@@ -461,13 +462,13 @@ def test_unreachable_service_with_no_cache_yields_an_empty_fragment(tmp_path):
 def test_unreachable_service_still_shows_the_cached_references(tmp_path):
     """A transient outage must not retract references mid-campaign."""
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(
-        workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe")
 
     result = collect_references(
-        workspace_dir=str(tmp_path), client=_StubClient(healthy=False),
-        fellow="aiter", operator_name="moe",
+        workspace_dir=str(tmp_path),
+        client=_StubClient(healthy=False),
+        fellow="aiter",
+        operator_name="moe",
     )
 
     assert result.injected
@@ -480,13 +481,13 @@ def test_unreachable_service_still_shows_the_cached_references(tmp_path):
 
 def test_unresolvable_repo_still_shows_the_cached_references(tmp_path):
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(
-        workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe")
 
     # A later invocation cannot resolve a repo at all.
     result = collect_references(
-        workspace_dir=str(tmp_path), client=_StubClient(), fellow="ck",
+        workspace_dir=str(tmp_path),
+        client=_StubClient(),
+        fellow="ck",
         operator_name="moe",
     )
 
@@ -496,16 +497,16 @@ def test_unresolvable_repo_still_shows_the_cached_references(tmp_path):
 
 def test_transport_failure_still_shows_the_cached_references(tmp_path):
     warm = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(
-        workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=warm, fellow="aiter", operator_name="moe")
 
     class _Unavailable(_StubClient):
         def list_repos(self, *, timeout_sec=None):
             raise PRTransportError("offline")
 
     result = collect_references(
-        workspace_dir=str(tmp_path), client=_Unavailable(), fellow="aiter",
+        workspace_dir=str(tmp_path),
+        client=_Unavailable(),
+        fellow="aiter",
         operator_name="moe",
     )
 
@@ -531,9 +532,7 @@ def test_unexpected_client_failure_is_not_silenced(tmp_path):
 def test_unresolvable_repo_makes_no_query(tmp_path):
     client = _StubClient()
 
-    result = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="ck", operator_name="gemm"
-    )
+    result = collect_references(workspace_dir=str(tmp_path), client=client, fellow="ck", operator_name="gemm")
 
     assert result.reason == "repo_unresolved"
     assert client.searched == []
@@ -542,9 +541,7 @@ def test_unresolvable_repo_makes_no_query(tmp_path):
 def test_successful_lookup_renders_persists_and_indexes(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
 
-    result = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    result = collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     assert result.injected
     assert UNTRUSTED_PREFIX in result.prompt_context
@@ -620,15 +617,11 @@ def test_a_query_proven_empty_is_not_reissued(tmp_path):
     """The negative cache is what keeps refreshes from re-paying for misses."""
     client = _StubClient(by_query={})
 
-    first = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    first = collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
     issued_first = list(client.searched)
     client.searched.clear()
 
-    second = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    second = collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     assert issued_first
     assert client.searched == []
@@ -639,27 +632,19 @@ def test_a_query_proven_empty_is_not_reissued(tmp_path):
 def test_a_query_that_hit_is_reissued_on_the_next_call(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
 
-    collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
     client.searched.clear()
-    collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     assert client.searched
 
 
 def test_snapshot_is_monotonic_across_two_lookups(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1, worth=0.6)})
-    collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     client._prs = {1: _pr_payload(1, worth=0.1)}
-    collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     entries = load_snapshot(str(tmp_path)).entries
     assert len(entries) == 1
@@ -669,15 +654,15 @@ def test_snapshot_is_monotonic_across_two_lookups(tmp_path):
 def test_resume_reinjects_from_the_snapshot_when_a_refresh_finds_nothing(tmp_path):
     """Dropping already-shown references mid-campaign would contradict the lesson."""
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    first = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    first = collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
     assert first.injected
 
     # A later call finds nothing new: different keywords, no hits.
     quiet = _StubClient(by_query={})
     second = collect_references(
-        workspace_dir=str(tmp_path), client=quiet, fellow="aiter",
+        workspace_dir=str(tmp_path),
+        client=quiet,
+        fellow="aiter",
         operator_name="moe",
     )
 
@@ -689,9 +674,7 @@ def test_resume_reinjects_from_the_snapshot_when_a_refresh_finds_nothing(tmp_pat
 
 def test_service_outage_still_reinjects_what_was_already_shown(tmp_path):
     client = _StubClient(by_query={"moe": [1]}, prs={1: _pr_payload(1)})
-    collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe"
-    )
+    collect_references(workspace_dir=str(tmp_path), client=client, fellow="aiter", operator_name="moe")
 
     class _Broken(_StubClient):
         def get_many(self, requests, *, budget_sec=None):
@@ -700,13 +683,12 @@ def test_service_outage_still_reinjects_what_was_already_shown(tmp_path):
                 PRTransportError,
             )
 
-            return [
-                FetchOutcome(path, error=PRTransportError("down"))
-                for path, _ in requests
-            ]
+            return [FetchOutcome(path, error=PRTransportError("down")) for path, _ in requests]
 
     second = collect_references(
-        workspace_dir=str(tmp_path), client=_Broken(), fellow="aiter",
+        workspace_dir=str(tmp_path),
+        client=_Broken(),
+        fellow="aiter",
         operator_name="moe",
     )
 
@@ -719,14 +701,20 @@ def test_all_queries_cached_empty_still_renders_prior_references(tmp_path):
     client = _StubClient(by_file={"a.py": [1]}, by_query={}, prs={1: _pr_payload(1)})
     (tmp_path / "a.py").write_text("x")
     collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter",
-        source_files=["a.py"], operator_name="moe",
+        workspace_dir=str(tmp_path),
+        client=client,
+        fellow="aiter",
+        source_files=["a.py"],
+        operator_name="moe",
     )
 
     # Second call: the keyword query is now a cached miss, path query still hits.
     second = collect_references(
-        workspace_dir=str(tmp_path), client=client, fellow="aiter",
-        source_files=["a.py"], operator_name="moe",
+        workspace_dir=str(tmp_path),
+        client=client,
+        fellow="aiter",
+        source_files=["a.py"],
+        operator_name="moe",
     )
 
     assert second.injected
@@ -736,16 +724,17 @@ def test_all_queries_cached_empty_still_renders_prior_references(tmp_path):
 def test_snapshot_entry_round_trips_every_rendered_field(tmp_path):
     """Re-rendering from disk must not lose the distill prose."""
     reference = _ref(
-        7, summary="detailed distill prose", risk_notes="watch occupancy",
-        expected_gain="up", mechanisms=("vectorize", "prefetch"),
+        7,
+        summary="detailed distill prose",
+        risk_notes="watch occupancy",
+        expected_gain="up",
+        mechanisms=("vectorize", "prefetch"),
     )
     snapshot = Snapshot()
     merge_references(snapshot, [reference])
     save_snapshot(str(tmp_path), snapshot)
 
-    restored = entry_to_reference(
-        next(iter(load_snapshot(str(tmp_path)).entries.values()))
-    )
+    restored = entry_to_reference(next(iter(load_snapshot(str(tmp_path)).entries.values())))
 
     assert restored.summary == "detailed distill prose"
     assert restored.risk_notes == "watch occupancy"
@@ -775,14 +764,16 @@ class _PathIndexClient(_StubClient):
         for path, params in requests:
             params = params or {}
             if params.get("file_path") and "/prs/" not in path:
-                repo = path[len("/repos/"):-len("/prs")]
+                repo = path[len("/repos/") : -len("/prs")]
                 self.probed.append(repo)
                 owner = self.owner_of.get(params["file_path"])
                 hit = repo in owner if isinstance(owner, set) else owner == repo
-                outcomes.append(FetchOutcome(
-                    path,
-                    payload={"items": [{"number": 1}]} if hit else None,
-                ))
+                outcomes.append(
+                    FetchOutcome(
+                        path,
+                        payload={"items": [{"number": 1}]} if hit else None,
+                    )
+                )
                 continue
             outcomes.append(super().get_many([(path, params)])[0])
         return outcomes
@@ -792,10 +783,7 @@ class _InvalidProbeClient(_PathIndexClient):
     def get_many(self, requests, *, budget_sec=None):
         from kernelforge.knowledge.pr_monitor_client import FetchOutcome
 
-        return [
-            FetchOutcome(path, payload={"unexpected": True})
-            for path, _ in requests
-        ]
+        return [FetchOutcome(path, payload={"unexpected": True}) for path, _ in requests]
 
 
 class _ContractProbeUnavailableDiscovery(_PathIndexClient):
@@ -806,23 +794,16 @@ class _ContractProbeUnavailableDiscovery(_PathIndexClient):
             outcomes = []
             failed = False
             for path, _ in requests:
-                repo = path[len("/repos/"):-len("/prs")]
+                repo = path[len("/repos/") : -len("/prs")]
                 if repo == "ROCm/aiter":
-                    outcomes.append(
-                        FetchOutcome(path, payload={"items": [{"number": 1}]})
-                    )
+                    outcomes.append(FetchOutcome(path, payload={"items": [{"number": 1}]}))
                 elif not failed:
-                    outcomes.append(
-                        FetchOutcome(path, error=PRContractError("bad payload"))
-                    )
+                    outcomes.append(FetchOutcome(path, error=PRContractError("bad payload")))
                     failed = True
                 else:
                     outcomes.append(FetchOutcome(path, payload=None))
             return outcomes
-        return [
-            FetchOutcome(path, error=PRTransportError("offline"))
-            for path, _ in requests
-        ]
+        return [FetchOutcome(path, error=PRTransportError("offline")) for path, _ in requests]
 
 
 def test_fork_upstream_is_identified_by_source_path():
@@ -830,9 +811,11 @@ def test_fork_upstream_is_identified_by_source_path():
     path = "csrc/py_itfs_ck/mha_batch_prefill_kernels.cu"
     client = _PathIndexClient({path: "ROCm/aiter"})
 
-    assert identify_repo_by_path(
-        client, path, PR_REPOS_EXPECTED, hint="carlushuang/aiter-k3"
-    ) == ("ROCm/aiter", len(PR_REPOS_EXPECTED), "")
+    assert identify_repo_by_path(client, path, PR_REPOS_EXPECTED, hint="carlushuang/aiter-k3") == (
+        "ROCm/aiter",
+        len(PR_REPOS_EXPECTED),
+        "",
+    )
 
 
 def test_a_path_no_repo_owns_identifies_nothing():
@@ -849,12 +832,15 @@ def test_name_affinity_resolves_multiple_path_owners():
     path = "a/b.cu"
     client = _PathIndexClient({path: {"ROCm/aiter", "ROCm/ATOM"}})
 
-    assert identify_repo_by_path(
-        client,
-        path,
-        PR_REPOS_EXPECTED,
-        hint="someone/aiter-k3",
-    )[0] == "ROCm/aiter"
+    assert (
+        identify_repo_by_path(
+            client,
+            path,
+            PR_REPOS_EXPECTED,
+            hint="someone/aiter-k3",
+        )[0]
+        == "ROCm/aiter"
+    )
 
 
 def test_identify_needs_both_a_path_and_candidates():
@@ -940,9 +926,7 @@ def test_probe_contract_error_is_reported_without_starting_discovery(tmp_path):
 def test_probe_requests_are_counted_as_http_calls(tmp_path):
     """Probing is real traffic. Omitting it understates the cost of the
     untracked-fork path by one request per tracked repo."""
-    client = _PathIndexClient(
-        {"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)}
-    )
+    client = _PathIndexClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
     result = collect_references(client=client, **_fork_workspace(tmp_path))
 
@@ -982,6 +966,7 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
     sleeps overshoot, so a pass depended on the scheduler rather than on the
     deadline being honoured. The clock is driven instead, one stage at a time.
     """
+
     class _Body:
         def __init__(self, payload):
             self._raw = json.dumps(payload).encode()
@@ -1016,12 +1001,8 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
     # it, search subtracts from it, and a clock patched in one of them only
     # would leave the other reading the real one.
     for module in ("pr_monitor_refs", "pr_monitor_search"):
-        monkeypatch.setattr(
-            f"kernelforge.knowledge.{module}.time.monotonic", _now
-        )
-    monkeypatch.setattr(
-        "kernelforge.knowledge.pr_monitor_client.urllib.request.urlopen", slow
-    )
+        monkeypatch.setattr(f"kernelforge.knowledge.{module}.time.monotonic", _now)
+    monkeypatch.setattr("kernelforge.knowledge.pr_monitor_client.urllib.request.urlopen", slow)
 
     collect_references(
         workspace_dir=str(tmp_path),
@@ -1039,6 +1020,7 @@ def test_the_whole_lookup_fits_inside_one_end_to_end_budget(monkeypatch, tmp_pat
 
 def test_a_budget_spent_on_preflight_is_not_reported_as_an_outage(tmp_path):
     """Running out of time and the service being down are different findings."""
+
     class _SlowPreflight(_StubClient):
         def healthz(self, *, timeout_sec=None):
             time.sleep(0.1)
@@ -1060,6 +1042,7 @@ def test_a_budget_spent_on_preflight_is_not_reported_as_an_outage(tmp_path):
 
 def test_the_deadline_starts_before_local_snapshot_loading(monkeypatch, tmp_path):
     """A slow local read must not leave a fresh budget for the first HTTP call."""
+
     class _NoHttpClient(_StubClient):
         def __init__(self):
             super().__init__()
@@ -1098,13 +1081,9 @@ def test_a_budget_spent_before_probing_starts_no_probe(tmp_path):
             time.sleep(0.1)
             return super().list_repos(timeout_sec=timeout_sec)
 
-    client = _SlowListing(
-        {"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)}
-    )
+    client = _SlowListing({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
-    result = collect_references(
-        client=client, budget_sec=0.05, **_fork_workspace(tmp_path)
-    )
+    result = collect_references(client=client, budget_sec=0.05, **_fork_workspace(tmp_path))
 
     assert result.reason == REASON_SKIPPED_DEADLINE
     assert client.budgets == [], "probing must not start past the deadline"
@@ -1112,9 +1091,7 @@ def test_a_budget_spent_before_probing_starts_no_probe(tmp_path):
 
 def test_probing_draws_on_the_caller_budget(tmp_path):
     """Charge path probing to what is left of the caller's deadline."""
-    client = _BudgetRecordingClient(
-        {"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)}
-    )
+    client = _BudgetRecordingClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
     collect_references(client=client, budget_sec=7.0, **_fork_workspace(tmp_path))
 
@@ -1124,9 +1101,7 @@ def test_probing_draws_on_the_caller_budget(tmp_path):
 
 def test_an_unset_budget_does_not_starve_probing(tmp_path):
     """Fall back to the configured default rather than to no deadline at all."""
-    client = _BudgetRecordingClient(
-        {"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)}
-    )
+    client = _BudgetRecordingClient({"csrc/k.cu": "ROCm/aiter"}, by_query={"mha": [1]}, prs={1: _pr_payload(1)})
 
     result = collect_references(client=client, **_fork_workspace(tmp_path))
 
@@ -1137,6 +1112,7 @@ def test_an_unset_budget_does_not_starve_probing(tmp_path):
 
 def test_repo_drift_warns_but_does_not_block(tmp_path, caplog):
     """The tracked set is server-side config; drift is a warning, not a stop."""
+
     class _Drifted(_StubClient):
         def list_repos(self, *, timeout_sec=None):
             return [{"repo_name": "ROCm/aiter", "is_active": True}]
@@ -1145,7 +1121,9 @@ def test_repo_drift_warns_but_does_not_block(tmp_path, caplog):
 
     with caplog.at_level("WARNING"):
         result = collect_references(
-            workspace_dir=str(tmp_path), client=client, fellow="aiter",
+            workspace_dir=str(tmp_path),
+            client=client,
+            fellow="aiter",
             operator_name="moe",
         )
 

@@ -30,6 +30,7 @@ def test_build_task_prompt_uses_bounded_artifact_access():
     assert "remaining headroom for EVERY scored case" in p
     assert "no required output schema" in p
 
+
 def test_build_task_prompt_empty_digest_placeholder():
     p = _build_task_prompt("PROG", "", "reason", "gfx942", 3)
     assert "(no archived trajectory yet)" in p
@@ -57,8 +58,14 @@ def test_build_task_prompt_includes_structured_profile_evidence():
 def test_persist_interaction_writes_file(tmp_path):
     reply = "\n  REPLY with intentional surrounding whitespace  \n"
     _persist_interaction(
-        str(tmp_path), 7, "stall", "SYSTEM", "USER", reply,
-        backend="codex", model="gpt-5.3-codex",
+        str(tmp_path),
+        7,
+        "stall",
+        "SYSTEM",
+        "USER",
+        reply,
+        backend="codex",
+        model="gpt-5.3-codex",
     )
     f = tmp_path / "forge_experiments" / "supervisor" / "intervention_iter_007.md"
     assert f.exists()
@@ -71,9 +78,7 @@ def test_persist_interaction_writes_file(tmp_path):
 
 
 def test_persist_interaction_empty_reply_placeholder(tmp_path):
-    _persist_interaction(
-        str(tmp_path), 1, "stall", "SYS", "USR", "", backend="claude", model="gpt-5.5"
-    )
+    _persist_interaction(str(tmp_path), 1, "stall", "SYS", "USR", "", backend="claude", model="gpt-5.5")
     f = tmp_path / "forge_experiments" / "supervisor" / "intervention_iter_001.md"
     assert "(empty" in f.read_text()
     assert load_latest_supervisor_ruling(str(tmp_path)) == ""
@@ -81,12 +86,24 @@ def test_persist_interaction_empty_reply_placeholder(tmp_path):
 
 def test_empty_attempt_expires_latest_ruling(tmp_path):
     _persist_interaction(
-        str(tmp_path), 1, "stall", "SYS", "USR", "FIRST",
-        backend="claude", model="gpt-5.5",
+        str(tmp_path),
+        1,
+        "stall",
+        "SYS",
+        "USR",
+        "FIRST",
+        backend="claude",
+        model="gpt-5.5",
     )
     _persist_interaction(
-        str(tmp_path), 2, "stall", "SYS", "USR", "",
-        backend="claude", model="gpt-5.5",
+        str(tmp_path),
+        2,
+        "stall",
+        "SYS",
+        "USR",
+        "",
+        backend="claude",
+        model="gpt-5.5",
     )
 
     assert load_latest_supervisor_ruling(str(tmp_path)) == ""

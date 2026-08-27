@@ -31,8 +31,8 @@ class SupervisionMonitor:
     dead-ended" judgment is made by the LLM supervisor, not here.
     """
 
-    supervise_after: int = 3      # consecutive no-improvement iters that trigger
-    cooldown: int = 3             # min iterations between interventions
+    supervise_after: int = 3  # consecutive no-improvement iters that trigger
+    cooldown: int = 3  # min iterations between interventions
 
     no_improve_streak: int = 0
     intervention_count: int = 0
@@ -53,8 +53,7 @@ class SupervisionMonitor:
         if iteration - self.last_attempt_iter < self.cooldown:
             return False, ""
         if self.no_improve_streak >= self.supervise_after:
-            return True, (f"no new best for {self.no_improve_streak} consecutive "
-                          "iterations")
+            return True, (f"no new best for {self.no_improve_streak} consecutive iterations")
         return False, ""
 
     def mark_attempted(self, iteration: int) -> None:

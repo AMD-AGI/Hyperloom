@@ -61,10 +61,7 @@ MAX_RELATIVE_ERROR = 5e-2
 # reference lands near zero dominate, and a K=7168 random GEMM produces plenty
 # of those. Measured that way the unmodified torch.matmul scores 1.375 -- a
 # gate at any sane threshold would reject the default path itself.
-MAX_RELATIVE_ERROR_DEFINITION = (
-    "max|got - ref| / mean|ref|, over the whole output tensor, with ref "
-    "computed in fp32"
-)
+MAX_RELATIVE_ERROR_DEFINITION = "max|got - ref| / mean|ref|, over the whole output tensor, with ref computed in fp32"
 
 
 @dataclass
@@ -110,10 +107,7 @@ class TunerMandate:
 
     def render(self) -> str:
         """The mandate as a brief. Kept in one place so the constraints travel."""
-        shapes = "\n".join(
-            "  " + ", ".join(f"{k}={v}" for k, v in s.items())
-            for s in self.demand_shapes
-        )
+        shapes = "\n".join("  " + ", ".join(f"{k}={v}" for k, v in s.items()) for s in self.demand_shapes)
         return _TEMPLATE.format(
             table=self.table,
             gpu=self.gpu or "(unspecified)",

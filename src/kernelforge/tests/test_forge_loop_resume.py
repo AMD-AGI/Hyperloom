@@ -133,9 +133,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
             try:
                 return captured["experiments"][experiment_id]
             except KeyError:
-                raise FileNotFoundError(
-                    f"Experiment not found: {experiment_id}"
-                ) from None
+                raise FileNotFoundError(f"Experiment not found: {experiment_id}") from None
 
         def create(self, task_id="", experiment_id=None, **kwargs):
             record = SimpleNamespace(experiment_id=experiment_id, checkpoint={})
@@ -213,6 +211,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
     )
     monkeypatch.setattr("kernelforge.loop.runner.IterationLoop", FakeLoop)
     monkeypatch.setattr("kernelforge.tracker.ExperimentTracker", FakeTracker)
+
     def fake_make_agent_fn(**kwargs):
         captured["agent_fn_kwargs"] = kwargs
         return None
@@ -408,10 +407,7 @@ def test_validated_warm_start_publishes_recovery_before_iteration(tmp_path):
     assert sidecar["search_start_mean_case_speedup"] == 1.25
     assert sidecar["best_commit"] == manifest["commit_hash"]
     assert checkpoints["hyperloom"]["decision"] == "WARM_START"
-    assert (
-        checkpoints["hyperloom"]["search_start_mean_case_speedup"]
-        == 1.25
-    )
+    assert checkpoints["hyperloom"]["search_start_mean_case_speedup"] == 1.25
 
 
 def test_return_after_read_kb_skips_iteration_for_validated_improvement(
@@ -589,6 +585,7 @@ def test_warm_start_post_commit_point_failures_are_degraded(
             fail_after_commit_point,
         )
     if failure_stage == "result_json":
+
         def fail_result_write(_path, _payload):
             raise OSError("result unavailable")
 
@@ -798,31 +795,18 @@ def test_forge_loop_defaults_to_fresh_and_workspace_campaign_root(tmp_path, monk
     assert len(captured["warmstarts"]) == 1
     assert captured["run_kwargs"]["workspace_lock_held"] is True
     assert captured["run_kwargs"]["usage"] is not None
-    assert (
-        captured["run_kwargs"]["orchestration_service"]
-        is captured["orchestration_service"]
-    )
-    assert (
-        captured["run_kwargs"]["analysis_service"]
-        is captured["analysis_service"]
-    )
+    assert captured["run_kwargs"]["orchestration_service"] is captured["orchestration_service"]
+    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
-    assert (
-        captured["orchestration_service_kwargs"][
-            "enable_plan_critic"
-        ]
-        is False
-    )
+    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
     assert captured["lock_held_during_warmstart"] is True
     assert captured["lock_held_during_run"] is True
     assert captured["lock_held_during_finalization"] is True
     assert (workspace / "forge_experiments" / "campaign_config.json").is_file()
     campaign = CampaignConfigStore(str(workspace)).load()
     assert campaign.framework == "unknown"
-    assert campaign.driver_sha256 == hashlib.sha256(
-        (workspace / campaign.driver_path).read_bytes()
-    ).hexdigest()
+    assert campaign.driver_sha256 == hashlib.sha256((workspace / campaign.driver_path).read_bytes()).hexdigest()
     assert not (workspace / "forge_experiments" / "result.json").exists()
     payload = _result_payload(result.output)
     assert payload["campaign_id"] == "campaign-1"
@@ -851,19 +835,11 @@ def test_short_forge_budget_keeps_profiling_disabled(
     )
 
     assert result.exit_code == 0, result.output
-    assert (
-        captured["run_kwargs"]["analysis_service"]
-        is captured["analysis_service"]
-    )
+    assert captured["run_kwargs"]["analysis_service"] is captured["analysis_service"]
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is False
     assert captured["analysis_service_kwargs"]["timeout_sec"] == 7200
     assert captured["agent_fn_kwargs"]["profiling_enabled"] is False
-    assert (
-        captured["orchestration_service_kwargs"][
-            "enable_plan_critic"
-        ]
-        is False
-    )
+    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is False
 
 
 def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
@@ -877,12 +853,7 @@ def test_long_forge_budget_enables_analysis_profiling(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
     assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
-    assert (
-        captured["orchestration_service_kwargs"][
-            "enable_plan_critic"
-        ]
-        is True
-    )
+    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
 
 
 def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
@@ -905,12 +876,7 @@ def test_multi_lane_long_horizon_reports_the_critic_it_enabled(
     assert result.exit_code == 0, result.output
     assert captured["analysis_service_kwargs"]["profiling_enabled"] is True
     assert captured["agent_fn_kwargs"]["profiling_enabled"] is True
-    assert (
-        captured["orchestration_service_kwargs"][
-            "enable_plan_critic"
-        ]
-        is True
-    )
+    assert captured["orchestration_service_kwargs"]["enable_plan_critic"] is True
     assert "Plan Critic: enabled (long-horizon, same backend/model)" in result.output
 
 
@@ -1044,9 +1010,7 @@ def test_fresh_cli_roundtrip_infers_direct_framework_before_signature(
     workspace, _kernel, driver = _initialize_workspace(tmp_path)
     kernel = workspace / "vllm" / "ops" / "direct.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n\n@triton.jit\ndef direct_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef direct_kernel(x):\n    return x\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True)
     subprocess.run(
         ["git", "commit", "-m", "add direct kernel"],
@@ -1060,9 +1024,7 @@ def test_fresh_cli_roundtrip_infers_direct_framework_before_signature(
     assert result.exit_code == 0, result.output
     campaign = CampaignConfigStore(str(workspace)).load()
     assert campaign.framework == "vllm"
-    assert campaign.implementation_identity["source_paths"] == [
-        "vllm/ops/direct.py"
-    ]
+    assert campaign.implementation_identity["source_paths"] == ["vllm/ops/direct.py"]
 
 
 def test_fresh_cli_roundtrip_uses_cross_package_defining_owner(
@@ -1075,15 +1037,8 @@ def test_fresh_cli_roundtrip_uses_cross_package_defining_owner(
     defining = workspace / "aiter" / "ops" / "attention.py"
     anchor.parent.mkdir(parents=True)
     defining.parent.mkdir(parents=True)
-    anchor.write_text(
-        "def attention_entry(x):\n    return unified_attention_kernel(x)\n"
-    )
-    defining.write_text(
-        "import triton\n\n"
-        "@triton.jit\n"
-        "def unified_attention_kernel(x):\n"
-        "    return x\n"
-    )
+    anchor.write_text("def attention_entry(x):\n    return unified_attention_kernel(x)\n")
+    defining.write_text("import triton\n\n@triton.jit\ndef unified_attention_kernel(x):\n    return x\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True)
     subprocess.run(
         ["git", "commit", "-m", "add cross-package kernel"],
@@ -1106,9 +1061,7 @@ def test_fresh_cli_roundtrip_uses_cross_package_defining_owner(
     assert result.exit_code == 0, result.output
     campaign = CampaignConfigStore(str(workspace)).load()
     assert campaign.framework == "aiter"
-    assert "aiter/ops/attention.py" in campaign.implementation_identity[
-        "source_paths"
-    ]
+    assert "aiter/ops/attention.py" in campaign.implementation_identity["source_paths"]
 
 
 def test_fresh_cli_roundtrip_honors_explicit_framework_override(
@@ -1119,9 +1072,7 @@ def test_fresh_cli_roundtrip_honors_explicit_framework_override(
     workspace, _kernel, driver = _initialize_workspace(tmp_path)
     kernel = workspace / "aiter" / "ops" / "explicit.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n\n@triton.jit\ndef explicit_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef explicit_kernel(x):\n    return x\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True)
     subprocess.run(
         ["git", "commit", "-m", "add explicit kernel"],
@@ -1208,16 +1159,18 @@ def test_keep_callback_snapshots_result_and_kb_before_iteration_callback(
     captured["kb_writes"].clear()
     captured["loops"][0].experiment = None
     callback = captured["run_kwargs"]["on_best_committed"]
-    callback(SimpleNamespace(
-        kept=True,
-        commit_hash="best-commit",
-        wall_ms=0.8,
-        mean_case_speedup=1.25,
-        iteration=4,
-        validation_passed=True,
-        validation_summary="passed",
-        snr_db=40.0,
-    ))
+    callback(
+        SimpleNamespace(
+            kept=True,
+            commit_hash="best-commit",
+            wall_ms=0.8,
+            mean_case_speedup=1.25,
+            iteration=4,
+            validation_passed=True,
+            validation_summary="passed",
+            snr_db=40.0,
+        )
+    )
 
     snapshot = json.loads(result_json.read_text())
     assert snapshot["best_commit"] == "best-commit"
@@ -1376,8 +1329,7 @@ def test_config_only_retry_rejects_mismatching_inputs(tmp_path, monkeypatch):
 
     mismatched = CliRunner().invoke(
         main,
-        _fresh_command(workspace, kernel, driver)
-        + ["--snr-threshold", "31"],
+        _fresh_command(workspace, kernel, driver) + ["--snr-threshold", "31"],
     )
 
     assert initial.exit_code != 0
@@ -1737,19 +1689,13 @@ def test_experience_ledger_skips_bad_rows_without_losing_valid_suffix(
 
     ledger.record_iteration(iteration=4, outcome="KEEP")
 
-    persisted = [
-        json.loads(line)
-        for line in jsonl_path.read_text().splitlines()
-        if line.strip()
-    ]
+    persisted = [json.loads(line) for line in jsonl_path.read_text().splitlines() if line.strip()]
     assert [entry["iteration"] for entry in persisted] == [1, 3, 4]
     reloaded = ExperienceLedger(str(tmp_path))
     assert [entry.iteration for entry in reloaded.entries] == [1, 3, 4]
 
 
-def test_fresh_campaign_captures_post_prep_driver_digest_and_base(
-    tmp_path, monkeypatch
-):
+def test_fresh_campaign_captures_post_prep_driver_digest_and_base(tmp_path, monkeypatch):
     """Review #1: a fresh campaign with task preparation enabled must persist the
     driver digest and pristine base_commit captured AFTER prep runs.
 
@@ -1774,9 +1720,7 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(
     repaired_body = "pass\n# repaired by prep\n"
 
     def fake_preflight(**_kwargs):
-        return SimpleNamespace(
-            ok=False, profile_ok=False, summary=lambda: "needs prep"
-        )
+        return SimpleNamespace(ok=False, profile_ok=False, summary=lambda: "needs prep")
 
     def fake_prepare(**kwargs):
         # Simulate the prep agent: repair the driver and commit scaffolding into
@@ -1806,12 +1750,8 @@ def test_fresh_campaign_captures_post_prep_driver_digest_and_base(
             audit_dir="",
         )
 
-    monkeypatch.setattr(
-        "kernelforge.loop.task_preparer.preflight_task", fake_preflight
-    )
-    monkeypatch.setattr(
-        "kernelforge.loop.task_preparer.prepare_task_sync", fake_prepare
-    )
+    monkeypatch.setattr("kernelforge.loop.task_preparer.preflight_task", fake_preflight)
+    monkeypatch.setattr("kernelforge.loop.task_preparer.prepare_task_sync", fake_prepare)
 
     result = CliRunner().invoke(
         main,

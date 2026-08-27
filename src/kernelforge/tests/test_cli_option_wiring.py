@@ -67,4 +67,3 @@ def test_callbacks_have_no_required_parameter_click_never_supplies():
             if p.default is p.empty and pname not in supplied:
                 unfilled.append(f"{name}: {pname}")
     assert not unfilled, "callback parameters click cannot fill: " + ", ".join(unfilled)
-

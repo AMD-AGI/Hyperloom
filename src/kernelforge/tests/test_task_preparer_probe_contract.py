@@ -8,6 +8,7 @@ success, timeout, and cancellation branches were entirely uncovered. We drive
 them here with a fake subprocess and a patched ``wait_for`` so no real process
 is launched and the timeout path is exercised deterministically.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,9 +42,7 @@ def _patch_spawn(monkeypatch, proc):
     async def _fake_create(*args, **kwargs):
         return proc
 
-    monkeypatch.setattr(
-        task_preparer.asyncio, "create_subprocess_exec", _fake_create
-    )
+    monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _fake_create)
 
 
 def _run(coro):
@@ -70,6 +69,7 @@ def _patch_probe_shards(monkeypatch, tmp_path, payloads):
 # _count_graph_replays
 # ---------------------------------------------------------------------------
 
+
 def test_graph_probe_sitecustomize_records_rank_identity():
     """Every structured shard identifies its distributed rank context."""
     source = task_preparer._GRAPH_PROBE_SITECUSTOMIZE
@@ -88,9 +88,7 @@ def test_count_graph_replays_reads_replay_file(monkeypatch, tmp_path):
         [{"replays": 42, "rank": None, "world_size": None}],
     )
 
-    replays, tail = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5)
-    )
+    replays, tail = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
     assert replays == 42
     assert "stdout-tail" in tail and "stderr-tail" in tail
 
@@ -101,9 +99,7 @@ def test_count_graph_replays_accepts_legacy_integer_shard(monkeypatch, tmp_path)
     _patch_spawn(monkeypatch, proc)
     _patch_probe_shards(monkeypatch, tmp_path, ["17"])
 
-    replays, _ = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5)
-    )
+    replays, _ = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
     assert replays == 17
 
 
@@ -129,9 +125,7 @@ def test_count_graph_replays_uses_minimum_complete_rank_count(
         ],
     )
 
-    replays, _ = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5)
-    )
+    replays, _ = _run(task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5))
     assert replays == 5
 
 
@@ -168,9 +162,7 @@ def test_count_graph_replays_ignores_ranked_helper_process(monkeypatch, tmp_path
         ],
     )
 
-    replays, _ = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5)
-    )
+    replays, _ = _run(task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5))
     assert replays == 5
 
 
@@ -189,9 +181,7 @@ def test_count_graph_replays_rejects_incomplete_rank_set(monkeypatch, tmp_path):
         ],
     )
 
-    replays, tail = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5)
-    )
+    replays, tail = _run(task_preparer._count_graph_replays("driver.py", 1, 10, timeout_sec=5))
     assert replays == -1
     assert "missing ranks: [0]" in tail
 
@@ -201,9 +191,7 @@ def test_count_graph_replays_nonzero_exit_fails(monkeypatch):
     proc = _FakeProc(out=b"partial output", err=b"worker failed", returncode=3)
     _patch_spawn(monkeypatch, proc)
 
-    replays, tail = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5)
-    )
+    replays, tail = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=5))
     assert replays == -1
     assert "benchmark exited 3" in tail
     assert "worker failed" in tail
@@ -228,9 +216,7 @@ def test_count_graph_replays_timeout_reaps_group(monkeypatch):
 
     monkeypatch.setattr(task_preparer.asyncio, "wait_for", _fake_wait_for)
 
-    replays, tail = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=1)
-    )
+    replays, tail = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=1))
     assert replays == -1
     assert "timed out" in tail
     assert killed["called"] is True
@@ -240,13 +226,9 @@ def test_count_graph_replays_spawn_error_returns_minus_one(monkeypatch):
     async def _boom(*a, **k):
         raise OSError("cannot spawn")
 
-    monkeypatch.setattr(
-        task_preparer.asyncio, "create_subprocess_exec", _boom
-    )
+    monkeypatch.setattr(task_preparer.asyncio, "create_subprocess_exec", _boom)
 
-    replays, tail = _run(
-        task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=1)
-    )
+    replays, tail = _run(task_preparer._count_graph_replays("driver.py", 1, 1, timeout_sec=1))
     assert replays == -1
     assert "OSError" in tail
 
@@ -255,13 +237,12 @@ def test_count_graph_replays_spawn_error_returns_minus_one(monkeypatch):
 # _check_profile_contract
 # ---------------------------------------------------------------------------
 
+
 def test_profile_contract_success(monkeypatch):
     proc = _FakeProc(out=b"ok", err=b"", returncode=0)
     _patch_spawn(monkeypatch, proc)
 
-    ok, detail = _run(
-        task_preparer._check_profile_contract("driver.py", timeout_sec=5)
-    )
+    ok, detail = _run(task_preparer._check_profile_contract("driver.py", timeout_sec=5))
     assert ok is True
     assert detail == "verified"
 
@@ -270,9 +251,7 @@ def test_profile_contract_nonzero_exit(monkeypatch):
     proc = _FakeProc(out=b"", err=b"boom", returncode=3)
     _patch_spawn(monkeypatch, proc)
 
-    ok, msg = _run(
-        task_preparer._check_profile_contract("driver.py", timeout_sec=5)
-    )
+    ok, msg = _run(task_preparer._check_profile_contract("driver.py", timeout_sec=5))
     assert ok is False
     assert "exited 3" in msg
 
@@ -295,9 +274,7 @@ def test_profile_contract_timeout_reaps_group(monkeypatch):
 
     monkeypatch.setattr(task_preparer.asyncio, "wait_for", _fake_wait_for)
 
-    ok, msg = _run(
-        task_preparer._check_profile_contract("driver.py", timeout_sec=1)
-    )
+    ok, msg = _run(task_preparer._check_profile_contract("driver.py", timeout_sec=1))
     assert ok is False
     assert "timed out" in msg
     assert killed["called"] is True

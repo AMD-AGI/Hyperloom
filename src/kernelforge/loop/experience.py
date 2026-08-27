@@ -62,8 +62,15 @@ _CONSTRAINT_RULES: list[tuple[re.Pattern, str]] = [
 
 # Heuristic markers for the single most informative line in an error blob.
 _ERR_MARKERS = (
-    "error", "assert", "exception", "traceback", "failed",
-    "not faster", "allclose", "mlirerror", "unable to parse",
+    "error",
+    "assert",
+    "exception",
+    "traceback",
+    "failed",
+    "not faster",
+    "allclose",
+    "mlirerror",
+    "unable to parse",
 )
 
 
@@ -95,9 +102,7 @@ class ExperienceLedger:
         self.path = self.root / "forge_experience.md"
         self.jsonl_path = self.root / "experience.jsonl"
         self.keep_recent = keep_recent
-        self.memory = ConstraintMemory(
-            _CONSTRAINT_RULES, max_constraints=max_constraints
-        )
+        self.memory = ConstraintMemory(_CONSTRAINT_RULES, max_constraints=max_constraints)
         self.entries: list[ExperienceEntry] = []
         self._load()
 
@@ -123,10 +128,7 @@ class ExperienceLedger:
         outcome = payload.get("outcome")
         if type(iteration) is not int or not isinstance(outcome, str):
             return None
-        if any(
-            not isinstance(payload[field], str)
-            for field in ("diff_summary", "error_sig")
-        ):
+        if any(not isinstance(payload[field], str) for field in ("diff_summary", "error_sig")):
             return None
         return ExperienceEntry(
             iteration=iteration,
@@ -208,17 +210,14 @@ class ExperienceLedger:
         since its trajectory and diffs would duplicate the ledger's recent
         iteration rows.
         """
-        entries = self.entries[-self.keep_recent:] if include_recent else []
+        entries = self.entries[-self.keep_recent :] if include_recent else []
         return self._render(entries)
 
     def flush(self) -> None:
         """Persist structured JSONL and the full Markdown inspection view."""
         with contextlib.suppress(Exception):
             self.root.mkdir(parents=True, exist_ok=True)
-            payload = "".join(
-                json.dumps(asdict(entry), sort_keys=True) + "\n"
-                for entry in self.entries
-            )
+            payload = "".join(json.dumps(asdict(entry), sort_keys=True) + "\n" for entry in self.entries)
             atomic_write_text(self.jsonl_path, payload)
         with contextlib.suppress(Exception):
             self.root.mkdir(parents=True, exist_ok=True)

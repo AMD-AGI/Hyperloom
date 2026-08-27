@@ -51,6 +51,7 @@ class _MetaSpy:
         def wrapper(directory, iteration):
             self.calls += 1
             return self._orig(directory, iteration)
+
         self.archive._inspect_complete_meta = wrapper
         return self
 

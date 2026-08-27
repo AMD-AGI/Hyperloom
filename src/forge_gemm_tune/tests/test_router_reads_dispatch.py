@@ -72,9 +72,15 @@ class TestVllmMoeRouting:
     def test_the_ck_tuner_is_given_only_the_tokens_ck_served(self, tmp_path):
         # Selecting both tuners is not enough on its own: a CK table keyed on
         # the token counts Triton served is one nothing ever reads.
-        specs = _select(tmp_path, [
-            _CK.format(tok=16), _CK.format(tok=64), _ASM.format(tok=4096), _TRITON,
-        ])
+        specs = _select(
+            tmp_path,
+            [
+                _CK.format(tok=16),
+                _CK.format(tok=64),
+                _ASM.format(tok=4096),
+                _TRITON,
+            ],
+        )
         (ck,) = [s for s in specs if s.name == "fmoe_ck"]
         assert ck.token_hint == [16, 64]
 
@@ -101,10 +107,15 @@ class TestVllmMoeRouting:
 
     def test_a_dense_model_is_untouched(self, tmp_path):
         dense = ModelProfile(
-            model_path="/fake", hidden_size=4096, intermediate_size=14336,
+            model_path="/fake",
+            hidden_size=4096,
+            intermediate_size=14336,
         )
         specs = select_tuners(
-            dense, framework="vllm", precision="bf16", quant_type="none",
+            dense,
+            framework="vllm",
+            precision="bf16",
+            quant_type="none",
             gpu_type="mi355x",
             kernel_signature_log=_log(tmp_path, [_CK.format(tok=16)]),
         )
@@ -118,8 +129,11 @@ class TestVllmMoeRouting:
         # sglang already selects fmoe_ck through its own branch; the vLLM-side
         # addition must not double it or reorder anything.
         specs = select_tuners(
-            _moe_profile(), framework="sglang", precision="bf16",
-            quant_type="none", gpu_type="mi355x",
+            _moe_profile(),
+            framework="sglang",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi355x",
             kernel_signature_log=_log(tmp_path, [_CK.format(tok=16)]),
         )
         names = [s.name for s in specs]

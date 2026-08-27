@@ -24,11 +24,28 @@ from pathlib import Path
 
 from forge_gemm_tune.tuners import sglang_dense_bf16 as sd
 
-_HDR = ",".join([
-    "gfx", "cu_num", "M", "N", "K", "bias", "dtype", "outdtype", "scaleAB",
-    "bpreshuffle", "libtype", "solidx", "splitK", "us", "kernelName",
-    "err_ratio", "tflops", "bw",
-])
+_HDR = ",".join(
+    [
+        "gfx",
+        "cu_num",
+        "M",
+        "N",
+        "K",
+        "bias",
+        "dtype",
+        "outdtype",
+        "scaleAB",
+        "bpreshuffle",
+        "libtype",
+        "solidx",
+        "splitK",
+        "us",
+        "kernelName",
+        "err_ratio",
+        "tflops",
+        "bw",
+    ]
+)
 
 
 def _row(m, n, k, libtype, splitk, us, err_ratio):
@@ -56,10 +73,13 @@ class TestDropInaccurateRows:
     def test_drops_the_row_aiter_measured_as_wrong(self, tmp_path):
         # The real pair from the MI355X run: the split-K kernel is faster and
         # wrong, the hipblaslt one is slower and right.
-        csv_path = _csv(tmp_path, [
-            _row(16, 1536, 7168, "flydsl", 7, 8.116, 0.0202),
-            _row(1024, 1536, 7168, "hipblaslt", 0, 35.739, 0.0),
-        ])
+        csv_path = _csv(
+            tmp_path,
+            [
+                _row(16, 1536, 7168, "flydsl", 7, 8.116, 0.0202),
+                _row(1024, 1536, 7168, "hipblaslt", 0, 35.739, 0.0),
+            ],
+        )
 
         dropped = sd.drop_inaccurate_rows(csv_path)
 
@@ -68,10 +88,13 @@ class TestDropInaccurateRows:
         assert _shapes(csv_path) == {("1024", "1536", "7168")}
 
     def test_keeps_everything_when_all_rows_are_accurate(self, tmp_path):
-        csv_path = _csv(tmp_path, [
-            _row(16, 1536, 7168, "hipblaslt", 0, 11.126, 0.0),
-            _row(16, 4096, 7168, "hipblaslt", 0, 13.709, 0.0),
-        ])
+        csv_path = _csv(
+            tmp_path,
+            [
+                _row(16, 1536, 7168, "hipblaslt", 0, 11.126, 0.0),
+                _row(16, 4096, 7168, "hipblaslt", 0, 13.709, 0.0),
+            ],
+        )
         before = csv_path.read_text(encoding="utf-8")
 
         assert sd.drop_inaccurate_rows(csv_path) == []
@@ -99,7 +122,8 @@ class TestDropInaccurateRows:
         # upstream would disable it invisibly.
         hdr = ",".join(c for c in _HDR.split(",") if c != "err_ratio")
         row = ",".join(
-            v for i, v in enumerate(_row(16, 1536, 7168, "flydsl", 7, 8.1, 0.02).split(","))
+            v
+            for i, v in enumerate(_row(16, 1536, 7168, "flydsl", 7, 8.1, 0.02).split(","))
             if i != _HDR.split(",").index("err_ratio")
         )
         csv_path = _csv(tmp_path, [row], hdr)
@@ -161,7 +185,8 @@ class TestDropInaccurateRows:
         csv_path = _csv(tmp_path, rows)
         before = csv_path.read_text(encoding="utf-8")
         monkeypatch.setattr(
-            sd.os, "replace",
+            sd.os,
+            "replace",
             lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
         )
 

@@ -50,22 +50,25 @@ def _demand_file(tmp_path, shapes):
     from forge_gemm_tune.evidence import SCHEMA_VERSION
 
     path = tmp_path / "demand.json"
-    path.write_text(json.dumps({
-        "schema": SCHEMA_VERSION,
-        "demands": [
+    path.write_text(
+        json.dumps(
             {
-                "table": "tunableop",
-                "tuner": "vllm_dense_tunableop",
-                "env_var": "PYTORCH_TUNABLEOP_FILENAME",
-                "key_schema": ["M", "N", "K"],
-                "logged_fields": ["M", "N", "K"],
-                "miss_count": len(shapes),
-                "keys": [
-                    {"M": m, "N": n, "K": k, "requests": 1} for m, n, k in shapes
+                "schema": SCHEMA_VERSION,
+                "demands": [
+                    {
+                        "table": "tunableop",
+                        "tuner": "vllm_dense_tunableop",
+                        "env_var": "PYTORCH_TUNABLEOP_FILENAME",
+                        "key_schema": ["M", "N", "K"],
+                        "logged_fields": ["M", "N", "K"],
+                        "miss_count": len(shapes),
+                        "keys": [{"M": m, "N": n, "K": k, "requests": 1} for m, n, k in shapes],
+                    }
                 ],
             }
-        ],
-    }), encoding="utf-8")
+        ),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -75,10 +78,19 @@ def _ctx(tmp_path, **overrides):
 
     base = dict(
         profile=ModelProfile(model_path="/fake", hidden_size=4096),
-        framework="vllm", precision="bf16", quant_type="none",
-        gpu_type="mi355x", tp=1, conc=8, tokens=[8], mp=1,
-        output_dir=tmp_path, iters=20, warmup=5,
-        min_improvement_pct=1.0, timeout_s=3600,
+        framework="vllm",
+        precision="bf16",
+        quant_type="none",
+        gpu_type="mi355x",
+        tp=1,
+        conc=8,
+        tokens=[8],
+        mp=1,
+        output_dir=tmp_path,
+        iters=20,
+        warmup=5,
+        min_improvement_pct=1.0,
+        timeout_s=3600,
     )
     base.update(overrides)
     return TuneContext(**base)
@@ -90,9 +102,7 @@ class TestDemandBecomesAnInput:
             VllmDenseTunableopTuner,
         )
 
-        return VllmDenseTunableopTuner(
-            _ctx(tmp_path, precision=precision, demand_json=demand)
-        )
+        return VllmDenseTunableopTuner(_ctx(tmp_path, precision=precision, demand_json=demand))
 
     def test_a_demand_file_alone_is_enough_to_validate(self, tmp_path):
         t = self._tuner(tmp_path, _demand_file(tmp_path, [(16, 1536, 7168)]))
@@ -137,22 +147,28 @@ class TestDemandBecomesAnInput:
         from forge_gemm_tune.evidence import SCHEMA_VERSION
 
         path = tmp_path / "demand.json"
-        path.write_text(json.dumps({
-            "schema": SCHEMA_VERSION,
-            "demands": [{
-                "table": "bf16_tuned_gemm.csv",
-                "tuner": "sglang_dense_bf16",
-                "key_schema": ["M", "N", "K"],
-                "miss_count": 2,
-                "keys": [
-                    {"M": 16, "N": 1536, "K": 7168, "requests": 9},
-                    {"M": 1024, "N": 4096, "K": 7168, "requests": 3},
-                ],
-            }],
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": SCHEMA_VERSION,
+                    "demands": [
+                        {
+                            "table": "bf16_tuned_gemm.csv",
+                            "tuner": "sglang_dense_bf16",
+                            "key_schema": ["M", "N", "K"],
+                            "miss_count": 2,
+                            "keys": [
+                                {"M": 16, "N": 1536, "K": 7168, "requests": 9},
+                                {"M": 1024, "N": 4096, "K": 7168, "requests": 3},
+                            ],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
-        lines = self._tuner(tmp_path, path)._resolve_input().read_text(
-            encoding="utf-8").strip().splitlines()
+        lines = self._tuner(tmp_path, path)._resolve_input().read_text(encoding="utf-8").strip().splitlines()
 
         assert lines == [
             "GemmTunableOp_BFloat16_TN,tn_1536_16_7168_ld_7168_7168_1536",
@@ -165,16 +181,23 @@ class TestDemandBecomesAnInput:
         from forge_gemm_tune.evidence import SCHEMA_VERSION
 
         path = tmp_path / "demand.json"
-        path.write_text(json.dumps({
-            "schema": SCHEMA_VERSION,
-            "demands": [{
-                "table": "tuned_fmoe.csv",
-                "tuner": "fmoe_ck",
-                "key_schema": ["token", "model_dim"],
-                "miss_count": 1,
-                "keys": [{"M": 16, "N": 1536, "K": 7168, "requests": 1}],
-            }],
-        }), encoding="utf-8")
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": SCHEMA_VERSION,
+                    "demands": [
+                        {
+                            "table": "tuned_fmoe.csv",
+                            "tuner": "fmoe_ck",
+                            "key_schema": ["token", "model_dim"],
+                            "miss_count": 1,
+                            "keys": [{"M": 16, "N": 1536, "K": 7168, "requests": 1}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
         assert self._tuner(tmp_path, path)._resolve_input() is None
 
@@ -202,19 +225,28 @@ class TestDemandReplacesTheModelConfig:
 
         base = dict(
             profile=ModelProfile(
-                model_path="/fake", hidden_size=4096, intermediate_size=0,
+                model_path="/fake",
+                hidden_size=4096,
+                intermediate_size=0,
             ),
-            framework="sglang", precision="bf16", quant_type="none",
-            gpu_type="mi355x", tp=1, conc=8, tokens=[8], mp=1,
-            output_dir=tmp_path, iters=20, warmup=5,
-            min_improvement_pct=1.0, timeout_s=3600,
+            framework="sglang",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi355x",
+            tp=1,
+            conc=8,
+            tokens=[8],
+            mp=1,
+            output_dir=tmp_path,
+            iters=20,
+            warmup=5,
+            min_improvement_pct=1.0,
+            timeout_s=3600,
         )
         base.update(over)
         return SglangDenseBf16Tuner(TuneContext(**base))
 
-    def test_a_moe_only_config_is_fine_when_demand_supplies_the_shapes(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_moe_only_config_is_fine_when_demand_supplies_the_shapes(self, tmp_path, monkeypatch):
         from forge_gemm_tune.tuners import sglang_dense_bf16 as sd
 
         root = tmp_path / "aiter"
@@ -226,9 +258,7 @@ class TestDemandReplacesTheModelConfig:
         t = self._tuner(tmp_path, demand_json=tmp_path / "demand.json")
         assert t.validate() is None
 
-    def test_a_moe_only_config_alone_is_also_fine_on_its_attention_shapes(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_moe_only_config_alone_is_also_fine_on_its_attention_shapes(self, tmp_path, monkeypatch):
         """No demand, but the config still yields the attention projections.
 
         Missing ``intermediate_size`` only costs the FFN pair; QKV and O derive
@@ -245,9 +275,7 @@ class TestDemandReplacesTheModelConfig:
 
         assert self._tuner(tmp_path).validate() is None
 
-    def test_without_any_shape_source_it_still_refuses_and_says_why(
-        self, tmp_path, monkeypatch
-    ):
+    def test_without_any_shape_source_it_still_refuses_and_says_why(self, tmp_path, monkeypatch):
         """Nothing derivable and no demand: refuse, and name the way out."""
         from forge_gemm_tune.model_analyzer import ModelProfile
         from forge_gemm_tune.tuners import sglang_dense_bf16 as sd

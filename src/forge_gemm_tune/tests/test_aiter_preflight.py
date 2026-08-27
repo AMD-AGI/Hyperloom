@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 """aiter tune/serve alignment preflight."""
+
 from __future__ import annotations
 
 import importlib.util
@@ -87,9 +88,7 @@ def test_main_strict_passes_when_aligned(monkeypatch, tmp_path):
     serve.mkdir()
     monkeypatch.setenv("AITER_ROOT_DIR", str(root))
     monkeypatch.setenv("AITER_COMMIT", "abc123")
-    monkeypatch.setattr(
-        "forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve))
-    )
+    monkeypatch.setattr("forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve)))
     assert main(["--strict"]) == 0
 
 
@@ -98,9 +97,7 @@ def test_collect_aligned(monkeypatch, tmp_path):
     root.mkdir()
     serve = root / "aiter"
     serve.mkdir()
-    monkeypatch.setattr(
-        "forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve))
-    )
+    monkeypatch.setattr("forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: os.path.realpath(str(serve)))
     st = collect({"AITER_ROOT_DIR": str(root), "AITER_COMMIT": "abc123"})
     assert st["aligned"] is True
     assert st["hard"] == [] and st["soft"] == []
@@ -110,9 +107,7 @@ def test_collect_aligned(monkeypatch, tmp_path):
 def test_collect_misaligned_reports_hard(monkeypatch, tmp_path):
     root = tmp_path / "aiter_src"
     root.mkdir()
-    monkeypatch.setattr(
-        "forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter"
-    )
+    monkeypatch.setattr("forge_gemm_tune.aiter_preflight.serve_aiter_path", lambda: "/usr/local/aiter")
     st = collect({"AITER_ROOT_DIR": str(root)})
     assert st["aligned"] is False
     assert any("MISALIGNED" in h for h in st["hard"])

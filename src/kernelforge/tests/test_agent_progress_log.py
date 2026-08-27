@@ -6,6 +6,7 @@ the backend accumulated in locals is lost — a real run left nothing behind but
 ``AgentRunSpec.progress_log`` is owned by the caller, so it still holds what the
 agent was doing after the cancellation.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,12 +36,8 @@ def _msg(*blocks):
 def test_records_text_and_tool_calls():
     sink: list[str] = []
     claude_backend._record_progress(sink, _msg(_TextBlock("Let me read the spec first")))
-    claude_backend._record_progress(
-        sink, _msg(ToolUseBlock("Read", {"file_path": "/ws/.forge_driver.py"}))
-    )
-    claude_backend._record_progress(
-        sink, _msg(ToolUseBlock("Bash", {"command": "python driver.py --smoke"}))
-    )
+    claude_backend._record_progress(sink, _msg(ToolUseBlock("Read", {"file_path": "/ws/.forge_driver.py"})))
+    claude_backend._record_progress(sink, _msg(ToolUseBlock("Bash", {"command": "python driver.py --smoke"})))
 
     assert sink == [
         "say: Let me read the spec first",
@@ -73,12 +70,8 @@ def test_sink_survives_cancellation_of_the_streaming_run():
     sink: list[str] = []
 
     async def stream_forever():
-        claude_backend._record_progress(
-            sink, _msg(ToolUseBlock("Read", {"file_path": "spec.json"}))
-        )
-        claude_backend._record_progress(
-            sink, _msg(ToolUseBlock("Grep", {"pattern": "paged_attention"}))
-        )
+        claude_backend._record_progress(sink, _msg(ToolUseBlock("Read", {"file_path": "spec.json"})))
+        claude_backend._record_progress(sink, _msg(ToolUseBlock("Grep", {"pattern": "paged_attention"})))
         await asyncio.sleep(60)
 
     async def main():

@@ -272,9 +272,7 @@ def build_multi_author_prompt(
         )
     src = recipes[0].get("source_file") or "(resolve under the framework model dir)"
     shapes = recipes[0].get("shapes", {})
-    harness_block = (
-        harness_contract(harness_path, " ".join(all_flags)) if harness_path else ""
-    )
+    harness_block = harness_contract(harness_path, " ".join(all_flags)) if harness_path else ""
     existing_operators = [
         str(recipe.get("existing_operator"))
         for recipe in recipes
@@ -376,7 +374,9 @@ def _git_bytes(
     """Run one bounded Git plumbing command without decoding path bytes."""
     try:
         result = git(
-            "-C", str(root), *args,
+            "-C",
+            str(root),
+            *args,
             input=input_data,
             check=False,
             text=False,
@@ -393,8 +393,7 @@ def _git_bytes(
     if check and result.returncode != 0:
         detail = result.stderr.decode(errors="replace").strip()[-400:]
         raise AuthorSafetyError(
-            f"author workspace Git command failed: git {' '.join(args[:3])}: "
-            f"{detail or f'exit {result.returncode}'}"
+            f"author workspace Git command failed: git {' '.join(args[:3])}: {detail or f'exit {result.returncode}'}"
         )
     return result
 
@@ -621,11 +620,7 @@ class _AuthorWorkspaceGuard:
         return result.stdout.strip() if result.returncode == 0 else b""
 
     def _index_path(self) -> Path:
-        raw = (
-            _git_bytes(self.root, "rev-parse", "--git-path", "index")
-            .stdout.decode(errors="surrogateescape")
-            .strip()
-        )
+        raw = _git_bytes(self.root, "rev-parse", "--git-path", "index").stdout.decode(errors="surrogateescape").strip()
         path = Path(raw)
         return path if path.is_absolute() else self.root / path
 
@@ -649,14 +644,9 @@ class _AuthorWorkspaceGuard:
                     int(raw_stage),
                 )
             except (ValueError, UnicodeError) as exc:
-                raise AuthorSafetyError(
-                    "cannot parse Git index metadata for author workspace"
-                ) from exc
+                raise AuthorSafetyError("cannot parse Git index metadata for author workspace") from exc
             entries.setdefault(_decode_git_path(raw_path), []).append(entry)
-        return {
-            path: tuple(sorted(values, key=lambda item: item[2]))
-            for path, values in entries.items()
-        }
+        return {path: tuple(sorted(values, key=lambda item: item[2])) for path, values in entries.items()}
 
     def _index_flags(self) -> dict[str, str]:
         flags: dict[str, str] = {}
@@ -952,9 +942,7 @@ class _AuthorWorkspaceGuard:
                 child_parts = Path(child).parts
                 if child_parts[: len(parent_parts)] != parent_parts:
                     continue
-                if self._baseline_has_path_object(child) and not (
-                    self._baseline_has_path_object(parent)
-                ):
+                if self._baseline_has_path_object(child) and not (self._baseline_has_path_object(parent)):
                     selected.discard(parent)
                 else:
                     selected.discard(child)
@@ -974,13 +962,9 @@ class _AuthorWorkspaceGuard:
         index_paths = set(self.baseline_index_entries) | set(post_entries)
         flag_paths = set(self.baseline_index_flags) | set(post_flags)
         index_changed = {
-            rel
-            for rel in index_paths
-            if self.baseline_index_entries.get(rel, ()) != post_entries.get(rel, ())
+            rel for rel in index_paths if self.baseline_index_entries.get(rel, ()) != post_entries.get(rel, ())
         }
-        flag_changed = {
-            rel for rel in flag_paths if self.baseline_index_flags.get(rel) != post_flags.get(rel)
-        }
+        flag_changed = {rel for rel in flag_paths if self.baseline_index_flags.get(rel) != post_flags.get(rel)}
         candidates = self.baseline_status_paths | post_status | index_changed | flag_changed
         worktree_changed: set[str] = set()
         for rel in candidates:
@@ -1034,10 +1018,7 @@ class _AuthorWorkspaceGuard:
         final_flags = self._index_flags()
         final_status = self._status_paths()
         verify_paths = (
-            self.baseline_status_paths
-            | final_status
-            | set(self.baseline_index_entries)
-            | set(final_entries)
+            self.baseline_status_paths | final_status | set(self.baseline_index_entries) | set(final_entries)
         ) - preserved
         failed: set[str] = set()
         for rel in verify_paths:
@@ -1129,19 +1110,11 @@ def _target_file_hooks(
     if not target_files:
         return None
     root = Path(workdir).resolve()
-    targets = {
-        (Path(value) if Path(value).is_absolute() else root / value).resolve()
-        for value in target_files
-    }
+    targets = {(Path(value) if Path(value).is_absolute() else root / value).resolve() for value in target_files}
 
     async def _deny_non_target(input_data: dict, _tool_use_id: Any, _context: Any) -> dict:
         tool_input = input_data.get("tool_input") or {}
-        raw_path = (
-            tool_input.get("file_path")
-            or tool_input.get("path")
-            or tool_input.get("notebook_path")
-            or ""
-        )
+        raw_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path") or ""
         if raw_path:
             candidate = Path(str(raw_path)).expanduser()
             if not candidate.is_absolute():
@@ -1212,9 +1185,7 @@ def _run_registered_author(
     """Run authoring through one already-created registered Agent backend."""
     progress: list[str] = []
     requested_targets = list(dict.fromkeys(str(path) for path in target_files if str(path)))
-    requested_module_dirs = list(
-        dict.fromkeys(str(path) for path in new_module_dirs if str(path))
-    )
+    requested_module_dirs = list(dict.fromkeys(str(path) for path in new_module_dirs if str(path)))
     try:
         guard = _AuthorWorkspaceGuard(workdir, requested_targets, requested_module_dirs)
     except AuthorSafetyError as exc:
@@ -1338,9 +1309,7 @@ def _run_registered_author(
         detail = ", ".join(violations[:20])
         if len(violations) > 20:
             detail += f", ... ({len(violations)} paths)"
-        reason = _with_run_error(
-            f"author workspace rejected and restored non-target paths: {detail}"
-        )
+        reason = _with_run_error(f"author workspace rejected and restored non-target paths: {detail}")
         try:
             _write_registered_author_log(
                 log_path,
@@ -1467,10 +1436,7 @@ def run_author(
     """
     if callable(backend) and not hasattr(backend, "run"):
         backend = backend()
-    selected_model = (
-        str(model or "").strip()
-        or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
-    )
+    selected_model = str(model or "").strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
     log.info(
         "running %s Agent author (model=%s max_turns=%d workdir=%s)",
         backend.name,
@@ -1490,4 +1456,3 @@ def run_author(
         target_files=list(target_files or []),
         new_module_dirs=list(new_module_dirs or []),
     )
-

@@ -32,10 +32,20 @@ Re-run with --update_improved to apply.
 def _ctx(tmp_path):
     return TuneContext(
         profile=types.SimpleNamespace(),
-        framework="vllm-aiter", precision="fp8", quant_type="blockscale",
-        gpu_type="mi355x", tp=1, conc=64, tokens=[64], mp=1,
-        output_dir=tmp_path, iters=1, warmup=0, min_improvement_pct=3.0,
-        timeout_s=60, untuned_csv=tmp_path / "in.csv",
+        framework="vllm-aiter",
+        precision="fp8",
+        quant_type="blockscale",
+        gpu_type="mi355x",
+        tp=1,
+        conc=64,
+        tokens=[64],
+        mp=1,
+        output_dir=tmp_path,
+        iters=1,
+        warmup=0,
+        min_improvement_pct=3.0,
+        timeout_s=60,
+        untuned_csv=tmp_path / "in.csv",
     )
 
 
@@ -62,9 +72,12 @@ def _prep(tmp_path, monkeypatch, *, compare_dir: Path | None = None):
 
 def _run(tmp_path):
     return ac.run_aiter_dense_tuner(
-        tuner_name="a8w8_blockscale", script_key="a8w8_blockscale",
-        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", ctx=_ctx(tmp_path),
-        work_dir=tmp_path, extra_args=["--libtype", "all"],
+        tuner_name="a8w8_blockscale",
+        script_key="a8w8_blockscale",
+        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+        ctx=_ctx(tmp_path),
+        work_dir=tmp_path,
+        extra_args=["--libtype", "all"],
     )
 
 

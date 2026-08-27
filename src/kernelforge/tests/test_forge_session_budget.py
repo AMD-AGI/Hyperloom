@@ -51,6 +51,4 @@ def test_explicit_override_takes_precedence_over_the_formula():
 
 def test_floor_is_below_ceiling():
     # A degenerate ordering would make the min/max clamp collapse to a constant.
-    assert (
-        FORGE_SESSION_BUDGET_MIN_MINUTES < FORGE_SESSION_BUDGET_MAX_MINUTES
-    )
+    assert FORGE_SESSION_BUDGET_MIN_MINUTES < FORGE_SESSION_BUDGET_MAX_MINUTES

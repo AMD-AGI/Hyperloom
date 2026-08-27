@@ -81,45 +81,29 @@ class ExternalArtifactTransaction:
         passthrough_paths: list[Path] | None = None,
         read_only_paths: list[Path] | None = None,
     ) -> None:
-        self._ignored_directory_names = (
-            _IGNORED_DIRECTORY_NAMES | _extra_ignored_directory_names()
-        )
-        lexical_driver = Path(
-            os.path.abspath(os.path.expanduser(str(driver_path)))
-        )
+        self._ignored_directory_names = _IGNORED_DIRECTORY_NAMES | _extra_ignored_directory_names()
+        lexical_driver = Path(os.path.abspath(os.path.expanduser(str(driver_path))))
         if lexical_driver.is_symlink():
-            raise ExternalArtifactError(
-                f"external driver cannot be a symlink: {lexical_driver}"
-            )
+            raise ExternalArtifactError(f"external driver cannot be a symlink: {lexical_driver}")
         self.root = lexical_driver.parent.resolve()
         self.driver_path = self.root / lexical_driver.name
         if not self.root.is_dir():
-            raise ExternalArtifactError(
-                f"external driver directory does not exist: {self.root}"
-            )
+            raise ExternalArtifactError(f"external driver directory does not exist: {self.root}")
         if self.root == Path(self.root.anchor):
-            raise ExternalArtifactError(
-                f"refusing to stage a filesystem root as an artifact directory: {self.root}"
-            )
+            raise ExternalArtifactError(f"refusing to stage a filesystem root as an artifact directory: {self.root}")
 
         self._lock_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
         try:
             fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
             os.close(self._lock_fd)
-            raise ExternalArtifactError(
-                f"another external artifact transaction is active: {self.root}"
-            ) from exc
+            raise ExternalArtifactError(f"another external artifact transaction is active: {self.root}") from exc
 
         self._baseline_temporary: tempfile.TemporaryDirectory | None = None
         self._stage_temporary: tempfile.TemporaryDirectory | None = None
         try:
-            self._baseline_temporary = tempfile.TemporaryDirectory(
-                prefix="forge_external_baseline_"
-            )
-            self._stage_temporary = tempfile.TemporaryDirectory(
-                prefix="forge_external_staging_"
-            )
+            self._baseline_temporary = tempfile.TemporaryDirectory(prefix="forge_external_baseline_")
+            self._stage_temporary = tempfile.TemporaryDirectory(prefix="forge_external_staging_")
             baseline_temporary_root = Path(self._baseline_temporary.name)
             stage_temporary_root = Path(self._stage_temporary.name)
             self._baseline_root = baseline_temporary_root / "artifacts"
@@ -127,14 +111,8 @@ class ExternalArtifactTransaction:
             self._published = False
             self._ignored_boundary_rels: set[Path] = set()
 
-            excluded = [
-                p.expanduser().resolve(strict=False)
-                for p in excluded_paths or []
-            ]
-            passthrough = [
-                p.expanduser().resolve(strict=False)
-                for p in passthrough_paths or []
-            ]
+            excluded = [p.expanduser().resolve(strict=False) for p in excluded_paths or []]
+            passthrough = [p.expanduser().resolve(strict=False) for p in passthrough_paths or []]
             # Avoid recursively copying the transaction itself when the external
             # root is a broad temporary directory such as /tmp.
             excluded.extend(
@@ -146,9 +124,7 @@ class ExternalArtifactTransaction:
 
             self._excluded_rels = self._relative_descendants(excluded)
             self._passthrough: dict[Path, Path] = {
-                rel: path
-                for path in passthrough
-                if (rel := self._relative_descendant(path)) is not None
+                rel: path for path in passthrough if (rel := self._relative_descendant(path)) is not None
             }
             self._excluded_rels.update(self._passthrough)
             self._read_only_rels: set[Path] = set()
@@ -161,9 +137,7 @@ class ExternalArtifactTransaction:
 
             driver_rel = self.driver_path.relative_to(self.root)
             if self._is_excluded(driver_rel):
-                raise ExternalArtifactError(
-                    f"external driver is inside an excluded path: {self.driver_path}"
-                )
+                raise ExternalArtifactError(f"external driver is inside an excluded path: {self.driver_path}")
 
             self._baseline_root.mkdir(parents=True)
             self.stage_root.mkdir(parents=True)
@@ -211,25 +185,17 @@ class ExternalArtifactTransaction:
             for rel in set(self._baseline_manifest) | set(staged)
             if self._baseline_manifest.get(rel) != staged.get(rel)
         }
-        protected_changes = sorted(
-            rel.as_posix()
-            for rel in changed
-            if self._touches_read_only_path(rel)
-        )
+        protected_changes = sorted(rel.as_posix() for rel in changed if self._touches_read_only_path(rel))
         if protected_changes:
             raise ExternalArtifactError(
-                "preparer modified read-only external input(s): "
-                + ", ".join(protected_changes)
+                "preparer modified read-only external input(s): " + ", ".join(protected_changes)
             )
         excluded_boundary_changes = sorted(
-            rel.as_posix()
-            for rel in changed
-            if self._is_ancestor_of_protected_boundary(rel)
+            rel.as_posix() for rel in changed if self._is_ancestor_of_protected_boundary(rel)
         )
         if excluded_boundary_changes:
             raise ExternalArtifactError(
-                "preparer changed an ancestor of excluded external state: "
-                + ", ".join(excluded_boundary_changes)
+                "preparer changed an ancestor of excluded external state: " + ", ".join(excluded_boundary_changes)
             )
 
         try:
@@ -248,18 +214,13 @@ class ExternalArtifactTransaction:
                 )
             except Exception as rollback_exc:
                 raise ExternalArtifactError(
-                    f"external artifact publish failed ({exc}); "
-                    f"rollback also failed ({rollback_exc})"
+                    f"external artifact publish failed ({exc}); rollback also failed ({rollback_exc})"
                 ) from exc
-            raise ExternalArtifactError(
-                f"external artifact publish failed and was rolled back: {exc}"
-            ) from exc
+            raise ExternalArtifactError(f"external artifact publish failed and was rolled back: {exc}") from exc
 
         written = tuple(str(self.root / rel) for rel in sorted(changed))
         created = tuple(
-            str(self.root / rel)
-            for rel in sorted(changed)
-            if rel not in self._baseline_manifest and rel in staged
+            str(self.root / rel) for rel in sorted(changed) if rel not in self._baseline_manifest and rel in staged
         )
         self._published = True
         return ExternalArtifactChanges(
@@ -294,9 +255,7 @@ class ExternalArtifactTransaction:
 
     def _assert_baseline_intact(self) -> None:
         if self._manifest(self._baseline_root) != self._baseline_manifest:
-            raise ExternalArtifactError(
-                "external artifact rollback snapshot was modified"
-            )
+            raise ExternalArtifactError("external artifact rollback snapshot was modified")
 
     def _relative_descendant(self, path: Path) -> Path | None:
         try:
@@ -305,34 +264,23 @@ class ExternalArtifactTransaction:
             return None
 
     def _relative_descendants(self, paths: list[Path]) -> set[Path]:
-        return {
-            rel
-            for path in paths
-            if (rel := self._relative_descendant(path)) is not None
-        }
+        return {rel for path in paths if (rel := self._relative_descendant(path)) is not None}
 
     def _is_excluded(self, rel: Path) -> bool:
-        return any(rel == excluded or rel.is_relative_to(excluded)
-                   for excluded in self._excluded_rels)
+        return any(rel == excluded or rel.is_relative_to(excluded) for excluded in self._excluded_rels)
 
     def _is_ignored_name(self, path: Path) -> bool:
-        return (
-            path.name in self._ignored_directory_names
-            or path.suffix.lower() in _IGNORED_FILE_SUFFIXES
-        )
+        return path.name in self._ignored_directory_names or path.suffix.lower() in _IGNORED_FILE_SUFFIXES
 
     def _touches_read_only_path(self, rel: Path) -> bool:
         return any(
-            rel == protected
-            or rel.is_relative_to(protected)
-            or protected.is_relative_to(rel)
+            rel == protected or rel.is_relative_to(protected) or protected.is_relative_to(rel)
             for protected in self._read_only_rels
         )
 
     def _is_ancestor_of_protected_boundary(self, rel: Path) -> bool:
         boundaries = self._excluded_rels | self._ignored_boundary_rels
-        return any(boundary != rel and boundary.is_relative_to(rel)
-                   for boundary in boundaries)
+        return any(boundary != rel and boundary.is_relative_to(rel) for boundary in boundaries)
 
     def _copy_tree(
         self,
@@ -357,27 +305,14 @@ class ExternalArtifactTransaction:
                 if stat.S_ISLNK(child_stat.st_mode):
                     link_target = os.readlink(child)
                     if os.path.isabs(link_target):
-                        raise ExternalArtifactError(
-                            f"absolute artifact symlink is not supported: {child}"
-                        )
+                        raise ExternalArtifactError(f"absolute artifact symlink is not supported: {child}")
                     try:
-                        resolved_target = (
-                            child.parent / link_target
-                        ).resolve(strict=False)
-                        target_rel = resolved_target.relative_to(
-                            source_root.resolve()
-                        )
+                        resolved_target = (child.parent / link_target).resolve(strict=False)
+                        target_rel = resolved_target.relative_to(source_root.resolve())
                     except (OSError, RuntimeError, ValueError) as exc:
-                        raise ExternalArtifactError(
-                            f"artifact symlink escapes its staging root: {child}"
-                        ) from exc
-                    if apply_exclusions and (
-                        self._is_excluded(target_rel)
-                        or self._touches_read_only_path(target_rel)
-                    ):
-                        raise ExternalArtifactError(
-                            f"artifact symlink targets protected state: {child}"
-                        )
+                        raise ExternalArtifactError(f"artifact symlink escapes its staging root: {child}") from exc
+                    if apply_exclusions and (self._is_excluded(target_rel) or self._touches_read_only_path(target_rel)):
+                        raise ExternalArtifactError(f"artifact symlink targets protected state: {child}")
                     os.symlink(link_target, target)
                 elif stat.S_ISDIR(child_stat.st_mode):
                     copy_directory(child, target, child_rel)
@@ -385,9 +320,7 @@ class ExternalArtifactTransaction:
                 elif stat.S_ISREG(child_stat.st_mode):
                     shutil.copy2(child, target, follow_symlinks=False)
                 else:
-                    raise ExternalArtifactError(
-                        f"unsupported artifact file type: {child}"
-                    )
+                    raise ExternalArtifactError(f"unsupported artifact file type: {child}")
 
         copy_directory(source_root, destination_root, Path())
 
@@ -400,22 +333,14 @@ class ExternalArtifactTransaction:
             if entry.kind != "symlink":
                 continue
             if os.path.isabs(entry.digest):
-                raise ExternalArtifactError(
-                    f"staged artifact contains an absolute symlink: {rel}"
-                )
+                raise ExternalArtifactError(f"staged artifact contains an absolute symlink: {rel}")
             try:
-                target = (self.stage_root / rel).parent.joinpath(
-                    entry.digest
-                ).resolve(strict=False)
+                target = (self.stage_root / rel).parent.joinpath(entry.digest).resolve(strict=False)
                 target_rel = target.relative_to(stage_root)
             except (OSError, RuntimeError, ValueError) as exc:
-                raise ExternalArtifactError(
-                    f"staged artifact symlink escapes the transaction: {rel}"
-                ) from exc
+                raise ExternalArtifactError(f"staged artifact symlink escapes the transaction: {rel}") from exc
             if self._is_excluded(target_rel) or self._touches_read_only_path(target_rel):
-                raise ExternalArtifactError(
-                    f"staged artifact symlink targets protected state: {rel}"
-                )
+                raise ExternalArtifactError(f"staged artifact symlink targets protected state: {rel}")
 
     def _create_passthrough_links(self) -> None:
         for rel, source in self._passthrough.items():
@@ -442,10 +367,7 @@ class ExternalArtifactTransaction:
                     continue
                 if apply_exclusions and self._is_excluded(child_rel):
                     continue
-                if any(
-                    child_rel == ignored or child_rel.is_relative_to(ignored)
-                    for ignored in ignored_rels
-                ):
+                if any(child_rel == ignored or child_rel.is_relative_to(ignored) for ignored in ignored_rels):
                     continue
 
                 child_stat = child.lstat()
@@ -464,9 +386,7 @@ class ExternalArtifactTransaction:
                         mode=stat.S_IMODE(child_stat.st_mode),
                     )
                 else:
-                    raise ExternalArtifactError(
-                        f"unsupported artifact file type: {child}"
-                    )
+                    raise ExternalArtifactError(f"unsupported artifact file type: {child}")
 
         visit(root, Path())
         return entries
@@ -490,11 +410,7 @@ class ExternalArtifactTransaction:
         current = self._manifest(self.root, apply_exclusions=True)
         if expected_current is not None:
             checked_paths = scope if scope is not None else set(expected_current) | set(current)
-            conflicts = [
-                rel
-                for rel in checked_paths
-                if current.get(rel) != expected_current.get(rel)
-            ]
+            conflicts = [rel for rel in checked_paths if current.get(rel) != expected_current.get(rel)]
             if conflicts:
                 raise ExternalArtifactError(
                     "external artifact path(s) changed concurrently: "
@@ -523,20 +439,12 @@ class ExternalArtifactTransaction:
             elif entry.kind == "symlink":
                 self._replace_with_symlink(source, destination)
             else:
-                raise ExternalArtifactError(
-                    f"unsupported staged artifact kind: {entry.kind}"
-                )
+                raise ExternalArtifactError(f"unsupported staged artifact kind: {entry.kind}")
 
         actual = self._manifest(self.root, apply_exclusions=True)
-        matches = (
-            actual == desired
-            if scope is None
-            else all(actual.get(rel) == desired.get(rel) for rel in scope)
-        )
+        matches = actual == desired if scope is None else all(actual.get(rel) == desired.get(rel) for rel in scope)
         if not matches:
-            raise ExternalArtifactError(
-                "external artifact tree does not match the requested state after sync"
-            )
+            raise ExternalArtifactError("external artifact tree does not match the requested state after sync")
 
     @staticmethod
     def _remove_path(path: Path) -> None:

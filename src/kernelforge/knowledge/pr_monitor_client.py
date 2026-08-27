@@ -88,12 +88,8 @@ class PRMonitorClient:
     ) -> None:
         """Configure endpoint and budgets, using ``PR_KB_*`` env defaults."""
         self._base = normalize_base_url(base_url)
-        self._timeout = timeout_sec or float(
-            os.environ.get("PR_KB_TIMEOUT_SEC", "10") or 10
-        )
-        self._budget = budget_sec or float(
-            os.environ.get("PR_KB_BUDGET_SEC", "30") or 30
-        )
+        self._timeout = timeout_sec or float(os.environ.get("PR_KB_TIMEOUT_SEC", "10") or 10)
+        self._budget = budget_sec or float(os.environ.get("PR_KB_BUDGET_SEC", "30") or 30)
 
     @property
     def base_url(self) -> str:
@@ -128,14 +124,10 @@ class PRMonitorClient:
         timeouts, connection failures, and 5xx.
         """
         if params and "before" in params:
-            raise PRMonitorError(
-                "pagination is disabled: the server cursor drops same-timestamp rows"
-            )
+            raise PRMonitorError("pagination is disabled: the server cursor drops same-timestamp rows")
         url = self._url(path, params)
         try:
-            with urllib.request.urlopen(
-                url, timeout=self._request_timeout(timeout_sec)
-            ) as response:
+            with urllib.request.urlopen(url, timeout=self._request_timeout(timeout_sec)) as response:
                 body = response.read()
         except urllib.error.HTTPError as error:
             if error.code == 404:
@@ -170,10 +162,7 @@ class PRMonitorClient:
             return []
         budget = self._budget if budget_sec is None else max(0.0, budget_sec)
         if budget <= 0:
-            return [
-                FetchOutcome(path, error=PRTransportError("budget exhausted"))
-                for path, _ in requests
-            ]
+            return [FetchOutcome(path, error=PRTransportError("budget exhausted")) for path, _ in requests]
         deadline = time.monotonic() + budget
         outcomes: list[FetchOutcome] = []
         pool = ThreadPoolExecutor(max_workers=_MAX_WORKERS)
@@ -186,17 +175,12 @@ class PRMonitorClient:
             return self.get(path, params, timeout_sec=remaining)
 
         try:
-            futures = [
-                pool.submit(fetch, path, params)
-                for path, params in requests
-            ]
+            futures = [pool.submit(fetch, path, params) for path, params in requests]
             wait(futures, timeout=max(0.0, deadline - time.monotonic()))
             for (path, _), future in zip(requests, futures):
                 if not future.done():
                     future.cancel()
-                    outcomes.append(
-                        FetchOutcome(path, error=PRTransportError("budget exhausted"))
-                    )
+                    outcomes.append(FetchOutcome(path, error=PRTransportError("budget exhausted")))
                     continue
                 try:
                     outcomes.append(FetchOutcome(path, payload=future.result()))
@@ -217,9 +201,7 @@ class PRMonitorClient:
     def list_repos(self, *, timeout_sec: float | None = None) -> list[dict]:
         """List tracked repositories with their polling state."""
         payload = self.get("/repos", timeout_sec=timeout_sec)
-        if not isinstance(payload, list) or not all(
-            isinstance(item, dict) for item in payload
-        ):
+        if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
             raise PRContractError("repository list must be an array of objects")
         return payload
 
@@ -256,9 +238,7 @@ class PRMonitorClient:
         Filters on the PR's current head while ``?file_path=`` reverse lookup
         does not, so after a force-push a path that matched the PR can 404 here.
         """
-        payload = self.get(
-            f"/repos/{repo}/prs/{number}/files/by-path", {"path": file_path}
-        )
+        payload = self.get(f"/repos/{repo}/prs/{number}/files/by-path", {"path": file_path})
         if payload is None:
             return None
         if not isinstance(payload, dict):

@@ -220,16 +220,10 @@ def _load_invocation_spec(path: str) -> bytes:
 
 def _reference_examples() -> dict[str, bytes]:
     examples = {
-        _SOFTMAX_REFERENCE: resource_path(
-            "examples/triton2flydsl-softmax-flydsl-rewrite/driver.py"
-        ),
+        _SOFTMAX_REFERENCE: resource_path("examples/triton2flydsl-softmax-flydsl-rewrite/driver.py"),
         _MXFP8_REFERENCE: resource_path("examples/triton2flydsl-mxfp8-grouped-gemm/driver.py"),
     }
-    return {
-        name: content
-        for name, path in examples.items()
-        if (content := _read_evidence(path, required=False))
-    }
+    return {name: content for name, path in examples.items() if (content := _read_evidence(path, required=False))}
 
 
 def _write_evidence(
@@ -320,8 +314,7 @@ def _ensure_agent_git_workspace(stage: Path) -> None:
         )
         if result.returncode != 0:
             raise RuntimeError(
-                "could not initialize the isolated driver preparation workspace: "
-                f"{result.stderr or result.stdout}"
+                f"could not initialize the isolated driver preparation workspace: {result.stderr or result.stdout}"
             )
 
 
@@ -408,13 +401,9 @@ def _preflight_payload(preflight: DriverPreflight) -> dict:
     return {
         "report": asdict(preflight.report),
         "reference": (asdict(preflight.reference) if preflight.reference is not None else None),
-        "candidate_probe": (
-            asdict(preflight.candidate_probe) if preflight.candidate_probe is not None else None
-        ),
+        "candidate_probe": (asdict(preflight.candidate_probe) if preflight.candidate_probe is not None else None),
         "warnings": list(preflight.warnings),
     }
-
-
 
 
 def _restore_driver(path: Path, original: bytes | None) -> None:
@@ -443,11 +432,7 @@ def _build_prompt(
             "quantization-scale domains."
         )
     )
-    retry = (
-        f"\n## Deterministic failure from the previous attempt\n{prior_failure}\n"
-        if prior_failure
-        else ""
-    )
+    retry = f"\n## Deterministic failure from the previous attempt\n{prior_failure}\n" if prior_failure else ""
     return f"""\
 Create or repair the self-contained rewrite measurement driver at
 `{stage_driver.name}`.
@@ -543,10 +528,7 @@ async def prepare_rewrite_driver(
         return DriverPreparationResult(
             ok=False,
             failure_class=driver_contract.DRIVER_NOT_INDEPENDENT,
-            error=(
-                "the driver destination is producer-owned experiment state and "
-                "cannot own the correctness gate"
-            ),
+            error=("the driver destination is producer-owned experiment state and cannot own the correctness gate"),
         )
     try:
         invocation_spec = _load_invocation_spec(invocation_spec_file)
@@ -568,11 +550,7 @@ async def prepare_rewrite_driver(
             error=f"could not initialize rewrite driver preparation: {error}",
         )
     last_preflight = initial_preflight
-    prior_failure = (
-        initial_preflight.detail
-        if initial_preflight is not None and not initial_preflight.ok
-        else ""
-    )
+    prior_failure = initial_preflight.detail if initial_preflight is not None and not initial_preflight.ok else ""
     if initial_preflight is not None:
         _audit_json(audit, "initial_preflight.json", _preflight_payload(initial_preflight))
 
@@ -594,9 +572,7 @@ async def prepare_rewrite_driver(
 
             for attempt in range(1, max(1, max_attempts) + 1):
                 remaining = _remaining(deadline_unix)
-                preflight_reserve = (
-                    DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
-                )
+                preflight_reserve = DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
                 if remaining <= preflight_reserve:
                     break
                 attempts_run = attempt
@@ -633,8 +609,7 @@ async def prepare_rewrite_driver(
                     _audit_text(audit, f"{attempt_dir}/agent_output.txt", output)
                 except asyncio.TimeoutError:
                     prior_failure = (
-                        f"the previous authoring session timed out after "
-                        f"{timeout_sec}s; save a complete driver earlier"
+                        f"the previous authoring session timed out after {timeout_sec}s; save a complete driver earlier"
                     )
                     _audit_json(
                         audit,
@@ -717,9 +692,7 @@ async def prepare_rewrite_driver(
                     )
                 except Exception as error:  # noqa: BLE001
                     _restore_driver(destination, original)
-                    prior_failure = (
-                        f"deterministic preflight raised {type(error).__name__}: {error}"
-                    )
+                    prior_failure = f"deterministic preflight raised {type(error).__name__}: {error}"
                     continue
                 _audit_driver(
                     audit,
@@ -753,10 +726,7 @@ async def prepare_rewrite_driver(
         )
 
     _restore_driver(destination, original)
-    deadline_reached = (
-        _remaining(deadline_unix)
-        <= DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
-    )
+    deadline_reached = _remaining(deadline_unix) <= DEFAULT_REWRITE_BUDGET.driver_preflight_reserve_sec
     detail = prior_failure or "the preparation agent produced no conforming driver"
     if deadline_reached:
         detail = f"driver preparation reached its deadline; last failure: {detail}"
@@ -764,9 +734,7 @@ async def prepare_rewrite_driver(
         ok=False,
         attempts=attempts_run,
         preflight=last_preflight,
-        failure_class=(
-            DRIVER_PREPARATION_DEADLINE if deadline_reached else DRIVER_PREPARATION_FAILED
-        ),
+        failure_class=(DRIVER_PREPARATION_DEADLINE if deadline_reached else DRIVER_PREPARATION_FAILED),
         error=detail,
         audit_dir=str(audit),
     )

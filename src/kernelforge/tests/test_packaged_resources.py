@@ -13,8 +13,17 @@ def test_packaged_resource_paths_are_available():
 
 _REPO = Path(__file__).resolve().parents[1]
 _VGPR_LIVENESS = (
-    _REPO / "local_knowledge" / "languages" / "asm" / "skills" / "optimize" / "asm_levers"
-          / "intellikit" / "tools" / "scripts" / "vgpr_liveness.py"
+    _REPO
+    / "local_knowledge"
+    / "languages"
+    / "asm"
+    / "skills"
+    / "optimize"
+    / "asm_levers"
+    / "intellikit"
+    / "tools"
+    / "scripts"
+    / "vgpr_liveness.py"
 )
 
 

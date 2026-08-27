@@ -31,10 +31,7 @@ _HIT = (
     "otype='torch.bfloat16' bias=False, scaleAB=False, bpreshuffle=False, "
     "found padded_M: 16"
 )
-_MERGE = (
-    "[aiter] merge tuned file under model_configs/ and configs/ "
-    "/tmp/a.csv:/tmp/bf16_tuned_gemm.csv"
-)
+_MERGE = "[aiter] merge tuned file under model_configs/ and configs/ /tmp/a.csv:/tmp/bf16_tuned_gemm.csv"
 
 
 class TestKeyGroupIsOptional:
@@ -53,7 +50,8 @@ class TestKeyGroupIsOptional:
     def test_both_forms_in_one_log(self):
         rep = ev.parse_log("\n".join([_BF16_MISS, _NARROW_MISS]))
         assert {d["table"] for d in rep["demands"]} == {
-            "bf16_tuned_gemm.csv", "a8w8_blockscale_tuned_gemm.csv",
+            "bf16_tuned_gemm.csv",
+            "a8w8_blockscale_tuned_gemm.csv",
         }
 
     def test_key_schema_follows_the_table_not_the_line(self):
@@ -105,20 +103,24 @@ class TestMoEDispatch:
         # A model dispatches different stages at different token counts; a single
         # "saw 1stage" boolean collapses that away and suppresses tuning for the
         # range 2stage actually serves.
-        log = "\n".join([
-            "[aiter] [fused_moe] using 1stage default for (304, 1, 4096, 1536, 256, 6)",
-            "[aiter] [fused_moe] using 2stage default for (304, 64, 4096, 1536, 256, 6)",
-        ])
+        log = "\n".join(
+            [
+                "[aiter] [fused_moe] using 1stage default for (304, 1, 4096, 1536, 256, 6)",
+                "[aiter] [fused_moe] using 2stage default for (304, 64, 4096, 1536, 256, 6)",
+            ]
+        )
         moe = ev.parse_log(log)["dispatch"]["moe"]
         assert moe["impl"] == "aiter_ck"
         assert moe["stages_seen"] == ["1stage", "2stage"]
         assert moe["tunable_ck_2stage"] is True
 
     def test_vllm_triton_hits_and_misses(self):
-        log = "\n".join([
-            "Using configuration from /cfg/E=256,N=2048.json for MoE layer",
-            "Config file not found at /cfg/E=256,N=4096.json",
-        ])
+        log = "\n".join(
+            [
+                "Using configuration from /cfg/E=256,N=2048.json for MoE layer",
+                "Config file not found at /cfg/E=256,N=4096.json",
+            ]
+        )
         moe = ev.parse_log(log)["dispatch"]["moe"]
         assert moe["impl"] == "vllm_triton"
         assert moe["vllm_config_hit"] == 1 and moe["vllm_config_miss"] == 1

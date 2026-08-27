@@ -58,9 +58,8 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
     ),
     (
         "pyproject.toml",
-        r'^kernel-agents = ',
-        "Deprecated console-script alias, kept one release so existing scripts and "
-        "shell history keep working.",
+        r"^kernel-agents = ",
+        "Deprecated console-script alias, kept one release so existing scripts and shell history keep working.",
     ),
     # TEMPORARY -- delete this entry in P7, when the Hyperloom-side call sites
     # (subprocess argv, find_spec probes, $FORGE_PATH package sniffing) are
@@ -93,9 +92,7 @@ def _repo_root() -> Path | None:
 
 
 def _tracked_hits(root: Path) -> list[tuple[str, int, str]]:
-    files = subprocess.run(
-        ["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True
-    ).stdout.split()
+    files = subprocess.run(["git", "ls-files"], cwd=root, capture_output=True, text=True, check=True).stdout.split()
     hits: list[tuple[str, int, str]] = []
     for rel in files:
         path = root / rel
@@ -122,11 +119,7 @@ def test_no_stray_kernel_agents_references() -> None:
     root = _repo_root()
     if root is None:
         pytest.skip("not a source checkout")
-    stray = [
-        f"{rel}:{lineno}: {line}"
-        for rel, lineno, line in _tracked_hits(root)
-        if not _is_allowed(rel, line)
-    ]
+    stray = [f"{rel}:{lineno}: {line}" for rel, lineno, line in _tracked_hits(root) if not _is_allowed(rel, line)]
     assert not stray, (
         "unrenamed kernel_agents references; rename them, or add a justified entry "
         "to _ALLOWED:\n  " + "\n  ".join(stray[:40])

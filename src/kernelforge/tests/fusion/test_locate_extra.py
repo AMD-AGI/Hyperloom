@@ -35,15 +35,13 @@ def test_first_source_file_uses_package_dir(tmp_path, monkeypatch):
     (pkg_dir / "srt" / "models").mkdir(parents=True)
     (pkg_dir / "srt" / "models" / "lfm2.py").write_text("# m")
     monkeypatch.setattr(locate, "_package_dir", lambda pkg: str(pkg_dir))
-    got = _first_source_file("lfm2", "", ("srt/models",), pkg="sglang",
-                             pkg_models=("srt", "models"))
+    got = _first_source_file("lfm2", "", ("srt/models",), pkg="sglang", pkg_models=("srt", "models"))
     assert got.endswith("srt/models/lfm2.py")
 
 
 def test_first_source_file_none_found(monkeypatch):
     monkeypatch.setattr(locate, "_package_dir", lambda pkg: "")
-    got = _first_source_file("nope", "", ("srt/models",), pkg="sglang",
-                             pkg_models=("srt", "models"))
+    got = _first_source_file("nope", "", ("srt/models",), pkg="sglang", pkg_models=("srt", "models"))
     assert got == ""
 
 
@@ -89,7 +87,9 @@ class TestVllmRegisteredSource:
         registry = types.ModuleType("vllm.model_executor.models.registry")
         registry.ModelRegistry = types.SimpleNamespace(models=models)
         for name in (
-            "vllm", "vllm.model_executor", "vllm.model_executor.models",
+            "vllm",
+            "vllm.model_executor",
+            "vllm.model_executor.models",
             "vllm.model_executor.models.registry",
         ):
             monkeypatch.setitem(sys.modules, name, sys.modules.get(name) or types.ModuleType(name))
@@ -107,28 +107,32 @@ class TestVllmRegisteredSource:
 
     def _config(self, monkeypatch, model_type: str, arch: str):
         monkeypatch.setattr(
-            locate, "load_model_config",
+            locate,
+            "load_model_config",
             lambda p: {"model_type": model_type, "architectures": [arch]},
         )
 
     @pytest.mark.parametrize(
         "arch, module_name, class_name, model_type",
         [
-            ("LlamaForCausalLM", "vllm.model_executor.models.llama",
-             "LlamaForCausalLM", "llama"),
-            ("DeepseekV4ForCausalLM", "vllm.models.deepseek_v4",
-             "DeepseekV4ForCausalLM", "deepseek_v4"),
-            ("DeepseekV32ForCausalLM", "vllm.model_executor.models.deepseek_v2",
-             "DeepseekV3ForCausalLM", "deepseek_v2"),
+            ("LlamaForCausalLM", "vllm.model_executor.models.llama", "LlamaForCausalLM", "llama"),
+            ("DeepseekV4ForCausalLM", "vllm.models.deepseek_v4", "DeepseekV4ForCausalLM", "deepseek_v4"),
+            (
+                "DeepseekV32ForCausalLM",
+                "vllm.model_executor.models.deepseek_v2",
+                "DeepseekV3ForCausalLM",
+                "deepseek_v2",
+            ),
         ],
     )
-    def test_follows_the_registered_entry(
-        self, tmp_path, monkeypatch, arch, module_name, class_name, model_type
-    ):
+    def test_follows_the_registered_entry(self, tmp_path, monkeypatch, arch, module_name, class_name, model_type):
         impl, _ = self._module(tmp_path, monkeypatch, module_name, class_name)
-        self._registry(monkeypatch, {
-            arch: types.SimpleNamespace(module_name=module_name, class_name=class_name),
-        })
+        self._registry(
+            monkeypatch,
+            {
+                arch: types.SimpleNamespace(module_name=module_name, class_name=class_name),
+            },
+        )
         self._config(monkeypatch, model_type, arch)
 
         assert resolve_framework_source_file("/m", "vllm") == (str(impl), "vllm registry")
@@ -136,9 +140,12 @@ class TestVllmRegisteredSource:
     def test_follows_an_out_of_tree_class(self, tmp_path, monkeypatch):
         """``register_model(arch, cls)`` stores the class, not a module name."""
         impl, module = self._module(tmp_path, monkeypatch, "my_pkg.my_mod", "MyCustomModel")
-        self._registry(monkeypatch, {
-            "MyCustomModel": types.SimpleNamespace(model_cls=module.MyCustomModel),
-        })
+        self._registry(
+            monkeypatch,
+            {
+                "MyCustomModel": types.SimpleNamespace(model_cls=module.MyCustomModel),
+            },
+        )
         self._config(monkeypatch, "custom", "MyCustomModel")
 
         assert resolve_framework_source_file("/m", "vllm") == (str(impl), "vllm registry")
@@ -153,16 +160,21 @@ class TestVllmRegisteredSource:
         self._config(monkeypatch, "llama", "LlamaForCausalLM")
 
         assert resolve_framework_source_file("/m", "vllm") == (
-            str(models / "llama.py"), "path convention (registry missed)",
+            str(models / "llama.py"),
+            "path convention (registry missed)",
         )
 
     def test_names_a_registered_arch_it_could_not_follow(self, tmp_path, monkeypatch, caplog):
         """The silent debug fallback is what hid this resolution being broken."""
-        self._registry(monkeypatch, {
-            "SomeArch": types.SimpleNamespace(
-                module_name="vllm.model_executor.models.nonexistent", class_name="SomeClass",
-            ),
-        })
+        self._registry(
+            monkeypatch,
+            {
+                "SomeArch": types.SimpleNamespace(
+                    module_name="vllm.model_executor.models.nonexistent",
+                    class_name="SomeClass",
+                ),
+            },
+        )
         self._config(monkeypatch, "some", "SomeArch")
         monkeypatch.setattr(locate, "_package_dir", lambda pkg: "")
 

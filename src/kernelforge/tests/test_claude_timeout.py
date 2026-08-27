@@ -104,6 +104,7 @@ def _run_bounded(coro, *, guard_sec=5.0):
     than a wedged worker. Once the deadline is honoured the coroutine returns
     well inside the guard and the guard never fires.
     """
+
     async def _guarded():
         return await asyncio.wait_for(coro, timeout=guard_sec)
 
@@ -153,17 +154,11 @@ def test_a_workspace_the_reaper_could_not_clear_is_reported_on_the_result(
     """
 
     async def _contended_reap(cwd):
-        return ReapReport(
-            directory=cwd, unkillable=(4321,), holding_device=(4321,)
-        )
+        return ReapReport(directory=cwd, unkillable=(4321,), holding_device=(4321,))
 
-    monkeypatch.setattr(
-        claude_mod, "_reap_workspace_processes", _contended_reap
-    )
+    monkeypatch.setattr(claude_mod, "_reap_workspace_processes", _contended_reap)
     captured: dict = {}
-    backend = _hanging_backend(
-        [_message(subtype="init", session_id="sess-timeout")], captured
-    )
+    backend = _hanging_backend([_message(subtype="init", session_id="sess-timeout")], captured)
 
     result = _run_bounded(backend.run(_spec()))
 
@@ -184,9 +179,7 @@ def test_timeout_reports_a_terminal_reason_not_sdk_error(monkeypatch):
 
     monkeypatch.setattr(claude_mod, "_reap_workspace_processes", _noop_reap)
     captured: dict = {}
-    backend = _hanging_backend(
-        [_message(subtype="init", session_id="sess-timeout")], captured
-    )
+    backend = _hanging_backend([_message(subtype="init", session_id="sess-timeout")], captured)
 
     result = _run_bounded(backend.run(_spec()))
 

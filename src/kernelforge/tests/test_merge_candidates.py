@@ -62,9 +62,17 @@ def _candidate(iteration: int, speedup: float, cases: set[str]) -> MergeCandidat
 
 
 def test_a_case_is_owned_only_when_it_beat_the_incumbent_time():
-    metas = [_meta(1, speedup=1.01, case_times={
-        "prefill": 0.9, "decode": 2.0, "mixed": 5.0,
-    })]
+    metas = [
+        _meta(
+            1,
+            speedup=1.01,
+            case_times={
+                "prefill": 0.9,
+                "decode": 2.0,
+                "mixed": 5.0,
+            },
+        )
+    ]
 
     eligible = eligible_candidates(metas, INCUMBENT)
 
@@ -188,18 +196,12 @@ def test_the_recorded_plan_survives_a_round_trip_in_either_order():
     first = _candidate(7, 1.01, {"prefill"})
     second = _candidate(3, 1.02, {"decode"})
 
-    assert attempted_pairs([merge_plan(first, second)]) == frozenset(
-        {frozenset({3, 7})}
-    )
-    assert attempted_pairs([merge_plan(second, first)]) == frozenset(
-        {frozenset({3, 7})}
-    )
+    assert attempted_pairs([merge_plan(first, second)]) == frozenset({frozenset({3, 7})})
+    assert attempted_pairs([merge_plan(second, first)]) == frozenset({frozenset({3, 7})})
 
 
 def test_an_ordinary_plan_is_never_read_as_an_attempted_pair():
-    assert attempted_pairs(["vectorize the epilogue stores", "", "stacked x+y: n"]) == (
-        frozenset()
-    )
+    assert attempted_pairs(["vectorize the epilogue stores", "", "stacked x+y: n"]) == (frozenset())
 
 
 def test_a_prefixed_plan_naming_anything_but_two_iterations_is_not_a_pair():
@@ -209,13 +211,16 @@ def test_a_prefixed_plan_naming_anything_but_two_iterations_is_not_a_pair():
     measured, so anything that is not exactly two integers is discarded rather
     than guessed at.
     """
-    assert attempted_pairs(
-        [
-            f"{MERGE_PLAN_PREFIX} 1+2+3: three at once",
-            f"{MERGE_PLAN_PREFIX} first+second: named, not numbered",
-            f"{MERGE_PLAN_PREFIX} 4: a lone iteration",
-        ]
-    ) == frozenset()
+    assert (
+        attempted_pairs(
+            [
+                f"{MERGE_PLAN_PREFIX} 1+2+3: three at once",
+                f"{MERGE_PLAN_PREFIX} first+second: named, not numbered",
+                f"{MERGE_PLAN_PREFIX} 4: a lone iteration",
+            ]
+        )
+        == frozenset()
+    )
 
 
 def test_a_case_without_a_usable_reference_time_can_never_be_owned():
@@ -264,14 +269,8 @@ def _per_case_meta(iteration: int, *, speedup: float, runs: list[dict]) -> dict:
         "mean_case_speedup": speedup,
         "plan": f"plan {iteration}",
         "bench": {
-            "case_times": {
-                case_id: sum(run[case_id] for run in runs) / len(runs)
-                for case_id in runs[0]
-            },
-            "measurements": [
-                {"success": True, "case_times": run, "unscored_cases": []}
-                for run in runs
-            ],
+            "case_times": {case_id: sum(run[case_id] for run in runs) / len(runs) for case_id in runs[0]},
+            "measurements": [{"success": True, "case_times": run, "unscored_cases": []} for run in runs],
         },
     }
 
@@ -282,15 +281,11 @@ def test_a_case_is_won_only_when_the_gain_clears_that_case_s_own_spread():
         {"heavy": 1.02, "light": 0.51},
         {"heavy": 0.98, "light": 0.49},
     ]
-    spreads = case_spreads(
-        [{"case_times": run} for run in runs]
-    )
+    spreads = case_spreads([{"case_times": run} for run in runs])
     measured = {"heavy": 1.00, "light": 0.50}
 
     # `heavy` moved 2% against a 2% spread; `light` moved 10% against the same.
-    assert cases_beating_reference(
-        measured, {"heavy": 1.02, "light": 0.556}, spreads
-    ) == frozenset({"light"})
+    assert cases_beating_reference(measured, {"heavy": 1.02, "light": 0.556}, spreads) == frozenset({"light"})
 
 
 def test_a_case_measured_only_once_can_never_be_won():
@@ -317,9 +312,7 @@ def test_a_revert_beating_the_incumbent_on_one_case_beyond_noise_is_eligible():
     eligible = eligible_candidates(metas, GQA_INCUMBENT)
 
     assert [item.iteration for item in eligible] == [21]
-    assert [item.winning_cases for item in eligible] == [
-        frozenset({"m3-prefill-b2-q8073p60"})
-    ]
+    assert [item.winning_cases for item in eligible] == [frozenset({"m3-prefill-b2-q8073p60"})]
 
 
 def test_a_revert_winning_only_inside_its_own_spread_stays_out():
@@ -340,10 +333,7 @@ def test_a_revert_winning_only_inside_its_own_spread_stays_out():
 
 def test_a_candidate_that_regresses_every_case_is_still_dropped():
     """Eligibility admits gains, not a second chance at a regression."""
-    runs = [
-        {case_id: time_ms * 1.05 for case_id, time_ms in GQA_INCUMBENT.items()}
-        for _ in range(3)
-    ]
+    runs = [{case_id: time_ms * 1.05 for case_id, time_ms in GQA_INCUMBENT.items()} for _ in range(3)]
     runs[1] = {case_id: time_ms * 1.051 for case_id, time_ms in GQA_INCUMBENT.items()}
     metas = [_per_case_meta(7, speedup=0.95, runs=runs)]
 
@@ -459,8 +449,7 @@ def test_a_stack_that_reverted_is_not_itself_stackable():
             3,
             speedup=1.006,
             case_times={"prefill": 0.9, "decode": 1.8},
-            plan=merge_plan(_candidate(1, 1.003, {"prefill"}),
-                            _candidate(2, 1.004, {"decode"})),
+            plan=merge_plan(_candidate(1, 1.003, {"prefill"}), _candidate(2, 1.004, {"decode"})),
         ),
     ]
 

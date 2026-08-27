@@ -66,6 +66,7 @@ def _client(responses):
 
 # ── classification ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.parametrize(
     ("error", "expected"),
     [
@@ -150,12 +151,10 @@ def test_a_timeout_is_retryable_but_a_rejection_is_not():
 
 # ── retry policy ──────────────────────────────────────────────────────────────
 
+
 def test_backoff_reaches_minutes_not_seconds():
     """The old fixed 3s steps covered ~30s — shorter than the outage every time."""
-    delays = [
-        retry_delay(attempt, base_sec=5.0, max_sec=120.0, rng=lambda: 1.0)
-        for attempt in range(1, 6)
-    ]
+    delays = [retry_delay(attempt, base_sec=5.0, max_sec=120.0, rng=lambda: 1.0) for attempt in range(1, 6)]
     assert delays == [5.0, 15.0, 45.0, 120.0, 120.0]
     assert sum(delays) > 180
 
@@ -180,11 +179,10 @@ def test_env_setting_ignores_unparseable_and_negative_overrides(monkeypatch):
 
 # ── complete_with_retry ───────────────────────────────────────────────────────
 
+
 def test_transient_failure_then_success_returns_the_answer():
     client, calls = _client([_Status("flaky", 400), '[{"name":"x"}]'])
-    out = complete_with_retry(
-        client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None
-    )
+    out = complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None)
     assert out == '[{"name":"x"}]'
     assert calls["n"] == 2
 
@@ -192,18 +190,14 @@ def test_transient_failure_then_success_returns_the_answer():
 def test_max_tokens_is_not_shrunk_between_attempts():
     """Shrinking only truncated the answer; the 400s recur at every cap."""
     client, calls = _client([_Status("flaky", 400), _Status("flaky", 400), "[]"])
-    complete_with_retry(
-        client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None
-    )
+    complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None)
     assert calls["max_tokens"] == [2400, 2400, 2400]
 
 
 def test_exhausted_retries_raise_rather_than_return_empty():
     client, calls = _client([_Status("flaky", 400)])
     with pytest.raises(LlmUnavailableError) as excinfo:
-        complete_with_retry(
-            client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None
-        )
+        complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None)
     assert calls["n"] == 4
     assert excinfo.value.attempts == 4
 
@@ -211,9 +205,7 @@ def test_exhausted_retries_raise_rather_than_return_empty():
 def test_a_non_retryable_failure_gives_up_immediately():
     client, calls = _client([_Status("bad key", 401)])
     with pytest.raises(LlmUnavailableError) as excinfo:
-        complete_with_retry(
-            client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None
-        )
+        complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None)
     assert calls["n"] == 1
     assert excinfo.value.kind == AUTH
 
@@ -223,9 +215,7 @@ def test_a_transient_timeout_is_retried():
     previous implementation had: one slow response published "unreachable"."""
     client, calls = _client([RuntimeError("request timed out"), '[{"name":"x"}]'])
 
-    out = complete_with_retry(
-        client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None
-    )
+    out = complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=4, sleep=lambda _: None)
 
     assert out == '[{"name":"x"}]'
     assert calls["n"] == 2
@@ -235,9 +225,7 @@ def test_an_exhausted_timeout_chain_reports_the_timeout_kind():
     client, calls = _client([RuntimeError("request timed out")])
 
     with pytest.raises(LlmUnavailableError) as excinfo:
-        complete_with_retry(
-            client, "prompt", model="m", max_tokens=2400, attempts=3, sleep=lambda _: None
-        )
+        complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=3, sleep=lambda _: None)
 
     assert calls["n"] == 3
     assert excinfo.value.kind == TIMEOUT
@@ -252,8 +240,13 @@ def test_the_retry_chain_stops_at_its_deadline():
 
     with pytest.raises(LlmUnavailableError) as excinfo:
         complete_with_retry(
-            client, "prompt", model="m", max_tokens=2400, attempts=5,
-            deadline_sec=600.0, sleep=lambda _: None,
+            client,
+            "prompt",
+            model="m",
+            max_tokens=2400,
+            attempts=5,
+            deadline_sec=600.0,
+            sleep=lambda _: None,
             monotonic=lambda: next(reads, 5000.0),
         )
 
@@ -266,8 +259,14 @@ def test_deadline_zero_lifts_the_bound():
     client, calls = _client([RuntimeError("request timed out"), "[]"])
 
     out = complete_with_retry(
-        client, "prompt", model="m", max_tokens=2400, attempts=4,
-        deadline_sec=0.0, sleep=lambda _: None, monotonic=lambda: 10**9,
+        client,
+        "prompt",
+        model="m",
+        max_tokens=2400,
+        attempts=4,
+        deadline_sec=0.0,
+        sleep=lambda _: None,
+        monotonic=lambda: 10**9,
     )
 
     assert out == "[]"
@@ -278,20 +277,17 @@ def test_an_empty_completion_is_a_failure_not_an_answer():
     """Discovery's prompt demands JSON: a model with nothing to propose says [];."""
     client, calls = _client([""])
     with pytest.raises(LlmUnavailableError):
-        complete_with_retry(
-            client, "prompt", model="m", max_tokens=2400, attempts=2, sleep=lambda _: None
-        )
+        complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=2, sleep=lambda _: None)
     assert calls["n"] == 2
 
 
 def test_an_empty_json_array_is_a_real_answer():
     client, _ = _client(["[]"])
-    assert complete_with_retry(
-        client, "prompt", model="m", max_tokens=2400, attempts=2, sleep=lambda _: None
-    ) == "[]"
+    assert complete_with_retry(client, "prompt", model="m", max_tokens=2400, attempts=2, sleep=lambda _: None) == "[]"
 
 
 # ── the manifest verdict ──────────────────────────────────────────────────────
+
 
 def _launch_bound_diagnosis():
     return diagnose_from_shares(
@@ -303,8 +299,11 @@ def _launch_bound_diagnosis():
 def test_a_launch_bound_model_with_no_recipe_is_still_no_opportunity():
     diagnosis = _launch_bound_diagnosis()
     manifest = build_manifest(
-        framework="sglang", model_path="/m", model_type="mixtral",
-        diagnosis=diagnosis, recipe=None,
+        framework="sglang",
+        model_path="/m",
+        model_type="mixtral",
+        diagnosis=diagnosis,
+        recipe=None,
     )
     assert manifest["verdict"] == "no_opportunity"
     assert manifest["error"] is None
@@ -315,8 +314,11 @@ def test_an_unreachable_llm_is_not_reported_as_no_opportunity():
     assert diagnosis.is_candidate, "the incident's precondition: the trace WAS a candidate"
     error = LlmUnavailableError("gateway 400 x4", kind=API_ERROR, attempts=4)
     manifest = build_manifest(
-        framework="sglang", model_path="/m", model_type="mixtral",
-        diagnosis=diagnosis, recipe=None,
+        framework="sglang",
+        model_path="/m",
+        model_type="mixtral",
+        diagnosis=diagnosis,
+        recipe=None,
         verdict_override=LLM_UNAVAILABLE_VERDICT,
         error=error.to_dict(),
     )
@@ -330,8 +332,11 @@ def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
     """Adding a value to an enum is not additive for a consumer that switches on
     it, so the version has to move even though every v1 field is untouched."""
     manifest = build_manifest(
-        framework="sglang", model_path="/m", model_type="mixtral",
-        diagnosis=_launch_bound_diagnosis(), recipe=None,
+        framework="sglang",
+        model_path="/m",
+        model_type="mixtral",
+        diagnosis=_launch_bound_diagnosis(),
+        recipe=None,
     )
 
     assert FUSION_MANIFEST_SCHEMA_VERSION == 2
@@ -339,8 +344,17 @@ def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
     # v1's fields keep their names, types and meaning, so a v2 reader handles a v1
     # payload and a v1 reader that only reads known keys is unaffected.
     for key in (
-        "tool", "version", "verdict", "framework", "model", "diagnosis",
-        "fusion", "fusion_candidates", "validation", "fusion_loop", "artifacts",
+        "tool",
+        "version",
+        "verdict",
+        "framework",
+        "model",
+        "diagnosis",
+        "fusion",
+        "fusion_candidates",
+        "validation",
+        "fusion_loop",
+        "artifacts",
     ):
         assert key in manifest, key
     assert manifest["error"] is None, "null on every verdict but llm_unavailable"
@@ -348,8 +362,11 @@ def test_the_wider_verdict_enum_declares_itself_as_schema_v2():
 
 def test_the_manifest_lands_whole_with_the_bytes_its_readers_parse(tmp_path):
     manifest = build_manifest(
-        framework="sglang", model_path="/m", model_type="mixtral",
-        diagnosis=_launch_bound_diagnosis(), recipe=None,
+        framework="sglang",
+        model_path="/m",
+        model_type="mixtral",
+        diagnosis=_launch_bound_diagnosis(),
+        recipe=None,
     )
 
     path = write_manifest(manifest, tmp_path / "out")

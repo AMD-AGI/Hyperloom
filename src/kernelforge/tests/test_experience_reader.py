@@ -49,12 +49,13 @@ def workspace(tmp_path):
 
 @pytest.fixture()
 def config(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env(
-        {}, mode="local", local_root=tmp_path / "knowledge"
-    )
+    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=tmp_path / "knowledge")
     return Config.from_env(
-        workspace=str(workspace), gpu_target="gfx942", gpu_type="mi300x",
-        knowledge_config=knowledge, agent_precheck=False,
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
     )
 
 
@@ -96,13 +97,19 @@ def _read_args(config, workspace, **overrides):
 # --- the paths that yield no candidate ------------------------------------- #
 def test_read_none_when_the_store_is_not_configured(tmp_path, workspace):
     knowledge = KnowledgeConfig.from_env(
-        {}, mode="remote", local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid", gbrain_token="secret",
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        gbrain_base_url="https://gbrain.invalid",
+        gbrain_token="secret",
         remote_backend=REMOTE_BACKEND_GBRAIN,
     )
     config = Config.from_env(
-        workspace=str(workspace), gpu_target="gfx942", gpu_type="mi300x",
-        knowledge_config=knowledge, agent_precheck=False,
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
     )
     status: dict[str, str] = {}
 
@@ -128,9 +135,7 @@ def test_read_none_when_nothing_was_ever_recorded(config, workspace):
     assert read_best_solution(**_read_args(config, workspace)) is None
 
 
-def test_a_transport_failure_is_not_reported_as_an_empty_store(
-    config, workspace, monkeypatch
-):
+def test_a_transport_failure_is_not_reported_as_an_empty_store(config, workspace, monkeypatch):
     """Cold-starting on a broken link would hide an outage as a normal miss."""
     _seed(config, workspace)
 
@@ -145,9 +150,7 @@ def test_a_transport_failure_is_not_reported_as_an_empty_store(
     assert "kaboom" in status["read_error"]
 
 
-def test_an_unexpected_failure_cold_starts_instead_of_raising(
-    config, workspace, monkeypatch
-):
+def test_an_unexpected_failure_cold_starts_instead_of_raising(config, workspace, monkeypatch):
     def boom(*_args, **_kwargs):
         raise RuntimeError("kaboom")
 
@@ -192,7 +195,8 @@ def test_a_foreign_implementation_stays_reference_only(config, workspace):
         "implementation_symbols": ["someone_elses_kernel"],
     }
     _seed(
-        config, workspace,
+        config,
+        workspace,
         implementation_signature_override=hash_implementation_identity(foreign_identity),
         implementation_identity_override=foreign_identity,
     )
@@ -204,12 +208,9 @@ def test_a_foreign_implementation_stays_reference_only(config, workspace):
 
 
 def test_candidates_come_back_ranked_by_speedup(config, workspace):
-    _seed(config, workspace, experiment_id="mid", mean_case_speedup=2.0,
-          cumulative_diff=DIFF.replace("+new", "+mid"))
-    _seed(config, workspace, experiment_id="best", mean_case_speedup=5.0,
-          cumulative_diff=DIFF.replace("+new", "+best"))
-    _seed(config, workspace, experiment_id="low", mean_case_speedup=1.25,
-          cumulative_diff=DIFF.replace("+new", "+low"))
+    _seed(config, workspace, experiment_id="mid", mean_case_speedup=2.0, cumulative_diff=DIFF.replace("+new", "+mid"))
+    _seed(config, workspace, experiment_id="best", mean_case_speedup=5.0, cumulative_diff=DIFF.replace("+new", "+best"))
+    _seed(config, workspace, experiment_id="low", mean_case_speedup=1.25, cumulative_diff=DIFF.replace("+new", "+low"))
 
     solutions = read_top_solutions(**_read_args(config, workspace), top_k=3)
 
@@ -219,8 +220,13 @@ def test_candidates_come_back_ranked_by_speedup(config, workspace):
 
 def test_top_k_bounds_the_result(config, workspace):
     for name, speedup in (("a", 2.0), ("b", 3.0), ("c", 4.0)):
-        _seed(config, workspace, experiment_id=name, mean_case_speedup=speedup,
-              cumulative_diff=DIFF.replace("+new", f"+{name}"))
+        _seed(
+            config,
+            workspace,
+            experiment_id=name,
+            mean_case_speedup=speedup,
+            cumulative_diff=DIFF.replace("+new", f"+{name}"),
+        )
 
     assert len(read_top_solutions(**_read_args(config, workspace), top_k=2)) == 2
 
@@ -228,8 +234,13 @@ def test_top_k_bounds_the_result(config, workspace):
 def test_only_the_champion_is_downloaded_at_top_1(config, workspace):
     """A bounded read must not pay for the candidates it will never look at."""
     for name, speedup in (("a", 2.0), ("b", 3.0), ("c", 4.0)):
-        _seed(config, workspace, experiment_id=name, mean_case_speedup=speedup,
-              cumulative_diff=DIFF.replace("+new", f"+{name}"))
+        _seed(
+            config,
+            workspace,
+            experiment_id=name,
+            mean_case_speedup=speedup,
+            cumulative_diff=DIFF.replace("+new", f"+{name}"),
+        )
 
     solutions = read_top_solutions(**_read_args(config, workspace), top_k=1)
 
@@ -285,10 +296,7 @@ def test_without_a_workspace_nothing_is_written_beside_the_kernel(config, worksp
 # --- error message hygiene -------------------------------------------------- #
 def test_read_error_is_sanitized_and_bounded():
     message = sanitize_read_error(
-        RuntimeError(
-            "Authorization: Bearer super-secret password=hunter2 "
-            "https://user:pw@gbrain.example " + "x" * 500
-        ),
+        RuntimeError("Authorization: Bearer super-secret password=hunter2 https://user:pw@gbrain.example " + "x" * 500),
         secrets=("super-secret",),
     )
 

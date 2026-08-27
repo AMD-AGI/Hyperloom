@@ -17,17 +17,20 @@ class TestFmoeCandidateIsolation:
         stale = compare_dir / "tuned_fmoe.99999.candidate.csv"
         stale.write_text("old data")
 
-        monkeypatch.setattr("forge_gemm_tune.tuners.fmoe_ck.Path", lambda x: tmp_path / "aiter_compare" if x == "/tmp/aiter_compare" else Path(x))
+        monkeypatch.setattr(
+            "forge_gemm_tune.tuners.fmoe_ck.Path",
+            lambda x: tmp_path / "aiter_compare" if x == "/tmp/aiter_compare" else Path(x),
+        )
 
         # Simulate: file mtime is before start_time
         import os
+
         os.utime(stale, (1000, 1000))
         start_time = time.time()
 
         # Direct test of the logic (without full tuner setup)
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and "tuned_fmoe" in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and "tuned_fmoe" in p.name
         ]
         assert len(candidates) == 0
 
@@ -45,8 +48,7 @@ class TestFmoeCandidateIsolation:
         # Our stem
         stem = "tuned_fmoe"
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and stem in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and stem in p.name
         ]
         assert len(candidates) == 0
 
@@ -63,8 +65,7 @@ class TestFmoeCandidateIsolation:
 
         stem = "tuned_fmoe"
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and stem in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and stem in p.name
         ]
         assert len(candidates) == 1
         assert candidates[0] == ours
@@ -82,14 +83,14 @@ class TestFmoeCandidateIsolation:
 
         # Our candidate (slightly older)
         import os
+
         ours = compare_dir / "tuned_fmoe.11111.candidate.csv"
         ours.write_text("ours")
         os.utime(ours, (time.time() - 0.5, time.time() - 0.5))
 
         stem = "tuned_fmoe"
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and stem in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and stem in p.name
         ]
         assert len(candidates) == 1
         assert candidates[0] == ours
@@ -113,8 +114,7 @@ class TestDenseCommonCandidateIsolation:
 
         stem = "tuned_a8w8_blockscale"
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and stem in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and stem in p.name
         ]
         assert len(candidates) == 1
         assert candidates[0] == right
@@ -137,9 +137,7 @@ class TestStemMatches:
         from forge_gemm_tune.tuners._aiter_dense_common import _stem_matches
 
         # The core regression: a8w8_blockscale must NOT claim the bpreshuffle CSV.
-        assert not _stem_matches(
-            "a8w8_blockscale", "tuned_a8w8_blockscale_bpreshuffle.candidate.csv"
-        )
+        assert not _stem_matches("a8w8_blockscale", "tuned_a8w8_blockscale_bpreshuffle.candidate.csv")
         # ...nor should the shortest name swallow every longer sibling.
         assert not _stem_matches("a8w8", "tuned_a8w8_blockscale.candidate.csv")
         assert not _stem_matches("a8w8", "tuned_a8w8_bpreshuffle.candidate.csv")
@@ -148,9 +146,7 @@ class TestStemMatches:
         from forge_gemm_tune.tuners._aiter_dense_common import _stem_matches
 
         # Isolated runner: _iso_tuned_<tuner>_<idx>_tuned... -> stem + "_<digit>".
-        assert _stem_matches(
-            "a8w8_blockscale", "_iso_tuned_a8w8_blockscale_0_tuned.candidate.csv"
-        )
+        assert _stem_matches("a8w8_blockscale", "_iso_tuned_a8w8_blockscale_0_tuned.candidate.csv")
         # ...and a longer sibling in isolated form is still rejected.
         assert not _stem_matches(
             "a8w8_blockscale",

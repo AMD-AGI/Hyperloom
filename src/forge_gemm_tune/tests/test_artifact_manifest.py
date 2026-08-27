@@ -34,12 +34,30 @@ def _manifest_dict() -> dict:
             "variant_steady_replay": {"eager": 1},
         },
         "rows": [
-            {"dims": {"M": 8192, "N": 5120, "K": 5120}, "is_target_gemm": True,
-             "cum_gpu_us": 7995.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "fp8"},
-            {"dims": {"M": 8192, "N": 34816, "K": 5120}, "is_target_gemm": True,
-             "cum_gpu_us": 3503.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "fp8"},
-            {"dims": {"M": 1, "N": 5120, "K": 5120}, "is_target_gemm": True,
-             "cum_gpu_us": 1000.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "fp8"},
+            {
+                "dims": {"M": 8192, "N": 5120, "K": 5120},
+                "is_target_gemm": True,
+                "cum_gpu_us": 7995.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "fp8",
+            },
+            {
+                "dims": {"M": 8192, "N": 34816, "K": 5120},
+                "is_target_gemm": True,
+                "cum_gpu_us": 3503.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "fp8",
+            },
+            {
+                "dims": {"M": 1, "N": 5120, "K": 5120},
+                "is_target_gemm": True,
+                "cum_gpu_us": 1000.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "fp8",
+            },
         ],
     }
 
@@ -47,12 +65,34 @@ def _manifest_dict() -> dict:
 def _candidate_result(csv_path: str) -> TuneResult:
     # o_proj + gate_up improved; (1,5120,5120) NOT improved -> not covered.
     return TuneResult(
-        tuner_name="a8w8_blockscale", status="ok",
-        artifact_path=csv_path, env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", env_value=csv_path,
-        total_shapes=3, improved_shapes=2, best_micro_speedup=4.75, avg_micro_speedup=4.3,
+        tuner_name="a8w8_blockscale",
+        status="ok",
+        artifact_path=csv_path,
+        env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+        env_value=csv_path,
+        total_shapes=3,
+        improved_shapes=2,
+        best_micro_speedup=4.75,
+        avg_micro_speedup=4.3,
         shape_results=[
-            {"M": 8192, "N": 5120, "K": 5120, "default_us": 1037.7, "tuned_us": 271.9, "speedup": 3.82, "improved": True},
-            {"M": 8192, "N": 34816, "K": 5120, "default_us": 6955.5, "tuned_us": 1464.5, "speedup": 4.75, "improved": True},
+            {
+                "M": 8192,
+                "N": 5120,
+                "K": 5120,
+                "default_us": 1037.7,
+                "tuned_us": 271.9,
+                "speedup": 3.82,
+                "improved": True,
+            },
+            {
+                "M": 8192,
+                "N": 34816,
+                "K": 5120,
+                "default_us": 6955.5,
+                "tuned_us": 1464.5,
+                "speedup": 4.75,
+                "improved": True,
+            },
             {"M": 1, "N": 5120, "K": 5120, "default_us": 50.0, "tuned_us": 49.0, "speedup": 1.02, "improved": False},
         ],
     )
@@ -60,7 +100,9 @@ def _candidate_result(csv_path: str) -> TuneResult:
 
 def _report() -> TuneReport:
     return TuneReport(
-        status="ok", micro_decision="candidate", requires_e2e_validation=True,
+        status="ok",
+        micro_decision="candidate",
+        requires_e2e_validation=True,
         recommended_env={"AITER_CONFIG_GEMM_A8W8_BLOCKSCALE": "/tmp/c.csv"},
         finished_at="2026-07-23T00:00:00Z",
     )
@@ -72,8 +114,14 @@ def test_schema_and_provenance(tmp_path):
     mf = tmp_path / "m.json"
     mf.write_text(json.dumps(_manifest_dict()))
     am = build_artifact_manifest(
-        _report(), [_candidate_result(str(csv))], shape_manifest_path=mf,
-        gpu_type="mi355x", framework="vllm-aiter", precision="fp8", quant_type="blockscale", tp=1,
+        _report(),
+        [_candidate_result(str(csv))],
+        shape_manifest_path=mf,
+        gpu_type="mi355x",
+        framework="vllm-aiter",
+        precision="fp8",
+        quant_type="blockscale",
+        tp=1,
         generated_at="2026-07-23T00:00:00Z",
     )
     assert am["schema_version"] == TUNING_ARTIFACT_SCHEMA_VERSION
@@ -125,7 +173,10 @@ def test_write_artifact_manifest(tmp_path):
     mf = tmp_path / "m.json"
     mf.write_text(json.dumps(_manifest_dict()))
     out = write_artifact_manifest(
-        _report(), [_candidate_result(str(csv))], tmp_path, shape_manifest_path=mf,
+        _report(),
+        [_candidate_result(str(csv))],
+        tmp_path,
+        shape_manifest_path=mf,
     )
     assert out.name == "tuning_artifact_manifest.json"
     data = json.loads(out.read_text())

@@ -17,9 +17,7 @@ import pytest
 
 from kernelforge.loop import task_preparer
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("git") is None, reason="git not available"
-)
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
 
 def _init_repo(root: Path) -> None:
@@ -56,9 +54,7 @@ def test_prepass_add_excludes_forge_experiments(tmp_path):
     (fe / "candidates" / "cand_0.py").write_text("# cand\n", encoding="utf-8")
 
     # Exactly the command the prepass runs.
-    code, out = task_preparer._git(
-        repo, "add", "-A", "--", ".", ":(exclude)forge_experiments"
-    )
+    code, out = task_preparer._git(repo, "add", "-A", "--", ".", ":(exclude)forge_experiments")
     assert code == 0, out
     task_preparer._git(repo, "commit", "-q", "-m", "prepass")
 

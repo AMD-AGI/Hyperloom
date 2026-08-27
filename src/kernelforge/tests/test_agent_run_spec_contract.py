@@ -7,6 +7,7 @@ inserted in the middle silently re-binds every positional argument after it, and
 a caller passing a tool policy positionally would hand it to the new flag
 instead. New fields go at the end.
 """
+
 from __future__ import annotations
 
 from dataclasses import fields

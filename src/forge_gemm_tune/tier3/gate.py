@@ -91,24 +91,24 @@ def should_generate(gaps: list[CoverageGap]) -> GateDecision:
     for gap in sorted(gaps, key=lambda g: -g.miss_count):
         if not gap.warrants_generated_tuner:
             reasons.append(
-                f"{gap.table}: {gap.kind} -- a tuner for this exists, so the fix "
-                "is there and not a generated one"
+                f"{gap.table}: {gap.kind} -- a tuner for this exists, so the fix is there and not a generated one"
             )
             continue
         if allow and "*" not in allow and gap.table not in allow:
             reasons.append(f"{gap.table}: {ALLOW_ENV} is set and does not list it")
             continue
         if gap.miss_count < floor:
-            reasons.append(
-                f"{gap.table}: {gap.miss_count} misses is below the floor of {floor}"
-            )
+            reasons.append(f"{gap.table}: {gap.miss_count} misses is below the floor of {floor}")
             continue
         if not gap.key_schema:
             reasons.append(f"{gap.table}: no key schema to write a tuner against")
             continue
         log.warning(
             "tier3: generating a tuner for %s (%d misses over %d keys) -- %s",
-            gap.table, gap.miss_count, gap.distinct_keys, gap.reason,
+            gap.table,
+            gap.miss_count,
+            gap.distinct_keys,
+            gap.reason,
         )
         return GateDecision(True, gap, [f"{gap.table}: {gap.reason}"])
 

@@ -59,14 +59,26 @@ log = logging.getLogger("forge_fusion")
 _DECODE_MEDIAN_RE = re.compile(r"Decode\.\s+median latency:\s*([0-9.]+)\s*s")
 
 
-def _bench_one_batch_cmd(
-    model_path: str, *, batch: int, isl: int, osl: int, extra: str = ""
-) -> list[str]:
+def _bench_one_batch_cmd(model_path: str, *, batch: int, isl: int, osl: int, extra: str = "") -> list[str]:
     return [
-        "python3", "-m", "sglang.bench_one_batch",
-        "--model-path", model_path, "--trust-remote-code", "--tp", "1",
-        "--mem-fraction-static", "0.85", "--context-length", "4096",
-        "--batch-size", str(batch), "--input-len", str(isl), "--output-len", str(osl),
+        "python3",
+        "-m",
+        "sglang.bench_one_batch",
+        "--model-path",
+        model_path,
+        "--trust-remote-code",
+        "--tp",
+        "1",
+        "--mem-fraction-static",
+        "0.85",
+        "--context-length",
+        "4096",
+        "--batch-size",
+        str(batch),
+        "--input-len",
+        str(isl),
+        "--output-len",
+        str(osl),
         *([p for p in extra.split() if p]),
     ]
 
@@ -91,7 +103,10 @@ def _run_arm(
     try:
         proc = subprocess.run(
             _bench_one_batch_cmd(model_path, batch=batch, isl=isl, osl=osl, extra=extra),
-            capture_output=True, text=True, timeout=timeout_s, env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            env=env,
             cwd=str(_runtime_dir("bench_one_batch")),
         )
     except subprocess.TimeoutExpired:
@@ -132,10 +147,28 @@ def run_ab(
         ``{"eager_s", "fused_s", "speedup"}``; values are ``None`` on failure.
     """
     eager_off = {k: "0" for k in env_flags}
-    eager_s = _run_arm(model_path, eager_off, batch=batch, isl=isl, osl=osl,
-                       gpu=gpu, timeout_s=timeout_s, extra=extra, log_path=log_path)
-    fused_s = _run_arm(model_path, env_flags, batch=batch, isl=isl, osl=osl,
-                       gpu=gpu, timeout_s=timeout_s, extra=extra, log_path=log_path)
+    eager_s = _run_arm(
+        model_path,
+        eager_off,
+        batch=batch,
+        isl=isl,
+        osl=osl,
+        gpu=gpu,
+        timeout_s=timeout_s,
+        extra=extra,
+        log_path=log_path,
+    )
+    fused_s = _run_arm(
+        model_path,
+        env_flags,
+        batch=batch,
+        isl=isl,
+        osl=osl,
+        gpu=gpu,
+        timeout_s=timeout_s,
+        extra=extra,
+        log_path=log_path,
+    )
     speedup: Optional[float] = None
     if eager_s and fused_s and fused_s > 0:
         speedup = eager_s / fused_s
@@ -148,14 +181,24 @@ def run_ab(
 # never triggers, but the REAL sglang decode CUDA-graph loop does when a fused
 # kernel uses a data-dependent grid / per-call allocation / OOB access.
 # Strips "(EngineCore pid=123) ERROR 08-15 15:32:33 [core.py:1231] " style prefixes.
-_EXC_PREFIX_RE = re.compile(r"^\s*(?:\([^)]*\)\s*)?(?:(?:ERROR|CRITICAL|WARNING)\s+)?"
-                            r"(?:\d[\d\-: ]*)?(?:\[[^\]]*\]\s*)?")
+_EXC_PREFIX_RE = re.compile(
+    r"^\s*(?:\([^)]*\)\s*)?(?:(?:ERROR|CRITICAL|WARNING)\s+)?"
+    r"(?:\d[\d\-: ]*)?(?:\[[^\]]*\]\s*)?"
+)
 _EXC_LINE_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Exit)\b\s*:\s*\S")
 
 _SERVING_CRASH_MARKERS = (
-    "HSA_STATUS_ERROR_EXCEPTION", "hardware exception", "Memory access fault",
-    "an illegal memory access", "device-side assert", "Fatal Python error",
-    "SIGQUIT", "core dumped", "CUDA error", "HIP error", "aborting with error",
+    "HSA_STATUS_ERROR_EXCEPTION",
+    "hardware exception",
+    "Memory access fault",
+    "an illegal memory access",
+    "device-side assert",
+    "Fatal Python error",
+    "SIGQUIT",
+    "core dumped",
+    "CUDA error",
+    "HIP error",
+    "aborting with error",
 )
 # Ready markers cover both frameworks (aligned with Hyperloom _subprocess_kill):
 # SGLang "...fired up..." (substring of the full banner) and vLLM's uvicorn/FastAPI
@@ -267,16 +310,24 @@ SMOKE_STAGE_HARNESS_ERROR = "harness_error"
 # kernel itself is unusable; everything else a server can print on its way down
 # (a rejected config, a missing dependency, exhausted memory) is the environment.
 _HARD_GPU_FAULT_MARKERS = (
-    "HSA_STATUS_ERROR_EXCEPTION", "hardware exception", "Memory access fault",
-    "an illegal memory access", "device-side assert", "core dumped",
+    "HSA_STATUS_ERROR_EXCEPTION",
+    "hardware exception",
+    "Memory access fault",
+    "an illegal memory access",
+    "device-side assert",
+    "core dumped",
 )
 # Resource exhaustion. Reported through the SAME "HIP error:" / "CUDA error:"
 # channel as a fault, so it must be excluded explicitly or every OOM reads as a
 # kernel bug and discards a KEEP that parity and the microbench both passed.
 _RESOURCE_EXHAUSTION_MARKERS = (
-    "out of memory", "outofmemory", "hiperroroutofmemory",
-    "no available memory for the cache blocks", "insufficient memory",
-    "cannot allocate memory", "memoryerror",
+    "out of memory",
+    "outofmemory",
+    "hiperroroutofmemory",
+    "no available memory for the cache blocks",
+    "insufficient memory",
+    "cannot allocate memory",
+    "memoryerror",
 )
 
 
@@ -347,8 +398,15 @@ def _hip_visible_devices(gpu: str, tp: int) -> str:
 
 
 def _serving_smoke_launch_cmd(
-    framework: str, model_path: str, port: int, server_extra: str, *, launcher_exe: str = "",
-    tp: int = 1, block_size: Optional[int] = None, max_model_len: int = 4096,
+    framework: str,
+    model_path: str,
+    port: int,
+    server_extra: str,
+    *,
+    launcher_exe: str = "",
+    tp: int = 1,
+    block_size: Optional[int] = None,
+    max_model_len: int = 4096,
 ) -> list[str]:
     """Framework-specific serve launch command for the serving smoke.
 
@@ -366,21 +424,45 @@ def _serving_smoke_launch_cmd(
     mml = int(max_model_len) if max_model_len else 4096
     if _is_vllm_framework(framework):
         cmd = [
-            launcher_exe or "vllm", "serve", model_path,
-            "--host", "0.0.0.0", "--port", str(port),
-            "--tensor-parallel-size", str(tp_n), "--trust-remote-code",
-            "--max-model-len", str(mml),
+            launcher_exe or "vllm",
+            "serve",
+            model_path,
+            "--host",
+            "0.0.0.0",
+            "--port",
+            str(port),
+            "--tensor-parallel-size",
+            str(tp_n),
+            "--trust-remote-code",
+            "--max-model-len",
+            str(mml),
         ]
         if block_size:
             cmd.extend(["--block-size", str(int(block_size))])
         cmd.extend(extra)
         return cmd
     return [
-        "python3", "-m", "sglang.launch_server",
-        "--model-path", model_path, "--host", "0.0.0.0", "--port", str(port),
-        "--trust-remote-code", "--tp", str(tp_n), "--mem-fraction-static", "0.85",
-        "--disable-radix-cache", "--cuda-graph-max-bs", "128",
-        "--moe-runner-backend", "aiter", "--context-length", str(mml),
+        "python3",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        model_path,
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(port),
+        "--trust-remote-code",
+        "--tp",
+        str(tp_n),
+        "--mem-fraction-static",
+        "0.85",
+        "--disable-radix-cache",
+        "--cuda-graph-max-bs",
+        "128",
+        "--moe-runner-backend",
+        "aiter",
+        "--context-length",
+        str(mml),
         *extra,
     ]
 
@@ -396,10 +478,7 @@ def pass_activation_evidence(log_text: str) -> tuple[Optional[bool], list[str]]:
     verbose enough) -- that is unknown, not proof of failure. ``False`` means the
     pass ran and matched NOTHING, which is proof the edit bought nothing.
     """
-    lines = [
-        ln.strip() for ln in (log_text or "").splitlines()
-        if _SITES_RE.search(ln) or "FusionPass completed" in ln
-    ]
+    lines = [ln.strip() for ln in (log_text or "").splitlines() if _SITES_RE.search(ln) or "FusionPass completed" in ln]
     counts = [int(m.group(1)) for ln in lines for m in [_SITES_RE.search(ln)] if m]
     if not counts:
         return None, lines[:20]
@@ -407,7 +486,13 @@ def pass_activation_evidence(log_text: str) -> tuple[Optional[bool], list[str]]:
 
 
 def _vllm_decode_probe(
-    port: int, *, isl: int, osl: int, num_prompts: int, conc: int, timeout_s: int,
+    port: int,
+    *,
+    isl: int,
+    osl: int,
+    num_prompts: int,
+    conc: int,
+    timeout_s: int,
     metrics: Optional[dict] = None,
 ) -> tuple[bool, str]:
     """Drive concurrent decode requests against a live vLLM OpenAI server.
@@ -441,18 +526,21 @@ def _vllm_decode_probe(
     tokens: list[int] = []
 
     def _one(i: int) -> tuple[bool, str]:
-        payload = _json.dumps({
-            "model": model_id, "prompt": prompt,
-            "max_tokens": int(osl), "temperature": 0.0,
-        }).encode()
-        req = _rq.Request(f"{base}/v1/completions", data=payload,
-                          headers={"Content-Type": "application/json"})
+        payload = _json.dumps(
+            {
+                "model": model_id,
+                "prompt": prompt,
+                "max_tokens": int(osl),
+                "temperature": 0.0,
+            }
+        ).encode()
+        req = _rq.Request(f"{base}/v1/completions", data=payload, headers={"Content-Type": "application/json"})
         try:
             with _rq.urlopen(req, timeout=timeout_s) as r:
                 body = _json.loads(r.read().decode())
         except Exception as e:  # noqa: BLE001
             return False, f"completion {i} error: {type(e).__name__}: {e}"
-        text = ((body.get("choices") or [{}])[0].get("text") or "")
+        text = (body.get("choices") or [{}])[0].get("text") or ""
         if not text:
             return False, f"completion {i} produced no output tokens"
         # Server-reported count when available; max_tokens is the deterministic
@@ -469,13 +557,18 @@ def _vllm_decode_probe(
     elapsed = max(1e-6, _time.perf_counter() - started)
     total = sum(tokens)
     if metrics is not None:
-        metrics.update({
-            "output_tokens": total, "seconds": round(elapsed, 3),
-            "tok_s": round(total / elapsed, 2),
-            "num_prompts": n, "concurrency": workers, "isl": int(isl), "osl": int(osl),
-        })
-    return True, (f"{n} decode completions ok (conc={workers}, "
-                  f"{total / elapsed:.1f} tok/s)")
+        metrics.update(
+            {
+                "output_tokens": total,
+                "seconds": round(elapsed, 3),
+                "tok_s": round(total / elapsed, 2),
+                "num_prompts": n,
+                "concurrency": workers,
+                "isl": int(isl),
+                "osl": int(osl),
+            }
+        )
+    return True, (f"{n} decode completions ok (conc={workers}, {total / elapsed:.1f} tok/s)")
 
 
 def _framework_package(framework: str) -> str:
@@ -483,9 +576,7 @@ def _framework_package(framework: str) -> str:
     return "vllm" if _is_vllm_framework(framework) else "sglang"
 
 
-def framework_tree_is_the_imported_one(
-    framework_root: str, framework: str, *, _finder=None
-) -> tuple[bool, str]:
+def framework_tree_is_the_imported_one(framework_root: str, framework: str, *, _finder=None) -> tuple[bool, str]:
     """Whether the tree the loop patched is the tree a server would import.
 
     The smoke launches the framework's own entry point, which imports the
@@ -643,16 +734,14 @@ def _reads_by_owner(source: str) -> dict[str, set[str]]:
         return {}
     out: dict[str, set[str]] = {}
     for node in tree.body:
-        owner = getattr(node, "name", "") if isinstance(
-            node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-        ) else ""
+        owner = (
+            getattr(node, "name", "") if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) else ""
+        )
         bucket = out.setdefault(owner, set())
         exported: set[str] = set()
         for inner in ast.walk(node):
             if isinstance(inner, ast.Assign):
-                exported |= {
-                    t.attr for t in inner.targets if isinstance(t, ast.Attribute)
-                }
+                exported |= {t.attr for t in inner.targets if isinstance(t, ast.Attribute)}
             if isinstance(inner, ast.Attribute) and isinstance(inner.ctx, ast.Load):
                 bucket.add(inner.attr)
             elif isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load):
@@ -662,9 +751,7 @@ def _reads_by_owner(source: str) -> dict[str, set[str]]:
                 # `getattr(mod, "op")`. In `__all__ = ["op"]` it is a listing,
                 # and counting it would let a module vouch for its own symbol.
                 bucket |= {
-                    arg.value
-                    for arg in inner.args
-                    if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
+                    arg.value for arg in inner.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)
                 }
         # `other.op = mine.op` reads `op` on the right, and that read is the
         # publish itself -- counting it would let a publisher vouch for its own
@@ -708,9 +795,7 @@ def unreached_fusion_symbols(
     root = Path(repo_root)
     if not repo_root or not root.is_dir() or not changed_files:
         return []
-    changed = [
-        Path(f) if Path(f).is_absolute() else root / f for f in changed_files
-    ]
+    changed = [Path(f) if Path(f).is_absolute() else root / f for f in changed_files]
     changed += _authored_modules_beside(changed, root, pristine_dir)
     changed_set = {str(p) for p in changed}
 
@@ -749,12 +834,7 @@ def unreached_fusion_symbols(
     while changing:
         changing = False
         for path_str, owner, names in reads:
-            owner_is_new = (
-                owner
-                and path_str in changed_set
-                and owner in candidates
-                and owner not in reached
-            )
+            owner_is_new = owner and path_str in changed_set and owner in candidates and owner not in reached
             if owner_is_new:
                 continue
             new_hits = names - reached
@@ -772,9 +852,7 @@ def unreached_fusion_symbols(
     return sorted(candidates)
 
 
-def _authored_modules_beside(
-    changed: list[Path], root: Path, pristine_dir: str
-) -> list[Path]:
+def _authored_modules_beside(changed: list[Path], root: Path, pristine_dir: str) -> list[Path]:
     """Fused-kernel modules the author created next to a file it edited.
 
     The caller knows the model source it asked for; it does not know what the
@@ -802,6 +880,7 @@ def _authored_modules_beside(
             found.append(sibling)
             known.add(sibling.resolve())
     return found
+
 
 def _baseline_names(path: Path, root: Path, pristine_dir: str) -> set[str]:
     """Top-level names this file had before authoring.
@@ -847,8 +926,7 @@ def _pkill(pattern: str) -> None:
 
 def _free_vram_fraction(gpu: str, *, _run=None) -> Optional[float]:
     """Fraction of the target GPU's memory that is free, or None if unknown."""
-    run = _run or (lambda cmd: subprocess.run(
-        cmd, shell=True, capture_output=True, text=True, timeout=60))
+    run = _run or (lambda cmd: subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=60))
     try:
         out = run("rocm-smi --showmemuse").stdout
     except Exception:  # noqa: BLE001 -- a probe must never end the run
@@ -882,7 +960,7 @@ def gpu_is_free_enough(gpu: str, *, need: float = 0.5, _probe=None) -> tuple[boo
     if free >= need:
         return True, ""
     return False, (
-        f"GPU {gpu} has only {free*100:.0f}% of its memory free before the server "
+        f"GPU {gpu} has only {free * 100:.0f}% of its memory free before the server "
         f"starts, so the launch would fail on allocation regardless of the kernel "
         f"-- something from an earlier stage is still holding the card"
     )
@@ -973,8 +1051,13 @@ def serving_smoke_verdict(
     if metrics is not None:
         metrics["server_log"] = slog
     cmd = _serving_smoke_launch_cmd(
-        framework, model_path, port, server_extra,
-        launcher_exe=launcher_exe, tp=tp, block_size=block_size,
+        framework,
+        model_path,
+        port,
+        server_extra,
+        launcher_exe=launcher_exe,
+        tp=tp,
+        block_size=block_size,
         max_model_len=max_model_len,
     )
     # Wrap the WHOLE harness: any failure returns a verdict instead of raising (a
@@ -984,8 +1067,7 @@ def serving_smoke_verdict(
     server = None
     fh: object = None
     try:
-        _pkill(f"vllm serve.*{port}" if is_vllm
-               else f"sglang.launch_server.*port={port}")
+        _pkill(f"vllm serve.*{port}" if is_vllm else f"sglang.launch_server.*port={port}")
         # The launcher's children do not carry its command line, so the pattern
         # above misses them and they keep the card allocated.
         for child in _ENGINE_CHILD_PATTERNS:
@@ -995,9 +1077,14 @@ def serving_smoke_verdict(
             fh = open(slog, "w")
         except OSError:
             fh = subprocess.DEVNULL
-        server = subprocess.Popen(cmd, env=env, stdout=fh,  # type: ignore[arg-type]
-                                  stderr=subprocess.STDOUT, start_new_session=True,
-                                  cwd=str(_runtime_dir("serving_smoke")))
+        server = subprocess.Popen(
+            cmd,
+            env=env,
+            stdout=fh,  # type: ignore[arg-type]
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+            cwd=str(_runtime_dir("serving_smoke")),
+        )
 
         deadline = _time.time() + timeout_s
         ready = False
@@ -1009,8 +1096,7 @@ def serving_smoke_verdict(
                 # and both exit through this same path.
                 return SmokeVerdict(
                     False,
-                    f"server exited rc={server.returncode} before ready: "
-                    f"{_serving_crash_reason(tail)}",
+                    f"server exited rc={server.returncode} before ready: {_serving_crash_reason(tail)}",
                     SMOKE_STAGE_STARTUP_CRASH,
                     _is_hard_gpu_fault(tail),
                 )
@@ -1028,14 +1114,16 @@ def serving_smoke_verdict(
             _time.sleep(3)
         if not ready:
             return SmokeVerdict(
-                False, f"server not ready within {timeout_s}s", SMOKE_STAGE_BOOT_TIMEOUT,
+                False,
+                f"server not ready within {timeout_s}s",
+                SMOKE_STAGE_BOOT_TIMEOUT,
             )
 
         # Exercise the fused kernel in the real CUDA-graph decode loop.
         if is_vllm:
             probe_ok, probe_detail = _vllm_decode_probe(
-                port, isl=isl, osl=osl, num_prompts=num_prompts, conc=conc,
-                timeout_s=timeout_s, metrics=metrics)
+                port, isl=isl, osl=osl, num_prompts=num_prompts, conc=conc, timeout_s=timeout_s, metrics=metrics
+            )
             stail = _tail_text(slog)
             if metrics is not None:
                 # Read the WHOLE log: pass activation is logged at compile time,
@@ -1046,8 +1134,7 @@ def serving_smoke_verdict(
             if server.poll() is not None or _contains_marker(stail, _SERVING_CRASH_MARKERS):
                 return SmokeVerdict(
                     False,
-                    f"scheduler crashed during CUDA-graph decode: "
-                    f"{_serving_crash_reason(stail)}",
+                    f"scheduler crashed during CUDA-graph decode: {_serving_crash_reason(stail)}",
                     SMOKE_STAGE_DECODE_CRASH,
                     _is_hard_gpu_fault(stail),
                 )
@@ -1055,26 +1142,53 @@ def serving_smoke_verdict(
                 # The server is up and unfaulted, so this is the probe's own
                 # transport/response failure, not the kernel misbehaving.
                 return SmokeVerdict(
-                    False, f"decode probe failed: {probe_detail}", SMOKE_STAGE_DECODE_PROBE,
+                    False,
+                    f"decode probe failed: {probe_detail}",
+                    SMOKE_STAGE_DECODE_PROBE,
                 )
             return SmokeVerdict(
-                True, "serving smoke ok: fused kernel survives CUDA-graph decode",
+                True,
+                "serving smoke ok: fused kernel survives CUDA-graph decode",
             )
         try:
             bench = subprocess.run(
-                ["python3", "-m", "sglang.bench_serving", "--backend", "sglang",
-                 "--host", "127.0.0.1", "--port", str(port),
-                 "--dataset-name", "random", "--random-input-len", str(isl),
-                 "--random-output-len", str(osl), "--num-prompts", str(num_prompts),
-                 "--max-concurrency", str(conc), "--random-range-ratio", "1.0"],
-                env=env, capture_output=True, text=True, timeout=timeout_s,
-                cwd=str(_runtime_dir("serving_smoke")))
+                [
+                    "python3",
+                    "-m",
+                    "sglang.bench_serving",
+                    "--backend",
+                    "sglang",
+                    "--host",
+                    "127.0.0.1",
+                    "--port",
+                    str(port),
+                    "--dataset-name",
+                    "random",
+                    "--random-input-len",
+                    str(isl),
+                    "--random-output-len",
+                    str(osl),
+                    "--num-prompts",
+                    str(num_prompts),
+                    "--max-concurrency",
+                    str(conc),
+                    "--random-range-ratio",
+                    "1.0",
+                ],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout_s,
+                cwd=str(_runtime_dir("serving_smoke")),
+            )
         except subprocess.TimeoutExpired:
             # A server that came up and then stopped answering is the fused kernel
             # hanging in the decode loop; nothing in the environment stalls only here.
             return SmokeVerdict(
-                False, "decode bench timed out (possible hang in fused kernel)",
-                SMOKE_STAGE_DECODE_HANG, True,
+                False,
+                "decode bench timed out (possible hang in fused kernel)",
+                SMOKE_STAGE_DECODE_HANG,
+                True,
             )
         bout = (bench.stdout or "") + "\n" + (bench.stderr or "")
         stail = _tail_text(slog)
@@ -1088,15 +1202,18 @@ def serving_smoke_verdict(
         if bench.returncode != 0 or "Output token throughput" not in bout:
             # The bench itself failed against a live, unfaulted server.
             return SmokeVerdict(
-                False, f"decode bench failed rc={bench.returncode}: {bout[-300:]}",
+                False,
+                f"decode bench failed rc={bench.returncode}: {bout[-300:]}",
                 SMOKE_STAGE_DECODE_BENCH,
             )
         return SmokeVerdict(
-            True, "serving smoke ok: fused kernel survives CUDA-graph decode",
+            True,
+            "serving smoke ok: fused kernel survives CUDA-graph decode",
         )
     except Exception as e:  # noqa: BLE001 — a harness error is a soft-fail, never a crash.
         return SmokeVerdict(
-            False, f"serving smoke harness error: {type(e).__name__}: {e}",
+            False,
+            f"serving smoke harness error: {type(e).__name__}: {e}",
             SMOKE_STAGE_HARNESS_ERROR,
         )
     finally:
@@ -1131,14 +1248,28 @@ MAX_PLAUSIBLE_SPEEDUP = 20.0
 # pulls in CUDA-only headers/intrinsics and will NOT build on ROCm; the lesson the
 # loop must learn is "author a ROCm-native Triton kernel, do not reuse the CUDA op".
 _CUDA_ONLY_MARKERS = (
-    "cuda_bf16.h", "cuda_fp16.h", "cuda_runtime", "nvcc", "__nv_",
-    "sm_80", "sm_90", "cutlass", "mma.sync", "device_functions.h",
+    "cuda_bf16.h",
+    "cuda_fp16.h",
+    "cuda_runtime",
+    "nvcc",
+    "__nv_",
+    "sm_80",
+    "sm_90",
+    "cutlass",
+    "mma.sync",
+    "device_functions.h",
 )
 # Triton JIT/compile failures on this GPU arch (gfx942) — actionable but distinct
 # from the CUDA-only case (the kernel IS ROCm-native, it just doesn't build yet).
 _TRITON_BUILD_MARKERS = (
-    "out of resource", "shared memory", "invalid argument", "passmanager",
-    "llvm error", "triton", "cannot compile", "no kernel image",
+    "out of resource",
+    "shared memory",
+    "invalid argument",
+    "passmanager",
+    "llvm error",
+    "triton",
+    "cannot compile",
+    "no kernel image",
 )
 # The decode microbench relies on ``bench_one_batch``; on ROCm it cannot init the
 # Mamba/SSM backend, so for hybrid models the microbench must fall back / be
@@ -1296,10 +1427,7 @@ def implausible_speedup_reason(speedup: float) -> str:
     """
     value = float(speedup)
     if not math.isfinite(value) or value > MAX_PLAUSIBLE_SPEEDUP:
-        return (
-            f"microbench speedup {value:.6f}x exceeds the "
-            f"{MAX_PLAUSIBLE_SPEEDUP}x absolute plausibility ceiling"
-        )
+        return f"microbench speedup {value:.6f}x exceeds the {MAX_PLAUSIBLE_SPEEDUP}x absolute plausibility ceiling"
     return ""
 
 
@@ -1342,8 +1470,13 @@ def validate_recipe(
         lesson = classify_compile_error(comp.error, recipe)
         kind = "triton JIT" if comp.is_triton else "module import"
         return ValidationResult(
-            correctness_passed=False, max_abs_err=None, rtol=rtol,
-            kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
+            correctness_passed=False,
+            max_abs_err=None,
+            rtol=rtol,
+            kernel_speedup=None,
+            eager_us=None,
+            fused_us=None,
+            kept=False,
             note=f"COMPILE FAILED ({kind}): {_tail(comp.error)} | LESSON: {lesson}",
         )
 
@@ -1351,11 +1484,18 @@ def validate_recipe(
     samples = runner.parity_samples(recipe)
     if not samples:
         return ValidationResult(
-            correctness_passed=False, max_abs_err=None, rtol=rtol,
-            kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
-            note=("PARITY UNAVAILABLE: the runner returned no samples — the eager "
-                  "reference could not be imported/executed. LESSON: import the REAL "
-                  "eager op per the recipe's eager_reference_hint and assert parity."),
+            correctness_passed=False,
+            max_abs_err=None,
+            rtol=rtol,
+            kernel_speedup=None,
+            eager_us=None,
+            fused_us=None,
+            kept=False,
+            note=(
+                "PARITY UNAVAILABLE: the runner returned no samples — the eager "
+                "reference could not be imported/executed. LESSON: import the REAL "
+                "eager op per the recipe's eager_reference_hint and assert parity."
+            ),
         )
     worst_err: Optional[float] = None
     min_snr: Optional[float] = None
@@ -1375,11 +1515,18 @@ def validate_recipe(
         snr_txt = f"{min_snr:.1f} dB" if min_snr is not None else "n/a"
         err_txt = f"{worst_err:.3e}" if worst_err is not None else "n/a"
         return ValidationResult(
-            correctness_passed=False, max_abs_err=worst_err, rtol=rtol,
-            kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
-            note=(f"PARITY FAILED: min SNR={snr_txt} (< {snr_threshold_db:.0f} dB), "
-                  f"max_abs_err={err_txt}. bf16 + fp32-accum is not bit-exact; check "
-                  f"the accumulation dtype and the fused math against the eager op."),
+            correctness_passed=False,
+            max_abs_err=worst_err,
+            rtol=rtol,
+            kernel_speedup=None,
+            eager_us=None,
+            fused_us=None,
+            kept=False,
+            note=(
+                f"PARITY FAILED: min SNR={snr_txt} (< {snr_threshold_db:.0f} dB), "
+                f"max_abs_err={err_txt}. bf16 + fp32-accum is not bit-exact; check "
+                f"the accumulation dtype and the fused math against the eager op."
+            ),
         )
 
     # ── gate (c): microbench speedup (eager vs fused) ────────────────────────
@@ -1387,8 +1534,12 @@ def validate_recipe(
     if bench.skipped:
         note = classify_bench_skip(bench.skip_reason)
         return ValidationResult(
-            correctness_passed=True, max_abs_err=worst_err, rtol=rtol,
-            kernel_speedup=None, eager_us=bench.eager_us, fused_us=bench.fused_us,
+            correctness_passed=True,
+            max_abs_err=worst_err,
+            rtol=rtol,
+            kernel_speedup=None,
+            eager_us=bench.eager_us,
+            fused_us=bench.fused_us,
             kept=False,
             note=f"PARITY OK; MICROBENCH SKIPPED ({bench.skip_reason}): {note}",
         )
@@ -1398,20 +1549,31 @@ def validate_recipe(
     implausible = implausible_speedup_reason(speedup) if speedup is not None else ""
     kept = speedup is not None and not implausible and speedup >= target_speedup
     if speedup is None:
-        note = ("PARITY OK but microbench produced no timing (eager_us/fused_us "
-                "missing) — cannot confirm the speedup; treat as not kept.")
+        note = (
+            "PARITY OK but microbench produced no timing (eager_us/fused_us "
+            "missing) — cannot confirm the speedup; treat as not kept."
+        )
     elif implausible:
         note = f"PARITY OK but the microbench is not believable: {implausible}"
     elif kept:
-        note = (f"KEPT: parity OK and {speedup:.3f}x >= {target_speedup:.2f}x target "
-                f"(eager={bench.eager_us} us, fused={bench.fused_us} us).")
+        note = (
+            f"KEPT: parity OK and {speedup:.3f}x >= {target_speedup:.2f}x target "
+            f"(eager={bench.eager_us} us, fused={bench.fused_us} us)."
+        )
     else:
-        note = (f"PARITY OK but only {speedup:.3f}x (< {target_speedup:.2f}x target) — "
-                f"correct yet not fast enough; try a cheaper fused schedule.")
+        note = (
+            f"PARITY OK but only {speedup:.3f}x (< {target_speedup:.2f}x target) — "
+            f"correct yet not fast enough; try a cheaper fused schedule."
+        )
     return ValidationResult(
-        correctness_passed=True, max_abs_err=worst_err, rtol=rtol,
+        correctness_passed=True,
+        max_abs_err=worst_err,
+        rtol=rtol,
         kernel_speedup=round(speedup, 4) if speedup is not None else None,
-        eager_us=bench.eager_us, fused_us=bench.fused_us, kept=kept, note=note,
+        eager_us=bench.eager_us,
+        fused_us=bench.fused_us,
+        kept=kept,
+        note=note,
     )
 
 
@@ -1459,7 +1621,8 @@ class HarnessKernelRunner:
         result: dict
         if not self.harness_path or not Path(self.harness_path).is_file():
             result = {
-                "compiled": False, "is_triton": False,
+                "compiled": False,
+                "is_triton": False,
                 "error": f"kernel harness not found: {self.harness_path!r}",
             }
             self._cache = result
@@ -1476,16 +1639,21 @@ class HarnessKernelRunner:
         try:
             proc = subprocess.run(
                 ["python3", self.harness_path],
-                cwd=self.workdir, env=env, capture_output=True, text=True,
+                cwd=self.workdir,
+                env=env,
+                capture_output=True,
+                text=True,
                 timeout=self.timeout_s,
             )
             result = _parse_harness_json(proc.stdout, proc.stderr, proc.returncode)
         except subprocess.TimeoutExpired:
-            result = {"compiled": False, "is_triton": False,
-                      "error": f"kernel harness timed out after {self.timeout_s}s"}
+            result = {
+                "compiled": False,
+                "is_triton": False,
+                "error": f"kernel harness timed out after {self.timeout_s}s",
+            }
         except OSError as e:
-            result = {"compiled": False, "is_triton": False,
-                      "error": f"could not run kernel harness: {e}"}
+            result = {"compiled": False, "is_triton": False, "error": f"could not run kernel harness: {e}"}
         self._cache = result
         return result
 
@@ -1503,11 +1671,13 @@ class HarnessKernelRunner:
         for p in d.get("parity") or []:
             if not isinstance(p, dict):
                 continue
-            out.append(ParitySample(
-                snr_db=p.get("snr_db"),
-                max_abs_err=p.get("max_abs_err"),
-                label=str(p.get("label") or ""),
-            ))
+            out.append(
+                ParitySample(
+                    snr_db=p.get("snr_db"),
+                    max_abs_err=p.get("max_abs_err"),
+                    label=str(p.get("label") or ""),
+                )
+            )
         return out
 
     def microbench(self, recipe: Recipe) -> BenchOutcome:
@@ -1534,5 +1704,4 @@ def _parse_harness_json(stdout: str, stderr: str, returncode: int) -> dict:
             except json.JSONDecodeError:
                 continue
     tail = _tail((stdout or "") + "\n" + (stderr or ""))
-    return {"compiled": False, "is_triton": False,
-            "error": f"harness produced no JSON (rc={returncode}): {tail}"}
+    return {"compiled": False, "is_triton": False, "error": f"harness produced no JSON (rc={returncode}): {tail}"}

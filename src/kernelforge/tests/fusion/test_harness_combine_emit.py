@@ -17,10 +17,15 @@ from kernelforge.fusion.models import Recipe
 
 def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", **over) -> Recipe:
     base = dict(
-        pattern_id=pattern_id, description="d", env_flag=env_flag,
-        source_file="/sgl/models/lfm2.py", source_hints=["+ residual"],
-        fusion_math="y=norm(x+r)", eager_reference_hint="import RMSNorm",
-        shapes={"hidden_size": 2048, "T": 16}, matched_categories=["rmsnorm"],
+        pattern_id=pattern_id,
+        description="d",
+        env_flag=env_flag,
+        source_file="/sgl/models/lfm2.py",
+        source_hints=["+ residual"],
+        fusion_math="y=norm(x+r)",
+        eager_reference_hint="import RMSNorm",
+        shapes={"hidden_size": 2048, "T": 16},
+        matched_categories=["rmsnorm"],
         trigger_share=0.3,
     )
     base.update(over)
@@ -29,8 +34,9 @@ def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", *
 
 class TestHarnessContractInPrompt:
     def test_single_prompt_includes_harness_when_path_given(self):
-        p = build_author_prompt(_recipe().to_dict(), framework="sglang",
-                                ab_hint="x", harness_path="/out/kernel_harness.py")
+        p = build_author_prompt(
+            _recipe().to_dict(), framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py"
+        )
         assert "/out/kernel_harness.py" in p
         assert '"compiled"' in p and '"parity"' in p and '"snr_db"' in p  # JSON contract
         assert "LFM2_FUSED_RESIDUAL" in p
@@ -40,31 +46,33 @@ class TestHarnessContractInPrompt:
         assert "kernel_harness.py" not in p
 
     def test_multi_prompt_includes_harness_and_all_flags(self):
-        rs = [_recipe().to_dict(),
-              _recipe(pattern_id="swiglu_silu_mul", env_flag="LFM2_FUSED_SILU").to_dict()]
-        p = build_multi_author_prompt(rs, framework="sglang", ab_hint="x",
-                                      harness_path="/out/kernel_harness.py")
+        rs = [_recipe().to_dict(), _recipe(pattern_id="swiglu_silu_mul", env_flag="LFM2_FUSED_SILU").to_dict()]
+        p = build_multi_author_prompt(rs, framework="sglang", ab_hint="x", harness_path="/out/kernel_harness.py")
         assert "/out/kernel_harness.py" in p
         assert "LFM2_FUSED_RESIDUAL" in p and "LFM2_FUSED_SILU" in p
 
 
 class TestCombinedRecipe:
     def test_folds_flags_and_ids(self):
-        combined = _combined_recipe([
-            _recipe(),
-            _recipe(pattern_id="swiglu_silu_mul", env_flag="LFM2_FUSED_SILU"),
-        ])
+        combined = _combined_recipe(
+            [
+                _recipe(),
+                _recipe(pattern_id="swiglu_silu_mul", env_flag="LFM2_FUSED_SILU"),
+            ]
+        )
         assert combined.env_flag == "LFM2_FUSED_RESIDUAL LFM2_FUSED_SILU"
         assert combined.pattern_id == "residual_add_rmsnorm+swiglu_silu_mul"
         # validate_fn splits env_flag -> both flags toggled together.
         assert set(combined.env_flag.split()) == {"LFM2_FUSED_RESIDUAL", "LFM2_FUSED_SILU"}
 
     def test_dedupes_repeated_stable_flags(self):
-        combined = _combined_recipe([
-            _recipe(pattern_id="normalize_qk", env_flag="ZAYA_FUSED_QK"),
-            _recipe(pattern_id="grouped_qk", env_flag="ZAYA_FUSED_QK"),
-            _recipe(pattern_id="residual", env_flag="ZAYA_FUSED_RESIDUAL"),
-        ])
+        combined = _combined_recipe(
+            [
+                _recipe(pattern_id="normalize_qk", env_flag="ZAYA_FUSED_QK"),
+                _recipe(pattern_id="grouped_qk", env_flag="ZAYA_FUSED_QK"),
+                _recipe(pattern_id="residual", env_flag="ZAYA_FUSED_RESIDUAL"),
+            ]
+        )
         assert combined.env_flag == "ZAYA_FUSED_QK ZAYA_FUSED_RESIDUAL"
 
 
@@ -78,11 +86,13 @@ class TestArtifactId:
     attempt."""
 
     def test_combined_llm_id_is_reduced_to_safe_characters(self):
-        combined = _combined_recipe([
-            _recipe(pattern_id="llm:qk_norm_rope", env_flag="Q_FUSED_QK"),
-            _recipe(pattern_id="llm:add_rmsnorm_input", env_flag="Q_FUSED_ADD"),
-            _recipe(pattern_id="llm:silu_mul_mlp", env_flag="Q_FUSED_SILU"),
-        ])
+        combined = _combined_recipe(
+            [
+                _recipe(pattern_id="llm:qk_norm_rope", env_flag="Q_FUSED_QK"),
+                _recipe(pattern_id="llm:add_rmsnorm_input", env_flag="Q_FUSED_ADD"),
+                _recipe(pattern_id="llm:silu_mul_mlp", env_flag="Q_FUSED_SILU"),
+            ]
+        )
 
         safe = _safe_artifact_id(combined.pattern_id)
 
@@ -112,14 +122,17 @@ class TestArtifactId:
     def test_authoring_writes_artifacts_under_sanitized_names(self, tmp_path, monkeypatch):
         """Locks the call site, not just the helper: both the prompt dump and the
         author log must go through sanitization."""
-        combined = _combined_recipe([
-            _recipe(pattern_id="llm:qk_norm_rope", env_flag="Q_FUSED_QK"),
-            _recipe(pattern_id="llm:add_rmsnorm_input", env_flag="Q_FUSED_ADD"),
-        ])
+        combined = _combined_recipe(
+            [
+                _recipe(pattern_id="llm:qk_norm_rope", env_flag="Q_FUSED_QK"),
+                _recipe(pattern_id="llm:add_rmsnorm_input", env_flag="Q_FUSED_ADD"),
+            ]
+        )
         from kernelforge.fusion import campaign as campaign_module
 
         monkeypatch.setattr(
-            campaign_module.subprocess, "Popen",
+            campaign_module.subprocess,
+            "Popen",
             lambda *a, **k: (_ for _ in ()).throw(OSError("no forge-loop here")),
         )
         campaign_module.run_recipe_campaign(
@@ -144,10 +157,12 @@ class TestScopedEmit:
         mdir.mkdir(parents=True)
         (mdir / "lfm2.py").write_text("# eager\n", encoding="utf-8")
         (repo / "unrelated.py").write_text("# pre-existing\n", encoding="utf-8")
-        for args in (["init", "-q"], ["add", "-A"], ["-c", "user.email=a@b.c",
-                     "-c", "user.name=t", "commit", "-qm", "base"]):
-            subprocess.run(["git", "-C", str(repo), *args], check=True,
-                           capture_output=True, text=True)
+        for args in (
+            ["init", "-q"],
+            ["add", "-A"],
+            ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
+        ):
+            subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
         # Simulate a fusion: edit lfm2.py + add a new fused module + dirty an
         # UNRELATED tracked file (must NOT appear in the scoped patch).
         (mdir / "lfm2.py").write_text("# eager\n# fused edit\n", encoding="utf-8")
@@ -164,7 +179,9 @@ class TestScopedEmit:
         assert "unrelated.py" not in patch_text
         cached = subprocess.run(
             ["git", "-C", str(repo), "diff", "--cached", "--name-only"],
-            check=True, capture_output=True, text=True,
+            check=True,
+            capture_output=True,
+            text=True,
         ).stdout
         assert cached == ""
 

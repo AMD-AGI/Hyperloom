@@ -74,6 +74,4 @@ def test_a_context_without_the_flag_is_treated_as_fast():
     class _Old:
         timeout_s = 3_600
 
-    assert adc._demand_budget(_Old()) == (
-        (3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_S
-    )
+    assert adc._demand_budget(_Old()) == ((3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_S)

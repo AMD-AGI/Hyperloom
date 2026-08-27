@@ -111,7 +111,7 @@ def test_missing_config_leaves_the_candidate_unverified_rather_than_failed(tmp_p
 def test_config_without_a_correctness_command_fails_the_gate(tmp_path):
     # The ``compile_command`` is well-formed filler: without it the gate would
     # stop on Step 1's declaration and never reach the case this test names.
-    tmp_path.joinpath("config.yaml").write_text("compile_command:\n  - \"true\"\n")
+    tmp_path.joinpath("config.yaml").write_text('compile_command:\n  - "true"\n')
 
     result = _run(tmp_path)
 
@@ -131,7 +131,7 @@ def test_unreadable_config_fails_the_gate(tmp_path):
 
 def test_a_bare_string_command_is_refused_rather_than_run_per_character(tmp_path):
     tmp_path.joinpath("config.yaml").write_text(
-        "compile_command:\n  - \"true\"\ncorrectness_command: python3 task_runner.py\n"
+        'compile_command:\n  - "true"\ncorrectness_command: python3 task_runner.py\n'
     )
 
     result = _run(tmp_path)
@@ -188,13 +188,9 @@ def test_arena_default_compile_timeout_is_the_one_the_arena_applies():
     assert ARENA_DEFAULT_COMPILE_TIMEOUT_SEC == 3600
 
 
-@pytest.mark.parametrize(
-    "declared", ["correctness_command: []", "correctness_command:"]
-)
+@pytest.mark.parametrize("declared", ["correctness_command: []", "correctness_command:"])
 def test_an_empty_correctness_command_fails_the_gate(tmp_path, declared):
-    tmp_path.joinpath("config.yaml").write_text(
-        f"compile_command:\n  - \"true\"\n{declared}\n"
-    )
+    tmp_path.joinpath("config.yaml").write_text(f'compile_command:\n  - "true"\n{declared}\n')
 
     result = _run(tmp_path)
 
@@ -205,9 +201,7 @@ def test_an_empty_correctness_command_fails_the_gate(tmp_path, declared):
 # --- The arena's Step 1, which forge reaches before Step 2 -------------------
 
 
-def _two_step_config(
-    workspace, *, compile_: list[str], correctness: list[str], **settings
-) -> None:
+def _two_step_config(workspace, *, compile_: list[str], correctness: list[str], **settings) -> None:
     document = {
         "compile_command": compile_,
         "correctness_command": correctness,
@@ -287,9 +281,7 @@ def test_a_passing_gate_reports_both_steps(tmp_path):
 def test_config_without_a_compile_command_fails_the_gate(tmp_path):
     # evaluate_compilation returns (False, "No compile_command specified") when
     # the key is absent -- a failure, not a skip, unlike anything else there.
-    tmp_path.joinpath("config.yaml").write_text(
-        "correctness_command:\n  - true\n"
-    )
+    tmp_path.joinpath("config.yaml").write_text("correctness_command:\n  - true\n")
 
     result = _run(tmp_path)
 

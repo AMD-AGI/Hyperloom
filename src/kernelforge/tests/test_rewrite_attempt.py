@@ -97,6 +97,4 @@ def test_the_attempt_root_is_a_producer_owned_path(tmp_path):
     attempt = create_attempt_workspace(tmp_path)
 
     assert attempt_module.ATTEMPT_ROOT_DIR in protocol.PRODUCER_OWNED_PATH_PATTERNS
-    assert protocol.is_producer_owned_path(
-        f"{attempt.relative_root}/kernel.py"
-    ) is True
+    assert protocol.is_producer_owned_path(f"{attempt.relative_root}/kernel.py") is True

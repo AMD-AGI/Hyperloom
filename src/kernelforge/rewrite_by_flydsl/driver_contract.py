@@ -133,8 +133,7 @@ def read_driver_output(text: str) -> DriverReading:
             continue
         # A canonical key always wins over the deprecated spelling.
         if reading.timing_ms is None or (
-            metric == CANONICAL_TIMING_METRIC
-            and reading.timing_metric != CANONICAL_TIMING_METRIC
+            metric == CANONICAL_TIMING_METRIC and reading.timing_metric != CANONICAL_TIMING_METRIC
         ):
             reading.timing_ms = value
             reading.timing_metric = metric
@@ -256,8 +255,7 @@ def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightR
     if resolved_driver in (source, candidate):
         return _failed(
             DRIVER_NOT_INDEPENDENT,
-            "the measurement driver is the same file as the kernel it measures: "
-            f"{resolved_driver}",
+            f"the measurement driver is the same file as the kernel it measures: {resolved_driver}",
         )
     if "forge_experiments" in resolved_driver.parts:
         return _failed(
@@ -268,8 +266,7 @@ def check_driver_independence(spec: RewriteSpec, driver_path: str) -> PreflightR
     if source == candidate:
         return _failed(
             SOURCE_CANDIDATE_COLLISION,
-            "the FlyDSL candidate would overwrite the source kernel it is compared "
-            f"against: {candidate}",
+            f"the FlyDSL candidate would overwrite the source kernel it is compared against: {candidate}",
         )
 
     # Python resolves the driver's own directory before anything the producer
@@ -347,13 +344,11 @@ def preflight_reference(
         if reading.has_correctness_verdict:
             return _failed(
                 REF_MODE_UNSUPPORTED,
-                f"the driver ignored {REF_BENCH_FLAG} and ran its correctness path "
-                "instead of timing the source",
+                f"the driver ignored {REF_BENCH_FLAG} and ran its correctness path instead of timing the source",
             )
         return _failed(
             REF_TIMING_UNPARSEABLE,
-            f"the driver reported no {CANONICAL_TIMING_METRIC} in {REF_BENCH_FLAG}: "
-            f"{run.tail}",
+            f"the driver reported no {CANONICAL_TIMING_METRIC} in {REF_BENCH_FLAG}: {run.tail}",
         )
     return _timing_report(reading)
 
@@ -469,13 +464,11 @@ def preflight_candidate(
         if reading.has_correctness_verdict:
             return _failed(
                 CANDIDATE_MODE_UNSUPPORTED,
-                f"the driver ignored {BENCH_FLAG} and ran its correctness path "
-                "instead of timing the candidate",
+                f"the driver ignored {BENCH_FLAG} and ran its correctness path instead of timing the candidate",
             )
         return _failed(
             CANDIDATE_TIMING_UNPARSEABLE,
-            f"the driver reported no {CANONICAL_TIMING_METRIC} in {BENCH_FLAG}: "
-            f"{run.tail}",
+            f"the driver reported no {CANONICAL_TIMING_METRIC} in {BENCH_FLAG}: {run.tail}",
         )
 
     coverage = check_case_coverage(reference_case_ids, reading.case_ids)

@@ -18,6 +18,7 @@ aiter rebuild for a Triton task would trigger a slow, pointless C++ recompile.
 sglang (tvm-ffi) tasks are intentionally NOT handled yet (deferred). Best-effort
 and idempotent; unknown frameworks are no-ops.
 """
+
 from __future__ import annotations
 
 import logging
@@ -54,9 +55,7 @@ def force_jit_rebuild(paths: Iterable[str]) -> None:
             # rebuilds exactly once. Repeated correctness/bench/profile
             # subprocesses for unchanged source reuse that shard instead of
             # deleting the entire build tree via AITER_REBUILD.
-            activate_aiter_cache_for_sources(
-                source_paths
-            )
+            activate_aiter_cache_for_sources(source_paths)
     except Exception as exc:  # noqa: BLE001 - best-effort safety net
         log.debug("force_jit_rebuild skipped: %r", exc)
 
@@ -67,7 +66,12 @@ def tracked_source_changes(workspace: str | Path) -> list[str]:
     root = Path(workspace).expanduser().resolve()
     try:
         result = git(
-            "diff", "--name-only", "-z", "HEAD", "--", ".",
+            "diff",
+            "--name-only",
+            "-z",
+            "HEAD",
+            "--",
+            ".",
             cwd=root,
             check=False,
             text=False,
@@ -93,10 +97,12 @@ def force_jit_rebuild_for_changes(
 ) -> None:
     """Rebuild from declared entry points plus every actual tracked source edit."""
 
-    paths = list(dict.fromkeys(
-        [
-            *(str(path) for path in declared_paths if path),
-            *tracked_source_changes(workspace),
-        ]
-    ))
+    paths = list(
+        dict.fromkeys(
+            [
+                *(str(path) for path in declared_paths if path),
+                *tracked_source_changes(workspace),
+            ]
+        )
+    )
     force_jit_rebuild(paths)

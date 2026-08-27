@@ -63,12 +63,14 @@ def validate_output_csv(
     if header != expected:
         missing = [c for c in expected if c not in header]
         extra = [c for c in header if c not in expected]
-        bad.append(ContractViolation(
-            "header",
-            f"expected {expected}, got {header}"
-            + (f"; missing {missing}" if missing else "")
-            + (f"; unexpected {extra}" if extra else ""),
-        ))
+        bad.append(
+            ContractViolation(
+                "header",
+                f"expected {expected}, got {header}"
+                + (f"; missing {missing}" if missing else "")
+                + (f"; unexpected {extra}" if extra else ""),
+            )
+        )
         # Without the agreed columns the per-row checks would report noise.
         if missing:
             return bad
@@ -112,10 +114,12 @@ def validate_output_csv(
                 pass
             else:
                 if d > 0 and t > 0 and (improved == "true") != (t < d):
-                    bad.append(ContractViolation(
-                        where,
-                        f"improved={improved} contradicts default_us={d} tuned_us={t}",
-                    ))
+                    bad.append(
+                        ContractViolation(
+                            where,
+                            f"improved={improved} contradicts default_us={d} tuned_us={t}",
+                        )
+                    )
 
         if "," in str(row.get("config", "")):
             bad.append(ContractViolation(where, "config contains a comma"))
@@ -123,15 +127,18 @@ def validate_output_csv(
     if wanted:
         unmet = wanted - seen
         if unmet:
-            bad.append(ContractViolation(
-                str(path),
-                f"{len(unmet)} demanded shape(s) have no row: {sorted(unmet)[:5]}",
-            ))
+            bad.append(
+                ContractViolation(
+                    str(path),
+                    f"{len(unmet)} demanded shape(s) have no row: {sorted(unmet)[:5]}",
+                )
+            )
 
     if bad:
         log.warning(
             "generated tuner output %s failed the contract: %s",
-            path, "; ".join(str(v) for v in bad[:5]),
+            path,
+            "; ".join(str(v) for v in bad[:5]),
         )
     return bad
 

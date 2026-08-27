@@ -30,7 +30,9 @@ class A8W8BlockscaleBpreshuffleTuner(BaseTuner):
 
     def validate(self) -> str | None:
         return validate_dense_tuner_inputs(
-            self.ctx, "a8w8_blockscale_bpreshuffle", script_label="blockscale_bpreshuffle",
+            self.ctx,
+            "a8w8_blockscale_bpreshuffle",
+            script_label="blockscale_bpreshuffle",
         )
 
     def run(self) -> TuneResult:

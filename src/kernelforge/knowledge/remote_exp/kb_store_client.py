@@ -101,9 +101,7 @@ def _bundle_rel_path(value: Any) -> str:
     if value.startswith("/") or PureWindowsPath(value).drive:
         raise KBStoreError(f"artifact path must be relative: {value!r}")
     if any(part in ("", ".", "..") for part in value.split("/")):
-        raise KBStoreError(
-            f"artifact path contains an empty or traversal component: {value!r}"
-        )
+        raise KBStoreError(f"artifact path contains an empty or traversal component: {value!r}")
     return value
 
 
@@ -135,21 +133,13 @@ def _validated_download_manifest(
             or len(expected_sha) != 64
             or any(char not in "0123456789abcdef" for char in expected_sha)
         ):
-            raise KBStoreError(
-                f"download manifest entry {rel!r} has invalid sha256"
-            )
+            raise KBStoreError(f"download manifest entry {rel!r} has invalid sha256")
         expected_size = entry.get("size")
-        if (
-            isinstance(expected_size, bool)
-            or not isinstance(expected_size, int)
-            or expected_size < 0
-        ):
+        if isinstance(expected_size, bool) or not isinstance(expected_size, int) or expected_size < 0:
             raise KBStoreError(f"download manifest entry {rel!r} has invalid size")
         url = entry.get("download_url")
         if not isinstance(url, str) or not url:
-            raise KBStoreError(
-                f"download manifest entry {rel!r} has no download_url"
-            )
+            raise KBStoreError(f"download manifest entry {rel!r} has no download_url")
         entries.append((rel, expected_sha, expected_size, url))
     return entries
 
@@ -161,16 +151,12 @@ def _checked_download_target(files_root: Path, rel: str) -> Path:
     try:
         target.resolve(strict=False).relative_to(resolved_root)
     except ValueError as exc:
-        raise KBStoreError(
-            f"artifact target escapes files directory: {rel!r}"
-        ) from exc
+        raise KBStoreError(f"artifact target escapes files directory: {rel!r}") from exc
 
     current = target.parent
     while current != files_root:
         if current.is_symlink():
-            raise KBStoreError(
-                f"artifact parent directory may not be a symlink: {current}"
-            )
+            raise KBStoreError(f"artifact parent directory may not be a symlink: {current}")
         current = current.parent
     return target
 
@@ -250,10 +236,7 @@ class KBStoreClient:
         return urllib.parse.quote(value, safe=":")
 
     def _session_base(self, canonical_id: str, session_id: str) -> str:
-        return (
-            f"/v1/kb/{self._quote(canonical_id)}"
-            f"/sessions/{self._quote(session_id)}"
-        )
+        return f"/v1/kb/{self._quote(canonical_id)}/sessions/{self._quote(session_id)}"
 
     # -- knowledge ----------------------------------------------------------
 
@@ -326,15 +309,11 @@ class KBStoreClient:
         offset: int = 0,
     ) -> dict[str, Any]:
         """Rank scored sessions retained by the identity's rollup index."""
-        query = urllib.parse.urlencode(
-            {"metric": metric, "limit": int(limit), "offset": int(offset)}
-        )
+        query = urllib.parse.urlencode({"metric": metric, "limit": int(limit), "offset": int(offset)})
         path = f"/v1/kb/{self._quote(canonical_id)}/sessions/top?{query}"
         return self._request("GET", path) or {}
 
-    def list_identity_files(
-        self, canonical_id: str, *, kind: str = ""
-    ) -> list[dict[str, Any]]:
+    def list_identity_files(self, canonical_id: str, *, kind: str = "") -> list[dict[str, Any]]:
         """Artifacts across all sessions of an identity, deduped by digest."""
         path = f"/v1/kb/{self._quote(canonical_id)}/files"
         if kind:
@@ -429,9 +408,7 @@ class KBStoreClient:
             with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
                 list(
                     pool.map(
-                        lambda item: self._upload_one(
-                            item[1], sources[item[0]], by_path[item[0]]["sha256"]
-                        ),
+                        lambda item: self._upload_one(item[1], sources[item[0]], by_path[item[0]]["sha256"]),
                         pending,
                     )
                 )
@@ -442,8 +419,7 @@ class KBStoreClient:
             {"files": entries, "verify": True},
         )
         manifest = {
-            str(f.get("path")): str(f.get("uri") or "")
-            for f in (commit.get("artifacts") or {}).get("files") or []
+            str(f.get("path")): str(f.get("uri") or "") for f in (commit.get("artifacts") or {}).get("files") or []
         }
         return {rel: manifest.get(rel, "") for rel in sources}
 
@@ -498,9 +474,7 @@ class KBStoreClient:
 
     # -- download -----------------------------------------------------------
 
-    def list_session_files(
-        self, canonical_id: str, session_id: str, *, kind: str = ""
-    ) -> dict[str, Any]:
+    def list_session_files(self, canonical_id: str, session_id: str, *, kind: str = "") -> dict[str, Any]:
         """Manifest with a short-lived presigned GET URL per file."""
         path = self._session_base(canonical_id, session_id) + "/files"
         if kind:
@@ -543,9 +517,7 @@ class KBStoreClient:
         targets: dict[str, Path] = {}
         if entries:
             if files_root.is_symlink():
-                raise KBStoreError(
-                    f"files directory may not be a symlink: {files_root}"
-                )
+                raise KBStoreError(f"files directory may not be a symlink: {files_root}")
             if files_root.exists() and not files_root.is_dir():
                 raise KBStoreError(f"files path is not a directory: {files_root}")
             files_root.mkdir(exist_ok=True)
@@ -557,15 +529,11 @@ class KBStoreClient:
             values = document.get("knowledge") or {}
             values_target = root / VALUES_MEMBER
             if values_target.is_symlink():
-                raise KBStoreError(
-                    f"values target may not be a symlink: {values_target}"
-                )
+                raise KBStoreError(f"values target may not be a symlink: {values_target}")
             try:
                 values_target.resolve(strict=False).relative_to(root.resolve())
             except ValueError as exc:
-                raise KBStoreError(
-                    "values target escapes download destination"
-                ) from exc
+                raise KBStoreError("values target escapes download destination") from exc
             values_target.write_text(
                 json.dumps(values, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
@@ -581,12 +549,8 @@ class KBStoreClient:
                 target = _checked_download_target(files_root, rel)
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target = _checked_download_target(files_root, rel)
-                partial = target.with_name(
-                    f".{target.name}.{uuid.uuid4().hex}.partial"
-                )
-                with urllib.request.urlopen(
-                    url, timeout=self._timeout
-                ) as resp, open(partial, "xb") as out:
+                partial = target.with_name(f".{target.name}.{uuid.uuid4().hex}.partial")
+                with urllib.request.urlopen(url, timeout=self._timeout) as resp, open(partial, "xb") as out:
                     while True:
                         chunk = resp.read(_READ_CHUNK)
                         if not chunk:
@@ -597,14 +561,10 @@ class KBStoreClient:
                 actual_sha = digest.hexdigest()
                 if actual_sha != expected_sha:
                     raise KBStoreError(
-                        f"download of {rel!r} sha256 mismatch: "
-                        f"expected {expected_sha}, got {actual_sha}"
+                        f"download of {rel!r} sha256 mismatch: expected {expected_sha}, got {actual_sha}"
                     )
                 if size != expected_size:
-                    raise KBStoreError(
-                        f"download of {rel!r} size mismatch: "
-                        f"expected {expected_size}, got {size}"
-                    )
+                    raise KBStoreError(f"download of {rel!r} size mismatch: expected {expected_size}, got {size}")
                 _checked_download_target(files_root, rel)
                 os.replace(partial, target)
                 partial = None
@@ -622,9 +582,7 @@ class KBStoreClient:
         with ThreadPoolExecutor(max_workers=self._parallelism) as pool:
             return list(pool.map(fetch, entries))
 
-    def download_archive(
-        self, canonical_id: str, session_id: str, dest_file: str | Path
-    ) -> Path:
+    def download_archive(self, canonical_id: str, session_id: str, dest_file: str | Path) -> Path:
         """Download the session directory as a single tar.gz."""
         url = self._base + self._session_base(canonical_id, session_id) + "/archive"
         headers = {}
@@ -634,9 +592,7 @@ class KBStoreClient:
         target = Path(dest_file)
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(
-                target, "wb"
-            ) as out:
+            with urllib.request.urlopen(req, timeout=self._timeout) as resp, open(target, "wb") as out:
                 while True:
                     chunk = resp.read(_READ_CHUNK)
                     if not chunk:
@@ -688,10 +644,7 @@ class SectionContent:
         self.files = list(files or [])
 
     def __repr__(self) -> str:
-        return (
-            f"SectionContent(section={self.section!r}, "
-            f"keys={sorted(self.knowledge)!r}, files={len(self.files)})"
-        )
+        return f"SectionContent(section={self.section!r}, keys={sorted(self.knowledge)!r}, files={len(self.files)})"
 
 
 class KnowledgeSections:
@@ -770,9 +723,7 @@ class KnowledgeSections:
         merged = dict(knowledge)
         refs: list[str] = []
         if staged is not None:
-            refs = [
-                path.relative_to(self.files_dir).as_posix() for path in staged.files
-            ]
+            refs = [path.relative_to(self.files_dir).as_posix() for path in staged.files]
             if mode == "merge":
                 merged = {**staged.knowledge, **knowledge}
 
@@ -852,11 +803,7 @@ class KnowledgeSections:
         if not isinstance(knowledge, dict):
             return None
         root = self.warm_start_dir / FILES_MEMBER_ROOT / name
-        files = (
-            sorted(path for path in root.rglob("*") if path.is_file())
-            if root.is_dir()
-            else []
-        )
+        files = sorted(path for path in root.rglob("*") if path.is_file()) if root.is_dir() else []
         return SectionContent(name, dict(knowledge), files)
 
     def sections(self) -> list[str]:
@@ -868,8 +815,7 @@ class KnowledgeSections:
 
     def document(self) -> dict[str, Any]:
         """The staged ``{section: knowledge}`` map to publish under ``value``."""
-        return {name: (self.staged(name) or SectionContent(name, {})).knowledge
-                for name in self.sections()}
+        return {name: (self.staged(name) or SectionContent(name, {})).knowledge for name in self.sections()}
 
 
 def _same_bytes(left: Path, right: Path) -> bool:

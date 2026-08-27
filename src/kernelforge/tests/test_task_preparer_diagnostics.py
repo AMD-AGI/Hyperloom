@@ -7,6 +7,7 @@ crash with no traceback and spent its attempt rediscovering it — the observed
 failure mode behind "could not produce a conforming driver within the budget".
 These tests pin the tail to the result, the audit dict, and the retry prompt.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,9 +36,7 @@ def _run_preflight(monkeypatch, tmp_path, *, correctness, bench):
 
     monkeypatch.setattr(task_preparer, "test_correctness", _fake_correctness)
     monkeypatch.setattr(task_preparer, "bench_wallclock", _fake_bench)
-    return asyncio.run(
-        task_preparer._preflight_async(driver.as_posix(), 30.0, 1, 2)
-    )
+    return asyncio.run(task_preparer._preflight_async(driver.as_posix(), 30.0, 1, 2))
 
 
 def test_crash_tail_reaches_result_and_audit(monkeypatch, tmp_path):

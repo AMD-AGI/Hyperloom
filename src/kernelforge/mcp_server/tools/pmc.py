@@ -19,9 +19,7 @@ _DEF_RE = re.compile(r"^\s*def\s+(\w+)\s*\(")
 # matches the prefix of an identifier, so `__global__ void inline_helper_kernel(`
 # is read as the attribute `inline` followed by the name `_helper_kernel`, and
 # that truncated name matches no dispatch.
-_GLOBAL_ATTR = (
-    r"(?:__launch_bounds__\s*\([^)]*\)|__attribute__\s*\(\([^)]*\)\)|\bstatic\b|\binline\b)"
-)
+_GLOBAL_ATTR = r"(?:__launch_bounds__\s*\([^)]*\)|__attribute__\s*\(\([^)]*\)\)|\bstatic\b|\binline\b)"
 _GLOBAL_RE = re.compile(
     rf"__global__\s+(?:{_GLOBAL_ATTR}\s+)*void\s+(?:{_GLOBAL_ATTR}\s*)*(\w+)\s*\(",
 )

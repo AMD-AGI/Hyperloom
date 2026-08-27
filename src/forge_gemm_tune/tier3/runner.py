@@ -129,7 +129,8 @@ def attempt_generated_tuner(
 
         outcome.stage = "sandbox"
         run = run_generated_tuner(
-            gen.script_path, work_dir,
+            gen.script_path,
+            work_dir,
             expect=[Path(mandate.output_csv), Path(mandate.candidates_json)],
         )
         if not run.ok:
@@ -146,9 +147,7 @@ def attempt_generated_tuner(
         outcome.stage = "contract"
         violations = validate_output_csv(mandate.output_csv, mandate)
         if violations:
-            retry_note = "The output violated the contract:\n" + "\n".join(
-                f"- {v}" for v in violations[:8]
-            )
+            retry_note = "The output violated the contract:\n" + "\n".join(f"- {v}" for v in violations[:8])
             outcome.reason = retry_note
             if attempt < MAX_ATTEMPTS:
                 continue
@@ -171,7 +170,8 @@ def attempt_generated_tuner(
     for shape, cands in candidates.items():
         outcome.judgements.append(
             judge_candidates(
-                shape, cands,
+                shape,
+                cands,
                 baseline=make_baseline(shape),
                 dispatch=make_dispatch(shape),
                 is_correct=make_correctness(shape) if make_correctness else None,
@@ -181,19 +181,22 @@ def attempt_generated_tuner(
 
     outcome.ok = outcome.improved_shapes > 0
     best = max(
-        (j.best_timing.speedup for j in outcome.judgements
-         if j.best_timing and j.best_timing.usable),
+        (j.best_timing.speedup for j in outcome.judgements if j.best_timing and j.best_timing.usable),
         default=None,
     )
     outcome.reason = (
         f"{outcome.improved_shapes} of {len(outcome.judgements)} shape(s) improved"
-        if outcome.ok else "no shape improved once re-timed"
+        if outcome.ok
+        else "no shape improved once re-timed"
     )
 
     record = record_outcome(
         work_root / "tier3" / "ledger.json",
-        digest=outcome.digest, table=gap.table, model=model_name,
-        improved=outcome.ok, speedup=best,
+        digest=outcome.digest,
+        table=gap.table,
+        model=model_name,
+        improved=outcome.ok,
+        speedup=best,
     )
     from .ledger import is_trusted
 

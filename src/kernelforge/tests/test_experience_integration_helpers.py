@@ -85,10 +85,7 @@ def test_git_cumulative_diff_empty_on_exception(monkeypatch, tmp_path):
 
 def test_git_apply_check_and_exception(tmp_path):
     repo = _init_repo(tmp_path)
-    good = (
-        "diff --git a/kernel.py b/kernel.py\n"
-        "--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
-    )
+    good = "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-old\n+new\n"
     assert integ._git_apply(str(repo), good, check_only=True) is True
     # A workspace that is not there is not a patch that does not apply.
     with pytest.raises(OSError):
@@ -195,26 +192,31 @@ class _Archive:
 
 def test_cheap_summary_none_archive():
     assert integ._cheap_summary(None) == {
-        "category": "", "strategy": "", "recipe": "", "lessons": "",
+        "category": "",
+        "strategy": "",
+        "recipe": "",
+        "lessons": "",
     }
 
 
 def test_cheap_summary_picks_best_mean_case_speedup_without_distilling_records():
-    archive = _Archive([
-        {
-            "decision": "KEEP",
-            "wall_ms": 9.0,
-            "mean_case_speedup": 3.0,
-            "plan": "best mean plan",
-        },
-        {
-            "decision": "KEEP",
-            "wall_ms": 3.0,
-            "mean_case_speedup": 2.0,
-            "plan": "fast raw plan",
-        },
-        {"decision": "REVERT", "wall_ms": 1.0, "plan": "ignored"},
-    ])
+    archive = _Archive(
+        [
+            {
+                "decision": "KEEP",
+                "wall_ms": 9.0,
+                "mean_case_speedup": 3.0,
+                "plan": "best mean plan",
+            },
+            {
+                "decision": "KEEP",
+                "wall_ms": 3.0,
+                "mean_case_speedup": 2.0,
+                "plan": "fast raw plan",
+            },
+            {"decision": "REVERT", "wall_ms": 1.0, "plan": "ignored"},
+        ]
+    )
     out = integ._cheap_summary(archive)
     assert out["strategy"] == "best mean plan"
     assert out["lessons"] == ""
@@ -236,12 +238,19 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 
     def fake_read(**_k):
-        return [{"solution_slug": "s/prev", "speedup": 1.5, "patch_content": "",
-                 "strategy": "st", "recipe": "", "lessons": "",
-                 "match_mode": "exact"}]
+        return [
+            {
+                "solution_slug": "s/prev",
+                "speedup": 1.5,
+                "patch_content": "",
+                "strategy": "st",
+                "recipe": "",
+                "lessons": "",
+                "match_mode": "exact",
+            }
+        ]
 
-    monkeypatch.setattr(
-        "kernelforge.knowledge.experience_reader.read_top_solutions", fake_read)
+    monkeypatch.setattr("kernelforge.knowledge.experience_reader.read_top_solutions", fake_read)
     monkeypatch.setattr(
         integ,
         "_bench_once",
@@ -253,8 +262,8 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     )
 
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py",
-        workspace_dir=str(repo), fellow="triton-fellow")
+        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), fellow="triton-fellow"
+    )
     assert warm["candidate"] is True
     assert warm["applied"] is False
     assert warm["keep_baseline_ms"] == 10.0
@@ -282,9 +291,14 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         archive = None
 
     status = integ.write_experience_to_kb(
-        config=object(), loop_runner=_LR(), workspace_dir=str(tmp_path),
-        kernel=str(kernel), fellow="triton-fellow", gpu_target="gfx942",
-        base_sha="base")
+        config=object(),
+        loop_runner=_LR(),
+        workspace_dir=str(tmp_path),
+        kernel=str(kernel),
+        fellow="triton-fellow",
+        gpu_target="gfx942",
+        base_sha="base",
+    )
     assert status == {
         "written": False,
         "reason": "missing_mean_case_speedup",
@@ -298,11 +312,10 @@ def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
     def boom(**_k):
         raise RuntimeError("read blew up")
 
-    monkeypatch.setattr(
-        "kernelforge.knowledge.experience_reader.read_top_solutions", boom)
+    monkeypatch.setattr("kernelforge.knowledge.experience_reader.read_top_solutions", boom)
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py",
-        workspace_dir=str(repo), fellow="triton-fellow")
+        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), fellow="triton-fellow"
+    )
     assert warm == {
         "candidate": False,
         "read_reason": "warm_start_error",

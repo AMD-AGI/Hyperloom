@@ -30,22 +30,64 @@ def _manifest() -> dict:
             "variant_steady_replay": {"bs_512_piecewise": 100, "eager": 1},
         },
         "rows": [
-            {"dims": {"M": 8192, "N": 5120, "K": 5120}, "is_gemm": True, "is_target_gemm": True,
-             "cum_gpu_us": 6954.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "c10::Float8_e4m3fn"},
-            {"dims": {"M": 8192, "N": 34816, "K": 5120}, "is_gemm": True, "is_target_gemm": True,
-             "cum_gpu_us": 3503.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "c10::Float8_e4m3fn"},
+            {
+                "dims": {"M": 8192, "N": 5120, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": True,
+                "cum_gpu_us": 6954.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "c10::Float8_e4m3fn",
+            },
+            {
+                "dims": {"M": 8192, "N": 34816, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": True,
+                "cum_gpu_us": 3503.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "c10::Float8_e4m3fn",
+            },
             # dedups with row 0 (same M,N,K) -> weights sum
-            {"dims": {"M": 8192, "N": 5120, "K": 5120}, "is_gemm": True, "is_target_gemm": True,
-             "cum_gpu_us": 1041.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "c10::Float8_e4m3fn"},
+            {
+                "dims": {"M": 8192, "N": 5120, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": True,
+                "cum_gpu_us": 1041.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "c10::Float8_e4m3fn",
+            },
             # capture_only -> weight scaled by variant_steady_replay (10 * 100 = 1000)
-            {"dims": {"M": 1, "N": 5120, "K": 5120}, "is_gemm": True, "is_target_gemm": True,
-             "cum_gpu_us": 10.0, "capture_only": True, "graph_variant": "bs_512_piecewise", "in_dtype": "fp8"},
+            {
+                "dims": {"M": 1, "N": 5120, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": True,
+                "cum_gpu_us": 10.0,
+                "capture_only": True,
+                "graph_variant": "bs_512_piecewise",
+                "in_dtype": "fp8",
+            },
             # is_gemm but NOT target -> excluded
-            {"dims": {"M": 8192, "N": 5120, "K": 5120}, "is_gemm": True, "is_target_gemm": False,
-             "cum_gpu_us": 9999.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "bf16"},
+            {
+                "dims": {"M": 8192, "N": 5120, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": False,
+                "cum_gpu_us": 9999.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "bf16",
+            },
             # missing M -> dropped (cannot tune)
-            {"dims": {"M": None, "N": 5120, "K": 5120}, "is_gemm": True, "is_target_gemm": True,
-             "cum_gpu_us": 5.0, "capture_only": False, "graph_variant": "eager", "in_dtype": "fp8"},
+            {
+                "dims": {"M": None, "N": 5120, "K": 5120},
+                "is_gemm": True,
+                "is_target_gemm": True,
+                "cum_gpu_us": 5.0,
+                "capture_only": False,
+                "graph_variant": "eager",
+                "in_dtype": "fp8",
+            },
         ],
     }
 
@@ -55,9 +97,9 @@ class TestManifestToShapes:
         shapes = manifest_to_shapes(_manifest())
         # 3 distinct target shapes (non-target + missing-M dropped)
         assert [(s["M"], s["N"], s["K"]) for s in shapes] == [
-            (8192, 5120, 5120),   # 6954 + 1041 = 7995 (deduped, highest)
+            (8192, 5120, 5120),  # 6954 + 1041 = 7995 (deduped, highest)
             (8192, 34816, 5120),  # 3503
-            (1, 5120, 5120),      # 10 * 100 (capture_only x steady replay) = 1000
+            (1, 5120, 5120),  # 10 * 100 (capture_only x steady replay) = 1000
         ]
         assert shapes[0]["weight"] == pytest.approx(7995.0)
         assert shapes[2]["weight"] == pytest.approx(1000.0)

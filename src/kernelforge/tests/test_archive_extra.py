@@ -19,6 +19,7 @@ from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 
 # ── numeric helpers ────────────────────────────────────────────────────────────
 
+
 def test_mean_case_speedup_delta_pct():
     assert CandidateArchive._mean_case_speedup_delta_pct(2.0, 1.0) == 100.0
     assert CandidateArchive._mean_case_speedup_delta_pct(None, 1.0) is None
@@ -40,17 +41,29 @@ def test_label_fallback():
 
 # ── record + meta round-trip ───────────────────────────────────────────────────
 
+
 def test_record_writes_all_files_and_meta(tmp_path):
     archive = CandidateArchive(str(tmp_path), kernel_file="flash.py")
-    d = archive.record(CandidateRecord(
-        iteration=1, commit_hash="abc", decision="KEEP", kept=True,
-        validation_passed=True, wall_ms=1.0, mean_case_speedup=2.0, snr_db=40.0,
-        baseline_wall_ms=2.0, best_wall_ms_before=2.0,
-        best_mean_case_speedup_before=1.0,
-        kernel_source="print(1)\n", change_diff="+ added\n",
-        pmc_full="PMC SUMMARY", validation_text="validation ok",
-        plan="vectorize",
-    ))
+    d = archive.record(
+        CandidateRecord(
+            iteration=1,
+            commit_hash="abc",
+            decision="KEEP",
+            kept=True,
+            validation_passed=True,
+            wall_ms=1.0,
+            mean_case_speedup=2.0,
+            snr_db=40.0,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            best_mean_case_speedup_before=1.0,
+            kernel_source="print(1)\n",
+            change_diff="+ added\n",
+            pmc_full="PMC SUMMARY",
+            validation_text="validation ok",
+            plan="vectorize",
+        )
+    )
     assert d is not None
     assert (d / "flash.py").read_text() == "print(1)\n"
     assert (d / "change.diff").exists()
@@ -69,6 +82,7 @@ def test_default_kernel_basename(tmp_path):
 
 
 # ── robust read paths ──────────────────────────────────────────────────────────
+
 
 def test_load_index_missing_is_empty(tmp_path):
     archive = CandidateArchive(str(tmp_path))
@@ -98,6 +112,7 @@ def test_read_candidate_file_missing_is_empty(tmp_path):
 
 # ── digest ──────────────────────────────────────────────────────────────────────
 
+
 def test_render_digest_empty_when_nothing_archived(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     assert archive.render_digest() == ""
@@ -105,12 +120,20 @@ def test_render_digest_empty_when_nothing_archived(tmp_path):
 
 def test_render_digest_basic_layers(tmp_path):
     archive = CandidateArchive(str(tmp_path))
-    archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True, wall_ms=1.0,
-        mean_case_speedup=2.0, baseline_wall_ms=2.0,
-        best_wall_ms_before=2.0, best_mean_case_speedup_before=1.0,
-        change_diff="+ win\n", plan="vectorize",
-    ))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            wall_ms=1.0,
+            mean_case_speedup=2.0,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            best_mean_case_speedup_before=1.0,
+            change_diff="+ win\n",
+            plan="vectorize",
+        )
+    )
     digest = archive.render_digest()
     assert "Solution archive" in digest
     assert "Trajectory (1 attempts" in digest
@@ -124,22 +147,36 @@ def test_render_digest_basic_layers(tmp_path):
 def test_render_digest_diff_truncation(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     big_diff = "\n".join(f"+ line {i}" for i in range(200))
-    archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True, wall_ms=1.0,
-        baseline_wall_ms=2.0, best_wall_ms_before=2.0,
-        change_diff=big_diff, plan="p",
-    ))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            wall_ms=1.0,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            change_diff=big_diff,
+            plan="p",
+        )
+    )
     digest = archive.render_digest(max_diff_lines=10)
     assert "truncated to 10 lines" in digest
 
 
 def test_render_digest_diff_unavailable(tmp_path):
     archive = CandidateArchive(str(tmp_path))
-    archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True, wall_ms=1.0,
-        baseline_wall_ms=2.0, best_wall_ms_before=2.0,
-        change_diff="", plan="no diff",
-    ))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            wall_ms=1.0,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            change_diff="",
+            plan="no diff",
+        )
+    )
     digest = archive.render_digest()
     assert "diff unavailable" in digest
 
@@ -147,17 +184,33 @@ def test_render_digest_diff_unavailable(tmp_path):
 def test_render_digest_table_capping_keeps_and_recent(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     # One early KEEP + many REVERTs so the table must cap and keep the KEEP row.
-    archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True, wall_ms=1.0,
-        baseline_wall_ms=2.0, best_wall_ms_before=2.0, plan="the-keep"))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            wall_ms=1.0,
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+            plan="the-keep",
+        )
+    )
     for i in range(2, 12):
-        archive.record(CandidateRecord(
-            iteration=i, decision="REVERT_PERF", kept=False, wall_ms=1.5,
-            baseline_wall_ms=2.0, best_wall_ms_before=1.0, plan=f"revert-{i}"))
+        archive.record(
+            CandidateRecord(
+                iteration=i,
+                decision="REVERT_PERF",
+                kept=False,
+                wall_ms=1.5,
+                baseline_wall_ms=2.0,
+                best_wall_ms_before=1.0,
+                plan=f"revert-{i}",
+            )
+        )
     digest = archive.render_digest(max_table_rows=4)
     assert "older rows omitted" in digest
-    assert "the-keep" in digest       # KEEP row is always retained
-    assert "revert-11" in digest      # most recent retained
+    assert "the-keep" in digest  # KEEP row is always retained
+    assert "revert-11" in digest  # most recent retained
 
 
 def test_select_for_diffs_prioritizes_keep_near_recent(tmp_path):
@@ -169,8 +222,7 @@ def test_select_for_diffs_prioritizes_keep_near_recent(tmp_path):
         {"iter": 4, "decision": "REVERT_VALIDATION", "wall_ms": None},
         {"iter": 5, "decision": "REVERT_PERF", "wall_ms": 5.0},
     ]
-    sel = archive._select_for_diffs(index, max_full_diffs=3,
-                                    near_miss_count=2, recent_count=1)
+    sel = archive._select_for_diffs(index, max_full_diffs=3, near_miss_count=2, recent_count=1)
     iters = [e["iter"] for e in sel]
     assert iters == sorted(iters)
     assert 1 in iters  # the KEEP
@@ -178,6 +230,7 @@ def test_select_for_diffs_prioritizes_keep_near_recent(tmp_path):
 
 
 # ── unusable archive root ───────────────────────────────────────────────────────
+
 
 def test_unusable_root_degrades_instead_of_raising(tmp_path):
     # A file where forge_experiments/ should be: the archive must never take the
@@ -199,6 +252,7 @@ def test_unusable_root_degrades_instead_of_raising(tmp_path):
 
 # ── metadata classification ─────────────────────────────────────────────────────
 
+
 def _meta_payload(**overrides) -> dict:
     meta = {
         "archive_format": 2,
@@ -213,19 +267,22 @@ def _meta_payload(**overrides) -> dict:
     return meta
 
 
-@pytest.mark.parametrize("payload", [
-    [1, 2, 3],                                          # not a JSON object
-    _meta_payload(files="kernel.py"),                   # files must be a mapping
-    _meta_payload(iteration=7),                         # iteration must match dir
-    _meta_payload(archive_format="2"),                  # format must be an int
-    _meta_payload(complete=False),                      # format >= 2 needs marker
-    {"iteration": 1, "decision": "KEEP", "kept": True},  # missing required keys
-    _meta_payload(files={"kernel": "../escape.py"}),    # must stay inside the dir
-    _meta_payload(files={"kernel": ""}),                # empty filename
-    _meta_payload(files={"kernel": 7}),                 # non-string filename
-    _meta_payload(files={"kernel": "gone.py"}),         # referenced file missing
-    _meta_payload(files={"kernel": "subdir"}),          # not a regular file
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [1, 2, 3],  # not a JSON object
+        _meta_payload(files="kernel.py"),  # files must be a mapping
+        _meta_payload(iteration=7),  # iteration must match dir
+        _meta_payload(archive_format="2"),  # format must be an int
+        _meta_payload(complete=False),  # format >= 2 needs marker
+        {"iteration": 1, "decision": "KEEP", "kept": True},  # missing required keys
+        _meta_payload(files={"kernel": "../escape.py"}),  # must stay inside the dir
+        _meta_payload(files={"kernel": ""}),  # empty filename
+        _meta_payload(files={"kernel": 7}),  # non-string filename
+        _meta_payload(files={"kernel": "gone.py"}),  # referenced file missing
+        _meta_payload(files={"kernel": "subdir"}),  # not a regular file
+    ],
+)
 def test_incomplete_metadata_shapes_are_rejected(tmp_path, payload):
     archive = CandidateArchive(str(tmp_path))
     directory = archive._iter_dir(1)
@@ -257,9 +314,10 @@ def test_corrupt_metadata_is_quarantined_not_deleted(tmp_path):
 
 def test_unreadable_metadata_is_preserved_and_reported(tmp_path, monkeypatch):
     archive = CandidateArchive(str(tmp_path))
-    assert archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True,
-        kernel_source="healthy kernel\n")) is not None
+    assert (
+        archive.record(CandidateRecord(iteration=1, decision="KEEP", kept=True, kernel_source="healthy kernel\n"))
+        is not None
+    )
     meta_path = archive._iter_dir(1) / "meta.json"
     original_read_text = Path.read_text
 
@@ -298,6 +356,7 @@ def test_load_meta_on_unstattable_directory_degrades(tmp_path, monkeypatch):
 
 
 # ── reconcile / index repair ────────────────────────────────────────────────────
+
 
 def test_reconcile_ignores_non_directory_iter_entries(tmp_path):
     archive = CandidateArchive(str(tmp_path))
@@ -393,13 +452,12 @@ def test_cache_add_entry_leaves_a_cold_cache_cold(tmp_path):
 
 # ── record collision handling ───────────────────────────────────────────────────
 
+
 def test_record_replaces_stray_file_at_iteration_path(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     (archive.root / "iter_001").write_text("stray file squatting on iter_001\n")
 
-    recorded = archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True,
-        kernel_source="real kernel\n"))
+    recorded = archive.record(CandidateRecord(iteration=1, decision="KEEP", kept=True, kernel_source="real kernel\n"))
 
     assert recorded == archive._iter_dir(1)
     assert archive.read_candidate_file(1, "kernel.py") == "real kernel\n"
@@ -420,9 +478,10 @@ def test_record_aborts_when_collision_cannot_be_quarantined(tmp_path, monkeypatc
 
     monkeypatch.setattr(os, "replace", refuse_quarantine)
 
-    assert archive.record(CandidateRecord(
-        iteration=1, decision="KEEP", kept=True,
-        kernel_source="replacement kernel\n")) is None
+    assert (
+        archive.record(CandidateRecord(iteration=1, decision="KEEP", kept=True, kernel_source="replacement kernel\n"))
+        is None
+    )
     # Rather than write over ground it could not clear, record backs off and the
     # unreadable partial stays put for inspection.
     assert (partial / "kernel.py").read_text() == "partial kernel\n"
@@ -442,9 +501,7 @@ def test_record_aborts_when_target_cannot_be_stated(tmp_path, monkeypatch):
 
     monkeypatch.setattr(Path, "stat", transient_stat)
 
-    assert archive.record(CandidateRecord(
-        iteration=2, decision="KEEP", kept=True,
-        kernel_source="kernel\n")) is None
+    assert archive.record(CandidateRecord(iteration=2, decision="KEEP", kept=True, kernel_source="kernel\n")) is None
     monkeypatch.undo()
     assert not target.exists()
     assert archive.degraded is True

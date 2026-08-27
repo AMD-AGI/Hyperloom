@@ -34,8 +34,8 @@ class RewriteSpec:
     op_name: str
 
     # Source (to rewrite) — absolute paths inside the workspace.
-    source_kernel: str            # e.g. /ws/softmax.py or /ws/attention.hip
-    target_functions: list[str]   # kernel entry names, e.g. ["softmax_kernel_online"]
+    source_kernel: str  # e.g. /ws/softmax.py or /ws/attention.hip
+    target_functions: list[str]  # kernel entry names, e.g. ["softmax_kernel_online"]
     # Host callable in the source that runs the kernel (a hint shown to the port
     # agent). Optional: the measurement driver owns how the reference is invoked,
     # so an unresolved entry does not block the pipeline. Auto-derived if "".
@@ -47,7 +47,7 @@ class RewriteSpec:
     source_language: str = ""
 
     # Produced file (this layer only rewrites into FlyDSL).
-    flydsl_kernel: str = ""       # e.g. /ws/kernel.py (the file the agent writes)
+    flydsl_kernel: str = ""  # e.g. /ws/kernel.py (the file the agent writes)
 
     # Shapes driving correctness (vs the source oracle) and benchmark. Each entry
     # is an operator-defined dict of dims + a ``dtype`` string, e.g.
@@ -84,11 +84,6 @@ class RewriteSpec:
     def flydsl_kernel_relpath(self) -> str:
         """Candidate path relative to the workspace, for prompts and logs."""
         try:
-            return (
-                Path(self.flydsl_kernel)
-                .resolve()
-                .relative_to(Path(self.workspace).resolve())
-                .as_posix()
-            )
+            return Path(self.flydsl_kernel).resolve().relative_to(Path(self.workspace).resolve()).as_posix()
         except ValueError:
             return self.flydsl_kernel_name

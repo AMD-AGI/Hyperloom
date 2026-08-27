@@ -19,9 +19,11 @@ def _profile():
 # ── TuneReport.to_dict / write_report ────────────────────────────────────────
 def test_report_to_dict_includes_skipped_and_error():
     report = TuneReport(
-        status="failed", micro_decision="failed",
+        status="failed",
+        micro_decision="failed",
         tuners_skipped=[{"tuner": "x", "skip_reason": "no"}],
-        error="boom", error_class="RuntimeError",
+        error="boom",
+        error_class="RuntimeError",
     )
     d = report.to_dict()
     assert d["tuners_skipped"] == [{"tuner": "x", "skip_reason": "no"}]
@@ -36,10 +38,18 @@ def test_report_to_dict_omits_empty_optionals():
 
 def test_write_report_creates_json(tmp_path):
     report = build_report(
-        results=[], skipped=[("fmoe_ck", "not MoE")],
-        profile=_profile(), framework="sglang", precision="bf16",
-        quant_type="none", gpu_type="mi300x", tp=1, conc=64,
-        tokens=[64], started_at="2026-01-01T00:00:00Z", total_elapsed_s=1.0,
+        results=[],
+        skipped=[("fmoe_ck", "not MoE")],
+        profile=_profile(),
+        framework="sglang",
+        precision="bf16",
+        quant_type="none",
+        gpu_type="mi300x",
+        tp=1,
+        conc=64,
+        tokens=[64],
+        started_at="2026-01-01T00:00:00Z",
+        total_elapsed_s=1.0,
     )
     out = tmp_path / "nested" / "dir"
     path = write_report(report, out)
@@ -51,9 +61,18 @@ def test_write_report_creates_json(tmp_path):
 # ── TuneResult.to_dict extra branches ────────────────────────────────────────
 def test_tune_result_to_dict_full():
     r = TuneResult(
-        tuner_name="t", status="ok", artifact_path="/a", env_var="V", env_value="/a",
-        total_shapes=3, improved_shapes=2, best_micro_speedup=1.2, avg_micro_speedup=1.1,
-        shape_results=[{"M": 4, "speedup": 1.2}], error="e", error_class="C",
+        tuner_name="t",
+        status="ok",
+        artifact_path="/a",
+        env_var="V",
+        env_value="/a",
+        total_shapes=3,
+        improved_shapes=2,
+        best_micro_speedup=1.2,
+        avg_micro_speedup=1.1,
+        shape_results=[{"M": 4, "speedup": 1.2}],
+        error="e",
+        error_class="C",
         skip_reason="sr",
     )
     d = r.to_dict()
@@ -71,9 +90,20 @@ def test_has_improvement_variants():
 # ── BaseTuner.execute ────────────────────────────────────────────────────────
 def _ctx(tmp_path):
     return TuneContext(
-        profile=_profile(), framework="sglang", precision="bf16", quant_type="none",
-        gpu_type="mi300x", tp=1, conc=64, tokens=[], mp=1, output_dir=tmp_path,
-        iters=10, warmup=2, min_improvement_pct=3.0, timeout_s=60,
+        profile=_profile(),
+        framework="sglang",
+        precision="bf16",
+        quant_type="none",
+        gpu_type="mi300x",
+        tp=1,
+        conc=64,
+        tokens=[],
+        mp=1,
+        output_dir=tmp_path,
+        iters=10,
+        warmup=2,
+        min_improvement_pct=3.0,
+        timeout_s=60,
     )
 
 
@@ -84,8 +114,7 @@ class _OkTuner(BaseTuner):
         return None
 
     def run(self):
-        return TuneResult(tuner_name=self.name, status="ok", improved_shapes=1,
-                          best_micro_speedup=1.2)
+        return TuneResult(tuner_name=self.name, status="ok", improved_shapes=1, best_micro_speedup=1.2)
 
 
 class _ValidateFailTuner(BaseTuner):

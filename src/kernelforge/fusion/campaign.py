@@ -92,8 +92,13 @@ def _failed_campaign(note: str) -> CampaignOutcome:
     """A campaign that produced no verdict for the recipe to be judged on."""
     return CampaignOutcome(
         result=ValidationResult(
-            correctness_passed=False, max_abs_err=None, rtol=None,
-            kernel_speedup=None, eager_us=None, fused_us=None, kept=False,
+            correctness_passed=False,
+            max_abs_err=None,
+            rtol=None,
+            kernel_speedup=None,
+            eager_us=None,
+            fused_us=None,
+            kept=False,
             note=f"CAMPAIGN FAILED: {note}",
         )
     )
@@ -137,9 +142,7 @@ def _best_harness_report(reports: list[dict], best_ms) -> dict:
     the right report; without a best, the fastest fused report is that candidate.
     """
     usable = [
-        r for r in reports
-        if r.get("compiled") and isinstance(r.get("fused_us"), (int, float))
-        and not r.get("skipped")
+        r for r in reports if r.get("compiled") and isinstance(r.get("fused_us"), (int, float)) and not r.get("skipped")
     ]
     if not usable:
         return {}
@@ -160,9 +163,7 @@ def _worst_parity(report: dict) -> tuple[float | None, float | None]:
     return (max(errs) if errs else None, min(snrs) if snrs else None)
 
 
-def _to_validation_result(
-    payload: dict, target_speedup: float, reports: list[dict] | None = None
-) -> ValidationResult:
+def _to_validation_result(payload: dict, target_speedup: float, reports: list[dict] | None = None) -> ValidationResult:
     """Translate the loop's campaign result into the fusion verdict shape.
 
     The loop reports its search outcome, not a per-candidate verdict. It anchors
@@ -256,26 +257,40 @@ def build_forge_loop_command(
     source_files = [recipe.source_file] + ([fused_module] if fused_module else [])
     cmd = _forge_loop_argv() + [
         "forge-loop",
-        "--workspace", workspace,
-        "--kernel", recipe.source_file,
-        "--driver", driver_path,
-        "--experiments-dir", experiments_dir,
-        "--result-json", result_json,
-        "--program-md-file", program_md_file,
-        "--snr-threshold", str(snr_threshold),
-        "--max-hours", str(max(1.0, max_hours)),
-        "--fellow", FUSION_FELLOW,
+        "--workspace",
+        workspace,
+        "--kernel",
+        recipe.source_file,
+        "--driver",
+        driver_path,
+        "--experiments-dir",
+        experiments_dir,
+        "--result-json",
+        result_json,
+        "--program-md-file",
+        program_md_file,
+        "--snr-threshold",
+        str(snr_threshold),
+        "--max-hours",
+        str(max(1.0, max_hours)),
+        "--fellow",
+        FUSION_FELLOW,
         # The loop refuses a workspace on an unnamed, main or master branch.
-        "--git-branch", SHADOW_BRANCH,
-        "--task-type", "repository",
-        "--source-files", ",".join(source_files),
+        "--git-branch",
+        SHADOW_BRANCH,
+        "--task-type",
+        "repository",
+        "--source-files",
+        ",".join(source_files),
         # Discovery already picked the chain and the harness already exists; the
         # loop's single-path preparer has a different contract and must not
         # rewrite either.
         "--no-prepare-task",
         "--experience-kb",
-        "--producer", FUSION_PRODUCER,
-        "--operator-name", recipe.pattern_id,
+        "--producer",
+        FUSION_PRODUCER,
+        "--operator-name",
+        recipe.pattern_id,
         "--no-kb-warmstart",
         # A fusion campaign is single-lane, and says so rather than inheriting
         # the loop's default. A lane is a full copy of the workspace measured on
@@ -288,7 +303,8 @@ def build_forge_loop_command(
         # and session_env, and that refusal lands before the first iteration, so
         # inheriting the default would fail runs on backends fusion otherwise
         # supports.
-        "--lanes", "1",
+        "--lanes",
+        "1",
     ]
     if gpu_target:
         cmd += ["--gpu-target", gpu_target]
@@ -339,8 +355,12 @@ def run_recipe_campaign(
     report_log = str(out / f"harness_reports_{stem}.jsonl")
     Path(report_log).unlink(missing_ok=True)
     driver_path = write_driver(
-        out / f"driver_{stem}.py", harness_path, env_flags,
-        report_log=report_log, case_id=stem, fused_module=fused_module,
+        out / f"driver_{stem}.py",
+        harness_path,
+        env_flags,
+        report_log=report_log,
+        case_id=stem,
+        fused_module=fused_module,
     )
 
     program_md_file = str(out / f"program_{stem}.md")
@@ -387,8 +407,13 @@ def run_recipe_campaign(
         # the group, and a detached campaign would go on holding the GPU and
         # editing the framework after the parent reported a failure.
         proc = subprocess.Popen(
-            cmd, cwd=workspace, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, bufsize=1, env=env,
+            cmd,
+            cwd=workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
@@ -405,9 +430,7 @@ def run_recipe_campaign(
         return _failed_campaign(f"forge-loop exited {returncode}")
     payload = _read_result_json(result_json)
     return CampaignOutcome(
-        result=_to_validation_result(
-            payload, target_speedup, _read_harness_reports(report_log)
-        ),
+        result=_to_validation_result(payload, target_speedup, _read_harness_reports(report_log)),
         experiment_id=str(payload.get("experiment_id") or ""),
     )
 

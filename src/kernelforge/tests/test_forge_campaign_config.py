@@ -93,13 +93,9 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     assert "fused_kernel" in loaded.target_functions
     assert loaded.operator_name == "fused"
     assert len(loaded.implementation_signature) == 64
-    assert loaded.implementation_identity["implementation_symbols"] == [
-        "fused_kernel"
-    ]
+    assert loaded.implementation_identity["implementation_symbols"] == ["fused_kernel"]
     assert loaded.program_md_path == "forge_experiments/program.md"
-    assert loaded.program_md_sha256 == hashlib.sha256(
-        program.read_bytes()
-    ).hexdigest()
+    assert loaded.program_md_sha256 == hashlib.sha256(program.read_bytes()).hexdigest()
     assert (workspace / loaded.program_md_path).read_text() == program.read_text()
     assert store.read_program_md(loaded) == program.read_text()
 
@@ -173,9 +169,7 @@ def test_campaign_infers_direct_source_owner_before_signature(tmp_path, monkeypa
     workspace, _kernel, _helper, driver = _git_workspace(tmp_path)
     kernel = workspace / "vllm" / "ops" / "direct.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n\n@triton.jit\ndef direct_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef direct_kernel(x):\n    return x\n")
     _commit_paths(workspace, "add direct vllm kernel")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
@@ -188,9 +182,7 @@ def test_campaign_infers_direct_source_owner_before_signature(tmp_path, monkeypa
     )
 
     assert config.framework == "vllm"
-    assert config.implementation_identity["source_paths"] == [
-        "vllm/ops/direct.py"
-    ]
+    assert config.implementation_identity["source_paths"] == ["vllm/ops/direct.py"]
 
 
 def test_campaign_infers_owner_from_cross_package_defining_file(
@@ -202,15 +194,8 @@ def test_campaign_infers_owner_from_cross_package_defining_file(
     defining = workspace / "aiter" / "ops" / "triton" / "attention.py"
     anchor.parent.mkdir(parents=True)
     defining.parent.mkdir(parents=True)
-    anchor.write_text(
-        "def attention_entry(x):\n    return unified_attention_kernel(x)\n"
-    )
-    defining.write_text(
-        "import triton\n\n"
-        "@triton.jit\n"
-        "def unified_attention_kernel(x):\n"
-        "    return x\n"
-    )
+    anchor.write_text("def attention_entry(x):\n    return unified_attention_kernel(x)\n")
+    defining.write_text("import triton\n\n@triton.jit\ndef unified_attention_kernel(x):\n    return x\n")
     _commit_paths(workspace, "add cross-package kernel")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
@@ -224,13 +209,8 @@ def test_campaign_infers_owner_from_cross_package_defining_file(
 
     assert config.framework == "aiter"
     assert "unified_attention_kernel" in config.target_functions
-    assert "aiter/ops/triton/attention.py" in config.implementation_identity[
-        "source_paths"
-    ]
-    assert all(
-        path.startswith("aiter/")
-        for path in config.implementation_identity["source_paths"]
-    )
+    assert "aiter/ops/triton/attention.py" in config.implementation_identity["source_paths"]
+    assert all(path.startswith("aiter/") for path in config.implementation_identity["source_paths"])
 
 
 def test_campaign_explicit_framework_overrides_defining_path(
@@ -240,9 +220,7 @@ def test_campaign_explicit_framework_overrides_defining_path(
     workspace, _kernel, _helper, driver = _git_workspace(tmp_path)
     kernel = workspace / "aiter" / "ops" / "explicit.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n\n@triton.jit\ndef explicit_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef explicit_kernel(x):\n    return x\n")
     _commit_paths(workspace, "add explicit override kernel")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
 
@@ -256,9 +234,7 @@ def test_campaign_explicit_framework_overrides_defining_path(
     )
 
     assert config.framework == "vllm"
-    assert config.implementation_identity["source_paths"] == [
-        "vllm/aiter/ops/explicit.py"
-    ]
+    assert config.implementation_identity["source_paths"] == ["vllm/aiter/ops/explicit.py"]
 
 
 def test_campaign_persists_unknown_when_source_owner_is_unrecognized(
@@ -895,9 +871,7 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
         program_md_file=None,
     )
     # The loop does its job and rewrites the kernel under a brand-new symbol.
-    kernel.write_text(
-        "import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n\n@triton.jit\ndef rewritten_kernel(x):\n    return x\n")
 
     signature, identity = derive_campaign_implementation_contract(
         workspace_dir=str(workspace),

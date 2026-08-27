@@ -97,9 +97,7 @@ class _McpBackend:
 
     capabilities = AgentCapabilities(mcp=True)
 
-    def __init__(
-        self, result: str = "Widen the block.", ledger=(), corrupt: bool = False
-    ) -> None:
+    def __init__(self, result: str = "Widen the block.", ledger=(), corrupt: bool = False) -> None:
         self.result = result
         self.ledger = list(ledger)
         self.corrupt = corrupt
@@ -144,9 +142,7 @@ def _probe(tmp_path: Path, **kwargs) -> SpecialistProbeConfig:
 
 
 @pytest.mark.asyncio
-async def test_probe_is_offered_without_reaching_the_canonical_tree(
-    tmp_path, monkeypatch
-) -> None:
+async def test_probe_is_offered_without_reaching_the_canonical_tree(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
     before = _fingerprint(workspace)
@@ -193,9 +189,7 @@ async def test_probe_is_offered_without_reaching_the_canonical_tree(
 
 
 @pytest.mark.asyncio
-async def test_unused_probe_is_distinguished_from_an_unavailable_one(
-    tmp_path, monkeypatch
-) -> None:
+async def test_unused_probe_is_distinguished_from_an_unavailable_one(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     backend = _McpBackend()
     agent = SpecialistAgent(
@@ -212,9 +206,7 @@ async def test_unused_probe_is_distinguished_from_an_unavailable_one(
 
 
 @pytest.mark.asyncio
-async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(
-    tmp_path, monkeypatch
-) -> None:
+async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     probe = _probe(tmp_path)
     stale = Path(probe.scratch_root) / "memory-1" / "probe_ledger.jsonl"
@@ -247,9 +239,7 @@ async def test_an_earlier_rounds_probes_are_not_reported_as_this_rounds(
 
 
 @pytest.mark.asyncio
-async def test_missing_measurement_primitive_is_reported_not_hidden(
-    tmp_path, monkeypatch
-) -> None:
+async def test_missing_measurement_primitive_is_reported_not_hidden(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, None)
     backend = _McpBackend()
     agent = SpecialistAgent(
@@ -269,9 +259,7 @@ async def test_missing_measurement_primitive_is_reported_not_hidden(
 
 
 @pytest.mark.asyncio
-async def test_scratch_root_inside_the_canonical_tree_disables_the_probe(
-    tmp_path, monkeypatch, caplog
-) -> None:
+async def test_scratch_root_inside_the_canonical_tree_disables_the_probe(tmp_path, monkeypatch, caplog) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     workspace = _workspace(tmp_path)
     before = _fingerprint(workspace)
@@ -343,9 +331,7 @@ async def test_specialist_without_probe_keeps_its_read_only_spec(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(
-    tmp_path, monkeypatch, caplog
-) -> None:
+async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(tmp_path, monkeypatch, caplog) -> None:
     async def _wrong_signature(*, workspace, scratch_dir, case_id):
         raise AssertionError("the probe must not call a primitive it cannot call")
 
@@ -369,9 +355,7 @@ async def test_a_primitive_the_probe_cannot_call_is_reported_not_offered(
 
 
 @pytest.mark.asyncio
-async def test_a_sandbox_the_server_would_refuse_is_never_offered(
-    tmp_path, monkeypatch, caplog
-) -> None:
+async def test_a_sandbox_the_server_would_refuse_is_never_offered(tmp_path, monkeypatch, caplog) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setattr(
         specialists,
@@ -397,9 +381,7 @@ async def test_a_sandbox_the_server_would_refuse_is_never_offered(
 
 
 @pytest.mark.asyncio
-async def test_an_unreadable_probe_ledger_is_reported_as_partial(
-    tmp_path, monkeypatch
-) -> None:
+async def test_an_unreadable_probe_ledger_is_reported_as_partial(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     backend = _McpBackend(
         ledger=[
@@ -430,9 +412,7 @@ async def test_an_unreadable_probe_ledger_is_reported_as_partial(
 # --- the probe server itself ------------------------------------------------
 
 
-async def _stub_primitive(
-    *, driver_script, case_id, constants, timeout_sec, prefix_constants=True
-):
+async def _stub_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
     """Stand in for PR-1's ``sweep_case``, with its result shape."""
     return {
         "success": True,
@@ -445,9 +425,7 @@ async def _stub_primitive(
     }
 
 
-async def _failing_primitive(
-    *, driver_script, case_id, constants, timeout_sec, prefix_constants=True
-):
+async def _failing_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
     """PR-1 reports a configuration that did not run with no timing at all."""
     return {
         "success": False,
@@ -483,17 +461,11 @@ def _sandbox(tmp_path, **overrides) -> probe_server.ProbeSandbox:
 
 
 def _ledger(sandbox) -> list[dict]:
-    return [
-        json.loads(line)
-        for line in sandbox.ledger_path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in sandbox.ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 @pytest.mark.asyncio
-async def test_server_probe_records_a_measurement_without_editing_the_workspace(
-    tmp_path, monkeypatch
-) -> None:
+async def test_server_probe_records_a_measurement_without_editing_the_workspace(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path)
     (sandbox.workspace / "kernel.py").write_text("BLOCK = 256\n", encoding="utf-8")
@@ -521,9 +493,7 @@ async def test_server_probe_records_a_measurement_without_editing_the_workspace(
 
 
 @pytest.mark.asyncio
-async def test_server_passes_verbatim_names_and_records_what_was_read(
-    tmp_path, monkeypatch
-) -> None:
+async def test_server_passes_verbatim_names_and_records_what_was_read(tmp_path, monkeypatch) -> None:
     """A knob the source named itself is unreachable under FORGE_SWEEP_."""
     seen: dict[str, object] = {}
 
@@ -583,9 +553,7 @@ async def test_server_defaults_to_the_sweep_prefix(tmp_path, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_server_refuses_a_non_boolean_prefix_constants(
-    tmp_path, monkeypatch
-) -> None:
+async def test_server_refuses_a_non_boolean_prefix_constants(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
 
     with pytest.raises(probe_server.InvalidParamsError):
@@ -643,9 +611,7 @@ async def test_server_reports_an_exhausted_count_budget(tmp_path, monkeypatch) -
 
 
 @pytest.mark.asyncio
-async def test_server_reports_an_exhausted_wallclock_budget(
-    tmp_path, monkeypatch
-) -> None:
+async def test_server_reports_an_exhausted_wallclock_budget(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, budget_sec=30.0)
     budget = probe_server.ProbeBudget(attempts=1, seconds_used=30.0)
@@ -677,9 +643,7 @@ async def test_server_reports_the_missing_primitive(tmp_path, monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(tmp_path, monkeypatch) -> None:
     ledger = tmp_path / "scratch" / "memory-1" / "probe_ledger.jsonl"
     monkeypatch.setenv(probe_server.LEDGER_ENV, str(ledger))
     monkeypatch.delenv(probe_server.SCRATCH_ENV, raising=False)
@@ -695,11 +659,7 @@ async def test_a_refused_sandbox_reaches_the_ledger_the_parent_reads(
 
     assert result["status"] == probe_server.REFUSED
     assert "probe sandbox unusable" in result["detail"]
-    recorded = [
-        json.loads(line)
-        for line in ledger.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    recorded = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert [record["status"] for record in recorded] == [
         probe_server.REFUSED,
         probe_server.REFUSED,
@@ -725,9 +685,7 @@ async def test_a_refusal_with_no_ledger_to_reach_says_so(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_refusals_the_server_records_are_reported_as_refusals(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_refusals_the_server_records_are_reported_as_refusals(tmp_path, monkeypatch) -> None:
     """The whole point of the fallback ledger: six refusals are not zero calls."""
     _patch_primitive(monkeypatch, _stub_primitive)
     backend = _McpBackend(
@@ -758,9 +716,7 @@ async def test_the_refusals_the_server_records_are_reported_as_refusals(
 
 
 @pytest.mark.asyncio
-async def test_a_driver_outside_the_workspace_is_refused_and_recorded(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_driver_outside_the_workspace_is_refused_and_recorded(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path)
     outside = tmp_path / "elsewhere" / "driver.py"
@@ -779,9 +735,7 @@ async def test_a_driver_outside_the_workspace_is_refused_and_recorded(
 
 
 @pytest.mark.asyncio
-async def test_a_primitive_that_returns_no_timing_is_a_failed_probe(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_primitive_that_returns_no_timing_is_a_failed_probe(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _failing_primitive)
     sandbox = _sandbox(tmp_path)
 
@@ -798,12 +752,8 @@ async def test_a_primitive_that_returns_no_timing_is_a_failed_probe(
 
 
 @pytest.mark.asyncio
-async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(
-    tmp_path, monkeypatch
-) -> None:
-    async def _hanging_primitive(
-        *, driver_script, case_id, constants, timeout_sec, prefix_constants=True
-    ):
+async def test_a_probe_that_overruns_its_ceiling_is_a_failed_probe(tmp_path, monkeypatch) -> None:
+    async def _hanging_primitive(*, driver_script, case_id, constants, timeout_sec, prefix_constants=True):
         await asyncio.sleep(30)
 
     _patch_primitive(monkeypatch, _hanging_primitive)
@@ -884,9 +834,7 @@ def test_probe_config_rejects_an_empty_budget() -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_default_campaign_layout_still_gets_a_usable_probe(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_default_campaign_layout_still_gets_a_usable_probe(tmp_path, monkeypatch) -> None:
     """The CLI default puts experiments_dir inside the workspace; the probe runs anyway.
 
     ``config.experiments_dir = campaign_root`` is ``<workspace>/forge_experiments``
@@ -939,9 +887,7 @@ def test_factory_says_when_it_cannot_place_a_scratch_root(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_the_probe_child_is_given_the_environment_its_driver_needs(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_probe_child_is_given_the_environment_its_driver_needs(tmp_path, monkeypatch) -> None:
     """The MCP client forwards a six-name allow-list, not this process's env.
 
     So the child would start with no import path -- this repo is not installed
@@ -982,9 +928,7 @@ async def test_the_probe_child_is_given_the_environment_its_driver_needs(
 
 
 @pytest.mark.asyncio
-async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_path, monkeypatch) -> None:
     """One GPU, one sentinel: a probe queues behind a lane and a lane behind it."""
     from kernelforge.loop.fanout import campaign_device_lock_path
 
@@ -1002,16 +946,12 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(
     await agent.run(_assignment(), _context(workspace))
 
     env = backend.specs[0].mcp_servers["specialist_probe"].env
-    assert env[probe_server.DEVICE_LOCK_ENV] == str(
-        campaign_device_lock_path(workspace)
-    )
+    assert env[probe_server.DEVICE_LOCK_ENV] == str(campaign_device_lock_path(workspace))
     assert not Path(env[probe_server.DEVICE_LOCK_ENV]).is_relative_to(workspace)
 
 
 @pytest.mark.asyncio
-async def test_a_probe_with_no_device_sentinel_measures_nothing(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_with_no_device_sentinel_measures_nothing(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, device_lock=None)
 
@@ -1026,9 +966,7 @@ async def test_a_probe_with_no_device_sentinel_measures_nothing(
 
 
 @pytest.mark.asyncio
-async def test_waiting_for_a_busy_device_is_charged_and_bounded(
-    tmp_path, monkeypatch
-) -> None:
+async def test_waiting_for_a_busy_device_is_charged_and_bounded(tmp_path, monkeypatch) -> None:
     """A specialist that blocked on the device would spend its session idle."""
     import fcntl
 
@@ -1059,48 +997,30 @@ async def test_waiting_for_a_busy_device_is_charged_and_bounded(
 def test_a_probe_budget_never_outlasts_the_session_that_pays_for_it() -> None:
     """The configured budget is a ceiling, not an entitlement."""
     # Plenty of session: the configured budget stands.
-    assert probe_server.probe_budget_sec(
-        configured_remaining=600.0, session_remaining=1800.0
-    ) == 600.0
+    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=1800.0) == 600.0
     # Little session left: half of what remains, not the configured 600.
-    assert probe_server.probe_budget_sec(
-        configured_remaining=600.0, session_remaining=300.0
-    ) == 150.0
+    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=300.0) == 150.0
     # Overspent, or no session left at all: nothing.
-    assert probe_server.probe_budget_sec(
-        configured_remaining=-5.0, session_remaining=1800.0
-    ) == 0.0
-    assert probe_server.probe_budget_sec(
-        configured_remaining=600.0, session_remaining=0.0
-    ) == 0.0
+    assert probe_server.probe_budget_sec(configured_remaining=-5.0, session_remaining=1800.0) == 0.0
+    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=0.0) == 0.0
     # No declared session deadline leaves the configured budget alone.
-    assert probe_server.probe_budget_sec(
-        configured_remaining=600.0, session_remaining=math.inf
-    ) == 600.0
+    assert probe_server.probe_budget_sec(configured_remaining=600.0, session_remaining=math.inf) == 600.0
 
 
 def test_a_probe_ceiling_leaves_the_session_time_to_write_its_analysis() -> None:
     """``int(budget_sec)`` truncated a fractional budget to an instant timeout."""
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=600.0
-    ) == 600
+    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0) == 600
     # The session, not the budget, is what is short here.
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=300.0, requested=600.0
-    ) == int(300 - probe_server.ANALYSIS_RESERVE_SEC)
+    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=300.0, requested=600.0) == int(
+        300 - probe_server.ANALYSIS_RESERVE_SEC
+    )
     # Never zero, which some backends read as "time out immediately".
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=0.5, session_remaining=1800.0, requested=0.5
-    ) == 1
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=10.0, requested=600.0
-    ) == 1
+    assert probe_server.probe_timeout_sec(budget_remaining=0.5, session_remaining=1800.0, requested=0.5) == 1
+    assert probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=10.0, requested=600.0) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_probe_that_would_leave_no_time_for_the_analysis_is_refused(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_that_would_leave_no_time_for_the_analysis_is_refused(tmp_path, monkeypatch) -> None:
     """A specialist killed mid-probe returns no analysis, and the round raises.
 
     Driven with a fake clock rather than a sleep: what is under test is the
@@ -1130,9 +1050,7 @@ async def test_a_probe_that_would_leave_no_time_for_the_analysis_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_probe_still_runs_while_the_session_has_room_for_both(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_still_runs_while_the_session_has_room_for_both(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
     sandbox = _sandbox(tmp_path, session_deadline=1_000.0 + 1800.0)
@@ -1164,12 +1082,8 @@ async def test_the_mcp_tool_timeout_is_not_the_raw_budget(tmp_path, monkeypatch)
     server = backend.specs[0].mcp_servers["specialist_probe"]
     # Plus the grace the server itself allows the primitive: a client that
     # timed out first would kill the call before ``_record`` wrote anything.
-    assert server.tool_timeout_sec == (
-        int(300 - probe_server.ANALYSIS_RESERVE_SEC) + probe_server.PROBE_TOOL_GRACE_SEC
-    )
-    assert float(
-        server.env[probe_server.SESSION_DEADLINE_ENV]
-    ) > 0.0
+    assert server.tool_timeout_sec == (int(300 - probe_server.ANALYSIS_RESERVE_SEC) + probe_server.PROBE_TOOL_GRACE_SEC)
+    assert float(server.env[probe_server.SESSION_DEADLINE_ENV]) > 0.0
 
 
 # --- the round, not the assignment, is what the budget bounds ----------------
@@ -1193,9 +1107,7 @@ def test_the_probe_budget_is_shared_by_the_specialists_of_one_round(
 
 
 @pytest.mark.asyncio
-async def test_a_rounds_scratch_tree_does_not_outlive_the_round(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_rounds_scratch_tree_does_not_outlive_the_round(tmp_path, monkeypatch) -> None:
     """Nothing removed the per-assignment scratch trees, one per round forever."""
     _patch_primitive(monkeypatch, _stub_primitive)
     probe = _probe(tmp_path)
@@ -1227,9 +1139,7 @@ async def test_a_rounds_scratch_tree_does_not_outlive_the_round(
 
 
 @pytest.mark.asyncio
-async def test_a_rounds_scratch_tree_is_removed_when_the_round_fails(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_rounds_scratch_tree_is_removed_when_the_round_fails(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
 
     class _Exploding(_McpBackend):
@@ -1247,9 +1157,7 @@ async def test_a_rounds_scratch_tree_is_removed_when_the_round_fails(
     )
     pool = specialists.SpecialistPool({"memory": agent}, max_parallel=1)
 
-    outcomes = (
-        await pool.run((_assignment(),), _context(_workspace(tmp_path)))
-    ).outcomes
+    outcomes = (await pool.run((_assignment(),), _context(_workspace(tmp_path)))).outcomes
 
     assert outcomes[0].failure is not None
     assert list(Path(probe.scratch_root).iterdir()) == []
@@ -1307,9 +1215,7 @@ async def _run_one_round(tmp_path, monkeypatch, *, probe=None):
 
 
 @pytest.mark.asyncio
-async def test_a_probe_that_outlived_its_round_is_reported_to_the_caller(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_that_outlived_its_round_is_reported_to_the_caller(tmp_path, monkeypatch) -> None:
     """A specialist killed mid-probe left a benchmark on the shared GPU.
 
     The tree was removed and nothing else was done, so the lanes queued behind
@@ -1340,9 +1246,7 @@ async def test_a_probe_that_outlived_its_round_is_reported_to_the_caller(
 
 
 @pytest.mark.asyncio
-async def test_an_ordinary_round_is_not_made_to_look_contended(
-    tmp_path, monkeypatch
-) -> None:
+async def test_an_ordinary_round_is_not_made_to_look_contended(tmp_path, monkeypatch) -> None:
     """A clean teardown must cost the round nothing."""
     calls = _fake_reaper(monkeypatch, lambda directory: ReapReport(str(directory)))
 
@@ -1355,9 +1259,7 @@ async def test_an_ordinary_round_is_not_made_to_look_contended(
 
 
 @pytest.mark.asyncio
-async def test_a_round_that_never_got_a_tree_is_not_reaped(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_round_that_never_got_a_tree_is_not_reaped(tmp_path, monkeypatch) -> None:
     """There is no directory to survey, and the specialists still analyse."""
     _patch_primitive(monkeypatch, _stub_primitive)
     calls = _fake_reaper(monkeypatch, lambda directory: ReapReport(str(directory)))
@@ -1439,9 +1341,7 @@ def test_an_operator_can_place_the_scratch_root(tmp_path) -> None:
     assert Path(probe.scratch_root) == tmp_path / "elsewhere"
 
 
-def test_a_scratch_root_that_contains_the_workspace_is_refused(
-    tmp_path, caplog
-) -> None:
+def test_a_scratch_root_that_contains_the_workspace_is_refused(tmp_path, caplog) -> None:
     """The containment check ran one way only; a tree removed per round is worse."""
     config = Config(
         workspace=str(tmp_path / "campaign" / "canonical"),
@@ -1460,9 +1360,7 @@ def test_a_scratch_root_that_contains_the_workspace_is_refused(
 
 
 @pytest.mark.asyncio
-async def test_a_refused_probe_costs_one_of_the_round_count(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_refused_probe_costs_one_of_the_round_count(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, max_probes=2)
     budget = probe_server.ProbeBudget()
@@ -1488,9 +1386,7 @@ async def test_a_refused_probe_costs_one_of_the_round_count(
 
 
 @pytest.mark.asyncio
-async def test_an_unavailable_primitive_costs_one_of_the_round_count(
-    tmp_path, monkeypatch
-) -> None:
+async def test_an_unavailable_primitive_costs_one_of_the_round_count(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, None)
     sandbox = _sandbox(tmp_path, max_probes=1)
     budget = probe_server.ProbeBudget()
@@ -1517,11 +1413,7 @@ def test_a_ledger_stops_growing_at_its_cap(tmp_path) -> None:
     for index in range(probe_server.MAX_LEDGER_RECORDS + 5):
         probe_server._append_line(ledger, {"probe_index": index, "status": "refused"})
 
-    lines = [
-        json.loads(line)
-        for line in ledger.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == probe_server.MAX_LEDGER_RECORDS + 1
     assert lines[-1]["label"] == "ledger-full"
     assert "dropped and unrecorded" in lines[-1]["detail"]
@@ -1548,9 +1440,7 @@ def test_a_primitive_that_explodes_on_import_is_reported_unavailable(
 
 
 @pytest.mark.asyncio
-async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(tmp_path, monkeypatch) -> None:
     """A probe that misses these times a binary built from other source.
 
     ``aiter_cache.configure_aiter_cache_isolation`` puts five variables in the
@@ -1612,27 +1502,30 @@ async def test_the_probe_child_inherits_the_campaigns_aiter_cache_isolation(
 
 def test_a_non_positive_requested_ceiling_falls_back_to_the_default() -> None:
     """``requested <= 0`` matched the outer test and failed the inner one."""
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=None
-    ) == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=0
-    ) == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=-5
-    ) == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=True
-    ) == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
-    assert probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested="60"
-    ) == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    assert (
+        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=None)
+        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    )
+    assert (
+        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=0)
+        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    )
+    assert (
+        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=-5)
+        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    )
+    assert (
+        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=True)
+        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    )
+    assert (
+        probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested="60")
+        == probe_server.DEFAULT_PROBE_TIMEOUT_SEC
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_session_too_small_for_one_probe_is_never_offered_one(
-    tmp_path, monkeypatch, caplog
-) -> None:
+async def test_a_session_too_small_for_one_probe_is_never_offered_one(tmp_path, monkeypatch, caplog) -> None:
     """Offered, promised six probes, and refused from the first call."""
     _patch_primitive(monkeypatch, _stub_primitive)
     backend = _McpBackend()
@@ -1655,9 +1548,7 @@ async def test_a_session_too_small_for_one_probe_is_never_offered_one(
 
 
 @pytest.mark.asyncio
-async def test_the_prompt_states_the_ceiling_the_client_enforces(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_prompt_states_the_ceiling_the_client_enforces(tmp_path, monkeypatch) -> None:
     """The tool timeout must outlive the server's own grace, and be stated."""
     _patch_primitive(monkeypatch, _stub_primitive)
     backend = _McpBackend()
@@ -1673,9 +1564,7 @@ async def test_the_prompt_states_the_ceiling_the_client_enforces(
 
     spec = backend.specs[0]
     server = spec.mcp_servers["specialist_probe"]
-    ceiling = probe_server.probe_timeout_sec(
-        budget_remaining=600.0, session_remaining=1800.0, requested=600.0
-    )
+    ceiling = probe_server.probe_timeout_sec(budget_remaining=600.0, session_remaining=1800.0, requested=600.0)
     # The client must outlast the server, or ``_record`` never writes the
     # ledger line that is the only channel back to the parent.
     assert server.tool_timeout_sec == ceiling + probe_server.PROBE_TOOL_GRACE_SEC
@@ -1683,9 +1572,7 @@ async def test_the_prompt_states_the_ceiling_the_client_enforces(
     assert f"{ceiling}s" in spec.system_prompt
 
 
-def test_an_unreachable_round_budget_is_reported_not_silently_per_process(
-    tmp_path, caplog
-) -> None:
+def test_an_unreachable_round_budget_is_reported_not_silently_per_process(tmp_path, caplog) -> None:
     """Falling back per process gives every specialist a full budget of its own."""
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("", encoding="utf-8")
@@ -1701,9 +1588,7 @@ def test_an_unreachable_round_budget_is_reported_not_silently_per_process(
 
 
 @pytest.mark.asyncio
-async def test_a_probe_whose_shared_budget_is_unreachable_measures_nothing(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_probe_whose_shared_budget_is_unreachable_measures_nothing(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     blocker = tmp_path / "not-a-directory"
     blocker.write_text("", encoding="utf-8")
@@ -1722,9 +1607,7 @@ async def test_a_probe_whose_shared_budget_is_unreachable_measures_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_non_utf8_round_budget_does_not_escape_the_handler(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_non_utf8_round_budget_does_not_escape_the_handler(tmp_path, monkeypatch) -> None:
     """A UnicodeDecodeError is not an OSError; it reached JSON-RPC -32603."""
     _patch_primitive(monkeypatch, _stub_primitive)
     shared = tmp_path / "round_budget.json"
@@ -1744,9 +1627,7 @@ async def test_a_non_utf8_round_budget_does_not_escape_the_handler(
 
 
 @pytest.mark.asyncio
-async def test_the_gate_is_re_checked_after_waiting_for_the_device(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_gate_is_re_checked_after_waiting_for_the_device(tmp_path, monkeypatch) -> None:
     """A full-length wait can push the session under the analysis reserve.
 
     The old code recomputed the ceiling but not the gate, so the probe started
@@ -1805,9 +1686,7 @@ def test_a_session_deadline_that_is_not_a_time_is_refused(tmp_path) -> None:
 
     for raw in ("nan", "inf", "-inf", "0.000", "-5"):
         with pytest.raises(probe_server.ProbeSandboxError, match="Unix timestamp"):
-            probe_server.load_sandbox(
-                {**base, probe_server.SESSION_DEADLINE_ENV: raw}
-            )
+            probe_server.load_sandbox({**base, probe_server.SESSION_DEADLINE_ENV: raw})
 
     # Absent stays fail-open: the configured probe budget still bounds it.
     sandbox = probe_server.load_sandbox(base)
@@ -1830,9 +1709,7 @@ def test_a_setup_with_no_deadline_omits_the_variable(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_every_result_carries_the_three_numbers_promised(
-    tmp_path, monkeypatch
-) -> None:
+async def test_every_result_carries_the_three_numbers_promised(tmp_path, monkeypatch) -> None:
     """The description promised a third number the record never carried."""
     _patch_primitive(monkeypatch, _stub_primitive)
     monkeypatch.setattr(probe_server, "wall_clock", lambda: 1_000.0)
@@ -1855,9 +1732,7 @@ async def test_every_result_carries_the_three_numbers_promised(
 
 
 @pytest.mark.asyncio
-async def test_the_ledger_full_marker_is_written_before_the_refusals_go_quiet(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_ledger_full_marker_is_written_before_the_refusals_go_quiet(tmp_path, monkeypatch) -> None:
     """A truncated ledger that reads like a short one is what the marker prevents."""
     ledger = tmp_path / "scratch" / "memory-1" / "probe_ledger.jsonl"
     monkeypatch.setenv(probe_server.LEDGER_ENV, str(ledger))
@@ -1871,19 +1746,13 @@ async def test_the_ledger_full_marker_is_written_before_the_refusals_go_quiet(
             {"label": "widen", "driver_script": "driver.py", "case_id": "case-a"},
         )
 
-    lines = [
-        json.loads(line)
-        for line in ledger.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    lines = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert len(lines) == probe_server.MAX_LEDGER_RECORDS + 1
     assert lines[-1]["label"] == "ledger-full"
 
 
 @pytest.mark.asyncio
-async def test_a_device_sentinel_that_does_not_exist_measures_nothing(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_device_sentinel_that_does_not_exist_measures_nothing(tmp_path, monkeypatch) -> None:
     """Opening it ``a+`` locked a fresh private file and serialized nothing."""
     _patch_primitive(monkeypatch, _stub_primitive)
     missing = tmp_path / "no-such-sentinel.lock"
@@ -1901,9 +1770,7 @@ async def test_a_device_sentinel_that_does_not_exist_measures_nothing(
 
 
 @pytest.mark.asyncio
-async def test_the_probe_index_counts_this_assignments_own_attempts(
-    tmp_path, monkeypatch
-) -> None:
+async def test_the_probe_index_counts_this_assignments_own_attempts(tmp_path, monkeypatch) -> None:
     """The ledger is one assignment's; a round-global counter read 1, 3, 4."""
     _patch_primitive(monkeypatch, _stub_primitive)
     shared = tmp_path / "round_budget.json"
@@ -1930,9 +1797,7 @@ async def test_the_probe_index_counts_this_assignments_own_attempts(
 
 
 @pytest.mark.asyncio
-async def test_a_round_whose_tree_cannot_be_made_disables_the_probe(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_round_whose_tree_cannot_be_made_disables_the_probe(tmp_path, monkeypatch) -> None:
     """``None`` meant both "no round" and "no tree", so the probe fell back to it."""
     _patch_primitive(monkeypatch, _stub_primitive)
 
@@ -1951,9 +1816,7 @@ async def test_a_round_whose_tree_cannot_be_made_disables_the_probe(
     )
     pool = specialists.SpecialistPool({"memory": agent}, max_parallel=1)
 
-    outcomes = (
-        await pool.run((_assignment(),), _context(_workspace(tmp_path)))
-    ).outcomes
+    outcomes = (await pool.run((_assignment(),), _context(_workspace(tmp_path)))).outcomes
 
     assert backend.specs[0].mcp_servers == {}
     assert "No probe ran" in outcomes[0].content
@@ -1990,9 +1853,7 @@ def test_the_probe_env_overrides_are_reachable_from_the_forge_loop_path(
     """Concrete click defaults meant ``from_env`` never saw the environment."""
     from kernelforge.cli import main
 
-    params = {
-        param.name: param for param in main.commands["forge-loop"].params
-    }
+    params = {param.name: param for param in main.commands["forge-loop"].params}
     for name in (
         "specialist_probe",
         "specialist_probe_max",

@@ -99,13 +99,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 def _resolve_repo(arguments: dict[str, Any]) -> str:
     """Pick and validate the target repository for one call."""
-    repo = str(
-        arguments.get("repo") or os.environ.get("PR_KB_REPO", "")
-    ).strip()
+    repo = str(arguments.get("repo") or os.environ.get("PR_KB_REPO", "")).strip()
     if not repo:
-        raise InvalidParamsError(
-            "no repo configured for this campaign; pass repo=owner/name"
-        )
+        raise InvalidParamsError("no repo configured for this campaign; pass repo=owner/name")
     parts = [segment for segment in repo.split("/") if segment]
     if len(parts) != 2:
         raise InvalidParamsError(f"repo must be owner/name, got {repo!r}")
@@ -179,9 +175,7 @@ def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
     files = detail.get("files")
     if files is None:
         files = []
-    if not isinstance(files, list) or not all(
-        isinstance(item, dict) for item in files
-    ):
+    if not isinstance(files, list) or not all(isinstance(item, dict) for item in files):
         raise PRContractError("PR response field 'files' must be an array of objects")
     commits = detail.get("commits")
     if commits is None:
@@ -218,7 +212,9 @@ def _get_reference(arguments: dict[str, Any]) -> dict[str, Any]:
             "mechanisms": distill.get("mechanisms"),
             "expected_gain": distill.get("expected_gain"),
             "risk_notes": distill.get("risk_notes"),
-        } if distill else None,
+        }
+        if distill
+        else None,
     }
 
 
@@ -308,11 +304,13 @@ def _write_message(payload: dict[str, Any]) -> None:
 
 def _write_error(request_id: Any, code: int, message: str) -> None:
     """Write one JSON-RPC error response."""
-    _write_message({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": code, "message": message},
-    })
+    _write_message(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        }
+    )
 
 
 async def _serve() -> None:

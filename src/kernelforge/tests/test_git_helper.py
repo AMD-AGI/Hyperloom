@@ -63,7 +63,8 @@ def test_the_environment_overlay_extends_rather_than_replaces(tmp_path, monkeypa
     monkeypatch.setenv("FORGE_GIT_HELPER_PROBE", "inherited")
 
     result = git(
-        "-c", "alias.probe=!printf '%s %s' \"$FORGE_GIT_HELPER_PROBE\" \"$OVERLAID\"",
+        "-c",
+        'alias.probe=!printf \'%s %s\' "$FORGE_GIT_HELPER_PROBE" "$OVERLAID"',
         "probe",
         cwd=root,
         env={"OVERLAID": "overlaid"},
@@ -75,8 +76,7 @@ def test_the_environment_overlay_extends_rather_than_replaces(tmp_path, monkeypa
 def test_input_reaches_the_command(tmp_path):
     root = _repo(tmp_path)
     patch = (
-        "diff --git a/kernel.py b/kernel.py\n"
-        "--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
+        "diff --git a/kernel.py b/kernel.py\n--- a/kernel.py\n+++ b/kernel.py\n@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n"
     )
 
     git("apply", "-", cwd=root, input=patch)
@@ -93,9 +93,7 @@ def test_a_wedged_command_is_bounded_by_the_timeout(tmp_path):
     with pytest.raises(subprocess.TimeoutExpired):
         git("-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root, timeout=0.2)
 
-    assert marker not in subprocess.run(
-        ["ps", "-eo", "args"], capture_output=True, text=True
-    ).stdout
+    assert marker not in subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
 
 
 async def test_the_async_entry_reports_the_same_result_shape(tmp_path):
@@ -131,9 +129,7 @@ async def test_a_cancelled_await_takes_the_git_process_with_it(tmp_path):
     # sibling test or a parallel shard sleeping too would otherwise answer it.
     marker = f"forge-cancel-{uuid.uuid4().hex[:12]}"
 
-    task = asyncio.ensure_future(
-        git_async("-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root)
-    )
+    task = asyncio.ensure_future(git_async("-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root))
     await asyncio.sleep(0.2)
     task.cancel()
 
@@ -141,9 +137,7 @@ async def test_a_cancelled_await_takes_the_git_process_with_it(tmp_path):
         # Bounded so a cancellation that does not take fails the test rather
         # than hanging it.
         await asyncio.wait_for(task, timeout=5)
-    assert marker not in subprocess.run(
-        ["ps", "-eo", "args"], capture_output=True, text=True
-    ).stdout
+    assert marker not in subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
 
 
 async def test_a_wedged_await_is_bounded_too(tmp_path):
@@ -154,13 +148,9 @@ async def test_a_wedged_await_is_bounded_too(tmp_path):
     marker = f"forge-wedged-{uuid.uuid4().hex[:12]}"
 
     with pytest.raises(asyncio.TimeoutError):
-        await git_async(
-            "-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root, timeout=0.2
-        )
+        await git_async("-c", f"alias.wait=!sleep 30 # {marker}", "wait", cwd=root, timeout=0.2)
 
-    assert marker not in subprocess.run(
-        ["ps", "-eo", "args"], capture_output=True, text=True
-    ).stdout
+    assert marker not in subprocess.run(["ps", "-eo", "args"], capture_output=True, text=True).stdout
 
 
 def test_a_replaced_file_keeps_the_permissions_it_had(tmp_path):

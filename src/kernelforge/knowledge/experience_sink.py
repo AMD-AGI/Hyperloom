@@ -67,8 +67,7 @@ _C_LIKE_LANGS = {"hip", "cuda", "cpp", "c"}
 # --------------------------------------------------------------------------- #
 # slug / value normalization
 # --------------------------------------------------------------------------- #
-def resolve_operation(kernel_source: str, kernel_path: str,
-                      target_functions: list[str] | None = None) -> str:
+def resolve_operation(kernel_source: str, kernel_path: str, target_functions: list[str] | None = None) -> str:
     """Return the operation identity (the entry function name, not the file name).
 
     Uses ``derive_kernel_names`` (parses ``@triton.jit`` / ``@*.kernel`` defs and
@@ -89,9 +88,9 @@ def resolve_operation(kernel_source: str, kernel_path: str,
     unaffected: the anchor derive succeeds and ``target_functions`` is never
     consulted.
     """
+
     def _pick(names: list[str]) -> str | None:
-        preferred = [n for n in names
-                     if not n.lower().startswith(("launch", "main", "wrapper", "run_"))]
+        preferred = [n for n in names if not n.lower().startswith(("launch", "main", "wrapper", "run_"))]
         if preferred:
             return preferred[0]
         return names[0] if names else None
@@ -184,7 +183,7 @@ def find_defining_source(
     glob_re = re.compile(r"__global__[^\n]*\b" + re.escape(op) + r"\b")
     if def_re.search(anchor_source or "") or glob_re.search(anchor_source or ""):
         return anchor_source or ""
-    for f in (source_files or []):
+    for f in source_files or []:
         txt = _read_text_safe(f, source_contents)
         if txt and (def_re.search(txt) or glob_re.search(txt)):
             return txt
@@ -216,7 +215,7 @@ def find_defining_path(
     glob_re = re.compile(r"__global__[^\n]*\b" + re.escape(op) + r"\b")
     if def_re.search(anchor_source or "") or glob_re.search(anchor_source or ""):
         return anchor_path
-    for f in (source_files or []):
+    for f in source_files or []:
         txt = _read_text_safe(f, source_contents)
         if txt and (def_re.search(txt) or glob_re.search(txt)):
             return f
@@ -234,9 +233,7 @@ def infer_source_owner_framework(
     concrete_operation: str = "",
 ) -> str:
     """Resolve the canonical framework that owns the concrete operation."""
-    concrete_op = concrete_operation or resolve_operation(
-        kernel_source, kernel_path, target_functions=target_functions
-    )
+    concrete_op = concrete_operation or resolve_operation(kernel_source, kernel_path, target_functions=target_functions)
     defining_path = find_defining_path(
         concrete_op,
         kernel_path,
@@ -263,7 +260,7 @@ def _balanced_parens(source: str, open_idx: int) -> tuple[str, int]:
         elif c == ")":
             depth -= 1
             if depth == 0:
-                return source[open_idx + 1:i], i
+                return source[open_idx + 1 : i], i
     return "", -1
 
 
@@ -282,7 +279,7 @@ def _signature_params(source: str, func: str) -> str | None:
         if close < 0:
             continue
         # A definition has a body after the (optional trailing return type).
-        if re.match(r"\s*(?:->[^\{;]*)?\{", source[close + 1:close + 60]):
+        if re.match(r"\s*(?:->[^\{;]*)?\{", source[close + 1 : close + 60]):
             return inner
     return None
 
@@ -337,11 +334,11 @@ def _parse_param_c(p: str) -> tuple[str, str]:
     m_arr = re.search(r"((?:\[\s*(?:\d+\s*)?\])+)\s*$", body)
     if m_arr:
         arr = m_arr.group(1)
-        body = body[:m_arr.start()].rstrip()
+        body = body[: m_arr.start()].rstrip()
     m_name = re.search(r"([A-Za-z_]\w*)\s*$", body)
     if not m_name:
         return "", ""
-    typ = body[:m_name.start()].strip()
+    typ = body[: m_name.start()].strip()
     name = m_name.group(1).strip()
     # Pointer/reference markers may attach to the name side ("float *a"); fold
     # them back into the type so the recorded dtype is faithful.
@@ -434,7 +431,7 @@ def _extract_json(text: str) -> dict[str, Any]:
     if candidate is None:
         start = text.find("{")
         end = text.rfind("}")
-        candidate = text[start:end + 1] if start != -1 and end > start else ""
+        candidate = text[start : end + 1] if start != -1 and end > start else ""
     if not candidate:
         return {}
     try:
@@ -480,6 +477,7 @@ async def _query_llm(config, workspace: str, prompt: str, usage=None) -> str:
 
 def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
     """Coerce the LLM's JSON into the fields we store, with safe fallbacks."""
+
     def _str(key: str) -> str:
         val = raw.get(key)
         return val.strip() if isinstance(val, str) and val.strip() else ""
@@ -495,8 +493,7 @@ def _normalize_summary(raw: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def summarize_run(config, workspace: str, op: str, digest: str,
-                  kernel_source: str, usage=None) -> dict[str, Any]:
+def summarize_run(config, workspace: str, op: str, digest: str, kernel_source: str, usage=None) -> dict[str, Any]:
     """Summarize a run with one LLM call; returns normalized fields (never raises).
 
     On any backend failure, timeout, or unparsable reply every field degrades to
@@ -515,8 +512,7 @@ def summarize_run(config, workspace: str, op: str, digest: str,
         log.warning("experience summarize LLM failed: %r", exc)
         return defaults
     parsed = _normalize_summary(_extract_json(reply))
-    log.info("experience summarize: category=%s strategy=%r",
-             parsed["category"], parsed["strategy"][:60])
+    log.info("experience summarize: category=%s strategy=%r", parsed["category"], parsed["strategy"][:60])
     return parsed
 
 
@@ -639,19 +635,28 @@ def write_run_experience(
     """
     try:
         return _write_run_experience_impl(
-            config=config, workspace=workspace, kernel_path=kernel_path,
-            kernel_source=kernel_source, fellow=fellow, gpu_target=gpu_target,
-            experiment_id=experiment_id, baseline_wall_ms=baseline_wall_ms,
-            best_wall_ms=best_wall_ms, mean_case_speedup=mean_case_speedup,
+            config=config,
+            workspace=workspace,
+            kernel_path=kernel_path,
+            kernel_source=kernel_source,
+            fellow=fellow,
+            gpu_target=gpu_target,
+            experiment_id=experiment_id,
+            baseline_wall_ms=baseline_wall_ms,
+            best_wall_ms=best_wall_ms,
+            mean_case_speedup=mean_case_speedup,
             cumulative_diff=cumulative_diff,
-            digest=digest, snr_db=snr_db,
-            source_files=source_files, target_functions=target_functions,
+            digest=digest,
+            snr_db=snr_db,
+            source_files=source_files,
+            target_functions=target_functions,
             operator_name=operator_name,
             implementation_signature_override=implementation_signature_override,
             implementation_identity_override=implementation_identity_override,
             framework=framework,
             summary_override=summary_override,
-            reused_speedup=reused_speedup, usage=usage,
+            reused_speedup=reused_speedup,
+            usage=usage,
         )
     except Exception as exc:  # noqa: BLE001 - a KB write must never break the loop
         # Imported here rather than at module scope: the reader imports this
@@ -664,16 +669,31 @@ def write_run_experience(
         return {"written": False, "reason": reason}
 
 
-def _write_run_experience_impl(*, config, workspace, kernel_path, kernel_source,
-                               fellow, gpu_target, experiment_id, baseline_wall_ms,
-                               best_wall_ms, mean_case_speedup, cumulative_diff,
-                               digest, snr_db,
-                               source_files=None, target_functions=None,
-                               operator_name="",
-                               implementation_signature_override="",
-                               implementation_identity_override=None, framework="",
-                               summary_override=None, reused_speedup=None,
-                               usage=None) -> dict[str, Any]:
+def _write_run_experience_impl(
+    *,
+    config,
+    workspace,
+    kernel_path,
+    kernel_source,
+    fellow,
+    gpu_target,
+    experiment_id,
+    baseline_wall_ms,
+    best_wall_ms,
+    mean_case_speedup,
+    cumulative_diff,
+    digest,
+    snr_db,
+    source_files=None,
+    target_functions=None,
+    operator_name="",
+    implementation_signature_override="",
+    implementation_identity_override=None,
+    framework="",
+    summary_override=None,
+    reused_speedup=None,
+    usage=None,
+) -> dict[str, Any]:
     # The hardware model addresses the record; without it the run would file its
     # experience under a GPU-less address that no read ever resolves to, so a
     # silent write is worse than no write at all.
@@ -723,21 +743,15 @@ def _write_run_experience_impl(*, config, workspace, kernel_path, kernel_source,
     )
     op = identity.kernel_name
     backend_lang = identity.backend
-    op_source = find_defining_source(
-        concrete_op, kernel_path, kernel_source, source_files
-    )
+    op_source = find_defining_source(concrete_op, kernel_path, kernel_source, source_files)
     dtypes = extract_input_dtypes(op_source, concrete_op, backend_lang)
     if implementation_signature_override and implementation_identity_override:
         impl_signature = str(implementation_signature_override)
         impl_identity = dict(implementation_identity_override)
         if hash_implementation_identity(impl_identity) != impl_signature:
-            raise ValueError(
-                "implementation identity override does not match its signature"
-            )
+            raise ValueError("implementation identity override does not match its signature")
     elif implementation_signature_override or implementation_identity_override:
-        raise ValueError(
-            "implementation signature and identity overrides must be supplied together"
-        )
+        raise ValueError("implementation signature and identity overrides must be supplied together")
     else:
         # Compatibility for direct/non-campaign callers. Forge campaigns always
         # supply the immutable pristine contract captured before warm-start.
@@ -748,9 +762,12 @@ def _write_run_experience_impl(*, config, workspace, kernel_path, kernel_source,
             framework=framework,
         )
     log.info(
-        "experience identity: op=%s concrete=%s framework=%s "
-        "backend=%s implementation=%s",
-        op, concrete_op, framework, backend_lang, impl_signature[:12],
+        "experience identity: op=%s concrete=%s framework=%s backend=%s implementation=%s",
+        op,
+        concrete_op,
+        framework,
+        backend_lang,
+        impl_signature[:12],
     )
 
     # The KB Store is addressed by the recipe identity, so the facade is opened
@@ -774,8 +791,12 @@ def _write_run_experience_impl(*, config, workspace, kernel_path, kernel_source,
         summary = _normalize_summary(summary_override)
     else:
         summary = summarize_run(
-            config=config, workspace=workspace, op=op,
-            digest=digest, kernel_source=kernel_source, usage=usage,
+            config=config,
+            workspace=workspace,
+            op=op,
+            digest=digest,
+            kernel_source=kernel_source,
+            usage=usage,
         )
 
     metric = {
@@ -838,7 +859,9 @@ def _write_run_experience_impl(*, config, workspace, kernel_path, kernel_source,
     solution = str(outcome.get("solution") or "")
     log.info(
         "experience written: %s (speedup %.3f, champion=%s)",
-        solution, this_speedup, outcome.get("champion"),
+        solution,
+        this_speedup,
+        outcome.get("champion"),
     )
     return {
         "written": True,

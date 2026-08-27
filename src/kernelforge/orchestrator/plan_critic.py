@@ -65,9 +65,7 @@ _WIDTH_BLOCK_SCHEMA: dict[str, Any] = {
     _WIDTH_BLOCK_KEY: [
         {
             "lane_id": "The integer lane_id from draft_lane_plans",
-            "reason": (
-                "Why this lane is not worth an Implementer session of its own"
-            ),
+            "reason": ("Why this lane is not worth an Implementer session of its own"),
         }
     ]
 }
@@ -332,12 +330,7 @@ def parse_plan_critic_width_block(text: str) -> LaneNarrowingRuling:
     start = review.rfind("{", 0, marker)
     if start < 0:
         return LaneNarrowingRuling(
-            notes=(
-                _bounded_note(
-                    f"the review named {_WIDTH_BLOCK_KEY} outside any JSON "
-                    "object"
-                ),
-            ),
+            notes=(_bounded_note(f"the review named {_WIDTH_BLOCK_KEY} outside any JSON object"),),
             status="malformed",
             unread=True,
         )
@@ -428,9 +421,7 @@ def build_plan_critic_prompts(
         "context": context.to_prompt_dict(),
         "dispatch_plan": dispatch_plan.to_dict(),
         "specialist_coverage": dict(coverage),
-        "specialist_outcomes": [
-            outcome.to_dict() for outcome in specialist_outcomes
-        ],
+        "specialist_outcomes": [outcome.to_dict() for outcome in specialist_outcomes],
     }
     if len(drafts) == 1:
         payload["draft_plan"] = drafts[0].text
@@ -564,13 +555,10 @@ class PlanCriticAgent:
         duration_sec = time.monotonic() - started_at
         verdict_source = "explicit" if verdict_explicit else "inferred"
         if not verdict_explicit:
-            log.warning(
-                "plan critic omitted an explicit VERDICT; inferring REVISE"
-            )
+            log.warning("plan critic omitted an explicit VERDICT; inferring REVISE")
         self._log_width_ruling(ruling)
         log.info(
-            "plan critic completed verdict=%s source=%s width=%s lane_drops=%d "
-            "duration=%.3fs",
+            "plan critic completed verdict=%s source=%s width=%s lane_drops=%d duration=%.3fs",
             verdict,
             verdict_source,
             ruling.status,
@@ -606,11 +594,7 @@ class PlanCriticAgent:
         """
         if drafts <= 1:
             volunteered = parse_plan_critic_width_block(review)
-            return (
-                volunteered
-                if volunteered.answered
-                else LaneNarrowingRuling(status="not_asked")
-            )
+            return volunteered if volunteered.answered else LaneNarrowingRuling(status="not_asked")
         ruling = parse_plan_critic_width_block(review)
         if ruling.answered:
             return ruling
@@ -682,8 +666,7 @@ class PlanCriticAgent:
         except Exception as error:  # noqa: BLE001 - provider boundary
             return self._unrepaired(
                 ruling,
-                f"one repair pass for the width block failed: "
-                f"{_bounded_error_detail(error)}",
+                f"one repair pass for the width block failed: {_bounded_error_detail(error)}",
             )
         recovered = parse_plan_critic_width_block(repaired)
         if not recovered.answered:
@@ -692,8 +675,7 @@ class PlanCriticAgent:
                 "one repair pass returned no readable width block either",
             )
         log.info(
-            "plan critic width block was recovered by one repair pass "
-            "(%s); it asks to drop %d lane(s)",
+            "plan critic width block was recovered by one repair pass (%s); it asks to drop %d lane(s)",
             ruling.status,
             len(recovered.drops),
         )
@@ -702,10 +684,7 @@ class PlanCriticAgent:
             notes=(
                 *ruling.notes,
                 *recovered.notes,
-                _bounded_note(
-                    "the review did not end with a readable width block; one "
-                    "repair pass restated it"
-                ),
+                _bounded_note("the review did not end with a readable width block; one repair pass restated it"),
             ),
             status="repaired",
             # What the first reading could not find has been found. Only what
@@ -753,15 +732,13 @@ class PlanCriticAgent:
         detail = "; ".join(ruling.notes)
         if ruling.status in _UNREAD_WIDTH_STATUSES:
             log.warning(
-                "plan critic width ruling was never read (%s), so no lane can "
-                "be dropped on it: %s",
+                "plan critic width ruling was never read (%s), so no lane can be dropped on it: %s",
                 ruling.status,
                 detail,
             )
         elif ruling.unread:
             log.warning(
-                "plan critic width block was read and part of what it asked "
-                "for was not: %s",
+                "plan critic width block was read and part of what it asked for was not: %s",
                 detail,
             )
         else:

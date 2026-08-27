@@ -50,8 +50,7 @@ def _without_compaction_recap(text: str, *, role: str) -> str:
     if stripped == text:
         return text
     log.warning(
-        "%s ran out of context and was compacted; its recap was dropped and "
-        "the answer it went on to give was kept",
+        "%s ran out of context and was compacted; its recap was dropped and the answer it went on to give was kept",
         role,
     )
     return stripped.strip()
@@ -66,26 +65,15 @@ def validated_agent_text(
 ) -> str:
     """Return complete response text or classify why it is unusable."""
     if is_api_failure(result):
-        detail = (
-            result.stderr_tail
-            or result.end_reason
-            or f"{role} backend failed before producing an answer"
-        )
+        detail = result.stderr_tail or result.end_reason or f"{role} backend failed before producing an answer"
         raise AgentResponseInfrastructureError(str(detail))
 
     text = _without_compaction_recap(str(result.text or "").strip(), role=role)
     end_reason = str(result.end_reason or "").strip()
     if end_reason in {"turn_cap", "timeout"} and not allow_incomplete:
-        raise AgentResponseIncompleteError(
-            f"{role} session ended before completing its answer: {end_reason}"
-        )
-    if (
-        "[session ended with sdk error:" in text.lower()
-        and not allow_incomplete
-    ):
-        raise AgentResponseIncompleteError(
-            f"{role} session returned a truncated SDK error transcript"
-        )
+        raise AgentResponseIncompleteError(f"{role} session ended before completing its answer: {end_reason}")
+    if "[session ended with sdk error:" in text.lower() and not allow_incomplete:
+        raise AgentResponseIncompleteError(f"{role} session returned a truncated SDK error transcript")
     if not text and not allow_empty:
         raise AgentResponseIncompleteError(f"{role} returned no answer")
     return text

@@ -74,6 +74,7 @@ def _gate(tmp_path: Path, **overrides) -> tuple[InSessionGate, Path]:
 
 # ── constructor bookkeeping ────────────────────────────────────────────────────
 
+
 def test_findings_blob_joins(tmp_path):
     gate, _ = _gate(tmp_path)
     gate.findings = ["a", "b"]
@@ -98,6 +99,7 @@ def test_extra_protected_globs_merged_and_deduped(tmp_path):
 
 # ── path-classification helpers ────────────────────────────────────────────────
 
+
 def test_is_protected_dir_path_detects_test_dir(tmp_path):
     gate, workspace = _gate(tmp_path)
     p = str(workspace / "tests" / "ref.py")
@@ -120,6 +122,7 @@ def test_snapshot_keys_driver_relative_to_root(tmp_path):
 
 # ── make_agent_hooks ───────────────────────────────────────────────────────────
 
+
 def test_make_agent_hooks_shape(tmp_path):
     """Expose the provider-neutral lifecycle hook groups."""
     gate, _ = _gate(tmp_path)
@@ -135,18 +138,19 @@ def test_make_agent_hooks_shape(tmp_path):
     assert gate.bench_timeout_sec == 300
     assert gate.hook_timeout_sec == 2820
     assert hooks.stop[0].timeout_sec == 2820
-    assert gate.hook_timeout_sec == (
-        gate.stage_timeout_sec + 3 * gate.bench_timeout_sec + 120
-    )
+    assert gate.hook_timeout_sec == (gate.stage_timeout_sec + 3 * gate.bench_timeout_sec + 120)
 
 
 # ── PreToolUse edit deny ───────────────────────────────────────────────────────
 
+
 def test_on_pre_edit_denies_protected(tmp_path):
     gate, workspace = _gate(tmp_path)
-    out = _run(gate._on_pre_edit(
-        {"tool_name": "Edit", "tool_input": {"file_path": str(workspace / "forge_driver.py")}},
-        None, None))
+    out = _run(
+        gate._on_pre_edit(
+            {"tool_name": "Edit", "tool_input": {"file_path": str(workspace / "forge_driver.py")}}, None, None
+        )
+    )
     dec = out["hookSpecificOutput"]
     assert dec["permissionDecision"] == "deny"
     assert any("protected measurement file" in f for f in gate.findings)
@@ -155,8 +159,7 @@ def test_on_pre_edit_denies_protected(tmp_path):
 def test_on_pre_edit_allows_target_kernel(tmp_path):
     gate, workspace = _gate(tmp_path)
     kernel = workspace / "aiter" / "csrc" / "kernel.cu"
-    out = _run(gate._on_pre_edit(
-        {"tool_name": "Edit", "tool_input": {"file_path": str(kernel)}}, None, None))
+    out = _run(gate._on_pre_edit({"tool_name": "Edit", "tool_input": {"file_path": str(kernel)}}, None, None))
     assert out == {}
 
 
@@ -168,19 +171,18 @@ def test_on_pre_edit_ignores_non_edit_tool(tmp_path):
 
 # ── PreToolUse bash deny ───────────────────────────────────────────────────────
 
+
 def test_on_pre_bash_denies_protected_write(tmp_path):
     gate, _ = _gate(tmp_path)
-    out = _run(gate._on_pre_bash(
-        {"tool_name": "Bash", "tool_input": {"command": "echo x > forge_driver.py"}},
-        None, None))
+    out = _run(
+        gate._on_pre_bash({"tool_name": "Bash", "tool_input": {"command": "echo x > forge_driver.py"}}, None, None)
+    )
     assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_on_pre_bash_allows_readonly(tmp_path):
     gate, _ = _gate(tmp_path)
-    out = _run(gate._on_pre_bash(
-        {"tool_name": "Bash", "tool_input": {"command": "ls -la 2>/dev/null"}},
-        None, None))
+    out = _run(gate._on_pre_bash({"tool_name": "Bash", "tool_input": {"command": "ls -la 2>/dev/null"}}, None, None))
     assert out == {}
 
 
@@ -192,19 +194,19 @@ def test_on_pre_bash_ignores_non_bash(tmp_path):
 
 # ── PostToolUse edit counting ──────────────────────────────────────────────────
 
+
 def test_on_edit_counts_all_non_protected_implementation_files(tmp_path):
     gate, workspace = _gate(tmp_path)
     kernel = str(workspace / "aiter" / "csrc" / "kernel.cu")
     _run(gate._on_edit({"tool_name": "Edit", "tool_input": {"file_path": kernel}}, None, None))
     assert gate.edit_count == 1
     # A non-target helper is an equally valid implementation edit.
-    _run(gate._on_edit(
-        {"tool_name": "Edit", "tool_input": {"file_path": str(workspace / "helper.py")}},
-        None, None))
+    _run(gate._on_edit({"tool_name": "Edit", "tool_input": {"file_path": str(workspace / "helper.py")}}, None, None))
     assert gate.edit_count == 2
 
 
 # ── hookless outer-gate edit counting ──────────────────────────────────────────
+
 
 def test_count_target_edits_includes_non_target_implementation_files(tmp_path):
     """Mirror _on_edit for backends whose changes are counted post-hoc."""
@@ -217,9 +219,7 @@ def test_count_target_edits_accepts_absolute_implementation_paths(tmp_path):
     """Count absolute non-protected implementation paths."""
     gate, workspace = _gate(tmp_path)
     kernel_abs = str(workspace / "aiter" / "csrc" / "kernel.cu")
-    assert gate.count_target_edits(
-        str(workspace), [kernel_abs, str(workspace / "helper.py")]
-    ) == 2
+    assert gate.count_target_edits(str(workspace), [kernel_abs, str(workspace / "helper.py")]) == 2
     assert gate.count_target_edits(str(workspace), []) == 0
 
 
@@ -236,6 +236,7 @@ import kernelforge.loop.insession_gate as gate_module
 
 def _patch_canonical(monkeypatch, *, correct=True, wall_ms=0.5):
     """Stub the gate's canonical correctness + bench with in-process fakes."""
+
     async def _corr(*a, **k):
         return {"passed": correct, "message": "" if correct else "SNR too low"}
 
@@ -398,10 +399,10 @@ def test_correctness_only_allows_without_ever_consulting_the_perf_gate(tmp_path,
     monkeypatch.setattr(gate_module, "measure_wallclock", _bench)
 
     out = _run(gate._on_stop({}, None, None))
-    assert out == {}                       # allowed
+    assert out == {}  # allowed
     assert gate.passed is True
     assert gate.end_reason == "converged"
-    assert bench_calls["n"] == 0            # perf gate never consulted in PORT mode
+    assert bench_calls["n"] == 0  # perf gate never consulted in PORT mode
 
 
 def test_stop_hands_off_when_block_budget_exhausted(tmp_path, monkeypatch):
@@ -439,6 +440,7 @@ def test_stop_block_cap_hands_off_as_harness_tampered(tmp_path):
 
 def test_stop_fails_open_on_exception(tmp_path, monkeypatch):
     gate, _ = _gate(tmp_path)
+
     # Force the protection check to raise; the gate must fail OPEN (allow stop)
     # so a hook crash can never hang the session — the outer loop re-validates.
     def boom():

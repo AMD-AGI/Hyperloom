@@ -19,7 +19,7 @@ from pathlib import Path
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 _MAX_SOURCE_CHARS = 16000  # keep the embedded source bounded for the prompt
-_MAX_DRIVER_CHARS = 8000   # the driver is small; cap defensively
+_MAX_DRIVER_CHARS = 8000  # the driver is small; cap defensively
 
 # Per source language: the markdown fence to embed it under, and the name to call
 # it by. A HIP kernel fenced as ``python`` misleads the agent in the block it
@@ -51,8 +51,7 @@ def build_port_program_md(spec: RewriteSpec, driver_path: str) -> str:
     candidate = spec.flydsl_kernel_relpath
     targets = ", ".join(spec.target_functions) or "the target kernel"
     entry_hint = (
-        f"The source host entry `{spec.source_entry}` runs the kernel end-to-end.\n"
-        if spec.source_entry else ""
+        f"The source host entry `{spec.source_entry}` runs the kernel end-to-end.\n" if spec.source_entry else ""
     )
     fence, language = _SOURCE_PRESENTATION.get(spec.source_language, ("", ""))
     source_heading = (

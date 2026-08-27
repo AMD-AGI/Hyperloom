@@ -111,10 +111,12 @@ class _Service:
         if path.endswith("/search/prs"):
             # A bare JSON array of {matched_field, snippet, summary}, NOT the
             # {items, page} envelope the /prs endpoints use.
-            return _Body(_search_body(
-                self.by_query.get(params.get("q", [""])[0], []),
-                repo=(params.get("repo") or [REPO])[0],
-            ))
+            return _Body(
+                _search_body(
+                    self.by_query.get(params.get("q", [""])[0], []),
+                    repo=(params.get("repo") or [REPO])[0],
+                )
+            )
         if params.get("file_path"):
             return _Body(_list_body(self.by_file.get(params["file_path"][0], [])))
         return _Body(_list_body(self.recent))
@@ -137,11 +139,13 @@ def _search_body(rows: list, *, repo: str = REPO) -> list:
         if isinstance(row, dict):
             out.append(row)
             continue
-        out.append({
-            "matched_field": "title",
-            "snippet": f"...match for #{row}...",
-            "summary": {"number": row, "repo_name": repo, "title": f"PR {row}"},
-        })
+        out.append(
+            {
+                "matched_field": "title",
+                "snippet": f"...match for #{row}...",
+                "summary": {"number": row, "repo_name": repo, "title": f"PR {row}"},
+            }
+        )
     return out
 
 
@@ -232,34 +236,42 @@ def test_ranking_with_all_none_scores_does_not_raise():
 def test_component_relevance_outranks_worth():
     """Prefer a task-related search hit over a higher generic score."""
     matching = PRReference(
-        repo=REPO, number=1, hit_via=(HIT_SEARCH,), worth_trying=0.1,
+        repo=REPO,
+        number=1,
+        hit_via=(HIT_SEARCH,),
+        worth_trying=0.1,
         components=("MXFP_MOE",),
     )
     other = PRReference(
-        repo=REPO, number=2, hit_via=(HIT_SEARCH,), worth_trying=0.9,
+        repo=REPO,
+        number=2,
+        hit_via=(HIT_SEARCH,),
+        worth_trying=0.9,
         components=("attention",),
     )
 
-    ranked = rank_references(
-        [other, matching], components_of_interest=frozenset({"mxfp_moe"})
-    )
+    ranked = rank_references([other, matching], components_of_interest=frozenset({"mxfp_moe"}))
 
     assert [ref.number for ref in ranked] == [1, 2]
 
 
 def test_component_relevance_orders_equal_scores():
     focused = PRReference(
-        repo=REPO, number=1, hit_via=(HIT_SEARCH,), worth_trying=0.3,
+        repo=REPO,
+        number=1,
+        hit_via=(HIT_SEARCH,),
+        worth_trying=0.3,
         components=("moe_gemm", "fused_moe"),
     )
     sweeping = PRReference(
-        repo=REPO, number=2, hit_via=(HIT_SEARCH,), worth_trying=0.3,
+        repo=REPO,
+        number=2,
+        hit_via=(HIT_SEARCH,),
+        worth_trying=0.3,
         components=("moe_gemm", "flash_attn", "softmax", "rmsnorm"),
     )
 
-    ranked = rank_references(
-        [sweeping, focused], components_of_interest=frozenset({"moe"})
-    )
+    ranked = rank_references([sweeping, focused], components_of_interest=frozenset({"moe"}))
 
     assert [ref.number for ref in ranked] == [1, 2]
 
@@ -273,8 +285,16 @@ def test_component_relevance_matches_sub_words_not_just_equality():
 
 def test_component_relevance_prices_in_a_long_component_list():
     """A sweeping refactor hitting one label out of eight is not a strong match."""
-    sweeping = ("flash_attn", "rmsnorm", "softmax", "layernorm",
-                "topk_gating", "fused_rope", "preshuffle_gemm", "mxfp_moe")
+    sweeping = (
+        "flash_attn",
+        "rmsnorm",
+        "softmax",
+        "layernorm",
+        "topk_gating",
+        "fused_rope",
+        "preshuffle_gemm",
+        "mxfp_moe",
+    )
     focused = ("fused_moe", "moe_gemm", "mxfp4_gemm2")
     interest = frozenset({"moe", "gemm2"})
 
@@ -295,9 +315,7 @@ def test_zero_relevance_search_hits_are_filtered():
         components=("rmsnorm",),
     )
 
-    assert filter_references_by_relevance(
-        [reference], frozenset({"mha_batch_prefill"})
-    ) == []
+    assert filter_references_by_relevance([reference], frozenset({"mha_batch_prefill"})) == []
 
 
 def test_exact_path_hits_survive_a_zero_component_score():
@@ -309,9 +327,7 @@ def test_exact_path_hits_survive_a_zero_component_score():
         components=("fp8_kv_cache",),
     )
 
-    assert filter_references_by_relevance(
-        [reference], frozenset({"mha_batch_prefill"})
-    ) == [reference]
+    assert filter_references_by_relevance([reference], frozenset({"mha_batch_prefill"})) == [reference]
 
 
 def test_undistilled_search_hits_are_not_assumed_irrelevant():
@@ -323,9 +339,7 @@ def test_undistilled_search_hits_are_not_assumed_irrelevant():
         distill_absent=True,
     )
 
-    assert filter_references_by_relevance(
-        [reference], frozenset({"mha_batch_prefill"})
-    ) == [reference]
+    assert filter_references_by_relevance([reference], frozenset({"mha_batch_prefill"})) == [reference]
 
 
 def test_missing_query_terms_disable_relevance_filtering():
@@ -344,16 +358,34 @@ def test_path_hit_layer_is_sorted_by_worth():
     interest = frozenset({"gemm2", "kernels", "moe", "mxfp_moe"})
     refs = [
         _ref(959, 0.60, True, components=("fused_moe", "gemm2", "mxfp4_gemm", "moe")),
-        _ref(974, 0.05, True, components=("flash_attn", "rmsnorm", "softmax",
-                                          "layernorm", "topk_gating", "fused_rope",
-                                          "preshuffle_gemm", "mxfp_moe")),
-        _ref(913, 0.05, True, components=("preshuffle_gemm", "fp8_gemm", "mxfp_moe",
-                                          "conv3d_implicit", "tiled_mma", "im2col")),
-        _ref(892, 0.30, True, components=("fused_moe", "moe_gemm", "mxfp4_gemm1",
-                                          "mxfp4_gemm2")),
-        _ref(930, 0.30, False, components=("flash_attention", "mla_decode",
-                                           "paged_attention", "fused_moe", "gemm",
-                                           "softmax")),
+        _ref(
+            974,
+            0.05,
+            True,
+            components=(
+                "flash_attn",
+                "rmsnorm",
+                "softmax",
+                "layernorm",
+                "topk_gating",
+                "fused_rope",
+                "preshuffle_gemm",
+                "mxfp_moe",
+            ),
+        ),
+        _ref(
+            913,
+            0.05,
+            True,
+            components=("preshuffle_gemm", "fp8_gemm", "mxfp_moe", "conv3d_implicit", "tiled_mma", "im2col"),
+        ),
+        _ref(892, 0.30, True, components=("fused_moe", "moe_gemm", "mxfp4_gemm1", "mxfp4_gemm2")),
+        _ref(
+            930,
+            0.30,
+            False,
+            components=("flash_attention", "mla_decode", "paged_attention", "fused_moe", "gemm", "softmax"),
+        ),
     ]
 
     ranked = rank_references(refs, components_of_interest=interest)
@@ -364,9 +396,7 @@ def test_path_hit_layer_is_sorted_by_worth():
 
 
 def test_components_of_interest_comes_from_keywords_and_paths():
-    terms = components_of_interest(
-        _context(file_paths=("kernels/moe/gemm2.py",), keywords=("mxfp moe",))
-    )
+    terms = components_of_interest(_context(file_paths=("kernels/moe/gemm2.py",), keywords=("mxfp moe",)))
 
     assert {"mxfp", "moe", "kernels", "gemm2"} <= terms
 
@@ -395,11 +425,15 @@ def test_search_results_are_parsed_from_a_bare_array(service, client):
 
 def test_search_rows_nest_the_number_under_summary(service, client):
     """A search row is {matched_field, snippet, summary}; the number is inside."""
-    service.by_query = {"moe": [{
-        "matched_field": "body",
-        "snippet": "...",
-        "summary": {"number": 4572, "repo_name": REPO, "title": "t"},
-    }]}
+    service.by_query = {
+        "moe": [
+            {
+                "matched_field": "body",
+                "snippet": "...",
+                "summary": {"number": 4572, "repo_name": REPO, "title": "t"},
+            }
+        ]
+    }
     service.details = {4572: _detail(4572)}
 
     outcome = discover(client, _context(keywords=("moe",)))
@@ -409,11 +443,15 @@ def test_search_rows_nest_the_number_under_summary(service, client):
 
 def test_search_rows_from_another_repo_are_discarded(service, client):
     """A search may run unfiltered; a foreign row must never become a candidate."""
-    service.by_query = {"moe": [{
-        "matched_field": "title",
-        "snippet": "...",
-        "summary": {"number": 99, "repo_name": "someone/else", "title": "t"},
-    }]}
+    service.by_query = {
+        "moe": [
+            {
+                "matched_field": "title",
+                "snippet": "...",
+                "summary": {"number": 99, "repo_name": "someone/else", "title": "t"},
+            }
+        ]
+    }
     service.details = {99: _detail(99)}
 
     outcome = discover(client, _context(keywords=("moe",)))
@@ -458,10 +496,7 @@ def test_low_scoring_fallback_only_candidates_are_dropped(service, client):
     """Drop recent-only candidates below their score floor."""
     service.recent = [11042, 11150, 11218, 11223, 11224]
     worths = {11042: 0.02, 11150: 0.60, 11218: 0.02, 11223: 0.05, 11224: 0.10}
-    service.details = {
-        n: _detail(n, worth=w, components=["nothing"])
-        for n, w in worths.items()
-    }
+    service.details = {n: _detail(n, worth=w, components=["nothing"]) for n, w in worths.items()}
 
     outcome = discover(client, _context(keywords=("nothing",)))
 
@@ -520,9 +555,7 @@ def test_the_global_floor_is_disabled_by_default(service, client):
     assert discover(client, _context(keywords=("moe",))).references
 
 
-def test_the_global_floor_filters_established_hits_when_raised(
-    monkeypatch, service, client
-):
+def test_the_global_floor_filters_established_hits_when_raised(monkeypatch, service, client):
     """PR_KB_MIN_WORTH is the opt-in that trades recall for precision."""
     monkeypatch.setenv("PR_KB_MIN_WORTH", "0.5")
     service.by_query = {"moe": [1, 2]}
@@ -798,9 +831,7 @@ def test_an_expired_deadline_blocks_the_recent_fallback(service, client):
     service.recent = [11042]
     service.details = {11042: _detail(11042, worth=0.9)}
 
-    outcome = discover(
-        client, _context(keywords=("moe",)), deadline=time.monotonic() - 1.0
-    )
+    outcome = discover(client, _context(keywords=("moe",)), deadline=time.monotonic() - 1.0)
 
     assert outcome.reason == REASON_SKIPPED_DEADLINE
     assert outcome.stats["fallback_used"] is False

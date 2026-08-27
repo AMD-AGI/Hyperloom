@@ -74,11 +74,7 @@ _PR_KB_CHILD_ENV_VARS = (
 
 def _pr_kb_child_env() -> dict[str, str]:
     """Collect the PR KB settings that must reach the position-C server."""
-    return {
-        name: os.environ[name]
-        for name in _PR_KB_CHILD_ENV_VARS
-        if os.environ.get(name, "").strip()
-    }
+    return {name: os.environ[name] for name in _PR_KB_CHILD_ENV_VARS if os.environ.get(name, "").strip()}
 
 
 def make_agent_fn(
@@ -169,8 +165,7 @@ def make_agent_fn(
         reason = getattr(backend, "fallback_reason", "")
         reason_suffix = f" ({reason})" if reason else ""
         print(
-            f"  [agent] {requested_backend} backend unavailable; "
-            f"falling back to {backend.name}{reason_suffix}",
+            f"  [agent] {requested_backend} backend unavailable; falling back to {backend.name}{reason_suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -178,8 +173,7 @@ def make_agent_fn(
         reason = getattr(backend, "model_fallback_reason", "")
         reason_suffix = f" ({reason})" if reason else ""
         print(
-            f"  [agent] model {runtime.model} unavailable; falling back to "
-            f"{backend.runtime.model}{reason_suffix}",
+            f"  [agent] model {runtime.model} unavailable; falling back to {backend.runtime.model}{reason_suffix}",
             file=sys.stderr,
             flush=True,
         )
@@ -200,11 +194,10 @@ def make_agent_fn(
     fellow_context = ""
     try:
         from kernelforge.fellows.base import build_single_fellow_prompt
-        fellow_context = build_single_fellow_prompt(
-            config, fellow_name, task_type=task_type, source_paths=source_files)
+
+        fellow_context = build_single_fellow_prompt(config, fellow_name, task_type=task_type, source_paths=source_files)
     except Exception as e:  # noqa: BLE001
-        print(f"  Warning: fellow prompt load failed for {fellow_name} ({e}); "
-              "using generic prompt", file=sys.stderr)
+        print(f"  Warning: fellow prompt load failed for {fellow_name} ({e}); using generic prompt", file=sys.stderr)
 
     # Fellow prompts name build/test/bench/pmc/registers as if they were tools.
     # This agent has Bash instead, so frame those names as shell steps it runs
@@ -215,15 +208,12 @@ def make_agent_fn(
         # disabled, so the implementer prompt carries no profiling guidance. (The
         # loaded fellow_context is backend domain knowledge and is left as-is.)
         _self_verbs = (
-            "build, run, and profile the kernel YOURSELF via the Bash tool "
-            "(compile, run the driver, run a profiler)"
-            if profiling_enabled else
-            "build and run the kernel YOURSELF via the Bash tool "
-            "(compile, run the driver)"
+            "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
+            if profiling_enabled
+            else "build and run the kernel YOURSELF via the Bash tool (compile, run the driver)"
         )
         _self_tools = (
-            "`build`/`test`/`bench`/`pmc`/`registers`"
-            if profiling_enabled else "`build`/`test`/`bench`/`registers`"
+            "`build`/`test`/`bench`/`pmc`/`registers`" if profiling_enabled else "`build`/`test`/`bench`/`registers`"
         )
         fellow_section = (
             f"{chr(10)}## Backend Expertise ({fellow_name}){chr(10)}"
@@ -294,7 +284,10 @@ both numbers, including the ones this session is judged on.
     profiling_dir = Path(config.local_knowledge_dir) / "common_methodology" / "profiling"
     # Suppressed when profiling is disabled so the implementer prompt carries no
     # profiling affordance/hint at all.
-    self_profiling_section = "" if not profiling_enabled else f"""
+    self_profiling_section = (
+        ""
+        if not profiling_enabled
+        else f"""
 ## Self-profiling (optional, on demand)
 If you need hardware profiling to decide the next change — which bottleneck (compute / bandwidth /
 latency-occupancy), cache hit rates, occupancy, arithmetic intensity — profile the kernel YOURSELF
@@ -309,6 +302,7 @@ script rather than raw `rocprof-compute` (it finds a usable interpreter, runs pr
 prints the tables). If this environment lacks rocprof-compute's deps the script prints an
 "unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).
 """
+    )
 
     # Register on-demand PR tools only for a resolved repo and MCP backend.
     pr_mcp_servers: dict[str, StdioMcpServer] = {}
@@ -591,6 +585,7 @@ Make your change(s) now.
         system_prompt = base_system_prompt
         if gate_enabled:
             from kernelforge.loop.insession_gate import InSessionGate
+
             gate = InSessionGate(
                 driver_script=driver_script,
                 snr_threshold=snr_threshold,
@@ -609,9 +604,9 @@ Make your change(s) now.
                 # protects the source kernel it ports FROM, which is also the
                 # correctness oracle). Both are additive; None keeps prior behavior.
                 extra_protected_globs=(
-                    (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else [])
-                    + list(extra_protected_globs or [])
-                ) or None,
+                    (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])
+                )
+                or None,
                 # Exact-path measurement files (e.g. the PORT phase's source kernel,
                 # which the driver imports as the oracle). Same tier as the driver.
                 extra_protected_paths=extra_protected_paths,
@@ -661,10 +656,7 @@ Make your change(s) now.
             ),
             target_files=(source_files or [kernel_path]),
             driver_script=driver_script or "",
-            protected_globs=(
-                (_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else [])
-                + list(extra_protected_globs or [])
-            ),
+            protected_globs=((_REPO_EXTRA_PROTECTED_GLOBS if is_repo_task else []) + list(extra_protected_globs or [])),
             # The loop writes its own ledger into the workspace it hands the
             # implementer, and the kernel's runtime leaves a JIT cache there, so
             # every iteration starts from a worktree the caller already
@@ -688,26 +680,17 @@ Make your change(s) now.
                 "*_results.db",
             ],
             protected_paths=list(extra_protected_paths or []),
-            hooks=(
-                gate.make_agent_hooks(stop_check=gate_stop_check)
-                if gate is not None
-                else None
-            ),
+            hooks=(gate.make_agent_hooks(stop_check=gate_stop_check) if gate is not None else None),
             mcp_servers=pr_mcp_servers,
             progress_log=progress_log,
         )
+
         def _finalize_integrity(error: BaseException | None = None) -> None:
             if gate is None:
                 return
             reason = gate.finalize_integrity()
-            if (
-                error is not None
-                and getattr(error, "agent_safety_rejection", False)
-            ):
-                reason = reason or (
-                    "backend workspace safety rejection: "
-                    f"{type(error).__name__}: {error}"
-                )
+            if error is not None and getattr(error, "agent_safety_rejection", False):
+                reason = reason or (f"backend workspace safety rejection: {type(error).__name__}: {error}")
                 gate.integrity_reason = reason
                 gate.integrity_violation = True
                 gate.integrity_verdict = "violation"
@@ -740,10 +723,9 @@ Make your change(s) now.
         # driven from out here, between explicit resume turns. Only the mode that
         # asked for that decision gets it: without the stop check there is no
         # Stop hook to stand in for, and running one here would benchmark.
-        uses_outer_gate = (
-            gate_stop_check and not backend.capabilities.stop_hooks
-        )
+        uses_outer_gate = gate_stop_check and not backend.capabilities.stop_hooks
         if uses_outer_gate:
+
             def count_result_target_edits(result) -> int:
                 """Count incremental target edits from a hookless backend turn."""
                 reported = getattr(result, "target_edit_count", None)
@@ -759,16 +741,9 @@ Make your change(s) now.
                 decision = await gate._on_stop({}, None, None)
                 if decision.get("decision") != "block":
                     break
-                if (
-                    not backend.capabilities.resumable
-                    or not run_result.session_id
-                    or not hasattr(backend, "resume")
-                ):
+                if not backend.capabilities.resumable or not run_result.session_id or not hasattr(backend, "resume"):
                     gate.end_reason = "resume_unavailable"
-                    gate.findings.append(
-                        "The gate requested another turn but no resumable "
-                        "session was available."
-                    )
+                    gate.findings.append("The gate requested another turn but no resumable session was available.")
                     break
 
                 feedback = (
@@ -783,8 +758,7 @@ Make your change(s) now.
                 try:
                     resume_targets = list(run_spec.target_files)
                     resume_targets.extend(
-                        str((Path(run_spec.cwd) / path).resolve())
-                        for path in run_result.file_changes
+                        str((Path(run_spec.cwd) / path).resolve()) for path in run_result.file_changes
                     )
                     resumed = await backend.resume(
                         replace(
@@ -800,9 +774,7 @@ Make your change(s) now.
                     if getattr(exc, "agent_safety_rejection", False):
                         integrity_error = exc
                     gate.end_reason = "resume_error"
-                    gate.findings.append(
-                        f"Agent resume failed: {type(exc).__name__}: {exc}"
-                    )
+                    gate.findings.append(f"Agent resume failed: {type(exc).__name__}: {exc}")
                     break
                 continuation_turns += 1
                 gate.edit_count += count_result_target_edits(resumed)
@@ -818,9 +790,7 @@ Make your change(s) now.
                 # it: resuming the session does not free the device, so the
                 # contention has to outlive the turn that reported it.
                 if not resumed.workspace_contention:
-                    resumed.workspace_contention = (
-                        run_result.workspace_contention
-                    )
+                    resumed.workspace_contention = run_result.workspace_contention
                 if not resumed.session_id:
                     resumed.session_id = run_result.session_id
                 run_result = resumed
@@ -832,9 +802,7 @@ Make your change(s) now.
 
         full = run_result.text
         result_subtype = run_result.subtype
-        num_turns = (
-            continuation_turns if uses_outer_gate else run_result.num_turns
-        )
+        num_turns = continuation_turns if uses_outer_gate else run_result.num_turns
 
         def _parse_tag(tag: str, cap: int, *, last: bool = False) -> str:
             """Pull a `TAG: ...` one-liner out of the agent output, sanitized:
@@ -850,7 +818,7 @@ Make your change(s) now.
             for ln in full.splitlines():
                 s = ln.strip()
                 if s.upper().startswith(tag):
-                    val = s[len(tag):].strip()
+                    val = s[len(tag) :].strip()
                     for marker in ("Stop hook feedback", "## ", "Make your change"):
                         idx = val.find(marker)
                         if idx != -1:
@@ -871,10 +839,7 @@ Make your change(s) now.
         # net change that gets committed + benchmarked), not an abandoned attempt.
         plan = _parse_tag("PLAN:", 160, last=True)
 
-        submitted = any(
-            line.strip().upper() == "SUBMIT_CANDIDATE"
-            for line in full.splitlines()
-        )
+        submitted = any(line.strip().upper() == "SUBMIT_CANDIDATE" for line in full.splitlines())
 
         # Explain WHY this session ended, for per-iteration analysis:
         #   * gate allowed a safe candidate handoff -> candidate_submitted;
@@ -898,10 +863,13 @@ Make your change(s) now.
         # One structured line per session (stdout is captured by the caller's
         # logs) so a run's end-reason distribution is analyzable without the LLM.
         edit_count = gate.edit_count if gate is not None else run_result.edit_count
-        print(f"  [session-end] backend={backend.name} reason={end_reason} "
-              f"edits={edit_count if edit_count else '-'} "
-              f"turns={num_turns if num_turns is not None else '?'} "
-              f"pass={gate.passed if gate is not None else '-'}", flush=True)
+        print(
+            f"  [session-end] backend={backend.name} reason={end_reason} "
+            f"edits={edit_count if edit_count else '-'} "
+            f"turns={num_turns if num_turns is not None else '?'} "
+            f"pass={gate.passed if gate is not None else '-'}",
+            flush=True,
+        )
 
         text = full or "no rationale provided"
         if gate is not None:
@@ -934,9 +902,7 @@ Make your change(s) now.
             # The runner never sees the AgentRunResult, so this is the only
             # place a workspace the reaper could not clear can reach the code
             # that decides whether to run the canonical measurement.
-            session_sink["workspace_contention"] = (
-                run_result.workspace_contention
-            )
+            session_sink["workspace_contention"] = run_result.workspace_contention
             if gate is not None:
                 session_sink["findings"] = gate.findings_blob()
                 session_sink["edit_count"] = gate.edit_count

@@ -120,17 +120,21 @@ def test_load_corrupt_fails_closed(tmp_path):
 def test_load_noncurrent_schema_fails_closed(tmp_path):
     root = tmp_path / "forge_experiments"
     root.mkdir(parents=True, exist_ok=True)
-    (root / "run_state.json").write_text(json.dumps({
-        "schema_version": 1,
-        "iteration": 7,
-        "phase": PHASE_EXPLOIT,
-        "best": {
-            "iteration": 5,
-            "wall_ms": 0.5,
-            "commit_hash": "abc1234",
-            "plan": "vectorize loads",
-        },
-    }))
+    (root / "run_state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "iteration": 7,
+                "phase": PHASE_EXPLOIT,
+                "best": {
+                    "iteration": 5,
+                    "wall_ms": 0.5,
+                    "commit_hash": "abc1234",
+                    "plan": "vectorize loads",
+                },
+            }
+        )
+    )
 
     with pytest.raises(ValueError, match="unsupported run state schema"):
         LoopStateStore(str(tmp_path)).load()
@@ -203,9 +207,7 @@ def test_load_v17_migrates_with_a_campaign_clock_that_covers_its_planning(
     assert migrated.schema_version == SCHEMA_VERSION
     assert migrated.round_costs.campaign_sec == 3300.0
     # A share, not a number several times its own definition.
-    assert migrated.round_costs.planning_share_pct() == pytest.approx(
-        100.0 * 2700.0 / 3300.0
-    )
+    assert migrated.round_costs.planning_share_pct() == pytest.approx(100.0 * 2700.0 / 3300.0)
 
 
 def test_load_v17_without_round_wall_clock_still_covers_its_planning(tmp_path):
@@ -567,14 +569,28 @@ def test_an_api_error_is_counted_apart_from_a_revert_and_leaves_the_stall_alone(
     """
     state = RunState()
     apply_iteration(
-        state, iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.2,
-        commit_hash="", plan="bigger tile", baseline_wall_ms=1.0, best_wall_ms=1.0,
+        state,
+        iteration=1,
+        decision="REVERT_PERF",
+        kept=False,
+        wall_ms=1.2,
+        commit_hash="",
+        plan="bigger tile",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
         stall_threshold=3,
     )
     for i in (2, 3, 4):
         apply_iteration(
-            state, iteration=i, decision="API_ERROR", kept=False, wall_ms=None,
-            commit_hash="", plan="", baseline_wall_ms=1.0, best_wall_ms=1.0,
+            state,
+            iteration=i,
+            decision="API_ERROR",
+            kept=False,
+            wall_ms=None,
+            commit_hash="",
+            plan="",
+            baseline_wall_ms=1.0,
+            best_wall_ms=1.0,
             stall_threshold=3,
         )
 
@@ -591,8 +607,15 @@ def test_api_error_counters_survive_save_load(tmp_path):
     store = LoopStateStore(str(tmp_path))
     state = store.load()
     apply_iteration(
-        state, iteration=1, decision="API_ERROR", kept=False, wall_ms=None,
-        commit_hash="", plan="", baseline_wall_ms=1.0, best_wall_ms=1.0,
+        state,
+        iteration=1,
+        decision="API_ERROR",
+        kept=False,
+        wall_ms=None,
+        commit_hash="",
+        plan="",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
     )
     store.save(state)
 
@@ -619,10 +642,7 @@ def test_orchestration_circuit_opens_and_half_open_probe_is_single_shot():
     assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_OPEN
 
     begin_orchestration_probe(state)
-    assert (
-        state.orchestration_circuit_state
-        == ORCHESTRATION_CIRCUIT_HALF_OPEN
-    )
+    assert state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
     apply_iteration(
         state,
         iteration=4,
@@ -710,12 +730,20 @@ def test_header_contains_best_and_retrieval_pointers():
 def test_header_bounded_by_max_chars():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
-        state, iteration=1, decision="KEEP", kept=True, wall_ms=0.9,
-        commit_hash="c1", plan="p", baseline_wall_ms=1.0, best_wall_ms=0.9,
+        state,
+        iteration=1,
+        decision="KEEP",
+        kept=True,
+        wall_ms=0.9,
+        commit_hash="c1",
+        plan="p",
+        baseline_wall_ms=1.0,
+        best_wall_ms=0.9,
     )
     events = [
         make_event(
-            "iteration_result", i,
+            "iteration_result",
+            i,
             decision="REVERT_PERF",
             plan=f"attempt number {i} with a fairly long descriptive plan text",
             wall_ms=1.0 + i / 100.0,
@@ -730,12 +758,18 @@ def test_header_bounded_by_max_chars():
 def test_header_keeps_retrieval_map_under_tight_budget():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
-        state, iteration=1, decision="KEEP", kept=True, wall_ms=0.9,
-        commit_hash="c1", plan="p", baseline_wall_ms=1.0, best_wall_ms=0.9,
+        state,
+        iteration=1,
+        decision="KEEP",
+        kept=True,
+        wall_ms=0.9,
+        commit_hash="c1",
+        plan="p",
+        baseline_wall_ms=1.0,
+        best_wall_ms=0.9,
     )
     events = [
-        make_event("iteration_result", i, decision="REVERT_PERF", plan="x" * 40, error_sig="y" * 80)
-        for i in range(20)
+        make_event("iteration_result", i, decision="REVERT_PERF", plan="x" * 40, error_sig="y" * 80) for i in range(20)
     ]
     header = render_long_horizon_header(state, events, max_recent=20, max_chars=600)
     assert len(header) <= 600
@@ -793,8 +827,15 @@ def test_header_preserves_retrieval_map_when_budget_is_below_essential_content()
 def test_header_shows_baseline_not_iter0_best_before_first_keep():
     state = RunState(baseline_wall_ms=1.0)
     apply_iteration(
-        state, iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1,
-        commit_hash="", plan="bigger tile", baseline_wall_ms=1.0, best_wall_ms=1.0,
+        state,
+        iteration=1,
+        decision="REVERT_PERF",
+        kept=False,
+        wall_ms=1.1,
+        commit_hash="",
+        plan="bigger tile",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
     )
     header = render_long_horizon_header(
         state, [make_event("iteration_result", 1, decision="REVERT_PERF", plan="bigger tile")]
@@ -811,10 +852,7 @@ def _pin_hint(header: str) -> str:
 
 def _pinned_iterations(header: str) -> list[int]:
     """Iteration numbers the pin hint names, ignoring any rendered speedup."""
-    return [
-        int(token)
-        for token in re.findall(r"(?<![\d.])\d+(?![\d.])", _pin_hint(header))
-    ]
+    return [int(token) for token in re.findall(r"(?<![\d.])\d+(?![\d.])", _pin_hint(header))]
 
 
 def _pin_entries(header: str) -> list[str]:
@@ -837,12 +875,8 @@ def _store_with_live_iteration_events(tmp_path, iterations: range) -> LoopStateS
     """
     store = LoopStateStore(str(tmp_path))
     for iteration in iterations:
-        store.append_event(
-            make_event("search_policy_decision", iteration, mode="EXPLOIT")
-        )
-        store.append_event(
-            make_event("iteration_started", iteration, phase=PHASE_EXPLOIT)
-        )
+        store.append_event(make_event("search_policy_decision", iteration, mode="EXPLOIT"))
+        store.append_event(make_event("iteration_started", iteration, phase=PHASE_EXPLOIT))
         store.append_event(make_event("analysis_result", iteration, status="ready"))
         store.append_event(
             make_event(
@@ -985,17 +1019,13 @@ def test_loop_header_window_covers_the_pin_cap_and_is_served_from_the_cache(tmp_
     state = RunState()
     for iteration in range(1, 3 * LONG_HORIZON_OUTCOME_WINDOW):
         pin_iteration(state, iteration)
-    store = _store_with_live_iteration_events(
-        tmp_path, range(1, LONG_HORIZON_OUTCOME_WINDOW + 2)
-    )
+    store = _store_with_live_iteration_events(tmp_path, range(1, LONG_HORIZON_OUTCOME_WINDOW + 2))
 
     window = store.recent_results(LONG_HORIZON_OUTCOME_WINDOW)
 
     assert len(state.pinned_iterations) <= LONG_HORIZON_OUTCOME_WINDOW
     assert _HEADER_MAX_RECENT <= LONG_HORIZON_OUTCOME_WINDOW <= _RECENT_RESULT_CACHE
-    assert [event["iter"] for event in window] == list(
-        range(2, LONG_HORIZON_OUTCOME_WINDOW + 2)
-    )
+    assert [event["iter"] for event in window] == list(range(2, LONG_HORIZON_OUTCOME_WINDOW + 2))
     with pytest.raises(ValueError, match="exceeds the cached outcome bound"):
         store.recent_results(_RECENT_RESULT_CACHE + 1)
 
@@ -1004,8 +1034,15 @@ def test_loop_header_window_covers_the_pin_cap_and_is_served_from_the_cache(tmp_
 def test_no_best_recorded_before_first_keep():
     state = RunState()
     apply_iteration(
-        state, iteration=1, decision="REVERT_PERF", kept=False, wall_ms=1.1,
-        commit_hash="", plan="x", baseline_wall_ms=1.0, best_wall_ms=1.0,
+        state,
+        iteration=1,
+        decision="REVERT_PERF",
+        kept=False,
+        wall_ms=1.1,
+        commit_hash="",
+        plan="x",
+        baseline_wall_ms=1.0,
+        best_wall_ms=1.0,
     )
     # The baseline must NOT masquerade as a best (best stays iter 0 / wall None).
     assert state.best.iteration == 0
@@ -1093,10 +1130,7 @@ def test_from_dict_rejects_nested_records_that_are_not_the_current_shape():
     incomplete["stall"] = {"no_improvement_iters": 2}
     with pytest.raises(
         ValueError,
-        match=(
-            "stall missing fields: last_supervisor_attempt_iter, "
-            "last_supervisor_iter, unresolved_stall_iters"
-        ),
+        match=("stall missing fields: last_supervisor_attempt_iter, last_supervisor_iter, unresolved_stall_iters"),
     ):
         RunState.from_dict(incomplete)
 
@@ -1271,9 +1305,7 @@ def test_read_events_skips_blank_lines_and_windows_refuse_nonpositive_counts(tmp
     root.mkdir()
     first = make_event("iteration_result", 1, decision="KEEP")
     second = make_event("iteration_result", 2, decision="REVERT_PERF")
-    (root / "events.jsonl").write_text(
-        "\n".join(["", json.dumps(first), "   ", "", json.dumps(second), ""]) + "\n"
-    )
+    (root / "events.jsonl").write_text("\n".join(["", json.dumps(first), "   ", "", json.dumps(second), ""]) + "\n")
 
     store = LoopStateStore(str(tmp_path))
 

@@ -18,6 +18,7 @@ opted out of. The turn kept its write permission and lost every file tool.
 These tests pin the distinction the pinning lost: raising a read-only policy to a
 writable one is required, lowering an already-writable one is not.
 """
+
 from __future__ import annotations
 
 import asyncio

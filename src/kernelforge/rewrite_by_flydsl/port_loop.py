@@ -73,8 +73,8 @@ def check_flydsl_port(spec: RewriteSpec) -> str:
     except (OSError, SyntaxError) as e:
         return f"could not parse the FlyDSL kernel {spec.flydsl_kernel_name}: {e}"
 
-    imported_roots: set[str] = set()   # top-level package of every static import
-    imported_names: set[str] = set()   # bare names bound by `from X import name`
+    imported_roots: set[str] = set()  # top-level package of every static import
+    imported_names: set[str] = set()  # bare names bound by `from X import name`
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -196,29 +196,18 @@ async def run_port_loop(
 
         if session_sink.get("integrity_violation") is not True:
             return ""
-        reason = str(
-            session_sink.get("integrity_reason")
-            or "protected PORT driver/source state changed"
-        )
+        reason = str(session_sink.get("integrity_reason") or "protected PORT driver/source state changed")
         restore = session_sink.get("integrity_restore")
         if not callable(restore):
             return reason + "; protected snapshot restore callback unavailable"
         try:
             restore()
         except Exception as error:  # noqa: BLE001 - report without validating
-            return (
-                reason
-                + "; protected snapshot restore failed: "
-                + f"{type(error).__name__}: {error}"
-            )
+            return reason + "; protected snapshot restore failed: " + f"{type(error).__name__}: {error}"
         return reason
 
     for attempt in range(1, max_attempts + 1):
-        remaining = (
-            stop_at_unix - time.time()
-            if stop_at_unix and stop_at_unix > 0
-            else None
-        )
+        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
         if remaining is not None and remaining <= 0:
             return PortResult(
                 ok=False,
@@ -289,11 +278,7 @@ async def run_port_loop(
             continue
 
         # Canonical acceptance: the driver's complete correctness suite.
-        remaining = (
-            stop_at_unix - time.time()
-            if stop_at_unix and stop_at_unix > 0
-            else None
-        )
+        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
         if remaining is not None and remaining <= 0:
             return PortResult(
                 ok=False,
@@ -301,9 +286,7 @@ async def run_port_loop(
                 error_tail="PORT stopped before validation at the finalization reserve",
             )
         validation_timeout = (
-            validate_stage_timeout_sec
-            if remaining is None
-            else max(1, min(validate_stage_timeout_sec, int(remaining)))
+            validate_stage_timeout_sec if remaining is None else max(1, min(validate_stage_timeout_sec, int(remaining)))
         )
         validation = run_validation_pipeline(
             driver_script=driver_path,
@@ -311,11 +294,7 @@ async def run_port_loop(
             timeout_per_stage=validation_timeout,
         )
         try:
-            report = (
-                await validation
-                if remaining is None
-                else await asyncio.wait_for(validation, timeout=remaining)
-            )
+            report = await validation if remaining is None else await asyncio.wait_for(validation, timeout=remaining)
         except asyncio.TimeoutError:
             return PortResult(
                 ok=False,
@@ -329,8 +308,11 @@ async def run_port_loop(
             return PortResult(ok=True, attempts=attempt, snr_db=snr)
 
         tail = _validation_error_tail(report)
-        log.info("port attempt %d not yet correct: %s",
-                 attempt, report.summary().splitlines()[-1] if report.summary() else "")
+        log.info(
+            "port attempt %d not yet correct: %s",
+            attempt,
+            report.summary().splitlines()[-1] if report.summary() else "",
+        )
         history = (
             "The FlyDSL port is NOT correct yet. Fix it to match the source "
             "kernel's numerics. Latest validation failure:\n" + tail

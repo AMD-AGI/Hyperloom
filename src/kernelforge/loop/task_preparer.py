@@ -106,9 +106,7 @@ PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", "900") or 
 # A first attempt always runs, however little time it has — a long shot is still
 # better than not trying — but handing the scraps to a retry only converts the
 # tail of the wall into tokens and a misleading "FAILED after 2 attempts".
-PREPARE_MIN_RETRY_SEC = int(
-    os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350"
-)
+PREPARE_MIN_RETRY_SEC = int(os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350")
 
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
 # These deliberately differ from bench_wallclock's measurement defaults (10/30,
@@ -138,9 +136,7 @@ MAX_INVOCATION_SPEC_BYTES = 1024 * 1024
 #: count -- so this only guards against a producer that grew without warning.
 _SPEC_INLINE_MAX_BYTES = 64 * 1024
 _INVOCATION_SPEC_NAME_RE = re.compile(r"^invocation_spec_[A-Za-z0-9._-]+\.json$")
-_REFERENCE_IGNORE = shutil.ignore_patterns(
-    "__pycache__", "*.pyc", "*.log", "forge_experiments", ".git"
-)
+_REFERENCE_IGNORE = shutil.ignore_patterns("__pycache__", "*.pyc", "*.log", "forge_experiments", ".git")
 
 
 # ---------------------------------------------------------------------------
@@ -199,16 +195,10 @@ class PreflightResult:
             return False
         _CASCADING = ("cannot verify", "could not verify")
         _TIMEOUT_TOKENS = ("TIMEOUT", "timed out")
-        primary = [
-            r for r in self.reasons
-            if not r.startswith(_CASCADING)
-            or any(t in r for t in _TIMEOUT_TOKENS)
-        ]
+        primary = [r for r in self.reasons if not r.startswith(_CASCADING) or any(t in r for t in _TIMEOUT_TOKENS)]
         if not primary:
             return False
-        return all(
-            any(t in r for t in _TIMEOUT_TOKENS) for r in primary
-        ) and not any("CRASHED" in r for r in primary)
+        return all(any(t in r for t in _TIMEOUT_TOKENS) for r in primary) and not any("CRASHED" in r for r in primary)
 
 
 # Counts ACTUAL torch.cuda.CUDAGraph.replay calls (HIP graphs go through the same
@@ -323,29 +313,19 @@ atexit.register(_dump)
 # real headroom; override via env if a build farm is unusually slow/fast. Same
 # root-cause family as forge_gemm_tune's FORGE_TUNE_TASK_TIMEOUT (7200s), a
 # different knob on the same JIT-latency problem.
-PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(
-    os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800"
-)
-PREFLIGHT_BENCH_TIMEOUT_S = int(
-    os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800"
-)
+PREFLIGHT_CORRECTNESS_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_CORRECTNESS_TIMEOUT", "1800") or "1800")
+PREFLIGHT_BENCH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_BENCH_TIMEOUT", "1800") or "1800")
 # graph-replay and profiling preflight run *after* bench, so the JIT cache is
 # usually warm by then, but on a cold first run a fresh module can still compile
 # here. Keep them generous and overridable rather than the old bare 300s.
-PREFLIGHT_GRAPH_TIMEOUT_S = int(
-    os.environ.get("FORGE_PREFLIGHT_GRAPH_TIMEOUT", "900") or "900"
-)
-PREFLIGHT_PROFILE_TIMEOUT_S = int(
-    os.environ.get("FORGE_PREFLIGHT_PROFILE_TIMEOUT", "900") or "900"
-)
+PREFLIGHT_GRAPH_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_GRAPH_TIMEOUT", "900") or "900")
+PREFLIGHT_PROFILE_TIMEOUT_S = int(os.environ.get("FORGE_PREFLIGHT_PROFILE_TIMEOUT", "900") or "900")
 
 
 # How much of a failed stage's stdout+stderr to carry into the audit record and
 # the repair agent's next prompt. The producing tools already cap their capture
 # at 2000 chars; a traceback plus the lines that led to it fits well inside this.
-DIAG_TAIL_CHARS = int(
-    os.environ.get("FORGE_PREFLIGHT_DIAG_CHARS", "1500") or "1500"
-)
+DIAG_TAIL_CHARS = int(os.environ.get("FORGE_PREFLIGHT_DIAG_CHARS", "1500") or "1500")
 
 
 def _record_stage_output(diagnostics: dict, stage: str, result: dict) -> None:
@@ -421,11 +401,7 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
 
         try:
             rank = int(rank_value)
-            local_rank = (
-                int(local_rank_value)
-                if local_rank_value is not None
-                else None
-            )
+            local_rank = int(local_rank_value) if local_rank_value is not None else None
             world_size = int(world_size_value)
         except (TypeError, ValueError):
             return -1, f"invalid rank identity in {Path(shard).name}"
@@ -433,10 +409,7 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
             world_size <= 0
             or rank < 0
             or rank >= world_size
-            or (
-                local_rank is not None
-                and (local_rank < 0 or local_rank >= world_size)
-            )
+            or (local_rank is not None and (local_rank < 0 or local_rank >= world_size))
         ):
             return -1, f"invalid rank identity in {Path(shard).name}"
         pid_value = payload.get("pid")
@@ -446,9 +419,7 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
             ppid = int(ppid_value) if ppid_value is not None else None
         except (TypeError, ValueError):
             return -1, f"invalid process identity in {Path(shard).name}"
-        if (pid is None) != (ppid is None) or (
-            pid is not None and (pid <= 0 or ppid is None or ppid < 0)
-        ):
+        if (pid is None) != (ppid is None) or (pid is not None and (pid <= 0 or ppid is None or ppid < 0)):
             return -1, f"invalid process identity in {Path(shard).name}"
         raw_ancestors = payload.get("ancestors") or []
         if not isinstance(raw_ancestors, list):
@@ -459,9 +430,7 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
             return -1, f"invalid process ancestry in {Path(shard).name}"
         if any(ancestor <= 0 for ancestor in ancestors):
             return -1, f"invalid process ancestry in {Path(shard).name}"
-        ranked_processes.setdefault(rank, []).append(
-            (replays, pid, ppid, ancestors)
-        )
+        ranked_processes.setdefault(rank, []).append((replays, pid, ppid, ancestors))
         world_sizes.add(world_size)
 
     if not ranked_processes:
@@ -494,14 +463,8 @@ def _read_graph_probe_shards(out_path: str) -> tuple[int, str]:
             replays
             for replays, pid, _ppid, _ancestors in processes
             if all(
-                other_pid == pid
-                or pid in other_ancestors
-                or (
-                    not other_ancestors
-                    and other_ppid == pid
-                )
-                for _other_replays, other_pid, other_ppid, other_ancestors
-                in processes
+                other_pid == pid or pid in other_ancestors or (not other_ancestors and other_ppid == pid)
+                for _other_replays, other_pid, other_ppid, other_ancestors in processes
             )
         ]
         if len(roots) != 1:
@@ -528,22 +491,23 @@ async def _count_graph_replays(
     fd, out_path = tempfile.mkstemp(prefix="forge_graph_probe_")
     os.close(fd)
     probe_dir = tempfile.mkdtemp(prefix="forge_graph_probe_site_")
-    pathlib.Path(probe_dir, "sitecustomize.py").write_text(
-        _GRAPH_PROBE_SITECUSTOMIZE
-    )
+    pathlib.Path(probe_dir, "sitecustomize.py").write_text(_GRAPH_PROBE_SITECUSTOMIZE)
     # PYTHONPATH rather than a wrapper script: torchrun children of a
     # self-launching driver inherit the environment, so each rank imports the
     # counter and reports its own replays.
     env = dict(
         os.environ,
         GRAPH_PROBE_OUT=out_path,
-        PYTHONPATH=os.pathsep.join(
-            [probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]
-        ),
+        PYTHONPATH=os.pathsep.join([probe_dir, *([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])]),
     )
     cmd = [
-        sys.executable, driver,
-        "--warmup", str(warmup), "--iters", str(iters), "--bench-mode",
+        sys.executable,
+        driver,
+        "--warmup",
+        str(warmup),
+        "--iters",
+        str(iters),
+        "--bench-mode",
     ]
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -580,8 +544,7 @@ async def _count_graph_replays(
     except Exception as exc:  # noqa: BLE001
         _cleanup_probe(out_path, probe_dir)
         return -1, f"{type(exc).__name__}: {exc}"
-    tail = ((out.decode(errors="replace") if out else "")
-            + (err.decode(errors="replace") if err else ""))[-400:]
+    tail = ((out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else ""))[-400:]
     if proc.returncode != 0:
         _cleanup_probe(out_path, probe_dir)
         detail = f"benchmark exited {proc.returncode}"
@@ -628,10 +591,7 @@ async def _check_profile_contract(
         with contextlib.suppress(Exception):
             await asyncio.wait_for(proc.wait(), timeout=10)
         raise
-    output = (
-        (out.decode(errors="replace") if out else "")
-        + (err.decode(errors="replace") if err else "")
-    )
+    output = (out.decode(errors="replace") if out else "") + (err.decode(errors="replace") if err else "")
     if proc.returncode != 0:
         return False, f"profile-run exited {proc.returncode}: {output[-200:]}"
     return True, "verified"
@@ -690,9 +650,7 @@ async def _preflight_async(
         }
         details["correctness"]["seconds"] = _stage_seconds(stage_started)
         has_metric = (
-            cres.get("snr_db") is not None
-            or cres.get("allclose") is not None
-            or cres.get("max_diff") is not None
+            cres.get("snr_db") is not None or cres.get("allclose") is not None or cres.get("max_diff") is not None
         )
         if has_metric:
             correctness_ok = True
@@ -732,8 +690,7 @@ async def _preflight_async(
         details["bench"]["undeclared_cases"] = undeclared_cases
         if not bres.get("success") or not reported_cases:
             reasons.append(
-                "bench mode must produce an aggregate and case_ms timing for "
-                f"every suite case ({bres.get('message')})"
+                f"bench mode must produce an aggregate and case_ms timing for every suite case ({bres.get('message')})"
             )
             _record_stage_output(diagnostics, "bench", bres)
         elif missing_cases:
@@ -809,13 +766,9 @@ async def _preflight_async(
             }
             if not profile_ok:
                 diagnostics["profile"] = profile_detail
-                reasons.append(
-                    f"profiling contract failed ({profile_detail})"
-                )
+                reasons.append(f"profiling contract failed ({profile_detail})")
         else:
-            reasons.append(
-                "cannot verify profiling contract because bench produced no timing"
-            )
+            reasons.append("cannot verify profiling contract because bench produced no timing")
 
     ok = correctness_ok and bench_ok and graph_ok and profile_ok
     return PreflightResult(
@@ -1104,8 +1057,7 @@ def _reference_note(ref_dir: Path | None, workspace: Path) -> str:
         drv = sub / "driver.py"
         if drv.is_file():
             rel = os.path.relpath(sub, workspace)
-            extras = [f.name for f in sub.iterdir()
-                      if f.name in ("graph_harness.py", "program.md")]
+            extras = [f.name for f in sub.iterdir() if f.name in ("graph_harness.py", "program.md")]
             extra = f" (+ {', '.join(sorted(extras))})" if extras else ""
             lines.append(f"- `./{rel}/driver.py`{extra} — a complete working reference driver")
     tmpl = ref_dir / "driver_template.py"
@@ -1149,11 +1101,7 @@ def _materialize_invocation_spec(
         payload = json.loads(source.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             return None, ""
-        destination_name = (
-            source.name
-            if _INVOCATION_SPEC_NAME_RE.fullmatch(source.name)
-            else INVOCATION_SPEC_FILENAME
-        )
+        destination_name = source.name if _INVOCATION_SPEC_NAME_RE.fullmatch(source.name) else INVOCATION_SPEC_FILENAME
         destination = durable_dir / destination_name
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.is_symlink():
@@ -1205,23 +1153,18 @@ def declared_case_ids(spec_path: Path | str | None) -> list[str]:
         payload = json.loads(Path(spec_path).read_text(encoding="utf-8"))
     except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(
-            f"could not read the invocation specification {spec_path} "
-            f"({type(exc).__name__}: {exc})"
+            f"could not read the invocation specification {spec_path} ({type(exc).__name__}: {exc})"
         ) from exc
     if not isinstance(payload, dict):
-        raise ValueError(
-            f"invocation specification {spec_path} is not a JSON object"
-        )
+        raise ValueError(f"invocation specification {spec_path} is not a JSON object")
     tests = payload.get("tests")
     contract = tests.get("driver_contract") if isinstance(tests, dict) else None
     selectors = contract.get("case_selectors") if isinstance(contract, dict) else None
     if not isinstance(selectors, list):
         return []
-    return sorted({
-        str(selector["CASE_ID"])
-        for selector in selectors
-        if isinstance(selector, dict) and selector.get("CASE_ID")
-    })
+    return sorted(
+        {str(selector["CASE_ID"]) for selector in selectors if isinstance(selector, dict) and selector.get("CASE_ID")}
+    )
 
 
 class _SpecInline(NamedTuple):
@@ -1299,14 +1242,9 @@ def _invocation_spec_note(spec_path: Path | None, workspace: Path) -> str:
     rel_path = os.path.relpath(spec_path, workspace)
     inline = _invocation_spec_text(spec_path)
     if inline.text:
-        spec_block = (
-            f"\n### The specification, verbatim\n```json\n{inline.text}\n```\n"
-        )
+        spec_block = f"\n### The specification, verbatim\n```json\n{inline.text}\n```\n"
     else:
-        spec_block = (
-            f"\nThe specification at `./{rel_path}` {inline.refusal}. "
-            f"{inline.recourse}\n"
-        )
+        spec_block = f"\nThe specification at `./{rel_path}` {inline.refusal}. {inline.recourse}\n"
     return f"""\
 ## Invocation specification — BUILD THE DRIVER FROM THIS
 The JSON below is the authoritative evidence for this task. Build the driver
@@ -1410,18 +1348,14 @@ async def _run_prepare_agent(
     backend = create_registered_backend(runtime)
     if backend.capabilities.requires_workspace_cwd:
         _ensure_agent_git_workspace(workspace)
-    protected_globs = list(dict.fromkeys(
-        Path(path).name for path in (protected_files or []) if path
-    ))
+    protected_globs = list(dict.fromkeys(Path(path).name for path in (protected_files or []) if path))
     spec = AgentRunSpec(
         system_prompt=system_prompt,
         user_prompt=prompt,
         cwd=str(workspace),
         writable=True,
         timeout_sec=max(1, int(timeout_sec)),
-        additional_directories=[
-            directory for directory in (additional_dirs or []) if directory
-        ],
+        additional_directories=[directory for directory in (additional_dirs or []) if directory],
         target_files=list(target_files or []),
         # Deliberately no driver_script. That field declares the measurement
         # driver whose content a turn must preserve, which is the opposite of
@@ -1469,7 +1403,7 @@ def _read_limited(path: Path, limit: int = 16000) -> str:
 
 
 _COMPILE_ONLY_RE = re.compile(
-    r'''print\s*\(\s*["']compile_only:\s*True["']\s*\)''',
+    r"""print\s*\(\s*["']compile_only:\s*True["']\s*\)""",
 )
 
 
@@ -1501,8 +1435,14 @@ def _build_evidence(
         parts += [f"  - `{s}`" for s in source_files if s and _abs(workspace, s) != kernel_path]
     if program_md.strip():
         parts += ["", "## program.md (task guidance)", "```", program_md[:4000], "```"]
-    parts += ["", "## Kernel source (the operator to measure — read its public entry point)",
-              f"### `{kernel}`", "```python", _read_limited(kernel_path, 16000), "```"]
+    parts += [
+        "",
+        "## Kernel source (the operator to measure — read its public entry point)",
+        f"### `{kernel}`",
+        "```python",
+        _read_limited(kernel_path, 16000),
+        "```",
+    ]
     dpath = _abs(workspace, driver)
     if dpath.is_file():
         driver_text = _read_limited(dpath, 12000)
@@ -1515,18 +1455,17 @@ def _build_evidence(
                 "output. You MUST write a complete measurement driver from scratch — "
                 "do not adapt the compile-only boilerplate.",
                 f"### `{driver}`",
-                "```python", driver_text, "```",
+                "```python",
+                driver_text,
+                "```",
             ]
         else:
-            parts += ["", "## Current (non-conforming) driver", f"### `{driver}`",
-                      "```python", driver_text, "```"]
+            parts += ["", "## Current (non-conforming) driver", f"### `{driver}`", "```python", driver_text, "```"]
     if preflight is not None and preflight.reasons:
-        parts += ["", "## Why the current task fails the forge-loop contract",
-                  *[f"- {r}" for r in preflight.reasons]]
+        parts += ["", "## Why the current task fails the forge-loop contract", *[f"- {r}" for r in preflight.reasons]]
         for stage, tail in (preflight.diagnostics or {}).items():
             if tail and tail.strip():
-                parts += ["", f"### What the {stage} stage actually printed (tail)",
-                          "```", tail.strip(), "```"]
+                parts += ["", f"### What the {stage} stage actually printed (tail)", "```", tail.strip(), "```"]
     return "\n".join(parts)
 
 
@@ -1544,12 +1483,7 @@ def summarize_agent_progress(progress_log: list[str]) -> str:
     if counts:
         parts.append(
             "tool calls: "
-            + ", ".join(
-                f"{name}x{count}"
-                for name, count in sorted(
-                    counts.items(), key=lambda kv: (-kv[1], kv[0])
-                )
-            )
+            + ", ".join(f"{name}x{count}" for name, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
         )
     elif non_streaming:
         parts.append("backend does not support progress streaming")
@@ -1741,9 +1675,7 @@ async def prepare_task(
             max(0.0, deadline_unix - time.time()),
         )
     workspace = Path(workspace_dir).resolve()
-    driver_input_path = Path(
-        os.path.abspath(os.path.expanduser(str(_abs(workspace, driver))))
-    )
+    driver_input_path = Path(os.path.abspath(os.path.expanduser(str(_abs(workspace, driver)))))
     driver_path = driver_input_path.resolve(strict=False)
     try:
         driver_input_path.relative_to(workspace)
@@ -1773,27 +1705,19 @@ async def prepare_task(
         external_exclusions = [workspace]
         if experiments_dir is not None:
             try:
-                experiments_rel = experiments_dir.resolve().relative_to(
-                    driver_path.parent
-                )
+                experiments_rel = experiments_dir.resolve().relative_to(driver_path.parent)
                 if experiments_rel.parts:
                     # Runtime logs/results can change while the agent is running.
                     # Exclude their complete top-level subtree from the staged
                     # driver/helper transaction.
-                    external_exclusions.append(
-                        driver_path.parent / experiments_rel.parts[0]
-                    )
+                    external_exclusions.append(driver_path.parent / experiments_rel.parts[0])
                 elif audit_dir is not None:
                     external_exclusions.append(audit_dir)
             except (OSError, ValueError):
                 # Keep the conservative workspace exclusion when the external
                 # experiments path cannot be relativized safely.
                 pass
-        protected_external_inputs = [
-            Path(path)
-            for path in [*(read_only_files or []), invocation_spec_file]
-            if path
-        ]
+        protected_external_inputs = [Path(path) for path in [*(read_only_files or []), invocation_spec_file] if path]
         try:
             external_transaction = ExternalArtifactTransaction(
                 driver_path=driver_input_path,
@@ -1813,11 +1737,7 @@ async def prepare_task(
         agent_workspace = external_transaction.stage_root
 
     driver_access_dir = driver_path.parent.resolve()
-    harness_path = (
-        driver_access_dir / "graph_harness.py"
-        if driver_external
-        else workspace / "graph_harness.py"
-    )
+    harness_path = driver_access_dir / "graph_harness.py" if driver_external else workspace / "graph_harness.py"
 
     def _audit_text(relative: str, text: str) -> None:
         if audit_dir is None:
@@ -1907,8 +1827,13 @@ async def prepare_task(
 
     driver_rel = os.path.relpath(driver_path, agent_workspace)
     evidence = _build_evidence(
-        workspace=workspace, kernel=kernel, driver=str(driver_path), program_md=program_md,
-        target_functions=target_functions, source_files=source_files, preflight=preflight,
+        workspace=workspace,
+        kernel=kernel,
+        driver=str(driver_path),
+        program_md=program_md,
+        target_functions=target_functions,
+        source_files=source_files,
+        preflight=preflight,
     )
 
     # Give the agent REAL reference files to Read (copied into the workspace so
@@ -1965,11 +1890,7 @@ async def prepare_task(
     provided_harness = canonical_harness is not None
     if provided_harness:
         harness_path.write_text(canonical_harness)
-        harness_display = (
-            str(harness_path)
-            if driver_external
-            else "./graph_harness.py"
-        )
+        harness_display = str(harness_path) if driver_external else "./graph_harness.py"
         reference_prefix = (
             "## Graph timing harness (already available beside the driver)\n"
             f"`{harness_display}` is a correct, capture-guarded harness. Import it —\n"
@@ -2068,11 +1989,14 @@ async def prepare_task(
                     audit_dir=audit_dir_str,
                 )
             return PrepareResult(
-                ok=True, attempts=attempt_count,
+                ok=True,
+                attempts=attempt_count,
                 wrote_files=list(changes.wrote_files),
                 created_files=list(changes.created_files),
-                rolled_back=False, final_preflight=pf,
-                message="external task prepared", audit_dir=audit_dir_str,
+                rolled_back=False,
+                final_preflight=pf,
+                message="external task prepared",
+                audit_dir=audit_dir_str,
             )
 
         # In-repository task scaffolding must become part of pristine before
@@ -2090,8 +2014,11 @@ async def prepare_task(
         if spec_path is not None and spec_indexed is not True:
             _rollback()
             return PrepareResult(
-                ok=False, attempts=attempt_count, wrote_files=[],
-                created_files=[], rolled_back=True,
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=True,
                 final_preflight=pf,
                 message=(
                     "prepared a conforming driver but its invocation "
@@ -2115,13 +2042,13 @@ async def prepare_task(
         if _git_head(workspace) == prep_base_sha:
             _rollback()
             return PrepareResult(
-                ok=False, attempts=attempt_count, wrote_files=[],
-                created_files=[], rolled_back=True,
+                ok=False,
+                attempts=attempt_count,
+                wrote_files=[],
+                created_files=[],
+                rolled_back=True,
                 final_preflight=pf,
-                message=(
-                    "prepared a conforming driver but the git commit did not land: "
-                    f"{commit_out.strip()[-200:]}"
-                ),
+                message=(f"prepared a conforming driver but the git commit did not land: {commit_out.strip()[-200:]}"),
                 audit_dir=audit_dir_str,
             )
         return PrepareResult(
@@ -2191,13 +2118,12 @@ async def prepare_task(
 
             try:
                 agent_output = await _run_prepare_agent(
-                    config=config, workspace=agent_workspace,
-                    system_prompt=_SYSTEM_PROMPT, prompt=prompt, timeout_sec=attempt_timeout,
-                    additional_dirs=(
-                        [str(workspace)]
-                        if driver_external
-                        else None
-                    ),
+                    config=config,
+                    workspace=agent_workspace,
+                    system_prompt=_SYSTEM_PROMPT,
+                    prompt=prompt,
+                    timeout_sec=attempt_timeout,
+                    additional_dirs=([str(workspace)] if driver_external else None),
                     allow_shell=not driver_external,
                     target_files=[
                         driver_path.as_posix(),
@@ -2242,9 +2168,7 @@ async def prepare_task(
                 _audit_json(f"{attempt_dir}/preflight.json", asdict(last_pf))
                 if last_pf.ok:
                     return await _finish_success(last_pf, attempts)
-                prior_failure_heading = (
-                    RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-                )
+                prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
                 if driver_edited:
                     jit_hint = ""
                     if last_pf.all_failures_are_timeouts:
@@ -2258,9 +2182,7 @@ async def prepare_task(
                             "run benefits from a warm JIT cache.\n"
                         )
                     prior_failure = (
-                        "Agent timed out, then deterministic preflight failed:\n"
-                        + last_pf.detail_report()
-                        + jit_hint
+                        "Agent timed out, then deterministic preflight failed:\n" + last_pf.detail_report() + jit_hint
                     )
                 else:
                     prior_failure = (
@@ -2272,8 +2194,7 @@ async def prepare_task(
                         "the whole contract in the time you have, still leave the "
                         "best driver you can on disk rather than nothing.\n"
                         f"What you spent that time on — {summarize_agent_progress(progress_log)}\n"
-                        "The deterministic check on that unchanged driver reported:\n"
-                        + last_pf.detail_report()
+                        "The deterministic check on that unchanged driver reported:\n" + last_pf.detail_report()
                     )
                 remaining_after_timeout = deadline_sec - (time.monotonic() - start)
                 if attempts < PREPARE_MAX_ATTEMPTS:
@@ -2330,19 +2251,21 @@ async def prepare_task(
 
             # require_graph=True: a produced driver must actually time under a
             # CUDA/HIP graph, not eagerly (nor silently fall back to eager).
-            last_pf = await _preflight_async(driver_path.as_posix(), snr_threshold,
-                                             PREFLIGHT_WARMUP, PREFLIGHT_ITERS,
-                                             require_graph=True,
-                                             require_profile=True,
-                                             deadline_unix=preflight_deadline_unix,
-                                             expected_case_ids=expected_case_ids)
+            last_pf = await _preflight_async(
+                driver_path.as_posix(),
+                snr_threshold,
+                PREFLIGHT_WARMUP,
+                PREFLIGHT_ITERS,
+                require_graph=True,
+                require_profile=True,
+                deadline_unix=preflight_deadline_unix,
+                expected_case_ids=expected_case_ids,
+            )
             _audit_driver(f"{attempt_dir}/driver_at_preflight.py")
             _audit_json(f"{attempt_dir}/preflight.json", asdict(last_pf))
             if last_pf.ok:
                 return await _finish_success(last_pf, attempts)
-            prior_failure_heading = (
-                RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
-            )
+            prior_failure_heading = RETRY_HEADING_DEFAULT if driver_edited else RETRY_HEADING_NO_EDIT
             jit_hint = ""
             if driver_edited and last_pf.all_failures_are_timeouts:
                 jit_hint = (
@@ -2396,13 +2319,22 @@ async def prepare_task(
         # the driver.
         log.error("%s", scaffold_error)
         return PrepareResult(
-            ok=False, attempts=attempts, wrote_files=[], created_files=[],
-            rolled_back=rolled_back, final_preflight=last_pf,
-            message=scaffold_error, audit_dir=audit_dir_str,
+            ok=False,
+            attempts=attempts,
+            wrote_files=[],
+            created_files=[],
+            rolled_back=rolled_back,
+            final_preflight=last_pf,
+            message=scaffold_error,
+            audit_dir=audit_dir_str,
         )
     return PrepareResult(
-        ok=False, attempts=attempts, wrote_files=[], created_files=[],
-        rolled_back=rolled_back, final_preflight=last_pf,
+        ok=False,
+        attempts=attempts,
+        wrote_files=[],
+        created_files=[],
+        rolled_back=rolled_back,
+        final_preflight=last_pf,
         message=(
             (
                 f"prep wall exhausted after {attempts} attempt(s); the remaining "
@@ -2419,11 +2351,7 @@ async def prepare_task(
                 "the ORIGINAL driver, not a failed repair"
             )
         )
-        + (
-            f"; external artifact rollback failed: {external_rollback_error}"
-            if external_rollback_error
-            else ""
-        ),
+        + (f"; external artifact rollback failed: {external_rollback_error}" if external_rollback_error else ""),
         audit_dir=audit_dir_str,
     )
 

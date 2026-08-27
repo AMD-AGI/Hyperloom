@@ -17,9 +17,7 @@ def test_operator_name_is_logical_and_backend_prefix_independent():
 def test_operator_name_strips_balanced_nested_template_arguments():
     raw = "backend::paged_attention<half, layout<16, 8>>_kernel"
     assert normalize_operator_name(raw) == "paged_attention"
-    assert normalize_operator_name(raw) == normalize_operator_name(
-        "paged_attention"
-    )
+    assert normalize_operator_name(raw) == normalize_operator_name("paged_attention")
 
 
 def test_package_relative_paths_ignore_workspace_layout(tmp_path):
@@ -141,19 +139,14 @@ def test_explicit_owner_stabilizes_flattened_optional_src_layout(tmp_path):
 def test_direct_signature_reflects_current_source_symbols(tmp_path):
     kernel = tmp_path / "vllm" / "ops" / "kernel.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
     before, before_identity = implementation_signature(
         workspace=str(tmp_path),
         kernel_path=str(kernel),
         source_files=[],
         framework="vllm",
     )
-    kernel.write_text(
-        kernel.read_text()
-        + "\n@triton.jit\ndef optimization_helper(x):\n    return x\n"
-    )
+    kernel.write_text(kernel.read_text() + "\n@triton.jit\ndef optimization_helper(x):\n    return x\n")
     after, after_identity = implementation_signature(
         workspace=str(tmp_path),
         kernel_path=str(kernel),
@@ -173,12 +166,8 @@ def test_signature_covers_all_editable_paths_and_source_symbols(tmp_path):
     kernel = tmp_path / "vllm" / "ops" / "kernel.py"
     helper = tmp_path / "vllm" / "ops" / "helper.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n"
-    )
-    helper.write_text(
-        "import triton\n@triton.jit\ndef helper_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
+    helper.write_text("import triton\n@triton.jit\ndef helper_kernel(x):\n    return x\n")
 
     _, identity = implementation_signature(
         workspace=str(tmp_path),

@@ -83,9 +83,7 @@ def test_a_recycled_pid_does_not_keep_a_hazard_alive(tmp_path, monkeypatch):
     assert log.recheck(2) is None
 
 
-def test_a_hazard_with_nothing_on_the_device_clears_at_the_next_check(
-    tmp_path, monkeypatch
-):
+def test_a_hazard_with_nothing_on_the_device_clears_at_the_next_check(tmp_path, monkeypatch):
     """The reaper's "could not clear" and "is on the device" are not the same.
 
     A directory the reaper could not empty is reason enough for the iteration
@@ -103,9 +101,7 @@ def test_a_hazard_with_nothing_on_the_device_clears_at_the_next_check(
     assert log.recheck(2) is None
 
 
-def test_re_checking_twice_in_one_iteration_counts_as_one_refusal(
-    tmp_path, monkeypatch
-):
+def test_re_checking_twice_in_one_iteration_counts_as_one_refusal(tmp_path, monkeypatch):
     """The loop consults the hazard before and after its fan-out round.
 
     Counting the second look as a second refusal would end the campaign in half
@@ -149,9 +145,7 @@ def test_a_hazard_survives_the_process_that_recorded_it(tmp_path, monkeypatch):
     exists to prevent.
     """
     _FakeDevice(monkeypatch, {4321: 99})
-    DeviceHazardLog(tmp_path).record(
-        iteration=7, detail="pid(s) [4321] hold a device node", pids=[4321]
-    )
+    DeviceHazardLog(tmp_path).record(iteration=7, detail="pid(s) [4321] hold a device node", pids=[4321])
 
     resumed = DeviceHazardLog(tmp_path)
 
@@ -180,9 +174,7 @@ def test_a_refusal_describes_what_it_is_waiting_on_without_repeating_itself():
 
     assert hazard.describe() == "lane 2: pid(s) [4321] survived SIGKILL"
 
-    blocked = DeviceHazard(
-        detail="lane 2: pid(s) [4321] survived SIGKILL", still_held_by=(4321,)
-    )
+    blocked = DeviceHazard(detail="lane 2: pid(s) [4321] survived SIGKILL", still_held_by=(4321,))
 
     assert blocked.describe().startswith("lane 2: pid(s) [4321] survived SIGKILL")
     assert "still hold a device node" in blocked.describe()

@@ -79,12 +79,20 @@ def test_removed_max_turns_environment_variable_warns_and_is_ignored(
 
 
 def test_forge_loop_rejects_short_max_hours():
-    result = CliRunner().invoke(main, [
-        "forge-loop",
-        "--kernel", "k.py", "--driver", "d.py",
-        "--workspace", ".",
-        "--max-hours", "0.5",
-    ])
+    result = CliRunner().invoke(
+        main,
+        [
+            "forge-loop",
+            "--kernel",
+            "k.py",
+            "--driver",
+            "d.py",
+            "--workspace",
+            ".",
+            "--max-hours",
+            "0.5",
+        ],
+    )
     assert result.exit_code != 0
     assert "must be >=" in result.output
 
@@ -102,24 +110,40 @@ def test_forge_loop_rejects_an_unregistered_producer():
     # A producer names an index in the KB identity scheme. Accepting a free
     # string here would publish under an address nothing ever reads back,
     # and the failure would only surface as a permanently cold warm start.
-    result = CliRunner().invoke(main, [
-        "forge-loop",
-        "--kernel", "k.py", "--driver", "d.py",
-        "--workspace", ".",
-        "--producer", "not-a-producer",
-    ])
+    result = CliRunner().invoke(
+        main,
+        [
+            "forge-loop",
+            "--kernel",
+            "k.py",
+            "--driver",
+            "d.py",
+            "--workspace",
+            ".",
+            "--producer",
+            "not-a-producer",
+        ],
+    )
     assert result.exit_code != 0
     assert "--producer must be one of" in result.output
     assert "fusion" in result.output
 
 
 def test_forge_loop_refuses_to_return_after_a_read_it_was_told_not_to_do():
-    result = CliRunner().invoke(main, [
-        "forge-loop",
-        "--kernel", "k.py", "--driver", "d.py",
-        "--workspace", ".",
-        "--no-kb-warmstart", "--return-after-read-kb",
-    ])
+    result = CliRunner().invoke(
+        main,
+        [
+            "forge-loop",
+            "--kernel",
+            "k.py",
+            "--driver",
+            "d.py",
+            "--workspace",
+            ".",
+            "--no-kb-warmstart",
+            "--return-after-read-kb",
+        ],
+    )
     assert result.exit_code != 0
     assert "--no-kb-warmstart" in result.output
 
@@ -174,11 +198,13 @@ def test_remote_publication_view_marks_only_latest_best_authoritative():
 
 
 def test_zero_keep_warmstart_is_authoritatively_already_published():
-    state = _initial_remote_publication_state({
-        "applied": True,
-        "applied_commit": "warm-local-commit",
-        "solution_slug": "kernelforge-exp/op/existing-solution",
-    })
+    state = _initial_remote_publication_state(
+        {
+            "applied": True,
+            "applied_commit": "warm-local-commit",
+            "solution_slug": "kernelforge-exp/op/existing-solution",
+        }
+    )
 
     assert _warm_start_publication_covers(state, "warm-local-commit")
     publication = _remote_publication_view(state, "warm-local-commit")
@@ -188,9 +214,7 @@ def test_zero_keep_warmstart_is_authoritatively_already_published():
     assert publication["pending_commit"] == ""
     assert publication["source"] == "existing_warm_start_solution"
     assert publication["state"] == "materialized_from_remote"
-    assert publication["solution_slug"] == (
-        "kernelforge-exp/op/existing-solution"
-    )
+    assert publication["solution_slug"] == ("kernelforge-exp/op/existing-solution")
     assert state["last_result"] == {
         "written": False,
         "reason": "existing_warm_start_solution",
@@ -199,11 +223,13 @@ def test_zero_keep_warmstart_is_authoritatively_already_published():
 
 
 def test_later_keep_publication_supersedes_warmstart_authority():
-    state = _initial_remote_publication_state({
-        "applied": True,
-        "applied_commit": "warm-local-commit",
-        "solution_slug": "kernelforge-exp/op/existing-solution",
-    })
+    state = _initial_remote_publication_state(
+        {
+            "applied": True,
+            "applied_commit": "warm-local-commit",
+            "solution_slug": "kernelforge-exp/op/existing-solution",
+        }
+    )
     state["pending_commit"] = "keep-commit"
     state["last_attempted_commit"] = "keep-commit"
 
@@ -223,17 +249,17 @@ def test_later_keep_publication_supersedes_warmstart_authority():
     assert publication["pending_commit"] == ""
     assert publication["source"] == "campaign_publication"
     assert publication["state"] == "published"
-    assert publication["solution_slug"] == (
-        "kernelforge-exp/op/campaign-solution"
-    )
+    assert publication["solution_slug"] == ("kernelforge-exp/op/campaign-solution")
 
 
 def test_failed_later_keep_preserves_warm_publication_and_marks_pending():
-    state = _initial_remote_publication_state({
-        "applied": True,
-        "applied_commit": "warm-local-commit",
-        "solution_slug": "kernelforge-exp/op/existing-solution",
-    })
+    state = _initial_remote_publication_state(
+        {
+            "applied": True,
+            "applied_commit": "warm-local-commit",
+            "solution_slug": "kernelforge-exp/op/existing-solution",
+        }
+    )
     state["pending_commit"] = "keep-commit"
 
     _record_remote_publication_result(

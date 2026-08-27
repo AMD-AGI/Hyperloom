@@ -68,8 +68,7 @@ def _credentialed_store_error(token: str) -> KBStoreError:
     """
     return KBStoreError(
         f"PUT https://forge:{token}@kb.example/knowledge failed "
-        f"(sent Bearer {token}); the store said {token} expired"
-        + " and returned an unbounded body" * 20
+        f"(sent Bearer {token}); the store said {token} expired" + " and returned an unbounded body" * 20
     )
 
 
@@ -133,9 +132,7 @@ def test_a_run_without_a_configured_store_turns_every_call_into_a_no_op(
 def test_a_rewrite_is_filed_under_its_producer_owned_identity(tmp_path, monkeypatch):
     kb, store, _spec_ = _kb(tmp_path, monkeypatch)
 
-    outcome = kb.write_candidate(
-        {"rewrite_kind": "standalone_flydsl"}, speedup=2.0
-    )
+    outcome = kb.write_candidate({"rewrite_kind": "standalone_flydsl"}, speedup=2.0)
 
     assert kb.canonical_id == SOFTMAX_IDENTITY
     assert outcome["written"] is True
@@ -179,10 +176,7 @@ def test_resolved_identity_allows_an_explicit_backend(tmp_path, monkeypatch):
 
     kb = KernelRecipeKB.open_identity(identity, config)
 
-    assert (
-        kb.canonical_id
-        == f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:triton:mi355x"
-    )
+    assert kb.canonical_id == f"kernel:flydsl:softmax:vllm:{VLLM_VERSION}:triton:mi355x"
 
 
 def test_recipe_identity_requires_a_supported_producer():
@@ -202,9 +196,7 @@ def test_recipe_identity_requires_a_supported_producer():
         backend="hip",
         gpu="mi355x",
     )
-    assert kernel_recipe_canonical_id(hip) == (
-        f"kernel:forge-loop:softmax:vllm:{VLLM_VERSION}:hip:mi355x"
-    )
+    assert kernel_recipe_canonical_id(hip) == (f"kernel:forge-loop:softmax:vllm:{VLLM_VERSION}:hip:mi355x")
     with pytest.raises(ValueError, match="producer must be one of"):
         KernelRecipeIdentity(
             producer="other",
@@ -239,19 +231,13 @@ def test_producers_have_independent_candidates_top1_and_champions(
     forge_loop = KernelRecipeKB.open_identity(forge_loop_identity, config)
 
     flydsl.write_candidate({"owner": "flydsl", "rank": 2}, speedup=1.5)
-    flydsl_best = flydsl.write_candidate(
-        {"owner": "flydsl", "rank": 1}, speedup=2.0
-    )
+    flydsl_best = flydsl.write_candidate({"owner": "flydsl", "rank": 1}, speedup=2.0)
     forge_loop.write_candidate({"owner": "forge-loop", "rank": 2}, speedup=3.0)
-    forge_loop_best = forge_loop.write_candidate(
-        {"owner": "forge-loop", "rank": 1}, speedup=4.0
-    )
+    forge_loop_best = forge_loop.write_candidate({"owner": "forge-loop", "rank": 1}, speedup=4.0)
 
     assert flydsl.canonical_id != forge_loop.canonical_id
     assert flydsl.canonical_id == SOFTMAX_IDENTITY
-    assert forge_loop.canonical_id == (
-        f"kernel:forge-loop:softmax:vllm:{VLLM_VERSION}:flydsl:mi355x"
-    )
+    assert forge_loop.canonical_id == (f"kernel:forge-loop:softmax:vllm:{VLLM_VERSION}:flydsl:mi355x")
     flydsl_bundles = flydsl.read_top_n(tmp_path / "flydsl-priors", limit=2)
     forge_bundles = forge_loop.read_top_n(tmp_path / "forge-priors", limit=2)
     assert [item.value["owner"] for item in flydsl_bundles] == [
@@ -264,14 +250,12 @@ def test_producers_have_independent_candidates_top1_and_champions(
     ]
     assert all(bundle.bundle_dir.parent.name == "flydsl-priors" for bundle in flydsl_bundles)
     assert all(bundle.bundle_dir.parent.name == "forge-priors" for bundle in forge_bundles)
-    assert {
-        json.loads(bundle.recipe_path.read_text(encoding="utf-8"))["producer"]
-        for bundle in flydsl_bundles
-    } == {"flydsl"}
-    assert {
-        json.loads(bundle.recipe_path.read_text(encoding="utf-8"))["producer"]
-        for bundle in forge_bundles
-    } == {"forge-loop"}
+    assert {json.loads(bundle.recipe_path.read_text(encoding="utf-8"))["producer"] for bundle in flydsl_bundles} == {
+        "flydsl"
+    }
+    assert {json.loads(bundle.recipe_path.read_text(encoding="utf-8"))["producer"] for bundle in forge_bundles} == {
+        "forge-loop"
+    }
     assert flydsl.read_best(tmp_path / "flydsl-best").value == {
         "owner": "flydsl",
         "rank": 1,
@@ -281,13 +265,8 @@ def test_producers_have_independent_candidates_top1_and_champions(
         "rank": 1,
     }
     assert store.champions[flydsl.canonical_id]["session_id"] == flydsl_best["session_id"]
-    assert (
-        store.champions[forge_loop.canonical_id]["session_id"]
-        == forge_loop_best["session_id"]
-    )
-    assert store.knowledge[
-        (forge_loop.canonical_id, forge_loop_best["session_id"])
-    ]["producer"] == "forge-loop"
+    assert store.champions[forge_loop.canonical_id]["session_id"] == forge_loop_best["session_id"]
+    assert store.knowledge[(forge_loop.canonical_id, forge_loop_best["session_id"])]["producer"] == "forge-loop"
 
 
 def test_a_file_list_becomes_artifacts_named_after_the_files(tmp_path, monkeypatch):
@@ -295,9 +274,7 @@ def test_a_file_list_becomes_artifacts_named_after_the_files(tmp_path, monkeypat
     artifact = b"line1\r\nline2\r\n\xff"
     Path(spec.flydsl_kernel).write_bytes(artifact)
 
-    outcome = kb.write_candidate(
-        {"metric": {}}, files=[spec.flydsl_kernel], speedup=1.5
-    )
+    outcome = kb.write_candidate({"metric": {}}, files=[spec.flydsl_kernel], speedup=1.5)
 
     assert outcome["files"] == ["kernel.py"]
     stored = store.files[(SOFTMAX_IDENTITY, outcome["session_id"])]
@@ -320,9 +297,7 @@ def test_a_mapping_names_the_artifacts_when_the_names_matter(tmp_path, monkeypat
 
 
 @pytest.mark.parametrize("path_kind", ["absolute", "traversal"])
-def test_unsafe_mapping_path_is_rejected_before_digest_or_staging(
-    tmp_path, monkeypatch, path_kind
-):
+def test_unsafe_mapping_path_is_rejected_before_digest_or_staging(tmp_path, monkeypatch, path_kind):
     kb, store, spec = _kb(tmp_path, monkeypatch)
     staging = tmp_path / "staging"
     canary = tmp_path / "canary.py"
@@ -346,9 +321,7 @@ def test_unsafe_mapping_path_is_rejected_before_digest_or_staging(
         digest_called = True
         return "unexpected"
 
-    monkeypatch.setattr(
-        agent_kb_module.tempfile, "TemporaryDirectory", FixedTemporaryDirectory
-    )
+    monkeypatch.setattr(agent_kb_module.tempfile, "TemporaryDirectory", FixedTemporaryDirectory)
     monkeypatch.setattr(agent_kb_module, "_port_digest", tracked_digest)
 
     outcome = kb.write_candidate(
@@ -365,9 +338,7 @@ def test_unsafe_mapping_path_is_rejected_before_digest_or_staging(
 
 
 @pytest.mark.parametrize("rel_path", ["/tmp/outside.py", "../../outside.py"])
-def test_stage_revalidates_mapping_paths_without_overwriting_canary(
-    tmp_path, monkeypatch, rel_path
-):
+def test_stage_revalidates_mapping_paths_without_overwriting_canary(tmp_path, monkeypatch, rel_path):
     kb, _store, spec = _kb(tmp_path, monkeypatch)
     staging = tmp_path / "stage"
     staging.mkdir()
@@ -389,9 +360,7 @@ def test_the_agent_reads_back_the_best_port_recorded_for_its_identity(
     kb.write_candidate({"tag": "fast"}, speedup=3.0)
 
     assert kb.read_best(tmp_path / "best").value == {"tag": "fast"}
-    assert [
-        prior.value["tag"] for prior in kb.read_top_n(tmp_path / "top")
-    ] == ["fast", "slow"]
+    assert [prior.value["tag"] for prior in kb.read_top_n(tmp_path / "top")] == ["fast", "slow"]
 
 
 def test_top_n_materializes_isolated_complete_bundles_and_only_downloads_limit(
@@ -443,9 +412,7 @@ def test_top_n_materializes_isolated_complete_bundles_and_only_downloads_limit(
         }
         assert (bundle.files_dir / "kernel.py").read_text(encoding="utf-8") == f"# {tag}\n"
         assert (bundle.files_dir / "only" / f"{tag}.txt").is_file()
-        assert sorted(path.name for path in (bundle.files_dir / "only").iterdir()) == [
-            f"{tag}.txt"
-        ]
+        assert sorted(path.name for path in (bundle.files_dir / "only").iterdir()) == [f"{tag}.txt"]
         recipe = json.loads(bundle.recipe_path.read_text(encoding="utf-8"))
         assert recipe["canonical_id"] == SOFTMAX_IDENTITY
         assert recipe["session_id"] == bundle.session_id
@@ -583,12 +550,8 @@ def test_the_champion_pointer_only_moves_for_a_port_that_beats_the_incumbent(
 def test_recording_the_same_port_twice_updates_one_candidate(tmp_path, monkeypatch):
     kb, store, spec = _kb(tmp_path, monkeypatch)
 
-    first = kb.write_candidate(
-        {"tag": "same"}, files=[spec.flydsl_kernel], speedup=2.0
-    )
-    second = kb.write_candidate(
-        {"tag": "same"}, files=[spec.flydsl_kernel], speedup=2.0
-    )
+    first = kb.write_candidate({"tag": "same"}, files=[spec.flydsl_kernel], speedup=2.0)
+    second = kb.write_candidate({"tag": "same"}, files=[spec.flydsl_kernel], speedup=2.0)
 
     assert first["session_id"] == second["session_id"]
     assert len(store.knowledge) == 1
@@ -626,9 +589,7 @@ def test_records_survive_on_the_local_backend_too(tmp_path):
     identity = _resolved_identity(spec, config)
     kb = KernelRecipeKB.open_identity(identity, config)
 
-    outcome = kb.write_candidate(
-        {"tag": "on-disk"}, files=[spec.flydsl_kernel], speedup=2.0
-    )
+    outcome = kb.write_candidate({"tag": "on-disk"}, files=[spec.flydsl_kernel], speedup=2.0)
 
     assert outcome["written"] is True
     bundle = kb.read_best(tmp_path / "best")
@@ -711,9 +672,7 @@ def test_an_unreadable_artifact_fails_the_write_instead_of_recording_half_a_port
     """
     kb, store, _spec_ = _kb(tmp_path, monkeypatch)
 
-    outcome = kb.write_candidate(
-        {"tag": "x"}, files=[tmp_path / "absent.py"], speedup=2.0
-    )
+    outcome = kb.write_candidate({"tag": "x"}, files=[tmp_path / "absent.py"], speedup=2.0)
 
     assert outcome["written"] is False
     assert outcome["reason"].startswith("FileNotFoundError: ")
@@ -754,9 +713,7 @@ def test_a_refused_measured_write_back_redacts_the_error_that_opened_the_store(
     def refuse_to_open(_config):
         raise _credentialed_store_error(token)
 
-    monkeypatch.setattr(
-        agent_kb_module, "create_rewrite_record_store", refuse_to_open
-    )
+    monkeypatch.setattr(agent_kb_module, "create_rewrite_record_store", refuse_to_open)
 
     writeback = experience_integration._record_measured_speedup(
         _remote_config_with_token(tmp_path, token),
@@ -799,9 +756,7 @@ def test_a_refused_candidate_write_redacts_and_bounds_the_store_error(
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
 
-    outcome = kb.write_candidate(
-        {"tag": "refused"}, files=[spec.flydsl_kernel], speedup=2.0
-    )
+    outcome = kb.write_candidate({"tag": "refused"}, files=[spec.flydsl_kernel], speedup=2.0)
 
     assert outcome["written"] is False
     assert token not in outcome["reason"]
@@ -873,9 +828,7 @@ def test_a_failed_run_experience_write_redacts_and_bounds_the_store_error(
     def refuse_to_open(_config):
         raise _credentialed_store_error(token)
 
-    monkeypatch.setattr(
-        agent_kb_module, "create_rewrite_record_store", refuse_to_open
-    )
+    monkeypatch.setattr(agent_kb_module, "create_rewrite_record_store", refuse_to_open)
 
     status = experience_sink.write_run_experience(
         config=_remote_config_with_token(tmp_path, token),

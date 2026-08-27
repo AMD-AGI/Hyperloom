@@ -184,11 +184,7 @@ def _source_digest(source_files: list[str]) -> str:
     """Hash only the declared build inputs, independent of unrelated repo state."""
     digest = hashlib.sha256()
     digest.update(_SOURCE_KEY_SCHEMA)
-    paths = {
-        Path(str(raw_path)).expanduser().resolve(strict=False)
-        for raw_path in source_files
-        if raw_path
-    }
+    paths = {Path(str(raw_path)).expanduser().resolve(strict=False) for raw_path in source_files if raw_path}
     for path in sorted(paths, key=str):
         digest.update(str(path).encode("utf-8", errors="replace"))
         digest.update(b"\0")
@@ -270,11 +266,7 @@ def prune_aiter_cache_shards(
     for path in candidates:
         owner = _read_owner(path / _OWNER_FILE)
         try:
-            last_used = float(
-                owner.get("last_used_unix")
-                or owner.get("created_unix")
-                or path.stat().st_mtime
-            )
+            last_used = float(owner.get("last_used_unix") or owner.get("created_unix") or path.stat().st_mtime)
         except (OSError, TypeError, ValueError):
             last_used = 0.0
         size = _directory_size(path)
@@ -327,9 +319,7 @@ def activate_aiter_cache_for_sources(
     cache_root_raw = os.environ.get("FORGE_AITER_CACHE_ROOT", "").strip()
     if not cache_root_raw:
         return None
-    cache_root = Path(cache_root_raw).resolve() / "sources" / _source_digest(
-        source_files
-    )
+    cache_root = Path(cache_root_raw).resolve() / "sources" / _source_digest(source_files)
     aiter_root_dir = cache_root / "cpp_itfs"
     aiter_jit_dir = cache_root / "jit"
     flydsl_cache_dir = cache_root / "flydsl_cache"
@@ -495,10 +485,7 @@ def _live_cache_users(isolation: AiterCacheIsolation) -> list[int] | None:
         except (OSError, PermissionError):
             uncertain = True
             continue
-        if (
-            b"AITER_ROOT_DIR=" + expected_root in environ
-            or b"AITER_JIT_DIR=" + expected_jit in environ
-        ):
+        if b"AITER_ROOT_DIR=" + expected_root in environ or b"AITER_JIT_DIR=" + expected_jit in environ:
             live.append(pid)
     if live:
         return live
@@ -540,9 +527,7 @@ def cleanup_owned_aiter_locks(isolation: AiterCacheIsolation) -> dict[str, Any]:
             stats["errors"] += 1
             continue
         for path in candidates:
-            if not path.is_file() or not (
-                path.name in _LOCK_NAMES or path.name.startswith("lock_")
-            ):
+            if not path.is_file() or not (path.name in _LOCK_NAMES or path.name.startswith("lock_")):
                 continue
             stats["scanned"] += 1
             try:
@@ -575,9 +560,7 @@ def cleanup_owned_aiter_cache(isolation: AiterCacheIsolation) -> dict[str, Any]:
     if sources_root.is_dir():
         try:
             candidates.extend(
-                _source_shard_isolation(path, isolation.owner_pid)
-                for path in sources_root.iterdir()
-                if path.is_dir()
+                _source_shard_isolation(path, isolation.owner_pid) for path in sources_root.iterdir() if path.is_dir()
             )
         except OSError:
             stats["errors"] += 1
@@ -602,9 +585,7 @@ def cleanup_owned_aiter_cache(isolation: AiterCacheIsolation) -> dict[str, Any]:
             value = os.environ.get(key, "")
             if value.startswith(prefix):
                 os.environ.pop(key, None)
-        if os.environ.get("FORGE_AITER_CACHE_ROOT") == str(
-            isolation.cache_root.resolve()
-        ):
+        if os.environ.get("FORGE_AITER_CACHE_ROOT") == str(isolation.cache_root.resolve()):
             os.environ.pop("FORGE_AITER_CACHE_ROOT", None)
             os.environ.pop("FORGE_AITER_CACHE_OWNER_PID", None)
     except OSError:

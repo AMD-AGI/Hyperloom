@@ -49,9 +49,7 @@ def test_resume_recovery_rejects_gap_before_pending_keep(tmp_path, monkeypatch):
         "validation_text": "passed",
         "plan": "keep candidate",
     }
-    (workspace / "forge_experiments" / "pending_keep.json").write_text(
-        json.dumps(pending)
-    )
+    (workspace / "forge_experiments" / "pending_keep.json").write_text(json.dumps(pending))
     loop.state_store = store
     loop.run_state = state
 
@@ -86,9 +84,7 @@ def test_keep_archive_failure_is_non_fatal_and_clears_pending_journal(
     monkeypatch.setattr(
         runner_module.CandidateArchive,
         "record",
-        lambda _archive, _record: (_ for _ in ()).throw(
-            OSError("simulated archive failure")
-        ),
+        lambda _archive, _record: (_ for _ in ()).throw(OSError("simulated archive failure")),
     )
 
     asyncio.run(loop.run(agent_fn=editing_agent))
@@ -187,12 +183,8 @@ async def test_malformed_analysis_checkpoint_is_rejected(tmp_path) -> None:
         )
     )
     (generation_root / "workflow.json").write_text('{"schema_version": 1, "session": {}}')
-    (generation_root / "published.json").write_text(
-        json.dumps({"generation_root": "generation-001"})
-    )
-    (commit_root / "published.json").write_text(
-        json.dumps({"generation_root": "generation-001"})
-    )
+    (generation_root / "published.json").write_text(json.dumps({"generation_root": "generation-001"}))
+    (commit_root / "published.json").write_text(json.dumps({"generation_root": "generation-001"}))
 
     service = _service(tmp_path, _BundleBackend(), profiling_enabled=True)
     with pytest.raises(AnalysisBundleError, match="workflow schema_version is invalid"):
@@ -208,13 +200,7 @@ async def test_malformed_analysis_checkpoint_is_rejected(tmp_path) -> None:
 async def test_fake_agent_command_rows_do_not_mark_profiled(tmp_path) -> None:
     workspace, _kernel, _driver = _workspace(tmp_path)
     context = _context(workspace)
-    work_root = (
-        workspace
-        / "forge_experiments"
-        / "analysis"
-        / "work"
-        / context.analysis_commit
-    )
+    work_root = workspace / "forge_experiments" / "analysis" / "work" / context.analysis_commit
     case = type(
         "Case",
         (),
@@ -244,16 +230,11 @@ async def test_fake_agent_command_rows_do_not_mark_profiled(tmp_path) -> None:
     (case_root / "normalized_metrics.json").write_text(json.dumps({"metrics": {"x": 1}}))
     assert AnalysisAgentService._has_valid_profile_evidence(work_root, case)
     framework_rows = [
-        json.loads(line)
-        for line in (work_root / "framework_commands.jsonl").read_text().splitlines()
-        if line.strip()
+        json.loads(line) for line in (work_root / "framework_commands.jsonl").read_text().splitlines() if line.strip()
     ]
     assert framework_rows
     assert all(row.get("framework_owned") is True for row in framework_rows)
-    assert not any(
-        row.get("command", "").startswith("rocprof")
-        for row in framework_rows
-    )
+    assert not any(row.get("command", "").startswith("rocprof") for row in framework_rows)
 
 
 def test_resume_rejects_head_mismatch_without_modifying_state(tmp_path, monkeypatch):

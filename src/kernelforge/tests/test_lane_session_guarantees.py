@@ -147,14 +147,10 @@ def test_a_lane_session_is_given_the_protected_path_hooks(tmp_path, monkeypatch)
         gate_module._EDIT_TOOL_MATCHER,
         "Bash",
     }
-    assert [hook.matcher for hook in spec.hooks.post_tool_use] == [
-        gate_module._EDIT_TOOL_MATCHER
-    ]
+    assert [hook.matcher for hook in spec.hooks.post_tool_use] == [gate_module._EDIT_TOOL_MATCHER]
 
 
-def test_a_lane_session_is_not_given_the_benchmarking_stop_hook(
-    tmp_path, monkeypatch
-):
+def test_a_lane_session_is_not_given_the_benchmarking_stop_hook(tmp_path, monkeypatch):
     """The Stop hook runs correctness and a benchmark; lanes are concurrent.
 
     Lanes overlap in time and the device measures one thing at a time, so a lane
@@ -171,9 +167,7 @@ def test_a_lane_hook_denies_an_edit_to_the_lane_driver(tmp_path, monkeypatch):
     """The installed hook refuses the edit rather than the finished candidate."""
     spec, lane_dir = _run_lane_session(tmp_path, monkeypatch)
     deny_edit = next(
-        hook.callback
-        for hook in spec.hooks.pre_tool_use
-        if hook.matcher == gate_module._EDIT_TOOL_MATCHER
+        hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == gate_module._EDIT_TOOL_MATCHER
     )
 
     denied = asyncio.run(
@@ -206,11 +200,7 @@ def test_a_lane_hook_denies_an_edit_to_the_lane_driver(tmp_path, monkeypatch):
 def test_a_lane_hook_denies_a_shell_write_to_the_lane_driver(tmp_path, monkeypatch):
     """The Bash denial travels with the lane too, not just the edit tools."""
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
-    deny_bash = next(
-        hook.callback
-        for hook in spec.hooks.pre_tool_use
-        if hook.matcher == "Bash"
-    )
+    deny_bash = next(hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == "Bash")
 
     denied = asyncio.run(
         deny_bash(
@@ -239,11 +229,7 @@ def test_a_lane_hook_denies_a_shell_write_to_the_lane_driver(tmp_path, monkeypat
 
 def _bash_hook(spec: AgentRunSpec):
     """The Bash denial the session carries to its provider."""
-    return next(
-        hook.callback
-        for hook in spec.hooks.pre_tool_use
-        if hook.matcher == "Bash"
-    )
+    return next(hook.callback for hook in spec.hooks.pre_tool_use if hook.matcher == "Bash")
 
 
 def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
@@ -283,9 +269,7 @@ def _bash_decision(spec: AgentRunSpec, command: str) -> dict:
         "sh -ic 'python3 forge_driver.py --bench-mode'",
     ],
 )
-def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(
-    tmp_path, monkeypatch, command
-):
+def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(tmp_path, monkeypatch, command):
     """A prompt is a preference; the number the round is judged on is not.
 
     The wrapper is what holds the device lock, so a driver run that goes around
@@ -294,9 +278,7 @@ def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(
     lesson can attribute to anything.
     """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(
-        tmp_path, monkeypatch, serialized_driver=wrapper
-    )
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
     decision = _bash_decision(spec, command)["hookSpecificOutput"]
 
@@ -320,25 +302,19 @@ def test_a_lane_hook_refuses_a_driver_run_that_would_skip_the_lock(
         "bash -lc 'python3 {wrapper} --bench-mode'",
     ],
 )
-def test_a_lane_hook_allows_the_locked_run_and_every_read(
-    tmp_path, monkeypatch, command
-):
+def test_a_lane_hook_allows_the_locked_run_and_every_read(tmp_path, monkeypatch, command):
     """Only executing the driver is refused, and only outside its wrapper.
 
     Reading the driver is how a lane learns what it is being scored on, and the
     wrapper is the command it was told to measure through.
     """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(
-        tmp_path, monkeypatch, serialized_driver=wrapper
-    )
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
     assert _bash_decision(spec, command.format(wrapper=wrapper)) == {}
 
 
-def test_a_session_without_a_wrapper_still_runs_the_driver_itself(
-    tmp_path, monkeypatch
-):
+def test_a_session_without_a_wrapper_still_runs_the_driver_itself(tmp_path, monkeypatch):
     """The refusal belongs to an interposed command, not to the gate at large.
 
     Every ordinary session runs the driver directly and must keep doing so; the
@@ -349,9 +325,7 @@ def test_a_session_without_a_wrapper_still_runs_the_driver_itself(
     assert _bash_decision(spec, "python3 forge_driver.py --bench-mode") == {}
 
 
-def test_a_lane_is_told_to_run_the_driver_through_its_own_lock(
-    tmp_path, monkeypatch
-):
+def test_a_lane_is_told_to_run_the_driver_through_its_own_lock(tmp_path, monkeypatch):
     """The lock lives in the wrapper, so it binds only if the session runs it.
 
     The wrapper used to reach the lane in a per-invocation note alone, while the
@@ -361,17 +335,13 @@ def test_a_lane_is_told_to_run_the_driver_through_its_own_lock(
     """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
 
-    spec, _lane_dir = _run_lane_session(
-        tmp_path, monkeypatch, serialized_driver=wrapper
-    )
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
     assert f"python3 {wrapper}" in spec.system_prompt
     assert "Never `python3 forge_driver.py` directly" in spec.system_prompt
 
 
-def test_a_session_without_a_wrapper_is_told_nothing_about_one(
-    tmp_path, monkeypatch
-):
+def test_a_session_without_a_wrapper_is_told_nothing_about_one(tmp_path, monkeypatch):
     """No wrapper means no interposition, so the prompt is exactly as it was."""
     spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch)
 
@@ -379,9 +349,7 @@ def test_a_session_without_a_wrapper_is_told_nothing_about_one(
     assert "Run the driver through this command" not in spec.system_prompt
 
 
-def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(
-    tmp_path, monkeypatch
-):
+def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(tmp_path, monkeypatch):
     """No Stop hook means no gate to send the agent back, so it is not promised one.
 
     The self-correcting prompt describes a gate that re-checks correctness and
@@ -393,9 +361,7 @@ def test_a_lane_keeps_the_prompt_of_the_session_it_actually_runs(
     assert "Authoritative mean case scoring state" not in spec.system_prompt
 
 
-def test_the_canonical_session_keeps_its_benchmarking_stop_hook(
-    tmp_path, monkeypatch
-):
+def test_the_canonical_session_keeps_its_benchmarking_stop_hook(tmp_path, monkeypatch):
     """Pin the single-session path: it self-corrects, and that has not changed."""
     specs = _record_backend_specs(monkeypatch)
     workspace = _tree(tmp_path / "workspace")
@@ -552,9 +518,7 @@ def test_the_builtin_hook_capable_provider_passes_the_lane_check():
         'grep -E "forge_driver.py|kernel.py" build.log',
     ],
 )
-def test_a_pipe_inside_one_argument_is_not_a_second_command(
-    tmp_path, monkeypatch, command
-):
+def test_a_pipe_inside_one_argument_is_not_a_second_command(tmp_path, monkeypatch, command):
     """Observed in a live round: a lane's `pgrep` was refused as a driver run.
 
     The operators that separate commands were found by a regex over the raw
@@ -562,8 +526,6 @@ def test_a_pipe_inside_one_argument_is_not_a_second_command(
     tail became a command whose verb was a file the session never ran.
     """
     wrapper = str(tmp_path / "lanes" / "1" / fanout.SERIALIZED_DRIVER_NAME)
-    spec, _lane_dir = _run_lane_session(
-        tmp_path, monkeypatch, serialized_driver=wrapper
-    )
+    spec, _lane_dir = _run_lane_session(tmp_path, monkeypatch, serialized_driver=wrapper)
 
     assert _bash_decision(spec, command) == {}

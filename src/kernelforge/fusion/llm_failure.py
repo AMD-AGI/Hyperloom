@@ -165,10 +165,7 @@ def is_agent_safety_error(error: BaseException) -> bool:
     both have to refuse to retry a rejection that is decided the same way
     every time.
     """
-    return any(
-        bool(getattr(current, AGENT_SAFETY_REJECTION_ATTR, False))
-        for current in _error_chain(error)
-    )
+    return any(bool(getattr(current, AGENT_SAFETY_REJECTION_ATTR, False)) for current in _error_chain(error))
 
 
 def is_agent_timeout_error(error: BaseException) -> bool:
@@ -180,8 +177,7 @@ def is_agent_timeout_error(error: BaseException) -> bool:
     visible only in ``__context__``.
     """
     return any(
-        isinstance(current, (asyncio.TimeoutError, TimeoutError))
-        or classify_llm_error(current) == TIMEOUT
+        isinstance(current, (asyncio.TimeoutError, TimeoutError)) or classify_llm_error(current) == TIMEOUT
         for current in _error_chain(error)
     )
 

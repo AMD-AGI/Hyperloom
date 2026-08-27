@@ -44,10 +44,7 @@ def forge_loop_prompts(monkeypatch):
         lambda *a, **k: _KB_SENTINEL,
     )
     config = Config(gpu_target=_GPU)
-    return {
-        backend: build_single_fellow_prompt(config, f"{backend}-fellow")
-        for backend in FELLOW_BACKENDS
-    }
+    return {backend: build_single_fellow_prompt(config, f"{backend}-fellow") for backend in FELLOW_BACKENDS}
 
 
 # ---------- snapshot hashes -------------------------------------------------
@@ -58,15 +55,15 @@ def forge_loop_prompts(monkeypatch):
 # which makes an unexpected diff in this table a precise signal that prompt text
 # moved, not that knowledge assembly did.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter":      "3f0b7ebcdaa71aeed07863b6ebe4b5e6616c28589ab59938f30577c1fab49a53",
-    "ck":         "7e6794a4dd0b17a087896083248bc7040c4c22a08985ea5bbdcca514cd731570",
-    "flydsl":     "356c429f55c796de99790f653a8cd16b549f0aca8dd9365081e6affeca109f2e",
-    "fusion":     "f461db9611095eb9a8c423bde73c9012985eae9d2cbc6afa93a508d09cc291b3",
-    "gluon":      "d8a4f4cfc9aa4ce32958d44e51f637f040e13d7c35165160f2d78fdf9efcdf59",
-    "hip":        "5217b3f51175ce13024d97d907a7bb63c786e09f14f69b78a6b515615984e32b",
-    "hipblaslt":  "4a6be121500463f42bb82d78656e7d03de80917fb2c15dd3da9226605b9524c9",
+    "aiter": "3f0b7ebcdaa71aeed07863b6ebe4b5e6616c28589ab59938f30577c1fab49a53",
+    "ck": "7e6794a4dd0b17a087896083248bc7040c4c22a08985ea5bbdcca514cd731570",
+    "flydsl": "356c429f55c796de99790f653a8cd16b549f0aca8dd9365081e6affeca109f2e",
+    "fusion": "f461db9611095eb9a8c423bde73c9012985eae9d2cbc6afa93a508d09cc291b3",
+    "gluon": "d8a4f4cfc9aa4ce32958d44e51f637f040e13d7c35165160f2d78fdf9efcdf59",
+    "hip": "5217b3f51175ce13024d97d907a7bb63c786e09f14f69b78a6b515615984e32b",
+    "hipblaslt": "4a6be121500463f42bb82d78656e7d03de80917fb2c15dd3da9226605b9524c9",
     "intellikit": "26d3e33deaebe7a741059427a8e676e85eec2a52c3c1b5fa7136d4780bcc93a7",
-    "triton":     "bca0355881da2717dcddde7f1c0ad3daf5e5f5978f54735e79f6b5a7502c9a9b",
+    "triton": "bca0355881da2717dcddde7f1c0ad3daf5e5f5978f54735e79f6b5a7502c9a9b",
 }
 
 
@@ -77,8 +74,7 @@ class TestRenderedPromptSnapshots:
         for backend, prompt in forge_loop_prompts.items():
             got = _sha256(prompt)
             assert got == _SHA256_FORGE_LOOP[backend], (
-                f"{backend}: forge-loop prompt changed (got {got!r}, "
-                f"expected {_SHA256_FORGE_LOOP[backend]!r})"
+                f"{backend}: forge-loop prompt changed (got {got!r}, expected {_SHA256_FORGE_LOOP[backend]!r})"
             )
 
 
@@ -101,9 +97,7 @@ class TestForgeLoopPath:
 
     def test_no_coordination_tag(self, forge_loop_prompts):
         for backend, prompt in forge_loop_prompts.items():
-            assert "<coordination>" not in prompt, (
-                f"{backend}: forge-loop prompt has <coordination>"
-            )
+            assert "<coordination>" not in prompt, f"{backend}: forge-loop prompt has <coordination>"
 
     def test_gpu_target_present(self, forge_loop_prompts):
         for backend, prompt in forge_loop_prompts.items():
@@ -129,35 +123,21 @@ class TestEditSurfaceAndSweepContract:
 
     def test_every_fellow_points_at_the_sweep_card(self, forge_loop_prompts):
         for backend, prompt in forge_loop_prompts.items():
-            assert _SWEEP_CARD in prompt, (
-                f"{backend}: prompt does not name the shared sweep card"
-            )
-            assert "FORGE_SWEEP_" in prompt, (
-                f"{backend}: prompt does not carry the sweep-knob contract"
-            )
-            assert "sweep_const" in prompt, (
-                f"{backend}: prompt does not carry the sweep echo contract"
-            )
+            assert _SWEEP_CARD in prompt, f"{backend}: prompt does not name the shared sweep card"
+            assert "FORGE_SWEEP_" in prompt, f"{backend}: prompt does not carry the sweep-knob contract"
+            assert "sweep_const" in prompt, f"{backend}: prompt does not carry the sweep echo contract"
 
     def test_every_fellow_points_at_the_edit_surface_card(self, forge_loop_prompts):
         for backend, prompt in forge_loop_prompts.items():
-            assert _EDIT_SURFACE_CARD in prompt, (
-                f"{backend}: prompt does not name the edit-surface card"
-            )
-            assert "editable_sources" in prompt, (
-                f"{backend}: prompt never names the editable source list"
-            )
-            assert "os.environ" in prompt, (
-                f"{backend}: prompt does not state the os.environ converse"
-            )
+            assert _EDIT_SURFACE_CARD in prompt, f"{backend}: prompt does not name the edit-surface card"
+            assert "editable_sources" in prompt, f"{backend}: prompt never names the editable source list"
+            assert "os.environ" in prompt, f"{backend}: prompt does not state the os.environ converse"
             # The declared list is a floor: `agent.py` tells repository tasks
             # that any tracked non-protected implementation file is editable,
             # so a prompt presenting the list as the boundary contradicts the
             # rest of its own assembly -- in the direction that lost the
             # campaigns.
-            assert "FLOOR, not a ceiling" in prompt, (
-                f"{backend}: prompt presents the editable list as a ceiling"
-            )
+            assert "FLOOR, not a ceiling" in prompt, f"{backend}: prompt presents the editable list as a ceiling"
 
     def test_every_fellow_carries_the_boolean_parse_warning(self, forge_loop_prompts):
         """A knob that cannot be turned off is the sweep bug the echo cannot catch.
@@ -168,26 +148,21 @@ class TestEditSurfaceAndSweepContract:
         """
         for backend, prompt in forge_loop_prompts.items():
             assert 'bool("0")' in prompt, (
-                f"{backend}: prompt does not warn that a bool-cast swept string "
-                "is always True"
+                f"{backend}: prompt does not warn that a bool-cast swept string is always True"
             )
 
-    def test_no_fellow_tells_the_implementer_to_collapse_the_knobs(
-        self, forge_loop_prompts
-    ):
+    def test_no_fellow_tells_the_implementer_to_collapse_the_knobs(self, forge_loop_prompts):
         """A knob deleted mid-campaign is an axis no later session re-opens."""
         for backend, prompt in forge_loop_prompts.items():
             lowered = prompt.lower()
             assert "collapse the knobs back" not in lowered, (
-                f"{backend}: prompt still tells the implementer to delete its "
-                "own sweep knobs"
+                f"{backend}: prompt still tells the implementer to delete its own sweep knobs"
             )
             assert "dead weight in the delivered kernel" not in lowered, (
                 f"{backend}: prompt still calls a shipped sweep knob dead weight"
             )
             assert "keep the knobs" in lowered, (
-                f"{backend}: prompt does not tell the implementer to keep the "
-                "sweep knobs through the search"
+                f"{backend}: prompt does not tell the implementer to keep the sweep knobs through the search"
             )
 
     def test_sweep_contract_is_not_owned_by_one_fellow(self):
@@ -220,9 +195,7 @@ class TestSharedCardsAreReachable:
     def test_cards_exist_on_disk(self):
         root = Path(Config(gpu_target=_GPU).local_knowledge_dir)
         for card in (_SWEEP_CARD, _EDIT_SURFACE_CARD, _LOOP_FORM_CARD):
-            assert (root / "common_methodology" / "optimization" / card).is_file(), (
-                f"missing shared card: {card}"
-            )
+            assert (root / "common_methodology" / "optimization" / card).is_file(), f"missing shared card: {card}"
 
     def test_assembled_knowledge_references_both_cards(self, knowledge_block):
         for card in (_SWEEP_CARD, _EDIT_SURFACE_CARD, _LOOP_FORM_CARD):
@@ -265,24 +238,12 @@ class TestDocumentedSweepHelper:
 
     @pytest.fixture()
     def sweep_const(self):
-        card = (
-            Path(Config(gpu_target=_GPU).local_knowledge_dir)
-            / "common_methodology"
-            / "optimization"
-            / _SWEEP_CARD
-        )
-        blocks = re.findall(
-            r"```python\n(.*?)```", card.read_text(encoding="utf-8"), re.DOTALL
-        )
-        assert len(blocks) == 1, (
-            f"{_SWEEP_CARD}: expected exactly one python block to lock, "
-            f"found {len(blocks)}"
-        )
+        card = Path(Config(gpu_target=_GPU).local_knowledge_dir) / "common_methodology" / "optimization" / _SWEEP_CARD
+        blocks = re.findall(r"```python\n(.*?)```", card.read_text(encoding="utf-8"), re.DOTALL)
+        assert len(blocks) == 1, f"{_SWEEP_CARD}: expected exactly one python block to lock, found {len(blocks)}"
         namespace: dict = {"os": os}
         exec(compile(blocks[0], str(card), "exec"), namespace)  # noqa: S102
-        assert "_sweep_const" in namespace, (
-            f"{_SWEEP_CARD}: the documented block no longer defines _sweep_const"
-        )
+        assert "_sweep_const" in namespace, f"{_SWEEP_CARD}: the documented block no longer defines _sweep_const"
         return namespace["_sweep_const"]
 
     def test_unset_knob_keeps_the_default(self, sweep_const, monkeypatch):
@@ -301,9 +262,7 @@ class TestDocumentedSweepHelper:
         monkeypatch.setenv("FORGE_SWEEP_USE_FUSED_EPILOGUE", token)
         assert sweep_const("USE_FUSED_EPILOGUE", False) is True
 
-    def test_an_unreadable_boolean_is_refused_not_guessed(
-        self, sweep_const, monkeypatch
-    ):
+    def test_an_unreadable_boolean_is_refused_not_guessed(self, sweep_const, monkeypatch):
         """A typo must fail the point, not silently time the default again."""
         monkeypatch.setenv("FORGE_SWEEP_USE_FUSED_EPILOGUE", "maybe")
         with pytest.raises(ValueError, match="USE_FUSED_EPILOGUE"):
@@ -313,9 +272,7 @@ class TestDocumentedSweepHelper:
         ("raw", "default", "expected"),
         [("64", 32, 64), ("1.5", 1.0, 1.5), ("nhwc", "nchw", "nhwc")],
     )
-    def test_non_boolean_defaults_still_convert(
-        self, sweep_const, monkeypatch, raw, default, expected
-    ):
+    def test_non_boolean_defaults_still_convert(self, sweep_const, monkeypatch, raw, default, expected):
         monkeypatch.setenv("FORGE_SWEEP_BLOCK_H", raw)
         assert sweep_const("BLOCK_H", default) == expected
 

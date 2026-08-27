@@ -133,9 +133,7 @@ def test_legacy_model_type_still_resolves(tmp_path: Path) -> None:
 def test_unknown_framework_returns_empty(tmp_path: Path) -> None:
     model_path = _model_dir(tmp_path, model_type="x", architectures=["XForCausalLM"])
 
-    path, how = resolve_framework_source_file(
-        model_path, "tensorrt", framework_root=_root(tmp_path)
-    )
+    path, how = resolve_framework_source_file(model_path, "tensorrt", framework_root=_root(tmp_path))
 
     assert path == ""
     assert "unsupported" in how
@@ -157,17 +155,13 @@ def test_a_pinned_root_outranks_the_installed_vllm_the_registry_names(
         lambda _p: "/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models/qwen3.py",
     )
 
-    got, how = resolve_framework_source_file(
-        model_path, "vllm", framework_root=_root(tmp_path)
-    )
+    got, how = resolve_framework_source_file(model_path, "vllm", framework_root=_root(tmp_path))
 
     assert got == str(models / "qwen3.py")
     assert how != "vllm registry"
 
 
-def test_the_registry_still_answers_when_no_root_is_pinned(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_registry_still_answers_when_no_root_is_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Nothing is pinned, so the importable vLLM IS the tree being optimized."""
     installed = tmp_path / "site-packages" / "vllm" / "model_executor" / "models"
     installed.mkdir(parents=True)

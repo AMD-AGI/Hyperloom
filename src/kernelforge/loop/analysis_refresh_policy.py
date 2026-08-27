@@ -54,9 +54,7 @@ def decide_analysis_refresh(
     )
 
     attempted_this_iteration = (
-        canonical
-        and last_attempt_commit == canonical
-        and last_attempt_iteration == current_iteration
+        canonical and last_attempt_commit == canonical and last_attempt_iteration == current_iteration
     )
     if attempted_this_iteration:
         return AnalysisRefreshDecision(
@@ -66,11 +64,7 @@ def decide_analysis_refresh(
             gain_since_evidence=gain,
         )
 
-    if (
-        canonical
-        and last_attempt_commit == canonical
-        and last_attempt_status == "exhausted"
-    ):
+    if canonical and last_attempt_commit == canonical and last_attempt_status == "exhausted":
         return AnalysisRefreshDecision(
             refresh=False,
             reasons=("ANALYSIS_ATTEMPTS_EXHAUSTED",),
@@ -78,11 +72,7 @@ def decide_analysis_refresh(
             gain_since_evidence=gain,
         )
 
-    if (
-        canonical
-        and last_attempt_commit == canonical
-        and last_attempt_status == "failed"
-    ):
+    if canonical and last_attempt_commit == canonical and last_attempt_status == "failed":
         return AnalysisRefreshDecision(
             refresh=True,
             reasons=("RETRY_FAILED_ANALYSIS",),
@@ -91,12 +81,7 @@ def decide_analysis_refresh(
         )
 
     status = str(evidence_status or "").strip().lower()
-    if (
-        canonical
-        and evidence == canonical
-        and status == "partial"
-        and last_attempt_iteration < current_iteration
-    ):
+    if canonical and evidence == canonical and status == "partial" and last_attempt_iteration < current_iteration:
         return AnalysisRefreshDecision(
             refresh=True,
             reasons=("PARTIAL_UPGRADE",),
@@ -113,11 +98,7 @@ def decide_analysis_refresh(
         )
 
     reasons: list[str] = []
-    if (
-        stale
-        and gain is not None
-        and gain + 1e-12 >= ANALYSIS_REFRESH_THRESHOLD
-    ):
+    if stale and gain is not None and gain + 1e-12 >= ANALYSIS_REFRESH_THRESHOLD:
         reasons.append("CUMULATIVE_GAIN")
     if stale and supervisor_due:
         reasons.append("SUPERVISOR_STALE_EVIDENCE")

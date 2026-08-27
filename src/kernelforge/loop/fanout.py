@@ -202,9 +202,7 @@ class DeviceBenchmarkLock:
                 sentinel=str(self.sentinel),
             )
         )
-        exclude = Path(
-            await _git("rev-parse", "--git-path", "info/exclude", cwd=lane_dir)
-        )
+        exclude = Path(await _git("rev-parse", "--git-path", "info/exclude", cwd=lane_dir))
         if not exclude.is_absolute():
             exclude = lane_dir / exclude
         exclude.parent.mkdir(parents=True, exist_ok=True)
@@ -225,15 +223,11 @@ async def _tree_bytes(source: Path) -> int:
     )
     stdout, stderr = await process.communicate()
     if process.returncode != 0:
-        raise RuntimeError(
-            f"could not size workspace {source}: "
-            f"{stderr.decode(errors='replace')[-400:]}"
-        )
+        raise RuntimeError(f"could not size workspace {source}: {stderr.decode(errors='replace')[-400:]}")
     fields = stdout.decode(errors="replace").split(maxsplit=1)
     if not fields or not fields[0].isdigit():
         raise RuntimeError(
-            f"could not size workspace {source}: unreadable du output "
-            f"{stdout.decode(errors='replace')[:200]!r}"
+            f"could not size workspace {source}: unreadable du output {stdout.decode(errors='replace')[:200]!r}"
         )
     return int(fields[0])
 
@@ -275,10 +269,7 @@ async def _copy_workspace(source: Path, destination: Path) -> None:
     )
     _stdout, stderr = await process.communicate()
     if process.returncode != 0:
-        raise RuntimeError(
-            f"could not clone workspace into {destination}: "
-            f"{stderr.decode(errors='replace')[-400:]}"
-        )
+        raise RuntimeError(f"could not clone workspace into {destination}: {stderr.decode(errors='replace')[-400:]}")
 
 
 async def _git(*args: str, cwd: Path) -> str:
@@ -290,9 +281,7 @@ async def _head_branch(lane_dir: Path) -> str:
     """The branch HEAD names, or empty when HEAD is detached."""
     # A detached HEAD is a normal answer here and reported as a non-zero exit.
     # The caller has already resolved HEAD, so the repository is readable.
-    completed = await git_async(
-        "symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False
-    )
+    completed = await git_async("symbolic-ref", "--quiet", "HEAD", cwd=lane_dir, check=False)
     return completed.stdout.strip()
 
 
@@ -320,9 +309,7 @@ async def _isolate_lane_repository(lane_dir: Path) -> None:
     if not objects.is_absolute():
         objects = lane_dir / objects
     if not objects.is_dir():
-        raise RuntimeError(
-            f"lane isolation found no object store for {lane_dir}: {objects}"
-        )
+        raise RuntimeError(f"lane isolation found no object store for {lane_dir}: {objects}")
     marker.unlink()
     await _git("init", "--quiet", cwd=lane_dir)
     alternates = lane_dir / ".git" / "objects" / "info" / "alternates"
@@ -355,11 +342,7 @@ def _lane_driver(*, source: Path, driver: str) -> Path:
     """
     relative = Path(driver)
     resolved = (source / relative).resolve()
-    if (
-        relative.is_absolute()
-        or source not in resolved.parents
-        or not resolved.is_file()
-    ):
+    if relative.is_absolute() or source not in resolved.parents or not resolved.is_file():
         raise RuntimeError(
             f"lanes cannot be given their own copy of the driver {driver!r}: it "
             f"is not a file inside the campaign workspace {source}"
@@ -377,9 +360,7 @@ async def _reap_lane_processes(lane_dir: Path) -> ReapReport:
     this one lane copy so the sibling lanes benching from their own copies -- and
     every one of them is this campaign's child too -- are not reaped with it.
     """
-    return await reap_processes_under(
-        lane_dir, description=f"left running in lane {lane_dir}"
-    )
+    return await reap_processes_under(lane_dir, description=f"left running in lane {lane_dir}")
 
 
 def _tracked_diff(lane_dir: Path) -> str:
@@ -432,19 +413,14 @@ async def run_lanes(
         lane_dirs = [root / lane.lane_id for lane in lanes]
         for lane_dir in lane_dirs:
             lane_dir.mkdir(parents=True)
-        await asyncio.gather(
-            *(_clone_lane(source, lane_dir) for lane_dir in lane_dirs)
-        )
+        await asyncio.gather(*(_clone_lane(source, lane_dir) for lane_dir in lane_dirs))
         # One sentinel for the whole campaign rather than for this round, so a
         # lane queues behind an analysis-phase probe as well as behind its
         # siblings. It therefore outlives the lane copies and is NOT removed
         # with them; it is an empty file that is only ever flocked.
         lock = DeviceBenchmarkLock(campaign_device_lock_path(source))
         serialized_drivers = [
-            await lock.install(
-                lane_dir=lane_dir, driver=lane_dir / driver_relative
-            )
-            for lane_dir in lane_dirs
+            await lock.install(lane_dir=lane_dir, driver=lane_dir / driver_relative) for lane_dir in lane_dirs
         ]
 
         async def _one(
@@ -469,8 +445,7 @@ async def run_lanes(
                 # the contention costs the ROUND is decided from ``reaped``.
                 if reaped.contended:
                     raise RuntimeError(
-                        "lane workspace could not be cleared, so its candidate "
-                        f"cannot be trusted: {reaped.describe()}"
+                        f"lane workspace could not be cleared, so its candidate cannot be trusted: {reaped.describe()}"
                     )
                 # Reading the diff belongs inside the same guard: a lane whose
                 # result cannot be read is lost for a different reason, but it is
@@ -495,9 +470,7 @@ async def run_lanes(
             await asyncio.gather(
                 *(
                     _one(lane, lane_dir, serialized_driver)
-                    for lane, lane_dir, serialized_driver in zip(
-                        lanes, lane_dirs, serialized_drivers
-                    )
+                    for lane, lane_dir, serialized_driver in zip(lanes, lane_dirs, serialized_drivers)
                 )
             )
         )

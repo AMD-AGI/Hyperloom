@@ -119,9 +119,7 @@ def test_critic_prompt_uses_checklist_and_workspace_paths(tmp_path):
     payload = json.loads(user)
 
     assert payload["context"]["workspace"] == str(tmp_path.resolve())
-    assert payload["context"]["source_map_path"] == str(
-        (tmp_path / "kernel.py").resolve()
-    )
+    assert payload["context"]["source_map_path"] == str((tmp_path / "kernel.py").resolve())
     assert payload["draft_plan"].startswith("# Plan")
     assert "should continue to exist" in system
     assert "existing GEMM" in system
@@ -131,11 +129,7 @@ def test_critic_prompt_uses_checklist_and_workspace_paths(tmp_path):
 
 @pytest.mark.asyncio
 async def test_critic_runs_one_independent_read_only_session(tmp_path):
-    backend = _Backend(
-        AgentRunResult(
-            text="VERDICT: ACCEPT\n\nThe plan is evidence-grounded."
-        )
-    )
+    backend = _Backend(AgentRunResult(text="VERDICT: ACCEPT\n\nThe plan is evidence-grounded."))
     critic = PlanCriticAgent(
         backend=backend,
         timeout_sec=2,
@@ -174,11 +168,7 @@ async def test_critic_infers_revision_and_records_missing_verdict(
     caplog,
 ):
     critic = PlanCriticAgent(
-        backend=_Backend(
-            AgentRunResult(
-                text="The plan needs a canonical comparison."
-            )
-        ),
+        backend=_Backend(AgentRunResult(text="The plan needs a canonical comparison.")),
         timeout_sec=2,
     )
 
@@ -214,10 +204,7 @@ async def test_critic_infers_revision_and_records_missing_verdict(
             stderr_tail="gateway unavailable",
         ),
         AgentRunResult(
-            text=(
-                "I will inspect the evidence.\n"
-                "[session ended with SDK error: Reached maximum number of turns]"
-            ),
+            text=("I will inspect the evidence.\n[session ended with SDK error: Reached maximum number of turns]"),
             end_reason="turn_cap",
         ),
         RuntimeError("provider crashed"),
@@ -277,9 +264,7 @@ def _round_prompts(tmp_path, drafts):
 
 def test_a_single_plan_is_reviewed_as_one_plan(tmp_path):
     """There is no division to review and no sibling to compare against."""
-    system, user = _round_prompts(
-        tmp_path, [SynthesizedPlan(text="# Plan\nUse vector loads.")]
-    )
+    system, user = _round_prompts(tmp_path, [SynthesizedPlan(text="# Plan\nUse vector loads.")])
     payload = json.loads(user)
 
     assert payload["draft_plan"] == "# Plan\nUse vector loads."
@@ -327,9 +312,7 @@ def test_a_review_needs_something_to_review(tmp_path):
 @pytest.mark.asyncio
 async def test_critic_error_detail_is_single_line_and_bounded(tmp_path):
     critic = PlanCriticAgent(
-        backend=_Backend(
-            RuntimeError("first line\n" + ("x" * 3000))
-        ),
+        backend=_Backend(RuntimeError("first line\n" + ("x" * 3000))),
         timeout_sec=2,
     )
 
@@ -396,9 +379,7 @@ def test_the_width_block_is_read_from_the_end_past_json_the_prose_quotes():
         "\n" + _width_block({"lane_id": 2, "reason": "lane 1 autotunes it"})
     )
 
-    assert [(drop.lane_id, drop.reason) for drop in ruling.drops] == [
-        (2, "lane 1 autotunes it")
-    ]
+    assert [(drop.lane_id, drop.reason) for drop in ruling.drops] == [(2, "lane 1 autotunes it")]
     assert ruling.status == "answered"
 
 
@@ -416,9 +397,7 @@ def test_the_width_block_is_read_from_the_end_past_json_the_prose_quotes():
 )
 def test_narrowing_that_cannot_be_read_is_named_not_discarded(entry, problem):
     """Silence would make "keep every lane" the answer to two questions."""
-    ruling = parse_plan_critic_width_block(
-        f"VERDICT: REVISE\n{_width_block(entry)}\n"
-    )
+    ruling = parse_plan_critic_width_block(f"VERDICT: REVISE\n{_width_block(entry)}\n")
 
     assert ruling.drops == ()
     # The block itself was read; only what it asked for could not be used.
@@ -451,9 +430,7 @@ def test_a_lane_is_dropped_once_or_the_second_entry_is_reported():
 
 def test_a_narrowing_note_is_one_bounded_line():
     """The note is persisted with the round, so a runaway entry cannot be."""
-    ruling = parse_plan_critic_width_block(
-        _width_block({"lane_id": "two " + ("x " * 500), "reason": "duplicate"})
-    )
+    ruling = parse_plan_critic_width_block(_width_block({"lane_id": "two " + ("x " * 500), "reason": "duplicate"}))
 
     assert ruling.drops == ()
     assert len(ruling.notes[0]) <= 240
@@ -465,8 +442,7 @@ def test_a_narrowing_note_is_one_bounded_line():
     ("review", "status", "problem"),
     [
         (
-            "VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives "
-            "lane 1's autotune lever.\n",
+            "VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
             "absent",
             "no lane_narrowing block",
         ),
@@ -526,9 +502,7 @@ def test_one_lane_is_dropped_for_one_reason():
 
 def test_a_review_with_an_empty_block_asks_for_no_narrowing():
     """The empty list is an answer, and it is the one that means "run them all"."""
-    ruling = parse_plan_critic_width_block(
-        "VERDICT: ACCEPT\nBoth lanes earn it.\n" + _width_block()
-    )
+    ruling = parse_plan_critic_width_block("VERDICT: ACCEPT\nBoth lanes earn it.\n" + _width_block())
 
     assert ruling.drops == ()
     assert ruling.notes == ()
@@ -586,9 +560,7 @@ async def test_the_reviews_narrowing_reaches_the_round(tmp_path):
     # entry it got wrong is its decision to have gotten wrong.
     assert len(backend.specs) == 1
     persisted = outcome.to_dict()
-    assert persisted["lane_drops"] == [
-        {"lane_id": 2, "reason": "it is lane 1's change in different words"}
-    ]
+    assert persisted["lane_drops"] == [{"lane_id": 2, "reason": "it is lane 1's change in different words"}]
     assert persisted["narrowing_notes"] == list(outcome.narrowing_notes)
     assert persisted["narrowing_status"] == "answered"
 
@@ -603,13 +575,7 @@ async def test_a_drop_stated_only_in_prose_is_recovered_by_one_repair(tmp_path):
     repair pass away from the decision it made in its prose.
     """
     backend = _QueuedBackend(
-        AgentRunResult(
-            text=(
-                "VERDICT: REVISE\n\n"
-                "Lane 2 should be dropped: it re-derives lane 1's autotune "
-                "lever.\n"
-            )
-        ),
+        AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(
             text=_width_block(
                 {
@@ -660,13 +626,7 @@ async def test_a_recovered_width_ruling_is_not_logged_as_a_failure(
     operator learns is wrong costs more than the line it occupies.
     """
     backend = _QueuedBackend(
-        AgentRunResult(
-            text=(
-                "VERDICT: REVISE\n\n"
-                "Lane 2 should be dropped: it re-derives lane 1's autotune "
-                "lever.\n"
-            )
-        ),
+        AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(
             text=_width_block(
                 {
@@ -693,12 +653,9 @@ async def test_a_recovered_width_ruling_is_not_logged_as_a_failure(
     assert [drop.lane_id for drop in outcome.lane_drops] == [2]
     assert outcome.narrowing_notes == (
         "the review ended with no lane_narrowing block",
-        "the review did not end with a readable width block; one repair pass "
-        "restated it",
+        "the review did not end with a readable width block; one repair pass restated it",
     )
-    assert not [
-        record for record in caplog.records if record.levelname == "WARNING"
-    ]
+    assert not [record for record in caplog.records if record.levelname == "WARNING"]
     assert "plan critic width block was read (repaired)" in caplog.text
 
 
@@ -715,13 +672,7 @@ async def test_a_width_ruling_nothing_recovered_is_still_a_warning(
     exists for.
     """
     backend = _QueuedBackend(
-        AgentRunResult(
-            text=(
-                "VERDICT: REVISE\n\n"
-                "Lane 2 should be dropped: it re-derives lane 1's autotune "
-                "lever.\n"
-            )
-        ),
+        AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         AgentRunResult(text="I could not tell what the review wanted."),
     )
     critic = PlanCriticAgent(backend=backend, timeout_sec=2)
@@ -798,13 +749,7 @@ async def test_a_drop_stated_only_in_prose_that_repair_misses_is_still_named(
     not read.
     """
     backend = _QueuedBackend(
-        AgentRunResult(
-            text=(
-                "VERDICT: REVISE\n\n"
-                "Lane 2 should be dropped: it re-derives lane 1's autotune "
-                "lever.\n"
-            )
-        ),
+        AgentRunResult(text=("VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n")),
         RuntimeError("provider crashed"),
     )
     critic = PlanCriticAgent(backend=backend, timeout_sec=2)
@@ -822,10 +767,7 @@ async def test_a_drop_stated_only_in_prose_that_repair_misses_is_still_named(
     assert outcome.lane_drops == ()
     assert outcome.narrowing_status == "absent"
     assert any("no lane_narrowing block" in n for n in outcome.narrowing_notes)
-    assert any(
-        "one repair pass for the width block failed" in note
-        for note in outcome.narrowing_notes
-    )
+    assert any("one repair pass for the width block failed" in note for note in outcome.narrowing_notes)
 
 
 @pytest.mark.asyncio
@@ -847,18 +789,13 @@ async def test_a_repair_that_answers_nothing_leaves_the_ruling_unread(tmp_path):
 
     assert outcome.lane_drops == ()
     assert outcome.narrowing_status == "absent"
-    assert any(
-        "no readable width block either" in note
-        for note in outcome.narrowing_notes
-    )
+    assert any("no readable width block either" in note for note in outcome.narrowing_notes)
 
 
 @pytest.mark.asyncio
 async def test_a_one_plan_review_is_never_asked_for_a_width_block(tmp_path):
     """There is no division to rule on, so no block is owed and none is bought."""
-    backend = _Backend(
-        AgentRunResult(text="VERDICT: ACCEPT\n\nThe plan is grounded.")
-    )
+    backend = _Backend(AgentRunResult(text="VERDICT: ACCEPT\n\nThe plan is grounded."))
     critic = PlanCriticAgent(backend=backend, timeout_sec=2)
 
     outcome = await critic.review(

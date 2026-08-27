@@ -11,6 +11,7 @@ wheel-build failure (observed across 8 top models on the shared
 that loop; these tests keep the config from regressing AND build the wheel to
 lock the incident's actual trigger.
 """
+
 from __future__ import annotations
 
 import os
@@ -81,20 +82,23 @@ def test_wheel_builds_twice_without_recursion(tmp_path):
     # from the 1st) and assert the incident signature never appears.
     src = tmp_path / _PKG_NAME
     shutil.copytree(
-        _PKG_ROOT, src,
+        _PKG_ROOT,
+        src,
         ignore=shutil.ignore_patterns("build", "__pycache__", "*.egg-info", ".pytest_cache"),
     )
     wheeldir = tmp_path / "wh"
     for _ in range(2):
         r = subprocess.run(
-            [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", ".",
-             "-w", str(wheeldir)],
-            cwd=src, capture_output=True, text=True,
+            [sys.executable, "-m", "pip", "wheel", "--no-deps", "--no-build-isolation", ".", "-w", str(wheeldir)],
+            cwd=src,
+            capture_output=True,
+            text=True,
         )
         blob = (r.stdout or "") + (r.stderr or "")
         # The incident's exact signatures -> hard fail (regression caught).
-        assert "Errno 17" not in blob and "File exists" not in blob, \
+        assert "Errno 17" not in blob and "File exists" not in blob, (
             f"wheel-recursion incident reproduced:\n{blob[-500:]}"
+        )
     # No nested build/ dir (recursion) in the on-disk tree.
     build_dir = src / "build"
     if build_dir.exists():

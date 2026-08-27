@@ -8,11 +8,13 @@ from kernelforge.learning.postmortem import PostMortem
 
 # ─── PostMortem tests ───
 
+
 def test_postmortem_finds_regressions():
     exp = Experiment(experiment_id="test", backend="ck")
     exp.add_iteration(snr_db=35.0, wall_ms=2.0, config={"BLOCK_M": 128})
-    exp.add_iteration(snr_db=33.0, wall_ms=2.5, config={"BLOCK_M": 64},
-                      decision="tried smaller block")  # 25% regression
+    exp.add_iteration(
+        snr_db=33.0, wall_ms=2.5, config={"BLOCK_M": 64}, decision="tried smaller block"
+    )  # 25% regression
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = PostMortem(tmpdir)
@@ -26,8 +28,7 @@ def test_postmortem_finds_regressions():
 def test_postmortem_finds_improvements():
     exp = Experiment(experiment_id="test", backend="flydsl")
     exp.add_iteration(snr_db=35.0, wall_ms=2.0, config={"wpe": 3})
-    exp.add_iteration(snr_db=34.0, wall_ms=1.5, config={"wpe": 2},
-                      decision="reduced waves per EU")  # 25% improvement
+    exp.add_iteration(snr_db=34.0, wall_ms=1.5, config={"wpe": 2}, decision="reduced waves per EU")  # 25% improvement
 
     with tempfile.TemporaryDirectory() as tmpdir:
         pm = PostMortem(tmpdir)

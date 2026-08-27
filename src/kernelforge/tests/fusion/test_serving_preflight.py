@@ -81,7 +81,8 @@ def test_the_cleanup_kills_only_this_users_engines(monkeypatch) -> None:
         pytest.skip("no POSIX uid on this platform")
     seen: list[str] = []
     monkeypatch.setattr(
-        validate.subprocess, "run",
+        validate.subprocess,
+        "run",
         lambda cmd, **kw: seen.append(cmd) or _Out(""),
     )
 

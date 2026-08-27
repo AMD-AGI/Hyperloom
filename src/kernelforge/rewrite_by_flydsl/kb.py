@@ -103,11 +103,7 @@ def _source_text(spec: RewriteSpec) -> str:
 
 def _secrets(config: Config) -> tuple[str, ...]:
     knowledge = knowledge_config_from_runtime(config)
-    return tuple(
-        value
-        for value in (knowledge.kb_store_token,)
-        if value
-    )
+    return tuple(value for value in (knowledge.kb_store_token,) if value)
 
 
 def _read_top_candidates(
@@ -236,21 +232,13 @@ async def try_flydsl_kb_warmstart(
         read_reason=plan.read_reason,
         read_error=plan.read_error,
     )
-    original = (
-        Path(spec.flydsl_kernel).read_bytes()
-        if Path(spec.flydsl_kernel).is_file()
-        else None
-    )
+    original = Path(spec.flydsl_kernel).read_bytes() if Path(spec.flydsl_kernel).is_file() else None
     source_hash = _sha256(spec.source_kernel)
     driver_hash = _sha256(driver_path)
     references: list[dict] = []
 
     for candidate in plan.candidates:
-        remaining = (
-            stop_at_unix - time.time()
-            if stop_at_unix and stop_at_unix > 0
-            else None
-        )
+        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
         if remaining is not None and remaining <= 0:
             result.read_reason = "deadline"
             break
@@ -262,10 +250,7 @@ async def try_flydsl_kb_warmstart(
         reason = ""
         if candidate.get("implementation_match") is not True:
             reason = "implementation_mismatch"
-        elif (
-            attrs.get("schema_version") != _SCHEMA_VERSION
-            or attrs.get("rewrite_kind") != _REWRITE_KIND
-        ):
+        elif attrs.get("schema_version") != _SCHEMA_VERSION or attrs.get("rewrite_kind") != _REWRITE_KIND:
             reason = "wrong_solution_kind"
         elif attrs.get("source_sha256") != source_hash:
             reason = "source_changed"
@@ -299,28 +284,16 @@ async def try_flydsl_kb_warmstart(
                     if not validation.all_passed:
                         reason = "correctness_failed"
                     else:
-                        remaining = (
-                            stop_at_unix - time.time()
-                            if stop_at_unix and stop_at_unix > 0
-                            else None
-                        )
+                        remaining = stop_at_unix - time.time() if stop_at_unix and stop_at_unix > 0 else None
                         candidate_ms = None
                         if remaining is None or remaining > 0:
                             benched = driver_contract.preflight_candidate(
                                 spec,
                                 driver_path,
-                                timeout_sec=(
-                                    600
-                                    if remaining is None
-                                    else max(1, min(600, int(remaining)))
-                                ),
+                                timeout_sec=(600 if remaining is None else max(1, min(600, int(remaining)))),
                             )
                             candidate_ms = benched.timing_ms if benched.ok else None
-                        snr = (
-                            validation.results[-1].snr_db
-                            if validation.results
-                            else None
-                        )
+                        snr = validation.results[-1].snr_db if validation.results else None
                         attempt.update(
                             reason="applied",
                             best_ms=candidate_ms,
@@ -387,11 +360,7 @@ def write_flydsl_kb_solution(
     gpu_type = str(config.gpu_type or "").strip()
     if not gpu_type:
         return {"written": False, "reason": "missing_gpu_type"}
-    speedup = (
-        source_ms / flydsl_best_ms
-        if source_ms and flydsl_best_ms
-        else None
-    )
+    speedup = source_ms / flydsl_best_ms if source_ms and flydsl_best_ms else None
     if not allow_non_improving and (speedup is None or speedup <= 1.0):
         return {"written": False, "reason": "no_improvement"}
     try:

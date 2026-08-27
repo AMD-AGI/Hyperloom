@@ -244,9 +244,7 @@ def test_mode_residence_outranks_diminishing_returns():
         no_improvement_iters=0,
         stall_threshold=3,
         current_mode=completed.mode,
-        residence_iterations_remaining=(
-            completed.residence_iterations_remaining
-        ),
+        residence_iterations_remaining=(completed.residence_iterations_remaining),
         window_gain_ratio=0.0,
     )
 

@@ -28,23 +28,37 @@ def _csv(tmp_path, rows):
 
 
 def _lost(m, n, k):
-    return {"M": m, "N": n, "K": k, "default_us": 10.0, "tuned_us": 12.0,
-            "speedup": 0.83, "improved": False}
+    return {"M": m, "N": n, "K": k, "default_us": 10.0, "tuned_us": 12.0, "speedup": 0.83, "improved": False}
 
 
 def _won(m, n, k):
-    return {"M": m, "N": n, "K": k, "default_us": 12.0, "tuned_us": 10.0,
-            "speedup": 1.2, "improved": True}
+    return {"M": m, "N": n, "K": k, "default_us": 12.0, "tuned_us": 10.0, "speedup": 1.2, "improved": True}
 
 
 def _new(m, n, k):
-    return {"M": m, "N": n, "K": k, "default_us": None, "tuned_us": 10.0,
-            "speedup": None, "improved": False, "is_new": True}
+    return {
+        "M": m,
+        "N": n,
+        "K": k,
+        "default_us": None,
+        "tuned_us": 10.0,
+        "speedup": None,
+        "improved": False,
+        "is_new": True,
+    }
 
 
 def _unverified(m, n, k):
-    return {"M": m, "N": n, "K": k, "default_us": None, "tuned_us": 10.0,
-            "speedup": None, "improved": False, "tuned_unverified": True}
+    return {
+        "M": m,
+        "N": n,
+        "K": k,
+        "default_us": None,
+        "tuned_us": 10.0,
+        "speedup": None,
+        "improved": False,
+        "tuned_unverified": True,
+    }
 
 
 def _rows_of(path):
@@ -55,9 +69,7 @@ def _rows_of(path):
 class TestDropsLosers:
     def test_row_that_lost_is_removed(self, tmp_path):
         csv = _csv(tmp_path, [_row(64, 5120, 5120), _row(128, 5120, 5120)])
-        dropped, kept = _filter_unimproved_rows(
-            csv, [_lost(64, 5120, 5120), _won(128, 5120, 5120)]
-        )
+        dropped, kept = _filter_unimproved_rows(csv, [_lost(64, 5120, 5120), _won(128, 5120, 5120)])
         assert (dropped, kept) == (1, 1)
         assert _rows_of(csv) == [("128", "5120", "5120")]
 
@@ -83,9 +95,7 @@ class TestKeepsUnmeasured:
 
     def test_mixed_batch_keeps_unmeasured_drops_losers(self, tmp_path):
         csv = _csv(tmp_path, [_row(1, 2, 3), _row(4, 5, 6), _row(7, 8, 9)])
-        dropped, kept = _filter_unimproved_rows(
-            csv, [_lost(1, 2, 3), _new(4, 5, 6), _won(7, 8, 9)]
-        )
+        dropped, kept = _filter_unimproved_rows(csv, [_lost(1, 2, 3), _new(4, 5, 6), _won(7, 8, 9)])
         assert (dropped, kept) == (1, 2)
         assert _rows_of(csv) == [("4", "5", "6"), ("7", "8", "9")]
 

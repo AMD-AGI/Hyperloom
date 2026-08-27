@@ -70,11 +70,7 @@ def _bound_at_module_level(tree: ast.Module) -> set[str]:
 def _unbound_reads(source: str) -> set[str]:
     tree = ast.parse(source)
     bound = _bound_at_module_level(tree) | set(dir(builtins)) | {"__file__", "__name__", "__doc__"}
-    used = {
-        node.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
-    }
+    used = {node.id for node in ast.walk(tree) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
     return used - bound
 
 

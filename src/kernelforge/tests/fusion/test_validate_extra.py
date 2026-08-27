@@ -32,6 +32,7 @@ import urllib.request as _urllib_rq
 class _FakeResp:
     def __init__(self, payload):
         import json as _j
+
         self._b = _j.dumps(payload).encode()
 
     def __enter__(self):
@@ -44,8 +45,7 @@ class _FakeResp:
         return self._b
 
 
-def _make_urlopen(models_payload=None, models_exc=None,
-                  completion_payload=None, completion_exc=None):
+def _make_urlopen(models_payload=None, models_exc=None, completion_payload=None, completion_exc=None):
     def fake(arg, timeout=None):
         url = arg.full_url if hasattr(arg, "full_url") else str(arg)
         if url.endswith("/v1/models"):
@@ -55,6 +55,7 @@ def _make_urlopen(models_payload=None, models_exc=None,
         if completion_exc:
             raise completion_exc
         return _FakeResp(completion_payload)
+
     return fake
 
 
@@ -71,24 +72,29 @@ def test_vllm_probe_empty_model_id(monkeypatch):
 
 
 def test_vllm_probe_empty_completion_text(monkeypatch):
-    monkeypatch.setattr(_urllib_rq, "urlopen", _make_urlopen(
-        models_payload={"data": [{"id": "m"}]},
-        completion_payload={"choices": [{"text": ""}]}))
+    monkeypatch.setattr(
+        _urllib_rq,
+        "urlopen",
+        _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_payload={"choices": [{"text": ""}]}),
+    )
     ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
     assert ok is False and "no output tokens" in detail
 
 
 def test_vllm_probe_completion_http_error(monkeypatch):
-    monkeypatch.setattr(_urllib_rq, "urlopen", _make_urlopen(
-        models_payload={"data": [{"id": "m"}]}, completion_exc=OSError("net")))
+    monkeypatch.setattr(
+        _urllib_rq, "urlopen", _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_exc=OSError("net"))
+    )
     ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
     assert ok is False and "error" in detail
 
 
 def test_vllm_probe_all_ok(monkeypatch):
-    monkeypatch.setattr(_urllib_rq, "urlopen", _make_urlopen(
-        models_payload={"data": [{"id": "m"}]},
-        completion_payload={"choices": [{"text": "hi"}]}))
+    monkeypatch.setattr(
+        _urllib_rq,
+        "urlopen",
+        _make_urlopen(models_payload={"data": [{"id": "m"}]}, completion_payload={"choices": [{"text": "hi"}]}),
+    )
     ok, detail = _vllm_decode_probe(8899, isl=64, osl=8, num_prompts=16, conc=4, timeout_s=5)
     assert ok is True and "decode completions ok" in detail
 
@@ -114,13 +120,25 @@ def test_launch_cmd_matches_session_tp_block_size_and_max_model_len():
     while the real session served TP=8 and --block-size 128.
     """
     cmd = _serving_smoke_launch_cmd(
-        "vllm", "/m", 8977, "", tp=8, block_size=128, max_model_len=13312,
+        "vllm",
+        "/m",
+        8977,
+        "",
+        tp=8,
+        block_size=128,
+        max_model_len=13312,
     )
     assert cmd[cmd.index("--tensor-parallel-size") + 1] == "8"
     assert cmd[cmd.index("--block-size") + 1] == "128"
     assert cmd[cmd.index("--max-model-len") + 1] == "13312"
     scmd = _serving_smoke_launch_cmd(
-        "sglang", "/m", 8977, "", tp=8, block_size=128, max_model_len=13312,
+        "sglang",
+        "/m",
+        8977,
+        "",
+        tp=8,
+        block_size=128,
+        max_model_len=13312,
     )
     assert scmd[scmd.index("--tp") + 1] == "8"
     assert scmd[scmd.index("--context-length") + 1] == "13312"
@@ -129,33 +147,29 @@ def test_launch_cmd_matches_session_tp_block_size_and_max_model_len():
 
 def test_classify_serving_smoke_failure_only_blames_explicit_gpu_faults():
     """The reason-only fallback needs fault EVIDENCE, not a keyword that resembles it."""
-    assert classify_serving_smoke_failure(
-        "server exited rc=1 before ready: ValueError: No common block size for 16"
-    ) == "env_or_boot"
+    assert (
+        classify_serving_smoke_failure("server exited rc=1 before ready: ValueError: No common block size for 16")
+        == "env_or_boot"
+    )
     assert classify_serving_smoke_failure("server not ready within 1200s") == "env_or_boot"
-    assert classify_serving_smoke_failure(
-        "serving smoke harness error: RuntimeError: popen exploded"
-    ) == "env_or_boot"
+    assert classify_serving_smoke_failure("serving smoke harness error: RuntimeError: popen exploded") == "env_or_boot"
     # Memory exhaustion reaches us through the same "HIP error:" channel as a fault.
-    assert classify_serving_smoke_failure(
-        "server exited rc=1 before ready: RuntimeError: HIP error: out of memory"
-    ) == "env_or_boot"
+    assert (
+        classify_serving_smoke_failure("server exited rc=1 before ready: RuntimeError: HIP error: out of memory")
+        == "env_or_boot"
+    )
     # A live server that refused a request is not the kernel faulting.
-    assert classify_serving_smoke_failure(
-        "decode probe failed: /v1/models probe error: OSError: boom"
-    ) == "env_or_boot"
-    assert classify_serving_smoke_failure(
-        "decode bench failed rc=1: ModuleNotFoundError: sglang.bench_serving"
-    ) == "env_or_boot"
-    assert classify_serving_smoke_failure(
-        "scheduler crashed during CUDA-graph decode: HSA_STATUS_ERROR_EXCEPTION"
-    ) == "kernel_fault"
-    assert classify_serving_smoke_failure(
-        "server crashed at startup: hardware exception"
-    ) == "kernel_fault"
-    assert classify_serving_smoke_failure(
-        "decode bench timed out (possible hang in fused kernel)"
-    ) == "kernel_fault"
+    assert classify_serving_smoke_failure("decode probe failed: /v1/models probe error: OSError: boom") == "env_or_boot"
+    assert (
+        classify_serving_smoke_failure("decode bench failed rc=1: ModuleNotFoundError: sglang.bench_serving")
+        == "env_or_boot"
+    )
+    assert (
+        classify_serving_smoke_failure("scheduler crashed during CUDA-graph decode: HSA_STATUS_ERROR_EXCEPTION")
+        == "kernel_fault"
+    )
+    assert classify_serving_smoke_failure("server crashed at startup: hardware exception") == "kernel_fault"
+    assert classify_serving_smoke_failure("decode bench timed out (possible hang in fused kernel)") == "kernel_fault"
 
 
 def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):
@@ -170,9 +184,9 @@ def test_serving_smoke_tp_exposes_enough_gpus(monkeypatch, tmp_path):
     monkeypatch.setattr(validate.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "")
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    serving_smoke("/m", {"F": "1"}, framework="vllm", gpu="0", tp=8,
-                  timeout_s=1, log_path=str(tmp_path / "tp.log"))
+    serving_smoke("/m", {"F": "1"}, framework="vllm", gpu="0", tp=8, timeout_s=1, log_path=str(tmp_path / "tp.log"))
     assert captured["env"].get("HIP_VISIBLE_DEVICES") == "0,1,2,3,4,5,6,7"
     assert captured["cmd"][captured["cmd"].index("--tensor-parallel-size") + 1] == "8"
 
@@ -186,15 +200,13 @@ def test_serving_smoke_vllm_uses_vllm_launcher_and_probe(monkeypatch, tmp_path):
         return _FakeServer([None, None])
 
     monkeypatch.setattr(validate.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(validate, "_tail_text",
-                        lambda *a, **k: "Application startup complete.\n")
+    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "Application startup complete.\n")
     # vLLM path must NOT use sglang.bench_serving; it uses the HTTP decode probe.
-    monkeypatch.setattr(validate, "_vllm_decode_probe",
-                        lambda *a, **k: (True, "3 decode completions ok"))
+    monkeypatch.setattr(validate, "_vllm_decode_probe", lambda *a, **k: (True, "3 decode completions ok"))
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
-    ok, reason = serving_smoke("/m", {"F": "1"}, framework="vllm",
-                               timeout_s=5, log_path=str(tmp_path / "v.log"))
+    ok, reason = serving_smoke("/m", {"F": "1"}, framework="vllm", timeout_s=5, log_path=str(tmp_path / "v.log"))
     assert ok is True and "survives" in reason
     assert captured["cmd"][:2] == ["vllm", "serve"]
     assert not any("sglang" in str(c) for c in captured["cmd"])
@@ -202,9 +214,15 @@ def test_serving_smoke_vllm_uses_vllm_launcher_and_probe(monkeypatch, tmp_path):
 
 def _recipe(**over) -> Recipe:
     base = dict(
-        pattern_id="p", description="d", env_flag="F",
-        source_file="/m.py", source_hints=["a"], fusion_math="y=x",
-        eager_reference_hint="h", shapes={"T": 8}, matched_categories=["c"],
+        pattern_id="p",
+        description="d",
+        env_flag="F",
+        source_file="/m.py",
+        source_hints=["a"],
+        fusion_math="y=x",
+        eager_reference_hint="h",
+        shapes={"T": 8},
+        matched_categories=["c"],
         trigger_share=0.3,
     )
     base.update(over)
@@ -255,11 +273,9 @@ def test_serving_crash_reason_default_when_no_marker():
 # ── _run_arm / run_ab ────────────────────────────────────────────────────────
 def test_run_arm_parses_last_median(tmp_path, monkeypatch):
     out = "Decode.  median latency: 0.5 s\nDecode.  median latency: 0.25 s\n"
-    monkeypatch.setattr(validate.subprocess, "run",
-                        lambda *a, **k: _Proc(stdout=out))
+    monkeypatch.setattr(validate.subprocess, "run", lambda *a, **k: _Proc(stdout=out))
     log = tmp_path / "arm.log"
-    med = _run_arm("/m", {"F": "1"}, batch=1, isl=8, osl=2, gpu="0",
-                   timeout_s=10, extra="", log_path=str(log))
+    med = _run_arm("/m", {"F": "1"}, batch=1, isl=8, osl=2, gpu="0", timeout_s=10, extra="", log_path=str(log))
     assert med == 0.25
     assert log.exists()
 
@@ -269,8 +285,7 @@ def test_run_arm_timeout_returns_none(monkeypatch):
         raise subprocess.TimeoutExpired(cmd="x", timeout=1)
 
     monkeypatch.setattr(validate.subprocess, "run", boom)
-    assert _run_arm("/m", {}, batch=1, isl=8, osl=2, gpu="0",
-                    timeout_s=1, extra="", log_path=None) is None
+    assert _run_arm("/m", {}, batch=1, isl=8, osl=2, gpu="0", timeout_s=1, extra="", log_path=None) is None
 
 
 def test_run_ab_computes_speedup(monkeypatch):
@@ -312,11 +327,10 @@ def test_serving_smoke_server_exits_before_ready(monkeypatch, tmp_path):
     # _tail_text returns a static string: serving_smoke truncates the log file.
     _patch_smoke_common(monkeypatch, tmp_path)
     slog = tmp_path / "s.log"
-    monkeypatch.setattr(validate, "_tail_text",
-                        lambda *a, **k: "boot...\nCUDA error: illegal\n")
-    monkeypatch.setattr(validate.subprocess, "Popen",
-                        lambda *a, **k: _FakeServer([0]))
+    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "boot...\nCUDA error: illegal\n")
+    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([0]))
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
     ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
     assert ok is False and "before ready" in reason
@@ -332,11 +346,10 @@ def test_serving_smoke_ready_then_bench_ok(monkeypatch, tmp_path):
         return _Proc()
 
     monkeypatch.setattr(validate.subprocess, "run", fake_run)
-    monkeypatch.setattr(validate, "_tail_text",
-                        lambda *a, **k: "The server is fired up and ready to roll!\n")
-    monkeypatch.setattr(validate.subprocess, "Popen",
-                        lambda *a, **k: _FakeServer([None, None]))
+    monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: "The server is fired up and ready to roll!\n")
+    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None]))
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
     ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
     assert ok is True and "survives" in reason
@@ -357,9 +370,9 @@ def test_serving_smoke_crash_during_decode(monkeypatch, tmp_path):
 
     monkeypatch.setattr(validate.subprocess, "run", fake_run)
     monkeypatch.setattr(validate, "_tail_text", lambda *a, **k: state["tail"])
-    monkeypatch.setattr(validate.subprocess, "Popen",
-                        lambda *a, **k: _FakeServer([None, None, None]))
+    monkeypatch.setattr(validate.subprocess, "Popen", lambda *a, **k: _FakeServer([None, None, None]))
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
     ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=5, log_path=str(slog))
     assert ok is False and "scheduler crashed" in reason
@@ -374,6 +387,7 @@ def test_serving_smoke_harness_error_is_soft_fail(monkeypatch, tmp_path):
 
     monkeypatch.setattr(validate.subprocess, "Popen", boom)
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
     ok, reason = serving_smoke("/m", {"F": "1"}, timeout_s=1, log_path=str(tmp_path / "x.log"))
     assert ok is False and "harness error" in reason
@@ -505,13 +519,23 @@ def test_apply_serving_gate_env_boot_failure_keeps_micro_keep(tmp_path, monkeypa
         kept=True,
         best=vr,
         best_recipe=SimpleNamespace(
-            env_flag="X_FUSED", pattern_id="llm:x", source_file="/s.py",
+            env_flag="X_FUSED",
+            pattern_id="llm:x",
+            source_file="/s.py",
         ),
         termination_reason="",
     )
     cli_module.apply_serving_gate(
-        result, framework="vllm", out=tmp_path, gpu="0", model_path="/m",
-        isl=8, osl=8, tp=8, block_size=128, max_model_len=13312,
+        result,
+        framework="vllm",
+        out=tmp_path,
+        gpu="0",
+        model_path="/m",
+        isl=8,
+        osl=8,
+        tp=8,
+        block_size=128,
+        max_model_len=13312,
     )
     assert result.kept is True
     assert vr.kernel_speedup == 2.5
@@ -554,13 +578,20 @@ def test_apply_serving_gate_cuda_graph_crash_clears_keep(tmp_path, monkeypatch):
         kept=True,
         best=vr,
         best_recipe=SimpleNamespace(
-            env_flag="X_FUSED", pattern_id="llm:x", source_file="/s.py",
+            env_flag="X_FUSED",
+            pattern_id="llm:x",
+            source_file="/s.py",
         ),
         termination_reason="",
     )
     cli_module.apply_serving_gate(
-        result, framework="sglang", out=tmp_path, gpu="0", model_path="/m",
-        isl=8, osl=8,
+        result,
+        framework="sglang",
+        out=tmp_path,
+        gpu="0",
+        model_path="/m",
+        isl=8,
+        osl=8,
     )
     assert result.kept is False
     assert vr.kept is False

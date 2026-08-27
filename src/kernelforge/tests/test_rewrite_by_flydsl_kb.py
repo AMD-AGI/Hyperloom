@@ -55,9 +55,7 @@ class InMemoryKBStore:
         limit=3,
         offset=0,
     ):
-        champion_id = str(
-            self.champions.get(canonical_id, {}).get("session_id") or ""
-        )
+        champion_id = str(self.champions.get(canonical_id, {}).get("session_id") or "")
         ranked = []
         for index, (identity, candidate_session_id) in enumerate(self.order):
             if identity != canonical_id:
@@ -104,9 +102,7 @@ class InMemoryKBStore:
                     "size": len(content),
                     "download_url": f"memory://{rel_path}",
                 }
-                for rel_path, content in self.files.get(
-                    (canonical_id, session_id), {}
-                ).items()
+                for rel_path, content in self.files.get((canonical_id, session_id), {}).items()
             ]
         }
 
@@ -116,9 +112,7 @@ class InMemoryKBStore:
         # relies on merge keeping the other fields pass here and lose them
         # against the real store.
         if mode not in ("merge", "replace"):
-            raise record_store.KBStoreError(
-                f"mode must be 'merge' or 'replace', got {mode!r}"
-            )
+            raise record_store.KBStoreError(f"mode must be 'merge' or 'replace', got {mode!r}")
         key = (canonical_id, session_id)
         if key not in self.knowledge:
             self.order.append(key)
@@ -131,9 +125,7 @@ class InMemoryKBStore:
         return {"session_id": session_id, "mode": mode}
 
     def put_file(self, canonical_id, session_id, rel_path, local_path, *, kind="other", meta=None):
-        self.files.setdefault((canonical_id, session_id), {})[rel_path] = Path(
-            local_path
-        ).read_bytes()
+        self.files.setdefault((canonical_id, session_id), {})[rel_path] = Path(local_path).read_bytes()
         return f"kb://{canonical_id}/{session_id}/{rel_path}"
 
     def download_session(self, canonical_id, session_id, destination, *, include_values=True):
@@ -159,18 +151,9 @@ def _spec(tmp_path):
     workspace = tmp_path / "workspace"
     source = workspace / "vllm" / "softmax.py"
     source.parent.mkdir(parents=True)
-    source.write_text(
-        "import triton\n"
-        "@triton.jit\n"
-        "def softmax_kernel(x):\n"
-        "    return x\n"
-    )
+    source.write_text("import triton\n@triton.jit\ndef softmax_kernel(x):\n    return x\n")
     kernel = workspace / "kernel.py"
-    kernel.write_text(
-        "import flydsl\n"
-        "def build_softmax_module(config):\n"
-        "    return lambda inputs: inputs['x']\n"
-    )
+    kernel.write_text("import flydsl\ndef build_softmax_module(config):\n    return lambda inputs: inputs['x']\n")
     driver = workspace / "driver.py"
     driver.write_text("# stable rewrite driver contract\n")
     return (
@@ -275,10 +258,7 @@ def test_a_rewrite_is_filed_under_the_flydsl_producer_identity(tmp_path, monkeyp
         "framework_version": VLLM_VERSION,
         "backend": "flydsl",
     }
-    assert (
-        store.knowledge[(SOFTMAX_IDENTITY, written["session_id"])]["producer"]
-        == "flydsl"
-    )
+    assert store.knowledge[(SOFTMAX_IDENTITY, written["session_id"])]["producer"] == "flydsl"
 
 
 def test_a_namespaced_operator_name_stays_out_of_the_identifiers(
@@ -384,10 +364,7 @@ def test_gpu_target_does_not_change_the_recipe_identity(tmp_path, monkeypatch):
     )
 
     assert first["canonical_id"] == second["canonical_id"] == SOFTMAX_IDENTITY
-    assert {
-        document["value"]["metric"]["gpu_arch"]
-        for document in store.knowledge.values()
-    } == {"gfx942", "gfx950"}
+    assert {document["value"]["metric"]["gpu_arch"] for document in store.knowledge.values()} == {"gfx942", "gfx950"}
 
 
 def test_a_session_id_stays_inside_the_length_the_store_allows():
@@ -453,11 +430,7 @@ def test_warmstart_materializes_crlf_bytes_without_newline_conversion(
     _use_in_memory_kb_store(monkeypatch)
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
-    artifact = (
-        b"import flydsl\r\n"
-        b"def build_softmax_module(config):\r\n"
-        b"    return lambda inputs: inputs['x']\r\n"
-    )
+    artifact = b"import flydsl\r\ndef build_softmax_module(config):\r\n    return lambda inputs: inputs['x']\r\n"
     Path(spec.flydsl_kernel).write_bytes(artifact)
     written = kb.write_flydsl_kb_solution(
         spec,
@@ -494,9 +467,7 @@ def test_reference_decoding_does_not_change_candidate_or_rollback_bytes(
     spec, driver = _spec(tmp_path)
     config = _remote_config(tmp_path)
     artifact = (
-        b"import flydsl\r\n"
-        b"def build_softmax_module(config):\r\n"
-        b"    return lambda inputs: inputs['x']  # \xff\r\n"
+        b"import flydsl\r\ndef build_softmax_module(config):\r\n    return lambda inputs: inputs['x']  # \xff\r\n"
     )
     Path(spec.flydsl_kernel).write_bytes(artifact)
     written = kb.write_flydsl_kb_solution(
@@ -687,10 +658,7 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
 
     for rank, best_ms in ((1, 2.0), (2, 3.0), (3, 4.0)):
         Path(spec.flydsl_kernel).write_text(
-            "import flydsl\n"
-            f"RANK = {rank}\n"
-            "def build_softmax_module(config):\n"
-            "    return lambda inputs: inputs['x']\n"
+            f"import flydsl\nRANK = {rank}\ndef build_softmax_module(config):\n    return lambda inputs: inputs['x']\n"
         )
         written = kb.write_flydsl_kb_solution(
             spec,
@@ -716,9 +684,7 @@ def test_top_three_are_tried_and_failures_become_references(tmp_path, monkeypatc
     monkeypatch.setattr(
         kb.driver_contract,
         "preflight_candidate",
-        lambda *args, **kwargs: driver_contract.PreflightReport(
-            ok=True, timing_ms=4.0
-        ),
+        lambda *args, **kwargs: driver_contract.PreflightReport(ok=True, timing_ms=4.0),
     )
     Path(spec.flydsl_kernel).write_text("def skeleton():\n    pass\n")
 
@@ -770,12 +736,7 @@ def test_local_mode_stores_the_same_record_shape_on_disk(tmp_path, monkeypatch):
     assert written["written"] is True
     assert config.gbrain_url == ""
     assert config.gbrain_token == ""
-    session_dir = (
-        knowledge.rewrite_root
-        / Path(*SOFTMAX_IDENTITY.split(":"))
-        / "sessions"
-        / written["session_id"]
-    )
+    session_dir = knowledge.rewrite_root / Path(*SOFTMAX_IDENTITY.split(":")) / "sessions" / written["session_id"]
     document = json.loads((session_dir / "knowledge.json").read_text())
     assert document["value"]["flydsl_kernel"] == "kernel.py"
     assert (session_dir / "files" / "kernel.py").read_bytes() == expected

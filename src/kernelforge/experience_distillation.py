@@ -46,7 +46,7 @@ class ConstraintMemory:
         self.constraints.append(constraint)
         if len(self.constraints) > self.max_constraints:
             # Newer, task-specific findings are worth more than the first ones.
-            self.constraints = self.constraints[-self.max_constraints:]
+            self.constraints = self.constraints[-self.max_constraints :]
 
     def distill(self, error_text: str, outcome: str) -> None:
         """Promote every known failure mode the evidence matches."""

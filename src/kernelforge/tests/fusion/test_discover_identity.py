@@ -34,15 +34,22 @@ def _claimable(flag: str) -> PassState:
     behaviour.
     """
     return PassState(
-        flag=flag, present=True, enabled=False,
-        config_file="/sp/vllm/config.py", source="default",
+        flag=flag,
+        present=True,
+        enabled=False,
+        config_file="/sp/vllm/config.py",
+        source="default",
     )
 
 
 def _parse(payload: list[dict], *, framework: str = "vllm", probe=None):
     return parse_discovered_recipes(
-        json.dumps(payload), model_type="qwen3", framework=framework,
-        source_file=SOURCE, shapes=SHAPES, pass_probe=probe or _claimable,
+        json.dumps(payload),
+        model_type="qwen3",
+        framework=framework,
+        source_file=SOURCE,
+        shapes=SHAPES,
+        pass_probe=probe or _claimable,
         framework_root="",
     )
 
@@ -102,8 +109,7 @@ def test_the_gate_still_sees_the_prose_when_traits_are_omitted():
     """
 
     def claimable(flag):
-        return PassState(flag=flag, present=True, enabled=False,
-                         config_file="/sp/c.py", source="default")
+        return PassState(flag=flag, present=True, enabled=False, config_file="/sp/c.py", source="default")
 
     proposal = {
         "name": "norm_then_quant",
@@ -112,51 +118,77 @@ def test_the_gate_still_sees_the_prose_when_traits_are_omitted():
         "ops": ["rmsnorm"],
     }
     recipes = parse_discovered_recipes(
-        json.dumps([proposal]), model_type="qwen3", framework="vllm",
-        source_file="/sp/vllm/models/qwen3.py", shapes={}, pass_probe=claimable,
+        json.dumps([proposal]),
+        model_type="qwen3",
+        framework="vllm",
+        source_file="/sp/vllm/models/qwen3.py",
+        shapes={},
+        pass_probe=claimable,
     )
     assert recipes[0].candidate_kind == "compile_pass"
 
 
 def test_declared_ops_outrank_the_prose():
     """The declaration is the identity; the prose is only description."""
-    recipes = _parse([{
-        "name": "misleading_name_mentioning_moe_and_conv",
-        "op_chain": "this sentence talks about gemm and attention in passing",
-        "fusion_math": "and this one mentions layernorm and a memcpy",
-        "ops": ["rmsnorm", "add"],
-    }], framework="sglang")
+    recipes = _parse(
+        [
+            {
+                "name": "misleading_name_mentioning_moe_and_conv",
+                "op_chain": "this sentence talks about gemm and attention in passing",
+                "fusion_math": "and this one mentions layernorm and a memcpy",
+                "ops": ["rmsnorm", "add"],
+            }
+        ],
+        framework="sglang",
+    )
     assert recipes[0].matched_categories == ["add", "rmsnorm"]
 
 
 def test_an_undeclared_proposal_still_falls_back_to_the_prose():
     """Older prompts and models that ignore the field must keep working."""
-    recipes = _parse([{
-        "name": "residual_add_rmsnorm",
-        "op_chain": "add then rmsnorm",
-        "fusion_math": "y = rmsnorm(x + residual)",
-    }], framework="sglang")
+    recipes = _parse(
+        [
+            {
+                "name": "residual_add_rmsnorm",
+                "op_chain": "add then rmsnorm",
+                "fusion_math": "y = rmsnorm(x + residual)",
+            }
+        ],
+        framework="sglang",
+    )
     assert recipes[0].matched_categories == ["add", "rmsnorm"]
 
 
 def test_junk_in_the_declaration_is_ignored_not_trusted():
     """A model inventing op names must not invent an identity segment with them."""
-    recipes = _parse([{
-        "name": "f", "op_chain": "c", "fusion_math": "m",
-        "ops": ["rmsnorm", "not_a_real_op", "", 7, "ROPE"],
-    }], framework="sglang")
+    recipes = _parse(
+        [
+            {
+                "name": "f",
+                "op_chain": "c",
+                "fusion_math": "m",
+                "ops": ["rmsnorm", "not_a_real_op", "", 7, "ROPE"],
+            }
+        ],
+        framework="sglang",
+    )
     # Case is normalised, unknown entries dropped, and the rest still identifies it.
     assert recipes[0].matched_categories == ["rmsnorm", "rope"]
 
 
 def test_a_wholly_invalid_declaration_falls_back_rather_than_emptying_identity():
     """Dropping every entry must not leave the fusion with no identity at all."""
-    recipes = _parse([{
-        "name": "residual_add_rmsnorm",
-        "op_chain": "add then rmsnorm",
-        "fusion_math": "y = rmsnorm(x + residual)",
-        "ops": ["nonsense", "alsojunk"],
-    }], framework="sglang")
+    recipes = _parse(
+        [
+            {
+                "name": "residual_add_rmsnorm",
+                "op_chain": "add then rmsnorm",
+                "fusion_math": "y = rmsnorm(x + residual)",
+                "ops": ["nonsense", "alsojunk"],
+            }
+        ],
+        framework="sglang",
+    )
     assert recipes[0].matched_categories == ["add", "rmsnorm"]
 
 
@@ -169,31 +201,50 @@ def test_traits_describe_the_kernel_without_moving_the_key():
     separates nothing -- nearly every decode fusion sits beside attention.
     """
     plain = _parse([{**TERSE, "traits": []}], framework="sglang")
-    adorned = _parse([{
-        **TERSE, "traits": ["attention", "qk_norm", "kvcache", "fp8", "quant"],
-    }], framework="sglang")
+    adorned = _parse(
+        [
+            {
+                **TERSE,
+                "traits": ["attention", "qk_norm", "kvcache", "fp8", "quant"],
+            }
+        ],
+        framework="sglang",
+    )
     assert plain[0].matched_categories == adorned[0].matched_categories
 
 
 def test_traits_still_reach_the_compile_pass_gate():
     """They are excluded from identity, not discarded: the gate keys on them."""
-    claimed = _parse([{
-        "name": "qk_norm_then_rope", "op_chain": "c", "fusion_math": "m",
-        "ops": ["rope"], "traits": ["qk_norm"],
-    }])
+    claimed = _parse(
+        [
+            {
+                "name": "qk_norm_then_rope",
+                "op_chain": "c",
+                "fusion_math": "m",
+                "ops": ["rope"],
+                "traits": ["qk_norm"],
+            }
+        ]
+    )
     assert claimed[0].candidate_kind == "compile_pass", (
-        "qk_norm + rope is a vLLM compile pass; the trait carries the half that "
-        "no op category can express"
+        "qk_norm + rope is a vLLM compile pass; the trait carries the half that no op category can express"
     )
 
 
 def test_a_term_declared_in_the_wrong_field_is_ignored():
     """The split is only meaningful if each field rejects the other's terms."""
-    recipes = _parse([{
-        "name": "f", "op_chain": "c", "fusion_math": "m",
-        "ops": ["attention", "fp8", "mla"],       # traits, not ops
-        "traits": ["rmsnorm", "add"],             # ops, not traits
-    }], framework="sglang")
+    recipes = _parse(
+        [
+            {
+                "name": "f",
+                "op_chain": "c",
+                "fusion_math": "m",
+                "ops": ["attention", "fp8", "mla"],  # traits, not ops
+                "traits": ["rmsnorm", "add"],  # ops, not traits
+            }
+        ],
+        framework="sglang",
+    )
     # Nothing valid was declared in either field, so identity falls back to prose.
     assert recipes[0].matched_categories == []
 

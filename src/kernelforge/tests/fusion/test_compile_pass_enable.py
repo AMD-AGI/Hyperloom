@@ -33,16 +33,19 @@ from kernelforge.fusion.vllm_passes import (
 
 QK_FLAG = "enable_qk_norm_rope_fusion"
 QK_SHARES = {"gemm": 0.5, "rmsnorm": 0.12, "rope": 0.06, "add": 0.02}
-QK_BODY = ("def _normalize_qk(self):\n    q_norm = 1\n    k_norm = 1\n"
-           "    return self.rotary_emb(q_norm)\n")
+QK_BODY = "def _normalize_qk(self):\n    q_norm = 1\n    k_norm = 1\n    return self.rotary_emb(q_norm)\n"
 
 
-def _fake_probe(*, present=True, enabled=False, config_file="/fw/vllm/config/compilation.py",
-                source="default", error=""):
+def _fake_probe(
+    *, present=True, enabled=False, config_file="/fw/vllm/config/compilation.py", source="default", error=""
+):
     """Stand-in for the subprocess probe (tests must not import a real vLLM)."""
+
     def fn(flag: str) -> PassState:
-        return PassState(flag=flag, present=present, enabled=enabled, config_file=config_file,
-                         source=source, error=error)
+        return PassState(
+            flag=flag, present=present, enabled=enabled, config_file=config_file, source=source, error=error
+        )
+
     return fn
 
 
@@ -65,7 +68,9 @@ class TestPatternRoute:
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
-            model_path=model, framework="vllm", framework_root=root,
+            model_path=model,
+            framework="vllm",
+            framework_root=root,
             pass_probe=_fake_probe(enabled=False, config_file="/fw/vllm/config/compilation.py"),
         )
         cp = [r for r in recipes if r.candidate_kind == "compile_pass"]
@@ -83,7 +88,9 @@ class TestPatternRoute:
         model, root = _fake_vllm_tree(tmp_path, "qklm", QK_BODY)
         recipes = build_recipes(
             diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
-            model_path=model, framework="vllm", framework_root=root,
+            model_path=model,
+            framework="vllm",
+            framework_root=root,
             pass_probe=_fake_probe(enabled=True),
         )
         assert all(r.pattern_id != "qk_norm_rope" for r in recipes)
@@ -99,8 +106,7 @@ class TestPatternRoute:
             # (probe kwargs) -> (compile_pass proposed?, qk authoring kept?)
             "enabled": (dict(enabled=True), False, False),
             "disabled": (dict(enabled=False), True, False),
-            "absent": (dict(present=False, enabled=None, config_file="", source="absent"),
-                       False, True),
+            "absent": (dict(present=False, enabled=None, config_file="", source="absent"), False, True),
             "undecidable-level": (dict(enabled=None, source="level-dynamic"), False, True),
             "probe-error": (dict(enabled=False, error="boom"), False, True),
             # Disabled but the optimization level pins it: flipping the PassConfig
@@ -111,7 +117,9 @@ class TestPatternRoute:
             model, root = _fake_vllm_tree(tmp_path / label, "qklm", QK_BODY)
             recipes = build_recipes(
                 diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
-                model_path=model, framework="vllm", framework_root=root,
+                model_path=model,
+                framework="vllm",
+                framework_root=root,
                 pass_probe=_fake_probe(**kw),
             )
             kinds = [r.candidate_kind for r in recipes]
@@ -135,11 +143,13 @@ class TestPatternRoute:
         model = tmp_path / "model"
         model.mkdir()
         (model / "config.json").write_text(
-            json.dumps({"model_type": "qklm", "hidden_size": 2048, "num_attention_heads": 16}),
-            encoding="utf-8")
+            json.dumps({"model_type": "qklm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8"
+        )
         recipes = build_recipes(
             diagnose_from_shares(QK_SHARES, busy_fraction_of_wall=0.21),
-            model_path=str(model), framework="sglang", framework_root=str(tmp_path / "fw"),
+            model_path=str(model),
+            framework="sglang",
+            framework_root=str(tmp_path / "fw"),
             pass_probe=boom,
         )
         assert any(r.pattern_id == "qk_norm_rope" for r in recipes)
@@ -171,7 +181,9 @@ class TestRanking:
         model, root = _fake_vllm_tree(tmp_path, "ranklm", self.BODY)
         return build_recipes(
             diagnose_from_shares(self.SHARES, busy_fraction_of_wall=0.21),
-            model_path=model, framework="vllm", framework_root=root,
+            model_path=model,
+            framework="vllm",
+            framework_root=root,
             pass_probe=_fake_probe(enabled=False),
         )
 
@@ -192,16 +204,25 @@ class TestRanking:
 
 class TestDiscoveryRoute:
     def _payload(self):
-        return json.dumps([{
-            "name": "qk_norm_rope_chain", "env_flag": "FUSED_QK",
-            "op_chain": "q_norm/k_norm rmsnorm + rotary_emb",
-            "fusion_math": "fuse qk norm with rope",
-            "priority": 0.9,
-        }])
+        return json.dumps(
+            [
+                {
+                    "name": "qk_norm_rope_chain",
+                    "env_flag": "FUSED_QK",
+                    "op_chain": "q_norm/k_norm rmsnorm + rotary_emb",
+                    "fusion_math": "fuse qk norm with rope",
+                    "priority": 0.9,
+                }
+            ]
+        )
 
     def test_proposes_enabling_the_switch_when_it_is_off(self):
         recipes = parse_discovered_recipes(
-            self._payload(), model_type="m", framework="vllm", source_file="/x.py", shapes={},
+            self._payload(),
+            model_type="m",
+            framework="vllm",
+            source_file="/x.py",
+            shapes={},
             pass_probe=_fake_probe(enabled=False),
         )
         assert len(recipes) == 1
@@ -211,7 +232,11 @@ class TestDiscoveryRoute:
 
     def test_still_drops_when_the_switch_is_already_on(self):
         recipes = parse_discovered_recipes(
-            self._payload(), model_type="m", framework="vllm", source_file="/x.py", shapes={},
+            self._payload(),
+            model_type="m",
+            framework="vllm",
+            source_file="/x.py",
+            shapes={},
             pass_probe=_fake_probe(enabled=True),
         )
         assert recipes == []
@@ -222,16 +247,15 @@ class TestDiscoveryRoute:
         cases = {
             "enabled": (dict(enabled=True), False, False),
             "disabled": (dict(enabled=False), True, False),
-            "absent": (dict(present=False, enabled=None, config_file="", source="absent"),
-                       False, True),
+            "absent": (dict(present=False, enabled=None, config_file="", source="absent"), False, True),
             "undecidable": (dict(enabled=None, source="level-dynamic"), False, True),
             "level-pinned-off": (dict(enabled=False, source="level"), False, True),
             "probe-error": (dict(enabled=False, error="boom"), False, True),
         }
         for label, (kw, want_cp, want_auth) in cases.items():
             recipes = parse_discovered_recipes(
-                payload, model_type="m", framework="vllm", source_file="/x.py", shapes={},
-                pass_probe=_fake_probe(**kw))
+                payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_fake_probe(**kw)
+            )
             kinds = [r.candidate_kind for r in recipes]
             assert ("compile_pass" in kinds) is want_cp, f"{label}: {kinds}"
             assert ("new_fusion" in kinds) is want_auth, f"{label}: {kinds}"
@@ -239,15 +263,24 @@ class TestDiscoveryRoute:
                 assert recipes[0].compile_pass_note, f"{label}: must record why"
 
     def test_compile_pass_outranks_a_higher_priority_authoring_proposal(self):
-        payload = json.dumps([
-            {"name": "author_me", "env_flag": "FUSED_X",
-             "op_chain": "scale add combine", "priority": 0.9},
-            {"name": "qk_chain", "env_flag": "FUSED_QK",
-             "op_chain": "q_norm/k_norm rmsnorm + rotary_emb",
-             "fusion_math": "fuse qk norm with rope", "priority": 0.2},
-        ])
+        payload = json.dumps(
+            [
+                {"name": "author_me", "env_flag": "FUSED_X", "op_chain": "scale add combine", "priority": 0.9},
+                {
+                    "name": "qk_chain",
+                    "env_flag": "FUSED_QK",
+                    "op_chain": "q_norm/k_norm rmsnorm + rotary_emb",
+                    "fusion_math": "fuse qk norm with rope",
+                    "priority": 0.2,
+                },
+            ]
+        )
         recipes = parse_discovered_recipes(
-            payload, model_type="m", framework="vllm", source_file="/x.py", shapes={},
+            payload,
+            model_type="m",
+            framework="vllm",
+            source_file="/x.py",
+            shapes={},
             pass_probe=_fake_probe(enabled=False),
         )
         assert [r.candidate_kind for r in recipes] == ["compile_pass", "new_fusion"]
@@ -314,13 +347,13 @@ class TestProbe:
             if exc is not None:
                 raise exc
             return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+
         monkeypatch.setattr(subprocess, "run", fake_run)
         probe_pass_states.cache_clear()
         return probe_pass_state(QK_FLAG)
 
     def test_reads_the_resolved_value_out_of_the_target_install(self, monkeypatch):
-        st = self._run(monkeypatch,
-                       stdout=f"some vllm warning\n{_probe_stdout({QK_FLAG: _flag_item(False)})}\n")
+        st = self._run(monkeypatch, stdout=f"some vllm warning\n{_probe_stdout({QK_FLAG: _flag_item(False)})}\n")
         assert st.present is True and st.enabled is False
         assert st.config_file == "/site/vllm/config/compilation.py"
         assert st.missed is True
@@ -337,8 +370,7 @@ class TestProbe:
     def test_level_resolved_flag_is_unknown_not_off(self, monkeypatch):
         # vLLM's optimization level resolves this one from the FULL VllmConfig, so
         # the probe cannot tell. Claiming it would invent no-op work.
-        st = self._run(monkeypatch,
-                       stdout=_probe_stdout({QK_FLAG: _flag_item(None, "level-dynamic")}))
+        st = self._run(monkeypatch, stdout=_probe_stdout({QK_FLAG: _flag_item(None, "level-dynamic")}))
         assert st.present is True and st.enabled is None
         assert st.missed is False and st.source == "level-dynamic"
 
@@ -379,15 +411,17 @@ class TestProbeSourceAgainstFakeVllm:
             f"    {QK_FLAG}: bool = None\n"
             "    fuse_norm_quant: bool = None\n"
             f"{pass_config_extra}",
-            encoding="utf-8")
+            encoding="utf-8",
+        )
         if level_module:
             (pkg / "config" / "vllm.py").write_text(level_module, encoding="utf-8")
         return tmp_path
 
     def _probe(self, root, flags=(QK_FLAG, "fuse_norm_quant")):
         env = dict(os.environ, PYTHONPATH=str(root))
-        proc = subprocess.run([sys.executable, "-c", _PROBE_SRC, *flags],
-                              capture_output=True, text=True, env=env, timeout=120)
+        proc = subprocess.run(
+            [sys.executable, "-c", _PROBE_SRC, *flags], capture_output=True, text=True, env=env, timeout=120
+        )
         payload = json.loads(proc.stdout.split(_VLLM_PASS_PROBE_MARKER)[-1].strip())
         return payload
 
@@ -397,8 +431,7 @@ class TestProbeSourceAgainstFakeVllm:
         payload = self._probe(self._fake_vllm(tmp_path))
         assert payload["error"] == ""
         assert payload["level_api"].startswith("absent")
-        assert payload["flags"][QK_FLAG] == {"present": True, "enabled": False,
-                                            "source": "default"}
+        assert payload["flags"][QK_FLAG] == {"present": True, "enabled": False, "source": "default"}
 
     def test_level_pinned_literal_wins_over_the_default(self, tmp_path):
         level = (
@@ -444,14 +477,14 @@ class TestProbeSourceAgainstFakeVllm:
         )
         payload = self._probe(self._fake_vllm(tmp_path, level_module=level))
         assert "optimization level unreadable" in payload["error"]
-        st = PassState(flag=QK_FLAG, present=True, enabled=False, source="default",
-                       config_file="/x.py", error=payload["error"])
+        st = PassState(
+            flag=QK_FLAG, present=True, enabled=False, source="default", config_file="/x.py", error=payload["error"]
+        )
         assert st.missed is False and st.claimable is False
 
     def test_absent_flag_reports_absent(self, tmp_path):
         payload = self._probe(self._fake_vllm(tmp_path), flags=("not_a_flag",))
-        assert payload["flags"]["not_a_flag"] == {"present": False, "enabled": None,
-                                                 "source": "absent"}
+        assert payload["flags"]["not_a_flag"] == {"present": False, "enabled": None, "source": "absent"}
 
 
 class TestProbeIsBatched:
@@ -514,8 +547,7 @@ class TestTargetIdentity:
         # The run was told which framework to target; probing/editing a different
         # install must stop the run, not proceed silently.
         def fake_run(cmd, **kw):
-            payload = _probe_stdout({QK_FLAG: _flag_item(False)},
-                                    config_file="/other/vllm/config/compilation.py")
+            payload = _probe_stdout({QK_FLAG: _flag_item(False)}, config_file="/other/vllm/config/compilation.py")
             return subprocess.CompletedProcess(cmd, 0, payload, "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
@@ -531,7 +563,8 @@ class TestTargetIdentity:
 
         def fake_run(cmd, **kw):
             return subprocess.CompletedProcess(
-                cmd, 0, _probe_stdout({QK_FLAG: _flag_item(False)}, config_file=str(cfg)), "")
+                cmd, 0, _probe_stdout({QK_FLAG: _flag_item(False)}, config_file=str(cfg)), ""
+            )
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         probe_pass_states.cache_clear()
@@ -545,8 +578,7 @@ class TestTargetIdentity:
         def fake_run(cmd, **kw):
             seen.append(cmd[0])
             enabled = cmd[0] == "/b/python"
-            return subprocess.CompletedProcess(
-                cmd, 0, _probe_stdout({QK_FLAG: _flag_item(enabled)}), "")
+            return subprocess.CompletedProcess(cmd, 0, _probe_stdout({QK_FLAG: _flag_item(enabled)}), "")
 
         monkeypatch.setattr(subprocess, "run", fake_run)
         probe_pass_states.cache_clear()
@@ -569,8 +601,7 @@ class TestTargetIdentity:
         assert rt.error and not rt.python
 
     def test_unpinned_runtime_refuses_to_judge(self):
-        state = vllm_compile_pass_state(
-            "qk_norm_rope", runtime=TargetRuntime(error="no vllm launcher on PATH"))
+        state = vllm_compile_pass_state("qk_norm_rope", runtime=TargetRuntime(error="no vllm launcher on PATH"))
         assert state is not None and state.enabled is None and state.claimable is False
         assert "no vllm launcher" in state.error
 

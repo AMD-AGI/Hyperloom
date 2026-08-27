@@ -52,9 +52,7 @@ def _loop(tmp_path, monkeypatch):
     (workspace / "driver.py").write_text("pass\n")
 
     subprocess.run(["git", "init"], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "config", "user.name", "KernelForge Tests"], cwd=workspace, check=True
-    )
+    subprocess.run(["git", "config", "user.name", "KernelForge Tests"], cwd=workspace, check=True)
     subprocess.run(
         ["git", "config", "user.email", "tests@example.com"],
         cwd=workspace,
@@ -106,9 +104,7 @@ def _open_loop(workspace, experiments_root, monkeypatch):
 
 def _round(loop, iteration, plans, *, analysis_commit="commit-a"):
     """Publish one round exactly as ``_run_orchestration`` publishes it."""
-    return loop._persist_lane_plans(
-        iteration, plans, analysis_commit=analysis_commit
-    )
+    return loop._persist_lane_plans(iteration, plans, analysis_commit=analysis_commit)
 
 
 def _started(loop, iteration):
@@ -116,9 +112,7 @@ def _started(loop, iteration):
 
 
 def _finished(loop, iteration):
-    loop.state_store.append_event(
-        make_event("iteration_result", iteration, decision="REVERT_PERF")
-    )
+    loop.state_store.append_event(make_event("iteration_result", iteration, decision="REVERT_PERF"))
 
 
 def _head_commit(loop) -> str:
@@ -157,23 +151,17 @@ def test_lane_one_keeps_the_name_the_rest_of_the_loop_reads(tmp_path, monkeypatc
     assert published == loop._lane_plan_path(2, 1)
 
 
-def test_a_single_lane_round_publishes_exactly_what_it_always_did(
-    tmp_path, monkeypatch
-):
+def test_a_single_lane_round_publishes_exactly_what_it_always_did(tmp_path, monkeypatch):
     """--lanes 1 predates all of this and its artifacts must be unchanged."""
     loop, workspace = _loop(tmp_path, monkeypatch)
 
     _round(loop, 1, ["widen the loads"])
 
     root = workspace / "forge_experiments" / "orchestration" / "iter_001"
-    assert sorted(path.name for path in root.glob("*.md")) == [
-        "optimization_plan.md"
-    ]
+    assert sorted(path.name for path in root.glob("*.md")) == ["optimization_plan.md"]
 
 
-def test_replanning_one_iteration_narrower_removes_the_wider_leftovers(
-    tmp_path, monkeypatch
-):
+def test_replanning_one_iteration_narrower_removes_the_wider_leftovers(tmp_path, monkeypatch):
     """A fan-out that loses its lane copies re-plans the same iteration at one.
 
     A leftover ``lane_003.md`` from the abandoned wider round would be read
@@ -185,9 +173,7 @@ def test_replanning_one_iteration_narrower_removes_the_wider_leftovers(
     _round(loop, 4, ["rewrite the whole thing"], analysis_commit="commit-b")
 
     root = workspace / "forge_experiments" / "orchestration" / "iter_004"
-    assert sorted(path.name for path in root.glob("*.md")) == [
-        "optimization_plan.md"
-    ]
+    assert sorted(path.name for path in root.glob("*.md")) == ["optimization_plan.md"]
     assert loop._load_lane_plans(4) == ("commit-b", ["rewrite the whole thing"])
 
 
@@ -198,9 +184,7 @@ def test_an_empty_plan_is_refused_rather_than_published(tmp_path, monkeypatch):
     with pytest.raises(ValueError):
         loop._persist_lane_plans(1, [], analysis_commit="commit-a")
     with pytest.raises(ValueError):
-        loop._persist_lane_plans(
-            1, ["widen the loads", "   "], analysis_commit="commit-a"
-        )
+        loop._persist_lane_plans(1, ["widen the loads", "   "], analysis_commit="commit-a")
 
 
 def test_plans_without_the_commit_they_describe_are_refused(tmp_path, monkeypatch):
@@ -228,9 +212,7 @@ def test_a_round_that_published_nothing_reads_back_as_nothing(tmp_path, monkeypa
     assert loop._load_lane_plans(3) is None
 
 
-def test_plans_without_their_manifest_are_read_back_as_nothing(
-    tmp_path, monkeypatch
-):
+def test_plans_without_their_manifest_are_read_back_as_nothing(tmp_path, monkeypatch):
     """The manifest is written last, so plan files without it are a dead round.
 
     Treating them as publishable would let a process that died mid-write hand
@@ -244,9 +226,7 @@ def test_plans_without_their_manifest_are_read_back_as_nothing(
     assert loop._load_lane_plans(5) is None
 
 
-def test_a_missing_lane_is_damage_rather_than_a_narrower_round(
-    tmp_path, monkeypatch
-):
+def test_a_missing_lane_is_damage_rather_than_a_narrower_round(tmp_path, monkeypatch):
     """The manifest counted that lane, and it was paid for like the rest."""
     loop, _workspace = _loop(tmp_path, monkeypatch)
     _round(loop, 5, ["widen the loads", "stage through LDS", "fuse the epilogue"])
@@ -261,9 +241,7 @@ def test_a_missing_lane_is_damage_rather_than_a_narrower_round(
 # --------------------------------------------------------------------------
 
 
-def test_plans_of_a_round_that_never_reported_a_result_are_recovered(
-    tmp_path, monkeypatch
-):
+def test_plans_of_a_round_that_never_reported_a_result_are_recovered(tmp_path, monkeypatch):
     """This is the round the crash cost: bought in full, dispatched never.
 
     The iteration asking has already marked itself started, because the loop
@@ -280,9 +258,7 @@ def test_plans_of_a_round_that_never_reported_a_result_are_recovered(
     assert loop._recoverable_lane_plans(7) == (6, plans)
 
 
-def test_plans_of_a_round_that_reported_a_result_are_not_recovered(
-    tmp_path, monkeypatch
-):
+def test_plans_of_a_round_that_reported_a_result_are_not_recovered(tmp_path, monkeypatch):
     """A finished round spent its plans, and the loop has ruled on them.
 
     Handing them back would re-issue directions that were already measured.
@@ -384,9 +360,7 @@ def _dispatch_without_planning(loop, monkeypatch) -> dict:
     return dispatched
 
 
-async def test_a_recovered_round_runs_its_lanes_without_planning_again(
-    tmp_path, monkeypatch
-):
+async def test_a_recovered_round_runs_its_lanes_without_planning_again(tmp_path, monkeypatch):
     """The tokens the crash cost are the planning; that is what is saved."""
     loop, _workspace = _loop(tmp_path, monkeypatch)
     plans = ["widen the loads", "stage through LDS", "fuse the epilogue"]
@@ -404,9 +378,7 @@ async def test_a_recovered_round_runs_its_lanes_without_planning_again(
     assert loop._last_lane_plans == plans
 
 
-async def test_a_recovered_round_republishes_under_its_own_iteration(
-    tmp_path, monkeypatch
-):
+async def test_a_recovered_round_republishes_under_its_own_iteration(tmp_path, monkeypatch):
     """Otherwise a second crash loses plans the first one had already saved.
 
     The recovered round is the one that runs the plans, so it has to be as
@@ -433,9 +405,7 @@ async def test_a_recovered_round_republishes_under_its_own_iteration(
     assert loop._recoverable_lane_plans(8) == (7, plans)
 
 
-async def test_a_republish_that_fails_costs_the_round_not_the_campaign(
-    tmp_path, monkeypatch, capsys
-):
+async def test_a_republish_that_fails_costs_the_round_not_the_campaign(tmp_path, monkeypatch, capsys):
     """A workspace too full for Markdown is too full for N workspace copies.
 
     The ordinary single-session path handles the iteration from here, which is
@@ -469,9 +439,7 @@ async def test_a_republish_that_fails_costs_the_round_not_the_campaign(
     assert "No space left on device" in capsys.readouterr().out
 
 
-async def test_a_recovered_round_that_cannot_dispatch_spends_its_plans_anyway(
-    tmp_path, monkeypatch
-):
+async def test_a_recovered_round_that_cannot_dispatch_spends_its_plans_anyway(tmp_path, monkeypatch):
     """Plans a crash left behind describe this tree and cost this round nothing.
 
     Losing the lane copies loses the sessions, not the planning, so the
@@ -498,9 +466,7 @@ async def test_a_recovered_round_that_cannot_dispatch_spends_its_plans_anyway(
     assert held == (loop._lane_plan_path(7, 1), "")
 
 
-async def test_a_round_with_nothing_to_recover_is_planned_as_usual(
-    tmp_path, monkeypatch
-):
+async def test_a_round_with_nothing_to_recover_is_planned_as_usual(tmp_path, monkeypatch):
     """Guards the recovery assertions above from passing for the wrong reason."""
     loop, _workspace = _loop(tmp_path, monkeypatch)
     dispatched: dict = {}
@@ -525,9 +491,7 @@ async def test_a_round_with_nothing_to_recover_is_planned_as_usual(
     assert dispatched["plans"] == ["widen the loads", "stage through LDS"]
 
 
-async def test_a_round_whose_planning_spent_the_budget_keeps_its_plans(
-    tmp_path, monkeypatch
-):
+async def test_a_round_whose_planning_spent_the_budget_keeps_its_plans(tmp_path, monkeypatch):
     """The production death, refused -- and refused without losing the plans.
 
     Planning is bought before anyone can know what it cost, so the round is
@@ -571,9 +535,7 @@ async def test_a_round_whose_planning_spent_the_budget_keeps_its_plans(
     assert loop._recoverable_lane_plans(2) == (1, plans)
 
 
-async def test_a_recovered_round_refused_for_budget_stays_recoverable(
-    tmp_path, monkeypatch
-):
+async def test_a_recovered_round_refused_for_budget_stays_recoverable(tmp_path, monkeypatch):
     """A refusal must not lose plans a crash already saved once.
 
     The recovered round is the iteration the next process will find unfinished,
@@ -601,9 +563,7 @@ async def test_a_recovered_round_refused_for_budget_stays_recoverable(
     assert loop._recoverable_lane_plans(8) == (7, plans)
 
 
-async def test_a_planned_round_records_the_commit_recovery_compares_against(
-    tmp_path, monkeypatch
-):
+async def test_a_planned_round_records_the_commit_recovery_compares_against(tmp_path, monkeypatch):
     """The seam between publishing a round and picking it back up.
 
     Planning attributes its plans to the analysis context's commit, and recovery
@@ -653,10 +613,7 @@ async def test_a_planned_round_records_the_commit_recovery_compares_against(
 
 def _queued(loop, *lanes):
     """Queue candidates the way a finished round's sessions leave them."""
-    loop._lane_queue = [
-        LaneResult(lane_id=lane_id, plan=plan, diff=diff)
-        for lane_id, plan, diff in lanes
-    ]
+    loop._lane_queue = [LaneResult(lane_id=lane_id, plan=plan, diff=diff) for lane_id, plan, diff in lanes]
     loop._persist_lane_queue()
 
 
@@ -675,9 +632,7 @@ def _widen(workspace):
 
     def diff_of(old, new):
         kernel.write_text(canonical.replace(old, new))
-        patch = subprocess.run(
-            ["git", "diff"], cwd=workspace, capture_output=True, text=True
-        ).stdout
+        patch = subprocess.run(["git", "diff"], cwd=workspace, capture_output=True, text=True).stdout
         kernel.write_text(canonical)
         return patch
 
@@ -703,9 +658,7 @@ def test_a_candidate_a_round_bought_outlives_the_process(tmp_path, monkeypatch):
     ]
 
 
-def test_a_measured_candidate_is_not_left_for_the_next_process(
-    tmp_path, monkeypatch
-):
+def test_a_measured_candidate_is_not_left_for_the_next_process(tmp_path, monkeypatch):
     """Reusing one the loop has already ruled on would re-run a spent lane."""
     loop, workspace = _loop(tmp_path, monkeypatch)
     diff_of = _widen(workspace)
@@ -755,9 +708,7 @@ def test_a_round_that_queued_nothing_publishes_nothing(tmp_path, monkeypatch):
     assert later._lane_queue == []
 
 
-def test_a_queue_that_cannot_be_written_costs_durability_only(
-    tmp_path, monkeypatch, capsys
-):
+def test_a_queue_that_cannot_be_written_costs_durability_only(tmp_path, monkeypatch, capsys):
     """The candidates are in memory and this process still measures them.
 
     Ending a campaign because a few KB of JSON would not land would cost the
@@ -770,9 +721,7 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(runner_module, "atomic_write_json", _no_room, raising=False)
-    monkeypatch.setattr(
-        "kernelforge.loop.recovery.atomic_write_json", _no_room
-    )
+    monkeypatch.setattr("kernelforge.loop.recovery.atomic_write_json", _no_room)
 
     loop._persist_lane_queue()
 
@@ -780,9 +729,7 @@ def test_a_queue_that_cannot_be_written_costs_durability_only(
     assert "No space left on device" in capsys.readouterr().out
 
 
-def test_a_restored_queue_is_measured_before_a_new_round_is_planned(
-    tmp_path, monkeypatch
-):
+def test_a_restored_queue_is_measured_before_a_new_round_is_planned(tmp_path, monkeypatch):
     """Fanning out on top of unspent candidates would buy a round twice over."""
     loop, workspace = _loop(tmp_path, monkeypatch)
     diff_of = _widen(workspace)
@@ -813,9 +760,7 @@ def _reviewed(loop, iteration, verdict, review):
     loop.state_store.save(loop.run_state)
 
 
-def test_a_replace_verdict_outlives_the_process_that_recorded_it(
-    tmp_path, monkeypatch
-):
+def test_a_replace_verdict_outlives_the_process_that_recorded_it(tmp_path, monkeypatch):
     """A critic rules on a round already planned, so its verdict is spent next.
 
     The budget routinely ends between those two rounds, and a ruling held only

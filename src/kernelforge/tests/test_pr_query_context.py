@@ -62,30 +62,22 @@ def test_unmapped_fellows_fall_to_repo_unresolved(fellow):
 
 
 def test_git_remote_is_the_second_link_in_the_chain():
-    repo, reason = resolve_repo(
-        fellow="ck", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED
-    )
+    repo, reason = resolve_repo(fellow="ck", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
     assert (repo, reason) == ("ROCm/ATOM", "")
 
 
 def test_fellow_mapping_wins_over_the_git_remote():
-    repo, reason = resolve_repo(
-        fellow="aiter", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED
-    )
+    repo, reason = resolve_repo(fellow="aiter", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
     assert (repo, reason) == ("ROCm/aiter", "")
 
 
 def test_fork_falls_back_to_upstream_when_the_fork_is_untracked():
-    repo, reason = resolve_repo(
-        git_remote="git@github.com:ROCm/vllm.git", tracked=("vllm-project/vllm",)
-    )
+    repo, reason = resolve_repo(git_remote="git@github.com:ROCm/vllm.git", tracked=("vllm-project/vllm",))
     assert (repo, reason) == ("vllm-project/vllm", "")
 
 
 def test_untracked_repo_does_not_degrade_to_another_repo():
-    repo, reason = resolve_repo(
-        git_remote="git@github.com:AMD-AGI/Primus-Turbo.git", tracked=TRACKED
-    )
+    repo, reason = resolve_repo(git_remote="git@github.com:AMD-AGI/Primus-Turbo.git", tracked=TRACKED)
     assert reason == REASON_REPO_UNTRACKED
     assert repo == "AMD-AGI/Primus-Turbo"
     assert repo not in TRACKED
@@ -98,8 +90,6 @@ def test_nothing_to_resolve_from_is_unresolved():
 def test_unknown_tracked_set_skips_the_whitelist_gate():
     """Skip tracked-repository validation when the set is unavailable."""
     assert resolve_repo(fellow="aiter", tracked=None) == ("ROCm/aiter", "")
-
-
 
 
 def test_absolute_path_becomes_repo_relative():
@@ -137,9 +127,7 @@ def test_absolute_path_without_a_workspace_is_rejected():
 def test_existence_check_is_applied_when_supplied():
     present = {"kernels/moe/gemm2.py"}
 
-    assert normalize_file_path(
-        "kernels/moe/gemm2.py", exists=present.__contains__
-    ) == "kernels/moe/gemm2.py"
+    assert normalize_file_path("kernels/moe/gemm2.py", exists=present.__contains__) == "kernels/moe/gemm2.py"
     assert normalize_file_path("kernels/gone.py", exists=present.__contains__) == ""
 
 
@@ -224,11 +212,7 @@ def test_wishlist_absence_never_counts_as_drift():
 
 
 def test_whitelist_reports_missing_expected_and_new_repos():
-    payload = [
-        {"repo_name": name, "is_active": True}
-        for name in PR_REPOS_EXPECTED
-        if name != "ROCm/ATOM"
-    ]
+    payload = [{"repo_name": name, "is_active": True} for name in PR_REPOS_EXPECTED if name != "ROCm/ATOM"]
     payload.append({"repo_name": "ROCm/brand-new", "is_active": True})
     drift = check_whitelist(payload)
 
@@ -238,10 +222,7 @@ def test_whitelist_reports_missing_expected_and_new_repos():
 
 
 def test_whitelist_flags_a_registered_but_inactive_repo():
-    payload = [
-        {"repo_name": name, "is_active": name != "ROCm/hip"}
-        for name in PR_REPOS_EXPECTED
-    ]
+    payload = [{"repo_name": name, "is_active": name != "ROCm/hip"} for name in PR_REPOS_EXPECTED]
 
     assert check_whitelist(payload).inactive == ("ROCm/hip",)
 

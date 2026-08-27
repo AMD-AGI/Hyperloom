@@ -8,6 +8,7 @@ from kernelforge.fellows.prompt_utils import (
     context_sections_block,
 )
 
+
 def build_system_prompt(
     config_gpu_target: str,
     knowledge_content: str,

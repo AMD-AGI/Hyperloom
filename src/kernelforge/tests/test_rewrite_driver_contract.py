@@ -52,9 +52,7 @@ def _spec(tmp_path, *, driver_body=_CONFORMING_DRIVER, candidate="") -> tuple:
     source.write_text("def softmax(x):\n    return x\n")
     kernel = tmp_path / "kernel.py"
     kernel.write_text(
-        candidate
-        or "def build_softmax_module(*args):\n"
-          "    raise NotImplementedError('not ported yet')\n"
+        candidate or "def build_softmax_module(*args):\n    raise NotImplementedError('not ported yet')\n"
     )
     driver = tmp_path / "driver.py"
     driver.write_text(driver_body)
@@ -68,18 +66,14 @@ def _spec(tmp_path, *, driver_body=_CONFORMING_DRIVER, candidate="") -> tuple:
     return spec, str(driver)
 
 
-_WORKING_CANDIDATE = (
-    "def build_softmax_module(*args):\n"
-    "    return lambda *a, **k: None\n"
-)
+_WORKING_CANDIDATE = "def build_softmax_module(*args):\n    return lambda *a, **k: None\n"
 
 
 # ── output parsing ───────────────────────────────────────────────────────────
 
+
 def test_the_canonical_timing_key_wins_over_the_deprecated_one():
-    reading = driver_contract.read_driver_output(
-        "mean_ms: 9.0\ncase_ms: c0 1.0\nmedian_ms: 4.0\n"
-    )
+    reading = driver_contract.read_driver_output("mean_ms: 9.0\ncase_ms: c0 1.0\nmedian_ms: 4.0\n")
 
     assert reading.timing_ms == 4.0
     assert reading.timing_metric == "median_ms"
@@ -95,9 +89,7 @@ def test_the_deprecated_timing_key_is_still_read():
 
 def test_case_ids_come_from_both_reporting_conventions():
     reading = driver_contract.read_driver_output(
-        "# case shape_a: relerr=0.01 ok=True\n"
-        "case_ms: shape_b 1.0\n"
-        "case_ms: shape_b 1.0\n"
+        "# case shape_a: relerr=0.01 ok=True\ncase_ms: shape_b 1.0\ncase_ms: shape_b 1.0\n"
     )
 
     assert reading.case_ids == ("shape_b", "shape_a")
@@ -111,6 +103,7 @@ def test_correctness_verdicts_are_read_from_either_metric():
 
 
 # ── driver independence ──────────────────────────────────────────────────────
+
 
 def test_a_missing_driver_is_named_as_such(tmp_path):
     spec, _driver = _spec(tmp_path)
@@ -179,6 +172,7 @@ def test_a_candidate_alone_in_its_attempt_directory_passes(tmp_path):
 
 # ── reference preflight ──────────────────────────────────────────────────────
 
+
 def test_the_reference_preflight_returns_the_baseline_and_its_cases(tmp_path):
     spec, driver = _spec(tmp_path)
     report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
@@ -203,10 +197,7 @@ def test_a_driver_without_ref_bench_mode_is_rejected_before_porting(tmp_path):
 def test_a_driver_that_refuses_the_ref_flag_is_rejected(tmp_path):
     spec, driver = _spec(
         tmp_path,
-        driver_body=(
-            "import argparse\n"
-            "argparse.ArgumentParser().parse_args()\n"
-        ),
+        driver_body=("import argparse\nargparse.ArgumentParser().parse_args()\n"),
     )
     report = driver_contract.preflight_reference(spec, driver, timeout_sec=60)
 
@@ -249,6 +240,7 @@ def test_the_deprecated_timing_key_is_accepted_with_a_warning(tmp_path):
 
 
 # ── candidate probe before porting ───────────────────────────────────────────
+
 
 def test_the_candidate_probe_accepts_a_driver_that_cannot_run_the_stub(tmp_path):
     spec, driver = _spec(tmp_path)
@@ -298,6 +290,7 @@ def test_a_driver_without_bench_mode_is_caught_by_the_probe(tmp_path):
 
 
 # ── candidate preflight after porting ────────────────────────────────────────
+
 
 def test_the_candidate_preflight_accepts_matching_case_coverage(tmp_path):
     spec, driver = _spec(tmp_path, candidate=_WORKING_CANDIDATE)
@@ -367,6 +360,7 @@ def test_a_candidate_that_reports_no_cases_fails_coverage():
 
 # ── producer-owned environment ───────────────────────────────────────────────
 
+
 def test_the_driver_receives_the_producer_owned_environment(tmp_path):
     spec, driver = _spec(
         tmp_path,
@@ -415,9 +409,7 @@ def test_the_driver_owns_case_selection(tmp_path):
         tmp_path,
         driver_body="import sys\nprint('argv:', ' '.join(sys.argv[1:]))\n",
     )
-    run = driver_contract.run_driver(
-        spec, driver, ["--bench-mode"], warmup=3, iters=7, timeout_sec=60
-    )
+    run = driver_contract.run_driver(spec, driver, ["--bench-mode"], warmup=3, iters=7, timeout_sec=60)
 
     assert "argv: --bench-mode --warmup 3 --iters 7" in run.output
 

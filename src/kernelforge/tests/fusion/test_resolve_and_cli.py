@@ -639,15 +639,22 @@ def _autoloop_result(tmp_path, monkeypatch, *, source: Path, author: bool = True
     """
     monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (True, ""))
     return cli_module._run_fusion_autoloop(
-        [_autoloop_recipe(source)], framework="vllm", out=tmp_path,
-        repo_root=str(source.parent), author=author, gpu="0", llm_model="m",
-        target_speedup=1.03, ab_isl=512, ab_osl=64, max_turns=1, agent_factory=object,
+        [_autoloop_recipe(source)],
+        framework="vllm",
+        out=tmp_path,
+        repo_root=str(source.parent),
+        author=author,
+        gpu="0",
+        llm_model="m",
+        target_speedup=1.03,
+        ab_isl=512,
+        ab_osl=64,
+        max_turns=1,
+        agent_factory=object,
     )
 
 
-def _autoloop_campaign_fn(
-    tmp_path, monkeypatch, *, source: Path, author: bool = True, experience: str = ""
-):
+def _autoloop_campaign_fn(tmp_path, monkeypatch, *, source: Path, author: bool = True, experience: str = ""):
     """Drive ``_run_fusion_autoloop`` for one recipe and report what it did.
 
     The campaign_fn is invoked INSIDE the loop rather than handed back, because
@@ -685,9 +692,7 @@ def test_autoloop_runs_one_forge_loop_campaign_per_recipe(tmp_path, monkeypatch)
         )
 
     monkeypatch.setattr(cli_module, "run_recipe_campaign", fake_campaign)
-    _autoloop_campaign_fn(
-        tmp_path, monkeypatch, source=source, experience="prior experience"
-    )
+    _autoloop_campaign_fn(tmp_path, monkeypatch, source=source, experience="prior experience")
 
     assert len(seen) == 1
     # Harness path is now per-recipe: kernel_harness_{stem}.py
@@ -713,10 +718,9 @@ def test_autoloop_gives_the_loop_a_git_workspace(tmp_path, monkeypatch):
     source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
 
     monkeypatch.setattr(
-        cli_module, "run_recipe_campaign",
-        lambda *a, **k: SimpleNamespace(
-            result=SimpleNamespace(kept=False, kernel_speedup=None), experiment_id=""
-        ),
+        cli_module,
+        "run_recipe_campaign",
+        lambda *a, **k: SimpleNamespace(result=SimpleNamespace(kept=False, kernel_speedup=None), experiment_id=""),
     )
     _recipe, captured = _autoloop_campaign_fn(tmp_path, monkeypatch, source=source)
 
@@ -768,9 +772,7 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
     assert on_entry == [("SOURCE = 'baseline'\n", ""), ("SOURCE = 'baseline'\n", "")]
 
 
-def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(
-    tmp_path, monkeypatch
-):
+def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(tmp_path, monkeypatch):
     """The harness anchors the speedup benchmark; failure aborts the whole run.
 
     Harness authoring happens inside campaign_fn (after reset_to_base, before
@@ -785,17 +787,22 @@ def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(
     source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
 
     started: list[str] = []
-    monkeypatch.setattr(
-        cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign")
-    )
-    monkeypatch.setattr(
-        cli_module, "_author_baseline_harness", lambda *a, **k: (False, "author exited 3")
-    )
+    monkeypatch.setattr(cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign"))
+    monkeypatch.setattr(cli_module, "_author_baseline_harness", lambda *a, **k: (False, "author exited 3"))
 
     result = cli_module._run_fusion_autoloop(
-        [_autoloop_recipe(source)], framework="vllm", out=tmp_path,
-        repo_root=str(source.parent), author=True, gpu="0", llm_model="m",
-        target_speedup=1.03, ab_isl=512, ab_osl=64, max_turns=1, agent_factory=object,
+        [_autoloop_recipe(source)],
+        framework="vllm",
+        out=tmp_path,
+        repo_root=str(source.parent),
+        author=True,
+        gpu="0",
+        llm_model="m",
+        target_speedup=1.03,
+        ab_isl=512,
+        ab_osl=64,
+        max_turns=1,
+        agent_factory=object,
     )
 
     assert started == []
@@ -805,9 +812,7 @@ def test_autoloop_refuses_to_run_without_the_harness_the_loop_benches(
     assert not (tmp_path / "shadow.git").exists()
 
 
-def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(
-    tmp_path, monkeypatch
-):
+def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(tmp_path, monkeypatch):
     """Running anyway is the measurement the restore exists to prevent."""
     model_dir = tmp_path / "models"
     model_dir.mkdir()
@@ -815,9 +820,7 @@ def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(
     source.write_text("SOURCE = 'baseline'\n", encoding="utf-8")
 
     started: list[str] = []
-    monkeypatch.setattr(
-        cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign")
-    )
+    monkeypatch.setattr(cli_module, "run_recipe_campaign", lambda *a, **k: started.append("campaign"))
     from kernelforge.fusion.shadow_repo import ShadowRepo
 
     monkeypatch.setattr(ShadowRepo, "reset_to_base", lambda _self: False, raising=True)
@@ -830,9 +833,7 @@ def test_autoloop_fails_a_recipe_whose_baseline_could_not_be_restored(
     assert "could not restore the unfused baseline" in verdict.note
 
 
-def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(
-    tmp_path, monkeypatch
-):
+def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_path, monkeypatch):
     """The loop anchors its campaign store to the workspace, not to --experiments-dir.
 
     It refuses to start where a campaign already left state, so without this the
@@ -888,12 +889,22 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
         recipe = recipes[0]
         campaign_fn(recipe, "")
         return cli_module.LoopResult(
-            kept=True, best=None, best_recipe=recipe,
-            history=[LoopIteration(
-                recipe_index=0, attempt=1, pattern_id=recipe.pattern_id,
-                env_flag=recipe.env_flag, kept=True, correctness_passed=True,
-                kernel_speedup=1.2, max_abs_err=None, note="",
-            )],
+            kept=True,
+            best=None,
+            best_recipe=recipe,
+            history=[
+                LoopIteration(
+                    recipe_index=0,
+                    attempt=1,
+                    pattern_id=recipe.pattern_id,
+                    env_flag=recipe.env_flag,
+                    kept=True,
+                    correctness_passed=True,
+                    kernel_speedup=1.2,
+                    max_abs_err=None,
+                    note="",
+                )
+            ],
         )
 
     monkeypatch.setattr(cli_module, "run_recipe_campaign", fake_campaign)
@@ -919,12 +930,12 @@ def test_autoloop_without_author_leaves_the_fusion_it_is_scoring(tmp_path, monke
     fused = model_dir / "qwen3_fused_residual_add_rmsnorm.py"
     fused.write_text("FUSED = 1\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        cli_module, "validate_recipe", lambda *a, **k: SimpleNamespace(kept=False)
-    )
+    monkeypatch.setattr(cli_module, "validate_recipe", lambda *a, **k: SimpleNamespace(kept=False))
     monkeypatch.setattr(cli_module, "HarnessKernelRunner", lambda **_k: object())
     monkeypatch.setattr(
-        cli_module, "run_recipe_campaign", lambda *a, **k: None,
+        cli_module,
+        "run_recipe_campaign",
+        lambda *a, **k: None,
     )
 
     _autoloop_campaign_fn(tmp_path, monkeypatch, source=source, author=False)
@@ -942,12 +953,11 @@ def test_autoloop_without_author_scores_the_source_as_it_stands(tmp_path, monkey
 
     started: list[str] = []
     monkeypatch.setattr(
-        cli_module, "run_recipe_campaign",
+        cli_module,
+        "run_recipe_campaign",
         lambda *a, **k: started.append("campaign"),
     )
-    monkeypatch.setattr(
-        cli_module, "validate_recipe", lambda *a, **k: SimpleNamespace(kept=False)
-    )
+    monkeypatch.setattr(cli_module, "validate_recipe", lambda *a, **k: SimpleNamespace(kept=False))
     monkeypatch.setattr(cli_module, "HarnessKernelRunner", lambda **_k: object())
 
     _autoloop_campaign_fn(tmp_path, monkeypatch, source=source, author=False)
@@ -1009,13 +1019,9 @@ def _venv_in_git_layout(tmp_path):
         (p / "__init__.py").write_text("", encoding="utf-8")
     src = d / "qwen3.py"
     src.write_text("def forward(x):\n    return x\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True
-    )
+    subprocess.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
     (project / ".gitignore").write_text(".venv/\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(project), "add", ".gitignore"], check=True, capture_output=True, text=True
-    )
+    subprocess.run(["git", "-C", str(project), "add", ".gitignore"], check=True, capture_output=True, text=True)
     subprocess.run(
         [
             "git",
@@ -1080,9 +1086,7 @@ class TestNonGitRepoRoot:
         src = d / "qwen3.py"
         src.write_text("x = 1\n", encoding="utf-8")
         # git project that does NOT track the venv
-        subprocess.run(
-            ["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True
-        )
+        subprocess.run(["git", "-C", str(project), "init", "-q"], check=True, capture_output=True, text=True)
         (project / ".gitignore").write_text(".venv/\n", encoding="utf-8")
         subprocess.run(
             ["git", "-C", str(project), "add", ".gitignore"],
@@ -1108,9 +1112,7 @@ class TestNonGitRepoRoot:
             text=True,
         )
         root = _framework_repo_root(str(src), "")
-        assert root == str(site.resolve()), (
-            "venv-in-git must use the package root, not the git project toplevel"
-        )
+        assert root == str(site.resolve()), "venv-in-git must use the package root, not the git project toplevel"
 
     def test_reset_venv_in_git_restores_from_pristine(self, tmp_path):
         """Repro: an UNTRACKED pip source under a git work tree must be reset from the
@@ -1123,9 +1125,7 @@ class TestNonGitRepoRoot:
         # a failed author attempt leaves a broken edit behind
         src.write_text("SYNTAX ERROR broken edit\n", encoding="utf-8")
         _reset_fusion_source(str(site), str(src), pristine_dir=pdir)
-        assert src.read_text() == pristine_text, (
-            "untracked venv source must be reverted via pristine snapshot"
-        )
+        assert src.read_text() == pristine_text, "untracked venv source must be reverted via pristine snapshot"
 
     def test_export_venv_in_git_produces_patch(self, tmp_path):
         """End-to-end: venv-in-git layout must still yield a non-empty, package-relative
@@ -1134,8 +1134,7 @@ class TestNonGitRepoRoot:
         out = tmp_path / "out"
         pdir = _snapshot_fusion_source(str(site), str(src), out)
         src.write_text(
-            "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\n"
-            "def forward(x):\n    return x\n",
+            "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\ndef forward(x):\n    return x\n",
             encoding="utf-8",
         )
         arts = export_artifacts(str(site), str(src), out, pristine_dir=pdir)
@@ -1333,14 +1332,11 @@ class TestCliDryRun:
             runtime=SimpleNamespace(model="gpt-test", sandbox_mode="workspace-write"),
         )
         monkeypatch.setattr(cli_module, "_create_agent_backend", lambda *_args: backend)
-        monkeypatch.setattr(
-            cli_module, "registered_agent_llm_fn", lambda *_a, **_k: lambda _p: "[]"
-        )
+        monkeypatch.setattr(cli_module, "registered_agent_llm_fn", lambda *_a, **_k: lambda _p: "[]")
         source = tmp_path / "toylm.py"
         source.write_text("def forward(x):\n    return x\n", encoding="utf-8")
         monkeypatch.setattr(
-            cli_module, "resolve_framework_source_file",
-            lambda *a, **k: (str(source), "path convention")
+            cli_module, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
         )
         trace = tmp_path / "decode.trace.json"
         _write_trace(trace, _launch_bound_events())
@@ -1403,8 +1399,7 @@ class TestCliDryRun:
         monkeypatch.setattr(cli_module, "_create_agent_backend", lambda *_args: backend)
         monkeypatch.setattr(cli_module, "registered_agent_llm_fn", dead_agent)
         monkeypatch.setattr(
-            cli_module, "resolve_framework_source_file",
-            lambda *a, **k: (str(source), "path convention")
+            cli_module, "resolve_framework_source_file", lambda *a, **k: (str(source), "path convention")
         )
         trace = tmp_path / "decode.trace.json"
         _write_trace(trace, _launch_bound_events())

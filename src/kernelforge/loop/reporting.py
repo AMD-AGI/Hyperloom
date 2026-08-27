@@ -58,21 +58,15 @@ def _round_budget_lines(summary: object) -> list[str]:
     total_sec = float(summary.get("total_sec", 0.0) or 0.0)
     campaign_sec = float(summary.get("campaign_sec", 0.0) or 0.0)
     lines.append(f"- Rounds planned (campaign total): {rounds}")
-    lines.append(
-        f"- Planning wall-clock (campaign total): {planning_sec / 60:.1f} min"
-    )
-    lines.append(
-        f"- Round wall-clock (campaign total): {total_sec / 60:.1f} min"
-    )
+    lines.append(f"- Planning wall-clock (campaign total): {planning_sec / 60:.1f} min")
+    lines.append(f"- Round wall-clock (campaign total): {total_sec / 60:.1f} min")
     if campaign_sec > 0:
         # Printed beside the share so a reader can check the division that
         # produced it against the two numbers it was made from.
         lines.append(f"- Campaign wall-clock: {campaign_sec / 60:.1f} min")
     share = summary.get("planning_share_pct")
     if isinstance(share, (int, float)) and not isinstance(share, bool):
-        lines.append(
-            f"- Planning share of campaign wall-clock: {float(share):.0f}%"
-        )
+        lines.append(f"- Planning share of campaign wall-clock: {float(share):.0f}%")
     refusal = summary.get("refused")
     if refusal:
         lines.append(f"- Stopped: no round fit the remaining budget ({refusal})")
@@ -148,7 +142,8 @@ class BestResultPublisher:
             if ".." in relative.parts:
                 continue
             result = git(
-                "show", f"{commit_hash}:{relative.as_posix()}",
+                "show",
+                f"{commit_hash}:{relative.as_posix()}",
                 cwd=self.workspace,
                 check=False,
                 text=False,
@@ -166,14 +161,8 @@ class BestResultPublisher:
     @classmethod
     def _same_publication(cls, left: dict, right: dict) -> bool:
         """Compare publication identity, ignoring what is not part of it."""
-        return {
-            key: value
-            for key, value in left.items()
-            if key not in cls._VOLATILE_MANIFEST_KEYS
-        } == {
-            key: value
-            for key, value in right.items()
-            if key not in cls._VOLATILE_MANIFEST_KEYS
+        return {key: value for key, value in left.items() if key not in cls._VOLATILE_MANIFEST_KEYS} == {
+            key: value for key, value in right.items() if key not in cls._VOLATILE_MANIFEST_KEYS
         }
 
     @staticmethod
@@ -197,15 +186,9 @@ class BestResultPublisher:
         source_files: dict[str, bytes],
     ) -> dict:
         """Accept only a complete immutable bundle for the same publication."""
-        missing = [
-            name
-            for name in BEST_BUNDLE_FILES
-            if not (version_dir / name).is_file()
-        ]
+        missing = [name for name in BEST_BUNDLE_FILES if not (version_dir / name).is_file()]
         if missing:
-            raise ValueError(
-                f"incomplete best artifact version {version_dir}: missing {', '.join(missing)}"
-            )
+            raise ValueError(f"incomplete best artifact version {version_dir}: missing {', '.join(missing)}")
 
         publication_path = version_dir / "publication.json"
         if publication_path.is_file():
@@ -250,11 +233,11 @@ class BestResultPublisher:
             raise ValueError(f"inconsistent best artifact benchmark: {version_dir}")
 
         files_root = version_dir / "files"
-        stored_files = {
-            str(path.relative_to(files_root))
-            for path in files_root.rglob("*")
-            if path.is_file()
-        } if files_root.is_dir() else set()
+        stored_files = (
+            {str(path.relative_to(files_root)) for path in files_root.rglob("*") if path.is_file()}
+            if files_root.is_dir()
+            else set()
+        )
         if stored_files != set(source_files):
             raise ValueError(f"inconsistent best artifact files: {version_dir}")
         for relative, source in source_files.items():
@@ -280,11 +263,7 @@ class BestResultPublisher:
             "- Status: best verified result",
             f"- mean case speedup: {manifest['mean_case_speedup']:.6f}x",
             f"- Improved overall: {'yes' if manifest['total_improved'] else 'no'}",
-            *(
-                [f"- Aggregate regression: {aggregate_regression}"]
-                if aggregate_regression
-                else []
-            ),
+            *([f"- Aggregate regression: {aggregate_regression}"] if aggregate_regression else []),
             f"- Baseline raw mean: {manifest['baseline_wall_ms']:.4f} ms",
             f"- Search-start raw mean: {manifest['search_start_ms']:.4f} ms",
             (
@@ -302,16 +281,18 @@ class BestResultPublisher:
         ]
         lines.extend(f"- `{path}`" for path in changed)
         lines.extend(_round_budget_lines(manifest.get("round_budget")))
-        lines.extend([
-            "",
-            "## Artifacts",
-            "",
-            f"- Patch: `{manifest['patch_path']}`",
-            f"- Validation: `{manifest['validation_path']}`",
-            f"- Benchmark: `{manifest['benchmark_path']}`",
-            f"- Bundle: `{manifest['artifact_dir']}`",
-            "",
-        ])
+        lines.extend(
+            [
+                "",
+                "## Artifacts",
+                "",
+                f"- Patch: `{manifest['patch_path']}`",
+                f"- Validation: `{manifest['validation_path']}`",
+                f"- Benchmark: `{manifest['benchmark_path']}`",
+                f"- Bundle: `{manifest['artifact_dir']}`",
+                "",
+            ]
+        )
         return "\n".join(lines)
 
     def publish(
@@ -347,11 +328,7 @@ class BestResultPublisher:
             changed_files,
             commit_hash=commit_hash,
         )
-        search_start = (
-            search_start_ms
-            if search_start_ms is not None
-            else baseline_wall_ms
-        )
+        search_start = search_start_ms if search_start_ms is not None else baseline_wall_ms
         resolved_mean_case_speedup = float(mean_case_speedup)
         resolved_search_start_speedup = float(search_start_mean_case_speedup)
         if (
@@ -383,9 +360,7 @@ class BestResultPublisher:
             "search_start_ms": search_start,
             "best_wall_ms": best_wall_ms,
             "mean_case_speedup": resolved_mean_case_speedup,
-            "search_start_mean_case_speedup": (
-                resolved_search_start_speedup
-            ),
+            "search_start_mean_case_speedup": (resolved_search_start_speedup),
             "speedup": round(resolved_mean_case_speedup, 6),
             "total_speedup": round(resolved_mean_case_speedup, 6),
             "incremental_speedup": round(
@@ -393,15 +368,9 @@ class BestResultPublisher:
                 6,
             ),
             "aggregate_regression": aggregate_regression,
-            "total_improved": (
-                resolved_mean_case_speedup > 1.0 and not aggregate_regression
-            ),
-            "incremental_improved": (
-                resolved_mean_case_speedup > resolved_search_start_speedup
-            ),
-            "improved_during_search": (
-                resolved_mean_case_speedup > resolved_search_start_speedup
-            ),
+            "total_improved": (resolved_mean_case_speedup > 1.0 and not aggregate_regression),
+            "incremental_improved": (resolved_mean_case_speedup > resolved_search_start_speedup),
+            "improved_during_search": (resolved_mean_case_speedup > resolved_search_start_speedup),
             "correctness_passed": True,
             "snr_db": snr_db,
             "changed_files": list(sources),
@@ -443,9 +412,7 @@ class BestResultPublisher:
             else:
                 generation = 1
                 while True:
-                    candidate = self.best_root / (
-                        f"{version_name}.generation-{generation:03d}"
-                    )
+                    candidate = self.best_root / (f"{version_name}.generation-{generation:03d}")
                     if not candidate.exists():
                         version_dir = candidate
                         break
@@ -462,10 +429,12 @@ class BestResultPublisher:
                 **expected,
                 "published_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
-            temporary = Path(tempfile.mkdtemp(
-                dir=str(self.best_root),
-                prefix=f".{version_name}.",
-            ))
+            temporary = Path(
+                tempfile.mkdtemp(
+                    dir=str(self.best_root),
+                    prefix=f".{version_name}.",
+                )
+            )
             try:
                 self._write_text_durable(temporary / "forge.patch", patch)
                 self._write_text_durable(temporary / "validation.txt", validation_text)
@@ -497,23 +466,17 @@ class BestResultPublisher:
             current = self._load_json(self.manifest_path, label="best manifest")
             current_iteration = int(current.get("iteration", 0) or 0)
             if current_iteration > iteration:
-                raise ValueError(
-                    f"best manifest is ahead of iteration {iteration}: "
-                    f"{current_iteration}"
-                )
+                raise ValueError(f"best manifest is ahead of iteration {iteration}: {current_iteration}")
             # Only manifests written under the same schema are comparable: an
             # older one differs by construction, so comparing it would report a
             # conflict on every republish across an upgrade and leave the stale
             # manifest -- and the verdict it was written with -- published.
             if (
                 current_iteration == iteration
-                and int(current.get("schema_version", 0) or 0)
-                == MANIFEST_SCHEMA_VERSION
+                and int(current.get("schema_version", 0) or 0) == MANIFEST_SCHEMA_VERSION
                 and not self._same_publication(current, manifest)
             ):
-                raise ValueError(
-                    f"best manifest conflicts with iteration {iteration}"
-                )
+                raise ValueError(f"best manifest conflicts with iteration {iteration}")
         if round_budget:
             manifest = {**manifest, "round_budget": dict(round_budget)}
         payload = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
@@ -610,11 +573,7 @@ class BestResultPublisher:
     ) -> None:
         """Regenerate the complete human-readable iteration history."""
         iteration_events = sorted(
-            (
-                event
-                for event in events
-                if event.get("type") == "iteration_result"
-            ),
+            (event for event in events if event.get("type") == "iteration_result"),
             key=lambda event: int(event.get("iter", 0) or 0),
         )
         lines = ["# Forge Optimization History", ""]
@@ -622,31 +581,27 @@ class BestResultPublisher:
             iteration = int(event.get("iter", 0) or 0)
             decision = str(event.get("decision") or "UNKNOWN")
             metadata = candidate_metadata.get(iteration, {})
-            lines.extend([
-                f"## Iteration {iteration} — {decision}",
-                "",
-                f"- Session: {event.get('session_index', 0)}",
-                f"- Experiment: `{event.get('experiment_id', '')}`",
-                f"- Session end: `{event.get('session_end_reason', '')}`",
-                f"- Turns: {event.get('turns', '')}",
-                f"- Plan: {event.get('plan', '') or 'unspecified'}",
-                f"- Canonical correctness: "
-                f"{'PASS' if metadata.get('validation_passed') else 'FAIL/NOT RUN'}",
-                f"- Candidate mean case speedup: {event.get('mean_case_speedup', '')}",
-                f"- Best mean case speedup before: "
-                f"{metadata.get('best_mean_case_speedup_before', '')}",
-                f"- Best mean case speedup after: "
-                f"{event.get('best_after_mean_case_speedup', '')}",
-                f"- Candidate raw mean ms: {event.get('wall_ms', '')}",
-                f"- Commit: `{metadata.get('commit_hash', '')}`",
-                f"- Archive: `{metadata.get('archive_path', '')}`",
-                "",
-                "Changed files:",
-            ])
-            changed_files = self._changed_files_from_metadata(metadata)
             lines.extend(
-                [f"- `{path}`" for path in changed_files]
-                or ["- (none)"]
+                [
+                    f"## Iteration {iteration} — {decision}",
+                    "",
+                    f"- Session: {event.get('session_index', 0)}",
+                    f"- Experiment: `{event.get('experiment_id', '')}`",
+                    f"- Session end: `{event.get('session_end_reason', '')}`",
+                    f"- Turns: {event.get('turns', '')}",
+                    f"- Plan: {event.get('plan', '') or 'unspecified'}",
+                    f"- Canonical correctness: {'PASS' if metadata.get('validation_passed') else 'FAIL/NOT RUN'}",
+                    f"- Candidate mean case speedup: {event.get('mean_case_speedup', '')}",
+                    f"- Best mean case speedup before: {metadata.get('best_mean_case_speedup_before', '')}",
+                    f"- Best mean case speedup after: {event.get('best_after_mean_case_speedup', '')}",
+                    f"- Candidate raw mean ms: {event.get('wall_ms', '')}",
+                    f"- Commit: `{metadata.get('commit_hash', '')}`",
+                    f"- Archive: `{metadata.get('archive_path', '')}`",
+                    "",
+                    "Changed files:",
+                ]
             )
+            changed_files = self._changed_files_from_metadata(metadata)
+            lines.extend([f"- `{path}`" for path in changed_files] or ["- (none)"])
             lines.append("")
         atomic_write_text(self.history_path, "\n".join(lines))

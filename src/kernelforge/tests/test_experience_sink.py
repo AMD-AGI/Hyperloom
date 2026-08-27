@@ -54,12 +54,13 @@ def workspace(tmp_path):
 
 @pytest.fixture()
 def config(tmp_path, workspace):
-    knowledge = KnowledgeConfig.from_env(
-        {}, mode="local", local_root=tmp_path / "knowledge"
-    )
+    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=tmp_path / "knowledge")
     return Config.from_env(
-        workspace=str(workspace), gpu_target="gfx942", gpu_type="mi300x",
-        knowledge_config=knowledge, agent_precheck=False,
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
     )
 
 
@@ -101,13 +102,19 @@ def test_write_skips_when_the_store_is_not_configured(tmp_path, workspace):
     # Remote mode selected against GBrain, which holds no rewrite records, so
     # there is no backend to write to.
     knowledge = KnowledgeConfig.from_env(
-        {}, mode="remote", local_root=tmp_path / "knowledge",
-        gbrain_base_url="https://gbrain.invalid", gbrain_token="secret",
+        {},
+        mode="remote",
+        local_root=tmp_path / "knowledge",
+        gbrain_base_url="https://gbrain.invalid",
+        gbrain_token="secret",
         remote_backend=REMOTE_BACKEND_GBRAIN,
     )
     config = Config.from_env(
-        workspace=str(workspace), gpu_target="gfx942", gpu_type="mi300x",
-        knowledge_config=knowledge, agent_precheck=False,
+        workspace=str(workspace),
+        gpu_target="gfx942",
+        gpu_type="mi300x",
+        knowledge_config=knowledge,
+        agent_precheck=False,
     )
 
     assert _write(config, workspace) == {
@@ -211,9 +218,7 @@ def test_the_record_carries_a_readable_account_beside_the_patch(config, workspac
     """
     _write(config, workspace)
 
-    bundle = _records(config, workspace).read_top_n(
-        workspace / "kb-candidates", limit=1
-    )[0]
+    bundle = _records(config, workspace).read_top_n(workspace / "kb-candidates", limit=1)[0]
     experience = (bundle.files_dir / EXPERIENCE_ARTIFACT).read_text(encoding="utf-8")
 
     assert experience.startswith(f"# {IDENTITY}\n")
@@ -237,7 +242,8 @@ def test_write_persists_supplied_pristine_implementation_contract(config, worksp
     pristine_signature = sink.hash_implementation_identity(pristine_identity)
 
     status = _write(
-        config, workspace,
+        config,
+        workspace,
         implementation_signature_override=pristine_signature,
         implementation_identity_override=pristine_identity,
     )
@@ -253,7 +259,10 @@ def test_a_slower_run_is_still_recorded_but_never_takes_the_champion(config, wor
     """Losing to a previous run is not a reason to discard the evidence."""
     fast = _write(config, workspace, experiment_id="run-a", mean_case_speedup=3.0)
     slow = _write(
-        config, workspace, experiment_id="run-b", mean_case_speedup=1.5,
+        config,
+        workspace,
+        experiment_id="run-b",
+        mean_case_speedup=1.5,
         cumulative_diff=DIFF.replace("+new", "+other"),
     )
 
@@ -263,14 +272,15 @@ def test_a_slower_run_is_still_recorded_but_never_takes_the_champion(config, wor
     assert kb.list_candidates(limit=1)[0].value["task_id"] == "run-a"
 
 
-def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(
-    config, workspace
-):
+def test_a_warm_started_run_that_improved_nothing_records_no_second_copy(config, workspace):
     """Reproducing the solution you started from is not a new solution."""
     _write(config, workspace, experiment_id="prior", mean_case_speedup=2.0)
 
     same = _write(
-        config, workspace, experiment_id="warm-started", mean_case_speedup=2.0,
+        config,
+        workspace,
+        experiment_id="warm-started",
+        mean_case_speedup=2.0,
         reused_speedup=2.0,
     )
 
@@ -287,8 +297,12 @@ def test_a_warm_started_run_that_improved_records_the_better_result(config, work
     _write(config, workspace, experiment_id="prior", mean_case_speedup=2.0)
 
     better = _write(
-        config, workspace, experiment_id="warm-started", mean_case_speedup=2.5,
-        reused_speedup=2.0, cumulative_diff=DIFF.replace("+new", "+better"),
+        config,
+        workspace,
+        experiment_id="warm-started",
+        mean_case_speedup=2.5,
+        reused_speedup=2.0,
+        cumulative_diff=DIFF.replace("+new", "+better"),
     )
 
     assert better["written"] is True
@@ -296,9 +310,7 @@ def test_a_warm_started_run_that_improved_records_the_better_result(config, work
     assert len(_records(config, workspace).list_candidates(limit=5)) == 2
 
 
-def test_a_new_summary_for_one_solution_is_recorded_as_a_second_candidate(
-    config, workspace
-):
+def test_a_new_summary_for_one_solution_is_recorded_as_a_second_candidate(config, workspace):
     """Known gap, pinned so a change in it cannot pass unnoticed.
 
     The store names a record after its own content, so the final write's richer
@@ -334,8 +346,11 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
     _write(config, workspace)
 
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"), kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow", gpu_type="mi355x", framework="standalone",
+        kernel_path=str(workspace / "kernel.py"),
+        kernel_source=KERNEL_SOURCE,
+        fellow="triton-fellow",
+        gpu_type="mi355x",
+        framework="standalone",
     )
     other = KernelRecipeKB.open_identity(identity, config)
 
@@ -357,8 +372,11 @@ def test_a_different_producer_is_a_different_address(config, workspace):
     _write(config, workspace)
 
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"), kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow", gpu_type="mi300x", framework="standalone",
+        kernel_path=str(workspace / "kernel.py"),
+        kernel_source=KERNEL_SOURCE,
+        fellow="triton-fellow",
+        gpu_type="mi300x",
+        framework="standalone",
         producer="fusion",
     )
     other = KernelRecipeKB.open_identity(identity, config)
@@ -373,7 +391,10 @@ def test_a_different_producer_is_a_different_address(config, workspace):
 def test_an_unset_producer_still_files_under_the_loops_own(config, workspace):
     """Every existing caller passes nothing, and must keep its address."""
     identity, _op, _fw = resolve_loop_identity(
-        kernel_path=str(workspace / "kernel.py"), kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow", gpu_type="mi300x", framework="standalone",
+        kernel_path=str(workspace / "kernel.py"),
+        kernel_source=KERNEL_SOURCE,
+        fellow="triton-fellow",
+        gpu_type="mi300x",
+        framework="standalone",
     )
     assert identity.producer == "forge-loop"

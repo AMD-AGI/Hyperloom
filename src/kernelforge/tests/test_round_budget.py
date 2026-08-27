@@ -37,11 +37,7 @@ def _admit(remaining_sec, *, lanes=3, history=None, measurement_sec=None):
         remaining_sec=remaining_sec,
         requested_lanes=lanes,
         history=history,
-        measurement_sec=(
-            estimate_measurement_sec(history)
-            if measurement_sec is None
-            else measurement_sec
-        ),
+        measurement_sec=(estimate_measurement_sec(history) if measurement_sec is None else measurement_sec),
     )
 
 
@@ -78,9 +74,7 @@ def test_first_round_is_admitted_at_full_width_without_history():
     assert decision.admitted is True
     assert decision.lanes == 3
     assert decision.narrowed is False
-    assert decision.required_sec == pytest.approx(
-        PLANNING_FLOOR_SEC + _EXECUTION_SEC
-    )
+    assert decision.required_sec == pytest.approx(PLANNING_FLOOR_SEC + _EXECUTION_SEC)
 
 
 def test_a_round_that_cannot_buy_the_cheapest_planning_is_refused():
@@ -121,8 +115,7 @@ def test_a_round_that_does_not_fit_narrows_one_width_at_a_time():
 def test_a_round_narrows_to_one_lane_when_two_still_do_not_fit():
     history = _fan_out_history(2400.0)
 
-    decision = _admit(2400.0 - PLAN_CRITIC_TIMEOUT_SEC + _EXECUTION_SEC - 60.0,
-                      history=history)
+    decision = _admit(2400.0 - PLAN_CRITIC_TIMEOUT_SEC + _EXECUTION_SEC - 60.0, history=history)
 
     assert decision.admitted is True
     assert decision.lanes == 1
@@ -145,9 +138,7 @@ def test_refusal_reports_the_narrowest_round_it_could_not_afford():
 
     decision = _admit(0.0, history=history)
 
-    assert decision.planning_sec == pytest.approx(
-        2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC
-    )
+    assert decision.planning_sec == pytest.approx(2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC)
 
 
 def test_single_lane_campaign_is_never_narrowed():
@@ -174,9 +165,7 @@ def test_the_planning_bound_is_the_cheapest_round_observed_not_the_worst():
     ]
 
     assert estimate_planning_sec(history, lanes=3) == pytest.approx(1900.0)
-    assert estimate_planning_sec([], lanes=3) == pytest.approx(
-        PLANNING_FLOOR_SEC
-    )
+    assert estimate_planning_sec([], lanes=3) == pytest.approx(PLANNING_FLOOR_SEC)
 
 
 def test_a_narrower_round_is_priced_from_its_own_observation_first():
@@ -191,17 +180,13 @@ def test_a_narrower_round_is_priced_from_its_own_observation_first():
 def test_a_narrower_round_is_otherwise_priced_by_the_plans_left_unread():
     history = _fan_out_history(2400.0, lanes=4)
 
-    assert estimate_planning_sec(history, lanes=2) == pytest.approx(
-        2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC
-    )
+    assert estimate_planning_sec(history, lanes=2) == pytest.approx(2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC)
 
 
 def test_no_bound_claims_to_plan_faster_than_anything_observed():
     history = _fan_out_history(900.0, lanes=8)
 
-    assert estimate_planning_sec(history, lanes=1) == pytest.approx(
-        PLANNING_FLOOR_SEC
-    )
+    assert estimate_planning_sec(history, lanes=1) == pytest.approx(PLANNING_FLOOR_SEC)
 
 
 def test_a_wider_round_is_never_priced_below_a_narrower_observed_one():
@@ -214,9 +199,7 @@ def test_a_wider_round_is_never_priced_below_a_narrower_observed_one():
 
 def test_the_measurement_estimate_starts_at_a_constant_and_then_observes():
     """The old estimate was the timeout ceilings: 19x the observed p90."""
-    assert estimate_measurement_sec([]) == pytest.approx(
-        FIRST_ROUND_MEASUREMENT_SEC
-    )
+    assert estimate_measurement_sec([]) == pytest.approx(FIRST_ROUND_MEASUREMENT_SEC)
     assert FIRST_ROUND_MEASUREMENT_SEC < 1800.0 + 300.0
 
     observed = [
@@ -231,9 +214,7 @@ def test_the_measurement_estimate_starts_at_a_constant_and_then_observes():
 def test_a_round_that_never_measured_is_not_an_observation_of_a_free_cycle():
     history = _fan_out_history(1500.0, measurement_sec=0.0, rounds=3)
 
-    assert estimate_measurement_sec(history) == pytest.approx(
-        FIRST_ROUND_MEASUREMENT_SEC
-    )
+    assert estimate_measurement_sec(history) == pytest.approx(FIRST_ROUND_MEASUREMENT_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -276,9 +257,7 @@ def test_each_constant_is_the_production_number_it_claims_to_be():
     assert DISPATCH_SESSION_SEC == pytest.approx(_SESSION_MEDIAN_SEC)
     # The floor is the p90 session less the grace the external kill allows:
     # at exactly this much time in hand, a p90 session ends as the kill lands.
-    assert DISPATCH_FLOOR_SEC == pytest.approx(
-        _SESSION_P90_SEC - _EXTERNAL_GRACE_SEC
-    )
+    assert DISPATCH_FLOOR_SEC == pytest.approx(_SESSION_P90_SEC - _EXTERNAL_GRACE_SEC)
 
 
 def test_dispatch_needs_a_session_and_the_measurement_that_judges_it():
@@ -356,9 +335,7 @@ def test_the_dispatch_requirement_never_falls_below_its_floor():
     for measured in range(5, 2000, 25):
         decision = admit_dispatch(
             remaining_sec=0.0,
-            measurement_sec=estimate_measurement_sec(
-                _fan_out_history(1500.0, measurement_sec=float(measured))
-            ),
+            measurement_sec=estimate_measurement_sec(_fan_out_history(1500.0, measurement_sec=float(measured))),
         )
         assert decision.required_sec >= DISPATCH_FLOOR_SEC
 
@@ -368,18 +345,14 @@ def test_the_dispatch_requirement_never_falls_below_its_floor():
 
 def test_a_fast_campaign_lowers_the_first_check_but_not_the_second():
     """Observation is right for one question and not for the other."""
-    history = _fan_out_history(
-        1500.0, measurement_sec=_FAST_MEASUREMENT_SEC, rounds=3
-    )
+    history = _fan_out_history(1500.0, measurement_sec=_FAST_MEASUREMENT_SEC, rounds=3)
     measurement = estimate_measurement_sec(history)
     assert measurement == pytest.approx(_FAST_MEASUREMENT_SEC)
 
     # Before planning, the campaign's own speed is exactly what should count:
     # a campaign that validates quickly may keep starting rounds later.
     admission = _admit(3600.0, history=history, measurement_sec=measurement)
-    assert admission.execution_sec == pytest.approx(
-        ADMISSION_SESSION_SEC + _FAST_MEASUREMENT_SEC
-    )
+    assert admission.execution_sec == pytest.approx(ADMISSION_SESSION_SEC + _FAST_MEASUREMENT_SEC)
     assert admission.execution_sec < _EXECUTION_SEC
 
     # After planning it is not: the requirement stops at the floor.
@@ -393,17 +366,13 @@ def test_a_refusal_names_what_it_was_priced_from():
     """A floored line says so; an estimated one still shows its parts."""
     estimated = _dispatch(60.0, measurement_sec=1200.0).summary()
 
-    assert estimated.startswith(
-        f"{(DISPATCH_SESSION_SEC + 1200.0) / 60:.0f} min needed after planning"
-    )
+    assert estimated.startswith(f"{(DISPATCH_SESSION_SEC + 1200.0) / 60:.0f} min needed after planning")
     assert "session 12, measurement 20" in estimated
     assert "floor" not in estimated
 
     summary = _dispatch(60.0, measurement_sec=_FAST_MEASUREMENT_SEC).summary()
 
-    assert summary.startswith(
-        f"{DISPATCH_FLOOR_SEC / 60:.0f} min needed after planning"
-    )
+    assert summary.startswith(f"{DISPATCH_FLOOR_SEC / 60:.0f} min needed after planning")
     assert "external-timeout floor" in summary
     assert "1 min remain" in summary
 
@@ -510,30 +479,20 @@ def test_the_verdict_does_not_change_on_a_campaign_that_measures_quickly(
     nothing about that.
     """
     planning_min = round_.planning_min if round_.planning_min else 21.9
-    history = _fan_out_history(
-        planning_min * 60.0, lanes=3, measurement_sec=_FAST_MEASUREMENT_SEC
-    )
+    history = _fan_out_history(planning_min * 60.0, lanes=3, measurement_sec=_FAST_MEASUREMENT_SEC)
 
     assert _replay(round_, history=history) is round_.survived
 
 
 def _post_planning_sec(entries) -> list[float]:
     """What each of these rounds had left when its planning returned."""
-    return [
-        (entry.remaining_min - entry.planning_min) * 60.0
-        for entry in entries
-        if entry.planning_min is not None
-    ]
+    return [(entry.remaining_min - entry.planning_min) * 60.0 for entry in entries if entry.planning_min is not None]
 
 
 def test_the_rounds_that_died_are_separated_from_the_survivors_after_planning():
     """The gap the whole re-calibration rests on: 8.3 minutes against 24.8."""
-    killed = _post_planning_sec(
-        [entry for entry in PRODUCTION_ROUNDS if not entry.survived]
-    )
-    survived = _post_planning_sec(
-        [entry for entry in PRODUCTION_ROUNDS if entry.survived]
-    )
+    killed = _post_planning_sec([entry for entry in PRODUCTION_ROUNDS if not entry.survived])
+    survived = _post_planning_sec([entry for entry in PRODUCTION_ROUNDS if entry.survived])
 
     # Whatever this campaign has observed, the dispatch bar lands in the gap.
     for measurement_sec in (
@@ -574,9 +533,7 @@ def test_recorded_round_costs_drive_the_next_admission():
     # Both halves come from the round just recorded: the planning bound falls
     # with each unread plan, and the measurement is the one observed, not the
     # no-history constant.
-    assert decision.planning_sec == pytest.approx(
-        2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC
-    )
+    assert decision.planning_sec == pytest.approx(2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC)
     assert decision.execution_sec == pytest.approx(ADMISSION_SESSION_SEC + 90.0)
     assert state.round_costs.rounds == 1
     assert state.round_costs.planning_total_sec == pytest.approx(2400.0)
@@ -597,9 +554,7 @@ def test_round_history_keeps_only_the_recent_window():
         )
 
     assert state.round_costs.rounds == ROUND_COST_WINDOW + 3
-    assert [cost.iteration for cost in state.round_costs.recent] == list(
-        range(4, ROUND_COST_WINDOW + 4)
-    )
+    assert [cost.iteration for cost in state.round_costs.recent] == list(range(4, ROUND_COST_WINDOW + 4))
 
 
 def test_a_round_that_did_not_plan_records_nothing():
@@ -698,10 +653,7 @@ def test_planning_share_takes_no_denominator():
     it divides. There is no parameter for a caller to pass a different span
     through, which is the property this test exists to keep.
     """
-    assert (
-        inspect.signature(RoundCostState.planning_share_pct).parameters.keys()
-        == {"self"}
-    )
+    assert inspect.signature(RoundCostState.planning_share_pct).parameters.keys() == {"self"}
 
 
 def test_a_state_whose_span_cannot_contain_its_planning_does_not_load():

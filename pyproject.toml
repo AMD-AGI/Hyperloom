@@ -360,13 +360,9 @@ extend-exclude = [
     ".venv",
     "TraceLens-internal",
     "InferenceX",
-    # TEMPORARY (P1 of the KernelForge in-tree migration): the freshly copied
-    # forge packages are still formatted for KernelForge's line-length 100.
-    # P3 reflows them at 120 and deletes these three entries; only
-    # ``src/kernelforge/data`` stays excluded permanently.
-    "src/kernelforge",
-    "src/forge_gemm_tune",
-    "src/forge_llm",
+    # Knowledge base / examples / serving patches, not source we own the style
+    # of. The example drivers are .py and would otherwise be reformatted.
+    "src/kernelforge/data",
 ]
 
 [tool.ruff.lint]
@@ -393,6 +389,9 @@ ignore = ["E501", "E741"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
+# The import sits under the comment block explaining why the attribute name is
+# shared with forge_llm rather than redeclared here.
+"src/kernelforge/fusion/llm_failure.py" = ["E402"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

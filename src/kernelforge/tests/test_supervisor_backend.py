@@ -235,12 +235,7 @@ def test_supervisor_api_failure_is_not_parsed_or_repaired(
 
     assert reply == ""
     assert calls == 1
-    persisted = (
-        tmp_path
-        / "forge_experiments"
-        / "supervisor"
-        / "intervention_iter_004.md"
-    ).read_text()
+    persisted = (tmp_path / "forge_experiments" / "supervisor" / "intervention_iter_004.md").read_text()
     assert "SDK error text is not a Supervisor Ruling" not in persisted
 
 

@@ -109,9 +109,7 @@ def _register_owning_fake(
         factory=factory,
         default_model=f"{name}-model",
         availability=(lambda: False) if unavailable else (lambda: True),
-        owns_model=lambda model, prefix=owns_prefix: (
-            model.strip().lower().startswith(prefix)
-        ),
+        owns_model=lambda model, prefix=owns_prefix: model.strip().lower().startswith(prefix),
     )
     register_agent_provider(provider)
     return provider
@@ -165,10 +163,13 @@ def test_builtin_model_ownership_predicates() -> None:
     assert not codex.owns_model("claude-opus-5")
     assert not codex.owns_model("")
     assert resolve_agent_runtime("claude").fallback_model == "claude-opus-4-8"
-    assert resolve_agent_runtime(
-        "claude",
-        model="claude-opus-4-8",
-    ).fallback_model == ""
+    assert (
+        resolve_agent_runtime(
+            "claude",
+            model="claude-opus-4-8",
+        ).fallback_model
+        == ""
+    )
     assert resolve_agent_runtime("codex").fallback_model == "gpt-5.5"
 
 
@@ -193,13 +194,15 @@ def test_provider_probe_falls_back_to_supported_model() -> None:
         backend.runtime = runtime
         return backend
 
-    register_agent_provider(AgentProvider(
-        name="modelprobe",
-        factory=factory,
-        default_model="future-model",
-        fallback_model="stable-model",
-        capabilities=AgentCapabilities(probe=True),
-    ))
+    register_agent_provider(
+        AgentProvider(
+            name="modelprobe",
+            factory=factory,
+            default_model="future-model",
+            fallback_model="stable-model",
+            capabilities=AgentCapabilities(probe=True),
+        )
+    )
     runtime = resolve_agent_runtime("modelprobe")
     backend = create_registered_backend(runtime, probe_cwd="/tmp")
 

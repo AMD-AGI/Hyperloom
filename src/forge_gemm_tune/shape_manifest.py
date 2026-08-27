@@ -34,7 +34,9 @@ def load_manifest(path: str | Path) -> dict[str, Any]:
     """
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict) or data.get("manifest_kind") != MANIFEST_KIND:
-        raise ValueError(f"{path} is not a {MANIFEST_KIND} (manifest_kind={data.get('manifest_kind') if isinstance(data, dict) else type(data).__name__!r})")
+        raise ValueError(
+            f"{path} is not a {MANIFEST_KIND} (manifest_kind={data.get('manifest_kind') if isinstance(data, dict) else type(data).__name__!r})"
+        )
     return data
 
 
@@ -101,7 +103,9 @@ def manifest_to_shapes(
         existing = agg.get(key)
         if existing is None:
             agg[key] = {
-                "M": m, "N": n, "K": k,
+                "M": m,
+                "N": n,
+                "K": k,
                 "weight": round(w, 3),
                 "quant": row.get("quant", "") or "",
                 "in_dtype": row.get("in_dtype", "") or "",
@@ -145,7 +149,9 @@ def write_manifest_untuned_csv(
                 f.write(f"{s['M']},{s['N']},{s['K']}\n")
     log.info(
         "shape_manifest: wrote %d target GEMM shape(s) from %s -> %s (weight-ordered)",
-        len(shapes), path, out,
+        len(shapes),
+        path,
+        out,
     )
     return out
 

@@ -15,6 +15,7 @@ from kernelforge.mcp_server.tools.bench import (
     bench_wallclock,
     calculate_mean_case_speedup,
 )
+
 # Alias avoids pytest-asyncio (auto mode) collecting the imported coroutine as
 # a test just because its name starts with "test_".
 from kernelforge.mcp_server.tools.test import test_correctness as run_correctness
@@ -69,9 +70,7 @@ def test_bench_rejects_duplicate_case_timings(tmp_path):
     driver = _write_driver(
         tmp_path,
         "duplicate_cases.py",
-        "print('case_ms: repeated 1.0')\n"
-        "print('case_ms: repeated 2.0')\n"
-        "print('mean_ms: 1.5')\n",
+        "print('case_ms: repeated 1.0')\nprint('case_ms: repeated 2.0')\nprint('mean_ms: 1.5')\n",
     )
 
     result = asyncio.run(bench_wallclock(driver_script=driver))
@@ -81,6 +80,7 @@ def test_bench_rejects_duplicate_case_timings(tmp_path):
 
 
 # ─── test_correctness ───
+
 
 def test_correctness_pass_snr(tmp_path):
     drv = _write_driver(tmp_path, "d.py", "print('SNR: 42.50 dB')\n")
@@ -100,8 +100,7 @@ def test_correctness_fail_snr(tmp_path):
 
 
 def test_correctness_allclose_and_maxdiff(tmp_path):
-    drv = _write_driver(tmp_path, "d.py",
-                        "print('allclose: True')\nprint('max_diff: 1.2e-05')\n")
+    drv = _write_driver(tmp_path, "d.py", "print('allclose: True')\nprint('max_diff: 1.2e-05')\n")
     result = asyncio.run(run_correctness(drv))
     assert result["passed"] is True
     assert result["allclose"] is True
@@ -134,9 +133,9 @@ def test_correctness_timeout(tmp_path):
 
 # ─── bench_wallclock ───
 
+
 def test_bench_per_iter_median(tmp_path):
-    drv = _write_driver(tmp_path, "b.py",
-                        "for t in (1.0, 2.0, 3.0):\n    print(f'wall_ms: {t}')\n")
+    drv = _write_driver(tmp_path, "b.py", "for t in (1.0, 2.0, 3.0):\n    print(f'wall_ms: {t}')\n")
     result = asyncio.run(bench_wallclock(drv))
     assert result["success"] is True
     assert result["median_ms"] == 2.0
@@ -146,8 +145,7 @@ def test_bench_per_iter_median(tmp_path):
 
 
 def test_bench_case_times_and_callback(tmp_path):
-    drv = _write_driver(tmp_path, "b.py",
-                        "print('wall_ms: 2.0')\nprint('case_ms: caseA 5.5')\n")
+    drv = _write_driver(tmp_path, "b.py", "print('wall_ms: 2.0')\nprint('case_ms: caseA 5.5')\n")
     captured = {}
     result = asyncio.run(bench_wallclock(drv, on_result=captured.update))
     assert result["case_times"] == {"caseA": 5.5}
@@ -159,9 +157,7 @@ def test_bench_parses_case_bandwidth(tmp_path):
     drv = _write_driver(
         tmp_path,
         "bandwidth.py",
-        "print('mean_ms: 1.0')\n"
-        "print('case_bw: caseA bytes=9007199254740993 "
-        "algbw=12.5GB/s busbw=10.25GB/s')\n",
+        "print('mean_ms: 1.0')\nprint('case_bw: caseA bytes=9007199254740993 algbw=12.5GB/s busbw=10.25GB/s')\n",
     )
 
     result = asyncio.run(bench_wallclock(drv))
@@ -211,15 +207,16 @@ def test_bench_timeout(tmp_path):
 
 
 def test_bench_bad_case_ms_skipped(tmp_path):
-    drv = _write_driver(tmp_path, "b.py",
-                        "print('wall_ms: 1.0')\nprint('case_ms: caseB notanumber')\n")
+    drv = _write_driver(tmp_path, "b.py", "print('wall_ms: 1.0')\nprint('case_ms: caseB notanumber')\n")
     result = asyncio.run(bench_wallclock(drv))
     assert result["case_times"] == {}
 
 
 # ─── build / pmc / registers dispatch (mock the GPU-bound tool coroutines) ───
 
+
 def _async_stub(return_value):
     async def _stub(*args, **kwargs):
         return return_value
+
     return _stub

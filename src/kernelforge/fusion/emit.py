@@ -96,9 +96,7 @@ def _unified_file_diff(rel: str, old_text: str, new_text: str) -> str:
     return f"diff --git a/{rel} b/{rel}\n{body}"
 
 
-def _export_nongit(
-    repo_root: str, source_file: str, out: Path, pristine_dir: Path
-) -> FusionArtifacts:
+def _export_nongit(repo_root: str, source_file: str, out: Path, pristine_dir: Path) -> FusionArtifacts:
     """Export ``fusion.patch`` without git, using a pre-authoring pristine snapshot.
 
     Needed when the framework is a plain pip install (not a git checkout), where
@@ -164,8 +162,9 @@ def _export_nongit(
     arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
     if arts.patch:
         arts.repo_root = str(root) if root else ""
-    log.info("exported %d fusion file(s) (non-git); patch=%s repo_root=%s",
-             len(arts.changes), arts.patch, arts.repo_root)
+    log.info(
+        "exported %d fusion file(s) (non-git); patch=%s repo_root=%s", len(arts.changes), arts.patch, arts.repo_root
+    )
     return arts
 
 
@@ -288,8 +287,7 @@ def export_artifacts(
     arts.patch = str(patch_path)
     arts.repo_root = str(Path(repo_root).resolve())
     arts.changes = [{"path": n, "kind": _classify(n, source_file)} for n in names]
-    log.info("exported %d fusion file(s); patch=%s repo_root=%s",
-             len(arts.changes), arts.patch, arts.repo_root)
+    log.info("exported %d fusion file(s); patch=%s repo_root=%s", len(arts.changes), arts.patch, arts.repo_root)
     return arts
 
 
@@ -319,8 +317,7 @@ def restore_exported_changes(
         snap = pdir / rel if pdir else None
         with contextlib.suppress(OSError):
             if snap and snap.is_file():
-                live.write_text(snap.read_text(encoding="utf-8", errors="replace"),
-                                encoding="utf-8")
+                live.write_text(snap.read_text(encoding="utf-8", errors="replace"), encoding="utf-8")
             elif pdir is not None:
                 live.unlink(missing_ok=True)
 

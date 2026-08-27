@@ -474,9 +474,7 @@ def test_staged_symlink_escaping_the_transaction_is_not_published(tmp_path):
         read_only_paths=[program],
     )
     try:
-        (transaction.stage_root / "escaped_link.py").symlink_to(
-            Path("..") / ".." / "outside.py"
-        )
+        (transaction.stage_root / "escaped_link.py").symlink_to(Path("..") / ".." / "outside.py")
 
         with pytest.raises(ExternalArtifactError, match="escapes the transaction"):
             transaction.publish()

@@ -294,10 +294,18 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
         return LoopResult(
             kept=True,
             best=ValidationResult(
-                correctness_passed=True, max_abs_err=0.001, rtol=0.02,
-                kernel_speedup=1.42, eager_us=100.0, fused_us=70.4, kept=True, note="ok",
+                correctness_passed=True,
+                max_abs_err=0.001,
+                rtol=0.02,
+                kernel_speedup=1.42,
+                eager_us=100.0,
+                fused_us=70.4,
+                kept=True,
+                note="ok",
             ),
-            best_recipe=recipes[0], history=[], experience_path=None,
+            best_recipe=recipes[0],
+            history=[],
+            experience_path=None,
             termination_reason="kept",
         )
 
@@ -305,7 +313,8 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
     monkeypatch.setattr(cli, "_author_baseline_harness", lambda *a, **k: (True, ""))
     monkeypatch.setattr(cli, "serving_smoke", lambda *a, **k: (True, ""))
     monkeypatch.setattr(
-        cli, "restore_exported_changes",
+        cli,
+        "restore_exported_changes",
         lambda *a, **k: restored.append("restored"),
     )
 
@@ -313,9 +322,17 @@ def test_a_kept_run_restores_the_framework(tmp_path, monkeypatch):
     result = CliRunner().invoke(
         cli_main,
         [
-            "--trace", str(_trace(tmp_path)), "--model-path", str(_model_dir(tmp_path)),
-            "--framework", "sglang", "--output-dir", str(out),
-            "--framework-root", str(root), "--author",
+            "--trace",
+            str(_trace(tmp_path)),
+            "--model-path",
+            str(_model_dir(tmp_path)),
+            "--framework",
+            "sglang",
+            "--output-dir",
+            str(out),
+            "--framework-root",
+            str(root),
+            "--author",
         ],
     )
     assert result.exit_code == 0, result.output

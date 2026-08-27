@@ -156,17 +156,19 @@ async def test_preflight_accepts_the_complete_declared_suite(tmp_path, monkeypat
 def test_declared_case_ids_reads_the_driver_contract(tmp_path):
     spec = tmp_path / "invocation_spec_gemm.json"
     spec.write_text(
-        json.dumps({
-            "tests": {
-                "driver_contract": {
-                    "case_selectors": [
-                        {"CASE_ID": "case_002", "M": 1},
-                        {"CASE_ID": "case_001", "M": 2},
-                        {"M": 3},
-                    ],
+        json.dumps(
+            {
+                "tests": {
+                    "driver_contract": {
+                        "case_selectors": [
+                            {"CASE_ID": "case_002", "M": 1},
+                            {"CASE_ID": "case_001", "M": 2},
+                            {"M": 3},
+                        ],
+                    },
                 },
-            },
-        }),
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -358,22 +360,26 @@ def test_prepare_agent_initializes_required_git_workspace(
         ),
     )
 
-    first = asyncio.run(task_preparer._run_prepare_agent(
-        config=config,
-        workspace=tmp_path,
-        system_prompt="system",
-        prompt="prompt",
-        timeout_sec=10,
-        target_files=[str(tmp_path / "driver.py")],
-    ))
-    second = asyncio.run(task_preparer._run_prepare_agent(
-        config=config,
-        workspace=tmp_path,
-        system_prompt="system",
-        prompt="prompt",
-        timeout_sec=10,
-        target_files=[str(tmp_path / "driver.py")],
-    ))
+    first = asyncio.run(
+        task_preparer._run_prepare_agent(
+            config=config,
+            workspace=tmp_path,
+            system_prompt="system",
+            prompt="prompt",
+            timeout_sec=10,
+            target_files=[str(tmp_path / "driver.py")],
+        )
+    )
+    second = asyncio.run(
+        task_preparer._run_prepare_agent(
+            config=config,
+            workspace=tmp_path,
+            system_prompt="system",
+            prompt="prompt",
+            timeout_sec=10,
+            target_files=[str(tmp_path / "driver.py")],
+        )
+    )
 
     assert first == "prepared"
     assert second == "prepared"
@@ -515,8 +521,7 @@ def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path)
     payload = {"schema_version": 1, "kernel": {"name": "gemm"}}
     source.write_text(json.dumps(payload), encoding="utf-8")
     existing = durable_dir / "invocation_spec_gemm.json"
-    existing.write_text('{"kernel": {"name": "gemm"}, "schema_version": 1}',
-                        encoding="utf-8")
+    existing.write_text('{"kernel": {"name": "gemm"}, "schema_version": 1}', encoding="utf-8")
 
     destination, canonical = task_preparer._materialize_invocation_spec(
         str(source),
@@ -524,9 +529,7 @@ def test_existing_durable_spec_with_the_same_payload_is_left_untouched(tmp_path)
     )
 
     assert destination == existing
-    assert existing.read_text(encoding="utf-8") == (
-        '{"kernel": {"name": "gemm"}, "schema_version": 1}'
-    )
+    assert existing.read_text(encoding="utf-8") == ('{"kernel": {"name": "gemm"}, "schema_version": 1}')
     assert canonical == '{"kernel": {"name": "gemm"}, "schema_version": 1}'
 
 
@@ -681,9 +684,7 @@ def test_prepare_agent_gets_the_spec_inline_and_it_is_restored(tmp_path, monkeyp
     # The durable spec has to be introduced before the temporary bundle, wherever
     # either block ends up: it is the authoritative input, so a reference-bundle
     # path above it competes for the agent's attention.
-    assert prompt.index("Invocation specification") < prompt.index(
-        task_preparer.REFERENCE_SUBDIR
-    )
+    assert prompt.index("Invocation specification") < prompt.index(task_preparer.REFERENCE_SUBDIR)
     assert captured["expected_case_ids"] == ["case_001"]
     # The specification is a durable task artifact: the driver may read it at
     # runtime, so it outlives preparation and enters the pristine commit.
@@ -949,12 +950,8 @@ def test_timeout_salvages_driver_when_preflight_passes(tmp_path, monkeypatch):
     assert result.attempts == 1
     assert driver.read_text(encoding="utf-8") == "VALID_DRIVER_WRITTEN_BEFORE_TIMEOUT\n"
     audit = Path(result.audit_dir)
-    assert json.loads(
-        (audit / "attempt_01" / "agent_event.json").read_text(encoding="utf-8")
-    )["status"] == "timeout"
-    assert json.loads(
-        (audit / "attempt_01" / "preflight.json").read_text(encoding="utf-8")
-    )["ok"] is True
+    assert json.loads((audit / "attempt_01" / "agent_event.json").read_text(encoding="utf-8"))["status"] == "timeout"
+    assert json.loads((audit / "attempt_01" / "preflight.json").read_text(encoding="utf-8"))["ok"] is True
 
 
 def test_the_note_carries_the_specification_verbatim(tmp_path):

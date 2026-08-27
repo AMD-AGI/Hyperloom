@@ -39,16 +39,16 @@ _TUNING_DB_WRITE_ENABLED = False
 class TuningEntry:
     """A single data point: config → performance for a specific context."""
 
-    operation: str              # "attention_fwd", "attention_bwd", "gemm", "moe"
-    backend: str                # "ck", "flydsl", "triton"
-    gpu_target: str             # "gfx950"
-    dtype: str                  # "bf16", "fp16", "fp8"
+    operation: str  # "attention_fwd", "attention_bwd", "gemm", "moe"
+    backend: str  # "ck", "flydsl", "triton"
+    gpu_target: str  # "gfx950"
+    dtype: str  # "bf16", "fp16", "fp8"
 
     # Shape (normalized to canonical keys)
-    shape: dict[str, int]       # {"M": 4096, "N": 4096, "K": 4096} or {"seq_len": 8192, ...}
+    shape: dict[str, int]  # {"M": 4096, "N": 4096, "K": 4096} or {"seq_len": 8192, ...}
 
     # Configuration that was tested
-    config: dict[str, Any]      # {"BLOCK_M": 128, "BLOCK_N": 64, "wpe": 2, ...}
+    config: dict[str, Any]  # {"BLOCK_M": 128, "BLOCK_N": 64, "wpe": 2, ...}
 
     # Results
     wall_ms: float
@@ -56,7 +56,7 @@ class TuningEntry:
     passed_correctness: bool = True
 
     # PMC diagnosis
-    pmc_diagnosis: str = ""     # "COMPUTE-BOUND", "BALANCED", "MEMORY-BOUND"
+    pmc_diagnosis: str = ""  # "COMPUTE-BOUND", "BALANCED", "MEMORY-BOUND"
     wait_mfma_ratio: float | None = None
     vgpr: int | None = None
 
@@ -91,12 +91,12 @@ class TransferRule:
 
     rule_id: str
     description: str
-    scope: str                  # "all_sparse", "attention_*", "gemm_large", etc.
-    parameter: str              # "wpe", "BLOCK_M", "num_stages", etc.
+    scope: str  # "all_sparse", "attention_*", "gemm_large", etc.
+    parameter: str  # "wpe", "BLOCK_M", "num_stages", etc.
     recommended_value: Any
-    anti_value: Any = None      # Value to AVOID
+    anti_value: Any = None  # Value to AVOID
     evidence: list[str] = field(default_factory=list)  # experiment IDs
-    confidence: float = 0.0     # 0-1 based on evidence count
+    confidence: float = 0.0  # 0-1 based on evidence count
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -251,18 +251,24 @@ class TuningDatabase:
         # Level 1: Exact match
         exact = self.best_config(operation, backend, shape, gpu_target, dtype)
         if exact:
-            suggestions.append({
-                "source": "exact_match",
-                "confidence": 1.0,
-                **exact,
-            })
+            suggestions.append(
+                {
+                    "source": "exact_match",
+                    "confidence": 1.0,
+                    **exact,
+                }
+            )
 
         # Level 2: Similar shapes (within 2× on each dimension)
         entries = self.all_entries()
         similar = []
         for entry in entries:
-            if (entry.operation == operation and entry.backend == backend
-                    and entry.gpu_target == gpu_target and entry.passed_correctness):
+            if (
+                entry.operation == operation
+                and entry.backend == backend
+                and entry.gpu_target == gpu_target
+                and entry.passed_correctness
+            ):
                 if self._shape_similar(shape, entry.shape, factor=2.0):
                     similar.append(entry)
 
@@ -273,39 +279,49 @@ class TuningDatabase:
             config_key = json.dumps(entry.config, sort_keys=True)
             if config_key not in seen_configs:
                 seen_configs.add(config_key)
-                suggestions.append({
-                    "source": f"similar_shape ({entry.shape_key()})",
-                    "confidence": 0.7,
-                    "config": entry.config,
-                    "wall_ms": entry.wall_ms,
-                })
+                suggestions.append(
+                    {
+                        "source": f"similar_shape ({entry.shape_key()})",
+                        "confidence": 0.7,
+                        "config": entry.config,
+                        "wall_ms": entry.wall_ms,
+                    }
+                )
 
         # Level 3: Same operation class
         op_class = operation.rsplit("_", 1)[0]  # "attention_bwd" → "attention"
         for entry in entries:
-            if (entry.operation.startswith(op_class) and entry.backend == backend
-                    and entry.gpu_target == gpu_target and entry.passed_correctness
-                    and entry.operation != operation):
+            if (
+                entry.operation.startswith(op_class)
+                and entry.backend == backend
+                and entry.gpu_target == gpu_target
+                and entry.passed_correctness
+                and entry.operation != operation
+            ):
                 config_key = json.dumps(entry.config, sort_keys=True)
                 if config_key not in seen_configs:
                     seen_configs.add(config_key)
-                    suggestions.append({
-                        "source": f"related_op ({entry.operation})",
-                        "confidence": 0.4,
-                        "config": entry.config,
-                        "wall_ms": entry.wall_ms,
-                    })
+                    suggestions.append(
+                        {
+                            "source": f"related_op ({entry.operation})",
+                            "confidence": 0.4,
+                            "config": entry.config,
+                            "wall_ms": entry.wall_ms,
+                        }
+                    )
 
         # Level 4: Transfer rules
         rules = self._load_rules()
         for rule in rules:
             if self._rule_applies(rule, operation):
-                suggestions.append({
-                    "source": f"transfer_rule ({rule['rule_id']})",
-                    "confidence": rule["confidence"],
-                    "config": {rule["parameter"]: rule["recommended_value"]},
-                    "note": rule["description"],
-                })
+                suggestions.append(
+                    {
+                        "source": f"transfer_rule ({rule['rule_id']})",
+                        "confidence": rule["confidence"],
+                        "config": {rule["parameter"]: rule["recommended_value"]},
+                        "note": rule["description"],
+                    }
+                )
 
         return suggestions[:max_suggestions]
 
@@ -377,16 +393,18 @@ class TuningDatabase:
                 existing["evidence"] = list(set(existing.get("evidence", []) + evidence))
             existing["confidence"] = min(1.0, len(existing["evidence"]) * 0.2)
         else:
-            rules.append(TransferRule(
-                rule_id=rule_id,
-                description=description,
-                scope=scope,
-                parameter=parameter,
-                recommended_value=recommended_value,
-                anti_value=anti_value,
-                evidence=evidence or [],
-                confidence=min(1.0, len(evidence or []) * 0.2),
-            ).to_dict())
+            rules.append(
+                TransferRule(
+                    rule_id=rule_id,
+                    description=description,
+                    scope=scope,
+                    parameter=parameter,
+                    recommended_value=recommended_value,
+                    anti_value=anti_value,
+                    evidence=evidence or [],
+                    confidence=min(1.0, len(evidence or []) * 0.2),
+                ).to_dict()
+            )
 
         self._save_rules(rules)
 
@@ -409,9 +427,7 @@ class TuningDatabase:
         for entry in entries:
             for param, value in entry.config.items():
                 key = (entry.backend, param)
-                param_values.setdefault(key, []).append(
-                    (value, entry.wall_ms, entry.operation)
-                )
+                param_values.setdefault(key, []).append((value, entry.wall_ms, entry.operation))
 
         # Find parameters where one value consistently wins
         for (backend, param), value_perf_ops in param_values.items():
@@ -479,7 +495,7 @@ class TuningDatabase:
             lines.append("\n### Best Known Config (exact match)")
             lines.append(f"  Config: {best['config']}")
             lines.append(f"  wall_ms: {best['wall_ms']}")
-            if best.get('pmc_diagnosis'):
+            if best.get("pmc_diagnosis"):
                 lines.append(f"  PMC: {best['pmc_diagnosis']}")
             lines.append("  START FROM THIS CONFIG — don't explore from scratch")
         else:
@@ -492,7 +508,7 @@ class TuningDatabase:
             for i, s in enumerate(suggestions):
                 conf = s.get("confidence", 0)
                 lines.append(
-                    f"  {i+1}. [{conf:.0%} confidence] from {s['source']}: "
+                    f"  {i + 1}. [{conf:.0%} confidence] from {s['source']}: "
                     f"{s.get('config', {})} → {s.get('wall_ms', '?')} ms"
                 )
                 if s.get("note"):
@@ -504,9 +520,7 @@ class TuningDatabase:
         if applicable:
             lines.append(f"\n### Transfer Rules ({len(applicable)})")
             for r in applicable:
-                lines.append(
-                    f"  - {r['parameter']}={r['recommended_value']}: {r['description']}"
-                )
+                lines.append(f"  - {r['parameter']}={r['recommended_value']}: {r['description']}")
                 if r.get("anti_value") is not None:
                     lines.append(f"    AVOID: {r['parameter']}={r['anti_value']}")
 

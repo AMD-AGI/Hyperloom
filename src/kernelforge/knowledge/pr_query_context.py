@@ -62,11 +62,32 @@ FORK_UPSTREAM_MAP: dict[str, str] = {
 _MIN_TOKEN_LEN = 3
 _MAX_KEYWORDS = 4
 # Terms too broad to narrow a kernel PR search.
-_STOPWORDS = frozenset({
-    "and", "block", "code", "cpp", "cuda", "fix", "for", "function",
-    "gpu", "hip", "impl", "kernel", "kernels", "not", "src", "support",
-    "test", "the", "use", "util", "utils", "with",
-})
+_STOPWORDS = frozenset(
+    {
+        "and",
+        "block",
+        "code",
+        "cpp",
+        "cuda",
+        "fix",
+        "for",
+        "function",
+        "gpu",
+        "hip",
+        "impl",
+        "kernel",
+        "kernels",
+        "not",
+        "src",
+        "support",
+        "test",
+        "the",
+        "use",
+        "util",
+        "utils",
+        "with",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -81,9 +102,7 @@ class PRQueryContext:
     @property
     def usable(self) -> bool:
         """True when the pipeline has a repo and at least one query source."""
-        return bool(self.repo) and not self.reason and bool(
-            self.file_paths or self.keywords
-        )
+        return bool(self.repo) and not self.reason and bool(self.file_paths or self.keywords)
 
 
 @dataclass
@@ -219,11 +238,7 @@ def extract_keywords(
 
 def check_whitelist(repos_payload: list[dict]) -> WhitelistDrift:
     """Compare expected repositories with the service's active set."""
-    actual = {
-        str(entry.get("repo_name") or "")
-        for entry in repos_payload
-        if isinstance(entry, dict)
-    }
+    actual = {str(entry.get("repo_name") or "") for entry in repos_payload if isinstance(entry, dict)}
     actual.discard("")
     inactive = {
         str(entry.get("repo_name") or "")

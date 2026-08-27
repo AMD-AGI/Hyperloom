@@ -98,46 +98,32 @@ class CampaignConfig:
         if version not in READABLE_SCHEMA_VERSIONS:
             raise ValueError(
                 f"unsupported campaign config schema {version}; expected one "
-                "of "
-                + ", ".join(str(known) for known in READABLE_SCHEMA_VERSIONS)
+                "of " + ", ".join(str(known) for known in READABLE_SCHEMA_VERSIONS)
             )
         unknown_fields = set(payload) - {item.name for item in fields(cls)}
         if unknown_fields:
-            raise ValueError(
-                "unsupported campaign config fields: "
-                + ", ".join(sorted(unknown_fields))
-            )
+            raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
         config = cls(
             schema_version=SCHEMA_VERSION,
             kernel_path=str(payload.get("kernel_path") or ""),
             driver_path=str(payload.get("driver_path") or ""),
             driver_sha256=str(payload.get("driver_sha256") or "").lower(),
-            source_files=[
-                str(path) for path in (payload.get("source_files") or [])
-            ],
+            source_files=[str(path) for path in (payload.get("source_files") or [])],
             program_md_path=str(payload.get("program_md_path") or ""),
             program_md_sha256=str(payload.get("program_md_sha256") or ""),
             snr_threshold=float(payload.get("snr_threshold", DEFAULT_SNR_THRESHOLD_DB)),
             gpu_target=str(payload.get("gpu_target") or ""),
-            gpu_type=str(
-                payload["gpu_type"] if "gpu_type" in payload else "mi355x"
-            ).strip().lower(),
+            gpu_type=str(payload["gpu_type"] if "gpu_type" in payload else "mi355x").strip().lower(),
             fellow=str(payload.get("fellow") or ""),
             task_type=str(payload.get("task_type") or ""),
-            target_functions=[
-                str(name) for name in (payload.get("target_functions") or [])
-            ],
+            target_functions=[str(name) for name in (payload.get("target_functions") or [])],
             git_branch=str(payload.get("git_branch") or ""),
             base_commit=str(payload.get("base_commit") or ""),
             framework=str(payload.get("framework") or ""),
             operator_name=str(payload.get("operator_name") or ""),
             producer=str(payload.get("producer") or ""),
-            implementation_signature=str(
-                payload.get("implementation_signature") or ""
-            ).lower(),
-            implementation_identity=dict(
-                payload.get("implementation_identity") or {}
-            ),
+            implementation_signature=str(payload.get("implementation_signature") or "").lower(),
+            implementation_identity=dict(payload.get("implementation_identity") or {}),
             # to_dict() is asdict(), so these are always written; leaving them
             # out of the reader made a resumed campaign silently fall back to
             # one rank and single-shot benching -- measuring a
@@ -148,9 +134,7 @@ class CampaignConfig:
             # KEEP commits and a REVERT deletes, so a hand-edited pattern the
             # loop would read differently than its author meant is refused
             # here rather than acted on later.
-            commit_new_paths=normalize_commit_new_paths(
-                payload.get("commit_new_paths") or []
-            ),
+            commit_new_paths=normalize_commit_new_paths(payload.get("commit_new_paths") or []),
         )
         if config.program_md_path and not config.program_md_sha256:
             raise ValueError("campaign program context digest is missing")
@@ -161,16 +145,9 @@ class CampaignConfig:
         if not math.isfinite(config.snr_threshold) or config.snr_threshold <= 0:
             raise ValueError("campaign SNR threshold must be a positive finite float")
         if not _SHA256_RE.fullmatch(config.implementation_signature):
-            raise ValueError(
-                "campaign pristine implementation signature is missing or invalid"
-            )
-        if (
-            hash_implementation_identity(config.implementation_identity)
-            != config.implementation_signature
-        ):
-            raise ValueError(
-                "campaign pristine implementation identity does not match its signature"
-            )
+            raise ValueError("campaign pristine implementation signature is missing or invalid")
+        if hash_implementation_identity(config.implementation_identity) != config.implementation_signature:
+            raise ValueError("campaign pristine implementation identity does not match its signature")
         return config
 
 
@@ -229,9 +206,7 @@ def _read_pristine_sources(
             continue
         source = None
         if base_commit:
-            result = git(
-                "show", f"{base_commit}:{relative}", cwd=workspace, check=False
-            )
+            result = git("show", f"{base_commit}:{relative}", cwd=workspace, check=False)
             if result.returncode == 0:
                 source = result.stdout
         if source is None:
@@ -376,14 +351,10 @@ def detect_gpu_target() -> str:
             timeout=15,
         )
     except Exception as error:
-        raise ValueError(
-            "could not detect GPU target; ensure rocminfo is available"
-        ) from error
+        raise ValueError("could not detect GPU target; ensure rocminfo is available") from error
     targets = sorted(set(_GPU_TARGET_RE.findall(result.stdout or "")))
     if result.returncode != 0 or len(targets) != 1:
-        raise ValueError(
-            "could not detect exactly one GPU target; configure the runtime GPU"
-        )
+        raise ValueError("could not detect exactly one GPU target; configure the runtime GPU")
     return targets[0].lower()
 
 
@@ -419,11 +390,7 @@ def infer_fellow(source_paths: list[Path]) -> str:
             return "hipblaslt-fellow"
         if "/aiter/" in path_text or "import aiter" in text:
             return "aiter-fellow"
-        if (
-            "flydsl" in text
-            or "cutlass.cute" in text
-            or "from cutlass import cute" in text
-        ):
+        if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
             return "flydsl-fellow"
         # Before Triton, and matching an import or a decorator rather than the
         # word: Gluon IS Triton's low-level dialect, so a Gluon file imports
@@ -432,11 +399,7 @@ def infer_fellow(source_paths: list[Path]) -> str:
         # file under `aiter/ops/triton/`, so neither the path nor the presence
         # of Triton markers distinguishes the two. Checked after flydsl because
         # that arm keys on its own toolchain, which this one never carries.
-        if (
-            "triton.experimental.gluon" in text
-            or "@gluon.jit" in text
-            or "gluon.language" in text
-        ):
+        if "triton.experimental.gluon" in text or "@gluon.jit" in text or "gluon.language" in text:
             return "gluon-fellow"
         if "@triton.jit" in text or "triton.language" in text:
             return "triton-fellow"
@@ -444,9 +407,7 @@ def infer_fellow(source_paths: list[Path]) -> str:
             return "ck-fellow"
         if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
             return "hip-fellow"
-    raise ValueError(
-        "could not infer kernel fellow; set FORGE_FELLOW to a known backend"
-    )
+    raise ValueError("could not infer kernel fellow; set FORGE_FELLOW to a known backend")
 
 
 def _derive_target_functions(
@@ -458,11 +419,7 @@ def _derive_target_functions(
     functions: list[str] = []
     for relative in source_files:
         absolute = str((workspace / relative).resolve())
-        source = (
-            source_contents.get(absolute)
-            if source_contents is not None
-            else None
-        )
+        source = source_contents.get(absolute) if source_contents is not None else None
         if source is None:
             try:
                 source = Path(absolute).read_text(errors="replace")
@@ -483,15 +440,10 @@ def validate_pending_campaign_head(workspace_dir: str, base_commit: str) -> None
         return
     parents = _git_value(workspace, "rev-list", "--parents", "-n", "1", head).split()
     subject = _git_value(workspace, "show", "-s", "--format=%s", head)
-    if (
-        len(parents) == 2
-        and parents[1] == base
-        and subject.lower().startswith("kb warm-start:")
-    ):
+    if len(parents) == 2 and parents[1] == base and subject.lower().startswith("kb warm-start:"):
         return
     raise ValueError(
-        "pending campaign HEAD mismatch: expected the configured base commit "
-        "or one direct `kb warm-start:` child"
+        "pending campaign HEAD mismatch: expected the configured base commit or one direct `kb warm-start:` child"
     )
 
 
@@ -544,13 +496,8 @@ def create_campaign_config(
 
     branch = _git_value(workspace, "branch", "--show-current")
     if not branch or branch in {"main", "master"}:
-        raise ValueError(
-            "forge-loop requires a non-main development branch in the workspace"
-        )
-    resolved_base_commit = (
-        (base_commit or "").strip()
-        or _git_value(workspace, "rev-parse", "HEAD")
-    )
+        raise ValueError("forge-loop requires a non-main development branch in the workspace")
+    resolved_base_commit = (base_commit or "").strip() or _git_value(workspace, "rev-parse", "HEAD")
     raw_source_paths = _campaign_source_paths(
         workspace,
         kernel_path,
@@ -614,9 +561,7 @@ def create_campaign_config(
         program_text = source_program.read_text(errors="replace")
         program_md_sha256 = hashlib.sha256(program_text.encode()).hexdigest()
 
-    resolved_task_type = (task_type or "").strip() or (
-        "repository" if len(normalized_sources) > 1 else ""
-    )
+    resolved_task_type = (task_type or "").strip() or ("repository" if len(normalized_sources) > 1 else "")
     resolved_snr_threshold = float(snr_threshold)
     if not math.isfinite(resolved_snr_threshold) or resolved_snr_threshold <= 0:
         raise ValueError("SNR threshold must be a positive finite float")

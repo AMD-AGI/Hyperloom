@@ -22,16 +22,18 @@ from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
 # ── spec ─────────────────────────────────────────────────────────────────────
 
+
 def test_builder_symbol_and_rewrite_shapes_are_preserved():
-    s = RewriteSpec(op_name="rmsnorm", source_kernel="/w/r.py", target_functions=[],
-                    shapes=[{"M": 4, "N": 4, "dtype": "fp16"}])
+    s = RewriteSpec(
+        op_name="rmsnorm", source_kernel="/w/r.py", target_functions=[], shapes=[{"M": 4, "N": 4, "dtype": "fp16"}]
+    )
     assert s.builder_symbol == "build_rmsnorm_module"
     assert s.shapes == [{"M": 4, "N": 4, "dtype": "fp16"}]
 
 
 # ── ingest: source-entry discovery is a best-effort hint (no fail-fast) ───────
 
-_TRITON_SRC = textwrap.dedent('''
+_TRITON_SRC = textwrap.dedent("""
     import triton
     @triton.jit
     def softmax_kernel_online(o, i, s, n): ...
@@ -39,7 +41,7 @@ _TRITON_SRC = textwrap.dedent('''
         y = x
         softmax_kernel_online[(1,)](y, x, x.stride(0), x.shape[0])
         return y
-''')
+""")
 
 
 def test_discover_source_entry_finds_wrapper(tmp_path):
@@ -63,9 +65,7 @@ def test_discover_source_entry_plain_call_and_bare_name(tmp_path):
     # name — exercises both the Call and Name discovery branches.
     src = tmp_path / "s.py"
     src.write_text(
-        "def k(x):\n    return x\n"
-        "def alias():\n    fn = k\n    return fn\n"
-        "def wrap(x):\n    k(x)\n    return x\n"
+        "def k(x):\n    return x\ndef alias():\n    fn = k\n    return fn\ndef wrap(x):\n    k(x)\n    return x\n"
     )
     # Both reference k; the simplest wrapper (fewest positional args) wins -> alias.
     assert ingest.discover_source_entry(str(src), ["k"]) in {"alias", "wrap"}
@@ -73,13 +73,12 @@ def test_discover_source_entry_plain_call_and_bare_name(tmp_path):
 
 def test_build_spec_autodiscovers_entry_when_absent(tmp_path):
     src = tmp_path / "softmax.py"
-    src.write_text(
-        "def _softmax_kernel(): ...\n"
-        "def softmax(x):\n    _softmax_kernel[(1,)](x)\n    return x\n"
-    )
+    src.write_text("def _softmax_kernel(): ...\ndef softmax(x):\n    _softmax_kernel[(1,)](x)\n    return x\n")
     spec = ingest.build_spec(
-        op_name="softmax", source_kernel=str(src),
-        flydsl_kernel=str(tmp_path / "kernel.py"), workspace=str(tmp_path),
+        op_name="softmax",
+        source_kernel=str(src),
+        flydsl_kernel=str(tmp_path / "kernel.py"),
+        workspace=str(tmp_path),
         target_functions=["_softmax_kernel"],
     )
     assert spec.source_entry == "softmax"
@@ -90,8 +89,10 @@ def test_build_spec_does_not_raise_on_unresolved_entry(tmp_path):
     src = tmp_path / "mystery.py"
     src.write_text("def unrelated():\n    return 1\n")
     spec = ingest.build_spec(
-        op_name="op", source_kernel=str(src),
-        flydsl_kernel=str(tmp_path / "kernel.py"), workspace=str(tmp_path),
+        op_name="op",
+        source_kernel=str(src),
+        flydsl_kernel=str(tmp_path / "kernel.py"),
+        workspace=str(tmp_path),
         target_functions=["nonexistent_kernel"],
     )
     assert spec.source_entry == ""  # unresolved, but no exception
@@ -104,8 +105,10 @@ def test_candidate_outside_the_workspace_reads_as_its_bare_name(tmp_path):
     src.write_text("def softmax(x):\n    return x\n")
     outside = tmp_path / "elsewhere" / "kernel.py"
     spec = ingest.build_spec(
-        op_name="softmax", source_kernel=str(src),
-        flydsl_kernel=str(outside), workspace=str(workspace),
+        op_name="softmax",
+        source_kernel=str(src),
+        flydsl_kernel=str(outside),
+        workspace=str(workspace),
         target_functions=["softmax"],
     )
 
@@ -129,7 +132,7 @@ def test_resolve_source_language_unreadable_python_reads_as_unknown(tmp_path):
 
 # ── ingest: the source language decides how the source is read ───────────────
 
-_HIP_SRC = textwrap.dedent('''
+_HIP_SRC = textwrap.dedent("""
     #include <hip/hip_runtime.h>
 
     __global__ void attention_kernel(const float* q, float* o, int n) {
@@ -139,7 +142,7 @@ _HIP_SRC = textwrap.dedent('''
     void attention(const float* q, float* o, int n) {
         attention_kernel<<<dim3(1), dim3(64)>>>(q, o, n);
     }
-''')
+""")
 
 
 @pytest.mark.parametrize(
@@ -194,8 +197,10 @@ def test_build_spec_resolves_the_language_and_the_c_like_entry(tmp_path):
     src.write_text(_HIP_SRC)
 
     spec = ingest.build_spec(
-        op_name="attention", source_kernel=str(src),
-        flydsl_kernel=str(tmp_path / "kernel.py"), workspace=str(tmp_path),
+        op_name="attention",
+        source_kernel=str(src),
+        flydsl_kernel=str(tmp_path / "kernel.py"),
+        workspace=str(tmp_path),
         target_functions=["attention_kernel"],
     )
 
@@ -205,9 +210,11 @@ def test_build_spec_resolves_the_language_and_the_c_like_entry(tmp_path):
 
 # ── seed: generic (operator-agnostic) skeleton ───────────────────────────────
 
+
 def test_seed_defines_builder_symbol_generically(tmp_path):
-    s = RewriteSpec(op_name="gemm", source_kernel="/w/gemm.py", target_functions=[],
-                    flydsl_kernel=str(tmp_path / "kernel.py"))
+    s = RewriteSpec(
+        op_name="gemm", source_kernel="/w/gemm.py", target_functions=[], flydsl_kernel=str(tmp_path / "kernel.py")
+    )
     seed.generate_seed(s, s.flydsl_kernel)
     text = (tmp_path / "kernel.py").read_text()
     assert "def build_gemm_module(*args, **kwargs):" in text  # no fixed (M,N,dtype)
@@ -221,41 +228,44 @@ def test_seed_defines_builder_symbol_generically(tmp_path):
 
 # ── port_loop: FlyDSL-only gate (a correct-but-cheating port is not a rewrite) ─
 
+
 def _spec_with_kernel(tmp_path, kernel_src: str) -> RewriteSpec:
     (tmp_path / "softmax.py").write_text("def softmax(x):\n    return x\n")
     (tmp_path / "kernel.py").write_text(kernel_src)
     return RewriteSpec(
-        op_name="softmax", source_kernel=str(tmp_path / "softmax.py"),
-        target_functions=["softmax"], flydsl_kernel=str(tmp_path / "kernel.py"),
+        op_name="softmax",
+        source_kernel=str(tmp_path / "softmax.py"),
+        target_functions=["softmax"],
+        flydsl_kernel=str(tmp_path / "kernel.py"),
         workspace=str(tmp_path),
     )
 
 
 def test_flydsl_gate_accepts_a_real_flydsl_port(tmp_path):
-    s = _spec_with_kernel(tmp_path, "import flydsl.expr as fx\n"
-                                    "def build_softmax_module(M, N, dt):\n"
-                                    "    def launch(A, C, m, stream=None): ...\n"
-                                    "    return launch\n")
+    s = _spec_with_kernel(
+        tmp_path,
+        "import flydsl.expr as fx\n"
+        "def build_softmax_module(M, N, dt):\n"
+        "    def launch(A, C, m, stream=None): ...\n"
+        "    return launch\n",
+    )
     assert check_flydsl_port(s) == ""
 
 
 def test_flydsl_gate_rejects_missing_flydsl(tmp_path):
-    s = _spec_with_kernel(tmp_path, "import torch\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import torch\ndef build_softmax_module(*a): ...\n")
     assert "import `flydsl`" in check_flydsl_port(s)
 
 
 def test_flydsl_gate_rejects_triton_reimplementation(tmp_path):
-    s = _spec_with_kernel(tmp_path, "import flydsl\nimport triton\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import flydsl\nimport triton\ndef build_softmax_module(*a): ...\n")
     assert "triton" in check_flydsl_port(s)
 
 
 def test_flydsl_gate_bans_triton_whatever_the_source_language_was(tmp_path):
     # Triton ships alongside FlyDSL, so deriving the ban from the source language
     # would hand a HIP port a free pass to reimplement the op in Triton.
-    s = _spec_with_kernel(tmp_path, "import flydsl\nimport triton\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import flydsl\nimport triton\ndef build_softmax_module(*a): ...\n")
     s.source_language = "hip"
 
     assert "triton" in check_flydsl_port(s)
@@ -263,41 +273,40 @@ def test_flydsl_gate_bans_triton_whatever_the_source_language_was(tmp_path):
 
 def test_flydsl_gate_rejects_calling_the_source_module(tmp_path):
     # The sneakiest cheat: import flydsl for show, but re-call the source oracle.
-    s = _spec_with_kernel(tmp_path, "import flydsl\nfrom softmax import softmax\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import flydsl\nfrom softmax import softmax\ndef build_softmax_module(*a): ...\n")
     assert "source module" in check_flydsl_port(s)
 
 
 def test_flydsl_gate_rejects_relative_source_import(tmp_path):
     # `from . import softmax` binds the source name with node.module=None.
-    s = _spec_with_kernel(tmp_path, "import flydsl\nfrom . import softmax\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import flydsl\nfrom . import softmax\ndef build_softmax_module(*a): ...\n")
     assert "source module" in check_flydsl_port(s)
 
 
 def test_flydsl_gate_rejects_dynamic_import_of_source_or_triton(tmp_path):
-    s = _spec_with_kernel(tmp_path, "import flydsl, importlib\n"
-                                    "m = importlib.import_module('softmax')\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(
+        tmp_path,
+        "import flydsl, importlib\nm = importlib.import_module('softmax')\ndef build_softmax_module(*a): ...\n",
+    )
     assert "dynamically imports" in check_flydsl_port(s)
-    s2 = _spec_with_kernel(tmp_path, "import flydsl\n"
-                                     "t = __import__('triton')\n"
-                                     "def build_softmax_module(*a): ...\n")
+    s2 = _spec_with_kernel(tmp_path, "import flydsl\nt = __import__('triton')\ndef build_softmax_module(*a): ...\n")
     assert "dynamically imports" in check_flydsl_port(s2)
 
 
 def test_flydsl_gate_rejects_nonliteral_dynamic_import(tmp_path):
-    s = _spec_with_kernel(tmp_path, "import flydsl, importlib\n"
-                                    "name = 'soft' + 'max'\n"
-                                    "m = importlib.import_module(name)\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(
+        tmp_path,
+        "import flydsl, importlib\n"
+        "name = 'soft' + 'max'\n"
+        "m = importlib.import_module(name)\n"
+        "def build_softmax_module(*a): ...\n",
+    )
     assert "non-literal" in check_flydsl_port(s)
 
 
 def test_flydsl_gate_allows_benign_calls(tmp_path):
     # A normal (non-import) call must pass through the dynamic-import scan.
-    s = _spec_with_kernel(tmp_path, "import flydsl\nprint('building')\n"
-                                    "def build_softmax_module(*a): ...\n")
+    s = _spec_with_kernel(tmp_path, "import flydsl\nprint('building')\ndef build_softmax_module(*a): ...\n")
     assert check_flydsl_port(s) == ""
 
 
@@ -315,22 +324,24 @@ def test_validation_error_tail_empty_when_passed():
 
 # ── report: cross-language speedup math ──────────────────────────────────────
 
+
 def test_rewrite_uses_forge_loop_result_sentinel():
     assert report.SENTINEL == "__FORGE_RESULT__"
 
 
 def test_speedup_only_when_port_ok_and_both_times():
-    ok = report.build_result(op_name="op", port_ok=True, port_attempts=1,
-                             source_ms=2.0, optimize_result={"best_ms": 1.0})
+    ok = report.build_result(
+        op_name="op", port_ok=True, port_attempts=1, source_ms=2.0, optimize_result={"best_ms": 1.0}
+    )
     assert ok.speedup == pytest.approx(2.0)
     assert ok.compiled and ok.correct and ok.target_language == "flydsl"
 
-    no_base = report.build_result(op_name="op", port_ok=True, port_attempts=1,
-                                  source_ms=None, optimize_result={"best_ms": 1.0})
+    no_base = report.build_result(
+        op_name="op", port_ok=True, port_attempts=1, source_ms=None, optimize_result={"best_ms": 1.0}
+    )
     assert no_base.speedup is None
 
-    failed = report.build_result(op_name="op", port_ok=False, port_attempts=3,
-                                 source_ms=2.0, optimize_result={})
+    failed = report.build_result(op_name="op", port_ok=False, port_attempts=3, source_ms=2.0, optimize_result={})
     assert failed.speedup is None and not failed.correct
 
 
@@ -368,28 +379,13 @@ def test_rewrite_result_exposes_canonical_forge_patch_contract():
         applyback_result={
             "ok": True,
             "best_commit": "framework-best",
-            "manifest_path": (
-                "/workspace/forge_experiments/rewrite_applyback/best/manifest.json"
-            ),
-            "patch_path": (
-                "/workspace/forge_experiments/rewrite_applyback"
-                "/best/iter_001/forge.patch"
-            ),
-            "canonical_patch_path": (
-                "/workspace/forge_experiments/rewrite_applyback"
-                "/best/iter_001/forge.patch"
-            ),
-            "canonical_files_root": (
-                "/workspace/forge_experiments/rewrite_applyback/best/iter_001/files"
-            ),
-            "canonical_result_path": (
-                "/workspace/forge_experiments/rewrite_applyback/result.json"
-            ),
+            "manifest_path": ("/workspace/forge_experiments/rewrite_applyback/best/manifest.json"),
+            "patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
+            "canonical_patch_path": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"),
+            "canonical_files_root": ("/workspace/forge_experiments/rewrite_applyback/best/iter_001/files"),
+            "canonical_result_path": ("/workspace/forge_experiments/rewrite_applyback/result.json"),
             "forge_workspace": "/workspace",
-            "artifacts": [
-                "/workspace/forge_experiments/rewrite_applyback"
-                "/best/iter_001/forge.patch"
-            ],
+            "artifacts": ["/workspace/forge_experiments/rewrite_applyback/best/iter_001/forge.patch"],
             "changed_files": ["framework/op.py"],
         },
         applyback_required=True,
@@ -402,9 +398,7 @@ def test_rewrite_result_exposes_canonical_forge_patch_contract():
     assert result.artifact_schema_version == 2
     assert result.canonical_patch_path == result.patch_path
     assert result.canonical_files_root.endswith("/files")
-    assert result.canonical_result_path.endswith(
-        "/rewrite_applyback/result.json"
-    )
+    assert result.canonical_result_path.endswith("/rewrite_applyback/result.json")
     assert result.forge_workspace == "/workspace"
     assert result.artifacts == [result.patch_path]
 

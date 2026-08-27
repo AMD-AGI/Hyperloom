@@ -223,10 +223,7 @@ class DispatchAdmission:
 
     def summary(self) -> str:
         """One line naming the decision's cost breakdown, in minutes."""
-        priced = (
-            f"session {self.session_sec / 60:.0f}, measurement "
-            f"{self.measurement_sec / 60:.0f}"
-        )
+        priced = f"session {self.session_sec / 60:.0f}, measurement {self.measurement_sec / 60:.0f}"
         if self.floored:
             priced = f"external-timeout floor over {priced}"
         return (
@@ -246,9 +243,7 @@ def estimate_measurement_sec(history: list[RoundCost]) -> float:
     true observation of what that round spent and is simply outranked by any
     fuller one in the window.
     """
-    observed = [
-        cost.measurement_sec for cost in history if cost.measurement_sec > 0
-    ]
+    observed = [cost.measurement_sec for cost in history if cost.measurement_sec > 0]
     if not observed:
         return FIRST_ROUND_MEASUREMENT_SEC
     return max(observed)

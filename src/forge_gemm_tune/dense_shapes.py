@@ -19,8 +19,25 @@ log = logging.getLogger(__name__)
 
 # sglang CUDAGraph capture batch sizes - key decode sizes (thorough mode).
 _SGLANG_CUDAGRAPH_BS_THOROUGH = [
-    1, 2, 4, 8, 12, 16, 24, 32, 48, 56, 64,
-    72, 80, 88, 96, 104, 112, 120, 128,
+    1,
+    2,
+    4,
+    8,
+    12,
+    16,
+    24,
+    32,
+    48,
+    56,
+    64,
+    72,
+    80,
+    88,
+    96,
+    104,
+    112,
+    120,
+    128,
 ]
 
 
@@ -84,13 +101,13 @@ def compute_dense_nk_shapes(
     else:
         # Standard / GQA attention with possibly distinct qk vs v head dims.
         qkv_out = (nh * qk_head + nkv * qk_head + nkv * vh) // tp
-        shapes.append((qkv_out, hidden_size))                 # fused QKV
-        shapes.append((hidden_size, nh * vh // tp))           # O
+        shapes.append((qkv_out, hidden_size))  # fused QKV
+        shapes.append((hidden_size, nh * vh // tp))  # O
 
     # Dense FFN (SwiGLU gate+up fused, then down). MoE-only models may omit it.
     if intermediate_size > 0:
         shapes.append((intermediate_size * 2 // tp, hidden_size))  # gate+up
-        shapes.append((hidden_size, intermediate_size // tp))      # down
+        shapes.append((hidden_size, intermediate_size // tp))  # down
 
     out: list[tuple[int, int]] = []
     seen: set[tuple[int, int]] = set()
@@ -155,8 +172,7 @@ def compute_dense_m_values(
             # Cap ISL-derived M at the same 16384 high-watermark as the
             # concurrency term: a long-context ISL (e.g. ~32k) would otherwise
             # tune M=32k/65k giant GEMMs -> huge tune time / OOM.
-            m_set.update([min(isl, 16384), min(isl * 2, 16384),
-                          min(isl * conc // 8, 16384)])
+            m_set.update([min(isl, 16384), min(isl * 2, 16384), min(isl * conc // 8, 16384)])
         return sorted(m_set)
 
     # Decode-representative sizes (throughput-dominant small M).
@@ -197,6 +213,7 @@ def write_mnk_untuned_csv(
     with csv_path.open("w", encoding="utf-8") as f:
         if needs_q_dtype_w:
             from .tuners._aiter_dense_common import _aiter_fp8_dtype_str
+
             effective_q = q_dtype or _aiter_fp8_dtype_str()
             f.write("M,N,K,q_dtype_w\n")
             for m in m_values:
@@ -209,6 +226,7 @@ def write_mnk_untuned_csv(
                     f.write(f"{m},{n},{k}\n")
     log.info(
         "Derived %d dense shapes from config -> %s",
-        len(m_values) * len(nk_shapes), csv_path,
+        len(m_values) * len(nk_shapes),
+        csv_path,
     )
     return csv_path

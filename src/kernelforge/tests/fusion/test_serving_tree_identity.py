@@ -26,9 +26,7 @@ def test_a_copy_of_the_tree_is_not_the_installed_one(tmp_path: Path) -> None:
     patched = _tree(tmp_path, "fwroot")
     installed = _tree(tmp_path, "site-packages")
 
-    ok, reason = framework_tree_is_the_imported_one(
-        str(patched), "vllm", _finder=lambda pkg: str(installed / pkg)
-    )
+    ok, reason = framework_tree_is_the_imported_one(str(patched), "vllm", _finder=lambda pkg: str(installed / pkg))
 
     assert ok is False
     assert "without ever loading the kernel" in reason
@@ -37,9 +35,7 @@ def test_a_copy_of_the_tree_is_not_the_installed_one(tmp_path: Path) -> None:
 def test_the_installed_tree_passes(tmp_path: Path) -> None:
     root = _tree(tmp_path, "site-packages")
 
-    ok, reason = framework_tree_is_the_imported_one(
-        str(root), "vllm", _finder=lambda pkg: str(root / pkg)
-    )
+    ok, reason = framework_tree_is_the_imported_one(str(root), "vllm", _finder=lambda pkg: str(root / pkg))
 
     assert (ok, reason) == (True, "")
 
@@ -50,9 +46,7 @@ def test_a_symlink_to_the_install_is_the_install(tmp_path: Path) -> None:
     link.mkdir()
     (link / "vllm").symlink_to(real / "vllm", target_is_directory=True)
 
-    ok, _ = framework_tree_is_the_imported_one(
-        str(link), "vllm", _finder=lambda pkg: str(real / pkg)
-    )
+    ok, _ = framework_tree_is_the_imported_one(str(link), "vllm", _finder=lambda pkg: str(real / pkg))
 
     assert ok is True
 
@@ -61,9 +55,7 @@ def test_sglang_is_checked_against_its_own_package(tmp_path: Path) -> None:
     patched = _tree(tmp_path, "fwroot", pkg="sglang")
     installed = _tree(tmp_path, "site-packages", pkg="sglang")
 
-    ok, reason = framework_tree_is_the_imported_one(
-        str(patched), "sglang", _finder=lambda pkg: str(installed / pkg)
-    )
+    ok, reason = framework_tree_is_the_imported_one(str(patched), "sglang", _finder=lambda pkg: str(installed / pkg))
 
     assert ok is False
     assert "sglang" in reason
@@ -76,6 +68,4 @@ def test_an_unknown_root_is_not_second_guessed() -> None:
 def test_an_unresolvable_package_is_not_second_guessed(tmp_path: Path) -> None:
     patched = _tree(tmp_path, "fwroot")
 
-    assert framework_tree_is_the_imported_one(
-        str(patched), "vllm", _finder=lambda pkg: ""
-    ) == (True, "")
+    assert framework_tree_is_the_imported_one(str(patched), "vllm", _finder=lambda pkg: "") == (True, "")

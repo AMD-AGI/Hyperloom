@@ -77,9 +77,7 @@ def build_manifest(
     localized recipe (ranked) for caller visibility. ``error`` is null on every
     normal run.
     """
-    verdict = verdict_override or (
-        "candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity"
-    )
+    verdict = verdict_override or ("candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity")
     return {
         "schema_version": FUSION_MANIFEST_SCHEMA_VERSION,
         # Manifest consumers key off this name; it stays even though the command

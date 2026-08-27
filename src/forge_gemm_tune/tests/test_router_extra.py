@@ -15,8 +15,13 @@ from forge_gemm_tune.model_analyzer import ModelProfile
 
 
 def _profile(is_moe=False, num_experts=0, **kw):
-    defaults = {"model_path": "/m", "hidden_size": 4096, "intermediate_size": 11008,
-                "moe_intermediate_size": 0, "num_experts_per_tok": 0}
+    defaults = {
+        "model_path": "/m",
+        "hidden_size": 4096,
+        "intermediate_size": 11008,
+        "moe_intermediate_size": 0,
+        "num_experts_per_tok": 0,
+    }
     defaults.update(kw)
     return ModelProfile(is_moe=is_moe, num_experts=num_experts, **defaults)
 
@@ -89,28 +94,24 @@ def test_sglang_moe_per_token_1stage_log_skips(tmp_path):
     # per_token + non-fp8 precision + 1-stage log -> skip reason set.
     log = tmp_path / "s.log"
     log.write_text("using 1stage default\n")
-    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8,
-                       moe_intermediate_size=768)
-    specs = select_tuners(profile, framework="sglang", precision="bf16",
-                          quant_type="per_token", kernel_signature_log=str(log))
+    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
+    specs = select_tuners(
+        profile, framework="sglang", precision="bf16", quant_type="per_token", kernel_signature_log=str(log)
+    )
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert not fmoe.should_run and "1-stage" in fmoe.skip_reason
 
 
 def test_sglang_moe_per_token_no_1stage_runs():
-    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8,
-                       moe_intermediate_size=768)
-    specs = select_tuners(profile, framework="sglang", precision="bf16",
-                          quant_type="per_token")
+    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
+    specs = select_tuners(profile, framework="sglang", precision="bf16", quant_type="per_token")
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert fmoe.should_run
 
 
 def test_sglang_moe_unsupported_combo_skips():
-    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8,
-                       moe_intermediate_size=768)
-    specs = select_tuners(profile, framework="sglang", precision="int8",
-                          quant_type="awq")
+    profile = _profile(is_moe=True, num_experts=128, num_experts_per_tok=8, moe_intermediate_size=768)
+    specs = select_tuners(profile, framework="sglang", precision="int8", quant_type="awq")
     fmoe = [s for s in specs if s.name == "fmoe_ck"][0]
     assert not fmoe.should_run and "Unsupported" in fmoe.skip_reason
 
@@ -118,8 +119,7 @@ def test_sglang_moe_unsupported_combo_skips():
 # ── vllm dense paths ─────────────────────────────────────────────────────────
 def test_vllm_dense_with_tunableop_input():
     profile = _profile(is_moe=False)
-    specs = select_tuners(profile, framework="vllm", precision="bf16",
-                          has_tunableop_input=True)
+    specs = select_tuners(profile, framework="vllm", precision="bf16", has_tunableop_input=True)
     names = [s.name for s in specs if s.should_run]
     assert "vllm_dense_tunableop" in names
 

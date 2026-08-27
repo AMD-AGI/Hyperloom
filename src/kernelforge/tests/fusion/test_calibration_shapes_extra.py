@@ -30,14 +30,18 @@ def test_load_calibration_missing_file(tmp_path):
 
 def test_load_calibration_skips_bad_rows(tmp_path):
     p = tmp_path / "cal.json"
-    p.write_text(json.dumps([
-        {"share": 0.2, "gain": 0.02},          # ok
-        {"share": "x", "gain": 0.01},          # bad float -> skipped
-        {"gain": 0.01},                        # missing key -> skipped
-        [0.4, 0.06],                           # list form ok
-        [0.5],                                 # index error -> skipped
-        {"share": -0.1, "gain": 0.5},          # negative -> filtered
-    ]))
+    p.write_text(
+        json.dumps(
+            [
+                {"share": 0.2, "gain": 0.02},  # ok
+                {"share": "x", "gain": 0.01},  # bad float -> skipped
+                {"gain": 0.01},  # missing key -> skipped
+                [0.4, 0.06],  # list form ok
+                [0.5],  # index error -> skipped
+                {"share": -0.1, "gain": 0.5},  # negative -> filtered
+            ]
+        )
+    )
     pts = load_calibration_points(str(p))
     assert pts == [(0.2, 0.02), (0.4, 0.06)]
 
@@ -54,8 +58,8 @@ def test_interp_empty_returns_zero():
 
 def test_interp_clamps_below_and_above():
     pts = [(0.2, 0.02), (0.4, 0.06)]
-    assert _interp(pts, 0.1) == 0.02   # below first
-    assert _interp(pts, 0.9) == 0.06   # above last
+    assert _interp(pts, 0.1) == 0.02  # below first
+    assert _interp(pts, 0.9) == 0.06  # above last
 
 
 def test_interp_exact_and_midpoint():
@@ -74,10 +78,14 @@ def test_predict_uses_env_calibration(tmp_path, monkeypatch):
 # ── shapes ───────────────────────────────────────────────────────────────────
 def test_shapes_reads_nested_text_config(tmp_path):
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({
-        "model_type": "multimodal",
-        "text_config": {"hidden_size": 4096, "num_attention_heads": 32},
-    }))
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "multimodal",
+                "text_config": {"hidden_size": 4096, "num_attention_heads": 32},
+            }
+        )
+    )
     s = resolve_decode_shapes(str(tmp_path))
     assert s["hidden_size"] == 4096
     assert s["num_attention_heads"] == 32
@@ -86,9 +94,15 @@ def test_shapes_reads_nested_text_config(tmp_path):
 
 def test_shapes_head_dim_zero_heads_no_crash(tmp_path):
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({
-        "model_type": "weird", "hidden_size": 2048, "num_attention_heads": 0,
-    }))
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "weird",
+                "hidden_size": 2048,
+                "num_attention_heads": 0,
+            }
+        )
+    )
     s = resolve_decode_shapes(str(tmp_path))
     # division by zero -> head_dim omitted, no crash
     assert "head_dim" not in s
@@ -97,9 +111,15 @@ def test_shapes_head_dim_zero_heads_no_crash(tmp_path):
 
 def test_shapes_gqa_groups_computed(tmp_path):
     cfg = tmp_path / "config.json"
-    cfg.write_text(json.dumps({
-        "model_type": "gqa", "num_attention_heads": 32, "num_key_value_heads": 8,
-    }))
+    cfg.write_text(
+        json.dumps(
+            {
+                "model_type": "gqa",
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+            }
+        )
+    )
     s = resolve_decode_shapes(str(tmp_path))
     assert s["gqa_groups"] == 4
 

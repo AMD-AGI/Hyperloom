@@ -25,9 +25,14 @@ from forge_gemm_tune.tier3.runner import attempt_generated_tuner
 
 def _gap(table="odd.csv", misses=100, kind="no_tuner", tuner=None):
     return CoverageGap(
-        table=table, tuner=tuner, env_var="AITER_CONFIG_ODD",
-        key_schema=["M", "N", "K"], miss_count=misses, distinct_keys=misses,
-        reason="no tuner is registered", kind=kind,
+        table=table,
+        tuner=tuner,
+        env_var="AITER_CONFIG_ODD",
+        key_schema=["M", "N", "K"],
+        miss_count=misses,
+        distinct_keys=misses,
+        reason="no tuner is registered",
+        kind=kind,
     )
 
 
@@ -99,11 +104,14 @@ class TestSandbox:
         # The aiter tuners in this same pipeline exit 1 on complete success, so
         # a script's return code cannot be the signal here either.
         out = tmp_path / "out.csv"
-        script = self._script(tmp_path, f"""
+        script = self._script(
+            tmp_path,
+            f"""
 import sys
 open({str(out)!r}, "w").write("done\\n")
 sys.exit(1)
-""")
+""",
+        )
         r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=60)
         assert r.ok and r.returncode == 1
 
@@ -122,27 +130,31 @@ sys.exit(1)
 
     def test_a_timeout_keeps_what_was_already_written(self, tmp_path):
         out = tmp_path / "out.csv"
-        script = self._script(tmp_path, f"""
+        script = self._script(
+            tmp_path,
+            f"""
 import time
 open({str(out)!r}, "w").write("partial\\n")
 time.sleep(30)
-""")
+""",
+        )
         r = sandbox.run_generated_tuner(script, tmp_path, expect=[out], timeout_s=3)
         assert r.timed_out and r.ok, "partial output is the contract check's to judge"
 
     def test_a_crash_is_a_result_not_an_exception(self, tmp_path):
         script = self._script(tmp_path, "raise SystemExit(139)\n")
-        r = sandbox.run_generated_tuner(
-            script, tmp_path, expect=[tmp_path / "out.csv"], timeout_s=60
-        )
+        r = sandbox.run_generated_tuner(script, tmp_path, expect=[tmp_path / "out.csv"], timeout_s=60)
         assert not r.ok and r.returncode == 139
 
     def test_the_child_is_confined_to_one_device(self, tmp_path):
         out = tmp_path / "env.txt"
-        script = self._script(tmp_path, f"""
+        script = self._script(
+            tmp_path,
+            f"""
 import os
 open({str(out)!r}, "w").write(os.environ.get("HIP_VISIBLE_DEVICES", "?"))
-""")
+""",
+        )
         sandbox.run_generated_tuner(script, tmp_path, expect=[out], gpu_id="3", timeout_s=60)
         assert out.read_text(encoding="utf-8") == "3"
 
@@ -160,13 +172,22 @@ class TestLedger:
         d = "abc123"
         for i in range(3):
             r = ledger.record_outcome(
-                path, digest=d, table="t.csv", model="model-a",
-                improved=True, speedup=1.2,
+                path,
+                digest=d,
+                table="t.csv",
+                model="model-a",
+                improved=True,
+                speedup=1.2,
             )
         # Three successes, one model: not enough.
         assert r.successes == 3 and not r.eligible_for_trust
         r = ledger.record_outcome(
-            path, digest=d, table="t.csv", model="model-b", improved=True, speedup=1.1,
+            path,
+            digest=d,
+            table="t.csv",
+            model="model-b",
+            improved=True,
+            speedup=1.1,
         )
         assert r.eligible_for_trust
 
@@ -175,10 +196,20 @@ class TestLedger:
         d = "abc123"
         for model in ("a", "b", "c"):
             ledger.record_outcome(
-                path, digest=d, table="t.csv", model=model, improved=True, speedup=1.2,
+                path,
+                digest=d,
+                table="t.csv",
+                model=model,
+                improved=True,
+                speedup=1.2,
             )
         r = ledger.record_outcome(
-            path, digest=d, table="t.csv", model="d", improved=False, speedup=0.8,
+            path,
+            digest=d,
+            table="t.csv",
+            model="d",
+            improved=False,
+            speedup=0.8,
         )
         assert r.regressions == 1 and not r.eligible_for_trust
 
@@ -186,7 +217,12 @@ class TestLedger:
         # A tuner that searched honestly and found no win has not misbehaved.
         path = tmp_path / "ledger.json"
         r = ledger.record_outcome(
-            path, digest="d", table="t.csv", model="a", improved=False, speedup=None,
+            path,
+            digest="d",
+            table="t.csv",
+            model="a",
+            improved=False,
+            speedup=None,
         )
         assert r.regressions == 0
 
@@ -195,8 +231,12 @@ class TestLedger:
         path = tmp_path / "ledger.json"
         for model in ("a", "b", "c"):
             r = ledger.record_outcome(
-                path, digest="d1", table="t.csv", model=model,
-                improved=True, speedup=1.3,
+                path,
+                digest="d1",
+                table="t.csv",
+                model=model,
+                improved=True,
+                speedup=1.3,
             )
         assert r.eligible_for_trust
         assert not ledger.is_trusted("d1"), "only an operator grants trust"
@@ -207,7 +247,12 @@ class TestLedger:
         path = tmp_path / "ledger.json"
         path.write_text("{not json", encoding="utf-8")
         r = ledger.record_outcome(
-            path, digest="d", table="t.csv", model="a", improved=True, speedup=1.1,
+            path,
+            digest="d",
+            table="t.csv",
+            model="a",
+            improved=True,
+            speedup=1.1,
         )
         assert r.successes == 1
         assert json.loads(path.read_text(encoding="utf-8"))["d"]["successes"] == 1
@@ -234,14 +279,14 @@ class TestPlanPreviewsWhatRunDoes:
         for name in ("run", "plan"):
             src = self._src(name)
             idx = src.index("has_shapes_json=")
-            assert "demand_json" in src[idx:idx + 90], name
+            assert "demand_json" in src[idx : idx + 90], name
 
     def test_plan_accepts_an_explicit_demand_file(self):
         from forge_gemm_tune import cli
 
-        assert any(
-            "--demand" in (p.opts or []) for p in cli.plan.params
-        ), "run takes --demand; plan must too or they diverge again"
+        assert any("--demand" in (p.opts or []) for p in cli.plan.params), (
+            "run takes --demand; plan must too or they diverge again"
+        )
 
 
 class TestTheCliActuallyReachesTier3:
@@ -271,9 +316,7 @@ class TestTheCliActuallyReachesTier3:
 
         # click wraps the command, so reach the function it decorated.
         source = inspect.getsource(cli.run.callback)
-        assert source.index("tuner_instance.execute()") < source.index(
-            "_attempt_tier3("
-        )
+        assert source.index("tuner_instance.execute()") < source.index("_attempt_tier3(")
 
     def test_a_table_with_no_adapter_is_refused_rather_than_approximated(self):
         from forge_gemm_tune.tier3.dispatch import adapters_for
@@ -298,7 +341,9 @@ class TestTheProviderCallMatchesTheProviderAPI:
         # What generate.call_agent passes. ``provider`` is positional and
         # required; calling it with keywords only raises TypeError.
         inspect.signature(registry.resolve_agent_runtime).bind(
-            "claude", model="", timeout_sec=1800,
+            "claude",
+            model="",
+            timeout_sec=1800,
         )
 
     def test_provider_selection_yields_something_with_a_name(self):
@@ -307,9 +352,9 @@ class TestTheProviderCallMatchesTheProviderAPI:
         registry = pytest.importorskip("forge_llm.agent_backends.registry")
 
         inspect.signature(registry.select_default_agent_provider).bind("")
-        assert "name" in inspect.get_annotations(
-            registry.AgentProvider, eval_str=False
-        ) or hasattr(registry.AgentProvider, "name")
+        assert "name" in inspect.get_annotations(registry.AgentProvider, eval_str=False) or hasattr(
+            registry.AgentProvider, "name"
+        )
 
 
 class TestTheWholeChain:
@@ -325,8 +370,7 @@ class TestTheWholeChain:
             script = work_dir / "tuner.py"
             script.write_text("# generated\n", encoding="utf-8")
             Path(mandate.output_csv).write_text(rows, encoding="utf-8")
-            Path(mandate.candidates_json).write_text(
-                json.dumps(candidates), encoding="utf-8")
+            Path(mandate.candidates_json).write_text(json.dumps(candidates), encoding="utf-8")
             return GeneratedTuner(True, script, "", "fake", "s1")
 
         return out, cj, _fake_generate
@@ -340,34 +384,37 @@ class TestTheWholeChain:
     _ROWS = _HDR + "\n16,1536,7168,x,c=1,10.0,5.0,True\n"
     _CANDS = {"16x1536x7168": [{"backend": "x", "config": "c=1"}]}
 
-    def _run(self, tmp_path, monkeypatch, *, rows, cands, dispatch_cost=1e-6,
-             correct=True, with_dispatch=True):
+    def _run(self, tmp_path, monkeypatch, *, rows, cands, dispatch_cost=1e-6, correct=True, with_dispatch=True):
         _, _, fake_gen = self._writes(tmp_path, rows, cands)
         monkeypatch.setattr("forge_gemm_tune.tier3.runner.generate_tuner", fake_gen)
         monkeypatch.setattr(
             "forge_gemm_tune.tier3.runner.run_generated_tuner",
             lambda script, wd, **kw: sandbox.SandboxResult(
-                True, 0, 1.0, produced=[str(p) for p in kw.get("expect", [])]),
+                True, 0, 1.0, produced=[str(p) for p in kw.get("expect", [])]
+            ),
         )
         now = {"t": 0.0}
-        monkeypatch.setattr(
-            "forge_gemm_tune.tier3.referee.time.perf_counter", lambda: now["t"])
+        monkeypatch.setattr("forge_gemm_tune.tier3.referee.time.perf_counter", lambda: now["t"])
 
         def _call(cost):
             def _fn():
                 now["t"] += cost
+
             return _fn
 
         kwargs = {}
         if with_dispatch:
             kwargs = {
                 "make_baseline": lambda shape: _call(2e-6),
-                "make_dispatch": lambda shape: (lambda c: _call(dispatch_cost)),
-                "make_correctness": lambda shape: (lambda call: correct),
+                "make_dispatch": lambda shape: lambda c: _call(dispatch_cost),
+                "make_correctness": lambda shape: lambda call: correct,
             }
         return attempt_generated_tuner(
-            [_gap()], lambda g: [{"M": 16, "N": 1536, "K": 7168}],
-            tmp_path, model_name="qwen3-8b", **kwargs,
+            [_gap()],
+            lambda g: [{"M": 16, "N": 1536, "K": 7168}],
+            tmp_path,
+            model_name="qwen3-8b",
+            **kwargs,
         )
 
     def test_a_genuinely_faster_candidate_passes(self, tmp_path, monkeypatch, open_gate):
@@ -377,51 +424,38 @@ class TestTheWholeChain:
         # Recorded, but still a candidate until a person says otherwise.
         assert not out.trusted
 
-    def test_the_scripts_own_claim_does_not_survive_re_timing(
-        self, tmp_path, monkeypatch, open_gate
-    ):
+    def test_the_scripts_own_claim_does_not_survive_re_timing(self, tmp_path, monkeypatch, open_gate):
         # Its CSV says 2x. Our clock says it is slower.
-        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS,
-                        dispatch_cost=8e-6)
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, dispatch_cost=8e-6)
         assert not out.ok and "no shape improved" in out.reason
 
-    def test_output_that_contradicts_itself_is_rejected_before_the_gpu(
-        self, tmp_path, monkeypatch, open_gate
-    ):
+    def test_output_that_contradicts_itself_is_rejected_before_the_gpu(self, tmp_path, monkeypatch, open_gate):
         rows = self._HDR + "\n16,1536,7168,x,c=1,5.0,10.0,True\n"
         out = self._run(tmp_path, monkeypatch, rows=rows, cands=self._CANDS)
         assert out.stage == "contract" and not out.ok
         assert "contradicts" in out.reason
 
-    def test_an_incorrect_candidate_never_becomes_a_win(
-        self, tmp_path, monkeypatch, open_gate
-    ):
-        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS,
-                        correct=False)
+    def test_an_incorrect_candidate_never_becomes_a_win(self, tmp_path, monkeypatch, open_gate):
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, correct=False)
         assert not out.ok
         assert out.judgements[0].rejected_incorrect == 1
 
-    def test_without_a_dispatch_nothing_is_emitted(
-        self, tmp_path, monkeypatch, open_gate
-    ):
+    def test_without_a_dispatch_nothing_is_emitted(self, tmp_path, monkeypatch, open_gate):
         # An unverified generated tuner is exactly what this tier must not emit.
-        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS,
-                        with_dispatch=False)
+        out = self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS, with_dispatch=False)
         assert out.stage == "referee" and not out.ok
         assert "cannot be re-timed" in out.reason
 
-    def test_the_kill_switch_stops_it_before_anything_happens(
-        self, tmp_path, monkeypatch
-    ):
+    def test_the_kill_switch_stops_it_before_anything_happens(self, tmp_path, monkeypatch):
         monkeypatch.setenv(gate.DISABLE_ENV, "1")
         out = attempt_generated_tuner(
-            [_gap()], lambda g: [], tmp_path,
+            [_gap()],
+            lambda g: [],
+            tmp_path,
         )
         assert not out.attempted and out.stage == "gate"
 
-    def test_the_outcome_is_written_where_a_human_can_read_it(
-        self, tmp_path, monkeypatch, open_gate
-    ):
+    def test_the_outcome_is_written_where_a_human_can_read_it(self, tmp_path, monkeypatch, open_gate):
         self._run(tmp_path, monkeypatch, rows=self._ROWS, cands=self._CANDS)
         written = list((tmp_path / "tier3").rglob("outcome.json"))
         assert written

@@ -83,11 +83,7 @@ class Judgement:
 
     @property
     def improved(self) -> bool:
-        return bool(
-            self.best_timing
-            and self.best_timing.usable
-            and (self.best_timing.speedup or 0) > 1.0
-        )
+        return bool(self.best_timing and self.best_timing.usable and (self.best_timing.speedup or 0) > 1.0)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -150,9 +146,10 @@ def time_paired(
     typical_ratio = statistics.median(base_s) / statistics.median(cand_s)
     if (best_ratio - 1.0) * (typical_ratio - 1.0) < 0:
         return PairedTiming(
-            mb, mc, None,
-            f"unstable: best-case {best_ratio:.4f}x contradicts typical-case "
-            f"{typical_ratio:.4f}x",
+            mb,
+            mc,
+            None,
+            f"unstable: best-case {best_ratio:.4f}x contradicts typical-case {typical_ratio:.4f}x",
         )
     return PairedTiming(mb, mc, best_ratio)
 
@@ -188,15 +185,11 @@ def judge_candidates(
     for cand in candidates:
         call = dispatch(cand)
         if call is None:
-            result.timings.append(
-                (cand, PairedTiming(0.0, 0.0, None, "not dispatchable"))
-            )
+            result.timings.append((cand, PairedTiming(0.0, 0.0, None, "not dispatchable")))
             continue
         if is_correct is not None and not is_correct(call):
             result.rejected_incorrect += 1
-            result.timings.append(
-                (cand, PairedTiming(0.0, 0.0, None, "failed the correctness check"))
-            )
+            result.timings.append((cand, PairedTiming(0.0, 0.0, None, "failed the correctness check")))
             continue
         timing = time_paired(baseline, call, sync=sync)
         result.timings.append((cand, timing))
@@ -209,7 +202,9 @@ def judge_candidates(
 
     log.info(
         "referee %s: %d candidate(s), %d rejected as incorrect, best %s",
-        shape, len(candidates), result.rejected_incorrect,
+        shape,
+        len(candidates),
+        result.rejected_incorrect,
         f"{result.best_timing.speedup:.4f}x" if result.improved else "none",
     )
     return result

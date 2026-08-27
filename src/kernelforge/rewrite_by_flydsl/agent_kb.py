@@ -97,11 +97,7 @@ def kb_store_secrets(config: Config) -> tuple[str, ...]:
     every one of them redacts against the same configured credential.
     """
     knowledge = knowledge_config_from_runtime(config)
-    return tuple(
-        value
-        for value in (knowledge.kb_store_token,)
-        if value
-    )
+    return tuple(value for value in (knowledge.kb_store_token,) if value)
 
 
 def _named_files(files: Any) -> dict[str, Path]:
@@ -118,9 +114,7 @@ def _named_files(files: Any) -> dict[str, Path]:
 def _port_digest(knowledge: Mapping[str, Any], files: Mapping[str, Path]) -> str:
     """Fingerprint one port so re-recording it updates a candidate, not adds one."""
     digest = hashlib.sha256()
-    digest.update(
-        json.dumps(dict(knowledge), ensure_ascii=False, sort_keys=True).encode()
-    )
+    digest.update(json.dumps(dict(knowledge), ensure_ascii=False, sort_keys=True).encode())
     for rel_path in sorted(files):
         digest.update(rel_path.encode())
         try:
@@ -402,6 +396,7 @@ class KernelRecipeKB:
 
     def _config_secrets(self) -> tuple[str, ...]:
         return kb_store_secrets(self._config) if self._config is not None else ()
+
 
 __all__ = [
     "CandidateBundle",

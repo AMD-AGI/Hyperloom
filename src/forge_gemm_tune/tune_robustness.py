@@ -283,7 +283,9 @@ def run_isolated(
         )
         start = time.time()
         rc, out, err = run_subprocess(
-            cmd, cwd=aiter_root, timeout_s=outer_timeout_s,
+            cmd,
+            cwd=aiter_root,
+            timeout_s=outer_timeout_s,
             log_file=work_dir / f"_iso_{tuned_stem}_{idx}.log",
         )
         merged_out.append(out)
@@ -318,7 +320,9 @@ def run_isolated(
             # as ok (otherwise a whole run of these reports final_rc=0).
             log.warning(
                 "shape %d/%d exited rc=%d with no recognized fault; treating as failed",
-                idx + 1, len(rows), rc,
+                idx + 1,
+                len(rows),
+                rc,
             )
             continue
         n_ok += 1
@@ -343,9 +347,7 @@ def run_isolated(
     # serve-safe split-K cap sees candidates for ALL shapes, not just the last.
     if profile_idx >= 0 and shared_profile is not None and profile_header is not None:
         try:
-            shared_profile.write_text(
-                profile_header + "\n" + "\n".join(merged_profile_rows) + "\n", encoding="utf-8"
-            )
+            shared_profile.write_text(profile_header + "\n" + "\n".join(merged_profile_rows) + "\n", encoding="utf-8")
         except OSError:
             pass
 
@@ -373,10 +375,7 @@ def _latest_candidate(compare_dir: Path, tuned_stem: str, start: float) -> Path 
     if not compare_dir.is_dir():
         return None
     boundary = re.compile(re.escape(tuned_stem) + r"(?:\.|_\d)")
-    cands = [
-        p for p in compare_dir.glob("*.candidate.csv")
-        if boundary.search(p.name) and p.stat().st_mtime > start
-    ]
+    cands = [p for p in compare_dir.glob("*.candidate.csv") if boundary.search(p.name) and p.stat().st_mtime > start]
     if not cands:
         return None
     cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)

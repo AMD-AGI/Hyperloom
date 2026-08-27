@@ -42,9 +42,7 @@ def _write(
 def _assert_old_session(root: Path, store: record_store.LocalRewriteRecords) -> None:
     session = _session_dir(root)
     assert (session / "files" / "kernel.py").read_bytes() == b"old"
-    assert json.loads((session / record_store.KNOWLEDGE_FILENAME).read_text())[
-        "version"
-    ] == "old"
+    assert json.loads((session / record_store.KNOWLEDGE_FILENAME).read_text())["version"] == "old"
     assert store.read_bytes(CANONICAL_ID, SESSION_ID, "kernel.py") == b"old"
     assert not [
         path
@@ -105,9 +103,7 @@ def test_failed_champion_write_preserves_the_old_pointer(
         monkeypatch.setattr(
             record_store,
             "_write_json_synced",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(
-                OSError("champion json failed")
-            ),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("champion json failed")),
         )
     else:
         original_replace = record_store.os.replace
@@ -124,9 +120,7 @@ def test_failed_champion_write_preserves_the_old_pointer(
 
     identity_dir = root / record_store.canonical_relpath(CANONICAL_ID)
     assert store.champion_speedup(CANONICAL_ID) == 2.0
-    assert json.loads((identity_dir / record_store.CHAMPION_FILENAME).read_text())[
-        "session_id"
-    ] == "old-session"
+    assert json.loads((identity_dir / record_store.CHAMPION_FILENAME).read_text())["session_id"] == "old-session"
     assert not list(identity_dir.glob(f".{record_store.CHAMPION_FILENAME}.*"))
 
 
@@ -191,9 +185,7 @@ def test_cross_process_reader_observes_only_complete_sessions(tmp_path):
     assert read_done.is_set()
     assert observed == [b"new"]
     assert store.read_bytes(CANONICAL_ID, SESSION_ID, "kernel.py") == b"new"
-    assert json.loads(
-        (_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text()
-    )["version"] == "new"
+    assert json.loads((_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text())["version"] == "new"
     assert not [
         path
         for path in _session_dir(root).parent.iterdir()
@@ -249,9 +241,7 @@ def test_rewriting_a_record_keeps_the_measurement_a_consumer_recorded(tmp_path):
     root = tmp_path / "records"
     store = record_store.LocalRewriteRecords(root)
     source = _artifact(tmp_path, "kernel.py", b"first")
-    store.write(
-        CANONICAL_ID, SESSION_ID, {"speedup": 9.0}, {"kernel.py": source}
-    )
+    store.write(CANONICAL_ID, SESSION_ID, {"speedup": 9.0}, {"kernel.py": source})
     store.record_measured_speedup(CANONICAL_ID, SESSION_ID, 1.2)
 
     store.write(
@@ -261,9 +251,7 @@ def test_rewriting_a_record_keeps_the_measurement_a_consumer_recorded(tmp_path):
         {"kernel.py": _artifact(tmp_path, "again.py", b"second")},
     )
 
-    knowledge = json.loads(
-        (_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text()
-    )
+    knowledge = json.loads((_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text())
     assert knowledge[record_store.MEASURED_SPEEDUP_KEY] == 1.2
     # The rest of the record is still replaced, which is what replace means.
     assert knowledge["version"] == "second"
@@ -275,9 +263,7 @@ def test_a_rewrite_that_measured_the_candidate_itself_wins(tmp_path):
     root = tmp_path / "records"
     store = record_store.LocalRewriteRecords(root)
     source = _artifact(tmp_path, "kernel.py", b"first")
-    store.write(
-        CANONICAL_ID, SESSION_ID, {"speedup": 9.0}, {"kernel.py": source}
-    )
+    store.write(CANONICAL_ID, SESSION_ID, {"speedup": 9.0}, {"kernel.py": source})
     store.record_measured_speedup(CANONICAL_ID, SESSION_ID, 1.2)
 
     store.write(
@@ -287,9 +273,7 @@ def test_a_rewrite_that_measured_the_candidate_itself_wins(tmp_path):
         {"kernel.py": source},
     )
 
-    knowledge = json.loads(
-        (_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text()
-    )
+    knowledge = json.loads((_session_dir(root) / record_store.KNOWLEDGE_FILENAME).read_text())
     assert knowledge[record_store.MEASURED_SPEEDUP_KEY] == 1.5
 
 

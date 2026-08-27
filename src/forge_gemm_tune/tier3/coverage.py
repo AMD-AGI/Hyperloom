@@ -50,8 +50,8 @@ _NOT_A_COVERAGE_GAP = (
 # production log made the distinction immediately: a vLLM run missed 122 bf16
 # keys with `sglang_dense_bf16` -- the tuner that owns that very table -- simply
 # not selected by the framework branch. Nothing about that calls for a new tuner.
-KIND_NO_TUNER = "no_tuner"          # nothing implements this: the Tier-3 case
-KIND_SKIPPED = "skipped"            # a tuner exists and declined, for a reason
+KIND_NO_TUNER = "no_tuner"  # nothing implements this: the Tier-3 case
+KIND_SKIPPED = "skipped"  # a tuner exists and declined, for a reason
 KIND_NOT_SELECTED = "not_selected"  # a tuner exists and routing did not pick it
 
 
@@ -114,10 +114,7 @@ def coverage_gaps(
     if not demands:
         return []
 
-    will_run = {
-        str(getattr(s, "name", "")) for s in tuner_specs
-        if getattr(s, "should_run", False)
-    }
+    will_run = {str(getattr(s, "name", "")) for s in tuner_specs if getattr(s, "should_run", False)}
     skipped = {
         str(getattr(s, "name", "")): str(getattr(s, "skip_reason", "") or "")
         for s in tuner_specs
@@ -159,6 +156,10 @@ def coverage_gaps(
     for gap in gaps:
         log.warning(
             "tuning coverage gap [%s]: %s (%d misses over %d keys) -- %s",
-            gap.kind, gap.table, gap.miss_count, gap.distinct_keys, gap.reason,
+            gap.kind,
+            gap.table,
+            gap.miss_count,
+            gap.distinct_keys,
+            gap.reason,
         )
     return gaps

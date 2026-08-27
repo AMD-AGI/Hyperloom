@@ -133,7 +133,8 @@ def render_long_horizon_header(
     # cold-start prompt (iteration 1, before any result) is unchanged. A bare
     # baseline/iteration_started marker is not enough to warrant the header.
     has_history = (
-        state.best.iteration > 0 or bool(state.best.commit_hash)
+        state.best.iteration > 0
+        or bool(state.best.commit_hash)
         or state.stall.unresolved_stall_iters > 0
         or any(e.get("type") == "iteration_result" for e in recent_events)
     )
@@ -149,20 +150,9 @@ def render_long_horizon_header(
     # Only claim a "best" once a real KEEP exists; before that, surface the
     # baseline so the agent still knows the bar to beat.
     if state.best.iteration > 0 or state.best.commit_hash:
-        label = (
-            "validated KB warm-start"
-            if state.best.source == "warm_start"
-            else f"iter {state.best.iteration}"
-        )
-        speedup_text = (
-            f"{state.best.mean_case_speedup:.6f}x"
-            if state.best.mean_case_speedup is not None
-            else "?"
-        )
-        best_line = (
-            f"Current best: {label}, mean case speedup {speedup_text}, raw mean "
-            f"{_fmt_ms(state.best.wall_ms)}"
-        )
+        label = "validated KB warm-start" if state.best.source == "warm_start" else f"iter {state.best.iteration}"
+        speedup_text = f"{state.best.mean_case_speedup:.6f}x" if state.best.mean_case_speedup is not None else "?"
+        best_line = f"Current best: {label}, mean case speedup {speedup_text}, raw mean {_fmt_ms(state.best.wall_ms)}"
         if state.baseline_wall_ms is not None:
             best_line += f" (baseline {_fmt_ms(state.baseline_wall_ms)})"
         if state.best.plan:
@@ -195,9 +185,7 @@ def render_long_horizon_header(
         "- analysis/<commit>/ — evidence",
     ]
     if include_handoffs:
-        retrieval.append(
-            f"- {_HANDOFFS_REL}/iter_NNN.json — structured iteration handoffs"
-        )
+        retrieval.append(f"- {_HANDOFFS_REL}/iter_NNN.json — structured iteration handoffs")
 
     # Recent factual attempts — summaries only, never full logs.
     recent_lines = [f"- {_recent_line(e)}" for e in result_events[-max_recent:]]

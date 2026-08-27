@@ -48,8 +48,7 @@ _AITER_DTYPE_ALIAS: dict[str, tuple[str, str]] = {
 
 # CSV header for untuned fmoe config
 _FMOE_CSV_HEADER = (
-    "token,model_dim,inter_dim,expert,topk,act_type,dtype,"
-    "q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
+    "token,model_dim,inter_dim,expert,topk,act_type,dtype,q_dtype_a,q_dtype_w,q_type,use_g1u1,doweight_stage1"
 )
 _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
 
@@ -57,11 +56,7 @@ _FMOE_CSV_COLUMNS = tuple(_FMOE_CSV_HEADER.split(","))
 def _validate_fmoe_csv(path: Path) -> str | None:
     """Return why ``path`` is unusable as an untuned fmoe CSV, or None if it is."""
     try:
-        lines = [
-            line.strip()
-            for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
+        lines = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
     except OSError as exc:
         return f"unreadable ({exc})"
     if not lines:
@@ -156,9 +151,7 @@ class FmoeCKTuner(BaseTuner):
         """Generate untuned CSV from model profile and token coverage."""
         profile = self.ctx.profile
         prec_key = self._precision_key()
-        q_dtype_a, q_dtype_w, q_type = _PRECISION_MAP.get(
-            prec_key, _PRECISION_MAP["bf16"]
-        )
+        q_dtype_a, q_dtype_w, q_type = _PRECISION_MAP.get(prec_key, _PRECISION_MAP["bf16"])
         # Every quantized entry in ``_PRECISION_MAP`` hardcodes the CDNA3 (gfx942)
         # fnuz FP8 value. The torch dtype behind each aiter alias is
         # architecture-specific, so on CDNA4 (gfx950 / MI355X) that constant is
@@ -249,19 +242,19 @@ class FmoeCKTuner(BaseTuner):
                 improve_pct = float(m.group(4))
                 action = m.group(5).strip()
                 speedup = pre_us / post_us if post_us > 0 else 1.0
-                results.append({
-                    "token": token,
-                    "default_us": pre_us,
-                    "tuned_us": post_us,
-                    "improve_pct": improve_pct,
-                    "speedup": round(speedup, 4),
-                    "improved": "UPDATE" in action.upper(),
-                })
+                results.append(
+                    {
+                        "token": token,
+                        "default_us": pre_us,
+                        "tuned_us": post_us,
+                        "improve_pct": improve_pct,
+                        "speedup": round(speedup, 4),
+                        "improved": "UPDATE" in action.upper(),
+                    }
+                )
 
         # Also parse the summary line for total counts
-        summary_pat = re.compile(
-            r"Total shapes:\s*(\d+)\s*\|\s*Would update:\s*(\d+)"
-        )
+        summary_pat = re.compile(r"Total shapes:\s*(\d+)\s*\|\s*Would update:\s*(\d+)")
         for line in stdout.splitlines():
             m = summary_pat.search(line)
             if m:
@@ -284,8 +277,7 @@ class FmoeCKTuner(BaseTuner):
         if not compare_dir.is_dir():
             return None
         candidates = [
-            p for p in compare_dir.glob("*.candidate.csv")
-            if p.stat().st_mtime > start_time and tuned_stem in p.name
+            p for p in compare_dir.glob("*.candidate.csv") if p.stat().st_mtime > start_time and tuned_stem in p.name
         ]
         if not candidates:
             return None
@@ -297,6 +289,7 @@ class FmoeCKTuner(BaseTuner):
         assert script is not None  # validated already
 
         import time
+
         run_start_time = time.time()
 
         untuned_csv, key_source = self._resolve_untuned_csv()
@@ -307,12 +300,17 @@ class FmoeCKTuner(BaseTuner):
         # below to activate mp_tuner's per-candidate GPU-fault isolation -- MoE
         # asm candidates fault on gfx950, and without --timeout the run hangs.
         base_args = [
-            "-o2", str(profile_csv),
-            "--mp", str(self.ctx.mp),
+            "-o2",
+            str(profile_csv),
+            "--mp",
+            str(self.ctx.mp),
             "--compare",
-            "--iters", str(self.ctx.iters),
-            "--warmup", str(self.ctx.warmup),
-            "--min_improvement_pct", str(self.ctx.min_improvement_pct),
+            "--iters",
+            str(self.ctx.iters),
+            "--warmup",
+            str(self.ctx.warmup),
+            "--min_improvement_pct",
+            str(self.ctx.min_improvement_pct),
             "-v",
         ]
 
@@ -323,21 +321,34 @@ class FmoeCKTuner(BaseTuner):
         if _tr.is_isolation_enabled():
             blocklist = _tr.FaultBlocklist(
                 getattr(self.ctx, "faulted_blocklist_path", None),
-                {"gpu_type": getattr(self.ctx, "gpu_type", ""), "quant_type": getattr(self.ctx, "quant_type", ""),
-                 "tp": getattr(self.ctx, "tp", 1), "tuner": self.name},
+                {
+                    "gpu_type": getattr(self.ctx, "gpu_type", ""),
+                    "quant_type": getattr(self.ctx, "quant_type", ""),
+                    "tp": getattr(self.ctx, "tp", 1),
+                    "tuner": self.name,
+                },
             )
             rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-                script=str(script), base_args=base_args, input_csv=untuned_csv,
-                tuned_stem=tuned_csv.stem, work_dir=self.work_dir, aiter_root=aiter_root,
-                outer_timeout_s=self.ctx.timeout_s, task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-                gpu_ids=getattr(self.ctx, "gpu_ids", "") or "", blocklist=blocklist,
+                script=str(script),
+                base_args=base_args,
+                input_csv=untuned_csv,
+                tuned_stem=tuned_csv.stem,
+                work_dir=self.work_dir,
+                aiter_root=aiter_root,
+                outer_timeout_s=self.ctx.timeout_s,
+                task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+                gpu_ids=getattr(self.ctx, "gpu_ids", "") or "",
+                blocklist=blocklist,
             )
         else:
             cmd = _tr.with_task_timeout(
                 ["python3", str(script), "-i", str(untuned_csv), "-o", str(tuned_csv), *base_args]
             )
             rc, stdout, stderr = run_subprocess(
-                cmd, cwd=cwd, timeout_s=self.ctx.timeout_s, log_file=self.work_dir / "tune.log",
+                cmd,
+                cwd=cwd,
+                timeout_s=self.ctx.timeout_s,
+                log_file=self.work_dir / "tune.log",
             )
 
         if rc == 124:
@@ -390,9 +401,7 @@ class FmoeCKTuner(BaseTuner):
         # candidate-CSV fallback row has speedup=None, and `None > 1.0` raises
         # TypeError, so filter to real numbers before comparing.
         speedups = [
-            r["speedup"]
-            for r in shape_results
-            if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
+            r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
         ]
 
         total = len(shape_results)

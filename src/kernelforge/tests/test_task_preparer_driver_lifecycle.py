@@ -28,9 +28,7 @@ import pytest
 
 from kernelforge.loop import task_preparer
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("git") is None, reason="git not available"
-)
+pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 
 
 # A driver that loads its case table from the invocation specification at RUNTIME
@@ -94,9 +92,7 @@ def _init_repo(root: Path) -> None:
     task_preparer._git(root, "config", "user.email", "t@t")
     task_preparer._git(root, "config", "user.name", "t")
     task_preparer._git(root, "add", "-A")
-    task_preparer._git(
-        root, "commit", "-q", "--allow-empty", "-m", "task baseline"
-    )
+    task_preparer._git(root, "commit", "-q", "--allow-empty", "-m", "task baseline")
 
 
 def _runtime_spec_path(prompt: str) -> str:
@@ -106,9 +102,7 @@ def _runtime_spec_path(prompt: str) -> str:
     statement rather than by a Read instruction; an oversized spec that cannot
     be inlined still falls back to naming it for a Read.
     """
-    match = re.search(r"`\./([^`]+)` is DURABLE", prompt) or re.search(
-        r"Read on `\./([^`]+)`", prompt
-    )
+    match = re.search(r"`\./([^`]+)` is DURABLE", prompt) or re.search(r"Read on `\./([^`]+)`", prompt)
     assert match, prompt
     return match.group(1)
 
@@ -160,8 +154,7 @@ def _prepare_with_spec_reading_driver(
 
     async def executing_preflight(driver_script, *_args, **_kwargs):
         """Validate the driver the way the loop does: by running it."""
-        bench = _run_driver(Path(driver_script), "--bench-mode", "--warmup", "1",
-                            "--iters", "1")
+        bench = _run_driver(Path(driver_script), "--bench-mode", "--warmup", "1", "--iters", "1")
         captured["preflight_bench"] = bench
         case_ids = re.findall(r"case_ms:\s*(\S+)", bench.stdout)
         ok = bench.returncode == 0 and len(case_ids) == 2
@@ -175,9 +168,7 @@ def _prepare_with_spec_reading_driver(
             details={"bench": {"case_count": len(case_ids)}},
         )
 
-    monkeypatch.setattr(
-        task_preparer, "_materialize_reference", fake_materialize_reference
-    )
+    monkeypatch.setattr(task_preparer, "_materialize_reference", fake_materialize_reference)
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", fake_agent)
     monkeypatch.setattr(task_preparer, "_preflight_async", executing_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
@@ -215,8 +206,7 @@ def test_prepared_driver_still_runs_after_preparation(tmp_path, monkeypatch):
     result = prepared["result"]
 
     assert result.ok is True, result.message
-    bench = _run_driver(prepared["driver"], "--bench-mode", "--warmup", "1",
-                        "--iters", "1")
+    bench = _run_driver(prepared["driver"], "--bench-mode", "--warmup", "1", "--iters", "1")
     assert bench.returncode == 0, bench.stdout + bench.stderr
     assert re.findall(r"case_ms:\s*(\S+)", bench.stdout) == ["case_001", "case_002"]
 
@@ -234,9 +224,7 @@ def test_prepared_runtime_inputs_are_committed_as_pristine(tmp_path, monkeypatch
     assert spec_rel in tracked_paths
 
 
-def test_authoring_scaffolding_is_gone_before_preflight_validates(
-    tmp_path, monkeypatch
-):
+def test_authoring_scaffolding_is_gone_before_preflight_validates(tmp_path, monkeypatch):
     """Preflight must judge the driver without the authoring-only bundle."""
     prepared = _prepare_with_spec_reading_driver(tmp_path, monkeypatch)
     workspace = prepared["workspace"]
@@ -255,13 +243,9 @@ def test_prompt_marks_the_reference_bundle_as_temporary(tmp_path, monkeypatch):
     assert "DURABLE" in prompt
 
 
-def test_undurable_spec_fails_loudly_instead_of_committing_a_broken_driver(
-    tmp_path, monkeypatch
-):
+def test_undurable_spec_fails_loudly_instead_of_committing_a_broken_driver(tmp_path, monkeypatch):
     """A runtime input that cannot join the pristine commit must abort prep."""
-    prepared = _prepare_with_spec_reading_driver(
-        tmp_path, monkeypatch, gitignore="invocation_spec_*.json\n"
-    )
+    prepared = _prepare_with_spec_reading_driver(tmp_path, monkeypatch, gitignore="invocation_spec_*.json\n")
     result = prepared["result"]
     workspace = prepared["workspace"]
 
@@ -274,9 +258,7 @@ def test_undurable_spec_fails_loudly_instead_of_committing_a_broken_driver(
     assert len([line for line in log.splitlines() if line.strip()]) == 1
 
 
-def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(
-    tmp_path, monkeypatch
-):
+def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(tmp_path, monkeypatch):
     """A removal that only half worked breaks the invariant in both directions.
 
     Preflight would judge the driver against scaffolding the prep commit then
@@ -284,6 +266,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(
     commit -- and neither is visible afterwards, which is why the retirement has to
     be checked rather than attempted.
     """
+
     def leave_the_bundle_behind(mp):
         real_rmtree = task_preparer._safe_rmtree
 
@@ -294,9 +277,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(
 
         mp.setattr(task_preparer, "_safe_rmtree", keep_reference_bundle)
 
-    prepared = _prepare_with_spec_reading_driver(
-        tmp_path, monkeypatch, extra_patch=leave_the_bundle_behind
-    )
+    prepared = _prepare_with_spec_reading_driver(tmp_path, monkeypatch, extra_patch=leave_the_bundle_behind)
     result = prepared["result"]
     workspace = prepared["workspace"]
 
@@ -311,9 +292,7 @@ def test_surviving_scaffolding_aborts_preparation_instead_of_being_committed(
     assert task_preparer.REFERENCE_SUBDIR not in tracked
 
 
-def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(
-    tmp_path, monkeypatch, caplog
-):
+def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(tmp_path, monkeypatch, caplog):
     """The caller's list is the one list, so it survives a materialization failure.
 
     Deriving the suite from the materialized copy lost the declared-case gate, the
@@ -348,9 +327,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(
         "_materialize_invocation_spec",
         lambda *_args, **_kwargs: (None, ""),
     )
-    monkeypatch.setattr(
-        task_preparer, "_materialize_reference", lambda _workspace: None
-    )
+    monkeypatch.setattr(task_preparer, "_materialize_reference", lambda _workspace: None)
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", fake_agent)
     monkeypatch.setattr(task_preparer, "_preflight_async", recording_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)
@@ -377,9 +354,7 @@ def test_a_declared_suite_still_gates_preflight_when_the_spec_cannot_be_staged(
     assert "could not materialize the invocation specification" in caplog.text
 
 
-def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(
-    tmp_path, monkeypatch, caplog
-):
+def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(tmp_path, monkeypatch, caplog):
     """Attempt 2 must not be told to Read a contract that is no longer there.
 
     ``_open_scaffold`` discarded the result, so the note computed once at the top
@@ -417,9 +392,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(
             reasons=["bench produced no timing"],
         )
 
-    monkeypatch.setattr(
-        task_preparer, "_materialize_reference", flaky_materialize_reference
-    )
+    monkeypatch.setattr(task_preparer, "_materialize_reference", flaky_materialize_reference)
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", fake_agent)
     monkeypatch.setattr(task_preparer, "_preflight_async", failing_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 2)
@@ -449,7 +422,7 @@ def test_a_failed_rematerialization_stops_advertising_the_absent_bundle(
 
 
 def test_git_indexed_separates_not_indexed_from_could_not_determine(tmp_path):
-    """"Not staged" and "never asked" send the operator to different places.
+    """ "Not staged" and "never asked" send the operator to different places.
 
     Collapsing both into ``False`` made the failure blame the workspace's ignore
     rules for a query that had not run.
@@ -526,9 +499,7 @@ def test_external_bundle_reuses_its_own_spec_beside_the_driver(tmp_path, monkeyp
             reasons=[] if ok else [f"bench exited {bench.returncode}"],
         )
 
-    monkeypatch.setattr(
-        task_preparer, "_materialize_reference", fake_materialize_reference
-    )
+    monkeypatch.setattr(task_preparer, "_materialize_reference", fake_materialize_reference)
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", fake_agent)
     monkeypatch.setattr(task_preparer, "_preflight_async", executing_preflight)
     monkeypatch.setattr(task_preparer, "PREPARE_MAX_ATTEMPTS", 1)

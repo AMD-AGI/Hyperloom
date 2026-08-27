@@ -49,9 +49,7 @@ Retime the MFMA issue schedule.
 
 def test_a_compacted_session_publishes_its_plan_and_not_its_recap():
     """The summary belongs to the session, not to the answer it went on to give."""
-    text = validated_agent_text(
-        AgentRunResult(text=_COMPACTED), role="orchestration lane 1 synthesis"
-    )
+    text = validated_agent_text(AgentRunResult(text=_COMPACTED), role="orchestration lane 1 synthesis")
 
     assert text.startswith("# Lane plan")
     assert "Retime the MFMA issue schedule." in text
@@ -66,9 +64,7 @@ def test_a_compaction_is_reported_because_the_plan_came_from_a_lossy_view(caplog
     through a summary of it, which is worth knowing when the plan disappoints.
     """
     with caplog.at_level("WARNING"):
-        validated_agent_text(
-            AgentRunResult(text=_COMPACTED), role="orchestration lane 1 synthesis"
-        )
+        validated_agent_text(AgentRunResult(text=_COMPACTED), role="orchestration lane 1 synthesis")
 
     assert "orchestration lane 1 synthesis" in caplog.text
     assert "ran out of context" in caplog.text
@@ -96,6 +92,4 @@ def test_a_half_written_compaction_marker_is_left_alone():
         "out of context.\n\n# Lane plan\n\nRetime the schedule."
     )
 
-    assert validated_agent_text(
-        AgentRunResult(text=truncated), role="synthesis"
-    ) == truncated
+    assert validated_agent_text(AgentRunResult(text=truncated), role="synthesis") == truncated

@@ -103,9 +103,7 @@ def test_list_repos_reads_the_bare_array_shape(monkeypatch):
         lambda url: _FakeResponse(json.dumps([{"repo_name": "ROCm/aiter"}])),
     )
 
-    assert PRMonitorClient("https://host/pr-monitor").list_repos() == [
-        {"repo_name": "ROCm/aiter"}
-    ]
+    assert PRMonitorClient("https://host/pr-monitor").list_repos() == [{"repo_name": "ROCm/aiter"}]
 
 
 def test_get_returns_payload_and_builds_versioned_url(monkeypatch):
@@ -197,11 +195,13 @@ def test_get_many_returns_one_outcome_per_request(monkeypatch):
     _install(monkeypatch, handler)
     client = PRMonitorClient("https://host/pr-monitor")
 
-    outcomes = client.get_many([
-        ("/repos/o/r/prs/1", None),
-        ("/repos/o/r/prs/2", None),
-        ("/repos/o/r/prs/3", None),
-    ])
+    outcomes = client.get_many(
+        [
+            ("/repos/o/r/prs/1", None),
+            ("/repos/o/r/prs/2", None),
+            ("/repos/o/r/prs/3", None),
+        ]
+    )
     by_path = {o.path: o for o in outcomes}
 
     assert by_path["/repos/o/r/prs/1"].error is None
@@ -253,6 +253,7 @@ def test_get_many_returns_when_the_budget_expires(monkeypatch):
 
 def test_get_many_keeps_results_a_slow_sibling_would_have_discarded(monkeypatch):
     """One slow request must not invalidate the answers already in hand."""
+
     def handler(url):
         if url.endswith("/1"):
             time.sleep(5.0)
@@ -261,9 +262,7 @@ def test_get_many_keeps_results_a_slow_sibling_would_have_discarded(monkeypatch)
     _install(monkeypatch, handler)
     client = PRMonitorClient("https://host/pr-monitor")
 
-    outcomes = client.get_many(
-        [(f"/repos/o/r/prs/{n}", None) for n in (1, 2, 3)], budget_sec=0.3
-    )
+    outcomes = client.get_many([(f"/repos/o/r/prs/{n}", None) for n in (1, 2, 3)], budget_sec=0.3)
 
     assert isinstance(outcomes[0].error, PRTransportError)
     assert outcomes[1].payload["url"].endswith("/2")
@@ -383,9 +382,7 @@ def test_get_many_preserves_input_order(monkeypatch):
     """Preserve order when paths are identical and parameters differ."""
     _install(monkeypatch, lambda url: _FakeResponse(json.dumps({"url": url})))
     client = PRMonitorClient("https://host/pr-monitor")
-    requests = [
-        ("/repos/o/r/prs", {"file_path": f"f{i}.py"}) for i in range(6)
-    ]
+    requests = [("/repos/o/r/prs", {"file_path": f"f{i}.py"}) for i in range(6)]
 
     outcomes = client.get_many(requests)
 
@@ -417,9 +414,7 @@ def test_recent_merged_fallback_defaults_to_a_small_page(monkeypatch):
 def test_recent_pr_404_is_normal_absence(monkeypatch):
     _install(monkeypatch, lambda url: (_ for _ in ()).throw(_http_error(404)))
 
-    assert PRMonitorClient("https://host/pr-monitor").list_recent_prs(
-        "ROCm/aiter"
-    ) == []
+    assert PRMonitorClient("https://host/pr-monitor").list_recent_prs("ROCm/aiter") == []
 
 
 def test_healthz_uses_the_versioned_path(monkeypatch):

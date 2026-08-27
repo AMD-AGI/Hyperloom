@@ -33,17 +33,11 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         iteration: int | None = None,
     ) -> AnalysisRefreshDecision:
         state = self.run_state.analysis
-        planning_iteration = (
-            self.run_state.iteration
-            if iteration is None
-            else int(iteration)
-        )
+        planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
         decision = decide_analysis_refresh(
             canonical_commit=context.analysis_commit,
             evidence_commit=state.evidence_commit,
-            evidence_mean_case_speedup=(
-                state.evidence_mean_case_speedup
-            ),
+            evidence_mean_case_speedup=(state.evidence_mean_case_speedup),
             evidence_status=state.evidence_status,
             current_mean_case_speedup=self.best_mean_case_speedup,
             supervisor_due=supervisor_due,
@@ -63,11 +57,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
     ) -> None:
         if getattr(self, "state_store", None) is None:
             return
-        planning_iteration = (
-            self.run_state.iteration
-            if iteration is None
-            else int(iteration)
-        )
+        planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
         try:
             self.state_store.append_event(
                 make_event(
@@ -76,27 +66,18 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     action="refresh" if decision.refresh else "reuse",
                     reasons=list(decision.reasons),
                     canonical_commit=context.analysis_commit,
-                    evidence_commit=(
-                        self.run_state.analysis.evidence_commit
-                    ),
+                    evidence_commit=(self.run_state.analysis.evidence_commit),
                     evidence_stale=decision.evidence_stale,
                     gain_since_evidence=decision.gain_since_evidence,
                     cumulative_diff_path=context.cumulative_diff_path,
                     cumulative_diff_error=context.cumulative_diff_error,
                     refresh_threshold=ANALYSIS_REFRESH_THRESHOLD,
-                    current_mean_case_speedup=(
-                        self.best_mean_case_speedup
-                    ),
-                    evidence_mean_case_speedup=(
-                        self.run_state.analysis.evidence_mean_case_speedup
-                    ),
+                    current_mean_case_speedup=(self.best_mean_case_speedup),
+                    evidence_mean_case_speedup=(self.run_state.analysis.evidence_mean_case_speedup),
                 )
             )
         except Exception as error:
-            message = (
-                "persist analysis refresh decision "
-                f"for iteration {planning_iteration}: {error}"
-            )
+            message = f"persist analysis refresh decision for iteration {planning_iteration}: {error}"
             self.persistence_degraded = True
             self.persistence_errors.append(message)
             self.persistence_errors = self.persistence_errors[-10:]
@@ -110,11 +91,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         iteration: int | None = None,
     ):
         """Refresh Analysis when policy requires it, otherwise reuse evidence."""
-        planning_iteration = (
-            self.run_state.iteration
-            if iteration is None
-            else int(iteration)
-        )
+        planning_iteration = self.run_state.iteration if iteration is None else int(iteration)
         context = self._build_orchestration_context()
         restore_published = getattr(
             analysis_service,
@@ -128,16 +105,12 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
         ):
             restored = restore_published(
                 context,
-                evidence_commit=(
-                    self.run_state.analysis.evidence_commit
-                ),
+                evidence_commit=(self.run_state.analysis.evidence_commit),
             )
             if restored is not context:
                 self._active_analysis_context = restored
         if analysis_service is None:
-            self._active_analysis_context = self._apply_last_analysis_evidence(
-                context
-            )
+            self._active_analysis_context = self._apply_last_analysis_evidence(context)
             return self._active_analysis_context
 
         decision = self._analysis_refresh_decision(
@@ -159,28 +132,15 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             self._active_analysis_context = context
             return context
 
-        previous_commit = (
-            self.run_state.analysis.evidence_commit
-            or self._last_published_analysis_commit
-        )
+        previous_commit = self.run_state.analysis.evidence_commit or self._last_published_analysis_commit
         incremental = None
-        if (
-            not context.cumulative_diff_error
-            and previous_commit != context.analysis_commit
-        ):
+        if not context.cumulative_diff_error and previous_commit != context.analysis_commit:
             incremental = self._incremental_analysis_input(
                 current_commit=context.analysis_commit,
                 previous_commit=previous_commit,
             )
-        mode = (
-            "cumulative post-KEEP incremental"
-            if incremental is not None
-            else "commit-bound"
-        )
-        print(
-            f"  [analysis] building {mode} analysis bundle "
-            f"({', '.join(decision.reasons)})..."
-        )
+        mode = "cumulative post-KEEP incremental" if incremental is not None else "commit-bound"
+        print(f"  [analysis] building {mode} analysis bundle ({', '.join(decision.reasons)})...")
 
         analysis_state = self.run_state.analysis
         analysis_state.last_attempt_commit = context.analysis_commit
@@ -200,24 +160,13 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             )
             outcome = getattr(self._analysis_bundle, "outcome", None)
             published = (
-                outcome is not None
-                and outcome.checkpoint_level == "published"
-            ) or self._published_analysis_bundle_root(
-                context.analysis_commit
-            ) is not None
+                outcome is not None and outcome.checkpoint_level == "published"
+            ) or self._published_analysis_bundle_root(context.analysis_commit) is not None
             manifest = getattr(self._analysis_bundle, "manifest", {}) or {}
-            manifest_status = str(
-                manifest.get("status") or "READY"
-            ).upper()
-            available_tier = str(
-                getattr(outcome, "available_tier", "") or ""
-            )
-            upgrade_exhausted = bool(
-                getattr(outcome, "upgrade_exhausted", False)
-            )
-            profiling_enabled = bool(
-                getattr(analysis_service, "profiling_enabled", True)
-            )
+            manifest_status = str(manifest.get("status") or "READY").upper()
+            available_tier = str(getattr(outcome, "available_tier", "") or "")
+            upgrade_exhausted = bool(getattr(outcome, "upgrade_exhausted", False))
+            profiling_enabled = bool(getattr(analysis_service, "profiling_enabled", True))
             if not profiling_enabled:
                 evidence_status = available_tier or "static"
                 attempt_status = "success"
@@ -232,13 +181,9 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                 attempt_status = "success"
 
             if published:
-                self._last_published_analysis_commit = (
-                    context.analysis_commit
-                )
+                self._last_published_analysis_commit = context.analysis_commit
                 analysis_state.evidence_commit = context.analysis_commit
-                analysis_state.evidence_mean_case_speedup = (
-                    self.best_mean_case_speedup or 1.0
-                )
+                analysis_state.evidence_mean_case_speedup = self.best_mean_case_speedup or 1.0
                 analysis_state.evidence_status = evidence_status
             analysis_state.last_attempt_status = attempt_status
             if getattr(self, "state_store", None) is not None:
@@ -247,9 +192,7 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                     "analysis_commit": context.analysis_commit,
                     "artifact_path": str(self._analysis_bundle.root),
                     "refresh_reasons": list(decision.reasons),
-                    "mean_case_speedup_at_collection": (
-                        self.best_mean_case_speedup or 1.0
-                    ),
+                    "mean_case_speedup_at_collection": (self.best_mean_case_speedup or 1.0),
                 }
                 if outcome is not None:
                     event_payload.update(outcome.to_dict())
@@ -326,20 +269,13 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
                 try:
                     self.state_store.save(self.run_state)
                 except Exception as error:
-                    message = (
-                        "persist Analysis refresh state for iteration "
-                        f"{planning_iteration}: {error}"
-                    )
+                    message = f"persist Analysis refresh state for iteration {planning_iteration}: {error}"
                     self.persistence_degraded = True
                     self.persistence_errors.append(message)
                     self.persistence_errors = self.persistence_errors[-10:]
                     log.warning(message, exc_info=True)
 
-        if (
-            self._analysis_bundle is not None
-            and self._analysis_bundle.analysis_commit
-            == context.analysis_commit
-        ):
+        if self._analysis_bundle is not None and self._analysis_bundle.analysis_commit == context.analysis_commit:
             # A published bundle, including PARTIAL, is the evidence view for
             # its own commit. Do not seed it with refs from the prior evidence
             # commit: that would report a current/non-stale commit while quietly
@@ -361,18 +297,13 @@ class AnalysisRuntimeMixin(AnalysisEvidenceMixin):
             canonical_commit=context.analysis_commit,
             evidence_commit=analysis_state.evidence_commit,
             evidence_stale=bool(
-                analysis_state.evidence_commit
-                and analysis_state.evidence_commit
-                != context.analysis_commit
+                analysis_state.evidence_commit and analysis_state.evidence_commit != context.analysis_commit
             ),
             evidence_status=analysis_state.evidence_status,
-            evidence_mean_case_speedup=(
-                analysis_state.evidence_mean_case_speedup
-            ),
+            evidence_mean_case_speedup=(analysis_state.evidence_mean_case_speedup),
             current_mean_case_speedup=self.best_mean_case_speedup,
             cumulative_diff_path=cumulative_diff.path,
             cumulative_diff_error=cumulative_diff.error,
         )
         self._active_analysis_context = context
         return context
-

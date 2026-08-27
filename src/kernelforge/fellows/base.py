@@ -79,8 +79,7 @@ def build_single_fellow_prompt(
     # Experimental ablation-only knob (off by default): see Config.include_mori_kb.
     include_mori = bool(getattr(config, "include_mori_kb", False))
 
-    knowledge = build_forge_knowledge(
-        root, language=language, include_aiter=include_aiter, include_mori=include_mori)
+    knowledge = build_forge_knowledge(root, language=language, include_aiter=include_aiter, include_mori=include_mori)
 
     build_prompt = importlib.import_module(module_path).build_system_prompt
     return build_prompt(config.gpu_target, knowledge)

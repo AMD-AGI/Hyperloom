@@ -30,9 +30,7 @@ def test_sidecar_records_exposure_without_parsing_free_form_lessons(tmp_path):
         experiment_id="exp-1",
     )
 
-    payload = json.loads(
-        (refs_dir(str(tmp_path)) / "provenance.json").read_text()
-    )
+    payload = json.loads((refs_dir(str(tmp_path)) / "provenance.json").read_text())
     assert payload["schema_version"] == 1
     assert payload["winning_iteration"] == 2
     assert payload["experiment_id"] == "exp-1"

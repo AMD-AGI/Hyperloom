@@ -80,9 +80,7 @@ class _DeadlineBackport:
         # Our cancellation surfaces as CancelledError; convert it to the same
         # TimeoutError asyncio.timeout raises so the caller's ``except Exception``
         # catches it (CancelledError is a BaseException on 3.10).
-        if self._expired and exc_type is not None and issubclass(
-            exc_type, asyncio.CancelledError
-        ):
+        if self._expired and exc_type is not None and issubclass(exc_type, asyncio.CancelledError):
             raise asyncio.TimeoutError from exc
         return False
 
@@ -134,9 +132,7 @@ async def _reap_workspace_processes(cwd: str) -> ReapReport:
     campaign's to kill at all -- comes back in the report, because the caller is
     the one that can decline to measure.
     """
-    return await reap_processes_under(
-        cwd, description=f"left running by a timed-out session in {cwd}"
-    )
+    return await reap_processes_under(cwd, description=f"left running by a timed-out session in {cwd}")
 
 
 class ClaudeBackendError(AgentProviderError):
@@ -205,9 +201,7 @@ def _sdk_hooks(hooks: AgentHooks, hook_type: Any) -> dict[str, list[Any]]:
     )
     for name, entries in groups:
         if entries:
-            translated[name] = [
-                _hook_matcher(entry, hook_type) for entry in entries
-            ]
+            translated[name] = [_hook_matcher(entry, hook_type) for entry in entries]
     return translated
 
 
@@ -216,9 +210,7 @@ def _load_claude_sdk() -> tuple[Any, Any]:
     try:
         from claude_agent_sdk import ClaudeAgentOptions, query
     except ImportError as exc:
-        raise ClaudeUnavailableError(
-            "claude-agent-sdk is not installed; install the 'claude' extra"
-        ) from exc
+        raise ClaudeUnavailableError("claude-agent-sdk is not installed; install the 'claude' extra") from exc
     return query, ClaudeAgentOptions
 
 
@@ -291,7 +283,8 @@ def _prepare_claude_environment() -> None:
             # trace in the first place.
             log.info(
                 "ANTHROPIC_BASE_URL %s -> %s (the CLI appends /v1/messages itself)",
-                configured, normalized,
+                configured,
+                normalized,
             )
             os.environ["ANTHROPIC_BASE_URL"] = normalized
     if gateway.headers:
@@ -333,15 +326,9 @@ class ClaudeBackend:
         if not explicit:
             return
         candidate = Path(explicit).expanduser()
-        executable = (
-            str(candidate)
-            if candidate.is_file() and os.access(candidate, os.X_OK)
-            else shutil.which(explicit)
-        )
+        executable = str(candidate) if candidate.is_file() and os.access(candidate, os.X_OK) else shutil.which(explicit)
         if not executable:
-            raise ClaudeUnavailableError(
-                f"Claude CLI is not executable: {explicit}"
-            )
+            raise ClaudeUnavailableError(f"Claude CLI is not executable: {explicit}")
         try:
             version = subprocess.run(
                 [executable, "--version"],
@@ -350,16 +337,11 @@ class ClaudeBackend:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise ClaudeUnavailableError(
-                f"Claude CLI version check failed: {exc}"
-            ) from exc
-        version_text = b"\n".join(
-            [version.stdout, version.stderr]
-        ).decode(errors="replace").strip()
+            raise ClaudeUnavailableError(f"Claude CLI version check failed: {exc}") from exc
+        version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
         if version.returncode != 0 or "claude" not in version_text.lower():
             raise ClaudeUnavailableError(
-                f"configured CLI does not appear to be Claude: {explicit}; "
-                f"--version returned {version_text!r}"
+                f"configured CLI does not appear to be Claude: {explicit}; --version returned {version_text!r}"
             )
 
     def probe(
@@ -404,25 +386,18 @@ class ClaudeBackend:
                 check=False,
             )
         except Exception as error:
-            raise ClaudeUnavailableError(
-                f"Claude model probe failed for {selected_model!r}: {error}"
-            ) from error
+            raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {error}") from error
         if completed.returncode != 0:
             detail = (completed.stderr or completed.stdout).strip()[-1200:]
-            raise ClaudeUnavailableError(
-                f"Claude model probe failed for {selected_model!r}: {detail}"
-            )
+            raise ClaudeUnavailableError(f"Claude model probe failed for {selected_model!r}: {detail}")
         try:
             payload = json.loads(completed.stdout)
         except json.JSONDecodeError as error:
-            raise ClaudeUnavailableError(
-                f"Claude model probe returned invalid JSON for {selected_model!r}"
-            ) from error
+            raise ClaudeUnavailableError(f"Claude model probe returned invalid JSON for {selected_model!r}") from error
         text = str(payload.get("result") or "").strip()
         if text != "OK":
             raise ClaudeUnavailableError(
-                f"Claude model probe returned an unexpected response for "
-                f"{selected_model!r}: {text[:200]!r}"
+                f"Claude model probe returned an unexpected response for {selected_model!r}: {text[:200]!r}"
             )
         return AgentRunResult(text=text, end_reason="agent_stopped")
 
@@ -455,10 +430,7 @@ class ClaudeBackend:
             allowed_tools.extend(policy.extra_tools)
             options.update(
                 allowed_tools=list(dict.fromkeys(allowed_tools)),
-                permission_mode=(
-                    policy.permission_mode
-                    or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")
-                ),
+                permission_mode=(policy.permission_mode or os.environ.get("FORGE_PERMISSION_MODE", "acceptEdits")),
             )
             if policy.max_turns is not None:
                 options["max_turns"] = policy.max_turns
@@ -487,9 +459,7 @@ class ClaudeBackend:
                     description=role.description,
                     prompt=role.instructions,
                     tools=(
-                        self._role_tools(role.tool_policy)
-                        if role.tool_policy is not None
-                        else ["Read", "Grep", "Glob"]
+                        self._role_tools(role.tool_policy) if role.tool_policy is not None else ["Read", "Grep", "Glob"]
                     ),
                     model=role.model or None,
                 )
@@ -657,33 +627,29 @@ class ClaudeBackend:
                                 if hasattr(block, "text"):
                                     text_parts.append(block.text)
                                 elif block.__class__.__name__ == "ToolUseBlock":
-                                    tool_calls.append((
-                                        getattr(block, "name", "?"),
-                                        getattr(block, "input", {}) or {},
-                                    ))
+                                    tool_calls.append(
+                                        (
+                                            getattr(block, "name", "?"),
+                                            getattr(block, "input", {}) or {},
+                                        )
+                                    )
             except Exception as exc:  # noqa: BLE001 - convert to a resumable result
                 if deadline.expired():
                     reap_on_exit = True
                     if not session_id:
                         rollback_on_exit = True
                         raise ClaudeTimeoutError(
-                            "Claude session timed out after "
-                            f"{spec.timeout_sec}s before it established a session"
+                            f"Claude session timed out after {spec.timeout_sec}s before it established a session"
                         ) from exc
                     timed_out = True
-                    stream_error = TimeoutError(
-                        f"Claude session timed out after {spec.timeout_sec}s"
-                    )
+                    stream_error = TimeoutError(f"Claude session timed out after {spec.timeout_sec}s")
                     log.warning(
-                        "Claude session %s timed out after %ss; preserving the "
-                        "resume handle and reaping its leftovers",
+                        "Claude session %s timed out after %ss; preserving the resume handle and reaping its leftovers",
                         session_id,
                         spec.timeout_sec,
                     )
                     if spec.progress_log is not None:
-                        spec.progress_log.append(
-                            f"end: timeout {spec.timeout_sec}s"
-                        )
+                        spec.progress_log.append(f"end: timeout {spec.timeout_sec}s")
                 else:
                     if not session_id:
                         rollback_on_exit = True
@@ -691,16 +657,13 @@ class ClaudeBackend:
                     stream_error = exc
                     if not _is_turn_cap_error(exc):
                         log.warning(
-                            "Claude SDK stream failed after session %s; "
-                            "preserving the resume handle (%s: %s)",
+                            "Claude SDK stream failed after session %s; preserving the resume handle (%s: %s)",
                             session_id,
                             type(exc).__name__,
                             exc,
                         )
                     if spec.progress_log is not None:
-                        spec.progress_log.append(
-                            f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}"
-                        )
+                        spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
         except asyncio.CancelledError:
             rollback_on_exit = True
             raise

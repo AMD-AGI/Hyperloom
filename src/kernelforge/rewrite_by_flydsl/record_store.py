@@ -325,9 +325,7 @@ def _process_lock(path: Path) -> threading.RLock:
 def _identity_file_lock(path: Path, *, exclusive: bool) -> Iterator[None]:
     """Hold one POSIX advisory lock for an identity."""
     if fcntl is None:
-        raise RewriteRecordError(
-            "local rewrite records require POSIX fcntl file locking"
-        )
+        raise RewriteRecordError("local rewrite records require POSIX fcntl file locking")
     flags = os.O_RDWR | os.O_CREAT
     flags |= getattr(os, "O_CLOEXEC", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
@@ -386,9 +384,7 @@ def _replace_directory(staging: Path, destination: Path) -> None:
     try:
         if destination.exists():
             if destination.is_symlink() or not destination.is_dir():
-                raise RewriteRecordError(
-                    f"existing rewrite session is not a safe directory: {destination}"
-                )
+                raise RewriteRecordError(f"existing rewrite session is not a safe directory: {destination}")
             backup = parent / f".{destination.name}.backup-{uuid.uuid4().hex}"
             os.replace(destination, backup)
             fsync_directory(parent)
@@ -429,13 +425,9 @@ def _validate_session_envelope(
     recorded_canonical = str(envelope.get("canonical_id") or "")
     recorded_session = str(envelope.get("session_id") or "")
     if recorded_canonical != canonical_id:
-        raise RewriteRecordError(
-            f"session canonical id mismatch: {recorded_canonical!r} != {canonical_id!r}"
-        )
+        raise RewriteRecordError(f"session canonical id mismatch: {recorded_canonical!r} != {canonical_id!r}")
     if recorded_session != session_id:
-        raise RewriteRecordError(
-            f"session id mismatch: {recorded_session!r} != {session_id!r}"
-        )
+        raise RewriteRecordError(f"session id mismatch: {recorded_session!r} != {session_id!r}")
 
 
 class KBStoreRewriteRecords:
@@ -493,9 +485,7 @@ class KBStoreRewriteRecords:
                     speedup=finite_speedup(knowledge.get("speedup")),
                     is_champion=item.get("is_champion") is True,
                     envelope=dict(envelope),
-                    measured_speedup=finite_speedup(
-                        knowledge.get(MEASURED_SPEEDUP_KEY)
-                    ),
+                    measured_speedup=finite_speedup(knowledge.get(MEASURED_SPEEDUP_KEY)),
                 )
             )
         return _rank(found, limit)
@@ -530,9 +520,7 @@ class KBStoreRewriteRecords:
                 expected: set[str] = set()
                 for item in raw_files:
                     if not isinstance(item, Mapping):
-                        raise RewriteRecordError(
-                            "session file manifest contains a non-object entry"
-                        )
+                        raise RewriteRecordError("session file manifest contains a non-object entry")
                     rel_path = safe_rel_path(item.get("path"))
                     if rel_path in expected:
                         raise RewriteRecordError(f"duplicate session artifact path: {rel_path}")
@@ -574,8 +562,7 @@ class KBStoreRewriteRecords:
             actual = _safe_files(staging / "files")
             if actual != expected:
                 raise RewriteRecordError(
-                    f"downloaded session files differ from manifest: {sorted(actual)!r} "
-                    f"!= {sorted(expected)!r}"
+                    f"downloaded session files differ from manifest: {sorted(actual)!r} != {sorted(expected)!r}"
                 )
             for generated in list(staging.iterdir()):
                 if generated.name == "files":
@@ -584,9 +571,7 @@ class KBStoreRewriteRecords:
                     shutil.rmtree(generated)
                 else:
                     generated.unlink()
-            service_fields = {
-                key: value for key, value in envelope.items() if key != "knowledge"
-            }
+            service_fields = {key: value for key, value in envelope.items() if key != "knowledge"}
             materialized = RewriteCandidate(
                 session_id=candidate.session_id,
                 knowledge=knowledge,
@@ -608,9 +593,7 @@ class KBStoreRewriteRecords:
         rel = safe_rel_path(rel_path)
         with tempfile.TemporaryDirectory(prefix="rewrite-read-") as temporary:
             destination = Path(temporary)
-            self._client.download_session(
-                canonical_id, session_id, destination, include_values=False
-            )
+            self._client.download_session(canonical_id, session_id, destination, include_values=False)
             path = destination / "files" / rel
             if not path.is_file() or path.is_symlink():
                 return b""
@@ -632,14 +615,10 @@ class KBStoreRewriteRecords:
                 kind=ARTIFACT_KIND,
                 meta={"schema": "kernelforge-rewrite-v1"},
             )
-        existing = _knowledge_of(
-            self._client.get_session(canonical_id, session_id)
-        ) or {}
+        existing = _knowledge_of(self._client.get_session(canonical_id, session_id)) or {}
         self._client.put_knowledge(
             canonical_id,
-            _with_preserved_measurement(
-                knowledge, recorded=existing.get(MEASURED_SPEEDUP_KEY)
-            ),
+            _with_preserved_measurement(knowledge, recorded=existing.get(MEASURED_SPEEDUP_KEY)),
             session_id=session_id,
             mode="replace",
         )
@@ -672,9 +651,7 @@ class KBStoreRewriteRecords:
         return finite_speedup(champion.get("value"))
 
     def promote(self, canonical_id: str, session_id: str, speedup: float) -> None:
-        self._client.set_champion(
-            canonical_id, session_id, metric=CHAMPION_METRIC, value=speedup
-        )
+        self._client.set_champion(canonical_id, session_id, metric=CHAMPION_METRIC, value=speedup)
 
 
 class LocalRewriteRecords:
@@ -698,9 +675,7 @@ class LocalRewriteRecords:
         identity_dir = self._identity_dir(canonical_id)
         identity_dir.mkdir(parents=True, exist_ok=True)
         if identity_dir.is_symlink() or not identity_dir.is_dir():
-            raise RewriteRecordError(
-                f"rewrite identity is not a safe directory: {identity_dir}"
-            )
+            raise RewriteRecordError(f"rewrite identity is not a safe directory: {identity_dir}")
         lock_path = identity_dir / LOCK_FILENAME
         with _process_lock(lock_path):
             with _identity_file_lock(lock_path, exclusive=exclusive):
@@ -721,14 +696,8 @@ class LocalRewriteRecords:
             sessions_dir = self._identity_dir(canonical_id) / "sessions"
             if not sessions_dir.is_dir() or sessions_dir.is_symlink():
                 return []
-            champion_id = str(
-                self._champion_unlocked(canonical_id).get("session_id") or ""
-            )
-            entries = [
-                path
-                for path in sessions_dir.iterdir()
-                if path.is_dir() and not path.is_symlink()
-            ]
+            champion_id = str(self._champion_unlocked(canonical_id).get("session_id") or "")
+            entries = [path for path in sessions_dir.iterdir() if path.is_dir() and not path.is_symlink()]
             found: list[RewriteCandidate] = []
             for entry in entries:
                 validate_session_id(entry.name)
@@ -747,9 +716,7 @@ class LocalRewriteRecords:
                         knowledge=knowledge,
                         speedup=finite_speedup(knowledge.get("speedup")),
                         is_champion=entry.name == champion_id,
-                        measured_speedup=finite_speedup(
-                            knowledge.get(MEASURED_SPEEDUP_KEY)
-                        ),
+                        measured_speedup=finite_speedup(knowledge.get(MEASURED_SPEEDUP_KEY)),
                     )
                 )
             return _rank(found, limit)
@@ -764,20 +731,14 @@ class LocalRewriteRecords:
         with self._identity_lock(canonical_id, exclusive=False):
             source = self._session_dir(canonical_id, candidate.session_id)
             if source.is_symlink() or not source.is_dir():
-                raise RewriteRecordError(
-                    f"candidate session is not a safe directory: {source}"
-                )
+                raise RewriteRecordError(f"candidate session is not a safe directory: {source}")
             document = source / KNOWLEDGE_FILENAME
             if document.is_symlink() or not document.is_file():
-                raise RewriteRecordError(
-                    f"candidate knowledge is not a regular file: {document}"
-                )
+                raise RewriteRecordError(f"candidate knowledge is not a regular file: {document}")
             try:
                 knowledge = json.loads(document.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as error:
-                raise RewriteRecordError(
-                    f"candidate knowledge is unreadable: {document}"
-                ) from error
+                raise RewriteRecordError(f"candidate knowledge is unreadable: {document}") from error
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
 
@@ -796,9 +757,7 @@ class LocalRewriteRecords:
                     knowledge=knowledge,
                     speedup=finite_speedup(knowledge.get("speedup")),
                     is_champion=candidate.is_champion,
-                    measured_speedup=finite_speedup(
-                        knowledge.get(MEASURED_SPEEDUP_KEY)
-                    ),
+                    measured_speedup=finite_speedup(knowledge.get(MEASURED_SPEEDUP_KEY)),
                 )
                 _write_recipe(
                     staging / RECIPE_FILENAME,
@@ -811,11 +770,7 @@ class LocalRewriteRecords:
 
     def read_bytes(self, canonical_id: str, session_id: str, rel_path: str) -> bytes:
         with self._identity_lock(canonical_id, exclusive=False):
-            path = (
-                self._session_dir(canonical_id, session_id)
-                / "files"
-                / safe_rel_path(rel_path)
-            )
+            path = self._session_dir(canonical_id, session_id) / "files" / safe_rel_path(rel_path)
             if not path.is_file() or path.is_symlink():
                 return b""
             return path.read_bytes()
@@ -848,9 +803,7 @@ class LocalRewriteRecords:
         files: Mapping[str, Path],
     ) -> None:
         safe_session_id = validate_session_id(session_id)
-        normalized_files = {
-            safe_rel_path(rel_path): Path(source) for rel_path, source in files.items()
-        }
+        normalized_files = {safe_rel_path(rel_path): Path(source) for rel_path, source in files.items()}
         if len(normalized_files) != len(files):
             raise RewriteRecordError("duplicate normalized artifact path")
         with self._identity_lock(canonical_id, exclusive=True):
@@ -858,18 +811,14 @@ class LocalRewriteRecords:
             sessions_dir = identity_dir / "sessions"
             sessions_dir.mkdir(parents=True, exist_ok=True)
             if sessions_dir.is_symlink() or not sessions_dir.is_dir():
-                raise RewriteRecordError(
-                    f"rewrite sessions path is not a safe directory: {sessions_dir}"
-                )
+                raise RewriteRecordError(f"rewrite sessions path is not a safe directory: {sessions_dir}")
             fsync_directory(identity_dir)
             session_dir = sessions_dir / safe_session_id
             payload = _with_preserved_measurement(
                 knowledge,
                 recorded=self._recorded_measurement(session_dir),
             )
-            staging = Path(
-                tempfile.mkdtemp(prefix=f".{safe_session_id}.staging-", dir=sessions_dir)
-            )
+            staging = Path(tempfile.mkdtemp(prefix=f".{safe_session_id}.staging-", dir=sessions_dir))
             try:
                 files_root = staging / "files"
                 files_root.mkdir()
@@ -878,9 +827,7 @@ class LocalRewriteRecords:
                 _write_json_synced(staging / KNOWLEDGE_FILENAME, payload)
                 if _safe_files(files_root) != set(normalized_files):
                     raise RewriteRecordError("staged rewrite artifacts failed validation")
-                loaded = json.loads(
-                    (staging / KNOWLEDGE_FILENAME).read_text(encoding="utf-8")
-                )
+                loaded = json.loads((staging / KNOWLEDGE_FILENAME).read_text(encoding="utf-8"))
                 if loaded != payload:
                     raise RewriteRecordError("staged rewrite knowledge failed validation")
                 _fsync_tree_directories(staging)
@@ -901,15 +848,11 @@ class LocalRewriteRecords:
             session_dir = self._session_dir(canonical_id, session_id)
             document_path = session_dir / KNOWLEDGE_FILENAME
             if document_path.is_symlink() or not document_path.is_file():
-                raise RewriteRecordError(
-                    f"candidate knowledge is not a regular file: {document_path}"
-                )
+                raise RewriteRecordError(f"candidate knowledge is not a regular file: {document_path}")
             try:
                 knowledge = json.loads(document_path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as error:
-                raise RewriteRecordError(
-                    f"candidate knowledge is unreadable: {document_path}"
-                ) from error
+                raise RewriteRecordError(f"candidate knowledge is unreadable: {document_path}") from error
             if not isinstance(knowledge, dict):
                 raise RewriteRecordError("candidate knowledge is not an object")
             knowledge[MEASURED_SPEEDUP_KEY] = measured

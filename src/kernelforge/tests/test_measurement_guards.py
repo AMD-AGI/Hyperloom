@@ -88,9 +88,7 @@ def test_a_high_speedup_measurement_is_believed(monkeypatch):
     assert required_keep_speedup(FROZEN_INCUMBENT, INCIDENT_SCORES) == pytest.approx(
         FROZEN_INCUMBENT * (1 + KEEP_MIN_MARGIN_FRACTION), abs=1e-6
     )
-    assert required_keep_speedup(FROZEN_INCUMBENT, INCIDENT_SCORES) == pytest.approx(
-        19.940854, abs=1e-6
-    )
+    assert required_keep_speedup(FROZEN_INCUMBENT, INCIDENT_SCORES) == pytest.approx(19.940854, abs=1e-6)
 
 
 def test_the_keep_margin_is_charged_in_units_of_the_measured_noise():
@@ -115,9 +113,7 @@ def test_the_keep_margin_is_charged_in_units_of_the_measured_noise():
     # this scatter the candidate's 0.15% gain is t = 8.8, certainly real, and
     # what the floor decides is whether a gain that small is worth a KEEP.
     assert (
-        keep_t_critical(KEEP_MEASUREMENT_COUNT)
-        * measurement_sigma(QUIET_SCORES)
-        / math.sqrt(KEEP_MEASUREMENT_COUNT)
+        keep_t_critical(KEEP_MEASUREMENT_COUNT) * measurement_sigma(QUIET_SCORES) / math.sqrt(KEEP_MEASUREMENT_COUNT)
         < FROZEN_INCUMBENT * KEEP_MIN_MARGIN_FRACTION
     )
     assert quiet_margin == pytest.approx(FROZEN_INCUMBENT * KEEP_MIN_MARGIN_FRACTION)
@@ -125,9 +121,7 @@ def test_the_keep_margin_is_charged_in_units_of_the_measured_noise():
     # bar and asks over four times the relative gain of the quiet kernel's
     # floor -- 0.475% against 0.1%.
     assert noisy_margin == pytest.approx(
-        keep_t_critical(KEEP_MEASUREMENT_COUNT)
-        * measurement_sigma(NOISY_SCORES)
-        / math.sqrt(KEEP_MEASUREMENT_COUNT)
+        keep_t_critical(KEEP_MEASUREMENT_COUNT) * measurement_sigma(NOISY_SCORES) / math.sqrt(KEEP_MEASUREMENT_COUNT)
     )
     assert noisy_margin / NOISY_INCUMBENT > 4 * (quiet_margin / FROZEN_INCUMBENT)
 
@@ -167,12 +161,11 @@ def test_near_identical_measurements_fall_back_to_the_floor():
     """
     freak_quiet = [2.500300, 2.500301, 2.500302]
 
-    assert keep_t_critical(KEEP_MEASUREMENT_COUNT) * measurement_sigma(
-        freak_quiet
-    ) / math.sqrt(KEEP_MEASUREMENT_COUNT) < 2.5 * KEEP_MIN_MARGIN_FRACTION
-    assert required_keep_speedup(2.5, freak_quiet) == pytest.approx(
-        2.5 * (1.0 + KEEP_MIN_MARGIN_FRACTION)
+    assert (
+        keep_t_critical(KEEP_MEASUREMENT_COUNT) * measurement_sigma(freak_quiet) / math.sqrt(KEEP_MEASUREMENT_COUNT)
+        < 2.5 * KEEP_MIN_MARGIN_FRACTION
     )
+    assert required_keep_speedup(2.5, freak_quiet) == pytest.approx(2.5 * (1.0 + KEEP_MIN_MARGIN_FRACTION))
     assert not passes_keep_threshold(freak_quiet, best_mean_case_speedup=2.5)
 
 
@@ -196,9 +189,9 @@ def test_a_single_low_draw_is_not_charged_twice():
     """
     mean_gain = statistics.fmean(DOUBLE_CHARGED_SCORES) / DOUBLE_CHARGED_INCUMBENT - 1
     sigma = measurement_sigma(DOUBLE_CHARGED_SCORES)
-    t_statistic = (
-        statistics.fmean(DOUBLE_CHARGED_SCORES) - DOUBLE_CHARGED_INCUMBENT
-    ) / (sigma / math.sqrt(KEEP_MEASUREMENT_COUNT))
+    t_statistic = (statistics.fmean(DOUBLE_CHARGED_SCORES) - DOUBLE_CHARGED_INCUMBENT) / (
+        sigma / math.sqrt(KEEP_MEASUREMENT_COUNT)
+    )
 
     assert mean_gain > 0.003
     assert t_statistic > 6.0
@@ -236,9 +229,7 @@ def test_a_sigma_estimated_from_more_samples_is_charged_the_df_it_earned():
     # The sample size changes the critical value only. The standard error stays
     # over the three scores the protocol took: a bought measurement informs the
     # bar and is never admitted as evidence of a gain.
-    assert nine - 1.0 == pytest.approx(
-        keep_t_critical(9) * sigma / math.sqrt(len(scores))
-    )
+    assert nine - 1.0 == pytest.approx(keep_t_critical(9) * sigma / math.sqrt(len(scores)))
 
 
 def test_a_candidate_inside_the_margin_is_still_refused():
@@ -258,18 +249,14 @@ def test_the_sample_standard_deviation_is_the_one_that_is_used():
     higher false-accept rate at k = 2 than at k = 3, which cannot be true of a
     bar that only gets stricter.
     """
-    assert measurement_sigma(INCIDENT_SCORES) == pytest.approx(
-        statistics.stdev(INCIDENT_SCORES)
-    )
+    assert measurement_sigma(INCIDENT_SCORES) == pytest.approx(statistics.stdev(INCIDENT_SCORES))
     assert measurement_sigma(INCIDENT_SCORES) > statistics.pstdev(INCIDENT_SCORES)
 
 
 def test_an_unmeasured_spread_leaves_the_bar_at_the_floor():
     """A crashed bench reports no scores, and no scores is not zero noise."""
     assert measurement_sigma([]) is None
-    assert required_keep_speedup(2.5, []) == pytest.approx(
-        2.5 * (1.0 + KEEP_MIN_MARGIN_FRACTION)
-    )
+    assert required_keep_speedup(2.5, []) == pytest.approx(2.5 * (1.0 + KEEP_MIN_MARGIN_FRACTION))
     assert not passes_keep_threshold([], best_mean_case_speedup=2.5)
 
 
@@ -303,8 +290,7 @@ def test_the_printed_bar_is_the_bar_that_was_enforced(monkeypatch, capsys):
 
     result = asyncio.run(loop.run_one_iteration(1))
     bench_line = next(
-        line for line in capsys.readouterr().out.splitlines()
-        if "[bench] pristine-relative scores=" in line
+        line for line in capsys.readouterr().out.splitlines() if "[bench] pristine-relative scores=" in line
     )
 
     required = required_keep_speedup(1.0, scores)
@@ -417,10 +403,7 @@ def test_kb_warm_start_still_adopts_a_modest_prior_solution(
     tmp_path,
 ):
     pristine, _ = _floored_case_times()
-    candidate = {
-        case_id: baseline_ms / MODEST_SPEEDUP
-        for case_id, baseline_ms in pristine.items()
-    }
+    candidate = {case_id: baseline_ms / MODEST_SPEEDUP for case_id, baseline_ms in pristine.items()}
     monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
     monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
     monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: True)
@@ -455,9 +438,7 @@ def test_kb_warm_start_still_adopts_a_modest_prior_solution(
     assert trial.reject_reason == ""
     assert trial.adoptable_ms == TIMING_FLOOR_MS
     assert trial.adoptable_mean_case_speedup == pytest.approx(MODEST_SPEEDUP)
-    assert trial.adoptable_bench["mean_case_speedup"] == (
-        trial.adoptable_mean_case_speedup
-    )
+    assert trial.adoptable_bench["mean_case_speedup"] == (trial.adoptable_mean_case_speedup)
     assert trial.measured_mean_case_speedup == trial.adoptable_mean_case_speedup
 
 
@@ -490,9 +471,7 @@ def test_a_high_scoring_measurement_reaches_the_event_stream_as_a_keep(
     asyncio.run(loop.run(agent_fn=fast_agent, supervisor_fn=_unused_supervisor))
 
     events = [
-        event
-        for event in LoopStateStore(str(workspace)).read_events()
-        if event.get("type") == "iteration_result"
+        event for event in LoopStateStore(str(workspace)).read_events() if event.get("type") == "iteration_result"
     ]
     assert [event.get("decision") for event in events] == ["KEEP"]
     assert "REVERT_IMPLAUSIBLE" not in json.dumps(events)
@@ -625,10 +604,7 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
     half of the same measurement is already mandatory, so both halves are.
     """
     pristine, _ = _floored_case_times()
-    candidate = {
-        case_id: baseline_ms / MODEST_SPEEDUP
-        for case_id, baseline_ms in pristine.items()
-    }
+    candidate = {case_id: baseline_ms / MODEST_SPEEDUP for case_id, baseline_ms in pristine.items()}
     discarded: list[str] = []
     monkeypatch.setattr(integration, "_apply_candidate_patch", lambda *_a, **_k: "")
     monkeypatch.setattr(integration, "_force_jit_rebuild", lambda *_a, **_k: None)
@@ -668,9 +644,7 @@ def test_a_warm_start_without_a_pristine_aggregate_refuses_to_adopt(
     assert trial.adoptable_bench is None
     # The suite still ran, so the record this candidate came from is still owed
     # the amendment; only the adoption is refused.
-    assert trial.measured_mean_case_speedup == pytest.approx(
-        MODEST_SPEEDUP
-    )
+    assert trial.measured_mean_case_speedup == pytest.approx(MODEST_SPEEDUP)
     assert discarded == [str(tmp_path)]
 
 
@@ -743,9 +717,7 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
         result_json=str(result_json),
     )
 
-    manifest = json.loads(
-        (Path(workspace) / "forge_experiments" / "best" / "manifest.json").read_text()
-    )
+    manifest = json.loads((Path(workspace) / "forge_experiments" / "best" / "manifest.json").read_text())
     checkpoint = checkpoints["consumer-run"]
     verdicts = [
         manifest["total_improved"],
@@ -757,9 +729,7 @@ def test_every_warm_start_artifact_agrees_on_the_aggregate_verdict(tmp_path):
     ]
 
     assert verdicts == [False] * len(verdicts)
-    assert "is not faster than the pristine baseline" in (
-        checkpoint["aggregate_regression"]
-    )
+    assert "is not faster than the pristine baseline" in (checkpoint["aggregate_regression"])
     assert checkpoint["aggregate_regression"] == manifest["aggregate_regression"]
 
 
@@ -774,12 +744,14 @@ DRIFT_TOLERANCE_ENV = "FORGE_BASELINE_DRIFT_TOLERANCE"
 def _write_reference(workspace, cases: dict[str, float]) -> None:
     lines = ["test_cases:"]
     for case_id, ms in cases.items():
-        lines.extend([
-            f"- test_case_id: {case_id}",
-            f"  execution_time_ms: {ms!r}",
-            "  shape:",
-            "  - (64,8,128) bf16",
-        ])
+        lines.extend(
+            [
+                f"- test_case_id: {case_id}",
+                f"  execution_time_ms: {ms!r}",
+                "  shape:",
+                "  - (64,8,128) bf16",
+            ]
+        )
     (workspace / "baseline_perf.yaml").write_text("\n".join(lines) + "\n")
 
 
@@ -795,15 +767,19 @@ def _write_partly_readable_reference(
     """
     lines = ["test_cases:"]
     for case_id, ms in readable.items():
-        lines.extend([
-            f"- test_case_id: {case_id}",
-            f"  execution_time_ms: {ms!r}",
-        ])
+        lines.extend(
+            [
+                f"- test_case_id: {case_id}",
+                f"  execution_time_ms: {ms!r}",
+            ]
+        )
     for case_id in unreadable:
-        lines.extend([
-            f"- test_case_id: {case_id}",
-            "  execution_time_msec: 1.0",
-        ])
+        lines.extend(
+            [
+                f"- test_case_id: {case_id}",
+                "  execution_time_msec: 1.0",
+            ]
+        )
     (workspace / "baseline_perf.yaml").write_text("\n".join(lines) + "\n")
 
 
@@ -850,9 +826,7 @@ def test_a_checked_baseline_reports_how_many_cases_backed_it(tmp_path):
     """
     _write_reference(tmp_path, {"case-a": 1.0, "case-b": 2.0, "unrelated": 9.0})
 
-    checked = check_baseline_against_reference(
-        str(tmp_path), {"case-a": 1.0, "case-b": 2.0}
-    )
+    checked = check_baseline_against_reference(str(tmp_path), {"case-a": 1.0, "case-b": 2.0})
 
     assert checked.compared_case_count == 2
 
@@ -861,9 +835,7 @@ def test_reference_case_ids_follow_the_driver_underscore_convention(tmp_path):
     """Drivers emit ``case_ms: <id with spaces replaced by underscores>``."""
     _write_reference(tmp_path, {"decode graph k001": 0.2777})
 
-    assert load_reference_case_times(str(tmp_path)).case_times == {
-        "decode_graph_k001": 0.2777
-    }
+    assert load_reference_case_times(str(tmp_path)).case_times == {"decode_graph_k001": 0.2777}
 
 
 def test_an_unusable_reference_is_not_silently_ignored(tmp_path):
@@ -944,9 +916,7 @@ def test_only_a_measured_disagreement_stops_the_run(tmp_path):
     _write_reference(tmp_path / "other", {"a-case-nobody-measured": 1.0})
 
     assert all(
-        check_baseline_against_reference(
-            str(tmp_path / name), {"case": 1.0}
-        ).unverified_reason
+        check_baseline_against_reference(str(tmp_path / name), {"case": 1.0}).unverified_reason
         for name in ("absent", "empty", "other")
     )
 
@@ -1023,18 +993,14 @@ def test_loop_startup_rejects_a_drifted_pristine_baseline(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 0.25})
 
     with pytest.raises(BaselineReferenceError):
-        asyncio.run(
-            loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-        )
+        asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
 
 def test_loop_startup_accepts_a_matching_pristine_baseline(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_reference(workspace, {"case": 1.02})
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     assert [
         event.get("decision")
@@ -1051,13 +1017,9 @@ def test_loop_startup_says_when_the_anchor_is_unverified(
     """A run against an unverified anchor must not look like a checked one."""
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
-    assert "the pristine anchor every speedup divides by is unverified" in (
-        capsys.readouterr().out
-    )
+    assert "the pristine anchor every speedup divides by is unverified" in (capsys.readouterr().out)
 
 
 def test_loop_startup_reports_how_many_of_its_cases_the_reference_backed(
@@ -1070,13 +1032,9 @@ def test_loop_startup_reports_how_many_of_its_cases_the_reference_backed(
     loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=measured)
     _write_reference(workspace, {"k001": 1.0})
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
-    assert "agrees with the task reference on 1 of 12 measured case(s)" in (
-        capsys.readouterr().out
-    )
+    assert "agrees with the task reference on 1 of 12 measured case(s)" in (capsys.readouterr().out)
 
 
 def test_loop_startup_names_the_reference_entries_it_could_not_read(
@@ -1088,9 +1046,7 @@ def test_loop_startup_names_the_reference_entries_it_could_not_read(
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_partly_readable_reference(workspace, {"case": 1.0}, ["ghost"])
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     assert "could not read 1 of the 2 entries" in capsys.readouterr().out
 
@@ -1105,9 +1061,7 @@ def test_loop_startup_announces_a_widened_drift_tolerance(
     _write_reference(workspace, {"case": 1.4})
     monkeypatch.setenv(DRIFT_TOLERANCE_ENV, "0.5")
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     output = capsys.readouterr().out
     assert "drift tolerance widened to 50%" in output
@@ -1147,9 +1101,7 @@ def _gqa_runs(scale: float = 1.0, *, level: float = 1.0) -> list[dict[str, float
     """Three measurements of the GQA candidate at ``level`` times its spread."""
     return [
         {
-            case_id: GQA_CANDIDATE[case_id]
-            * scale
-            * (1.0 + step * level * GQA_SPREAD[case_id])
+            case_id: GQA_CANDIDATE[case_id] * scale * (1.0 + step * level * GQA_SPREAD[case_id])
             for case_id in GQA_CANDIDATE
         }
         for step in (-1.0, 0.0, 1.0)
@@ -1175,25 +1127,16 @@ def _bench(runs: list[dict[str, float]]) -> dict:
     return {
         "success": True,
         "median_ms": statistics.fmean(sum(run.values()) for run in runs),
-        "case_times": {
-            case_id: statistics.fmean([run[case_id] for run in runs])
-            for case_id in runs[0]
-        },
+        "case_times": {case_id: statistics.fmean([run[case_id] for run in runs]) for case_id in runs[0]},
         "unscored_cases": [],
         "measurement_count": len(runs),
-        "measurements": [
-            {"success": True, "case_times": dict(run), "unscored_cases": []}
-            for run in runs
-        ],
+        "measurements": [{"success": True, "case_times": dict(run), "unscored_cases": []} for run in runs],
         "message": "three measurements",
     }
 
 
 def _case_scores(runs: list[dict[str, float]], baseline: dict[str, float]) -> list[float]:
-    return [
-        sum(baseline[case_id] / run[case_id] for case_id in baseline) / len(baseline)
-        for run in runs
-    ]
+    return [sum(baseline[case_id] / run[case_id] for case_id in baseline) / len(baseline) for run in runs]
 
 
 def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
@@ -1220,10 +1163,7 @@ def _attributed_loop(monkeypatch, baseline, runs, extra_rounds=()):
 
 
 def _bench_line(capsys) -> str:
-    return next(
-        line for line in capsys.readouterr().out.splitlines()
-        if "[bench] pristine-relative scores=" in line
-    )
+    return next(line for line in capsys.readouterr().out.splitlines() if "[bench] pristine-relative scores=" in line)
 
 
 # Four suites whose per-case noise is uniform in the sense that matters: no
@@ -1234,10 +1174,7 @@ UNIFORM_NOISE_SHAPES = [
     (
         "two equal cases moving together",
         {"small": 1.0, "large": 1.0},
-        [
-            {"small": 1.0 / score, "large": 1.0 / score}
-            for score in (1.004, 1.006, 1.008)
-        ],
+        [{"small": 1.0 / score, "large": 1.0 / score} for score in (1.004, 1.006, 1.008)],
     ),
     (
         "three equal-cost cases with comparable spreads",
@@ -1290,9 +1227,7 @@ UNIFORM_NOISE_SHAPES = [
     UNIFORM_NOISE_SHAPES,
     ids=[shape for shape, _baseline, _runs in UNIFORM_NOISE_SHAPES],
 )
-def test_uniform_per_case_noise_reproduces_todays_bar_exactly(
-    monkeypatch, capsys, shape, baseline, runs
-):
+def test_uniform_per_case_noise_reproduces_todays_bar_exactly(monkeypatch, capsys, shape, baseline, runs):
     """The no-op case. Nothing is bought, nothing moves, no verdict changes."""
     loop, calls = _attributed_loop(monkeypatch, baseline, runs)
 
@@ -1309,9 +1244,7 @@ def test_uniform_per_case_noise_reproduces_todays_bar_exactly(
     assert result.kept is passes_keep_threshold(scores, best_mean_case_speedup=1.0)
 
 
-def test_per_case_times_that_resolve_no_split_say_so_rather_than_fall_back_quietly(
-    monkeypatch, capsys
-):
+def test_per_case_times_that_resolve_no_split_say_so_rather_than_fall_back_quietly(monkeypatch, capsys):
     """A degraded estimate is still the aggregate one, and must not read as the new path.
 
     Three byte-identical runs leave no variance to divide, so attribution
@@ -1332,9 +1265,7 @@ def test_per_case_times_that_resolve_no_split_say_so_rather_than_fall_back_quiet
     assert f"required={required_keep_speedup(1.0, scores):.6f}x" in line
 
 
-def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(
-    monkeypatch, capsys
-):
+def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(monkeypatch, capsys):
     """The worst outcome here is reporting an unmeasured thing as measured.
 
     The round paid for the bench either way, so it is reported as bought; its
@@ -1364,10 +1295,7 @@ def test_a_re_measure_bench_that_failed_is_reported_as_bought_not_as_measured(
     assert f"sigma over {KEEP_MEASUREMENT_COUNT} samples per case" in line
     assert "stopped early: re-measure bench failed" in line
     assert f"sigma={measurement_sigma(scores):.6f}" in line
-    assert (
-        f"required="
-        f"{required_keep_speedup(GQA_NEAR_MISS_INCUMBENT, scores):.6f}x" in line
-    )
+    assert f"required={required_keep_speedup(GQA_NEAR_MISS_INCUMBENT, scores):.6f}x" in line
 
 
 def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch):
@@ -1412,9 +1340,7 @@ def test_the_extra_benches_are_charged_to_the_round_that_bought_them(monkeypatch
     assert bought_sec == pytest.approx(100.0 * bought_benches)
 
 
-def test_a_cheap_dominant_case_is_re_measured_and_the_bar_comes_down(
-    monkeypatch, capsys
-):
+def test_a_cheap_dominant_case_is_re_measured_and_the_bar_comes_down(monkeypatch, capsys):
     """q61 held 87% of sigma on 5.7% of the wall time; six more runs settled it.
 
     Settled it in the verdict's sense, not only the bar's: the three scores the
@@ -1454,9 +1380,7 @@ def test_a_cheap_dominant_case_is_re_measured_and_the_bar_comes_down(
     assert result.kept is True
 
 
-def test_a_case_that_stays_unstable_keeps_the_inflated_bar_and_says_so(
-    monkeypatch, capsys
-):
+def test_a_case_that_stays_unstable_keeps_the_inflated_bar_and_says_so(monkeypatch, capsys):
     """Genuinely unstable, not merely cheap. The honest outcome is to say so."""
     runs = _gqa_runs()
     wilder = _gqa_runs(level=2.5)
@@ -1478,9 +1402,7 @@ def test_a_case_that_stays_unstable_keeps_the_inflated_bar_and_says_so(
     assert result.kept is False
 
 
-def test_the_re_measure_loop_terminates_on_a_pathologically_noisy_case(
-    monkeypatch, capsys
-):
+def test_the_re_measure_loop_terminates_on_a_pathologically_noisy_case(monkeypatch, capsys):
     """Every round comes back worse; the bound, not convergence, ends it."""
     runs = _gqa_runs()
     rounds = [_gqa_runs(level=level) for level in (8.0, 40.0, 200.0)]
@@ -1497,9 +1419,7 @@ def test_the_re_measure_loop_terminates_on_a_pathologically_noisy_case(
     assert "did not lower its spread" in _bench_line(capsys)
 
 
-def test_a_candidate_that_cannot_be_kept_at_any_sigma_buys_no_measurements(
-    monkeypatch, capsys
-):
+def test_a_candidate_that_cannot_be_kept_at_any_sigma_buys_no_measurements(monkeypatch, capsys):
     """The bar is always strictly above the incumbent, so this is cost, not policy."""
     runs = _gqa_runs(scale=2.0)
     loop, calls = _attributed_loop(monkeypatch, GQA_BASELINE, runs)
@@ -1513,9 +1433,7 @@ def test_a_candidate_that_cannot_be_kept_at_any_sigma_buys_no_measurements(
     assert result.kept is False
 
 
-def test_a_candidate_already_clearing_the_bar_buys_no_measurements(
-    monkeypatch, capsys
-):
+def test_a_candidate_already_clearing_the_bar_buys_no_measurements(monkeypatch, capsys):
     """Above the bar sigma is not deciding, it is being drawn a second time.
 
     Replaying 1240 archived candidates, the floor-only gate charged 28% of them
@@ -1535,9 +1453,7 @@ def test_a_candidate_already_clearing_the_bar_buys_no_measurements(
     assert result.kept is True
 
 
-def test_an_aggregate_gain_carried_by_a_regressing_case_is_untouched(
-    monkeypatch, capsys
-):
+def test_an_aggregate_gain_carried_by_a_regressing_case_is_untouched(monkeypatch, capsys):
     """A 2.5x win paid for with a 0.6x collapse. Nothing here is about sigma.
 
     Attribution re-estimates the objective's spread; it never re-decides which
@@ -1561,16 +1477,12 @@ def test_an_aggregate_gain_carried_by_a_regressing_case_is_untouched(
     assert f"required={required_keep_speedup(1.0, scores):.6f}x" in line
     assert result.kept is passes_keep_threshold(scores, best_mean_case_speedup=1.0)
     assert result.bench_detail["case_times"]["lost"] > baseline["lost"]
-    assert scores == pytest.approx(
-        result.bench_detail["measurement_mean_case_speedups"]
-    )
+    assert scores == pytest.approx(result.bench_detail["measurement_mean_case_speedups"])
 
 
 def _old_rule_passes(incumbent: float, scores: list[float]) -> bool:
     """``all(score >= best + 3 sigma)``, the rule the t test replaced."""
-    margin = max(
-        3.0 * measurement_sigma(scores), incumbent * KEEP_MIN_MARGIN_FRACTION
-    )
+    margin = max(3.0 * measurement_sigma(scores), incumbent * KEEP_MIN_MARGIN_FRACTION)
     return all(score >= incumbent + margin for score in scores)
 
 
@@ -1597,9 +1509,7 @@ def test_the_gate_trades_no_false_accepts_for_the_power_it_gains():
         scores = [rng.gauss(true, sigma) for _ in range(KEEP_MEASUREMENT_COUNT)]
         return (
             _old_rule_passes(min(incumbent), scores),
-            passes_keep_threshold(
-                scores, best_mean_case_speedup=statistics.fmean(incumbent)
-            ),
+            passes_keep_threshold(scores, best_mean_case_speedup=statistics.fmean(incumbent)),
         )
 
     trials = 20_000
@@ -1661,10 +1571,7 @@ def test_the_gqa_campaign_bar_stops_being_a_lottery():
 
     def draw(count):
         return {
-            case_id: [
-                GQA_CANDIDATE[case_id] * (1.0 + rng.gauss(0.0, GQA_SPREAD[case_id]))
-                for _ in range(count)
-            ]
+            case_id: [GQA_CANDIDATE[case_id] * (1.0 + rng.gauss(0.0, GQA_SPREAD[case_id])) for _ in range(count)]
             for case_id in GQA_BASELINE
         }
 
@@ -1674,20 +1581,14 @@ def test_the_gqa_campaign_bar_stops_being_a_lottery():
         series = draw(KEEP_MEASUREMENT_COUNT)
         extended = {case_id: list(times) for case_id, times in series.items()}
         scores = [
-            sum(
-                GQA_BASELINE[case_id] / series[case_id][index]
-                for case_id in GQA_BASELINE
-            )
-            / len(GQA_BASELINE)
+            sum(GQA_BASELINE[case_id] / series[case_id][index] for case_id in GQA_BASELINE) / len(GQA_BASELINE)
             for index in range(KEEP_MEASUREMENT_COUNT)
         ]
         sigma = measurement_sigma(scores)
         # An incumbent a hair under the weakest score, so every candidate is a
         # contender and the bar is the only thing deciding it.
         incumbent = min(scores) * 0.999
-        aggregate_bars.append(
-            (required_keep_speedup(incumbent, scores) - incumbent) / incumbent
-        )
+        aggregate_bars.append((required_keep_speedup(incumbent, scores) - incumbent) / incumbent)
 
         base = attribute_sigma(series, GQA_BASELINE)
         assert base.dominant_case == "m3-decode-q61"
@@ -1699,10 +1600,7 @@ def test_the_gqa_campaign_bar_stops_being_a_lottery():
                 extended[case_id].extend(times)
             current = attribute_sigma(extended, GQA_BASELINE)
         refined = rescaled_sigma(sigma, base, current)
-        attributed_bars.append(
-            (required_keep_speedup(incumbent, scores, sigma=refined) - incumbent)
-            / incumbent
-        )
+        attributed_bars.append((required_keep_speedup(incumbent, scores, sigma=refined) - incumbent) / incumbent)
 
     aggregate_range = max(aggregate_bars) / min(aggregate_bars)
     attributed_range = max(attributed_bars) / min(attributed_bars)
@@ -1825,10 +1723,7 @@ def test_a_larger_sample_can_raise_the_bar_as_well_as_lower_it():
     quiet = {"cheap": [0.0500, 0.05001, 0.04999], "big": [2.0, 2.001, 1.999]}
     base = attribute_sigma(quiet, baseline)
     wide = attribute_sigma(
-        {
-            case_id: list(times) + [times[1] * 1.05, times[1] * 0.95, times[1]]
-            for case_id, times in quiet.items()
-        },
+        {case_id: list(times) + [times[1] * 1.05, times[1] * 0.95, times[1]] for case_id, times in quiet.items()},
         baseline,
     )
 

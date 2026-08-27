@@ -359,14 +359,10 @@ class OrchestrationAgent:
                 "Select the specialist roles needed for the supplied cases. "
                 "Assignments may overlap cases when independent expertise is "
                 "useful. Return role/case intent only; the framework binds "
-                "assignment IDs and exact evidence paths. "
-                + ruling_guidance
-                + mode_guidance
+                "assignment IDs and exact evidence paths. " + ruling_guidance + mode_guidance
             ),
             "context": context.to_prompt_dict(),
-            "available_specialists": [
-                definitions[role_id].to_dict() for role_id in sorted(definitions)
-            ],
+            "available_specialists": [definitions[role_id].to_dict() for role_id in sorted(definitions)],
             "output_schema": {
                 "assignments": [
                     {
@@ -440,11 +436,7 @@ class OrchestrationAgent:
             if isinstance(raw_cases, str):
                 raw_cases = [raw_cases]
             case_ids = tuple(
-                dict.fromkeys(
-                    str(case_id).strip()
-                    for case_id in (raw_cases or [])
-                    if str(case_id).strip()
-                )
+                dict.fromkeys(str(case_id).strip() for case_id in (raw_cases or []) if str(case_id).strip())
             )
             if not role_id:
                 notes.append(f"dropped assignment {index} without role_id")
@@ -473,34 +465,21 @@ class OrchestrationAgent:
             if intent.role_id not in definitions:
                 notes.append(f"dropped unknown role {intent.role_id!r}")
                 continue
-            selected_cases = [
-                case_id
-                for case_id in intent.target_case_ids
-                if case_id in allowed_cases
-            ]
+            selected_cases = [case_id for case_id in intent.target_case_ids if case_id in allowed_cases]
             if not selected_cases:
                 selected_cases = list(case_ids)
-                notes.append(
-                    f"bound role {intent.role_id!r} to all scored cases"
-                )
+                notes.append(f"bound role {intent.role_id!r} to all scored cases")
             if intent.role_id in merged:
                 notes.append(f"merged duplicate role {intent.role_id!r}")
                 current = merged[intent.role_id]["case_ids"]
-                selected_cases = list(
-                    dict.fromkeys([*current, *selected_cases])
-                )
+                selected_cases = list(dict.fromkeys([*current, *selected_cases]))
             merged[intent.role_id] = {
                 "case_ids": selected_cases,
-                "reason": (
-                    intent.reason
-                    or f"Framework-assigned {intent.role_id} analysis"
-                ),
+                "reason": (intent.reason or f"Framework-assigned {intent.role_id} analysis"),
             }
 
         required_roles = (
-            len(definitions)
-            if context.search_mode == "DIVERSIFY"
-            else min(self.min_assignments, len(definitions))
+            len(definitions) if context.search_mode == "DIVERSIFY" else min(self.min_assignments, len(definitions))
         )
         for role_id in sorted(definitions):
             if len(merged) >= required_roles:
@@ -512,11 +491,7 @@ class OrchestrationAgent:
                 }
                 notes.append(f"added default role {role_id!r}")
 
-        covered = {
-            case_id
-            for item in merged.values()
-            for case_id in item["case_ids"]
-        }
+        covered = {case_id for item in merged.values() for case_id in item["case_ids"]}
         missing = [case_id for case_id in case_ids if case_id not in covered]
         if missing and merged:
             first_role = next(iter(merged))
@@ -524,10 +499,7 @@ class OrchestrationAgent:
                 *merged[first_role]["case_ids"],
                 *missing,
             ]
-            notes.append(
-                "added missing cases to "
-                f"{first_role!r}: {', '.join(missing)}"
-            )
+            notes.append(f"added missing cases to {first_role!r}: {', '.join(missing)}")
 
         global_kinds = {
             "analysis_artifact_catalog",
@@ -539,11 +511,7 @@ class OrchestrationAgent:
             "latest_lesson",
             "supervisor_guidance",
         }
-        global_refs = [
-            reference
-            for reference in context.evidence_refs
-            if reference.kind in global_kinds
-        ]
+        global_refs = [reference for reference in context.evidence_refs if reference.kind in global_kinds]
         source_ref = EvidenceRef(
             kind="source_map",
             path=context.source_map_path,
@@ -560,9 +528,7 @@ class OrchestrationAgent:
                 measurement = EvidenceRef(
                     kind="measurement",
                     path=f"case:{case_id}",
-                    summary=(
-                        f"Canonical timing and Analysis flags for {case_id}."
-                    ),
+                    summary=(f"Canonical timing and Analysis flags for {case_id}."),
                 )
                 refs[measurement.path] = measurement
                 if case.profile_summary_path:
@@ -578,17 +544,9 @@ class OrchestrationAgent:
                         for flag in case.flags
                     )
                     reference = EvidenceRef(
-                        kind=(
-                            "profile"
-                            if profiled
-                            else "analysis_interpretation"
-                        ),
+                        kind=("profile" if profiled else "analysis_interpretation"),
                         path=case.profile_summary_path,
-                        summary=(
-                            "Measured profile"
-                            if profiled
-                            else "Analysis interpretation"
-                        )
+                        summary=("Measured profile" if profiled else "Analysis interpretation")
                         + f" for {case_id}. Flags: "
                         + f"{', '.join(case.flags) or '(none)'}.",
                     )
@@ -648,16 +606,13 @@ class OrchestrationAgent:
         ]
         if not analyses:
             raise ValueError("no specialist analysis is available for synthesis")
-        failures = [
-            outcome.to_dict() for outcome in specialist_outcomes if outcome.failure is not None
-        ]
+        failures = [outcome.to_dict() for outcome in specialist_outcomes if outcome.failure is not None]
         search_guidance = (
             "Use the latest Supervisor Ruling to choose whether immediate gain "
             "or mechanism diversity is appropriate for this planning cycle."
             if context.supervisor_guidance
             else (
-                "Prioritize mechanisms that can produce the strongest immediate "
-                "canonical gain."
+                "Prioritize mechanisms that can produce the strongest immediate canonical gain."
                 if context.search_mode == "EXPLOIT"
                 else (
                     "Prioritize meaningful mechanism diversity and cross-case "
@@ -761,9 +716,7 @@ class OrchestrationAgent:
         because a round that divides no code is not worth its N sessions. A
         pending REPLACE keeps that one lane as its challenger.
         """
-        analyses = [
-            outcome for outcome in specialist_outcomes if outcome.content is not None
-        ]
+        analyses = [outcome for outcome in specialist_outcomes if outcome.content is not None]
         width = max(1, min(int(lanes), len(analyses)))
         if width <= 1:
             with _phase_timer(self.phase_durations_sec, "synthesis"):
@@ -820,9 +773,7 @@ class OrchestrationAgent:
                     "joint": grounds[index].joint,
                     "fallback": grounds[index].fallback,
                     "ground_owned_by_other_lanes": [
-                        other.ground
-                        for position, other in enumerate(grounds)
-                        if position != index
+                        other.ground for position, other in enumerate(grounds) if position != index
                     ],
                 },
                 "specialist_analyses": [
@@ -882,15 +833,11 @@ class OrchestrationAgent:
                 # cannot use. Said out loud, because silently narrowing the
                 # round makes an empty answer indistinguishable from having
                 # asked for fewer lanes.
-                log.warning(
-                    "lane %d of %d returned an empty plan", index + 1, width
-                )
+                log.warning("lane %d of %d returned an empty plan", index + 1, width)
                 continue
             plans.append(answer)
         if not plans:
-            raise OrchestrationOutputError(
-                "orchestration synthesis returned no lane plan"
-            )
+            raise OrchestrationOutputError("orchestration synthesis returned no lane plan")
         return plans
 
     @staticmethod
@@ -940,9 +887,7 @@ class OrchestrationAgent:
                 lane_id=1,
                 ground=(
                     "whatever the "
-                    + ", ".join(
-                        sorted({outcome.role_id for outcome in analyses})
-                    )
+                    + ", ".join(sorted({outcome.role_id for outcome in analyses}))
                     + " analysis recommends, planned as a single lane"
                 ),
                 reason=(
@@ -953,9 +898,7 @@ class OrchestrationAgent:
             )
         ]
 
-    def _parse_lane_grounds(
-        self, response: str, *, lanes: int
-    ) -> tuple[list[LaneGround], dict, list[str]]:
+    def _parse_lane_grounds(self, response: str, *, lanes: int) -> tuple[list[LaneGround], dict, list[str]]:
         """Read lane grounds and the round's cross-cutting move out of one answer.
 
         Reports what it dropped, and reports the move separately from the
@@ -1042,10 +985,7 @@ class OrchestrationAgent:
         elif isinstance(raw, str):
             move = raw.strip()
             if move:
-                notes.append(
-                    "cross-cutting move came back as a string, which names a "
-                    "move and no lane to own it"
-                )
+                notes.append("cross-cutting move came back as a string, which names a move and no lane to own it")
         elif raw is None:
             move = ""
         else:
@@ -1053,30 +993,22 @@ class OrchestrationAgent:
                 {
                     "status": "unreadable",
                     "field": (
-                        "cross_cutting_move came back as a "
-                        f"{type(raw).__name__}, which no move can be read out "
-                        "of"
+                        f"cross_cutting_move came back as a {type(raw).__name__}, which no move can be read out of"
                     ),
                 },
                 notes,
             )
         if not move:
-            return {"status": "missing"}, notes + [
-                "partition named no largest cross-cutting move"
-            ]
+            return {"status": "missing"}, notes + ["partition named no largest cross-cutting move"]
         if isinstance(lane_id, bool) or not isinstance(lane_id, (int, float, str)):
             lane_id = 0
         if isinstance(lane_id, float) and not lane_id.is_integer():
-            notes.append(
-                "cross-cutting move named a lane_id that is not a lane number"
-            )
+            notes.append("cross-cutting move named a lane_id that is not a lane number")
             lane_id = 0
         try:
             lane_id = int(lane_id)
         except ValueError:
-            notes.append(
-                "cross-cutting move named a lane_id that is not a lane number"
-            )
+            notes.append("cross-cutting move named a lane_id that is not a lane number")
             lane_id = 0
         if 1 <= lane_id <= len(grounds):
             return (
@@ -1090,13 +1022,10 @@ class OrchestrationAgent:
             )
         if lane_id:
             notes.append(
-                f"cross-cutting move names lane {lane_id}, which this "
-                f"partition of {len(grounds)} lane(s) does not have"
+                f"cross-cutting move names lane {lane_id}, which this partition of {len(grounds)} lane(s) does not have"
             )
         if not reason:
-            notes.append(
-                "cross-cutting move was left unassigned and no reason was given"
-            )
+            notes.append("cross-cutting move was left unassigned and no reason was given")
         return (
             {
                 "status": "unassigned",
@@ -1150,9 +1079,7 @@ class OrchestrationAgent:
         round to die.
         """
         challenged = context.last_critic_verdict == "REPLACE"
-        system_prompt = _PARTITION_SYSTEM_PROMPT + (
-            _PARTITION_CHALLENGER_BLOCK if challenged else ""
-        )
+        system_prompt = _PARTITION_SYSTEM_PROMPT + (_PARTITION_CHALLENGER_BLOCK if challenged else "")
         payload = {
             "task": (
                 f"Divide this round into at most {lanes} lanes that would not "
@@ -1160,12 +1087,7 @@ class OrchestrationAgent:
                 "functions and mechanisms. Name the largest cross-cutting move "
                 "you found and either give it to a lane or say why no lane has "
                 "it."
-                + (
-                    " One lane validates the alternative the previous round's "
-                    "critic asked for."
-                    if challenged
-                    else ""
-                )
+                + (" One lane validates the alternative the previous round's critic asked for." if challenged else "")
             ),
             "context": context.to_prompt_dict(),
             "dispatch_plan": dispatch_plan.to_dict(),
@@ -1181,10 +1103,7 @@ class OrchestrationAgent:
             "output_schema": {
                 "lanes": [
                     {
-                        "ground": (
-                            "The files, functions and mechanisms this lane "
-                            "owns and may edit"
-                        ),
+                        "ground": ("The files, functions and mechanisms this lane owns and may edit"),
                         "reason": "Why this is one session's worth of work",
                         "joint": (
                             "true when this lane owns a change together with "
@@ -1198,16 +1117,9 @@ class OrchestrationAgent:
                     }
                 ],
                 "cross_cutting_move": {
-                    "move": (
-                        "The largest move the evidence supports that no single "
-                        "region contains"
-                    ),
-                    "lane_id": (
-                        "The 1-based lane that owns it, or 0 if no lane does"
-                    ),
-                    "unassigned_reason": (
-                        "Why no lane owns it, when no lane does"
-                    ),
+                    "move": ("The largest move the evidence supports that no single region contains"),
+                    "lane_id": ("The 1-based lane that owns it, or 0 if no lane does"),
+                    "unassigned_reason": ("Why no lane owns it, when no lane does"),
                 },
             },
         }
@@ -1220,15 +1132,11 @@ class OrchestrationAgent:
                     usage=usage,
                     allow_incomplete=True,
                     max_turns=ROUND_PARTITION_MAX_TURNS,
-                    timeout_sec=min(
-                        self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC
-                    ),
+                    timeout_sec=min(self.timeout_sec, ROUND_PARTITION_TIMEOUT_SEC),
                     tools=False,
                     reasoning_effort=ROUND_PARTITION_EFFORT,
                 )
-                grounds, move, notes = self._parse_lane_grounds(
-                    response, lanes=lanes
-                )
+                grounds, move, notes = self._parse_lane_grounds(response, lanes=lanes)
             except (
                 OrchestrationInfrastructureError,
                 OrchestrationOutputError,
@@ -1251,17 +1159,10 @@ class OrchestrationAgent:
             )
         elif move["status"] != "assigned":
             log.warning(
-                "round partition gave no lane its largest cross-cutting move: "
-                "%s",
-                move.get("move")
-                or move.get("field")
-                or "the partition named none",
+                "round partition gave no lane its largest cross-cutting move: %s",
+                move.get("move") or move.get("field") or "the partition named none",
             )
-        unbacked = [
-            ground.lane_id
-            for ground in grounds
-            if ground.joint and not ground.fallback
-        ]
+        unbacked = [ground.lane_id for ground in grounds if ground.joint and not ground.fallback]
         if unbacked:
             log.warning(
                 "joint lane(s) %s carry no fallback; a joint step that is "
@@ -1296,8 +1197,7 @@ class OrchestrationAgent:
     ) -> _RevisedPlan:
         """Revise one draft exactly once without rerunning specialists."""
         revision_task = (
-            "Revise the draft into the final optimization plan. "
-            "Address the critic's substantive concerns exactly once."
+            "Revise the draft into the final optimization plan. Address the critic's substantive concerns exactly once."
         )
         # A resume re-enters the lane's own synthesis session, which already
         # holds the dispatch, every specialist analysis and the whole synthesis
@@ -1321,9 +1221,7 @@ class OrchestrationAgent:
             "context": context.to_prompt_dict(),
             "dispatch_plan": dispatch_plan.to_dict(),
             "specialist_coverage": dict(coverage),
-            "specialist_outcomes": [
-                outcome.to_dict() for outcome in specialist_outcomes
-            ],
+            "specialist_outcomes": [outcome.to_dict() for outcome in specialist_outcomes],
         }
         session_id = str(synthesis_session_id or "").strip()
         timeout_sec = min(self.timeout_sec, PLAN_REVISION_TIMEOUT_SEC)
@@ -1343,15 +1241,11 @@ class OrchestrationAgent:
         else:
             if session_id:
                 log.warning(
-                    "orchestration backend cannot resume synthesis session %s; "
-                    "starting a fresh revision session",
+                    "orchestration backend cannot resume synthesis session %s; starting a fresh revision session",
                     session_id,
                 )
             else:
-                log.warning(
-                    "orchestration synthesis returned no session ID; starting "
-                    "a fresh revision session"
-                )
+                log.warning("orchestration synthesis returned no session ID; starting a fresh revision session")
             result = await self._run_result(
                 context,
                 system_prompt=_REVISION_SYSTEM_PROMPT,
@@ -1398,10 +1292,7 @@ class OrchestrationAgent:
             str(result.end_reason or "").strip() in {"turn_cap", "timeout"}
             or "[session ended with sdk error:" in text.lower()
         ):
-            log.warning(
-                "orchestration dispatch returned an incomplete response; "
-                "continuing through JSON repair"
-            )
+            log.warning("orchestration dispatch returned an incomplete response; continuing through JSON repair")
         return self._validated_text(
             result,
             role="orchestration",
@@ -1422,9 +1313,7 @@ class OrchestrationAgent:
         tools: bool = True,
         reasoning_effort: str = "max",
     ) -> AgentRunResult:
-        effective_timeout = (
-            self.timeout_sec if timeout_sec is None else timeout_sec
-        )
+        effective_timeout = self.timeout_sec if timeout_sec is None else timeout_sec
         try:
             return await asyncio.wait_for(
                 self.backend.run(
@@ -1442,13 +1331,9 @@ class OrchestrationAgent:
                 timeout=effective_timeout,
             )
         except asyncio.TimeoutError as error:
-            raise OrchestrationInfrastructureError(
-                f"{role} backend exceeded {effective_timeout}s timeout"
-            ) from error
+            raise OrchestrationInfrastructureError(f"{role} backend exceeded {effective_timeout}s timeout") from error
         except AgentProviderError as error:
-            raise OrchestrationInfrastructureError(
-                f"{type(error).__name__}: {error}"
-            ) from error
+            raise OrchestrationInfrastructureError(f"{type(error).__name__}: {error}") from error
 
     async def _resume_result(
         self,
@@ -1482,13 +1367,9 @@ class OrchestrationAgent:
                 timeout=timeout_sec,
             )
         except asyncio.TimeoutError as error:
-            raise OrchestrationInfrastructureError(
-                f"{role} backend exceeded {timeout_sec}s timeout"
-            ) from error
+            raise OrchestrationInfrastructureError(f"{role} backend exceeded {timeout_sec}s timeout") from error
         except AgentProviderError as error:
-            raise OrchestrationInfrastructureError(
-                f"{type(error).__name__}: {error}"
-            ) from error
+            raise OrchestrationInfrastructureError(f"{type(error).__name__}: {error}") from error
 
     def _run_spec(
         self,
@@ -1524,21 +1405,14 @@ class OrchestrationAgent:
                 search=tools,
                 write=False,
                 shell=False,
-                max_turns=(
-                    self.max_turns
-                    if max_turns is None
-                    else max_turns
-                ),
+                max_turns=(self.max_turns if max_turns is None else max_turns),
             ),
             protected_globs=["*"],
         )
 
     def _backend_supports_resume(self) -> bool:
         capabilities = getattr(self.backend, "capabilities", None)
-        return bool(
-            getattr(capabilities, "resumable", False)
-            and callable(getattr(self.backend, "resume", None))
-        )
+        return bool(getattr(capabilities, "resumable", False) and callable(getattr(self.backend, "resume", None)))
 
     @staticmethod
     def _validated_text(
@@ -1628,42 +1502,25 @@ class OrchestrationService:
             specialist_outcomes
             and not any(outcome.succeeded for outcome in specialist_outcomes)
             and any(
-                outcome.failure is not None
-                and outcome.failure.kind in {"backend_failure", "timeout"}
+                outcome.failure is not None and outcome.failure.kind in {"backend_failure", "timeout"}
                 for outcome in specialist_outcomes
             )
         ):
-            raise OrchestrationInfrastructureError(
-                "specialist infrastructure failed before any analysis was produced"
-            )
-        assignment_by_id = {
-            assignment.assignment_id: assignment
-            for assignment in dispatch_plan.assignments
-        }
+            raise OrchestrationInfrastructureError("specialist infrastructure failed before any analysis was produced")
+        assignment_by_id = {assignment.assignment_id: assignment for assignment in dispatch_plan.assignments}
         successful_assignments = [
             assignment_by_id[outcome.assignment_id]
             for outcome in specialist_outcomes
-            if outcome.succeeded
-            and outcome.assignment_id in assignment_by_id
+            if outcome.succeeded and outcome.assignment_id in assignment_by_id
         ]
         covered_cases = sorted(
-            {
-                case_id
-                for assignment in successful_assignments
-                for case_id in assignment.target_case_ids
-            }
+            {case_id for assignment in successful_assignments for case_id in assignment.target_case_ids}
         )
         coverage = {
-            "successful_roles": sorted(
-                {assignment.role_id for assignment in successful_assignments}
-            ),
+            "successful_roles": sorted({assignment.role_id for assignment in successful_assignments}),
             "covered_cases": covered_cases,
             "missing_cases": sorted(context.case_ids - set(covered_cases)),
-            "failed_roles": sorted(
-                outcome.role_id
-                for outcome in specialist_outcomes
-                if not outcome.succeeded
-            ),
+            "failed_roles": sorted(outcome.role_id for outcome in specialist_outcomes if not outcome.succeeded),
         }
         diagnostics["coverage"] = coverage
 
@@ -1707,9 +1564,7 @@ class OrchestrationService:
         # round is the one that most needs it: it commits several Implementer
         # sessions at once, and the question of whether the division earns them
         # exists only there.
-        critic_eligible = bool(
-            self._plan_critic is not None and optimization_plan_executable
-        )
+        critic_eligible = bool(self._plan_critic is not None and optimization_plan_executable)
         draft_plan = ""
         critic_outcome = None
         plan_revised = False
@@ -1844,14 +1699,10 @@ class OrchestrationService:
         requested = list(critic_outcome.lane_drops)
         notes = list(critic_outcome.narrowing_notes)
 
-        joint_lanes = [
-            index + 1 for index, draft in enumerate(drafts) if draft.joint
-        ]
+        joint_lanes = [index + 1 for index, draft in enumerate(drafts) if draft.joint]
 
         def _diagnostics(status: str, applied: Sequence) -> dict:
-            dropped_joint = sorted(
-                {drop.lane_id for drop in applied} & set(joint_lanes)
-            )
+            dropped_joint = sorted({drop.lane_id for drop in applied} & set(joint_lanes))
             return {
                 "status": status,
                 "block": critic_outcome.narrowing_status,
@@ -1885,15 +1736,13 @@ class OrchestrationService:
                 notes.append(note)
             if status != "not_requested":
                 log.warning(
-                    "plan critic narrowing was not applied (%s); the round "
-                    "keeps the %d lane(s) it planned",
+                    "plan critic narrowing was not applied (%s); the round keeps the %d lane(s) it planned",
                     status,
                     len(drafts),
                 )
             elif critic_outcome.narrowing_status != "not_asked":
                 log.info(
-                    "plan critic asked for no narrowing; the round publishes "
-                    "the %d lane(s) it planned",
+                    "plan critic asked for no narrowing; the round publishes the %d lane(s) it planned",
                     len(drafts),
                 )
             return list(drafts), _diagnostics(status, [])
@@ -1913,18 +1762,14 @@ class OrchestrationService:
         if len(drafts) <= 1:
             return _kept_whole(
                 "refused_single_lane",
-                "a round publishes at least one lane, and this round planned "
-                "exactly one",
+                "a round publishes at least one lane, and this round planned exactly one",
             )
         applied = []
         for drop in requested:
             if 1 <= drop.lane_id <= len(drafts):
                 applied.append(drop)
                 continue
-            notes.append(
-                f"lane drop names lane {drop.lane_id}, which this round of "
-                f"{len(drafts)} lanes does not have"
-            )
+            notes.append(f"lane drop names lane {drop.lane_id}, which this round of {len(drafts)} lanes does not have")
         if not applied:
             return _kept_whole("not_applied")
         if len(applied) >= len(drafts):
@@ -1952,11 +1797,7 @@ class OrchestrationService:
                 "none of it",
                 listed,
             )
-        kept = [
-            draft
-            for index, draft in enumerate(drafts)
-            if index + 1 not in dropped_ids
-        ]
+        kept = [draft for index, draft in enumerate(drafts) if index + 1 not in dropped_ids]
         log.info(
             "round narrowed from %d lanes to %d by the plan critic: %s",
             len(drafts),
@@ -1994,9 +1835,7 @@ class OrchestrationService:
         if critic_outcome is not None:
             durations["plan_critic"] = round(critic_outcome.duration_sec, 3)
         if revision_diagnostics is not None:
-            durations["plan_revision"] = round(
-                float(revision_diagnostics.get("duration_sec") or 0.0), 3
-            )
+            durations["plan_revision"] = round(float(revision_diagnostics.get("duration_sec") or 0.0), 3)
         durations["total"] = round(time.monotonic() - run_started_at, 3)
         return durations
 
@@ -2070,8 +1909,7 @@ class OrchestrationService:
         revision_mode = modes.pop() if len(modes) == 1 else "mixed"
         if not unrevised:
             log.info(
-                "orchestration revision completed lanes=%d mode=%s "
-                "duration=%.3fs",
+                "orchestration revision completed lanes=%d mode=%s duration=%.3fs",
                 len(revised),
                 revision_mode,
                 duration_sec,
@@ -2084,10 +1922,7 @@ class OrchestrationService:
                 "duration_sec": duration_sec,
             }
         if len(drafts) == 1:
-            log.warning(
-                "orchestration revision failed; publishing a non-executable "
-                "framework fallback"
-            )
+            log.warning("orchestration revision failed; publishing a non-executable framework fallback")
             return [
                 replace(
                     drafts[0],
@@ -2162,14 +1997,10 @@ class OrchestrationService:
             "",
             "## Planning status",
             f"- Search mode: {context.search_mode}",
-            "- Successful specialist roles: "
-            + (", ".join(coverage["successful_roles"]) or "(none)"),
-            "- Failed specialist roles: "
-            + (", ".join(coverage["failed_roles"]) or "(none)"),
-            "- Covered cases: "
-            + (", ".join(coverage["covered_cases"]) or "(none)"),
-            "- Missing cases: "
-            + (", ".join(coverage["missing_cases"]) or "(none)"),
+            "- Successful specialist roles: " + (", ".join(coverage["successful_roles"]) or "(none)"),
+            "- Failed specialist roles: " + (", ".join(coverage["failed_roles"]) or "(none)"),
+            "- Covered cases: " + (", ".join(coverage["covered_cases"]) or "(none)"),
+            "- Missing cases: " + (", ".join(coverage["missing_cases"]) or "(none)"),
             "",
             "## Evidence to inspect",
         ]
@@ -2187,11 +2018,7 @@ class OrchestrationService:
         )
         for path in dict.fromkeys(evidence_paths):
             lines.append(f"- {path}")
-        successful = [
-            outcome
-            for outcome in specialist_outcomes
-            if outcome.content is not None
-        ]
+        successful = [outcome for outcome in specialist_outcomes if outcome.content is not None]
         if successful:
             lines.extend(("", "## Available specialist analyses"))
             for outcome in successful:
@@ -2204,10 +2031,7 @@ class OrchestrationService:
                 )
         if dispatch_plan.normalization_notes:
             lines.extend(("", "## Dispatch normalization"))
-            lines.extend(
-                f"- {note}"
-                for note in dispatch_plan.normalization_notes
-            )
+            lines.extend(f"- {note}" for note in dispatch_plan.normalization_notes)
         return "\n".join(lines).strip()
 
 
@@ -2294,8 +2118,7 @@ def _specialist_probe_config(config: Config) -> SpecialistProbeConfig | None:
         candidate = Path(configured).expanduser().resolve()
         if _overlaps(workspace, candidate):
             log.warning(
-                "specialist probe disabled: the configured scratch root %s "
-                "overlaps the canonical tree %s",
+                "specialist probe disabled: the configured scratch root %s overlaps the canonical tree %s",
                 candidate,
                 workspace,
             )
@@ -2329,11 +2152,7 @@ def make_orchestration_service(
     enable_plan_critic: bool = False,
 ) -> OrchestrationService:
     """Build the default forge-loop planning chain through registered backends."""
-    resolved_definitions = dict(
-        default_specialist_definitions()
-        if definitions is None
-        else definitions
-    )
+    resolved_definitions = dict(default_specialist_definitions() if definitions is None else definitions)
     if not resolved_definitions:
         raise ValueError("definitions must not be empty")
     runtime = config.agent_runtime()

@@ -28,14 +28,86 @@ log = logging.getLogger(__name__)
 # Known-good configs carried over from GEAK results. They stay first in every
 # search space so a truncated run still measures the configs we already trust.
 _SEED_CONFIGS: list[dict[str, int]] = [
-    {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 1, "num_warps": 8, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 128, "GROUP_SIZE_M": 4, "num_warps": 4, "num_stages": 2, "waves_per_eu": 0, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 4, "num_warps": 8, "num_stages": 2, "waves_per_eu": 0, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 256, "BLOCK_SIZE_K": 64, "GROUP_SIZE_M": 8, "num_warps": 8, "num_stages": 2, "waves_per_eu": 0, "SPLIT_K": 1},
+    {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 4,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 4,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 128,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1,
+    },
     # Measured winners on the BK=256 axis. Widening --thorough alone did not
     # deliver them: Hyperloom only asks for thorough at session_max_min >= 1440
     # and mp >= 4, so almost every session runs the default list and would still
@@ -47,9 +119,36 @@ _SEED_CONFIGS: list[dict[str, int]] = [
     # N=14336) the M=1 and M=32 winners were also BK=256, and the seed list
     # above kept only 1 of 4 shapes there (avg 0.949x, i.e. a regression) while
     # a space containing BK=256 kept 3 of 4.
-    {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 1, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 16, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 8, "num_warps": 4, "num_stages": 2, "waves_per_eu": 2, "SPLIT_K": 1},
-    {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 128, "BLOCK_SIZE_K": 256, "GROUP_SIZE_M": 4, "num_warps": 8, "num_stages": 2, "waves_per_eu": 0, "SPLIT_K": 1},
+    {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 64,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 8,
+        "num_warps": 4,
+        "num_stages": 2,
+        "waves_per_eu": 2,
+        "SPLIT_K": 1,
+    },
+    {
+        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 256,
+        "GROUP_SIZE_M": 4,
+        "num_warps": 8,
+        "num_stages": 2,
+        "waves_per_eu": 0,
+        "SPLIT_K": 1,
+    },
 ]
 
 # BLOCK_SIZE_K=256 is why this is a generated space rather than a fixed list.
@@ -81,8 +180,7 @@ def _grid_configs() -> list[dict[str, int]]:
     """Full cross product of the tile axes, in a stable order."""
     names = list(_AXES)
     return [
-        dict(zip(names, values, strict=True), SPLIT_K=1)
-        for values in itertools.product(*(_AXES[n] for n in names))
+        dict(zip(names, values, strict=True), SPLIT_K=1) for values in itertools.product(*(_AXES[n] for n in names))
     ]
 
 
@@ -403,7 +501,9 @@ class VllmMoeTritonTuner(BaseTuner):
         configs = build_search_space(self.ctx.thorough)
         log.info(
             "MoE Triton sweep: %d configs x %d batch sizes (thorough=%s)",
-            len(configs), len(batch_sizes), self.ctx.thorough,
+            len(configs),
+            len(batch_sizes),
+            self.ctx.thorough,
         )
 
         # Generate and run the sweep script
@@ -488,18 +588,14 @@ class VllmMoeTritonTuner(BaseTuner):
 
         config_filename = f"E={E},N={N},device_name={gpu_name},dtype={dtype_str}.json"
         config_path = tuned_configs_dir / config_filename
-        config_path.write_text(
-            json.dumps(sweep_data, indent=4), encoding="utf-8"
-        )
+        config_path.write_text(json.dumps(sweep_data, indent=4), encoding="utf-8")
 
         # Extract speedup metrics from sweep script output
         shape_details = script_result.get("shape_details", [])
         best_speedup = script_result.get("best_speedup", 1.0)
         avg_speedup = script_result.get("avg_speedup", 1.0)
         min_pct = self.ctx.min_improvement_pct / 100.0 if self.ctx.min_improvement_pct else 0.0
-        improved_count = sum(
-            1 for d in shape_details if d.get("speedup", 1.0) > 1.0 + min_pct
-        )
+        improved_count = sum(1 for d in shape_details if d.get("speedup", 1.0) > 1.0 + min_pct)
 
         n_tuned = len(sweep_data)
         return TuneResult(

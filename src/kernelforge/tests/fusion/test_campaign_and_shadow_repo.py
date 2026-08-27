@@ -62,8 +62,12 @@ def _framework_tree(tmp_path: Path) -> tuple[Path, Path]:
 
 def _git_out(shadow, *args: str) -> str:
     return subprocess.run(
-        ["git", *args], cwd=shadow.root, capture_output=True, text=True,
-        env={**os.environ, **shadow.env}, check=True,
+        ["git", *args],
+        cwd=shadow.root,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **shadow.env},
+        check=True,
     ).stdout
 
 
@@ -71,13 +75,29 @@ def _make_checkout(root: Path) -> str:
     """Turn ``root`` into the developer's own repository and return its HEAD."""
     subprocess.run(["git", "-C", str(root), "init", "-q"], check=True, capture_output=True)
     subprocess.run(
-        ["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t",
-         "commit", "-q", "--allow-empty", "-m", "user base", "--no-gpg-sign"],
-        check=True, capture_output=True,
+        [
+            "git",
+            "-C",
+            str(root),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "user base",
+            "--no-gpg-sign",
+        ],
+        check=True,
+        capture_output=True,
     )
     return subprocess.run(
         ["git", "-C", str(root), "rev-parse", "HEAD"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout.strip()
 
 
@@ -86,9 +106,7 @@ class TestShadowRepo:
         """The shadow leaves only a pointer file, no git objects, in the tree."""
         root, source = _framework_tree(tmp_path)
 
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
 
         assert shadow is not None
         # The tree now has a .git POINTER FILE (one line pointing to shadow.git).
@@ -104,9 +122,7 @@ class TestShadowRepo:
     def test_pointer_file_is_removed_on_dispose(self, tmp_path):
         """dispose() leaves the framework tree exactly as it was found."""
         root, source = _framework_tree(tmp_path)
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         assert shadow is not None
         assert (root / ".git").is_file(), "pointer file should exist before dispose"
 
@@ -120,9 +136,7 @@ class TestShadowRepo:
         root, source = _framework_tree(tmp_path)
         user_head = _make_checkout(root)
 
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         # The env-fallback was used: the developer's .git is still a directory.
         assert shadow is not None
         assert (root / ".git").is_dir(), "developer .git must remain a directory"
@@ -133,7 +147,8 @@ class TestShadowRepo:
         assert (root / ".git").is_dir(), "disposal must not touch a real repository"
         after = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         )
         assert after.returncode == 0
         assert after.stdout.strip() == user_head, "developer's HEAD was altered"
@@ -142,9 +157,7 @@ class TestShadowRepo:
         """A pip install sits beside gigabytes that are no campaign's business."""
         root, source = _framework_tree(tmp_path)
 
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
 
         tracked = _git_out(shadow, "ls-files").split()
         assert "sglang/layers/lfm2.py" in tracked
@@ -152,16 +165,13 @@ class TestShadowRepo:
         # The exclude also keeps git from WALKING the neighbour, which is what
         # makes every later status cheap rather than merely correct.
         assert not any(
-            path.startswith("torch")
-            for path in _git_out(shadow, "ls-files", "--others", "--exclude-standard").split()
+            path.startswith("torch") for path in _git_out(shadow, "ls-files", "--others", "--exclude-standard").split()
         )
 
     def test_diff_paths_stay_package_relative(self, tmp_path):
         """The knowledge base replays a patch against the package, not below it."""
         root, source = _framework_tree(tmp_path)
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         source.write_text("def forward(x):\n    return fused(x)\n", encoding="utf-8")
 
         diff = _git_out(shadow, "diff", "HEAD")
@@ -175,20 +185,27 @@ class TestShadowRepo:
         # With an existing .git dir, ensure_git_workspace uses the env fallback.
         # The developer's history must be unaffected by commits in the shadow.
 
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
         assert shadow is not None
         source.write_text("def forward(x):\n    return fused(x)\n", encoding="utf-8")
         _git_out(shadow, "add", "-u")
         _git_out(
-            shadow, "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "keep", "--no-gpg-sign",
+            shadow,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "keep",
+            "--no-gpg-sign",
         )
 
         after = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "HEAD"],
-            capture_output=True, text=True,
+            capture_output=True,
+            text=True,
         ).stdout.strip()
         assert after == user_head, "a keep commit landed in the developer's repository"
         shadow.dispose()
@@ -200,7 +217,8 @@ class TestShadowRepo:
         fused = source.parent / "lfm2_fused_residual.py"
 
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(fused),),
         )
@@ -210,8 +228,16 @@ class TestShadowRepo:
         fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
         _git_out(shadow, "add", "-u")
         _git_out(
-            shadow, "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "keep", "--no-gpg-sign",
+            shadow,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "keep",
+            "--no-gpg-sign",
         )
         patch = _git_out(shadow, "diff", shadow.base_commit, "HEAD")
         assert "sglang/layers/lfm2_fused_residual.py" in patch
@@ -225,9 +251,7 @@ class TestShadowRepo:
         """
         root, source = _framework_tree(tmp_path)
 
-        shadow = ensure_git_workspace(
-            str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git")
-        )
+        shadow = ensure_git_workspace(str(root), str(source), git_dir=str(tmp_path / "out" / "shadow.git"))
 
         branch = _git_out(shadow, "branch", "--show-current").strip()
         assert branch and branch not in {"main", "master"}
@@ -245,7 +269,8 @@ class TestShadowRepo:
         root, source = _framework_tree(tmp_path)
         fused = source.parent / "lfm2_fused_residual.py"
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(fused),),
         )
@@ -257,11 +282,18 @@ class TestShadowRepo:
             monkeypatch.setenv(name, value)
 
         campaign = create_campaign_config(
-            workspace_dir=shadow.root, kernel=str(source), driver=str(driver),
-            source_files=list(shadow.created_paths), program_md_file=str(program),
-            git_branch=SHADOW_BRANCH, fellow="fusion-fellow", task_type="repository",
-            producer="fusion", operator_name="residual_add_rmsnorm",
-            gpu_type="mi355x", gpu_target="gfx950",
+            workspace_dir=shadow.root,
+            kernel=str(source),
+            driver=str(driver),
+            source_files=list(shadow.created_paths),
+            program_md_file=str(program),
+            git_branch=SHADOW_BRANCH,
+            fellow="fusion-fellow",
+            task_type="repository",
+            producer="fusion",
+            operator_name="residual_add_rmsnorm",
+            gpu_type="mi355x",
+            gpu_target="gfx950",
         )
 
         assert campaign.producer == "fusion"
@@ -269,7 +301,8 @@ class TestShadowRepo:
         # against an install rather than against one directory inside it.
         assert campaign.kernel_path == "sglang/layers/lfm2.py"
         assert campaign.source_files == [
-            "sglang/layers/lfm2.py", "sglang/layers/lfm2_fused_residual.py",
+            "sglang/layers/lfm2.py",
+            "sglang/layers/lfm2_fused_residual.py",
         ]
 
     def test_a_crashed_runs_leftover_does_not_become_the_baseline(self, tmp_path):
@@ -279,7 +312,8 @@ class TestShadowRepo:
         leftover.write_text("REJECTED = 1\n", encoding="utf-8")
 
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(leftover),),
         )
@@ -301,7 +335,8 @@ class TestShadowRepo:
         fused = root / "lfm2_fused_residual.py"
 
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(fused),),
         )
@@ -310,8 +345,16 @@ class TestShadowRepo:
         fused.write_text("FUSED = 1\n", encoding="utf-8")
         _git_out(shadow, "add", "-u")
         _git_out(
-            shadow, "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "keep", "--no-gpg-sign",
+            shadow,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "keep",
+            "--no-gpg-sign",
         )
         assert "FUSED = 1" in _git_out(shadow, "diff", shadow.base_commit, "HEAD")
 
@@ -320,7 +363,8 @@ class TestShadowRepo:
         root, source = _framework_tree(tmp_path)
         fused = source.parent / "lfm2_fused_residual.py"
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(fused),),
         )
@@ -328,8 +372,16 @@ class TestShadowRepo:
         fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
         _git_out(shadow, "add", "-u")
         _git_out(
-            shadow, "-c", "user.email=t@t", "-c", "user.name=t",
-            "commit", "-q", "-m", "keep", "--no-gpg-sign",
+            shadow,
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "-m",
+            "keep",
+            "--no-gpg-sign",
         )
         stray = source.parent / "lfm2_fusion_helper.py"
         stray.write_text("junk\n", encoding="utf-8")
@@ -346,7 +398,8 @@ class TestShadowRepo:
         unused = source.parent / "lfm2_fused_a.py"
         authored = source.parent / "lfm2_fused_b.py"
         shadow = ensure_git_workspace(
-            str(root), str(source),
+            str(root),
+            str(source),
             git_dir=str(tmp_path / "out" / "shadow.git"),
             extra_paths=(str(unused), str(authored)),
         )
@@ -364,61 +417,88 @@ class TestShadowRepo:
         stranger = tmp_path / "elsewhere.py"
         stranger.write_text("x = 1\n", encoding="utf-8")
 
-        assert ensure_git_workspace(
-            str(root), str(stranger), git_dir=str(tmp_path / "out" / "shadow.git")
-        ) is None
+        assert ensure_git_workspace(str(root), str(stranger), git_dir=str(tmp_path / "out" / "shadow.git")) is None
 
 
 class TestDriverShim:
     def _run(
-        self, tmp_path: Path, harness_report: dict, fused_module: str = "",
+        self,
+        tmp_path: Path,
+        harness_report: dict,
+        fused_module: str = "",
     ) -> subprocess.CompletedProcess:
         harness = tmp_path / "kernel_harness.py"
-        harness.write_text(
-            "import json\nprint(json.dumps(%r))\n" % harness_report, encoding="utf-8"
-        )
+        harness.write_text("import json\nprint(json.dumps(%r))\n" % harness_report, encoding="utf-8")
         driver = tmp_path / "driver.py"
         driver.write_text(
             render_driver(
-                str(harness), ("LFM2_FUSED_RESIDUAL",),
-                report_log=str(tmp_path / "reports.jsonl"), case_id="decode",
+                str(harness),
+                ("LFM2_FUSED_RESIDUAL",),
+                report_log=str(tmp_path / "reports.jsonl"),
+                case_id="decode",
                 fused_module=fused_module,
             ),
             encoding="utf-8",
         )
         import sys
-        return subprocess.run(
-            [sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path
-        )
+
+        return subprocess.run([sys.executable, str(driver)], capture_output=True, text=True, cwd=tmp_path)
 
     def test_parity_and_timing_become_the_loop_contract(self, tmp_path):
-        proc = self._run(tmp_path, {
-            "compiled": True, "is_triton": True, "error": "",
-            "parity": [{"snr_db": 41.5, "max_abs_err": 3e-05, "label": "T16"}],
-            "eager_us": 120.0, "fused_us": 96.0, "skipped": False, "skip_reason": "",
-        })
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": True,
+                "is_triton": True,
+                "error": "",
+                "parity": [{"snr_db": 41.5, "max_abs_err": 3e-05, "label": "T16"}],
+                "eager_us": 120.0,
+                "fused_us": 96.0,
+                "skipped": False,
+                "skip_reason": "",
+            },
+        )
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "SNR: 41.50 dB" in proc.stdout
         assert "case_ms: decode 0.096000" in proc.stdout
 
     def test_the_worst_shape_decides_parity(self, tmp_path):
-        proc = self._run(tmp_path, {
-            "compiled": True, "is_triton": True, "error": "",
-            "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
-                       {"snr_db": 22.0, "max_abs_err": 9e-03, "label": "b"}],
-            "eager_us": 100.0, "fused_us": 90.0, "skipped": False, "skip_reason": "",
-        })
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": True,
+                "is_triton": True,
+                "error": "",
+                "parity": [
+                    {"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
+                    {"snr_db": 22.0, "max_abs_err": 9e-03, "label": "b"},
+                ],
+                "eager_us": 100.0,
+                "fused_us": 90.0,
+                "skipped": False,
+                "skip_reason": "",
+            },
+        )
         assert "SNR: 22.00 dB" in proc.stdout
         assert "max_diff: 9.000000e-03" in proc.stdout
 
     def test_a_compile_failure_fails_the_iteration(self, tmp_path):
         fused = tmp_path / "model_fused.py"
         fused.write_text("def fused(x):\n    return x\n", encoding="utf-8")
-        proc = self._run(tmp_path, {
-            "compiled": False, "is_triton": False, "error": "cuda_bf16.h not found",
-            "parity": [], "eager_us": None, "fused_us": None,
-            "skipped": False, "skip_reason": "",
-        }, fused_module=str(fused))
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": False,
+                "is_triton": False,
+                "error": "cuda_bf16.h not found",
+                "parity": [],
+                "eager_us": None,
+                "fused_us": None,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(fused),
+        )
         assert proc.returncode == 1
         assert "COMPILE FAILED: cuda_bf16.h not found" in proc.stdout
 
@@ -432,12 +512,20 @@ class TestDriverShim:
         """
         fused = tmp_path / "model_fused.py"
         fused.write_text("", encoding="utf-8")  # committed empty by the campaign
-        proc = self._run(tmp_path, {
-            "compiled": False, "is_triton": False, "error": "",
-            "parity": [{"snr_db": 999.0, "max_abs_err": 0.0,
-                        "label": "T16 (baseline: eager vs eager)"}],
-            "eager_us": 425.0, "fused_us": 426.0, "skipped": False, "skip_reason": "",
-        }, fused_module=str(fused))
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": False,
+                "is_triton": False,
+                "error": "",
+                "parity": [{"snr_db": 999.0, "max_abs_err": 0.0, "label": "T16 (baseline: eager vs eager)"}],
+                "eager_us": 425.0,
+                "fused_us": 426.0,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(fused),
+        )
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "case_ms: decode 0.426000" in proc.stdout
@@ -445,22 +533,38 @@ class TestDriverShim:
 
     def test_a_missing_fused_module_still_anchors(self, tmp_path):
         """The placeholder is absent until ensure_git_workspace creates it."""
-        proc = self._run(tmp_path, {
-            "compiled": False, "is_triton": False, "error": "",
-            "parity": [{"snr_db": 999.0, "max_abs_err": 0.0, "label": "T16"}],
-            "eager_us": 425.0, "fused_us": 426.0, "skipped": False, "skip_reason": "",
-        }, fused_module=str(tmp_path / "never_created.py"))
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": False,
+                "is_triton": False,
+                "error": "",
+                "parity": [{"snr_db": 999.0, "max_abs_err": 0.0, "label": "T16"}],
+                "eager_us": 425.0,
+                "fused_us": 426.0,
+                "skipped": False,
+                "skip_reason": "",
+            },
+            fused_module=str(tmp_path / "never_created.py"),
+        )
 
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert "case_ms: decode 0.426000" in proc.stdout
 
     def test_a_skipped_microbench_is_not_a_failure(self, tmp_path):
-        proc = self._run(tmp_path, {
-            "compiled": True, "is_triton": True, "error": "",
-            "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "T16"}],
-            "eager_us": 130.0, "fused_us": None,
-            "skipped": True, "skip_reason": "Mamba backend cannot init on ROCm",
-        })
+        proc = self._run(
+            tmp_path,
+            {
+                "compiled": True,
+                "is_triton": True,
+                "error": "",
+                "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "T16"}],
+                "eager_us": 130.0,
+                "fused_us": None,
+                "skipped": True,
+                "skip_reason": "Mamba backend cannot init on ROCm",
+            },
+        )
         assert proc.returncode == 0
         assert "SKIPPED: Mamba backend cannot init on ROCm" in proc.stdout
         # Reporting the eager time for both arms shows no speedup rather than an
@@ -593,7 +697,8 @@ class TestCampaignCommand:
 
     def test_a_campaign_writes_its_driver_and_task_document(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
-            campaign_module.subprocess, "Popen",
+            campaign_module.subprocess,
+            "Popen",
             lambda *a, **k: (_ for _ in ()).throw(OSError("no forge-loop here")),
         )
         outcome = run_recipe_campaign(
@@ -632,9 +737,7 @@ class TestCampaignCommand:
 
         def fake_popen(*_a, **_k):
             result_json.write_text(json.dumps(payload), encoding="utf-8")
-            report_log.write_text(
-                "".join(json.dumps(r) + "\n" for r in reports), encoding="utf-8"
-            )
+            report_log.write_text("".join(json.dumps(r) + "\n" for r in reports), encoding="utf-8")
             return _Proc()
 
         monkeypatch.setattr(campaign_module.subprocess, "Popen", fake_popen)
@@ -646,35 +749,41 @@ class TestCampaignCommand:
         )
 
     def test_a_campaign_that_beat_the_bar_is_kept(self, tmp_path, monkeypatch):
-        outcome = self._campaign_with_result(tmp_path, monkeypatch, {
-            "mean_case_speedup": 1.21,
-            "total_speedup": 1.21,
-            "baseline_ms": 100.0,
-            "best_ms": 82.6,
-            "improved": True,
-            "best_iteration": 3,
-            "best_commit": "c0ffee1",
-            "experiment_id": "exp-1",
-        })
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "total_speedup": 1.21,
+                "baseline_ms": 100.0,
+                "best_ms": 82.6,
+                "improved": True,
+                "best_iteration": 3,
+                "best_commit": "c0ffee1",
+                "experiment_id": "exp-1",
+            },
+        )
 
         assert outcome.result.kept is True
         assert outcome.result.correctness_passed is True
         assert outcome.result.kernel_speedup == 1.21
         assert outcome.experiment_id == "exp-1"
 
-    def test_the_loops_pre_iteration_anchor_is_not_a_validated_candidate(
-        self, tmp_path, monkeypatch
-    ):
+    def test_the_loops_pre_iteration_anchor_is_not_a_validated_candidate(self, tmp_path, monkeypatch):
         """A run that kept nothing still reports the 1.0 anchor it started from."""
-        outcome = self._campaign_with_result(tmp_path, monkeypatch, {
-            "mean_case_speedup": 1.0,
-            "baseline_ms": 100.0,
-            "best_ms": 100.0,
-            "improved": False,
-            "best_iteration": 0,
-            "best_commit": "",
-            "experiment_id": "exp-1",
-        })
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.0,
+                "baseline_ms": 100.0,
+                "best_ms": 100.0,
+                "improved": False,
+                "best_iteration": 0,
+                "best_commit": "",
+                "experiment_id": "exp-1",
+            },
+        )
 
         assert outcome.result.kept is False
         assert outcome.result.correctness_passed is False
@@ -682,49 +791,72 @@ class TestCampaignCommand:
 
     def test_a_campaign_below_the_fusion_bar_is_not_kept(self, tmp_path, monkeypatch):
         """The loop keeps on its own smaller margin; the fusion bar is 1.03."""
-        outcome = self._campaign_with_result(tmp_path, monkeypatch, {
-            "mean_case_speedup": 1.01,
-            "baseline_ms": 100.0,
-            "best_ms": 99.0,
-            "improved": True,
-            "best_iteration": 2,
-            "experiment_id": "exp-1",
-        })
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.01,
+                "baseline_ms": 100.0,
+                "best_ms": 99.0,
+                "improved": True,
+                "best_iteration": 2,
+                "experiment_id": "exp-1",
+            },
+        )
 
         assert outcome.result.kept is False
         assert outcome.result.kernel_speedup == 1.01
 
     def test_a_campaign_that_validated_nothing_reports_no_result(self, tmp_path, monkeypatch):
-        outcome = self._campaign_with_result(tmp_path, monkeypatch, {
-            "mean_case_speedup": None,
-            "baseline_ms": 100.0,
-            "best_ms": None,
-            "improved": False,
-            "best_iteration": 0,
-            "experiment_id": "exp-1",
-        })
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": None,
+                "baseline_ms": 100.0,
+                "best_ms": None,
+                "improved": False,
+                "best_iteration": 0,
+                "experiment_id": "exp-1",
+            },
+        )
 
         assert outcome.result.kept is False
         assert outcome.result.correctness_passed is False
         assert outcome.result.kernel_speedup is None
 
-    def test_parity_and_timings_come_from_the_report_behind_the_kept_candidate(
-        self, tmp_path, monkeypatch
-    ):
+    def test_parity_and_timings_come_from_the_report_behind_the_kept_candidate(self, tmp_path, monkeypatch):
         """The loop's result carries a speedup and nothing else."""
         outcome = self._campaign_with_result(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             {
-                "mean_case_speedup": 1.25, "baseline_ms": 0.120, "best_ms": 0.096,
-                "improved": True, "best_iteration": 3, "experiment_id": "exp-1",
+                "mean_case_speedup": 1.25,
+                "baseline_ms": 0.120,
+                "best_ms": 0.096,
+                "improved": True,
+                "best_iteration": 3,
+                "experiment_id": "exp-1",
             },
             reports=[
                 # An earlier, slower candidate the loop did not settle on.
-                {"compiled": True, "skipped": False, "eager_us": 120.0, "fused_us": 111.0,
-                 "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}]},
-                {"compiled": True, "skipped": False, "eager_us": 120.0, "fused_us": 96.0,
-                 "parity": [{"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
-                            {"snr_db": 38.0, "max_abs_err": 4e-04, "label": "b"}]},
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 111.0,
+                    "parity": [{"snr_db": 44.0, "max_abs_err": 1e-05, "label": "a"}],
+                },
+                {
+                    "compiled": True,
+                    "skipped": False,
+                    "eager_us": 120.0,
+                    "fused_us": 96.0,
+                    "parity": [
+                        {"snr_db": 55.0, "max_abs_err": 1e-06, "label": "a"},
+                        {"snr_db": 38.0, "max_abs_err": 4e-04, "label": "b"},
+                    ],
+                },
             ],
         )
 
@@ -737,9 +869,7 @@ class TestCampaignCommand:
         assert outcome.result.kernel_speedup == 1.25
         assert outcome.result.rtol is None
 
-    def test_a_crashed_campaign_does_not_report_the_previous_runs_keep(
-        self, tmp_path, monkeypatch
-    ):
+    def test_a_crashed_campaign_does_not_report_the_previous_runs_keep(self, tmp_path, monkeypatch):
         """The result file outlives the run that wrote it."""
         stale = tmp_path / "forge_loop_residual_add_rmsnorm.json"
         stale.write_text(json.dumps({"mean_case_speedup": 1.4}), encoding="utf-8")
@@ -763,14 +893,20 @@ class TestCampaignCommand:
         assert "exited 1" in outcome.result.note
         assert not stale.exists(), "the stale result must be gone before the run"
 
-    def test_a_missing_report_log_degrades_rather_than_failing_the_recipe(
-        self, tmp_path, monkeypatch
-    ):
-        outcome = self._campaign_with_result(tmp_path, monkeypatch, {
-            "mean_case_speedup": 1.21, "baseline_ms": 0.120, "best_ms": 0.099,
-            "improved": True, "best_iteration": 2, "best_commit": "c0ffee1",
-            "experiment_id": "exp-1",
-        })
+    def test_a_missing_report_log_degrades_rather_than_failing_the_recipe(self, tmp_path, monkeypatch):
+        outcome = self._campaign_with_result(
+            tmp_path,
+            monkeypatch,
+            {
+                "mean_case_speedup": 1.21,
+                "baseline_ms": 0.120,
+                "best_ms": 0.099,
+                "improved": True,
+                "best_iteration": 2,
+                "best_commit": "c0ffee1",
+                "experiment_id": "exp-1",
+            },
+        )
 
         assert outcome.result.kept is True
         assert outcome.result.kernel_speedup == 1.21

@@ -78,9 +78,7 @@ def resolve_loop_identity(
         segment,
     )
 
-    concrete_op = resolve_operation(
-        kernel_source, kernel_path, target_functions=target_functions
-    )
+    concrete_op = resolve_operation(kernel_source, kernel_path, target_functions=target_functions)
     operator = normalize_operator_name(operator_name or concrete_op)
     backend = detect_backend_language(fellow)
     resolved_framework = infer_source_owner_framework(

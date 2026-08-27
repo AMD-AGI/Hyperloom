@@ -156,11 +156,7 @@ def _probe_child_env() -> dict[str, str]:
     return {
         name: value
         for name, value in os.environ.items()
-        if value.strip()
-        and (
-            name in _PROBE_CHILD_ENV_VARS
-            or name.startswith(_PROBE_CHILD_ENV_PREFIXES)
-        )
+        if value.strip() and (name in _PROBE_CHILD_ENV_VARS or name.startswith(_PROBE_CHILD_ENV_PREFIXES))
     }
 
 
@@ -252,19 +248,13 @@ async def _probe_round(probe: SpecialistProbeConfig | None):
         # round with an error rather than as no round, so nothing falls back to
         # the root that just failed.
         log.warning("specialist probe scratch root unusable: %s", error)
-        yield _ProbeRound(
-            error=f"the round scratch tree could not be created: {error}"
-        )
+        yield _ProbeRound(error=f"the round scratch tree could not be created: {error}")
         return
-    opened = _ProbeRound(
-        root=round_root, budget_path=round_root / _PROBE_BUDGET_NAME
-    )
+    opened = _ProbeRound(root=round_root, budget_path=round_root / _PROBE_BUDGET_NAME)
     try:
         yield opened
     finally:
-        opened.reaped = await reap_processes_under(
-            round_root, description=f"left running in probe round {round_root}"
-        )
+        opened.reaped = await reap_processes_under(round_root, description=f"left running in probe round {round_root}")
         shutil.rmtree(round_root, ignore_errors=True)
 
 
@@ -308,11 +298,7 @@ class _ProbeSetup:
             BUDGET_SEC_ENV: str(self.config.budget_sec),
             ROUND_BUDGET_ENV: str(self.budget_path or ""),
             DEVICE_LOCK_ENV: str(self.device_lock or ""),
-            **(
-                {SESSION_DEADLINE_ENV: f"{self.session_deadline:.3f}"}
-                if self.session_deadline is not None
-                else {}
-            ),
+            **({SESSION_DEADLINE_ENV: f"{self.session_deadline:.3f}"} if self.session_deadline is not None else {}),
         }
 
     def probe_ceiling_sec(self) -> int:
@@ -452,9 +438,8 @@ def _render_probe_record(record: dict) -> str:
     detail = str(record.get("detail") or "").strip()
     if status == MEASURED:
         detail = f"{record.get('case_ms')} ms" + (f" ({detail})" if detail else "")
-    return (
-        f"- probe {record.get('probe_index')} `{label}` on case `{case_id}`: "
-        f"{status}" + (f" -- {detail}" if detail else "")
+    return f"- probe {record.get('probe_index')} `{label}` on case `{case_id}`: {status}" + (
+        f" -- {detail}" if detail else ""
     )
 
 
@@ -476,23 +461,14 @@ def _render_probe_report(setup: _ProbeSetup) -> str:
             "Treat the probe evidence below as partial."
         )
     if not records:
-        lines.append(
-            "The probe was offered and never called: nothing above is a measured "
-            "claim."
-        )
+        lines.append("The probe was offered and never called: nothing above is a measured claim.")
         return "\n".join(lines)
     lines.extend(_render_probe_record(record) for record in records)
-    exhausted = [
-        record for record in records if record.get("status") == BUDGET_EXHAUSTED
-    ]
+    exhausted = [record for record in records if record.get("status") == BUDGET_EXHAUSTED]
     measured = sum(1 for record in records if record.get("status") == MEASURED)
     lines.append(
         f"{measured} of {len(records)} probe attempts produced a measurement"
-        + (
-            "; the budget was exhausted and the remaining questions stay unmeasured."
-            if exhausted
-            else "."
-        )
+        + ("; the budget was exhausted and the remaining questions stay unmeasured." if exhausted else ".")
     )
     return "\n".join(lines)
 
@@ -535,9 +511,7 @@ def build_specialist_prompts(
         raise ValueError("specialist assignment role does not match definition")
     unknown_cases = set(assignment.target_case_ids) - context.case_ids
     if unknown_cases:
-        raise ValueError(
-            "specialist assignment references unknown cases: " + ", ".join(sorted(unknown_cases))
-        )
+        raise ValueError("specialist assignment references unknown cases: " + ", ".join(sorted(unknown_cases)))
 
     system_prompt = (
         f"{_SPECIALIST_SYSTEM_PROMPT}"
@@ -660,9 +634,7 @@ class SpecialistAgent:
             )
             if is_api_failure(result):
                 detail = (
-                    result.stderr_tail
-                    or result.end_reason
-                    or "specialist backend failed before producing an answer"
+                    result.stderr_tail or result.end_reason or "specialist backend failed before producing an answer"
                 )
                 return self._failure(
                     assignment,
@@ -737,8 +709,7 @@ class SpecialistAgent:
         if not getattr(capabilities, "mcp", False):
             return self._no_probe(
                 assignment,
-                "the specialist backend does not serve MCP tools, so the "
-                "probe could not be offered",
+                "the specialist backend does not serve MCP tools, so the probe could not be offered",
             )
         # A session with no room for one probe must not be offered one. Below
         # the analysis reserve every call is refused from the first, and the
@@ -767,9 +738,7 @@ class SpecialistAgent:
             ledger_path=ledger_path,
             workspace=str(workspace),
             config=self.probe,
-            budget_path=(
-                probe_round.budget_path if probe_round is not None else None
-            ),
+            budget_path=(probe_round.budget_path if probe_round is not None else None),
             # The campaign's sentinel, not one of the probe's own: the GPU a
             # probe times on is the one a fan-out lane drives, so a probe and a
             # lane queue on the same file. The canonical measurement takes no
@@ -787,9 +756,7 @@ class SpecialistAgent:
             # be reported as this session's.
             ledger_path.unlink(missing_ok=True)
         except OSError as error:
-            return self._no_probe(
-                assignment, f"the scratch root could not be prepared: {error}"
-            )
+            return self._no_probe(assignment, f"the scratch root could not be prepared: {error}")
         # The server validates its own environment and would refuse a session it
         # cannot serve; a refusal it cannot write to the ledger reads downstream
         # like a probe nobody called, so the same check runs here, where "not
@@ -893,11 +860,7 @@ class SpecialistPool:
             raise ValueError("assignment_id values must be unique")
         semaphore = asyncio.Semaphore(self._max_parallel)
         probe = next(
-            (
-                agent.probe
-                for agent in self._agents.values()
-                if agent.probe is not None
-            ),
+            (agent.probe for agent in self._agents.values() if agent.probe is not None),
             None,
         )
 
@@ -917,14 +880,10 @@ class SpecialistPool:
                     ),
                 )
             async with semaphore:
-                return await agent.run(
-                    assignment, context, usage=usage, probe_round=probe_round
-                )
+                return await agent.run(assignment, context, usage=usage, probe_round=probe_round)
 
         async with _probe_round(probe) as probe_round:
-            outcomes = await asyncio.gather(
-                *(run_one(item, probe_round) for item in assignments)
-            )
+            outcomes = await asyncio.gather(*(run_one(item, probe_round) for item in assignments))
         # Read after the block, not inside it: the teardown that writes it runs
         # as the context manager closes.
         return SpecialistRunResult(

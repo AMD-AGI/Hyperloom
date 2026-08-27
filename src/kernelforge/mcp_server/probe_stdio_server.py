@@ -70,7 +70,11 @@ PRIMITIVE_PATH = f"{PRIMITIVE_MODULE}.{PRIMITIVE_ATTR}"
 # assumed: a primitive that landed under this name with a different signature
 # would otherwise fail once per probe, as a TypeError inside a compile report.
 PRIMITIVE_KEYWORDS = (
-    "driver_script", "case_id", "constants", "timeout_sec", "prefix_constants",
+    "driver_script",
+    "case_id",
+    "constants",
+    "timeout_sec",
+    "prefix_constants",
 )
 
 # Ledger statuses. The parent renders every one of them: a probe that was
@@ -194,11 +198,7 @@ def probe_timeout_sec(
     # ``requested > 0`` belongs in this test, not under it: a numeric zero or a
     # negative -- both of which an agent can send -- would otherwise match the
     # outer branch, fail the inner one, and escape every clamp.
-    if (
-        isinstance(requested, (int, float))
-        and not isinstance(requested, bool)
-        and requested > 0
-    ):
+    if isinstance(requested, (int, float)) and not isinstance(requested, bool) and requested > 0:
         allowed = min(allowed, float(requested))
     else:
         allowed = min(allowed, float(DEFAULT_PROBE_TIMEOUT_SEC))
@@ -276,9 +276,7 @@ class ProbeBudget:
         try:
             with _locked_json(self.path) as state:
                 state["attempts"] = int(state.get("attempts", 0) or 0) + attempts
-                state["seconds_used"] = (
-                    float(state.get("seconds_used", 0.0) or 0.0) + seconds
-                )
+                state["seconds_used"] = float(state.get("seconds_used", 0.0) or 0.0) + seconds
                 self.attempts = state["attempts"]
                 self.seconds_used = state["seconds_used"]
         except (OSError, ValueError) as error:
@@ -302,8 +300,7 @@ class ProbeBudget:
                     error,
                 )
             self.shared_error = (
-                f"the round's shared probe budget at {self.path} cannot be "
-                f"reached ({type(error).__name__}: {error})"
+                f"the round's shared probe budget at {self.path} cannot be reached ({type(error).__name__}: {error})"
             )
 
 
@@ -412,30 +409,20 @@ def probe_primitive_status() -> tuple[Any, str]:
         primitive = resolve_probe_primitive()
     except Exception as error:  # noqa: BLE001 - an unimportable seam is reported
         return None, (
-            f"the measurement primitive {PRIMITIVE_PATH} could not be imported: "
-            f"{type(error).__name__}: {error}"
+            f"the measurement primitive {PRIMITIVE_PATH} could not be imported: {type(error).__name__}: {error}"
         )
     if not callable(primitive):
-        return None, (
-            f"the measurement primitive {PRIMITIVE_PATH} is absent from this build"
-        )
+        return None, (f"the measurement primitive {PRIMITIVE_PATH} is absent from this build")
     try:
         signature = inspect.signature(primitive)
     except (TypeError, ValueError) as error:
-        return None, (
-            f"the measurement primitive {PRIMITIVE_PATH} is not introspectable: "
-            f"{error}"
-        )
+        return None, (f"the measurement primitive {PRIMITIVE_PATH} is not introspectable: {error}")
     accepted = {
         name
         for name, parameter in signature.parameters.items()
-        if parameter.kind
-        in (parameter.KEYWORD_ONLY, parameter.POSITIONAL_OR_KEYWORD)
+        if parameter.kind in (parameter.KEYWORD_ONLY, parameter.POSITIONAL_OR_KEYWORD)
     }
-    if any(
-        parameter.kind is parameter.VAR_KEYWORD
-        for parameter in signature.parameters.values()
-    ):
+    if any(parameter.kind is parameter.VAR_KEYWORD for parameter in signature.parameters.values()):
         return primitive, ""
     missing = [name for name in PRIMITIVE_KEYWORDS if name not in accepted]
     if missing:
@@ -457,37 +444,24 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
     scratch_raw = str(env.get(SCRATCH_ENV) or "").strip()
     workspace_raw = str(env.get(WORKSPACE_ENV) or "").strip()
     if not scratch_raw or not workspace_raw:
-        raise ProbeSandboxError(
-            f"{SCRATCH_ENV} and {WORKSPACE_ENV} must both be set"
-        )
+        raise ProbeSandboxError(f"{SCRATCH_ENV} and {WORKSPACE_ENV} must both be set")
     scratch_root = Path(scratch_raw).expanduser().resolve()
     workspace = Path(workspace_raw).expanduser().resolve()
     if _is_inside(scratch_root, workspace) or _is_inside(workspace, scratch_root):
-        raise ProbeSandboxError(
-            f"probe scratch root {scratch_root} overlaps the canonical tree "
-            f"{workspace}"
-        )
+        raise ProbeSandboxError(f"probe scratch root {scratch_root} overlaps the canonical tree {workspace}")
     if not scratch_root.is_dir():
         raise ProbeSandboxError(f"probe scratch root is not a directory: {scratch_root}")
     ledger_raw = str(env.get(LEDGER_ENV) or "").strip()
-    ledger_path = (
-        Path(ledger_raw).expanduser().resolve()
-        if ledger_raw
-        else scratch_root / "probe_ledger.jsonl"
-    )
+    ledger_path = Path(ledger_raw).expanduser().resolve() if ledger_raw else scratch_root / "probe_ledger.jsonl"
     if not _is_inside(ledger_path, scratch_root):
-        raise ProbeSandboxError(
-            f"probe ledger {ledger_path} lies outside the scratch root {scratch_root}"
-        )
+        raise ProbeSandboxError(f"probe ledger {ledger_path} lies outside the scratch root {scratch_root}")
     try:
         max_probes = int(env.get(MAX_PROBES_ENV, "0"))
         budget_sec = float(env.get(BUDGET_SEC_ENV, "0"))
     except ValueError as error:
         raise ProbeSandboxError(f"probe budget is not numeric: {error}") from error
     if max_probes <= 0 or budget_sec <= 0:
-        raise ProbeSandboxError(
-            f"{MAX_PROBES_ENV} and {BUDGET_SEC_ENV} must both be greater than zero"
-        )
+        raise ProbeSandboxError(f"{MAX_PROBES_ENV} and {BUDGET_SEC_ENV} must both be greater than zero")
     budget_raw = str(env.get(ROUND_BUDGET_ENV) or "").strip()
     device_raw = str(env.get(DEVICE_LOCK_ENV) or "").strip()
     deadline_raw = str(env.get(SESSION_DEADLINE_ENV) or "").strip()
@@ -501,25 +475,17 @@ def load_sandbox(environ: dict[str, str] | None = None) -> ProbeSandbox:
         try:
             session_deadline = float(deadline_raw)
         except ValueError as error:
-            raise ProbeSandboxError(
-                f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {error}"
-            ) from error
+            raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {error}") from error
         if not math.isfinite(session_deadline) or session_deadline <= 0:
-            raise ProbeSandboxError(
-                f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {deadline_raw!r}"
-            )
+            raise ProbeSandboxError(f"{SESSION_DEADLINE_ENV} is not a Unix timestamp: {deadline_raw!r}")
     return ProbeSandbox(
         scratch_root=scratch_root,
         workspace=workspace,
         ledger_path=ledger_path,
         max_probes=max_probes,
         budget_sec=budget_sec,
-        budget_path=(
-            Path(budget_raw).expanduser().resolve() if budget_raw else None
-        ),
-        device_lock=(
-            Path(device_raw).expanduser().resolve() if device_raw else None
-        ),
+        budget_path=(Path(budget_raw).expanduser().resolve() if budget_raw else None),
+        device_lock=(Path(device_raw).expanduser().resolve() if device_raw else None),
         session_deadline=session_deadline,
     )
 
@@ -676,10 +642,7 @@ async def probe_variant(
             {
                 **base,
                 "status": BUDGET_EXHAUSTED,
-                "detail": (
-                    f"{exhausted} for this round; this question stays unmeasured "
-                    "and must be reported as such"
-                ),
+                "detail": (f"{exhausted} for this round; this question stays unmeasured and must be reported as such"),
                 "duration_sec": 0.0,
             },
         )
@@ -734,8 +697,7 @@ async def probe_variant(
                 "status": REFUSED,
                 "driver_script": str(driver),
                 "detail": (
-                    f"{driver} is not a file inside the canonical workspace "
-                    f"{sandbox.workspace}; nothing was measured"
+                    f"{driver} is not a file inside the canonical workspace {sandbox.workspace}; nothing was measured"
                 ),
                 "duration_sec": 0.0,
             },
@@ -755,8 +717,7 @@ async def probe_variant(
                 **base,
                 "status": UNAVAILABLE,
                 "detail": (
-                    f"{missing}, so this probe would time the GPU while "
-                    "something else uses it; nothing was measured"
+                    f"{missing}, so this probe would time the GPU while something else uses it; nothing was measured"
                 ),
                 "duration_sec": 0.0,
             },
@@ -766,9 +727,7 @@ async def probe_variant(
     # The wait is bounded by the probe's own budget, and what it costs is
     # charged to the budget: a specialist that blocked here until the device
     # came free would spend its session doing nothing.
-    handle = await acquire_device_lock(
-        sandbox.device_lock, timeout_sec=budget_remaining
-    )
+    handle = await acquire_device_lock(sandbox.device_lock, timeout_sec=budget_remaining)
     waited = monotonic_clock() - started
     if handle is None:
         return _record(
@@ -861,10 +820,7 @@ async def probe_variant(
     record = {
         **base,
         "status": MEASURED if succeeded else FAILED,
-        "detail": _detail(
-            payload.get("message")
-            or f"the primitive returned no measurement: {payload or result!r}"
-        ),
+        "detail": _detail(payload.get("message") or f"the primitive returned no measurement: {payload or result!r}"),
         "duration_sec": monotonic_clock() - started,
     }
     if succeeded:
@@ -980,9 +936,7 @@ class ProbeServer:
                         {
                             "status": REFUSED,
                             "label": str(arguments.get("label") or ""),
-                            "detail": (
-                                f"probe sandbox unusable: {self._sandbox_error}"
-                            ),
+                            "detail": (f"probe sandbox unusable: {self._sandbox_error}"),
                         }
                     )
                 return {
@@ -1054,11 +1008,13 @@ def _write_message(payload: dict[str, Any]) -> None:
 
 def _write_error(request_id: Any, code: int, message: str) -> None:
     """Write one JSON-RPC error response."""
-    _write_message({
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "error": {"code": code, "message": message},
-    })
+    _write_message(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": code, "message": message},
+        }
+    )
 
 
 async def _serve() -> None:

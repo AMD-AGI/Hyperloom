@@ -19,10 +19,11 @@ from kernelforge.fusion.models import FusionArtifacts
 
 
 def _init_repo(repo):
-    for args in (["init", "-q"], ["-c", "user.email=a@b.c", "-c", "user.name=t",
-                 "commit", "--allow-empty", "-qm", "base"]):
-        subprocess.run(["git", "-C", str(repo), *args], check=True,
-                       capture_output=True, text=True)
+    for args in (
+        ["init", "-q"],
+        ["-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "--allow-empty", "-qm", "base"],
+    ):
+        subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True)
 
 
 def test_tracked_paths_empty_returns_set():
@@ -54,8 +55,7 @@ def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
     repo, src, out = _nongit_pkg(tmp_path)
     pristine_text = src.read_text()
     src.write_text(
-        "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\n"
-        "def forward(x):\n    return x\n",
+        "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\ndef forward(x):\n    return x\n",
         encoding="utf-8",
     )
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
@@ -64,13 +64,10 @@ def test_export_nongit_patch_is_git_apply_compatible(tmp_path):
     apply_root = tmp_path / "apply_here"
     (apply_root / "models").mkdir(parents=True)
     (apply_root / "models" / "qwen3.py").write_text(pristine_text, encoding="utf-8")
-    subprocess.run(["git", "-C", str(apply_root), "init", "-q"], check=True,
-                   capture_output=True, text=True)
-    chk = subprocess.run(["git", "-C", str(apply_root), "apply", "--check", arts.patch],
-                         capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(apply_root), "init", "-q"], check=True, capture_output=True, text=True)
+    chk = subprocess.run(["git", "-C", str(apply_root), "apply", "--check", arts.patch], capture_output=True, text=True)
     assert chk.returncode == 0, f"git apply --check failed: {chk.stderr}"
-    subprocess.run(["git", "-C", str(apply_root), "apply", arts.patch], check=True,
-                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(apply_root), "apply", arts.patch], check=True, capture_output=True, text=True)
     assert "FUSED = os.environ" in (apply_root / "models" / "qwen3.py").read_text()
 
 
@@ -132,8 +129,7 @@ def test_export_nongit_uses_pristine_snapshot(tmp_path):
     repo, src, out = _nongit_pkg(tmp_path)
     # author edits the source in place (env-gated fusion)
     src.write_text(
-        "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\n"
-        "def forward(x):\n    return x\n",
+        "import os\nFUSED = os.environ.get('QWEN3_FUSED', '0') == '1'\ndef forward(x):\n    return x\n",
         encoding="utf-8",
     )
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
@@ -165,11 +161,13 @@ def test_export_nongit_ignores_unchanged_preexisting_fused_sibling(tmp_path):
     src.write_text("FUSED = 1\ndef forward(x):\n    return x\n", encoding="utf-8")
     arts = export_artifacts(str(repo), str(src), out, pristine_dir=str(out / ".pristine"))
     assert arts.patch is not None
-    assert all(c["path"] != "models/other_fusion.py" for c in arts.changes), \
+    assert all(c["path"] != "models/other_fusion.py" for c in arts.changes), (
         "unchanged pre-existing fused sibling must not be reported as a change"
+    )
     restore_exported_changes(str(repo), arts, pristine_dir=str(out / ".pristine"))
-    assert sibling.is_file() and sibling.read_text() == sibling_text, \
+    assert sibling.is_file() and sibling.read_text() == sibling_text, (
         "restore must not delete an unrelated pre-existing framework file"
+    )
 
 
 def test_export_nongit_emits_new_author_module(tmp_path):
@@ -247,15 +245,16 @@ def test_restore_removes_untracked_and_prunes_dirs(tmp_path):
 def test_restore_checks_out_tracked_file(tmp_path):
     repo = tmp_path / "r"
     repo.mkdir()
-    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True,
-                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, capture_output=True, text=True)
     f = repo / "wired.py"
     f.write_text("original\n")
-    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True,
-                   capture_output=True, text=True)
-    subprocess.run(["git", "-C", str(repo), "-c", "user.email=a@b.c",
-                    "-c", "user.name=t", "commit", "-qm", "base"], check=True,
-                   capture_output=True, text=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True, capture_output=True, text=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=a@b.c", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     f.write_text("modified\n")
     arts = FusionArtifacts(changes=[{"path": "wired.py"}], patch="/tmp/x.patch")
     restore_exported_changes(str(repo), arts)

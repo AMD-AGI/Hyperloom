@@ -103,9 +103,7 @@ SUMMARY_MIN_SECONDS = 120
 # Session end reasons that mean the implementer was cut off rather than finishing.
 # The summarizer is told to flag these, so a later iteration can tell an
 # unfinished exploration apart from a settled negative result.
-_CUTOFF_END_REASONS = frozenset(
-    {"turn_cap", "block_budget_exhausted"}
-)
+_CUTOFF_END_REASONS = frozenset({"turn_cap", "block_budget_exhausted"})
 
 # Marker lines that carry a document's validity condition. ``SCOPE:`` is written
 # by the loop from what it actually measured; ``HELD-FIXED:`` is asked of the
@@ -322,7 +320,7 @@ def _disproved_evidence(text: str) -> str | None:
     if text == CLAIM_DISPROVED.rstrip():
         return ""
     if text.startswith(CLAIM_DISPROVED):
-        return text[len(CLAIM_DISPROVED):].strip()
+        return text[len(CLAIM_DISPROVED) :].strip()
     return None
 
 
@@ -364,11 +362,7 @@ def _disproof_field(disproof: str | None) -> str:
 def format_scope_line(scope: LessonScope) -> str:
     """One machine-written line stating what a document's results are valid for."""
     cases = ", ".join(scope.cases) if scope.cases else NOT_RECORDED
-    held = (
-        ", ".join(f"{name}={value}" for name, value in scope.held_fixed)
-        if scope.held_fixed
-        else NOT_RECORDED
-    )
+    held = ", ".join(f"{name}={value}" for name, value in scope.held_fixed) if scope.held_fixed else NOT_RECORDED
     parts = [f"{SCOPE_PREFIX} measured on {cases}", f"held fixed {held}"]
     if scope.lane_restricted:
         parts.append("lane restricted to the cases above")
@@ -388,7 +382,7 @@ def parse_scope_line(text: str) -> LessonScope | None:
             line = candidate.strip()
     if not line:
         return None
-    fields = [part.strip() for part in line[len(SCOPE_PREFIX):].split("|")]
+    fields = [part.strip() for part in line[len(SCOPE_PREFIX) :].split("|")]
     cases: tuple[str, ...] = ()
     held: tuple[tuple[str, str], ...] = ()
     lane_restricted = False
@@ -396,13 +390,11 @@ def parse_scope_line(text: str) -> LessonScope | None:
     disproof: str | None = None
     for part in fields:
         if part.startswith("measured on "):
-            listed = part[len("measured on "):].strip()
+            listed = part[len("measured on ") :].strip()
             if listed != NOT_RECORDED:
-                cases = tuple(
-                    item.strip() for item in listed.split(",") if item.strip()
-                )
+                cases = tuple(item.strip() for item in listed.split(",") if item.strip())
         elif part.startswith("held fixed "):
-            listed = part[len("held fixed "):].strip()
+            listed = part[len("held fixed ") :].strip()
             if listed != NOT_RECORDED:
                 held = _parse_pairs(listed)
         elif part.startswith("lane restricted"):
@@ -416,7 +408,7 @@ def parse_scope_line(text: str) -> LessonScope | None:
         elif (evidence := _disproved_evidence(part)) is not None:
             disproof = CLAIM_DISPROVED + evidence if evidence else UNDISPROVEN_CLAIM
         elif part.startswith(DISPROOF_RUN):
-            disproof = part[len(DISPROOF_RUN):].strip() or UNDISPROVEN_CLAIM
+            disproof = part[len(DISPROOF_RUN) :].strip() or UNDISPROVEN_CLAIM
         elif part.startswith(UNDISPROVEN_CLAIM):
             disproof = UNDISPROVEN_CLAIM
         elif part.startswith(NO_FEASIBILITY_CLAIM):
@@ -452,7 +444,7 @@ def parse_held_fixed(text: str) -> tuple[tuple[str, str], ...]:
         stripped = line.strip()
         if not stripped.startswith(HELD_FIXED_PREFIX):
             continue
-        for name, value in _parse_pairs(stripped[len(HELD_FIXED_PREFIX):]):
+        for name, value in _parse_pairs(stripped[len(HELD_FIXED_PREFIX) :]):
             found.setdefault(name, value)
     return tuple(found.items())
 
@@ -478,7 +470,7 @@ def parse_negatives_marker(text: str) -> bool | None:
         stripped = line.strip().lstrip("-*# ").strip()
         if not stripped.upper().startswith(NEGATIVES_PREFIX):
             continue
-        payload = stripped[len(NEGATIVES_PREFIX):].strip().strip("*.` ").strip()
+        payload = stripped[len(NEGATIVES_PREFIX) :].strip().strip("*.` ").strip()
         if not payload:
             continue
         if payload.lower() in _NO_NEGATIVES_WORDS:
@@ -540,7 +532,7 @@ def parse_disproof_marker(text: str) -> str | None:
         stripped = line.strip().lstrip("-*# ").strip()
         if not stripped.upper().startswith(DISPROOF_PREFIX):
             continue
-        payload = stripped[len(DISPROOF_PREFIX):].strip().strip("*.` ").strip()
+        payload = stripped[len(DISPROOF_PREFIX) :].strip().strip("*.` ").strip()
         if not payload:
             continue
         if payload.lower() in _NO_CLAIM_WORDS:
@@ -582,9 +574,7 @@ def _assigned_names(target: ast.AST) -> list[str]:
     if isinstance(target, ast.Starred):
         return _assigned_names(target.value)
     if isinstance(target, ast.Tuple | ast.List):
-        return [
-            name for element in target.elts for name in _assigned_names(element)
-        ]
+        return [name for element in target.elts for name in _assigned_names(element)]
     return []
 
 
@@ -607,17 +597,13 @@ def _is_constant_expr(node: ast.AST) -> bool:
     if isinstance(node, ast.UnaryOp):
         return _is_constant_expr(node.operand)
     if isinstance(node, ast.BinOp):
-        return (
-            _is_constant_expr(node.left) and _is_constant_expr(node.right)
-        )
+        return _is_constant_expr(node.left) and _is_constant_expr(node.right)
     if isinstance(node, ast.Tuple | ast.List | ast.Set):
         return all(_is_constant_expr(element) for element in node.elts)
     return False
 
 
-def _unpacked_pairs(
-    target: ast.AST, value: ast.AST
-) -> list[tuple[ast.AST, ast.AST]] | None:
+def _unpacked_pairs(target: ast.AST, value: ast.AST) -> list[tuple[ast.AST, ast.AST]] | None:
     """``a, b = 1, 2`` element by element, or None when it cannot be paired.
 
     ``BLOCK_M, BLOCK_N = 64, 32`` pins each name to its own element. Recording
@@ -632,10 +618,7 @@ def _unpacked_pairs(
         and len(target.elts) == len(value.elts)
     ):
         return None
-    if any(
-        isinstance(element, ast.Starred)
-        for element in (*target.elts, *value.elts)
-    ):
+    if any(isinstance(element, ast.Starred) for element in (*target.elts, *value.elts)):
         return None
     return list(zip(target.elts, value.elts, strict=True))
 
@@ -666,9 +649,7 @@ def _still_pinned(pinned: str, observed: Sequence[str]) -> bool:
     return any(_as_number(value) == number for value in observed)
 
 
-def scan_constant_values(
-    source: str, names: Iterable[str]
-) -> dict[str, tuple[str, ...]] | None:
+def scan_constant_values(source: str, names: Iterable[str]) -> dict[str, tuple[str, ...]] | None:
     """What each named constant is bound to in ``source``.
 
     Four outcomes, because they are four different facts:
@@ -861,9 +842,7 @@ def scope_conflicts(
     if scope.cases:
         outside = [case for case in current_cases if case not in scope.cases]
         if outside:
-            reasons.append(
-                "not measured on " + ", ".join(outside)
-            )
+            reasons.append("not measured on " + ", ".join(outside))
     else:
         reasons.append("the cases it was measured on were not recorded")
 
@@ -873,56 +852,35 @@ def scope_conflicts(
         # before the flag existed, which is not a "no" — is treated the same
         # way as a recorded negative.
         if scope.carries_negative is not False:
-            reasons.append(
-                "the constants it was measured under were not recorded"
-            )
+            reasons.append("the constants it was measured under were not recorded")
         return tuple(reasons)
 
     sources = _as_sources(kernel_source)
-    observed, complete = scan_sources_with_coverage(
-        sources, [name for name, _ in scope.held_fixed]
-    )
+    observed, complete = scan_sources_with_coverage(sources, [name for name, _ in scope.held_fixed])
     if observed is None:
         if not sources:
-            reasons.append(
-                "held-fixed values were not checked against the current kernel"
-            )
+            reasons.append("held-fixed values were not checked against the current kernel")
         elif any(source is None for source in sources):
-            reasons.append(
-                "held-fixed values were not checked: the declared source "
-                "could not be read or parsed"
-            )
+            reasons.append("held-fixed values were not checked: the declared source could not be read or parsed")
         else:
-            reasons.append(
-                "held-fixed values were not checked: the declared source "
-                "could not be parsed"
-            )
+            reasons.append("held-fixed values were not checked: the declared source could not be parsed")
         return tuple(reasons)
 
     for name, value in scope.held_fixed:
         values = observed.get(name)
         measured = f"(pinned at {value} when this was measured)"
         if values is None and complete:
-            reasons.append(
-                f"{name} is not assigned in the kernel source checked "
-                f"{measured}"
-            )
+            reasons.append(f"{name} is not assigned in the kernel source checked {measured}")
         elif values is None:
             reasons.append(
-                f"{name} was not checked: part of the declared source could "
-                f"not be read or parsed {measured}"
+                f"{name} was not checked: part of the declared source could not be read or parsed {measured}"
             )
         elif not values:
-            reasons.append(
-                f"{name} was not checked: the source names it but binds no "
-                f"literal to it {measured}"
-            )
+            reasons.append(f"{name} was not checked: the source names it but binds no literal to it {measured}")
         elif not _still_pinned(value, values):
             # An observation, not an inference: these values were read out of
             # a source that was checked, whatever happened to the rest.
-            reasons.append(
-                f"{name} is now {'/'.join(values)} {measured}"
-            )
+            reasons.append(f"{name} is now {'/'.join(values)} {measured}")
     return tuple(reasons)
 
 
@@ -943,10 +901,7 @@ def cases_named_in(text: str, case_ids: Iterable[str]) -> tuple[str, ...]:
     return tuple(
         case_id
         for case_id in case_ids
-        if case_id
-        and re.search(
-            rf"(?<!{_ID_CHAR}){re.escape(case_id)}(?!{_ID_CHAR})", body
-        )
+        if case_id and re.search(rf"(?<!{_ID_CHAR}){re.escape(case_id)}(?!{_ID_CHAR})", body)
     )
 
 
@@ -1002,8 +957,7 @@ def build_summary_prompt(
         listed = ", ".join(pr_references)
         reference_data = (pr_reference_context or "").strip()
         details = (
-            "\nThe exact read-only reference data available to the Implementer was:\n"
-            f"{reference_data}\n"
+            f"\nThe exact read-only reference data available to the Implementer was:\n{reference_data}\n"
             if reference_data
             else ""
         )
@@ -1116,7 +1070,7 @@ CITATION_RULE = (
     "was run and came out against the claim: that direction is known "
     "reachable, and the record naming it is a pointer to an open route rather "
     "than a closed one. A scope answers for one claim, so a document making "
-    "several \"cannot\" statements carries no verdict on the ones its scope "
+    'several "cannot" statements carries no verdict on the ones its scope '
     "did not name — those are unchecked, not tested. The document's own "
     "measured negatives are unaffected by all of this and are still read "
     "under the rule above."
@@ -1137,29 +1091,22 @@ def _validity_note(
             "settled negative: re-measure before treating any direction in it "
             "as closed."
         )
-    stated = format_scope_line(scope)[len(SCOPE_PREFIX):].strip()
-    reasons = scope_conflicts(
-        scope, current_cases=current_cases, kernel_source=kernel_source
-    )
+    stated = format_scope_line(scope)[len(SCOPE_PREFIX) :].strip()
+    reasons = scope_conflicts(scope, current_cases=current_cases, kernel_source=kernel_source)
     # Both feasibility verdicts below are independent of ``reasons``: a document
     # may have been measured on every current case with every pin still in place
     # and still be closing an axis on a premise nobody tested — or on one its own
     # experiment refuted. That combination is precisely the one the earlier "does
     # it carry a number" reading let through.
-    tail = (
-        ", and its negatives also need a fresh measurement here because "
-        + "; ".join(reasons)
-        if reasons
-        else ""
-    )
+    tail = ", and its negatives also need a fresh measurement here because " + "; ".join(reasons) if reasons else ""
     if is_claim_disproved(scope.disproof):
         return (
             f"VALIDITY: RE-OPEN (feasibility claim disproved) — {stated}. The "
-            "experiment run against its own \"cannot\" came out AGAINST the "
+            'experiment run against its own "cannot" came out AGAINST the '
             "claim, so the direction that claim closed is reachable: re-enter "
             "it rather than read anything here as closing it. This is a "
             "verdict on the one claim that was answered for and certifies no "
-            f"other \"cannot\" in the document{tail}."
+            f'other "cannot" in the document{tail}.'
         )
     if scope.disproof == UNDISPROVEN_CLAIM:
         return (
@@ -1303,7 +1250,7 @@ class LessonStore:
         if not iterations:
             return ""
 
-        selected = iterations[-self.recent:] if self.recent else []
+        selected = iterations[-self.recent :] if self.recent else []
         blocks = [
             (
                 number,
@@ -1333,8 +1280,7 @@ class LessonStore:
 
         def assemble(chosen: list[tuple[int, str, str]]) -> str:
             parts = [
-                f"## Implementer session records from recent iterations "
-                f"({len(chosen)} of {len(iterations)} shown)"
+                f"## Implementer session records from recent iterations ({len(chosen)} of {len(iterations)} shown)"
             ]
             for number, text, note in chosen:
                 parts.append(f"### iter {number}\n{note}\n\n{text.strip()}")
@@ -1342,10 +1288,7 @@ class LessonStore:
             return "\n\n".join(parts)
 
         if not blocks:
-            return (
-                "## Implementer session records from recent iterations\n\n"
-                + pointer
-            )
+            return "## Implementer session records from recent iterations\n\n" + pointer
 
         rendered = assemble(blocks)
         # Deterministic ceiling: drop the OLDEST inlined document first, so an
@@ -1439,9 +1382,7 @@ async def summarize_iteration(
         text = await summarizer(prompt)
     except Exception as error:  # noqa: BLE001 - never break the loop over this
         log.debug("lessons: summarizer failed for iter %s: %s", iteration, error)
-        return SummaryOutcome(
-            reason=f"{type(error).__name__}: {str(error)[:200]}"
-        )
+        return SummaryOutcome(reason=f"{type(error).__name__}: {str(error)[:200]}")
     text = (text or "").strip()
     if not text:
         return SummaryOutcome(reason="session replied with no text")
@@ -1477,11 +1418,7 @@ def build_fallback_document(
     Returns "" when the loop observed nothing to record, so the
     caller can skip writing a document rather than emit an empty one.
     """
-    blocks = [
-        line.strip()
-        for line in (findings or "").split("\n---\n")
-        if line.strip()
-    ]
+    blocks = [line.strip() for line in (findings or "").split("\n---\n") if line.strip()]
     progress = []
     for entry in progress_log or []:
         compact = " ".join(str(entry).split())
@@ -1495,10 +1432,7 @@ def build_fallback_document(
     # Lead with a machine-authored provenance marker so the record cannot be
     # mistaken for the resumed Implementer's own account.
     if blocks:
-        opening = (
-            f"(no agent summary) session hit {len(blocks)} gate rejection(s): "
-            f"{blocks[-1].splitlines()[0][:80]}"
-        )
+        opening = f"(no agent summary) session hit {len(blocks)} gate rejection(s): {blocks[-1].splitlines()[0][:80]}"
     elif diff_summary:
         opening = "(no agent summary) net change recorded without gate findings"
     else:

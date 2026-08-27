@@ -20,12 +20,7 @@ from kernelforge.knowledge.experience_reader import read_top_solutions
 from kernelforge.knowledge.experience_sink import write_run_experience
 from kernelforge.knowledge.experience_store import KnowledgeConfig
 
-TRITON_SRC = (
-    "import triton\n"
-    "@triton.jit\n"
-    "def fused_moe_kernel(x):\n"
-    "    return x\n"
-)
+TRITON_SRC = "import triton\n@triton.jit\ndef fused_moe_kernel(x):\n    return x\n"
 DIFF = """diff --git a/vllm/model_executor/fused_moe.py b/vllm/model_executor/fused_moe.py
 --- a/vllm/model_executor/fused_moe.py
 +++ b/vllm/model_executor/fused_moe.py
@@ -48,12 +43,13 @@ def knowledge_root(tmp_path):
 
 
 def _config(workspace, knowledge_root, gpu_type="mi355x"):
-    knowledge = KnowledgeConfig.from_env(
-        {}, mode="local", local_root=knowledge_root
-    )
+    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=knowledge_root)
     return Config.from_env(
-        workspace=str(workspace), gpu_target="gfx950", gpu_type=gpu_type,
-        knowledge_config=knowledge, agent_precheck=False,
+        workspace=str(workspace),
+        gpu_target="gfx950",
+        gpu_type=gpu_type,
+        knowledge_config=knowledge,
+        agent_precheck=False,
     )
 
 
@@ -64,8 +60,7 @@ def _write_source(root, relative, source=TRITON_SRC):
     return path
 
 
-def _producer_write(tmp_path, knowledge_root, *, experiment_id="producer-0731",
-                    best_wall_ms=5.0, gpu_type="mi355x"):
+def _producer_write(tmp_path, knowledge_root, *, experiment_id="producer-0731", best_wall_ms=5.0, gpu_type="mi355x"):
     workspace = tmp_path / "producer"
     kernel = _write_source(workspace, "vllm/model_executor/fused_moe.py")
     return write_run_experience(
@@ -100,9 +95,7 @@ def _consumer_read(tmp_path, knowledge_root, *, top_k=3, gpu_type="mi355x"):
     )
 
 
-def test_write_and_read_resolve_the_same_address_across_workspaces(
-    tmp_path, knowledge_root
-):
+def test_write_and_read_resolve_the_same_address_across_workspaces(tmp_path, knowledge_root):
     status = _producer_write(tmp_path, knowledge_root)
 
     assert status["written"] is True
@@ -138,7 +131,8 @@ def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge
     """
     workspace = tmp_path / "shared"
     aiter_file = _write_source(
-        workspace, "aiter/ops/triton/unified.py",
+        workspace,
+        "aiter/ops/triton/unified.py",
         TRITON_SRC.replace("fused_moe_kernel", "unified_attention_kernel"),
     )
     entry_src = "def unified_attention(x):\n    return call_aiter(x)\n"
@@ -146,10 +140,18 @@ def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge
     config = _config(workspace, knowledge_root)
 
     status = write_run_experience(
-        config=config, workspace=str(workspace), kernel_path=str(vllm_entry),
-        kernel_source=entry_src, fellow="triton-fellow", gpu_target="gfx950",
-        experiment_id="producer-x", baseline_wall_ms=10.0, best_wall_ms=5.0,
-        mean_case_speedup=2.0, cumulative_diff=DIFF, digest="d",
+        config=config,
+        workspace=str(workspace),
+        kernel_path=str(vllm_entry),
+        kernel_source=entry_src,
+        fellow="triton-fellow",
+        gpu_target="gfx950",
+        experiment_id="producer-x",
+        baseline_wall_ms=10.0,
+        best_wall_ms=5.0,
+        mean_case_speedup=2.0,
+        cumulative_diff=DIFF,
+        digest="d",
         source_files=[str(aiter_file)],
         target_functions=["unified_attention_kernel"],
         summary_override=SUMMARY,
@@ -159,10 +161,13 @@ def test_framework_follows_the_defining_file_across_packages(tmp_path, knowledge
     assert status["kernel"].startswith("kernel:forge-loop:unified_attention:aiter:")
 
     solutions = read_top_solutions(
-        config=config, kernel_path=str(vllm_entry), kernel_source=entry_src,
+        config=config,
+        kernel_path=str(vllm_entry),
+        kernel_source=entry_src,
         fellow="triton-fellow",
         target_functions=["unified_attention_kernel"],
-        source_files=[str(aiter_file)], top_k=3,
+        source_files=[str(aiter_file)],
+        top_k=3,
     )
 
     assert solutions, "the defining file must lead both sides to one address"

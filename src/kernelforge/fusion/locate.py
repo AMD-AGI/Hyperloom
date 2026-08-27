@@ -84,9 +84,9 @@ def resolve_framework_source_file(
         # the pinned tree, so a file outside it is not the one being optimized.
         if registered and not _within_root(registered, framework_root):
             log.info(
-                "vllm registry names %s, outside --framework-root %s; "
-                "searching the pinned tree instead",
-                registered, framework_root,
+                "vllm registry names %s, outside --framework-root %s; searching the pinned tree instead",
+                registered,
+                framework_root,
             )
             registered = ""
         if registered:
@@ -140,6 +140,7 @@ def _vllm_registered_source(model_path: str) -> str:
         return ""
     try:
         from vllm.model_executor.models.registry import ModelRegistry
+
         models = ModelRegistry.models
     except (ImportError, AttributeError) as exc:
         log.warning("vllm registry unavailable (%s); using the path convention", exc)
@@ -152,14 +153,18 @@ def _vllm_registered_source(model_path: str) -> str:
             # A model registered out of tree carries its class; an in-tree one
             # names the module to import it from.
             cls = (
-                entry.model_cls if hasattr(entry, "model_cls")
+                entry.model_cls
+                if hasattr(entry, "model_cls")
                 else getattr(importlib.import_module(entry.module_name), entry.class_name)
             )
             source = inspect.getsourcefile(cls)
         except (ImportError, AttributeError, TypeError) as exc:
             log.warning(
                 "vllm registers %s as %s, which did not resolve: %s: %s",
-                arch, getattr(entry, "module_name", entry), type(exc).__name__, exc,
+                arch,
+                getattr(entry, "module_name", entry),
+                type(exc).__name__,
+                exc,
             )
             continue
         if source and Path(source).is_file():
@@ -187,13 +192,9 @@ def _legacy_source_file(model_type: str, framework: str, framework_root: str) ->
     """The historical ``<models dir>/<model_type>.py`` guess."""
     if framework == "sglang":
         rels = ("python/sglang/srt/models", "sglang/srt/models", "srt/models")
-        return _first_source_file(
-            model_type, framework_root, rels, pkg="sglang", pkg_models=("srt", "models")
-        )
+        return _first_source_file(model_type, framework_root, rels, pkg="sglang", pkg_models=("srt", "models"))
     rels = ("vllm/model_executor/models", "model_executor/models")
-    return _first_source_file(
-        model_type, framework_root, rels, pkg="vllm", pkg_models=("model_executor", "models")
-    )
+    return _first_source_file(model_type, framework_root, rels, pkg="vllm", pkg_models=("model_executor", "models"))
 
 
 # Implementations live in the in-tree models package and, for newer families, an
@@ -425,20 +426,38 @@ def _already_fused(pattern: FusionPattern, source_text: str) -> bool:
 # (which vLLM does NOT fuse without quant) are never dropped. Ordered specific
 # (mla / cat) first so the reported pass is the most precise.
 _VLLM_COMPILE_PASSES: tuple[tuple[str, str, frozenset[str], tuple[tuple[str, ...], ...]], ...] = (
-    ("fuse_rope_kvcache_cat_mla", "fuse_rope_kvcache_cat_mla", frozenset(),
-     (("mla",), ("rope", "rotary"), ("cat", "concat", "kvcache", "kv_cache", "kv cache"))),
-    ("fuse_mla_dual_rms_norm", "fuse_mla_dual_rms_norm", frozenset(),
-     (("mla",), ("dual",), ("rms", "rmsnorm", "norm"))),
-    ("fuse_rope_kvcache", "fuse_rope_kvcache", frozenset(),
-     (("rope", "rotary"), ("kvcache", "kv_cache", "kv cache", "kv-cache"))),
-    ("qk_norm_rope", "enable_qk_norm_rope_fusion", frozenset({"rmsnorm", "rope"}),
-     (("q_norm", "k_norm", "qk_norm", "qk norm", "qk"), ("rope", "rotary"))),
-    ("fuse_attn_quant", "fuse_attn_quant", frozenset(),
-     (("attn", "attention"), ("quant", "fp8", "scaled_mm"))),
-    ("fuse_act_quant", "fuse_act_quant", frozenset(),
-     (("silu", "gelu", "swiglu", "activation", "act"), ("quant", "fp8"))),
-    ("fuse_norm_quant", "fuse_norm_quant", frozenset(),
-     (("rmsnorm", "rms", "layernorm", "norm"), ("quant", "fp8"))),
+    (
+        "fuse_rope_kvcache_cat_mla",
+        "fuse_rope_kvcache_cat_mla",
+        frozenset(),
+        (("mla",), ("rope", "rotary"), ("cat", "concat", "kvcache", "kv_cache", "kv cache")),
+    ),
+    (
+        "fuse_mla_dual_rms_norm",
+        "fuse_mla_dual_rms_norm",
+        frozenset(),
+        (("mla",), ("dual",), ("rms", "rmsnorm", "norm")),
+    ),
+    (
+        "fuse_rope_kvcache",
+        "fuse_rope_kvcache",
+        frozenset(),
+        (("rope", "rotary"), ("kvcache", "kv_cache", "kv cache", "kv-cache")),
+    ),
+    (
+        "qk_norm_rope",
+        "enable_qk_norm_rope_fusion",
+        frozenset({"rmsnorm", "rope"}),
+        (("q_norm", "k_norm", "qk_norm", "qk norm", "qk"), ("rope", "rotary")),
+    ),
+    ("fuse_attn_quant", "fuse_attn_quant", frozenset(), (("attn", "attention"), ("quant", "fp8", "scaled_mm"))),
+    (
+        "fuse_act_quant",
+        "fuse_act_quant",
+        frozenset(),
+        (("silu", "gelu", "swiglu", "activation", "act"), ("quant", "fp8")),
+    ),
+    ("fuse_norm_quant", "fuse_norm_quant", frozenset(), (("rmsnorm", "rms", "layernorm", "norm"), ("quant", "fp8"))),
 )
 
 # Compile passes belong to vLLM's torch.compile pipeline; sglang does not run
@@ -446,9 +465,7 @@ _VLLM_COMPILE_PASSES: tuple[tuple[str, str, frozenset[str], tuple[tuple[str, ...
 _VLLM_FRAMEWORKS = frozenset({"vllm", "vllm-aiter"})
 
 
-def covered_by_vllm_compile_pass(
-    *, matched_categories: list[str], text: str, framework: str
-) -> str:
+def covered_by_vllm_compile_pass(*, matched_categories: list[str], text: str, framework: str) -> str:
     """Name of the vLLM compile pass that implements this fusion, or ``""``.
 
     Reused by BOTH the pattern route (``build_recipes``) and the discovery route
@@ -483,7 +500,9 @@ def _all_pass_config_flags() -> tuple[str, ...]:
 
 
 def vllm_compile_pass_state(
-    pass_name: str, *, probe: Optional[PassProbe] = None,
+    pass_name: str,
+    *,
+    probe: Optional[PassProbe] = None,
     runtime: Optional[TargetRuntime] = None,
 ) -> Optional[PassState]:
     """Full state of the vLLM compile pass behind ``pass_name`` (``None`` if unmapped).
@@ -507,26 +526,36 @@ def vllm_compile_pass_state(
     # Read the WHOLE table in one probe: the cost is importing vLLM, so asking
     # per flag would re-pay it for every matched pattern.
     return probe_pass_states(
-        _all_pass_config_flags(), python=rt.python, require_root=rt.require_root,
+        _all_pass_config_flags(),
+        python=rt.python,
+        require_root=rt.require_root,
     ).get(flag)
 
 
 def _unclaimable_note(state: PassState) -> str:
     """Why a matched compile pass was not claimed, for the manifest."""
     if not state.present:
-        return (f"vLLM compile pass `{state.flag}` does not exist in this install "
-                f"(nothing to enable): authoring still applies")
+        return (
+            f"vLLM compile pass `{state.flag}` does not exist in this install "
+            f"(nothing to enable): authoring still applies"
+        )
     if state.error:
-        return (f"state of vLLM compile pass `{state.flag}` is UNDECIDABLE "
-                f"({state.error[:160]}): not claimed, authoring still applies")
+        return (
+            f"state of vLLM compile pass `{state.flag}` is UNDECIDABLE "
+            f"({state.error[:160]}): not claimed, authoring still applies"
+        )
     if state.enabled is None:
-        return (f"vLLM resolves `{state.flag}` from the full engine config "
-                f"(source={state.source}), so it cannot be decided here: "
-                f"not claimed, authoring still applies")
+        return (
+            f"vLLM resolves `{state.flag}` from the full engine config "
+            f"(source={state.source}), so it cannot be decided here: "
+            f"not claimed, authoring still applies"
+        )
     # Disabled, but a level pins it: flipping the class default would not take.
-    return (f"vLLM compile pass `{state.flag}` is off but pinned by the default "
-            f"optimization level (source={state.source}), so flipping the "
-            f"PassConfig default would have no effect: not claimed")
+    return (
+        f"vLLM compile pass `{state.flag}` is off but pinned by the default "
+        f"optimization level (source={state.source}), so flipping the "
+        f"PassConfig default would have no effect: not claimed"
+    )
 
 
 def rank_recipes(recipes: list[Recipe]) -> list[Recipe]:
@@ -632,7 +661,10 @@ def build_recipes(
     shapes = resolve_decode_shapes(model_path, decode_batch=decode_batch)
     model_type = str(shapes.get("model_type") or "")
     source_file, source_resolution_note = resolve_framework_source_file(
-        model_path, framework, framework_root=framework_root, model_type=model_type,
+        model_path,
+        framework,
+        framework_root=framework_root,
+        model_type=model_type,
     )
     source_text = _read_source(source_file)
     have_source = bool(source_text)
@@ -648,16 +680,11 @@ def build_recipes(
         # MEASURED memory-traffic share of this pattern's op chain (the slice of
         # HBM traffic fusion would collapse). None when the trace carried no shapes
         # -> predict falls back to the launch-share discount.
-        mem_share = (
-            sum(bytes_share.get(c, 0.0) for c in pat.trigger_categories)
-            if bytes_share else None
-        )
+        mem_share = sum(bytes_share.get(c, 0.0) for c in pat.trigger_categories) if bytes_share else None
         # Per-pattern predicted cg-ON gain, grounded in the measured memory channel
         # when available (else the launch-share discount). Annotated for ranking /
         # author context; not a hard drop (the diagnose gate vetoes non-candidates).
-        predicted_gain = predict_cuda_graph_on_gain(
-            trigger_share, decode_batch=decode_batch, mem_share=mem_share
-        )
+        predicted_gain = predict_cuda_graph_on_gain(trigger_share, decode_batch=decode_batch, mem_share=mem_share)
         # Compile-pass gate: a fusion vLLM performs at compile time is a no-op to
         # author -- but only while that pass is switched ON, which is read from the
         # install, not assumed.
@@ -669,10 +696,7 @@ def build_recipes(
             text=" ".join((pat.id, pat.fusion_math, pat.env_flag)),
             framework=framework,
         )
-        state = (
-            vllm_compile_pass_state(compile_pass, probe=pass_probe, runtime=runtime)
-            if compile_pass else None
-        )
+        state = vllm_compile_pass_state(compile_pass, probe=pass_probe, runtime=runtime) if compile_pass else None
         # ONLY an enabled pass makes the candidate a no-op. Absent / undecidable /
         # level-pinned-off all mean the framework is not fusing this for us, so the
         # candidate survives as normal authoring work (annotated with why).
@@ -688,14 +712,20 @@ def build_recipes(
             # Drop no-op patterns (source already fuses OR an ENABLED vLLM pass covers).
             continue
         if state is not None and state.claimable:
-            recipes.append(_compile_pass_recipe(
-                pat, state, shapes=shapes, trigger_share=trigger_share,
-                predicted_gain=predicted_gain, mem_share=mem_share,
-                source_confirmed=confirmed,
-                matched_categories=sorted(
-                    c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
-                ),
-            ))
+            recipes.append(
+                _compile_pass_recipe(
+                    pat,
+                    state,
+                    shapes=shapes,
+                    trigger_share=trigger_share,
+                    predicted_gain=predicted_gain,
+                    mem_share=mem_share,
+                    source_confirmed=confirmed,
+                    matched_categories=sorted(
+                        c for c in pat.trigger_categories if diagnosis.category_shares.get(c, 0.0) > 0
+                    ),
+                )
+            )
             continue
         recipes.append(
             Recipe(

@@ -96,9 +96,7 @@ class _BundleBackend:
         root = Path(payload["analysis_staging_dir"])
         request = json.loads(Path(payload["request_file"]).read_text())
         self.initial_progress.append(
-            json.loads((root / "progress.json").read_text())
-            if (root / "progress.json").is_file()
-            else None
+            json.loads((root / "progress.json").read_text()) if (root / "progress.json").is_file() else None
         )
         if self.modify_kernel:
             Path(payload["kernel_file"]).write_text("def kernel():\n    return 2\n")
@@ -122,9 +120,7 @@ class _BundleBackend:
             profile_root = case_root / "profile"
             profile_root.mkdir(parents=True, exist_ok=True)
             (case_root / "case.json").write_text(json.dumps(item))
-            (case_root / "normalized_metrics.json").write_text(
-                json.dumps({"metrics": {"occupancy": 0.75}})
-            )
+            (case_root / "normalized_metrics.json").write_text(json.dumps({"metrics": {"occupancy": 0.75}}))
             with (root / "commands.jsonl").open("a") as commands:
                 commands.write(
                     json.dumps(
@@ -259,9 +255,7 @@ class _StaticAnalysisBackend:
                 }
             )
         )
-        (root / "progress.json").write_text(
-            json.dumps({"phase": "COMPLETE", "completed_case_ids": []})
-        )
+        (root / "progress.json").write_text(json.dumps({"phase": "COMPLETE", "completed_case_ids": []}))
         (root / "commands.jsonl").write_text(json.dumps({"decision": "profiling_disabled"}) + "\n")
         for item in cases:
             case_root = root / "cases" / item["directory"]
@@ -386,12 +380,7 @@ async def test_analysis_protection_only_allows_artifact_writes(
     bounded = await protection._on_pre_bash(
         {
             "tool_name": "Bash",
-            "tool_input": {
-                "command": (
-                    "timeout --signal=TERM --kill-after=5s "
-                    "30s python driver.py"
-                )
-            },
+            "tool_input": {"command": ("timeout --signal=TERM --kill-after=5s 30s python driver.py")},
         },
         None,
         None,
@@ -400,20 +389,12 @@ async def test_analysis_protection_only_allows_artifact_writes(
     over_budget = await protection._on_pre_bash(
         {
             "tool_name": "Bash",
-            "tool_input": {
-                "command": (
-                    "timeout --signal=TERM --kill-after=5s "
-                    "120s python driver.py"
-                )
-            },
+            "tool_input": {"command": ("timeout --signal=TERM --kill-after=5s 120s python driver.py")},
         },
         None,
         None,
     )
-    assert (
-        over_budget["hookSpecificOutput"]["permissionDecision"]
-        == "deny"
-    )
+    assert over_budget["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_analysis_attempt_limit_persists_across_resume(tmp_path) -> None:
@@ -476,9 +457,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     assert reference_script.name == "rocpc_profile.py"
     assert (bundle.root / "tools" / "rocpc_profile.py").is_file()
     assert str(reference_script) in backend.specs[0].system_prompt
-    methodology = [
-        Path(path) for path in prompt_payload["profiling_methodology"]
-    ]
+    methodology = [Path(path) for path in prompt_payload["profiling_methodology"]]
     assert len(methodology) == 4
     assert all(path.is_absolute() and path.is_file() for path in methodology)
     staging_root = Path(prompt_payload["analysis_staging_dir"])
@@ -489,9 +468,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     assert "markdown-first output contract" in prompt
     assert "current_step" not in json.loads(backend.specs[0].user_prompt)
     catalog = json.loads((bundle.root / "artifact_catalog.json").read_text())
-    assert all(
-        Path(artifact["path"]).is_relative_to(bundle.root) for artifact in catalog["artifacts"]
-    )
+    assert all(Path(artifact["path"]).is_relative_to(bundle.root) for artifact in catalog["artifacts"])
     assert {artifact["status"] for artifact in catalog["artifacts"]} == {"COMPLETE"}
     assert not {
         "profiling_plan",
@@ -517,9 +494,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
         if artifact["kind"] == "case_directions" and artifact["case_id"] == "case-a"
     )
     assert directions_path in evidence_paths
-    marked = bundle.apply(
-        replace(context, evidence_status="profiled")
-    )
+    marked = bundle.apply(replace(context, evidence_status="profiled"))
     assert marked.evidence_status == "profiled"
     resumed_context = replace(
         context,
@@ -528,10 +503,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
         evidence_commit="abc123",
         evidence_stale=True,
         evidence_status="profiled",
-        cases=tuple(
-            replace(case, latency_ms=(case.latency_ms or 0) + 0.5)
-            for case in context.cases
-        ),
+        cases=tuple(replace(case, latency_ms=(case.latency_ms or 0) + 0.5) for case in context.cases),
     )
     restored = service.apply_published_evidence(
         resumed_context,
@@ -543,10 +515,7 @@ async def test_analysis_agent_publishes_multi_case_bundle(tmp_path) -> None:
     ]
     assert [case.latency_ms for case in restored.cases] == [1.5, 2.5]
     assert all(case.profile_summary_path for case in restored.cases)
-    assert all(
-        "analysis_evidence_stale" in case.flags
-        for case in restored.cases
-    )
+    assert all("analysis_evidence_stale" in case.flags for case in restored.cases)
     assert restored.evidence_commit == "abc123"
     assert restored.evidence_stale is True
 
@@ -599,13 +568,7 @@ async def test_analysis_reports_missing_optional_profiling_methodology(
     workspace, kernel, driver = _workspace(tmp_path)
     backend = _BundleBackend()
     service = _service(tmp_path, backend)
-    missing = (
-        tmp_path
-        / "knowledge"
-        / "common_methodology"
-        / "profiling"
-        / "roofline_on_mi.md"
-    )
+    missing = tmp_path / "knowledge" / "common_methodology" / "profiling" / "roofline_on_mi.md"
     missing.unlink()
 
     await service.ensure_bundle(
@@ -617,13 +580,8 @@ async def test_analysis_reports_missing_optional_profiling_methodology(
 
     assert backend.calls == 1
     payload = json.loads(backend.specs[0].user_prompt)
-    assert payload["profiling_methodology_missing"] == [
-        "roofline_on_mi.md"
-    ]
-    assert all(
-        Path(path).is_file()
-        for path in payload["profiling_methodology"]
-    )
+    assert payload["profiling_methodology_missing"] == ["roofline_on_mi.md"]
+    assert all(Path(path).is_file() for path in payload["profiling_methodology"])
 
 
 async def test_analysis_requires_packaged_profiling_script(
@@ -632,13 +590,7 @@ async def test_analysis_requires_packaged_profiling_script(
     workspace, kernel, driver = _workspace(tmp_path)
     backend = _BundleBackend()
     service = _service(tmp_path, backend)
-    script = (
-        tmp_path
-        / "knowledge"
-        / "common_methodology"
-        / "profiling"
-        / "rocpc_profile.py"
-    )
+    script = tmp_path / "knowledge" / "common_methodology" / "profiling" / "rocpc_profile.py"
     script.unlink()
 
     with pytest.raises(
@@ -693,20 +645,11 @@ async def test_post_keep_analysis_is_incremental_and_deadline_bounded(
     assert 0 < spec.timeout_sec <= 5
     assert payload["analysis_trigger"] == "post_keep_incremental"
     assert payload["previous_analysis_commit"] == "abc123"
-    assert Path(payload["incremental_diff_path"]).name == (
-        "incremental_diff.patch"
-    )
+    assert Path(payload["incremental_diff_path"]).name == ("incremental_diff.patch")
     assert (child.root / "incremental_diff.patch").is_file()
-    assert "cumulative re-analysis after one or more solutions" in (
-        spec.system_prompt
-    )
-    assert "diff may span multiple accepted KEEP commits" in (
-        spec.system_prompt
-    )
-    assert all(
-        "analysis_profile_incremental" in case.flags
-        for case in child.cases
-    )
+    assert "cumulative re-analysis after one or more solutions" in (spec.system_prompt)
+    assert "diff may span multiple accepted KEEP commits" in (spec.system_prompt)
+    assert all("analysis_profile_incremental" in case.flags for case in child.cases)
 
 
 async def test_invalid_incremental_parent_falls_back_to_full_analysis(
@@ -758,10 +701,7 @@ async def test_unvalidated_profile_files_publish_partial(
     assert bundle.manifest["skipped_case_ids"] == ["case-a", "case-b"]
     assert (bundle.root / "report.md").is_file()
     assert not (bundle.root / "summary.json").exists()
-    assert all(
-        "analysis_profiled" not in case.flags
-        for case in bundle.cases
-    )
+    assert all("analysis_profiled" not in case.flags for case in bundle.cases)
 
 
 async def test_incomplete_markdown_analysis_publishes_partial(
@@ -848,14 +788,9 @@ async def test_static_analysis_uses_one_session_and_marks_cases_skipped(
     workflow = json.loads((bundle.root / "workflow.json").read_text())
     assert workflow["session"]["status"] == "COMPLETE"
     catalog = json.loads((bundle.root / "artifact_catalog.json").read_text())
-    assert all(
-        artifact["kind"] != "profiling_plan"
-        for artifact in catalog["artifacts"]
-    )
+    assert all(artifact["kind"] != "profiling_plan" for artifact in catalog["artifacts"])
     assert catalog["analysis_session_status"] == "COMPLETE"
-    assert {
-        artifact["status"] for artifact in catalog["artifacts"] if artifact["scope"] == "case"
-    } == {"SKIPPED"}
+    assert {artifact["status"] for artifact in catalog["artifacts"] if artifact["scope"] == "case"} == {"SKIPPED"}
 
 
 async def test_profiled_service_upgrades_cached_static_bundle(
@@ -890,10 +825,7 @@ async def test_profiled_service_upgrades_cached_static_bundle(
 
     assert profiled_backend.calls == 1
     assert profiled_bundle.manifest["status"] == "READY"
-    assert all(
-        "analysis_profiled" in case.flags
-        for case in profiled_bundle.cases
-    )
+    assert all("analysis_profiled" in case.flags for case in profiled_bundle.cases)
 
 
 async def test_analysis_agent_restores_modified_kernel_and_rejects_bundle(
@@ -957,10 +889,7 @@ async def test_analysis_session_preserves_and_resumes_completed_outputs(
     assert workflow["status"] == "READY"
     assert workflow["session"]["status"] == "COMPLETE"
     assert (bundle.root / "cases").is_dir()
-    assert all(
-        (case_root / "analysis.md").is_file()
-        for case_root in (bundle.root / "cases").iterdir()
-    )
+    assert all((case_root / "analysis.md").is_file() for case_root in (bundle.root / "cases").iterdir())
 
 
 async def test_partial_checkpoint_is_exposed_as_orchestration_evidence(

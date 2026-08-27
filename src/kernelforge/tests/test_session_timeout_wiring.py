@@ -42,8 +42,11 @@ def captured_run_spec(monkeypatch):
             name="claude",
             runtime=runtime,
             capabilities=AgentCapabilities(
-                writable=True, resumable=True, stop_hooks=True,
-                native_subagents=True, mcp=False,
+                writable=True,
+                resumable=True,
+                stop_hooks=True,
+                native_subagents=True,
+                mcp=False,
             ),
             fallback_reason="",
         )
@@ -53,10 +56,8 @@ def captured_run_spec(monkeypatch):
             seen["spec"] = spec
             return AgentRunResult(text="PLAN: did a thing", subtype="success")
 
-        monkeypatch.setattr(agent_mod, "create_registered_backend",
-                            lambda *a, **k: backend)
-        monkeypatch.setattr(agent_mod, "run_session_with_api_resume",
-                            fake_resume_driver)
+        monkeypatch.setattr(agent_mod, "create_registered_backend", lambda *a, **k: backend)
+        monkeypatch.setattr(agent_mod, "run_session_with_api_resume", fake_resume_driver)
 
         config = Config()
         config.workspace = ""

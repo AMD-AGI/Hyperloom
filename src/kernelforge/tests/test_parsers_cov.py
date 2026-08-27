@@ -16,6 +16,7 @@ from kernelforge.mcp_server.parsers.compiler_output import (
 
 # ─── RegisterInfo ───
 
+
 def test_register_info_occupancy_and_summary():
     info = RegisterInfo(vgpr=200, agpr=64, sgpr=100, lds_bytes=40960, spill_bytes=0)
     analysis = info.occupancy_analysis
@@ -41,6 +42,7 @@ def test_register_info_unknown():
 
 
 # ─── parse_register_info fallbacks ───
+
 
 def test_parse_register_info_primary_patterns():
     text = """
@@ -73,6 +75,7 @@ def test_parse_register_info_alternative_patterns():
 
 
 # ─── errors / warnings ───
+
 
 def test_parse_compiler_warnings():
     text = "a.cpp:1: warning: unused var\nb.cpp:2: error: boom\n"

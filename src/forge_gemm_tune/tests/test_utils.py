@@ -72,10 +72,17 @@ class TestEmitResultJson:
 
 class TestTunerEnvVars:
     def test_all_tuners_have_env_var(self):
-        expected = ["fmoe_ck", "a8w8", "a8w8_blockscale", "a8w8_bpreshuffle",
-                    "a8w8_blockscale_bpreshuffle",
-                    "a4w4_blockscale", "vllm_moe_triton", "vllm_dense_tunableop",
-                    "sglang_dense_bf16"]
+        expected = [
+            "fmoe_ck",
+            "a8w8",
+            "a8w8_blockscale",
+            "a8w8_bpreshuffle",
+            "a8w8_blockscale_bpreshuffle",
+            "a4w4_blockscale",
+            "vllm_moe_triton",
+            "vllm_dense_tunableop",
+            "sglang_dense_bf16",
+        ]
         for name in expected:
             assert name in TUNER_ENV_VARS, f"Missing env var for {name}"
             assert TUNER_ENV_VARS[name], f"Empty env var for {name}"
@@ -91,9 +98,12 @@ class TestTunerEnvVars:
         # When aiter is importable, verify the name against ground truth rather
         # than a hard-coded literal, so this tracks aiter if it ever renames.
         import importlib.util
+
         if importlib.util.find_spec("aiter") is None:
             import pytest
+
             pytest.skip("aiter not installed")
         from aiter.jit import core as aiter_core
+
         assert hasattr(aiter_core, "AITER_CONFIG_GEMM_A4W4")
         assert TUNER_ENV_VARS["a4w4_blockscale"] == "AITER_CONFIG_GEMM_A4W4"

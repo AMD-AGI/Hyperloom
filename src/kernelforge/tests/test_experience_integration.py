@@ -116,19 +116,11 @@ def _bench(ms: float) -> dict:
 
 
 def _three_measurements(*stages: dict | None):
-    return iter(
-        measurement
-        for stage in stages
-        for measurement in [stage, stage, stage]
-    )
+    return iter(measurement for stage in stages for measurement in [stage, stage, stage])
 
 
 def _indexed_reference(root: Path, rank: int) -> Path:
-    line = next(
-        line
-        for line in (root / "index.md").read_text().splitlines()
-        if line.startswith(f"- Rank {rank}:")
-    )
+    line = next(line for line in (root / "index.md").read_text().splitlines() if line.startswith(f"- Rank {rank}:"))
     return root / line.split("`", 2)[1]
 
 
@@ -252,20 +244,22 @@ def test_git_checkout_branch_creates_and_switches_branch(tmp_path):
 
 
 def test_kb_read_status_is_compact_and_stable():
-    status = integ.kb_read_status({
-        "candidate": True,
-        "read_reason": "hit",
-        "read_error": "",
-        "applied": True,
-        "match_mode": "",
-        "reference_reason": "",
-        "solution_slug": "solution",
-        "speedup": 1.5,
-        "pristine_ms": 10.0,
-        "keep_baseline_ms": 5.0,
-        "applied_commit": "",
-        "program_md_addition": "large prompt text",
-    })
+    status = integ.kb_read_status(
+        {
+            "candidate": True,
+            "read_reason": "hit",
+            "read_error": "",
+            "applied": True,
+            "match_mode": "",
+            "reference_reason": "",
+            "solution_slug": "solution",
+            "speedup": 1.5,
+            "pristine_ms": 10.0,
+            "keep_baseline_ms": 5.0,
+            "applied_commit": "",
+            "program_md_addition": "large prompt text",
+        }
+    )
 
     assert status == {
         "measured_writebacks": 0,
@@ -290,14 +284,16 @@ def test_kb_read_status_keeps_a_refused_amendment():
     The KB goes on ranking a claim no consumer reproduced, so the refusal is
     exactly the outcome an operator needs to see later.
     """
-    status = integ.kb_read_status({
-        "candidate": True,
-        "applied": True,
-        "measured_writebacks": [
-            {"rank": 1, "recorded": True, "reason": ""},
-            {"rank": 2, "recorded": False, "reason": "error:KBStoreError:refused"},
-        ],
-    })
+    status = integ.kb_read_status(
+        {
+            "candidate": True,
+            "applied": True,
+            "measured_writebacks": [
+                {"rank": 1, "recorded": True, "reason": ""},
+                {"rank": 2, "recorded": False, "reason": "error:KBStoreError:refused"},
+            ],
+        }
+    )
 
     assert status["measured_writebacks"] == 2
     assert status["measured_writeback_failures"] == ["error:KBStoreError:refused"]
@@ -370,10 +366,12 @@ def test_kb_warmstart_propagates_reader_no_hit_status(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
 
     def no_hit(**kwargs):
-        kwargs["read_status"].update({
-            "read_reason": "kernel_page_not_found",
-            "read_error": "",
-        })
+        kwargs["read_status"].update(
+            {
+                "read_reason": "kernel_page_not_found",
+                "read_error": "",
+            }
+        )
         return []
 
     monkeypatch.setattr(
@@ -408,8 +406,7 @@ def test_fresh_kb_lookup_clears_stale_references(
     stale.parent.mkdir(parents=True)
     stale.write_text("stale reference\n")
     (root / "index.md").write_text(
-        "- Rank 1: `sets/stale-generation/reference_01.md` | "
-        "solution `stale` | speedup 2x | status `applied`\n"
+        "- Rank 1: `sets/stale-generation/reference_01.md` | solution `stale` | speedup 2x | status `applied`\n"
     )
 
     def lookup(**_kwargs):
@@ -459,12 +456,15 @@ def test_clear_kb_references_does_not_follow_root_symlink(tmp_path):
 
 def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
     repo = _init_repo(tmp_path)
-    _patch_read_solutions(monkeypatch, _solution(
-        APPLICABLE_PATCH,
-        solution_slug="kernelforge-exp/kernel/decode",
-        speedup=5.0,
-        match_mode="reference",
-    ))
+    _patch_read_solutions(
+        monkeypatch,
+        _solution(
+            APPLICABLE_PATCH,
+            solution_slug="kernelforge-exp/kernel/decode",
+            speedup=5.0,
+            match_mode="reference",
+        ),
+    )
     benches = _three_measurements(_bench(10.0), _bench(5.0))
     monkeypatch.setattr(integ, "_bench_once", lambda *_a, **_k: next(benches))
     monkeypatch.setattr(integ, "_correctness_once", lambda *_a, **_k: True)
@@ -510,12 +510,8 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
     assert warm["applied"] is True
     assert warm["solution_slug"] == "kernelforge-exp/kernel/second"
     assert (repo / "kernel.py").read_text() == "new\n"
-    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == (
-        "kb warm-start: apply kernelforge-exp/kernel/second"
-    )
-    index = (
-        repo / "forge_experiments" / "kb_references" / "index.md"
-    ).read_text()
+    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == ("kb warm-start: apply kernelforge-exp/kernel/second")
+    index = (repo / "forge_experiments" / "kb_references" / "index.md").read_text()
     assert "Rank 1:" in index
     assert "rejected:patch_touches_protected_path_or_not_applicable" in index
     assert "Rank 2:" in index
@@ -551,9 +547,7 @@ def test_kb_warmstart_persists_all_available_references_without_truncation(
     assert "reference_03.md" not in (root / "index.md").read_text()
     assert long_patch in _indexed_reference(root, 1).read_text()
     assert "strategy" in _indexed_reference(root, 1).read_text().lower()
-    generation_dirs = [
-        path for path in (root / "sets").iterdir() if path.is_dir()
-    ]
+    generation_dirs = [path for path in (root / "sets").iterdir() if path.is_dir()]
     assert len(generation_dirs) == 1
     assert long_patch not in warm["program_md_addition"]
     assert "kb_references/index.md" in warm["program_md_addition"]
@@ -691,9 +685,7 @@ def test_kb_warmstart_resume_skips_read_and_restores_reference_pointer(
 
     assert warm["skipped"] == "resume"
     assert "kb_references/index.md" in warm["program_md_addition"]
-    assert "Rank 1 solution `solution/fast` is already applied" in (
-        warm["program_md_addition"]
-    )
+    assert "Rank 1 solution `solution/fast` is already applied" in (warm["program_md_addition"])
     assert root.is_dir()
     assert reference.is_file()
 
@@ -724,9 +716,7 @@ def test_kb_warmstart_applies_benches_and_commits(monkeypatch, tmp_path):
     assert "status `applied`" in (references / "index.md").read_text()
     assert APPLICABLE_PATCH in _indexed_reference(references, 1).read_text()
     assert (repo / "kernel.py").read_text() == "new\n"
-    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == (
-        "kb warm-start: apply kernelforge-exp/kernel/prev"
-    )
+    assert _run(["git", "log", "-1", "--pretty=%s"], repo) == ("kb warm-start: apply kernelforge-exp/kernel/prev")
 
 
 def test_kb_warmstart_preserves_candidate_measurements_and_repeat(
@@ -783,38 +773,40 @@ def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
     """
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
-    benches = iter([
-        {
-            "success": True,
-            "median_ms": 10.0,
-            "case_times": {"case": 10.0},
-        },
-        {
-            "success": True,
-            "median_ms": 12.0,
-            "case_times": {"case": 12.0},
-        },
-        {
-            "success": True,
-            "median_ms": 9.0,
-            "case_times": {"case": 9.0},
-        },
-        {
-            "success": True,
-            "median_ms": 5.2,
-            "case_times": {"case": 5.2},
-        },
-        {
-            "success": True,
-            "median_ms": 5.0,
-            "case_times": {"case": 5.0},
-        },
-        {
-            "success": True,
-            "median_ms": 4.9,
-            "case_times": {"case": 4.9},
-        },
-    ])
+    benches = iter(
+        [
+            {
+                "success": True,
+                "median_ms": 10.0,
+                "case_times": {"case": 10.0},
+            },
+            {
+                "success": True,
+                "median_ms": 12.0,
+                "case_times": {"case": 12.0},
+            },
+            {
+                "success": True,
+                "median_ms": 9.0,
+                "case_times": {"case": 9.0},
+            },
+            {
+                "success": True,
+                "median_ms": 5.2,
+                "case_times": {"case": 5.2},
+            },
+            {
+                "success": True,
+                "median_ms": 5.0,
+                "case_times": {"case": 5.0},
+            },
+            {
+                "success": True,
+                "median_ms": 4.9,
+                "case_times": {"case": 4.9},
+            },
+        ]
+    )
     monkeypatch.setattr(
         integ,
         "_bench_once",
@@ -1018,9 +1010,7 @@ def test_kb_warmstart_commits_allowed_new_source_file(monkeypatch, tmp_path):
 
     assert warm["applied"] is True
     assert helper.read_text() == "helper\n"
-    assert _run(["git", "show", "--format=", "--name-only", "HEAD"], repo) == (
-        "helper.py"
-    )
+    assert _run(["git", "show", "--format=", "--name-only", "HEAD"], repo) == ("helper.py")
 
 
 def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
@@ -1049,9 +1039,7 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
     assert "kb_references/index.md" in warm["program_md_addition"]
     assert BAD_PATCH not in warm["program_md_addition"]
     references = repo / "forge_experiments" / "kb_references"
-    assert "patch_touches_protected_path_or_not_applicable" in (
-        references / "index.md"
-    ).read_text()
+    assert "patch_touches_protected_path_or_not_applicable" in (references / "index.md").read_text()
     assert BAD_PATCH in _indexed_reference(references, 1).read_text()
     assert (repo / "kernel.py").read_text() == "old\n"
     assert _run(["git", "log", "-1", "--pretty=%s"], repo) == "initial"
@@ -1212,9 +1200,7 @@ def test_kb_warmstart_applies_for_every_backend_when_driver_validates(
     assert warm["keep_baseline_ms"] == 5.0
     assert "already applied" in warm["program_md_addition"]
     assert (repo / "kernel.py").read_text() == "new\n"
-    assert _run(["git", "log", "-1", "--pretty=%s"], repo).startswith(
-        "kb warm-start: apply "
-    )
+    assert _run(["git", "log", "-1", "--pretty=%s"], repo).startswith("kb warm-start: apply ")
 
 
 def test_kb_warmstart_attempts_candidate_on_implementation_mismatch(
@@ -1324,9 +1310,7 @@ def test_kb_warmstart_rejects_patch_to_protected_config(
     )
 
     assert warm["applied"] is False
-    assert warm["reference_reason"] == (
-        "patch_touches_protected_path_or_not_applicable"
-    )
+    assert warm["reference_reason"] == ("patch_touches_protected_path_or_not_applicable")
     assert config.read_text() == "value: original\n"
 
 
@@ -1492,19 +1476,14 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
 ):
     kernel = tmp_path / "vllm" / "ops" / "kernel.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
     pristine_signature, pristine_identity = implementation_signature(
         workspace=str(tmp_path),
         kernel_path=str(kernel),
         source_files=[],
         framework="vllm",
     )
-    kernel.write_text(
-        kernel.read_text()
-        + "\n@triton.jit\ndef optimization_helper(x):\n    return x\n"
-    )
+    kernel.write_text(kernel.read_text() + "\n@triton.jit\ndef optimization_helper(x):\n    return x\n")
     optimized_signature, _ = implementation_signature(
         workspace=str(tmp_path),
         kernel_path=str(kernel),
@@ -1529,12 +1508,16 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
         best_wall_ms = 4.0
         best_mean_case_speedup = 2.0
         archive = None
-        ic = type("IC", (), {
-            "baseline_wall_ms": 8.0,
-            "pristine_baseline_wall_ms": 8.0,
-            "implementation_signature": pristine_signature,
-            "implementation_identity": pristine_identity,
-        })()
+        ic = type(
+            "IC",
+            (),
+            {
+                "baseline_wall_ms": 8.0,
+                "pristine_baseline_wall_ms": 8.0,
+                "implementation_signature": pristine_signature,
+                "implementation_identity": pristine_identity,
+            },
+        )()
 
     integ.write_experience_to_kb(
         config=object(),
@@ -1599,8 +1582,7 @@ def test_rewrite_warm_start_failure_is_persisted_without_its_credential(
     def failing_warm_start(*_args, **_kwargs):
         raise TimeoutError(
             f"connect https://forge:{token}@kb.example/knowledge failed "
-            f"(sent Bearer {token}); resolver said {token} is unreachable"
-            + " and dumped an unbounded trace" * 20
+            f"(sent Bearer {token}); resolver said {token} is unreachable" + " and dumped an unbounded trace" * 20
         )
 
     monkeypatch.setattr(
@@ -1665,9 +1647,7 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
     token = "kb-store-secret-9f3c"
     kernel = tmp_path / "vllm" / "ops" / "kernel.py"
     kernel.parent.mkdir(parents=True)
-    kernel.write_text(
-        "import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n"
-    )
+    kernel.write_text("import triton\n@triton.jit\ndef target_kernel(x):\n    return x\n")
 
     class ExplodingStore:
         """A KB Store client whose every call quotes the credential it used."""
@@ -1679,8 +1659,7 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
             def refuse(*_args, **_kwargs):
                 raise record_store.KBStoreError(
                     f"{name} https://forge:{token}@kb.example/knowledge failed "
-                    f"(sent Bearer {token}); the store said {token} expired"
-                    + " and returned an unbounded body" * 20
+                    f"(sent Bearer {token}); the store said {token} expired" + " and returned an unbounded body" * 20
                 )
 
             return refuse

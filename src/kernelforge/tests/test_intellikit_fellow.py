@@ -13,11 +13,13 @@ from kernelforge.fellows.intellikit.prompts import (
 
 # ─── Registration ───────────────────────────────────────────────────────────
 
+
 def test_intellikit_in_fellow_backends():
     assert "intellikit" in FELLOW_BACKENDS
 
 
 # ─── Prompt content ─────────────────────────────────────────────────────────
+
 
 def test_prompt_contains_gpu_target():
     prompt = build_system_prompt("gfx950", knowledge_content="# KB")
@@ -52,6 +54,7 @@ def test_prompt_contains_round_trip_workflow():
 
 # ─── Roofline lookup ────────────────────────────────────────────────────────
 
+
 def test_roofline_gfx950():
     line = _roofline("gfx950")
     assert "2517" in line
@@ -78,12 +81,14 @@ def test_roofline_peak_unknown():
 
 # ─── patch_co.py tool ───────────────────────────────────────────────────────
 
+
 def test_patch_co_ships_with_fellow():
     assert os.path.isfile(PATCH_CO), f"patch_co.py not found at {PATCH_CO}"
 
 
 def test_patch_co_syntax():
     import py_compile
+
     py_compile.compile(PATCH_CO, doraise=True)
 
 
@@ -98,9 +103,11 @@ def test_patch_co_mcpu_parameter():
 def test_patch_co_rejects_larger_text():
     """patch_co.py must exit non-zero when new .text is larger than original."""
     import subprocess
+
     result = subprocess.run(
         ["python3", PATCH_CO, "--help"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     # --help or no args should not crash with an unhandled exception
     assert result.returncode in (0, 1)  # usage error is fine, traceback is not

@@ -120,9 +120,7 @@ def _island_entry(x):
 """
     root = _tree(tmp_path, {"fused_island.py": island})
 
-    unreached = unreached_fusion_symbols(
-        str(root), ["mypkg/fused_mod.py", "mypkg/fused_island.py"]
-    )
+    unreached = unreached_fusion_symbols(str(root), ["mypkg/fused_mod.py", "mypkg/fused_island.py"])
 
     assert unreached == ["_island_entry", "fused_qk_norm"]
 
@@ -136,6 +134,7 @@ def test_no_changed_files_reports_nothing(tmp_path: Path) -> None:
     root = _tree(tmp_path)
 
     assert unreached_fusion_symbols(str(root), []) == []
+
 
 # The wiring an author actually writes, and the one the first version of this
 # check could not see: resolve eligibility in __init__, branch in forward. Both

@@ -52,9 +52,7 @@ __pycache__/
 """
 
 
-def _git(
-    repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC
-) -> subprocess.CompletedProcess:
+def _git(repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC) -> subprocess.CompletedProcess:
     """Run one git command in ``repo``; ``env`` overlays the process environment."""
     return git(*args, cwd=repo, check=False, timeout=timeout, env=env)
 
@@ -116,7 +114,9 @@ class ShadowRepo:
             if result.returncode != 0:
                 log.error(
                     "could not restore %s with git %s: %s",
-                    self.root, args[0], (result.stderr or result.stdout).strip(),
+                    self.root,
+                    args[0],
+                    (result.stderr or result.stdout).strip(),
                 )
                 return False
         return True
@@ -169,8 +169,9 @@ def ensure_git_workspace(
     detached = pointer.exists()
     if detached:
         log.warning(
-            "%s is a git checkout; the shadow routes through GIT_DIR=%s, which "
-            "the forge-loop agent inherits", root, git_dir,
+            "%s is a git checkout; the shadow routes through GIT_DIR=%s, which the forge-loop agent inherits",
+            root,
+            git_dir,
         )
     env = {"GIT_DIR": str(git_path), "GIT_WORK_TREE": str(root)} if detached else {}
     init = ("init", "-q") if detached else ("init", "-q", f"--separate-git-dir={git_path}")
@@ -193,9 +194,7 @@ def ensure_git_workspace(
             raise RuntimeError(f"git init failed: {(result.stderr or result.stdout).strip()}")
         (git_path / "info").mkdir(parents=True, exist_ok=True)
         (git_path / "info" / "exclude").write_text(
-            _EXCLUDE_HEADER
-            + "".join(f"{_admit(root, entry)}\n" for entry in indexed)
-            + _EXCLUDE_ARTIFACTS,
+            _EXCLUDE_HEADER + "".join(f"{_admit(root, entry)}\n" for entry in indexed) + _EXCLUDE_ARTIFACTS,
             encoding="utf-8",
         )
         for args in (
@@ -210,9 +209,7 @@ def ensure_git_workspace(
         ):
             result = _git(str(root), *args, env=env)
             if result.returncode != 0:
-                raise RuntimeError(
-                    f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}"
-                )
+                raise RuntimeError(f"git {' '.join(args)} failed: {(result.stderr or result.stdout).strip()}")
         base_commit = result.stdout.strip()  # the rev-parse above
     except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
         log.error("could not initialize a shadow repo over %s: %s", repo_root, exc)

@@ -7,6 +7,7 @@ The aiter tuner can select a splitK the production dispatch cannot run
 re-selects the fastest serve-safe (splitK <= max) candidate from the profile and
 reports whether the deployed CSV still carries any split-K>0 (drives force_candidate).
 """
+
 from __future__ import annotations
 
 import csv
@@ -14,13 +15,11 @@ from pathlib import Path
 
 from forge_gemm_tune.tuners._aiter_dense_common import _cap_splitk_to_serve_safe
 
-_HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us",
-        "kernelName", "tflops", "bw", "errRatio"]
+_HDR = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us", "kernelName", "tflops", "bw", "errRatio"]
 
 
 def _row(m, n, k, kid, sk, us, name="knl", er="0.0"):
-    return ["gfx950", "256", str(m), str(n), str(k), "ck", str(kid), str(sk),
-            str(us), name, "100", "1000", er]
+    return ["gfx950", "256", str(m), str(n), str(k), "ck", str(kid), str(sk), str(us), name, "100", "1000", er]
 
 
 def _write(path: Path, rows):
@@ -40,12 +39,15 @@ def test_unsafe_splitk_replaced_by_best_safe_candidate(tmp_path):
     prof = tmp_path / "profile.csv"
     # Winner picked splitK=3 (unsafe). Profile has safe alternatives.
     _write(art, [_row(64, 5120, 17408, 9, 3, 39.0, "sk3")])
-    _write(prof, [
-        _row(64, 5120, 17408, 9, 3, 39.0, "sk3"),   # fastest but unsafe
-        _row(64, 5120, 17408, 8, 2, 39.6, "sk2"),   # best safe
-        _row(64, 5120, 17408, 7, 1, 41.0, "sk1"),
-        _row(64, 5120, 17408, 0, 0, 45.0, "sk0"),
-    ])
+    _write(
+        prof,
+        [
+            _row(64, 5120, 17408, 9, 3, 39.0, "sk3"),  # fastest but unsafe
+            _row(64, 5120, 17408, 8, 2, 39.6, "sk2"),  # best safe
+            _row(64, 5120, 17408, 7, 1, 41.0, "sk1"),
+            _row(64, 5120, 17408, 0, 0, 45.0, "sk0"),
+        ],
+    )
     n, has = _cap_splitk_to_serve_safe(art, prof, max_splitk=2)
     assert n == 1
     assert has is True  # replacement is splitK=2 (>0)
@@ -81,10 +83,13 @@ def test_high_errratio_safe_candidate_rejected(tmp_path):
     prof = tmp_path / "profile.csv"
     _write(art, [_row(32, 7168, 5120, 9, 3, 20.0)])
     # Only safe candidate has a bad errRatio -> must be rejected -> row dropped.
-    _write(prof, [
-        _row(32, 7168, 5120, 9, 3, 20.0),
-        _row(32, 7168, 5120, 8, 2, 21.0, er="0.5"),
-    ])
+    _write(
+        prof,
+        [
+            _row(32, 7168, 5120, 9, 3, 20.0),
+            _row(32, 7168, 5120, 8, 2, 21.0, er="0.5"),
+        ],
+    )
     n, has = _cap_splitk_to_serve_safe(art, prof, max_splitk=2)
     assert n == 1
     assert has is False
@@ -102,8 +107,7 @@ def test_profile_missing_column_skips_candidate(tmp_path):
         w = csv.writer(f)
         w.writerow(hdr_no_err)
         # a splitK=2 candidate that WOULD be selected, but its row lacks errRatio
-        w.writerow(["gfx950", "256", "64", "5120", "17408", "ck", "8", "2",
-                    "39.6", "sk2", "100", "1000"])
+        w.writerow(["gfx950", "256", "64", "5120", "17408", "ck", "8", "2", "39.6", "sk2", "100", "1000"])
     n, has = _cap_splitk_to_serve_safe(art, prof, max_splitk=2)
     assert n == 1  # candidate skipped -> unsafe row dropped
     assert has is False
@@ -131,10 +135,15 @@ def test_support_fn_keeps_splitk_within_per_shape_max(tmp_path):
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     _write(art, [_row(16, 5120, 5120, 9, 3, 10.0, "A3"), _row(64, 5120, 5120, 9, 3, 20.0, "B3")])
-    _write(prof, [
-        _row(16, 5120, 5120, 9, 3, 10.0, "A3"), _row(16, 5120, 5120, 8, 2, 10.5, "A2"),
-        _row(64, 5120, 5120, 9, 3, 20.0, "B3"), _row(64, 5120, 5120, 8, 2, 20.6, "B2"),
-    ])
+    _write(
+        prof,
+        [
+            _row(16, 5120, 5120, 9, 3, 10.0, "A3"),
+            _row(16, 5120, 5120, 8, 2, 10.5, "A2"),
+            _row(64, 5120, 5120, 9, 3, 20.0, "B3"),
+            _row(64, 5120, 5120, 8, 2, 20.6, "B2"),
+        ],
+    )
     support = lambda m, n, k: 3 if (m, n, k) == (16, 5120, 5120) else 2  # noqa: E731
     n, has = _cap_splitk_to_serve_safe(art, prof, 2, support_fn=support)
     assert n == 1 and has is True  # only shape B changed
@@ -152,11 +161,14 @@ def test_support_fn_tightens_below_static_cap(tmp_path):
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
     _write(art, [_row(64, 5120, 5120, 8, 2, 20.0, "B2")])
-    _write(prof, [
-        _row(64, 5120, 5120, 8, 2, 20.0, "B2"),   # static-cap-safe but per-shape UNSAFE
-        _row(64, 5120, 5120, 7, 1, 20.4, "B1"),   # best within per-shape max=1
-        _row(64, 5120, 5120, 0, 0, 22.0, "B0"),
-    ])
+    _write(
+        prof,
+        [
+            _row(64, 5120, 5120, 8, 2, 20.0, "B2"),  # static-cap-safe but per-shape UNSAFE
+            _row(64, 5120, 5120, 7, 1, 20.4, "B1"),  # best within per-shape max=1
+            _row(64, 5120, 5120, 0, 0, 22.0, "B0"),
+        ],
+    )
     n, has = _cap_splitk_to_serve_safe(art, prof, 2, support_fn=lambda m, n, k: 1)
     assert n == 1  # the splitK=2 row was rewritten despite sk <= static cap
     row = _read(art)[1]
@@ -179,12 +191,23 @@ def test_support_fn_none_falls_back_to_static_cap(tmp_path):
 def test_schema_without_errratio_does_not_crash(tmp_path):
     # A CSV schema lacking the errRatio column must not KeyError-crash the tuner
     # (relevant when --splitK is extended to other dense tuners); absent -> 0.
-    hdr = ["gfx", "cu_num", "M", "N", "K", "libtype", "kernelId", "splitK", "us",
-           "kernelName", "tflops", "bw"]  # no errRatio
+    hdr = [
+        "gfx",
+        "cu_num",
+        "M",
+        "N",
+        "K",
+        "libtype",
+        "kernelId",
+        "splitK",
+        "us",
+        "kernelName",
+        "tflops",
+        "bw",
+    ]  # no errRatio
 
     def _r(m, n, k, kid, sk, us, name):
-        return ["gfx950", "256", str(m), str(n), str(k), "ck", str(kid), str(sk),
-                str(us), name, "100", "1000"]
+        return ["gfx950", "256", str(m), str(n), str(k), "ck", str(kid), str(sk), str(us), name, "100", "1000"]
 
     def _w(p, rows):
         with p.open("w", newline="") as f:
@@ -209,12 +232,24 @@ def test_cap_header_case_insensitive_no_unsafe_passthrough(tmp_path):
     # capped/dropped so no splitK>max survives.
     art = tmp_path / "a.csv"
     prof = tmp_path / "p.csv"
-    hdr = ["gfx", "cu_num", "m", "n", "k", "libtype", "kernelId", "SplitK",
-           "us", "kernelName", "tflops", "bw", "errRatio"]
+    hdr = [
+        "gfx",
+        "cu_num",
+        "m",
+        "n",
+        "k",
+        "libtype",
+        "kernelId",
+        "SplitK",
+        "us",
+        "kernelName",
+        "tflops",
+        "bw",
+        "errRatio",
+    ]
 
     def _r(sk, name):
-        return ["gfx950", "256", "64", "5120", "17408", "ck", "9", str(sk),
-                "39.0", name, "100", "1000", "0.0"]
+        return ["gfx950", "256", "64", "5120", "17408", "ck", "9", str(sk), "39.0", name, "100", "1000", "0.0"]
 
     with art.open("w", newline="") as f:
         csv.writer(f).writerows([hdr, _r(3, "sk3")])

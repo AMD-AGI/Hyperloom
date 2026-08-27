@@ -35,15 +35,21 @@ def _git_workspace(tmp_path, name="workspace"):
     workspace.mkdir()
     subprocess.run(
         ["git", "init", "-b", "feature/test-campaign"],
-        cwd=workspace, check=True, capture_output=True,
+        cwd=workspace,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.name", "Tests"],
-        cwd=workspace, check=True, capture_output=True,
+        cwd=workspace,
+        check=True,
+        capture_output=True,
     )
     subprocess.run(
         ["git", "config", "user.email", "tests@example.com"],
-        cwd=workspace, check=True, capture_output=True,
+        cwd=workspace,
+        check=True,
+        capture_output=True,
     )
     kernel = workspace / "kernel.py"
     driver = workspace / "driver.py"
@@ -52,7 +58,9 @@ def _git_workspace(tmp_path, name="workspace"):
     subprocess.run(["git", "add", "."], cwd=workspace, check=True)
     subprocess.run(
         ["git", "commit", "-m", "initial"],
-        cwd=workspace, check=True, capture_output=True,
+        cwd=workspace,
+        check=True,
+        capture_output=True,
     )
     return workspace, kernel, driver
 

@@ -73,8 +73,12 @@ def _user_prompt(mandate: TunerMandate, script_path: Path, retry_note: str) -> s
         "It must run with no arguments and produce both output files named above.",
     ]
     if retry_note:
-        parts += ["", "## The previous attempt was rejected", retry_note,
-                  "Fix exactly this and keep everything else that worked."]
+        parts += [
+            "",
+            "## The previous attempt was rejected",
+            retry_note,
+            "Fix exactly this and keep everything else that worked.",
+        ]
     return "\n".join(parts)
 
 
@@ -107,7 +111,8 @@ def generate_tuner(
         )
     except ImportError as exc:
         return GeneratedTuner(
-            False, None,
+            False,
+            None,
             f"no agent provider available in this install ({exc}); "
             "generation is skipped and tuning continues without it",
         )
@@ -118,8 +123,7 @@ def generate_tuner(
         # the model lets a Codex model route to Codex rather than to whichever
         # backend happens to be registered first.
         chosen = select_default_agent_provider(model)
-        runtime = resolve_agent_runtime(
-            chosen.name, model=model, timeout_sec=timeout_s)
+        runtime = resolve_agent_runtime(chosen.name, model=model, timeout_sec=timeout_s)
         backend = create_registered_backend(runtime)
     except Exception as exc:  # noqa: BLE001 - provider setup must not fail tuning
         return GeneratedTuner(False, None, f"agent provider unusable: {exc!r}")
@@ -143,10 +147,11 @@ def generate_tuner(
     session = str(getattr(result, "session_id", "") or "")
     if not script_path.is_file():
         return GeneratedTuner(
-            False, None,
-            f"the session ended ({getattr(result, 'end_reason', '?')}) without "
-            f"writing {script_path.name}",
-            provider, session,
+            False,
+            None,
+            f"the session ended ({getattr(result, 'end_reason', '?')}) without writing {script_path.name}",
+            provider,
+            session,
         )
     log.info("tier3: %s authored %s", provider or "agent", script_path)
     return GeneratedTuner(True, script_path, "", provider, session)

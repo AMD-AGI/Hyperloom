@@ -113,9 +113,7 @@ class AnalysisBundle:
         evidence_by_path[str(self.root)] = EvidenceRef(
             kind="analysis_bundle",
             path=str(self.root),
-            summary=(
-                f"Validated commit-bound Analysis bundle with {self.manifest.get('status')} status."
-            ),
+            summary=(f"Validated commit-bound Analysis bundle with {self.manifest.get('status')} status."),
         )
         evidence_by_path[str(report)] = EvidenceRef(
             kind="analysis_summary",
@@ -151,21 +149,11 @@ class AnalysisBundle:
             search_objective=context.search_objective,
             search_mode_residence_remaining=(context.search_mode_residence_remaining),
             evidence_refs=tuple(evidence_by_path.values()),
-            canonical_commit=(
-                context.canonical_commit or context.analysis_commit
-            ),
+            canonical_commit=(context.canonical_commit or context.analysis_commit),
             evidence_commit=self.analysis_commit,
-            evidence_stale=(
-                self.analysis_commit
-                != (context.canonical_commit or context.analysis_commit)
-            ),
-            evidence_status=(
-                context.evidence_status
-                or str(self.manifest.get("status") or "published").lower()
-            ),
-            evidence_mean_case_speedup=(
-                context.evidence_mean_case_speedup
-            ),
+            evidence_stale=(self.analysis_commit != (context.canonical_commit or context.analysis_commit)),
+            evidence_status=(context.evidence_status or str(self.manifest.get("status") or "published").lower()),
+            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
             current_mean_case_speedup=context.current_mean_case_speedup,
             cumulative_diff_path=context.cumulative_diff_path,
             cumulative_diff_error=context.cumulative_diff_error,
@@ -262,9 +250,7 @@ def _parse_catalog_payload(
     if payload.get("analysis_commit") != analysis_commit:
         raise AnalysisBundleError("analysis catalog commit is invalid")
     artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list) or not all(
-        isinstance(artifact, dict) for artifact in artifacts
-    ):
+    if not isinstance(artifacts, list) or not all(isinstance(artifact, dict) for artifact in artifacts):
         raise AnalysisBundleError("analysis catalog artifacts are invalid")
     return payload
 
@@ -405,9 +391,7 @@ class _AnalysisProtection:
         self.staging_root = staging_root.resolve()
         self.protected_paths = tuple(path.resolve() for path in protected_paths)
         self.deadline_monotonic = deadline_monotonic
-        self._snapshots = {
-            path: path.read_bytes() for path in self.protected_paths if path.is_file()
-        }
+        self._snapshots = {path: path.read_bytes() for path in self.protected_paths if path.is_file()}
         self._protected_basenames = {path.name for path in self.protected_paths}
 
     def hooks(self) -> AgentHooks:
@@ -428,17 +412,10 @@ class _AnalysisProtection:
         if input_data.get("tool_name") not in _WRITE_TOOLS:
             return {}
         tool_input = input_data.get("tool_input") or {}
-        raw_path = (
-            tool_input.get("file_path")
-            or tool_input.get("path")
-            or tool_input.get("notebook_path")
-            or ""
-        )
+        raw_path = tool_input.get("file_path") or tool_input.get("path") or tool_input.get("notebook_path") or ""
         if self._inside_staging(raw_path):
             return {}
-        return self._deny(
-            "Analysis output may only be written inside the supplied staging directory."
-        )
+        return self._deny("Analysis output may only be written inside the supplied staging directory.")
 
     async def _on_pre_bash(self, input_data, _tool_use_id, _context) -> dict:
         if input_data.get("tool_name") != "Bash":
@@ -475,8 +452,7 @@ class _AnalysisProtection:
             return self._deny("Analysis Bash timeout duration is missing or invalid.")
         if duration > remaining:
             return self._deny(
-                f"Analysis Bash timeout {duration:.1f}s exceeds the shared "
-                f"session remaining time {remaining}s."
+                f"Analysis Bash timeout {duration:.1f}s exceeds the shared session remaining time {remaining}s."
             )
         return {}
 
@@ -489,9 +465,7 @@ class _AnalysisProtection:
             if not match:
                 return None
             value = float(match.group(1))
-            multiplier = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}[
-                match.group(2)
-            ]
+            multiplier = {"": 1.0, "s": 1.0, "m": 60.0, "h": 3600.0}[match.group(2)]
             duration = value * multiplier
             return duration if duration > 0 else None
         return None
@@ -553,17 +527,10 @@ class AnalysisAgentService:
         self.profiling_enabled = bool(profiling_enabled)
 
     def _stage_reference_profiling_script(self, work_root: Path) -> Path:
-        profiling_source = (
-            Path(self.config.local_knowledge_dir).resolve()
-            / "common_methodology"
-            / "profiling"
-        )
+        profiling_source = Path(self.config.local_knowledge_dir).resolve() / "common_methodology" / "profiling"
         source = profiling_source / "rocpc_profile.py"
         if not source.is_file():
-            raise AnalysisConfigurationError(
-                "packaged Analysis profiling script is missing: "
-                f"{source}"
-            )
+            raise AnalysisConfigurationError(f"packaged Analysis profiling script is missing: {source}")
         target = work_root / "tools" / "rocpc_profile.py"
         payload = source.read_bytes()
         if not target.is_file() or target.read_bytes() != payload:
@@ -579,10 +546,7 @@ class AnalysisAgentService:
                 continue
             methodology_target = methodology_root / name
             methodology_payload = methodology_source.read_bytes()
-            if (
-                not methodology_target.is_file()
-                or methodology_target.read_bytes() != methodology_payload
-            ):
+            if not methodology_target.is_file() or methodology_target.read_bytes() != methodology_payload:
                 methodology_target.write_bytes(methodology_payload)
         if missing_methodology:
             log.warning(
@@ -634,30 +598,24 @@ class AnalysisAgentService:
         case: AnalysisCase,
     ) -> bool:
         profile_root = work_root / "cases" / case.directory / "profile"
-        profile_files = [
-            path
-            for path in profile_root.rglob("*")
-            if path.is_file()
-            and path.stat().st_size > 0
-            and path.name not in {"error.log", "stderr.log"}
-        ] if profile_root.is_dir() else []
+        profile_files = (
+            [
+                path
+                for path in profile_root.rglob("*")
+                if path.is_file() and path.stat().st_size > 0 and path.name not in {"error.log", "stderr.log"}
+            ]
+            if profile_root.is_dir()
+            else []
+        )
         if not profile_files:
             return False
 
-        metrics_path = (
-            work_root
-            / "cases"
-            / case.directory
-            / "normalized_metrics.json"
-        )
+        metrics_path = work_root / "cases" / case.directory / "normalized_metrics.json"
         try:
             metrics = json.loads(metrics_path.read_text())
         except (OSError, json.JSONDecodeError):
             return False
-        if not isinstance(metrics, dict) or not any(
-            value not in (None, "", [], {})
-            for value in metrics.values()
-        ):
+        if not isinstance(metrics, dict) or not any(value not in (None, "", [], {}) for value in metrics.values()):
             return False
 
         framework_commands_path = work_root / "framework_commands.jsonl"
@@ -666,26 +624,19 @@ class AnalysisAgentService:
             "case_id": case.case_id,
             "framework_owned": True,
             "validation": "artifact_digest",
-            "artifacts": {
-                str(path.relative_to(profile_root)): _sha256(path)
-                for path in profile_files
-            },
+            "artifacts": {str(path.relative_to(profile_root)): _sha256(path) for path in profile_files},
             "normalized_metrics_sha256": _sha256(metrics_path),
         }
         existing_rows: list[dict[str, Any]] = []
         if framework_commands_path.is_file():
             try:
                 existing_rows = [
-                    json.loads(line)
-                    for line in framework_commands_path.read_text().splitlines()
-                    if line.strip()
+                    json.loads(line) for line in framework_commands_path.read_text().splitlines() if line.strip()
                 ]
             except (OSError, json.JSONDecodeError):
                 existing_rows = []
         if not any(
-            isinstance(row, dict)
-            and row.get("case_id") == case.case_id
-            and row.get("framework_owned") is True
+            isinstance(row, dict) and row.get("case_id") == case.case_id and row.get("framework_owned") is True
             for row in existing_rows
         ):
             with framework_commands_path.open("a") as stream:
@@ -699,9 +650,7 @@ class AnalysisAgentService:
                 "case_id": case.case_id,
                 "framework_owned": True,
                 "artifacts": provenance_payload["artifacts"],
-                "normalized_metrics_sha256": provenance_payload[
-                    "normalized_metrics_sha256"
-                ],
+                "normalized_metrics_sha256": provenance_payload["normalized_metrics_sha256"],
             },
         )
         return True
@@ -749,12 +698,8 @@ class AnalysisAgentService:
                 {
                     **case.to_dict(),
                     "status": state,
-                    "analysis_path": (
-                        str(analysis_path.relative_to(work_root)) if has_analysis else ""
-                    ),
-                    "profile_path": (
-                        str(profile_root.relative_to(work_root)) if has_profile else ""
-                    ),
+                    "analysis_path": (str(analysis_path.relative_to(work_root)) if has_analysis else ""),
+                    "profile_path": (str(profile_root.relative_to(work_root)) if has_profile else ""),
                 }
             )
 
@@ -835,14 +780,8 @@ class AnalysisAgentService:
         work_root = analysis_root / "work" / context.analysis_commit
         retry_published_bundle = False
         requested_tier = "profiled" if self.profiling_enabled else "static"
-        parent_reuse_commit = (
-            incremental.parent_commit if incremental is not None else ""
-        )
-        published_root = (
-            self._published_generation_root(final_root)
-            if final_root.is_dir()
-            else None
-        )
+        parent_reuse_commit = incremental.parent_commit if incremental is not None else ""
+        published_root = self._published_generation_root(final_root) if final_root.is_dir() else None
         if published_root is not None:
             try:
                 request_payload = _parse_request_payload(
@@ -854,9 +793,7 @@ class AnalysisAgentService:
                     analysis_commit=context.analysis_commit,
                 )
             except (OSError, json.JSONDecodeError) as error:
-                raise AnalysisBundleError(
-                    f"published analysis checkpoint is malformed: {error}"
-                ) from error
+                raise AnalysisBundleError(f"published analysis checkpoint is malformed: {error}") from error
             cached = self._validate_bundle(
                 published_root,
                 context,
@@ -867,33 +804,19 @@ class AnalysisAgentService:
             attempts = int(workflow_payload["session"].get("attempts", 0))
             cached_profiled = request_payload["analysis_profiling_enabled"] is True
             tier_satisfied = cached_profiled or not self.profiling_enabled
-            status_satisfied = (
-                cached.manifest["status"] == "READY"
-                if self.profiling_enabled
-                else True
-            )
+            status_satisfied = cached.manifest["status"] == "READY" if self.profiling_enabled else True
             available_tier = self._tier_label(
                 profiling_enabled=self.profiling_enabled,
                 profiled=cached_profiled and bool(cached.manifest.get("completed_case_ids")),
             )
-            if tier_satisfied and (
-                status_satisfied
-                or attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS
-            ):
-                upgrade_exhausted = (
-                    not status_satisfied
-                    and attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS
-                )
+            if tier_satisfied and (status_satisfied or attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS):
+                upgrade_exhausted = not status_satisfied and attempts >= MAX_ANALYSIS_SESSION_ATTEMPTS
                 return AnalysisBundle(
                     analysis_commit=cached.analysis_commit,
                     root=cached.root,
                     manifest={
                         **cached.manifest,
-                        **(
-                            {"upgrade_exhausted": True}
-                            if upgrade_exhausted
-                            else {}
-                        ),
+                        **({"upgrade_exhausted": True} if upgrade_exhausted else {}),
                     },
                     cases=cached.cases,
                     outcome=self._build_outcome(
@@ -903,11 +826,7 @@ class AnalysisAgentService:
                         attempt=attempts,
                         checkpoint_level="published",
                         artifact_path=str(cached.root),
-                        failure_type=(
-                            "upgrade_exhausted"
-                            if upgrade_exhausted
-                            else None
-                        ),
+                        failure_type=("upgrade_exhausted" if upgrade_exhausted else None),
                         upgrade_exhausted=upgrade_exhausted,
                         parent_reuse_commit=parent_reuse_commit,
                     ),
@@ -939,9 +858,7 @@ class AnalysisAgentService:
                         json.loads((work_root / "workflow.json").read_text()),
                         analysis_commit=context.analysis_commit,
                     )
-                    work_attempts = int(
-                        work_flow.get("session", {}).get("attempts", 0)
-                    )
+                    work_attempts = int(work_flow.get("session", {}).get("attempts", 0))
                 except (
                     OSError,
                     TypeError,
@@ -982,9 +899,7 @@ class AnalysisAgentService:
         )
         session_timeout_sec = session_deadline_unix - time.time()
         if session_timeout_sec <= 1:
-            raise AnalysisBundleError(
-                "Analysis deadline exhausted before session start"
-            )
+            raise AnalysisBundleError("Analysis deadline exhausted before session start")
 
         (work_root / "tools").mkdir(parents=True, exist_ok=True)
         reference_script = self._stage_reference_profiling_script(work_root)
@@ -992,16 +907,10 @@ class AnalysisAgentService:
 
         incremental_diff_path = work_root / "incremental_diff.patch"
         if incremental is not None:
-            parent_commit_root = (
-                analysis_root / incremental.parent_commit
-            ).resolve()
+            parent_commit_root = (analysis_root / incremental.parent_commit).resolve()
             parent_root = self._published_generation_root(parent_commit_root)
             expected_parent = incremental.parent_bundle.resolve()
-            if (
-                parent_root is None
-                or parent_root != expected_parent
-                or not parent_root.is_dir()
-            ):
+            if parent_root is None or parent_root != expected_parent or not parent_root.is_dir():
                 # The current canonical can still be analyzed from scratch.
                 # A missing or superseded parent must not permanently block
                 # this commit's two durable Analysis session attempts.
@@ -1022,9 +931,7 @@ class AnalysisAgentService:
             workspace=workspace,
             staging_root=work_root,
             protected_paths=protected_paths,
-            deadline_monotonic=(
-                time.monotonic() + session_timeout_sec
-            ),
+            deadline_monotonic=(time.monotonic() + session_timeout_sec),
         )
         request_path = work_root / "request.json"
         request_payload = {
@@ -1041,34 +948,12 @@ class AnalysisAgentService:
             "analysis_profiling_enabled": self.profiling_enabled,
             "reference_profiling_script": str(reference_script),
             "reference_profiling_script_sha256": _sha256(reference_script),
-            "analysis_trigger": (
-                "post_keep_incremental"
-                if incremental is not None
-                else "canonical_baseline"
-            ),
-            "previous_analysis_commit": (
-                incremental.parent_commit if incremental is not None else ""
-            ),
-            "previous_analysis_bundle": (
-                str(incremental.parent_bundle.resolve())
-                if incremental is not None
-                else ""
-            ),
-            "incremental_diff_path": (
-                str(incremental_diff_path.resolve())
-                if incremental is not None
-                else ""
-            ),
-            "incremental_diff_sha256": (
-                _sha256(incremental_diff_path)
-                if incremental is not None
-                else ""
-            ),
-            "changed_source_files": (
-                list(incremental.changed_source_files)
-                if incremental is not None
-                else []
-            ),
+            "analysis_trigger": ("post_keep_incremental" if incremental is not None else "canonical_baseline"),
+            "previous_analysis_commit": (incremental.parent_commit if incremental is not None else ""),
+            "previous_analysis_bundle": (str(incremental.parent_bundle.resolve()) if incremental is not None else ""),
+            "incremental_diff_path": (str(incremental_diff_path.resolve()) if incremental is not None else ""),
+            "incremental_diff_sha256": (_sha256(incremental_diff_path) if incremental is not None else ""),
+            "changed_source_files": (list(incremental.changed_source_files) if incremental is not None else []),
         }
         if request_path.is_file():
             try:
@@ -1085,25 +970,16 @@ class AnalysisAgentService:
                     "cases",
                     "objective",
                 }
-                if any(
-                    durable_request.get(key) != request_payload.get(key)
-                    for key in immutable_keys
-                ):
-                    raise AnalysisBundleError(
-                        "durable analysis request does not match current inputs"
-                    )
+                if any(durable_request.get(key) != request_payload.get(key) for key in immutable_keys):
+                    raise AnalysisBundleError("durable analysis request does not match current inputs")
                 if retry_published_bundle:
-                    durable_request[
-                        "analysis_profiling_enabled"
-                    ] = self.profiling_enabled
+                    durable_request["analysis_profiling_enabled"] = self.profiling_enabled
                     request_payload = durable_request
                     _atomic_write_json(request_path, request_payload)
                 else:
                     request_payload = durable_request
             except json.JSONDecodeError as error:
-                raise AnalysisBundleError(
-                    f"durable analysis request is invalid: {error}"
-                ) from error
+                raise AnalysisBundleError(f"durable analysis request is invalid: {error}") from error
         else:
             _atomic_write_json(request_path, request_payload)
         (work_root / "commands.jsonl").touch(exist_ok=True)
@@ -1146,9 +1022,7 @@ class AnalysisAgentService:
 
         changed = protection.restore_and_report_changes()
         if changed:
-            raise AnalysisBundleError(
-                "Analysis Agent modified immutable inputs; restored: " + ", ".join(changed)
-            )
+            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
         self._validate_bundle(
             work_root,
             context,
@@ -1337,11 +1211,7 @@ class AnalysisAgentService:
     ) -> OrchestrationContext:
         """Expose validated partial Analysis outputs to downstream agents."""
         work_root = (
-            Path(context.workspace).resolve()
-            / "forge_experiments"
-            / "analysis"
-            / "work"
-            / context.analysis_commit
+            Path(context.workspace).resolve() / "forge_experiments" / "analysis" / "work" / context.analysis_commit
         )
         workflow_path = work_root / "workflow.json"
         catalog_path = work_root / "artifact_catalog.json"
@@ -1386,12 +1256,17 @@ class AnalysisAgentService:
             path = str(artifact.get("path") or "")
             status = str(artifact.get("status") or "")
             information = artifact.get("available_information")
-            if not path or status not in {
-                "AVAILABLE",
-                "COMPLETE",
-                "FAILED",
-                "SKIPPED",
-            } or not isinstance(information, list):
+            if (
+                not path
+                or status
+                not in {
+                    "AVAILABLE",
+                    "COMPLETE",
+                    "FAILED",
+                    "SKIPPED",
+                }
+                or not isinstance(information, list)
+            ):
                 continue
             try:
                 Path(path).resolve().relative_to(work_root.resolve())
@@ -1422,19 +1297,13 @@ class AnalysisAgentService:
             if bottleneck_path.is_file() and analysis_path.is_file():
                 try:
                     payload = json.loads(bottleneck_path.read_text())
-                    bottleneck = str(
-                        payload.get("classification") or bottleneck
-                    )
+                    bottleneck = str(payload.get("classification") or bottleneck)
                 except (OSError, TypeError, ValueError, json.JSONDecodeError):
                     bottleneck = original.bottleneck
                 summary_path = str(analysis_path.resolve())
                 flags.append(
                     "analysis_checkpoint_profile_interpretation"
-                    if (
-                        normalized_path.is_file()
-                        and profile_root.is_dir()
-                        and any(profile_root.iterdir())
-                    )
+                    if (normalized_path.is_file() and profile_root.is_dir() and any(profile_root.iterdir()))
                     else "analysis_checkpoint_interpretation_only"
                 )
             elif normalized_path.is_file():
@@ -1461,9 +1330,7 @@ class AnalysisAgentService:
             gpu_target=context.gpu_target,
             objective=context.objective,
             program_context=context.program_context,
-            source_map_path=(
-                str(source_map.resolve()) if source_map.is_file() else context.source_map_path
-            ),
+            source_map_path=(str(source_map.resolve()) if source_map.is_file() else context.source_map_path),
             editable_sources=context.editable_sources,
             cases=tuple(normalized_cases),
             knowledge_index=context.knowledge_index,
@@ -1473,19 +1340,11 @@ class AnalysisAgentService:
             search_objective=context.search_objective,
             search_mode_residence_remaining=(context.search_mode_residence_remaining),
             evidence_refs=tuple(evidence_by_path.values()),
-            canonical_commit=(
-                context.canonical_commit or context.analysis_commit
-            ),
-            evidence_commit=(
-                context.evidence_commit or context.analysis_commit
-            ),
+            canonical_commit=(context.canonical_commit or context.analysis_commit),
+            evidence_commit=(context.evidence_commit or context.analysis_commit),
             evidence_stale=context.evidence_stale,
-            evidence_status=(
-                context.evidence_status or "partial_checkpoint"
-            ),
-            evidence_mean_case_speedup=(
-                context.evidence_mean_case_speedup
-            ),
+            evidence_status=(context.evidence_status or "partial_checkpoint"),
+            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
             current_mean_case_speedup=context.current_mean_case_speedup,
             cumulative_diff_path=context.cumulative_diff_path,
             cumulative_diff_error=context.cumulative_diff_error,
@@ -1530,10 +1389,7 @@ class AnalysisAgentService:
             return context
         driver_digest = str(request_payload.get("driver_digest") or "")
         source_digest = str(request_payload.get("source_digest") or "")
-        if (
-            manifest.get("driver_digest") != driver_digest
-            or manifest.get("source_digest") != source_digest
-        ):
+        if manifest.get("driver_digest") != driver_digest or manifest.get("source_digest") != source_digest:
             return context
 
         cases = tuple(
@@ -1547,9 +1403,7 @@ class AnalysisAgentService:
         validation_context = replace(
             context,
             analysis_commit=commit,
-            canonical_commit=(
-                context.canonical_commit or context.analysis_commit
-            ),
+            canonical_commit=(context.canonical_commit or context.analysis_commit),
         )
         try:
             bundle = self._validate_bundle(
@@ -1563,24 +1417,16 @@ class AnalysisAgentService:
             return context
 
         applied = bundle.apply(context)
-        canonical_commit = (
-            context.canonical_commit or context.analysis_commit
-        )
+        canonical_commit = context.canonical_commit or context.analysis_commit
         stale = commit != canonical_commit
-        refs = {
-            reference.path: reference
-            for reference in applied.evidence_refs
-        }
+        refs = {reference.path: reference for reference in applied.evidence_refs}
         if stale and applied.source_map_path:
             source_map = Path(applied.source_map_path).resolve()
             if source_map.is_file():
                 refs[str(source_map)] = EvidenceRef(
                     kind="analysis_source_map",
                     path=str(source_map),
-                    summary=(
-                        "Source map produced with stale Analysis evidence at "
-                        f"commit {commit}."
-                    ),
+                    summary=(f"Source map produced with stale Analysis evidence at commit {commit}."),
                 )
         normalized_cases = tuple(
             replace(
@@ -1598,20 +1444,14 @@ class AnalysisAgentService:
         )
         return replace(
             applied,
-            source_map_path=(
-                context.source_map_path
-                if stale
-                else applied.source_map_path
-            ),
+            source_map_path=(context.source_map_path if stale else applied.source_map_path),
             cases=normalized_cases,
             evidence_refs=tuple(refs.values()),
             canonical_commit=canonical_commit,
             evidence_commit=commit,
             evidence_stale=stale,
             evidence_status=context.evidence_status,
-            evidence_mean_case_speedup=(
-                context.evidence_mean_case_speedup
-            ),
+            evidence_mean_case_speedup=(context.evidence_mean_case_speedup),
             current_mean_case_speedup=context.current_mean_case_speedup,
             cumulative_diff_path=context.cumulative_diff_path,
             cumulative_diff_error=context.cumulative_diff_error,
@@ -1729,9 +1569,7 @@ class AnalysisAgentService:
             error = "Analysis Agent modified immutable inputs: " + ", ".join(changed)
             workflow.fail(error)
             sync_checkpoint()
-            raise AnalysisBundleError(
-                "Analysis Agent modified immutable inputs; restored: " + ", ".join(changed)
-            )
+            raise AnalysisBundleError("Analysis Agent modified immutable inputs; restored: " + ", ".join(changed))
         self._finalize_framework_artifacts(
             work_root,
             context,
@@ -1765,20 +1603,9 @@ class AnalysisAgentService:
         request = json.loads(request_path.read_text())
         knowledge_root = Path(self.config.local_knowledge_dir).resolve()
         profiling_root = staging_root / "tools" / "profiling"
-        methodology_candidates = tuple(
-            profiling_root / name
-            for name in PROFILING_METHODOLOGY_FILES
-        )
-        methodology = tuple(
-            path.resolve()
-            for path in methodology_candidates
-            if path.is_file()
-        )
-        missing_methodology = tuple(
-            path.name
-            for path in methodology_candidates
-            if not path.is_file()
-        )
+        methodology_candidates = tuple(profiling_root / name for name in PROFILING_METHODOLOGY_FILES)
+        methodology = tuple(path.resolve() for path in methodology_candidates if path.is_file())
+        missing_methodology = tuple(path.name for path in methodology_candidates if not path.is_file())
         if self.profiling_enabled:
             system_prompt = """\
 You are the single Analysis Agent for one immutable canonical kernel. Complete
@@ -1933,12 +1760,8 @@ Update analysis incrementally:
             },
             "analysis_trigger": request["analysis_trigger"],
             "analysis_session_timeout_sec": timeout_sec,
-            "previous_analysis_commit": request[
-                "previous_analysis_commit"
-            ],
-            "previous_analysis_bundle": request[
-                "previous_analysis_bundle"
-            ],
+            "previous_analysis_commit": request["previous_analysis_commit"],
+            "previous_analysis_bundle": request["previous_analysis_bundle"],
             "incremental_diff_path": request["incremental_diff_path"],
             "changed_source_files": request["changed_source_files"],
             "knowledge_root": str(knowledge_root),
@@ -2053,11 +1876,7 @@ Update analysis incrementally:
         completed = manifest.get("completed_case_ids")
         failed = manifest.get("failed_case_ids")
         skipped = manifest.get("skipped_case_ids") or []
-        if (
-            not isinstance(completed, list)
-            or not isinstance(failed, list)
-            or not isinstance(skipped, list)
-        ):
+        if not isinstance(completed, list) or not isinstance(failed, list) or not isinstance(skipped, list):
             raise AnalysisBundleError("analysis manifest case statuses are invalid")
         if sorted(completed + failed + skipped) != sorted(expected):
             raise AnalysisBundleError("analysis manifest does not account for every case")
@@ -2079,9 +1898,7 @@ Update analysis incrementally:
         except (OSError, json.JSONDecodeError) as error:
             raise AnalysisBundleError(f"invalid Analysis session metadata: {error}") from error
         except AnalysisBundleError as error:
-            raise AnalysisBundleError(
-                f"malformed analysis checkpoint: {error}"
-            ) from error
+            raise AnalysisBundleError(f"malformed analysis checkpoint: {error}") from error
         profiling_enabled = bool(request_payload["analysis_profiling_enabled"])
         if not profiling_enabled and completed:
             raise AnalysisBundleError("static-only analysis cannot report profiled COMPLETE cases")
@@ -2099,9 +1916,7 @@ Update analysis incrementally:
         )
         missing_root = [name for name in required_root_files if not (root / name).is_file()]
         if missing_root:
-            raise AnalysisBundleError(
-                "analysis bundle missing root artifacts: " + ", ".join(missing_root)
-            )
+            raise AnalysisBundleError("analysis bundle missing root artifacts: " + ", ".join(missing_root))
         if not AnalysisAgentService._nonempty_file(root / "report.md"):
             raise AnalysisBundleError("analysis bundle has no report.md")
 
@@ -2115,9 +1930,7 @@ Update analysis incrementally:
             try:
                 case_payload = json.loads((case_root / "case.json").read_text())
             except (OSError, json.JSONDecodeError) as error:
-                raise AnalysisBundleError(
-                    f"invalid case.json for {case.case_id}: {error}"
-                ) from error
+                raise AnalysisBundleError(f"invalid case.json for {case.case_id}: {error}") from error
             if not isinstance(case_payload, dict) or case_payload.get("case_id") != case.case_id:
                 raise AnalysisBundleError(f"case.json identity mismatch for {case.case_id}")
             if case.case_id in completed_set:
@@ -2128,10 +1941,7 @@ Update analysis incrementally:
                     root,
                     case,
                 ):
-                    raise AnalysisBundleError(
-                        f"completed case {case.case_id} has no validated "
-                        "profile evidence"
-                    )
+                    raise AnalysisBundleError(f"completed case {case.case_id} has no validated profile evidence")
                 bottleneck = {}
                 bottleneck_path = case_root / "bottleneck.json"
                 if bottleneck_path.is_file():
@@ -2150,10 +1960,7 @@ Update analysis incrementally:
                         shape=original.shape,
                         dtype=original.dtype,
                         latency_ms=original.latency_ms,
-                        bottleneck=str(
-                            bottleneck.get("classification")
-                            or original.bottleneck
-                        ),
+                        bottleneck=str(bottleneck.get("classification") or original.bottleneck),
                         profile_summary_path=str(analysis_path),
                         flags=tuple(
                             dict.fromkeys(
@@ -2175,9 +1982,7 @@ Update analysis incrementally:
                         dtype=original.dtype,
                         latency_ms=original.latency_ms,
                         bottleneck=original.bottleneck,
-                        profile_summary_path=(
-                            str(analysis_path) if has_analysis else original.profile_summary_path
-                        ),
+                        profile_summary_path=(str(analysis_path) if has_analysis else original.profile_summary_path),
                         flags=tuple(
                             dict.fromkeys(
                                 [
@@ -2197,11 +2002,7 @@ Update analysis incrementally:
                     )
                 )
             else:
-                if not (
-                    AnalysisAgentService._nonempty_file(
-                        case_root / "failure.md"
-                    )
-                ):
+                if not (AnalysisAgentService._nonempty_file(case_root / "failure.md")):
                     raise AnalysisBundleError(f"failed case {case.case_id} has no failure record")
                 normalized_cases.append(
                     CaseEvidence(
@@ -2231,11 +2032,7 @@ Update analysis incrementally:
             except (OSError, json.JSONDecodeError):
                 pointer = {}
             if isinstance(pointer, dict):
-                generation_name = str(
-                    pointer.get("generation_root")
-                    or pointer.get("artifact_root")
-                    or ""
-                )
+                generation_name = str(pointer.get("generation_root") or pointer.get("artifact_root") or "")
                 if generation_name:
                     candidate = (commit_root / generation_name).resolve()
                     if candidate.is_dir():

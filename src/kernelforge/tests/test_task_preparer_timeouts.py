@@ -10,6 +10,7 @@ Two things are locked in here:
    that accidentally lowers them back would silently reintroduce that failure,
    so assert the committed defaults when the env override is absent.
 """
+
 from __future__ import annotations
 
 import os
@@ -20,6 +21,7 @@ from kernelforge.loop import task_preparer
 # ---------------------------------------------------------------------------
 # _deadline_timeout clamp
 # ---------------------------------------------------------------------------
+
 
 def test_deadline_zero_returns_default():
     assert task_preparer._deadline_timeout(0, 1800) == 1800
@@ -47,6 +49,7 @@ def test_deadline_past_floors_at_one_second(monkeypatch):
 # ---------------------------------------------------------------------------
 # Raised defaults stay raised (only when not env-overridden)
 # ---------------------------------------------------------------------------
+
 
 def test_prepare_defaults_stay_raised():
     if "FORGE_PREPARE_MAX_WALL" not in os.environ:

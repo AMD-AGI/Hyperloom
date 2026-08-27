@@ -103,14 +103,38 @@ _EDIT_TOOL_MATCHER = "|".join(_EDIT_TOOLS)
 # Shell verbs that WRITE their path arguments (vs reading / executing them). A
 # protected path is only a real write target when it is an ARGUMENT to one of these
 # within a simple command (matched per-command in _bash_deny_reason).
-_BASH_WRITE_VERBS = frozenset({
-    "rm", "rmdir", "mv", "cp", "tee", "truncate", "install", "dd", "shred", "chmod", "chown", "ln",
-})
+_BASH_WRITE_VERBS = frozenset(
+    {
+        "rm",
+        "rmdir",
+        "mv",
+        "cp",
+        "tee",
+        "truncate",
+        "install",
+        "dd",
+        "shred",
+        "chmod",
+        "chown",
+        "ln",
+    }
+)
 # Wrappers to see through when locating a simple command's real verb.
-_BASH_CMD_WRAPPERS = frozenset({
-    "env",
-    "timeout", "sudo", "nohup", "nice", "ionice", "stdbuf", "command", "exec", "time", "xargs",
-})
+_BASH_CMD_WRAPPERS = frozenset(
+    {
+        "env",
+        "timeout",
+        "sudo",
+        "nohup",
+        "nice",
+        "ionice",
+        "stdbuf",
+        "command",
+        "exec",
+        "time",
+        "xargs",
+    }
+)
 # A shell variable assignment, which is what precedes a command's verb. Anchored
 # to the name grammar so an option that merely carries a value -- ``--unset=FOO``
 # -- is not read as one.
@@ -125,9 +149,7 @@ _INLINE_WRITE_INTENT = re.compile(
     r"|\bPath\s*\([^)]*\)\.(?:rename|replace)\s*\(",
     re.IGNORECASE,
 )
-_BASH_REDIRECT_TARGET = re.compile(
-    r"(?:^|\s)(?<!<)(?:\d*>>?|\d*>\||&>>?)\s*([^\s;&|]+)"
-)
+_BASH_REDIRECT_TARGET = re.compile(r"(?:^|\s)(?<!<)(?:\d*>>?|\d*>\||&>>?)\s*([^\s;&|]+)")
 _PYTHON_HEREDOC = re.compile(
     r"<<\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?\s*\n(.*?)\n\1(?:\s|$)",
     re.DOTALL,
@@ -168,7 +190,7 @@ def _short_option_value(args: Sequence[str], letter: str) -> str:
         position = cluster.find(letter)
         if position < 0:
             continue
-        attached = cluster[position + 1:]
+        attached = cluster[position + 1 :]
         if attached:
             return attached
         return args[index + 1] if index + 1 < len(args) else ""
@@ -229,18 +251,17 @@ def _simple_commands(text: str) -> Iterator[tuple[str, list[str]]]:
             words = segment.split()
         index = 0
         while index < len(words) and (
-            _SHELL_ASSIGNMENT.match(words[index])
-            or os.path.basename(_unquote(words[index])) in _BASH_CMD_WRAPPERS
+            _SHELL_ASSIGNMENT.match(words[index]) or os.path.basename(_unquote(words[index])) in _BASH_CMD_WRAPPERS
         ):
             index += 1
         if index >= len(words):
             continue
-        yield os.path.basename(_unquote(words[index])), words[index + 1:]
+        yield os.path.basename(_unquote(words[index])), words[index + 1 :]
         if index:
             for position in range(index + 1, len(words)):
                 yield (
                     os.path.basename(_unquote(words[position])),
-                    words[position + 1:],
+                    words[position + 1 :],
                 )
 
 
@@ -330,17 +351,9 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
             return node.value
         if isinstance(node, ast.Name):
             return constants.get(node.id)
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Name)
-            and node.func.id == "Path"
-            and node.args
-        ):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path" and node.args:
             return resolve(node.args[0])
-        if (
-            isinstance(node, ast.BinOp)
-            and isinstance(node.op, ast.Div)
-        ):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
             left = resolve(node.left)
             right = resolve(node.right)
             if left is not None and right is not None:
@@ -368,11 +381,7 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = resolve(node.value)
-            names = (
-                node.targets
-                if isinstance(node, ast.Assign)
-                else [node.target]
-            )
+            names = node.targets if isinstance(node, ast.Assign) else [node.target]
             if value is not None:
                 for target in names:
                     if isinstance(target, ast.Name):
@@ -386,22 +395,14 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
             and node.func.value.id == "io"
             and node.func.attr == "open"
         )
-        is_path_open = (
-            isinstance(node.func, ast.Attribute)
-            and node.func.attr == "open"
-            and not is_io_open
-        )
+        is_path_open = isinstance(node.func, ast.Attribute) and node.func.attr == "open" and not is_io_open
         if is_builtin_open or is_io_open or is_path_open:
             positional_mode_index = 0 if is_path_open else 1
             mode_node = (
                 node.args[positional_mode_index]
                 if len(node.args) > positional_mode_index
                 else next(
-                    (
-                        keyword.value
-                        for keyword in node.keywords
-                        if keyword.arg == "mode"
-                    ),
+                    (keyword.value for keyword in node.keywords if keyword.arg == "mode"),
                     None,
                 )
             )
@@ -413,11 +414,7 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
             if not any(flag in mode for flag in "wax+"):
                 continue
             found_write = True
-            target = resolve(
-                node.func.value
-                if is_path_open
-                else (node.args[0] if node.args else None)
-            )
+            target = resolve(node.func.value if is_path_open else (node.args[0] if node.args else None))
             if target is None:
                 ambiguous = True
             else:
@@ -438,11 +435,7 @@ def _python_write_targets(source: str) -> tuple[set[str], bool, bool]:
                 and attribute in {"copy", "copy2", "copyfile", "move", "rmtree"}
             ):
                 found_write = True
-                target_nodes = (
-                    node.args[:1]
-                    if attribute == "rmtree"
-                    else node.args[:2]
-                )
+                target_nodes = node.args[:1] if attribute == "rmtree" else node.args[:2]
                 for target_node in target_nodes:
                     target = resolve(target_node)
                     if target is None:
@@ -527,9 +520,7 @@ class InSessionGate:
         targets = list(target_files) if target_files else []
         if kernel_file:
             targets.append(kernel_file)
-        self.target_abs = {
-            os.path.normpath(os.path.abspath(f)) for f in targets if f
-        }
+        self.target_abs = {os.path.normpath(os.path.abspath(f)) for f in targets if f}
         # Kept for logging/back-compat (the anchor file).
         self.kernel_abs = os.path.normpath(os.path.abspath(kernel_file)) if kernel_file else ""
         self.kernel_base = os.path.basename(kernel_file) if kernel_file else ""
@@ -573,7 +564,7 @@ class InSessionGate:
         # correctness oracle + baseline, so it gets the SAME tier as the driver —
         # matched by exact absolute path (not a fragile basename glob) and always
         # snapshotted for the stop-time change check.
-        for p in (extra_protected_paths or []):
+        for p in extra_protected_paths or []:
             if p:
                 self.protected_abs.add(os.path.normpath(os.path.abspath(p)))
         self.workspace_root = self._infer_workspace_root(driver_script, kernel_file)
@@ -597,9 +588,7 @@ class InSessionGate:
             if state.kind in {"file", "symlink"} and not state.error
         }
         self._last_protected_states = dict(self._protected_baseline)
-        self.integrity_verdict = (
-            "violation" if self._protected_snapshot_errors else "unknown"
-        )
+        self.integrity_verdict = "violation" if self._protected_snapshot_errors else "unknown"
         self.integrity_reason = "; ".join(self._protected_snapshot_errors)
         self.integrity_violation = bool(self._protected_snapshot_errors)
 
@@ -610,11 +599,7 @@ class InSessionGate:
     @property
     def hook_timeout_sec(self) -> int:
         """Total Stop-hook ceiling for correctness, optional bench, and cleanup."""
-        benchmark_budget = (
-            0
-            if self.correctness_only
-            else KEEP_MEASUREMENT_COUNT * self.bench_timeout_sec
-        )
+        benchmark_budget = 0 if self.correctness_only else KEEP_MEASUREMENT_COUNT * self.bench_timeout_sec
         return self.stage_timeout_sec + benchmark_budget + 120
 
     def count_target_edits(self, cwd: str, file_changes: list[str]) -> int:
@@ -624,11 +609,7 @@ class InSessionGate:
         for relative in file_changes:
             if not relative:
                 continue
-            candidate = (
-                relative
-                if os.path.isabs(relative)
-                else os.path.join(root, relative)
-            )
+            candidate = relative if os.path.isabs(relative) else os.path.join(root, relative)
             if not self._is_protected(candidate):
                 total += 1
         return total
@@ -729,10 +710,7 @@ class InSessionGate:
                 path = path.resolve().relative_to(self.workspace_root)
             except ValueError:
                 path = path.resolve()
-        return any(
-            part.lower() in _DEFAULT_PROTECTED_DIRS
-            for part in path.parts[:-1]
-        )
+        return any(part.lower() in _DEFAULT_PROTECTED_DIRS for part in path.parts[:-1])
 
     def _iter_snapshot_paths(self) -> list[Path]:
         root = self.workspace_root
@@ -834,10 +812,7 @@ class InSessionGate:
             paths = set(self._iter_snapshot_paths())
         except Exception as error:  # noqa: BLE001 - an incomplete scan is a verdict
             paths = set()
-            errors.append(
-                "protected inventory scan failed: "
-                f"{type(error).__name__}: {error}"
-            )
+            errors.append(f"protected inventory scan failed: {type(error).__name__}: {error}")
         if include_baseline:
             paths.update(state.path for state in self._protected_baseline.values())
         for path in sorted(paths, key=str):
@@ -855,9 +830,7 @@ class InSessionGate:
             include_baseline=hasattr(self, "_protected_baseline"),
         )
         return {
-            key: state.digest
-            for key, state in states.items()
-            if state.kind in {"file", "symlink"} and not state.error
+            key: state.digest for key, state in states.items() if state.kind in {"file", "symlink"} and not state.error
         }
 
     def _protected_changes(self) -> str:
@@ -888,11 +861,7 @@ class InSessionGate:
                 continue
             if old.kind == "missing":
                 added.append(key)
-            elif (
-                old.kind != new.kind
-                or old.digest != new.digest
-                or old.mode != new.mode
-            ):
+            elif old.kind != new.kind or old.digest != new.digest or old.mode != new.mode:
                 modified.append(key)
 
         if not (modified or deleted or added or errors):
@@ -914,10 +883,7 @@ class InSessionGate:
         try:
             reason = self._protected_changes()
         except Exception as error:  # noqa: BLE001 - scan failure is fail-closed
-            reason = (
-                "protected integrity scan failed: "
-                f"{type(error).__name__}: {error}"
-            )
+            reason = f"protected integrity scan failed: {type(error).__name__}: {error}"
         self.integrity_reason = reason
         self.integrity_violation = bool(reason)
         self.integrity_verdict = "violation" if reason else "clean"
@@ -947,9 +913,7 @@ class InSessionGate:
         if self._protected_snapshot_errors or current_errors:
             raise RuntimeError(
                 "cannot restore an incompletely snapshotted protected inventory: "
-                + "; ".join(
-                    [*self._protected_snapshot_errors, *current_errors]
-                )
+                + "; ".join([*self._protected_snapshot_errors, *current_errors])
             )
 
         baseline = self._protected_baseline
@@ -986,16 +950,11 @@ class InSessionGate:
                 path.mkdir(parents=True, exist_ok=True)
                 path.chmod(state.mode)
             else:
-                raise RuntimeError(
-                    f"unsupported protected snapshot kind: {state.kind}"
-                )
+                raise RuntimeError(f"unsupported protected snapshot kind: {state.kind}")
 
         remaining = self.finalize_integrity()
         if remaining:
-            raise RuntimeError(
-                "protected files remain inconsistent after restoration: "
-                f"{remaining}"
-            )
+            raise RuntimeError(f"protected files remain inconsistent after restoration: {remaining}")
 
     def _bash_deny_reason(self, command: str) -> str:
         """WHY a Bash command is denied (a short trigger reason), or "" to allow.
@@ -1047,10 +1006,7 @@ class InSessionGate:
                 if path.lower() in lowered or Path(path).name.lower() in lowered:
                     return Path(path).name
             for relative in self._protected_snapshot:
-                if (
-                    relative.lower() in lowered
-                    or Path(relative).name.lower() in lowered
-                ):
+                if relative.lower() in lowered or Path(relative).name.lower() in lowered:
                     return Path(relative).name
             return ""
 
@@ -1060,17 +1016,11 @@ class InSessionGate:
                 return ""
             for target in targets:
                 if _names_protected(target):
-                    return (
-                        "inline write targets protected file "
-                        f"'{os.path.basename(_unquote(target))}'"
-                    )
+                    return f"inline write targets protected file '{os.path.basename(_unquote(target))}'"
             if ambiguous:
                 mentioned = _protected_mention(source)
                 if mentioned:
-                    return (
-                        "inline write may modify protected file "
-                        f"'{mentioned}'"
-                    )
+                    return f"inline write may modify protected file '{mentioned}'"
             return ""
 
         # Parse every Python payload independently. Heredoc bodies are removed
@@ -1081,7 +1031,7 @@ class InSessionGate:
         heredoc_matches = list(_PYTHON_HEREDOC.finditer(command))
         for match in heredoc_matches:
             line_start = command.rfind("\n", 0, match.start()) + 1
-            prefix = command[line_start:match.start()]
+            prefix = command[line_start : match.start()]
             if re.search(
                 r"(?:^|\s)(?:[A-Za-z0-9_./-]*/)?python"
                 r"(?:\d+(?:\.\d+)*)?(?:\s|$)",
@@ -1202,11 +1152,7 @@ class InSessionGate:
             # refusing a command that merely named the driver, which costs the
             # session one retry against a message that says what to run
             # instead; the cost of missing one is a sibling lane's measurement.
-            if any(
-                os.path.basename(_unquote(arg)) == driver_base
-                for arg in args
-                if not arg.startswith("-")
-            ):
+            if any(os.path.basename(_unquote(arg)) == driver_base for arg in args if not arg.startswith("-")):
                 return f"`{verb} {driver_base}` runs the driver outside `{run_base}`"
         return ""
 
@@ -1292,10 +1238,7 @@ class InSessionGate:
 
     async def _on_edit(self, input_data: dict, tool_use_id: str | None, context: Any) -> dict:
         # Count every implementation edit outside the protected measurement set.
-        if (
-            input_data.get("tool_name", "") in _EDIT_TOOLS
-            and not self._is_protected(self._edited_path(input_data))
-        ):
+        if input_data.get("tool_name", "") in _EDIT_TOOLS and not self._is_protected(self._edited_path(input_data)):
             self.edit_count += 1
         return {}
 
@@ -1323,9 +1266,7 @@ class InSessionGate:
             protected_delta = self._protected_changes()
             self.integrity_reason = protected_delta
             self.integrity_violation = bool(protected_delta)
-            self.integrity_verdict = (
-                "violation" if protected_delta else "clean"
-            )
+            self.integrity_verdict = "violation" if protected_delta else "clean"
             if protected_delta:
                 # Keep fighting an unrestored harness change only up to the cap.
                 # Past it, the agent is not cooperating: stop blocking (which would
@@ -1340,10 +1281,7 @@ class InSessionGate:
                     )
                     return self._allow()
                 self.harness_block_count += 1
-                self._log(
-                    f"BLOCK {self.harness_block_count}/{self.max_stop_blocks} "
-                    "(protected harness changed)"
-                )
+                self._log(f"BLOCK {self.harness_block_count}/{self.max_stop_blocks} (protected harness changed)")
                 return self._harness_block(
                     "Protected benchmark harness/config files changed. Restore "
                     "them before continuing; only kernel implementation files may "
@@ -1392,10 +1330,7 @@ class InSessionGate:
                         "handing the candidate to outer validation without blocking."
                     )
                     self.findings.append(finding)
-                    self._log(
-                        "ALLOW (validation timeout; outer loop will retry once) "
-                        f"edit={self.edit_count}"
-                    )
+                    self._log(f"ALLOW (validation timeout; outer loop will retry once) edit={self.edit_count}")
                     return self._allow()
                 tail = corr.get("output") or corr.get("message") or "correctness failed"
                 self._log(f"BLOCK (validation {outcome}) edit={self.edit_count}")
@@ -1451,10 +1386,7 @@ class InSessionGate:
                     "suite coverage and continue."
                 )
             mean_case_speedup = keep_score(measurement_scores)
-            if (
-                mean_case_speedup is None
-                or self.best_mean_case_speedup is None
-            ):
+            if mean_case_speedup is None or self.best_mean_case_speedup is None:
                 self.last_wall_ms = wall
                 self.last_mean_case_speedup = None
                 self.last_bench_result = None
@@ -1468,17 +1400,13 @@ class InSessionGate:
             bench["mean_case_speedup"] = mean_case_speedup
             bench["measurement_mean_case_speedups"] = measurement_scores
             bench["candidate_diff_sha256"] = self._candidate_diff_sha256()
-            bench["driver_sha256"] = self._sha256(
-                Path(self.driver_script).resolve()
-            )
+            bench["driver_sha256"] = self._sha256(Path(self.driver_script).resolve())
             bench["baseline_case_times"] = dict(self.baseline_case_times)
             bench["best_mean_case_speedup"] = self.best_mean_case_speedup
             bench["bench_repeat"] = self.bench_repeat
             self.last_bench_result = bench
 
-            required = required_keep_speedup(
-                self.best_mean_case_speedup, measurement_scores
-            )
+            required = required_keep_speedup(self.best_mean_case_speedup, measurement_scores)
             if passes_keep_threshold(
                 measurement_scores,
                 best_mean_case_speedup=self.best_mean_case_speedup,
@@ -1518,14 +1446,9 @@ class InSessionGate:
             self.finalize_integrity()
             self.integrity_violation = True
             self.integrity_verdict = "violation"
-            self.integrity_reason = (
-                f"in-session gate failed: {type(e).__name__}: {e}"
-            )
+            self.integrity_reason = f"in-session gate failed: {type(e).__name__}: {e}"
             self.end_reason = "gate_error"
-            self._log(
-                f"gate error ({type(e).__name__}: {e}) -> "
-                "allow stop, outer loop will reject candidate"
-            )
+            self._log(f"gate error ({type(e).__name__}: {e}) -> allow stop, outer loop will reject candidate")
             return self._allow()
 
     def _log(self, msg: str) -> None:

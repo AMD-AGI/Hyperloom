@@ -117,9 +117,7 @@ def test_a_non_git_install_hands_over_a_patch_when_the_smoke_is_killed(monkeypat
     out.mkdir()
     pristine = cli_module._snapshot_fusion_source(str(repo), str(source), out)
     assert pristine, "snapshot precondition"
-    source.write_text(
-        "def forward(x):\n    return fused_norm(x)  # fused\n", encoding="utf-8"
-    )
+    source.write_text("def forward(x):\n    return fused_norm(x)  # fused\n", encoding="utf-8")
 
     _result, _vr, out, observed = _run_gate(
         monkeypatch,

@@ -78,8 +78,9 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     if not demands:
         av = (report.get("apply_verdict") or {}).get("verdict")
         log.info(
-            "serving log %s carries no tuned-config misses (verdict=%s); keeping "
-            "the configured shape source", server_log, av,
+            "serving log %s carries no tuned-config misses (verdict=%s); keeping the configured shape source",
+            server_log,
+            av,
         )
         return ""
 
@@ -93,8 +94,7 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
         "Derived demand from %s: %s",
         server_log,
         ", ".join(
-            f"{d.get('table')} ({d.get('miss_count')} misses, "
-            f"{len(d.get('keys') or [])} distinct keys)"
+            f"{d.get('table')} ({d.get('miss_count')} misses, {len(d.get('keys') or [])} distinct keys)"
             for d in demands
         ),
     )
@@ -120,7 +120,8 @@ def _coverage_gaps(demand_json: str, tuner_specs: list, output_dir: Path) -> lis
         if not gaps:
             return []
         (output_dir / "coverage_gaps.json").write_text(
-            json.dumps([g.to_dict() for g in gaps], indent=2), encoding="utf-8",
+            json.dumps([g.to_dict() for g in gaps], indent=2),
+            encoding="utf-8",
         )
         return gaps
     except Exception:  # noqa: BLE001 - a report must never fail the run
@@ -155,10 +156,7 @@ def _attempt_tier3(
     if not gaps:
         return None
     try:
-        model_name = str(
-            getattr(profile, "model_path", "") or getattr(profile, "architecture", "")
-            or "unknown"
-        )
+        model_name = str(getattr(profile, "model_path", "") or getattr(profile, "architecture", "") or "unknown")
         from .evidence import load_demand
         from .tier3 import attempt_generated_tuner
         from .tier3.dispatch import adapters_for
@@ -177,8 +175,12 @@ def _attempt_tier3(
             return list(getattr(entry, "shapes", None) or [])
 
         outcome = attempt_generated_tuner(
-            gaps, shapes_for, output_dir,
-            model_name=model_name, gpu=gpu_type, framework=framework,
+            gaps,
+            shapes_for,
+            output_dir,
+            model_name=model_name,
+            gpu=gpu_type,
+            framework=framework,
             decision=decision,
             make_baseline=adapter.make_baseline if adapter else None,
             make_dispatch=adapter.make_dispatch if adapter else None,
@@ -187,7 +189,8 @@ def _attempt_tier3(
         )
         log.info("tier3: %s -- %s", outcome.stage, outcome.reason)
         (output_dir / "tier3_outcome.json").write_text(
-            json.dumps(outcome.to_dict(), indent=2), encoding="utf-8",
+            json.dumps(outcome.to_dict(), indent=2),
+            encoding="utf-8",
         )
         return outcome.to_dict()
     except Exception:  # noqa: BLE001 - a bonus attempt must not fail the run
@@ -239,9 +242,18 @@ def main():
 
 @main.command()
 @click.option("--model-path", required=True, help="Path to model directory (must contain config.json)")
-@click.option("--framework", required=True, type=click.Choice(["sglang", "vllm", "vllm-aiter"]), help="Target framework (vllm-aiter = vllm with VLLM_ROCM_USE_AITER=1)")
+@click.option(
+    "--framework",
+    required=True,
+    type=click.Choice(["sglang", "vllm", "vllm-aiter"]),
+    help="Target framework (vllm-aiter = vllm with VLLM_ROCM_USE_AITER=1)",
+)
 @click.option("--precision", required=True, help="Precision: bf16, fp8, fp4, int8, awq")
-@click.option("--quant-type", default="auto", help="Quant type: auto, none, per_token, blockscale, bpreshuffle, awq, gptq, fp4, mxfp4")
+@click.option(
+    "--quant-type",
+    default="auto",
+    help="Quant type: auto, none, per_token, blockscale, bpreshuffle, awq, gptq, fp4, mxfp4",
+)
 @click.option("--gpu-type", default="auto", help="GPU type: auto (detect via rocminfo), mi300x, mi355x, gfx942, ...")
 @click.option("--tp", default=1, type=int, help="Tensor parallel degree")
 @click.option("--conc", default=64, type=int, help="Target serving concurrency (for token coverage)")
@@ -251,15 +263,37 @@ def main():
 @click.option("--iters", default=80, type=int, help="Benchmark iterations per config")
 @click.option("--warmup", default=20, type=int, help="Warmup iterations")
 @click.option("--min-improvement-pct", default=3.0, type=float, help="Min improvement threshold (%%)")
-@click.option("--timeout", default=10800, type=int, help="Per-tuner timeout in seconds (default 3h; first run includes JIT compilation)")
+@click.option(
+    "--timeout",
+    default=10800,
+    type=int,
+    help="Per-tuner timeout in seconds (default 3h; first run includes JIT compilation)",
+)
 @click.option("--global-timeout", default=0, type=int, help="Global timeout for entire session (0=unlimited)")
-@click.option("--thorough", is_flag=True, help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.")
+@click.option(
+    "--thorough",
+    is_flag=True,
+    help="Thorough mode: full search space (all libtypes, more shapes, no per-shape timeout). Slower but finds absolute best config.",
+)
 @click.option("--tuner", default="", help="Force a specific tuner (skip routing)")
 @click.option("--untuned-csv", default="", help="Input untuned CSV for dense aiter tuners")
-@click.option("--moe-untuned-csv", default="", help="Input untuned CSV for the MoE tuner, keyed on the tuple aiter dispatched at run time")
+@click.option(
+    "--moe-untuned-csv",
+    default="",
+    help="Input untuned CSV for the MoE tuner, keyed on the tuple aiter dispatched at run time",
+)
 @click.option("--shapes-json", default="", help="Input shapes JSON from TraceLens/Hyperloom")
-@click.option("--shapes-manifest", default="", help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set")
-@click.option("--demand", "demand_json", default="", help="demand.json from a serving log (forge-gemm-tune evidence); the highest-priority shape source")
+@click.option(
+    "--shapes-manifest",
+    default="",
+    help="Weighted TraceShapeManifest JSON (Hyperloom WP-1); preferred dense-shape source when set",
+)
+@click.option(
+    "--demand",
+    "demand_json",
+    default="",
+    help="demand.json from a serving log (forge-gemm-tune evidence); the highest-priority shape source",
+)
 @click.option("--tunableop-input", default="", help="PyTorch TunableOp shape file")
 @click.option("--kernel-signature-log", default="", help="Server log for 1-stage ASM detection")
 @click.option("--gpu-ids", default="", help="Comma-separated GPU IDs to use")
@@ -350,8 +384,9 @@ def run(
         if gpus:
             gpu_check_path = output_path / "gpu_check.json"
             gpu_check_path.write_text(
-                json.dumps([{"gpu_id": g.gpu_id, "utilization": g.utilization,
-                             "busy": g.busy} for g in gpus], indent=2),
+                json.dumps(
+                    [{"gpu_id": g.gpu_id, "utilization": g.utilization, "busy": g.busy} for g in gpus], indent=2
+                ),
                 encoding="utf-8",
             )
             busy = [g for g in gpus if g.busy]
@@ -369,9 +404,7 @@ def run(
         from .aiter_preflight import collect as _aiter_collect
 
         _pf = _aiter_collect()
-        (output_path / "aiter_preflight.json").write_text(
-            json.dumps(_pf, indent=2), encoding="utf-8"
-        )
+        (output_path / "aiter_preflight.json").write_text(json.dumps(_pf, indent=2), encoding="utf-8")
         for _m in _pf["soft"]:
             log.warning("aiter preflight: %s", _m)
         for _m in _pf["hard"]:
@@ -393,8 +426,7 @@ def run(
             "error_class": type(exc).__name__,
         }
         output_path.mkdir(parents=True, exist_ok=True)
-        (output_path / "result.json").write_text(
-            json.dumps(report_dict, indent=2), encoding="utf-8")
+        (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
         emit_result_json(report_dict)
         raise SystemExit(2)
 
@@ -415,8 +447,7 @@ def run(
             "error_class": "invalid_tokens",
         }
         output_path.mkdir(parents=True, exist_ok=True)
-        (output_path / "result.json").write_text(
-            json.dumps(report_dict, indent=2), encoding="utf-8")
+        (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
         emit_result_json(report_dict)
         raise SystemExit(2)
     token_list = compute_token_coverage(conc=conc, explicit_tokens=explicit_tokens)
@@ -451,8 +482,9 @@ def run(
         selected = [t for t in tuner_specs if t.name == tuner]
         if not selected and tuner in _tuner_registry():
             log.warning(
-                "Requested tuner %r not auto-selected (quant_type=%r); honoring "
-                "explicit --tuner anyway.", tuner, quant_type,
+                "Requested tuner %r not auto-selected (quant_type=%r); honoring explicit --tuner anyway.",
+                tuner,
+                quant_type,
             )
             selected = [TunerSpec(tuner, priority=20, estimated_minutes=20)]
         tuner_specs = selected
@@ -465,8 +497,7 @@ def run(
                 "error_class": "tuner_not_applicable",
             }
             output_path.mkdir(parents=True, exist_ok=True)
-            (output_path / "result.json").write_text(
-                json.dumps(report_dict, indent=2), encoding="utf-8")
+            (output_path / "result.json").write_text(json.dumps(report_dict, indent=2), encoding="utf-8")
             emit_result_json(report_dict)
             raise SystemExit(2)
 
@@ -478,18 +509,28 @@ def run(
         "quant_type": quant_type,
         "gpu_type": gpu_type,
         "tokens": token_list,
-        "tuners": [{"name": t.name, "will_run": t.should_run, "skip_reason": t.skip_reason,
-                    "estimated_minutes": t.estimated_minutes}
-                   for t in tuner_specs],
+        "tuners": [
+            {
+                "name": t.name,
+                "will_run": t.should_run,
+                "skip_reason": t.skip_reason,
+                "estimated_minutes": t.estimated_minutes,
+            }
+            for t in tuner_specs
+        ],
         "total_estimated_minutes": sum(t.estimated_minutes for t in tuner_specs if t.should_run),
     }
     (output_path / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
 
     runnable = [t for t in tuner_specs if t.should_run]
     total_est_min = sum(t.estimated_minutes for t in runnable)
-    log.info("Plan: %d tuners (%d will run, %d skipped), estimated %.0f min total",
-             len(tuner_specs), len(runnable),
-             sum(1 for t in tuner_specs if not t.should_run), total_est_min)
+    log.info(
+        "Plan: %d tuners (%d will run, %d skipped), estimated %.0f min total",
+        len(tuner_specs),
+        len(runnable),
+        sum(1 for t in tuner_specs if not t.should_run),
+        total_est_min,
+    )
 
     # Budget warning: if global_timeout is set but estimated time exceeds it
     if global_timeout > 0 and total_est_min * 60 > global_timeout:
@@ -497,7 +538,9 @@ def run(
             "Estimated total time (%.0f min) exceeds global timeout (%d s / %.0f min). "
             "Lower-priority tuners may be skipped. Consider increasing --global-timeout "
             "or reducing --tokens coverage.",
-            total_est_min, global_timeout, global_timeout / 60,
+            total_est_min,
+            global_timeout,
+            global_timeout / 60,
         )
 
     # Build context
@@ -553,12 +596,14 @@ def run(
         # MoE backends can split one run, and a table keyed on the other's
         # tokens is one nothing will read.
         import dataclasses
+
         tuner_ctx = dataclasses.replace(ctx, timeout_s=effective_timeout)
         if spec.token_hint:
             log.info(
-                "%s: tuning the %d token count(s) the log shows it serving (%s), "
-                "not the run's full coverage",
-                spec.name, len(spec.token_hint), spec.token_hint[:8],
+                "%s: tuning the %d token count(s) the log shows it serving (%s), not the run's full coverage",
+                spec.name,
+                len(spec.token_hint),
+                spec.token_hint[:8],
             )
             tuner_ctx = dataclasses.replace(tuner_ctx, tokens=list(spec.token_hint))
 
@@ -572,8 +617,12 @@ def run(
         results.append(result)
         log.info(
             "Tuner %s finished: status=%s, improved=%d/%d, best_speedup=%.3fx, elapsed=%.1fs",
-            spec.name, result.status, result.improved_shapes,
-            result.total_shapes, result.best_micro_speedup, result.elapsed_s,
+            spec.name,
+            result.status,
+            result.improved_shapes,
+            result.total_shapes,
+            result.best_micro_speedup,
+            result.elapsed_s,
         )
 
     # Last, and only on what the selected tuners left behind. Running it here
@@ -582,14 +631,19 @@ def run(
     # by now they all have.
     if coverage_gap_list and time.time() < global_deadline:
         _attempt_tier3(
-            coverage_gap_list, demand_json, output_path,
-            profile=profile, gpu_type=gpu_type, framework=framework,
+            coverage_gap_list,
+            demand_json,
+            output_path,
+            profile=profile,
+            gpu_type=gpu_type,
+            framework=framework,
         )
 
     # Build report
     total_elapsed = time.time() - start_time
     report = build_report(
-        results, skipped,
+        results,
+        skipped,
         profile=profile,
         framework=framework,
         precision=precision,
@@ -614,10 +668,16 @@ def run(
             from .artifact_manifest import write_artifact_manifest
 
             am_path = write_artifact_manifest(
-                report, results, output_path,
+                report,
+                results,
+                output_path,
                 shape_manifest_path=shapes_manifest or None,
-                gpu_type=gpu_type, framework=framework, precision=precision,
-                quant_type=quant_type, tp=tp, tuner_lib_version=kb_current_lib,
+                gpu_type=gpu_type,
+                framework=framework,
+                precision=precision,
+                quant_type=quant_type,
+                tp=tp,
+                tuner_lib_version=kb_current_lib,
                 generated_at=report.finished_at,
             )
             report.artifacts["tuning_artifact_manifest"] = str(am_path)
@@ -731,12 +791,11 @@ def plan(
     click.echo(f"Model: {model_path}")
     click.echo(f"  Architecture: {profile.architecture}")
     click.echo(f"  MoE: {profile.is_moe} (experts={profile.num_experts}, topk={profile.num_experts_per_tok})")
-    click.echo(f"  Hidden: {profile.hidden_size}, Inter: {profile.intermediate_size}, MoE Inter: {profile.moe_intermediate_size}")
-    click.echo(f"  Quant: {profile.quant_method or 'none'} ({profile.quant_bits}-bit)")
     click.echo(
-        f"\nFramework: {framework}, Precision: {precision}, "
-        f"Quant Type: {quant_type}, GPU Type: {gpu_type}"
+        f"  Hidden: {profile.hidden_size}, Inter: {profile.intermediate_size}, MoE Inter: {profile.moe_intermediate_size}"
     )
+    click.echo(f"  Quant: {profile.quant_method or 'none'} ({profile.quant_bits}-bit)")
+    click.echo(f"\nFramework: {framework}, Precision: {precision}, Quant Type: {quant_type}, GPU Type: {gpu_type}")
     click.echo(f"\nTuners ({len(tuner_specs)}):")
 
     for spec in tuner_specs:

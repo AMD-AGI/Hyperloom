@@ -96,6 +96,7 @@ async def _no_sleep(_seconds):
 
 # ── what counts as an API failure ─────────────────────────────────────────────
 
+
 @pytest.mark.parametrize(
     ("end_reason", "expected"),
     [
@@ -169,6 +170,7 @@ def test_a_safety_stop_stays_terminal_even_when_wrapped():
 
 # ── a raise that still holds a live session handle ────────────────────────────
 
+
 class _ErrorWithSession(RuntimeError):
     """Stands in for CodexExecutionError, which carries the thread it established."""
 
@@ -218,6 +220,7 @@ def test_the_handle_is_read_through_the_cause_chain():
 
 # ── the retry chain has a clock, not just a count ─────────────────────────────
 
+
 def test_the_resume_chain_stops_at_its_deadline():
     """The resume budget does not bound wall clock: each attempt may spend a full
     turn timeout, so an outage outliving the budget would hold the campaign."""
@@ -249,6 +252,7 @@ def test_deadline_zero_lifts_the_bound():
 
 # ── resume on API failure ─────────────────────────────────────────────────────
 
+
 def test_an_api_failure_resumes_the_same_session():
     finished = AgentRunResult(text="PLAN: fused the rmsnorm", end_reason="agent_stopped")
     backend = _Backend([_api_failure()], [finished])
@@ -267,8 +271,11 @@ def test_resume_keeps_the_work_done_before_the_failure():
     before.findings = ["baseline measured"]
     before.num_turns = 12
     after = AgentRunResult(
-        text="done", end_reason="agent_stopped", num_turns=3,
-        tool_calls=[("Bash", {"command": "pytest"})], findings=["parity ok"],
+        text="done",
+        end_reason="agent_stopped",
+        num_turns=3,
+        tool_calls=[("Bash", {"command": "pytest"})],
+        findings=["parity ok"],
     )
     backend = _Backend([before], [after])
 
@@ -312,6 +319,7 @@ def test_a_resume_that_fails_on_credentials_propagates():
 
 # ── limits the caller chose are never retried ─────────────────────────────────
 
+
 @pytest.mark.parametrize("end_reason", ["turn_cap", "timeout", "agent_stopped"])
 def test_a_session_that_answered_is_never_resumed(end_reason):
     backend = _Backend([AgentRunResult(end_reason=end_reason, session_id="s")])
@@ -324,6 +332,7 @@ def test_a_session_that_answered_is_never_resumed(end_reason):
 
 
 # ── giving up ─────────────────────────────────────────────────────────────────
+
 
 def test_an_exhausted_chain_reports_api_error_not_silence():
     """Downstream reads an empty diff; only this end reason says why it is empty."""
@@ -363,11 +372,10 @@ def test_a_backend_missing_resume_reports_api_error():
 
 # ── failures that precede the session ─────────────────────────────────────────
 
+
 def test_a_start_that_never_reached_the_model_is_retried_fresh():
     """No session id exists yet, so a plain re-run loses nothing."""
-    backend = _Backend(
-        [ConnectionError("gateway down"), AgentRunResult(end_reason="agent_stopped")]
-    )
+    backend = _Backend([ConnectionError("gateway down"), AgentRunResult(end_reason="agent_stopped")])
 
     result = _run(backend, max_resumes=2)
 
@@ -391,6 +399,7 @@ def test_a_start_that_fails_on_credentials_raises_immediately():
 
 # ── operator overrides ────────────────────────────────────────────────────────
 
+
 def test_the_retry_budget_is_tunable_without_a_redeploy(monkeypatch):
     monkeypatch.setenv("FORGE_AGENT_API_MAX_RESUMES", "1")
     backend = _Backend([_api_failure()], [_api_failure()])
@@ -410,8 +419,13 @@ def test_backoff_grows_between_resume_attempts():
     backend = _Backend([_api_failure()], [_api_failure(), _api_failure(), _api_failure()])
     asyncio.run(
         run_session_with_api_resume(
-            backend, _spec(), max_resumes=3, base_delay_sec=5.0, max_delay_sec=120.0,
-            sleep=record, rng=lambda: 1.0,
+            backend,
+            _spec(),
+            max_resumes=3,
+            base_delay_sec=5.0,
+            max_delay_sec=120.0,
+            sleep=record,
+            rng=lambda: 1.0,
         )
     )
     assert slept == [5.0, 15.0, 45.0]

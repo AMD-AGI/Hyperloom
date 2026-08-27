@@ -78,9 +78,7 @@ def test_non_object_arguments_are_rejected(arguments):
 
 def test_omitted_arguments_default_to_an_empty_object(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(
-        server, "_client", lambda: pytest.fail("must not reach the network")
-    )
+    monkeypatch.setattr(server, "_client", lambda: pytest.fail("must not reach the network"))
 
     reply = _call("tools/call", {"name": "pr_find_references"})
 
@@ -116,9 +114,7 @@ def test_malformed_repo_is_rejected(monkeypatch, bad):
 
 def test_find_references_without_a_query_does_not_call_the_service(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(
-        server, "_client", lambda: pytest.fail("must not reach the network")
-    )
+    monkeypatch.setattr(server, "_client", lambda: pytest.fail("must not reach the network"))
 
     result = _tool("pr_find_references", {})
 
@@ -132,12 +128,18 @@ def test_find_references_returns_ranked_results(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/FlyDSL")
     monkeypatch.setattr(server, "_client", object)
     monkeypatch.setattr(
-        server, "discover",
+        server,
+        "discover",
         lambda client, context, **kw: SearchOutcome(
             references=(
                 PRReference(
-                    repo="ROCm/FlyDSL", number=959, title="t", is_merged=True,
-                    worth_trying=0.6, components=("moe",), n_files=3,
+                    repo="ROCm/FlyDSL",
+                    number=959,
+                    title="t",
+                    is_merged=True,
+                    worth_trying=0.6,
+                    components=("moe",),
+                    n_files=3,
                 ),
             ),
             stats={"degraded_reason": "service_unreachable"},
@@ -172,9 +174,7 @@ def test_find_references_accepts_a_bare_string_keyword(monkeypatch):
 
 def test_get_reference_reports_a_missing_pr(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
-    monkeypatch.setattr(
-        server, "_client", type("_C", (), {"get_pr": lambda s, r, n: None})
-    )
+    monkeypatch.setattr(server, "_client", type("_C", (), {"get_pr": lambda s, r, n: None}))
 
     assert _tool("pr_get_reference", {"number": 7})["reason"] == "not_found"
 
@@ -189,7 +189,8 @@ def test_get_reference_counts_files_from_the_array(monkeypatch):
     }
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type("_C", (), {"get_pr": lambda s, r, n: payload}),
     )
 
@@ -204,15 +205,21 @@ def test_file_list_uses_the_file_path_field(monkeypatch):
     """The list field is file_path while the by-path query parameter is path."""
     payload = {
         "summary": {"title": "T", "is_merged": True},
-        "files": [{
-            "file_path": "kernels/moe/gemm2.py", "status": "modified",
-            "additions": 204, "deletions": 50, "has_patch": True,
-            "is_binary": False,
-        }],
+        "files": [
+            {
+                "file_path": "kernels/moe/gemm2.py",
+                "status": "modified",
+                "additions": 204,
+                "deletions": 50,
+                "has_patch": True,
+                "is_binary": False,
+            }
+        ],
     }
     monkeypatch.setenv("PR_KB_REPO", "ROCm/FlyDSL")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type("_C", (), {"get_pr": lambda s, r, n: payload}),
     )
 
@@ -230,7 +237,8 @@ def test_get_reference_caps_the_file_list(monkeypatch):
     }
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type("_C", (), {"get_pr": lambda s, r, n: payload}),
     )
 
@@ -262,7 +270,8 @@ def test_file_patch_absence_is_explained(monkeypatch):
     """A force-push makes an indexed path 404 at the current head."""
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type("_C", (), {"get_file_patch": lambda s, r, n, p: None}),
     )
 
@@ -275,7 +284,8 @@ def test_file_patch_is_truncated_to_a_context_safe_size(monkeypatch):
     payload = {"patch": "x" * (server.MAX_PATCH_BYTES * 3)}
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type("_C", (), {"get_file_patch": lambda s, r, n, p: payload}),
     )
 
@@ -288,7 +298,8 @@ def test_file_patch_is_truncated_to_a_context_safe_size(monkeypatch):
 def test_small_patch_is_returned_whole(monkeypatch):
     monkeypatch.setenv("PR_KB_REPO", "ROCm/aiter")
     monkeypatch.setattr(
-        server, "_client",
+        server,
+        "_client",
         type(
             "_C",
             (),
@@ -335,9 +346,7 @@ def _backend_like_env() -> dict[str, str]:
 def _feed_stdin(monkeypatch, lines: list[str]) -> None:
     """Install a fake stdin buffer yielding the given JSON-RPC lines."""
     stream = io.BytesIO("".join(lines).encode())
-    monkeypatch.setattr(
-        server.sys, "stdin", type("_Stdin", (), {"buffer": stream})()
-    )
+    monkeypatch.setattr(server.sys, "stdin", type("_Stdin", (), {"buffer": stream})())
 
 
 def test_write_message_emits_one_compact_json_line(capsys):
@@ -350,10 +359,13 @@ def test_write_message_emits_one_compact_json_line(capsys):
 
 
 def test_serve_answers_then_stops_at_end_of_input(monkeypatch, capsys):
-    _feed_stdin(monkeypatch, [
-        json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n",
-        json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}) + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -363,12 +375,15 @@ def test_serve_answers_then_stops_at_end_of_input(monkeypatch, capsys):
 
 
 def test_serve_reports_malformed_requests_and_skips_notifications(monkeypatch, capsys):
-    _feed_stdin(monkeypatch, [
-        "{not json}\n",
-        json.dumps([1, 2, 3]) + "\n",
-        json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n",
-        json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            "{not json}\n",
+            json.dumps([1, 2, 3]) + "\n",
+            json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 7, "method": "ping"}) + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -379,14 +394,20 @@ def test_serve_reports_malformed_requests_and_skips_notifications(monkeypatch, c
 
 
 def test_serve_rejects_non_object_params(monkeypatch, capsys):
-    _feed_stdin(monkeypatch, [
-        json.dumps({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "ping",
-            "params": [],
-        }) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "ping",
+                    "params": [],
+                }
+            )
+            + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -399,17 +420,23 @@ def test_serve_maps_invalid_tool_arguments_to_invalid_params(
     capsys,
 ):
     monkeypatch.setenv("PR_KB_REPO", "invalid")
-    _feed_stdin(monkeypatch, [
-        json.dumps({
-            "jsonrpc": "2.0",
-            "id": 8,
-            "method": "tools/call",
-            "params": {
-                "name": "pr_get_reference",
-                "arguments": {"number": 1},
-            },
-        }) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 8,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "pr_get_reference",
+                        "arguments": {"number": 1},
+                    },
+                }
+            )
+            + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -418,10 +445,13 @@ def test_serve_maps_invalid_tool_arguments_to_invalid_params(
 
 
 def test_serve_returns_on_exit_notification(monkeypatch, capsys):
-    _feed_stdin(monkeypatch, [
-        json.dumps({"jsonrpc": "2.0", "method": "exit"}) + "\n",
-        json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            json.dumps({"jsonrpc": "2.0", "method": "exit"}) + "\n",
+            json.dumps({"jsonrpc": "2.0", "id": 9, "method": "ping"}) + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -436,12 +466,20 @@ def test_serve_maps_tool_failures_to_jsonrpc_errors(monkeypatch, capsys):
         raise ValueError("invalid PR_KB_TOP_K")
 
     monkeypatch.setattr(server, "_client", exploding_client)
-    _feed_stdin(monkeypatch, [
-        json.dumps({
-            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-            "params": {"name": "pr_get_reference", "arguments": {"number": 1}},
-        }) + "\n",
-    ])
+    _feed_stdin(
+        monkeypatch,
+        [
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {"name": "pr_get_reference", "arguments": {"number": 1}},
+                }
+            )
+            + "\n",
+        ],
+    )
 
     asyncio.run(server._serve())
 
@@ -472,19 +510,38 @@ def test_server_speaks_json_rpc_over_stdio():
     """End-to-end through a real subprocess, the way a backend launches it."""
     proc = subprocess.Popen(
         [sys.executable, "-m", "kernelforge.mcp_server.pr_stdio_server"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_backend_like_env(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=_backend_like_env(),
     )
     try:
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {},
-        }) + "\n")
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {},
+                }
+            )
+            + "\n"
+        )
         proc.stdin.flush()
         init = json.loads(proc.stdout.readline())
 
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "id": 2, "method": "tools/list",
-        }) + "\n")
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 2,
+                    "method": "tools/list",
+                }
+            )
+            + "\n"
+        )
         proc.stdin.flush()
         listed = json.loads(proc.stdout.readline())
     finally:
@@ -499,16 +556,33 @@ def test_notifications_without_an_id_get_no_reply():
     """A JSON-RPC notification must not produce a response line."""
     proc = subprocess.Popen(
         [sys.executable, "-m", "kernelforge.mcp_server.pr_stdio_server"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, bufsize=1, env=_backend_like_env(),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+        env=_backend_like_env(),
     )
     try:
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "method": "notifications/initialized",
-        }) + "\n")
-        proc.stdin.write(json.dumps({
-            "jsonrpc": "2.0", "id": 9, "method": "ping",
-        }) + "\n")
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "notifications/initialized",
+                }
+            )
+            + "\n"
+        )
+        proc.stdin.write(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 9,
+                    "method": "ping",
+                }
+            )
+            + "\n"
+        )
         proc.stdin.flush()
         reply = json.loads(proc.stdout.readline())
     finally:

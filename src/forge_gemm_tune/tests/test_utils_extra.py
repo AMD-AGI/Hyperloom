@@ -23,6 +23,7 @@ from forge_gemm_tune.utils import (
 def test_resolve_aiter_root_wellknown_fallback(monkeypatch):
     monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
     import builtins
+
     real_import = builtins.__import__
 
     def fake_import(name, *a, **k):
@@ -32,8 +33,7 @@ def test_resolve_aiter_root_wellknown_fallback(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
     # Only the "/opt/aiter" well-known path exists.
-    monkeypatch.setattr(utils.Path, "is_dir",
-                        lambda self: str(self) == "/opt/aiter")
+    monkeypatch.setattr(utils.Path, "is_dir", lambda self: str(self) == "/opt/aiter")
     root = resolve_aiter_root()
     assert root == Path("/opt/aiter")
 
@@ -41,6 +41,7 @@ def test_resolve_aiter_root_wellknown_fallback(monkeypatch):
 def test_resolve_aiter_root_none(monkeypatch):
     monkeypatch.delenv("AITER_ROOT_DIR", raising=False)
     import builtins
+
     real_import = builtins.__import__
 
     def fake_import(name, *a, **k):
@@ -109,8 +110,7 @@ def test_check_gpu_status_parses(monkeypatch):
         "card1": {"GPU Utilization (%)": "10"},
         "system": {"ignored": "x"},
     }
-    monkeypatch.setattr(utils.subprocess, "run",
-                        lambda *a, **k: _Proc(stdout=json.dumps(data)))
+    monkeypatch.setattr(utils.subprocess, "run", lambda *a, **k: _Proc(stdout=json.dumps(data)))
     gpus = check_gpu_status()
     assert len(gpus) == 2
     g0 = next(g for g in gpus if g.gpu_id == 0)
@@ -133,8 +133,7 @@ def test_check_gpu_status_not_found(monkeypatch):
 
 
 def test_check_gpu_status_bad_json(monkeypatch):
-    monkeypatch.setattr(utils.subprocess, "run",
-                        lambda *a, **k: _Proc(stdout="not json"))
+    monkeypatch.setattr(utils.subprocess, "run", lambda *a, **k: _Proc(stdout="not json"))
     assert check_gpu_status() == []
 
 

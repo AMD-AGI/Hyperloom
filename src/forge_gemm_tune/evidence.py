@@ -61,9 +61,7 @@ DENSE_LOOKUP = re.compile(
 HIT_TABLE = re.compile(r"is tuned on cu_num\s*=\s*\d+\s+in\s+(?P<table>[^,]+)")
 
 # Which tables the runtime actually loaded (os.pathsep-separated path list).
-MERGE_TABLES = re.compile(
-    r"\[aiter\]\s+merge tuned file under model_configs/ and configs/\s+(?P<paths>\S+)"
-)
+MERGE_TABLES = re.compile(r"\[aiter\]\s+merge tuned file under model_configs/ and configs/\s+(?P<paths>\S+)")
 
 # aiter CK MoE dispatch; the tuple carries the dtype combination and token count.
 FUSED_MOE = re.compile(
@@ -121,7 +119,8 @@ TABLE_TO_TUNER: dict[str, tuple[str, str]] = {
     "a8w8_blockscale_tuned_gemm.csv": ("a8w8_blockscale", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE"),
     "a8w8_bpreshuffle_tuned_gemm.csv": ("a8w8_bpreshuffle", "AITER_CONFIG_GEMM_A8W8_BPRESHUFFLE"),
     "a8w8_blockscale_bpreshuffle_tuned_gemm.csv": (
-        "a8w8_blockscale_bpreshuffle", "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
+        "a8w8_blockscale_bpreshuffle",
+        "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE_BPRESHUFFLE",
     ),
     "a4w4_blockscale_tuned_gemm.csv": ("a4w4_blockscale", "AITER_CONFIG_GEMM_A4W4"),
     "tuned_fmoe.csv": ("fmoe_ck", "AITER_CONFIG_FMOE"),
@@ -217,9 +216,10 @@ def parse_log(text: str) -> dict[str, Any]:
         if lines_read > max_lines:
             truncated["lines"] = max_lines
             log.warning(
-                "serving log exceeds %d lines; demand is derived from the first "
-                "%d only (raise %s to read further)",
-                max_lines, max_lines, _MAX_LINES_ENV,
+                "serving log exceeds %d lines; demand is derived from the first %d only (raise %s to read further)",
+                max_lines,
+                max_lines,
+                _MAX_LINES_ENV,
             )
             break
         m = DENSE_LOOKUP.search(line)
@@ -259,7 +259,9 @@ def parse_log(text: str) -> dict[str, Any]:
                     log.warning(
                         "%s reached %d distinct demand keys; further new keys are "
                         "counted as misses but not listed (raise %s)",
-                        base, max_keys, _MAX_KEYS_ENV,
+                        base,
+                        max_keys,
+                        _MAX_KEYS_ENV,
                     )
             continue
 

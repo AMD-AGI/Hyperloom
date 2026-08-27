@@ -117,9 +117,7 @@ def build_report(
     finished_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
     tuners_run = [r.to_dict() for r in results]
-    tuners_skipped_list = [
-        {"tuner": name, "skip_reason": reason} for name, reason in skipped
-    ]
+    tuners_skipped_list = [{"tuner": name, "skip_reason": reason} for name, reason in skipped]
 
     # Determine overall status and recommended_env
     recommended_env: dict[str, str] = {}
@@ -136,9 +134,7 @@ def build_report(
         # partial_output counts alongside ok: the rows the tuner did write are a
         # valid deployable artifact, the shortfall is reported separately via
         # expected_shapes/missing_shapes rather than by discarding the result.
-        if (r.status in ("ok", "partial_output") and r.has_improvement) or (
-            r.candidate and r.status != "failed"
-        ):
+        if (r.status in ("ok", "partial_output") and r.has_improvement) or (r.candidate and r.status != "failed"):
             has_candidate = True
             if r.env_var and r.env_value:
                 recommended_env[r.env_var] = r.env_value
@@ -165,9 +161,7 @@ def build_report(
     # (empty_output) so an empty/unparsed run is never silently reported as a
     # real no-improvement result.
     non_failed_statuses = [r.status for r in results if r.status != "failed"]
-    all_empty_non_failed = bool(non_failed_statuses) and all(
-        s == "empty_output" for s in non_failed_statuses
-    )
+    all_empty_non_failed = bool(non_failed_statuses) and all(s == "empty_output" for s in non_failed_statuses)
 
     if all_skipped:
         status = "skipped"

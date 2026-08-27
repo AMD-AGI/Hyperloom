@@ -280,12 +280,8 @@ def _validate_round_costs(costs: "RoundCostState") -> None:
         ("round_costs.campaign_sec", costs.campaign_sec),
     ]
     for index, entry in enumerate(costs.recent):
-        durations.append(
-            (f"round_costs.recent[{index}].planning_sec", entry.planning_sec)
-        )
-        durations.append(
-            (f"round_costs.recent[{index}].total_sec", entry.total_sec)
-        )
+        durations.append((f"round_costs.recent[{index}].planning_sec", entry.planning_sec))
+        durations.append((f"round_costs.recent[{index}].total_sec", entry.total_sec))
         durations.append(
             (
                 f"round_costs.recent[{index}].measurement_sec",
@@ -296,16 +292,11 @@ def _validate_round_costs(costs: "RoundCostState") -> None:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"run state {label} must be a number")
         if not math.isfinite(float(value)) or float(value) < 0:
-            raise ValueError(
-                f"run state {label} must be a non-negative finite duration"
-            )
+            raise ValueError(f"run state {label} must be a non-negative finite duration")
     if costs.rounds < 0:
         raise ValueError("run state round_costs.rounds must not be negative")
     if float(costs.campaign_sec) < float(costs.planning_total_sec):
-        raise ValueError(
-            "run state round_costs.campaign_sec must cover "
-            "round_costs.planning_total_sec"
-        )
+        raise ValueError("run state round_costs.campaign_sec must cover round_costs.planning_total_sec")
 
 
 @dataclass
@@ -436,23 +427,16 @@ class RunState:
                 )
             version = SCHEMA_VERSION
         if version != SCHEMA_VERSION:
-            raise ValueError(
-                "unsupported run state schema: "
-                f"expected v{SCHEMA_VERSION}, got {version!r}"
-            )
+            raise ValueError(f"unsupported run state schema: expected v{SCHEMA_VERSION}, got {version!r}")
         payload["schema_version"] = SCHEMA_VERSION
 
         expected = set(cls.__dataclass_fields__)
         missing = expected - set(payload)
         unknown = set(payload) - expected
         if missing:
-            raise ValueError(
-                "run state missing fields: " + ", ".join(sorted(missing))
-            )
+            raise ValueError("run state missing fields: " + ", ".join(sorted(missing)))
         if unknown:
-            raise ValueError(
-                "run state has unknown fields: " + ", ".join(sorted(unknown))
-            )
+            raise ValueError("run state has unknown fields: " + ", ".join(sorted(unknown)))
 
         def nested(
             value: object,
@@ -465,15 +449,9 @@ class RunState:
             nested_missing = nested_expected - set(value)
             nested_unknown = set(value) - nested_expected
             if nested_missing:
-                raise ValueError(
-                    f"run state {label} missing fields: "
-                    + ", ".join(sorted(nested_missing))
-                )
+                raise ValueError(f"run state {label} missing fields: " + ", ".join(sorted(nested_missing)))
             if nested_unknown:
-                raise ValueError(
-                    f"run state {label} has unknown fields: "
-                    + ", ".join(sorted(nested_unknown))
-                )
+                raise ValueError(f"run state {label} has unknown fields: " + ", ".join(sorted(nested_unknown)))
             return model(**value)
 
         payload["best"] = nested(payload["best"], BestRecord, "best")
@@ -501,20 +479,16 @@ class RunState:
         if not isinstance(round_costs.recent, list):
             raise ValueError("run state round_costs.recent must be a list")
         round_costs.recent = [
-            nested(entry, RoundCost, f"round_costs.recent[{index}]")
-            for index, entry in enumerate(round_costs.recent)
+            nested(entry, RoundCost, f"round_costs.recent[{index}]") for index, entry in enumerate(round_costs.recent)
         ]
         payload["round_costs"] = round_costs
         state = cls(**payload)
         _validate_round_costs(state.round_costs)
         if state.search_mode not in SEARCH_MODES:
-            raise ValueError(
-                f"run state has unsupported search mode: {state.search_mode!r}"
-            )
+            raise ValueError(f"run state has unsupported search mode: {state.search_mode!r}")
         if state.orchestration_circuit_state not in ORCHESTRATION_CIRCUIT_STATES:
             raise ValueError(
-                "run state has unsupported orchestration circuit state: "
-                f"{state.orchestration_circuit_state!r}"
+                f"run state has unsupported orchestration circuit state: {state.orchestration_circuit_state!r}"
             )
         if state.next_iteration < 1:
             raise ValueError("run state next_iteration must be positive")
@@ -531,9 +505,7 @@ def start_session(
     requested_campaign_id = (campaign_id or "").strip()
     if state.campaign_id:
         if requested_campaign_id and requested_campaign_id != state.campaign_id:
-            raise ValueError(
-                f"campaign mismatch: expected {state.campaign_id}, got {requested_campaign_id}"
-            )
+            raise ValueError(f"campaign mismatch: expected {state.campaign_id}, got {requested_campaign_id}")
     else:
         state.campaign_id = requested_campaign_id or uuid.uuid4().hex
 
@@ -601,9 +573,7 @@ _DEFAULT_STALL_PHASE_THRESHOLD = 3
 # stall streak or count against the optimizer: a gateway outage that lasted three
 # iterations would otherwise read as "the optimizer stopped improving" and pull in
 # the supervisor to fix a problem it cannot see.
-INFRASTRUCTURE_DECISIONS = frozenset(
-    {"API_ERROR", "ORCHESTRATION_ERROR"}
-)
+INFRASTRUCTURE_DECISIONS = frozenset({"API_ERROR", "ORCHESTRATION_ERROR"})
 
 
 def is_infrastructure_decision(decision: str) -> bool:
@@ -661,8 +631,7 @@ def apply_iteration(
     """
     if iteration < state.next_iteration:
         raise ValueError(
-            f"iteration {iteration} would reuse completed iteration; "
-            f"next iteration is {state.next_iteration}"
+            f"iteration {iteration} would reuse completed iteration; next iteration is {state.next_iteration}"
         )
     infrastructure = is_infrastructure_decision(decision)
     state.iteration = iteration
@@ -684,11 +653,7 @@ def apply_iteration(
         state.best = BestRecord(
             iteration=iteration,
             wall_ms=wall_ms if wall_ms is not None else best_wall_ms,
-            mean_case_speedup=(
-                mean_case_speedup
-                if mean_case_speedup is not None
-                else best_mean_case_speedup
-            ),
+            mean_case_speedup=(mean_case_speedup if mean_case_speedup is not None else best_mean_case_speedup),
             commit_hash=commit_hash or state.best.commit_hash,
             plan=(plan or "").strip()[:120],
             source="iteration",
@@ -702,10 +667,8 @@ def apply_iteration(
     if str(decision or "").strip().upper() == "ORCHESTRATION_ERROR":
         state.orchestration_error_streak += 1
         if (
-            state.orchestration_circuit_state
-            == ORCHESTRATION_CIRCUIT_HALF_OPEN
-            or state.orchestration_error_streak
-            >= max(1, orchestration_error_threshold)
+            state.orchestration_circuit_state == ORCHESTRATION_CIRCUIT_HALF_OPEN
+            or state.orchestration_error_streak >= max(1, orchestration_error_threshold)
         ):
             state.orchestration_circuit_state = ORCHESTRATION_CIRCUIT_OPEN
     else:
@@ -717,10 +680,7 @@ def apply_iteration(
     if (
         best_mean_case_speedup is not None
         and (state.best.iteration > 0 or bool(state.best.commit_hash))
-        and (
-            state.best.mean_case_speedup is None
-            or best_mean_case_speedup >= state.best.mean_case_speedup
-        )
+        and (state.best.mean_case_speedup is None or best_mean_case_speedup >= state.best.mean_case_speedup)
     ):
         state.best.mean_case_speedup = best_mean_case_speedup
         state.best.wall_ms = best_wall_ms
@@ -787,7 +747,7 @@ def apply_round_cost(
             measurement_sec=measurement,
         )
     )
-    costs.recent = costs.recent[-max(1, window):]
+    costs.recent = costs.recent[-max(1, window) :]
     return state
 
 
@@ -852,12 +812,7 @@ def should_resume(state: "RunState", head_commit: str) -> bool:
     """
     recorded = (state.best.commit_hash or "").strip()
     head = (head_commit or "").strip()
-    return bool(
-        recorded
-        and state.best.mean_case_speedup is not None
-        and head
-        and head == recorded
-    )
+    return bool(recorded and state.best.mean_case_speedup is not None and head and head == recorded)
 
 
 # How many iterations the retrieval map can hold at once. Named so the loop can
@@ -913,9 +868,7 @@ class WorkspaceLock:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as e:
             lock_file.close()
-            raise WorkspaceLockError(
-                f"workspace is already in use: {self.path.parent.parent}"
-            ) from e
+            raise WorkspaceLockError(f"workspace is already in use: {self.path.parent.parent}") from e
         lock_file.seek(0)
         lock_file.truncate()
         lock_file.write(f"pid={os.getpid()}\n")
@@ -959,9 +912,7 @@ class LoopStateStore:
         # the search policy) are O(1) and never re-parse the whole, ever-growing
         # ``events.jsonl``. Both are primed once from disk here.
         self._recent: collections.deque[dict] = collections.deque(maxlen=_RECENT_CACHE)
-        self._recent_results: collections.deque[dict] = collections.deque(
-            maxlen=_RECENT_RESULT_CACHE
-        )
+        self._recent_results: collections.deque[dict] = collections.deque(maxlen=_RECENT_RESULT_CACHE)
         try:
             self.root.mkdir(parents=True, exist_ok=True)
         except Exception as e:  # noqa: BLE001 - best-effort
@@ -1002,9 +953,7 @@ class LoopStateStore:
         try:
             payload = json.loads(self.state_path.read_text())
         except (OSError, json.JSONDecodeError) as error:
-            raise ValueError(
-                f"invalid run state checkpoint: {self.state_path}"
-            ) from error
+            raise ValueError(f"invalid run state checkpoint: {self.state_path}") from error
         return RunState.from_dict(payload)
 
     def save(self, state: RunState) -> None:
@@ -1093,7 +1042,5 @@ class LoopStateStore:
             return []
         bound = self._recent_results.maxlen
         if n > bound:
-            raise ValueError(
-                f"recent_results({n}) exceeds the cached outcome bound {bound}"
-            )
+            raise ValueError(f"recent_results({n}) exceeds the cached outcome bound {bound}")
         return list(self._recent_results)[-n:]

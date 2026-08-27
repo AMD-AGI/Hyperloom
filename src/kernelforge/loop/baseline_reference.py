@@ -97,8 +97,7 @@ def resolve_drift_tolerance() -> tuple[float, bool]:
         ) from error
     if not math.isfinite(tolerance) or tolerance < 0.0:
         raise BaselineReferenceError(
-            f"{BASELINE_DRIFT_TOLERANCE_ENV}={raw!r} is not a finite, "
-            "non-negative fraction of the reference time"
+            f"{BASELINE_DRIFT_TOLERANCE_ENV}={raw!r} is not a finite, non-negative fraction of the reference time"
         )
     return tolerance, True
 
@@ -143,16 +142,10 @@ def load_reference_case_times(workspace_dir: str) -> ReferenceCases | None:
         try:
             execution_time_ms = float(raw_time)
         except (TypeError, ValueError):
-            unusable.append(
-                f"entry {position} ({case_id}) declares no numeric "
-                f"'execution_time_ms': {raw_time!r}"
-            )
+            unusable.append(f"entry {position} ({case_id}) declares no numeric 'execution_time_ms': {raw_time!r}")
             continue
         if not math.isfinite(execution_time_ms) or execution_time_ms <= 0.0:
-            unusable.append(
-                f"entry {position} ({case_id}) declares a non-positive "
-                f"'execution_time_ms': {raw_time!r}"
-            )
+            unusable.append(f"entry {position} ({case_id}) declares a non-positive 'execution_time_ms': {raw_time!r}")
             continue
         cases[case_id] = execution_time_ms
 
@@ -194,9 +187,7 @@ def check_baseline_against_reference(
         return BaselineReferenceCheck(
             drift_tolerance=drift_tolerance,
             tolerance_overridden=tolerance_overridden,
-            unverified_reason=(
-                f"this task ships no {BASELINE_REFERENCE_FILENAME}"
-            ),
+            unverified_reason=(f"this task ships no {BASELINE_REFERENCE_FILENAME}"),
         )
     if loaded.unreadable_reason:
         return BaselineReferenceCheck(
@@ -210,9 +201,7 @@ def check_baseline_against_reference(
     measured = {
         str(case_id): float(value)
         for case_id, value in (measured_case_times or {}).items()
-        if isinstance(value, (int, float))
-        and math.isfinite(float(value))
-        and float(value) > 0.0
+        if isinstance(value, (int, float)) and math.isfinite(float(value)) and float(value) > 0.0
     }
     shared = sorted(set(reference) & set(measured))
     if not shared:
@@ -235,8 +224,7 @@ def check_baseline_against_reference(
         f"({abs(measured[case_id] - reference[case_id]) / reference[case_id] * 100:.1f}%"
         " drift)"
         for case_id in shared
-        if abs(measured[case_id] - reference[case_id]) / reference[case_id]
-        > drift_tolerance
+        if abs(measured[case_id] - reference[case_id]) / reference[case_id] > drift_tolerance
     ]
     if drifted:
         raise BaselineReferenceError(

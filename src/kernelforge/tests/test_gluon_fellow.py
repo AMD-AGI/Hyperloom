@@ -47,6 +47,7 @@ def config() -> Config:
 
 # ─── registration ───
 
+
 def test_gluon_is_a_registered_backend():
     assert "gluon" in FELLOW_BACKENDS
 
@@ -56,6 +57,7 @@ def test_gluon_renders_a_forge_loop_prompt(config):
 
 
 # ─── the triton <-> gluon knowledge pairing ───
+
 
 class TestLanguagePairing:
     """Both backends must reach both language folders, in their own order."""
@@ -105,25 +107,21 @@ class TestKnowledgeBuilderAcceptsASequence:
         from kernelforge.knowledge import build_forge_knowledge
 
         block = build_forge_knowledge(config.local_knowledge_dir, language="gluon")
-        assert self._sections(block) == ["## languages/gluon/  —  base: %s" % (
-            Path(config.local_knowledge_dir) / "languages" / "gluon"
-        )]
+        assert self._sections(block) == [
+            "## languages/gluon/  —  base: %s" % (Path(config.local_knowledge_dir) / "languages" / "gluon")
+        ]
 
     def test_a_sequence_renders_in_order(self, config):
         from kernelforge.knowledge import build_forge_knowledge
 
-        block = build_forge_knowledge(
-            config.local_knowledge_dir, language=("gluon", "triton")
-        )
+        block = build_forge_knowledge(config.local_knowledge_dir, language=("gluon", "triton"))
         assert [s.split("/")[1] for s in self._sections(block)] == ["gluon", "triton"]
 
     def test_duplicates_collapse(self, config):
         """A folder must never be rendered twice into one prompt."""
         from kernelforge.knowledge import build_forge_knowledge
 
-        block = build_forge_knowledge(
-            config.local_knowledge_dir, language=("triton", "gluon", "triton")
-        )
+        block = build_forge_knowledge(config.local_knowledge_dir, language=("triton", "gluon", "triton"))
         assert [s.split("/")[1] for s in self._sections(block)] == ["triton", "gluon"]
 
     def test_none_and_empty_add_no_layer(self, config):
@@ -135,6 +133,7 @@ class TestKnowledgeBuilderAcceptsASequence:
 
 
 # ─── the knowledge tree itself ───
+
 
 class TestKnowledgeTree:
     """The cards the prompts route to must exist and be reachable.
@@ -186,7 +185,9 @@ def add_kernel(x_ptr, y_ptr, n, BLOCK: gl.constexpr):
 
 # The shape aiter ships: one file, one public entry, a Gluon path and a
 # @triton.jit fallback selected at dispatch.
-_MIXED_KERNEL = _GLUON_KERNEL + """
+_MIXED_KERNEL = (
+    _GLUON_KERNEL
+    + """
 
 @triton.jit
 def add_kernel_triton(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
@@ -196,6 +197,7 @@ def add_kernel_triton(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
 def add(x, y, n):
     return add_kernel if _use_gluon() else add_kernel_triton
 """
+)
 
 _TRITON_KERNEL = """\
 import triton
@@ -267,6 +269,7 @@ class TestInferFellow:
 
 # ─── the escalation hint ───
 
+
 class TestTritonEscalationHint:
     """A Triton campaign must be told the drop to Gluon is a move it can make.
 
@@ -323,9 +326,7 @@ class TestAiterFellowRoutesToAuthoringKnowledge:
     def test_names_the_authoring_route(self, aiter_prompt):
         assert "languages/<lang>/" in aiter_prompt
 
-    @pytest.mark.parametrize(
-        "lang", ["triton", "gluon", "hip", "ck", "asm", "flydsl"]
-    )
+    @pytest.mark.parametrize("lang", ["triton", "gluon", "hip", "ck", "asm", "flydsl"])
     def test_every_authoring_language_is_reachable(self, aiter_prompt, lang):
         assert f"languages/{lang}/" in aiter_prompt
 

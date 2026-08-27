@@ -430,9 +430,7 @@ def test_create_segment_crash_retry_reuses_persisted_child(tmp_path):
         for experiment in tracker.list_experiments()
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
-    assert [experiment.experiment_id for experiment in matching_segments] == [
-        child.experiment_id
-    ]
+    assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
 
 
 def test_create_segment_retry_rejects_parent_mismatch(tmp_path):
@@ -459,9 +457,7 @@ def test_create_segment_retry_rejects_parent_mismatch(tmp_path):
         for experiment in tracker.list_experiments()
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
-    assert [experiment.experiment_id for experiment in matching_segments] == [
-        child.experiment_id
-    ]
+    assert [experiment.experiment_id for experiment in matching_segments] == [child.experiment_id]
 
 
 def test_create_child_segment_rejects_broken_lineage(tmp_path):
@@ -566,9 +562,7 @@ def test_concurrent_processes_preserve_all_logged_iterations(tmp_path):
     loaded = tracker.get(exp.experiment_id)
     expected_count = process_count * iterations_per_process
     assert len(loaded.iterations) == expected_count
-    assert [iteration.iteration_id for iteration in loaded.iterations] == list(
-        range(1, expected_count + 1)
-    )
+    assert [iteration.iteration_id for iteration in loaded.iterations] == list(range(1, expected_count + 1))
     assert len({iteration.notes for iteration in loaded.iterations}) == expected_count
 
 
@@ -616,9 +610,7 @@ def test_concurrent_processes_create_one_campaign_segment(tmp_path):
         for experiment in tracker.list_experiments()
         if experiment.campaign_id == "campaign-1" and experiment.segment_index == 2
     ]
-    assert [experiment.experiment_id for experiment in matching_segments] == [
-        experiment_ids[0]
-    ]
+    assert [experiment.experiment_id for experiment in matching_segments] == [experiment_ids[0]]
 
 
 def test_concurrent_subprocess_updates_preserve_fields_and_single_transition(tmp_path):
@@ -677,9 +669,7 @@ else:
     operations = ["usage", "kb", "baseline", "complete", "complete", "complete", "segment"]
     env = os.environ.copy()
     src_dir = Path(__file__).resolve().parents[1] / "src"
-    env["PYTHONPATH"] = os.pathsep.join(
-        path for path in (str(src_dir), env.get("PYTHONPATH", "")) if path
-    )
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (str(src_dir), env.get("PYTHONPATH", "")) if path)
     ready_paths = [tmp_path / f"ready-{index}" for index in range(len(operations))]
     processes = [
         subprocess.Popen(
@@ -746,9 +736,7 @@ def test_create_segment_rejects_an_unusable_campaign_or_index(tmp_path):
 def test_segment_lookup_ignores_unreadable_and_non_experiment_json(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     (tmp_path / "corrupt.json").write_text("{not valid json")
-    (tmp_path / "not_an_experiment.json").write_text(
-        json.dumps([{"campaign_id": "campaign-1", "segment_index": 1}])
-    )
+    (tmp_path / "not_an_experiment.json").write_text(json.dumps([{"campaign_id": "campaign-1", "segment_index": 1}]))
 
     segment = tracker.create_segment(campaign_id="campaign-1", segment_index=1)
 

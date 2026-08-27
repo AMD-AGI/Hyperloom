@@ -129,14 +129,24 @@ def _restore_best_kernel(
 
     if best_commit and relative is not None:
         exists = git(
-            "-C", str(workspace), "cat-file", "-e", f"{best_commit}^{{commit}}",
+            "-C",
+            str(workspace),
+            "cat-file",
+            "-e",
+            f"{best_commit}^{{commit}}",
             check=False,
         )
         if exists.returncode == 0:
             restored = git(
-                "-C", str(workspace), "restore",
-                "--source", best_commit, "--staged", "--worktree",
-                "--", relative.as_posix(),
+                "-C",
+                str(workspace),
+                "restore",
+                "--source",
+                best_commit,
+                "--staged",
+                "--worktree",
+                "--",
+                relative.as_posix(),
                 check=False,
             )
             if restored.returncode == 0:
@@ -176,19 +186,32 @@ def run_optimize(
 
     cmd = _forge_loop_argv() + [
         "forge-loop",
-        "--kernel", spec.flydsl_kernel,
-        "--driver", driver_path,
-        "--workspace", spec.workspace,
-        "--experiments-dir", str(experiments_dir),
-        "--result-json", result_json,
-        "--snr-threshold", str(spec.snr_threshold),
-        "--max-hours", str(max(1.0, max_hours)),
-        "--git-branch", git_branch,
-        "--gpu-target", config.gpu_target,
-        "--fellow", "flydsl-fellow",
-        "--task-type", "flydsl2flydsl",
-        "--source-files", spec.flydsl_kernel,
-        "--target-functions", spec.builder_symbol,
+        "--kernel",
+        spec.flydsl_kernel,
+        "--driver",
+        driver_path,
+        "--workspace",
+        spec.workspace,
+        "--experiments-dir",
+        str(experiments_dir),
+        "--result-json",
+        result_json,
+        "--snr-threshold",
+        str(spec.snr_threshold),
+        "--max-hours",
+        str(max(1.0, max_hours)),
+        "--git-branch",
+        git_branch,
+        "--gpu-target",
+        config.gpu_target,
+        "--fellow",
+        "flydsl-fellow",
+        "--task-type",
+        "flydsl2flydsl",
+        "--source-files",
+        spec.flydsl_kernel,
+        "--target-functions",
+        spec.builder_symbol,
         # The outer rewrite pipeline exclusively owns rewrite KB read/write.
         # Prevent the nested optimizer from touching the generic forge-loop KB.
         "--no-experience-kb",
@@ -196,8 +219,10 @@ def run_optimize(
         # preparation and preflight. The single-path forge-loop preparer has a
         # different contract and must never rewrite it.
         "--no-prepare-task",
-        "--supervisor-backend", supervisor_backend,
-        "--profile-timeout-sec", str(profile_timeout_sec),
+        "--supervisor-backend",
+        supervisor_backend,
+        "--profile-timeout-sec",
+        str(profile_timeout_sec),
     ]
     if config.gpu_type:
         cmd += ["--gpu-type", config.gpu_type]
@@ -220,14 +245,16 @@ def run_optimize(
     collected: list[str] = []
     kernel_path = Path(spec.flydsl_kernel)
     fallback_content = kernel_path.read_bytes() if kernel_path.is_file() else None
-    fallback_mode = (
-        kernel_path.stat().st_mode & 0o777 if kernel_path.is_file() else None
-    )
+    fallback_mode = kernel_path.stat().st_mode & 0o777 if kernel_path.is_file() else None
     terminated_for_deadline = False
     try:
         proc = subprocess.Popen(
-            cmd, cwd=spec.workspace, stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            cmd,
+            cwd=spec.workspace,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
             start_new_session=True,
         )
         assert proc.stdout is not None
@@ -270,19 +297,17 @@ def run_optimize(
         # would skip the final result + sentinel). The caller then keeps the
         # port-only baseline as the final result.
         log.warning("optimize: forge-loop could not be launched/run (%s: %s)", type(e).__name__, e)
-        print(f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); "
-              "keeping the port-only result", flush=True)
+        print(
+            f"  [forge-rewrite] OPTIMIZE launch failed ({type(e).__name__}: {e}); keeping the port-only result",
+            flush=True,
+        )
         _restore_best_kernel(
             spec,
             best_commit="",
             fallback_content=fallback_content,
             fallback_mode=fallback_mode,
         )
-        return (
-            {"terminated_for_deadline": True}
-            if terminated_for_deadline
-            else {}
-        )
+        return {"terminated_for_deadline": True} if terminated_for_deadline else {}
     stdout_text = "".join(collected)
 
     # Trust --result-json only if it belongs to THIS run, keyed on experiment_id.
@@ -312,7 +337,8 @@ def run_optimize(
     if not result:
         log.warning(
             "optimize: no trusted forge-loop result (exit %s, expected experiment_id %s)",
-            proc.returncode, expected_id,
+            proc.returncode,
+            expected_id,
         )
 
     restored = _restore_best_kernel(

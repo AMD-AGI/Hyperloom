@@ -59,13 +59,9 @@ class AgentProvider:
         """Validate stable provider metadata at registration time."""
         normalized = normalize_provider_name(self.name)
         if normalized != self.name:
-            raise ValueError(
-                f"provider name must already be normalized: {self.name!r}"
-            )
+            raise ValueError(f"provider name must already be normalized: {self.name!r}")
         if not self.default_model.strip():
-            raise ValueError(
-                f"provider {self.name!r} requires a default model"
-            )
+            raise ValueError(f"provider {self.name!r} requires a default model")
 
 
 _providers: dict[str, AgentProvider] = {}
@@ -78,9 +74,7 @@ def normalize_provider_name(name: str) -> str:
     """Normalize and validate one provider identifier."""
     normalized = (name or "").strip().lower()
     if not _PROVIDER_NAME.fullmatch(normalized):
-        raise ValueError(
-            "provider names must match [a-z][a-z0-9_-]*"
-        )
+        raise ValueError("provider names must match [a-z][a-z0-9_-]*")
     return normalized
 
 
@@ -92,9 +86,7 @@ def register_agent_provider(
     """Register one provider without requiring core package modification."""
     with _registry_lock:
         if provider.name in _providers and not replace_existing:
-            raise ValueError(
-                f"agent provider {provider.name!r} is already registered"
-            )
+            raise ValueError(f"agent provider {provider.name!r} is already registered")
         _providers[provider.name] = provider
 
 
@@ -134,15 +126,11 @@ def discover_agent_providers(*, force: bool = False) -> None:
                 provider = loaded() if callable(loaded) else loaded
                 if not isinstance(provider, AgentProvider):
                     raise TypeError(
-                        "entry point must resolve to AgentProvider or a "
-                        "zero-argument factory returning AgentProvider"
+                        "entry point must resolve to AgentProvider or a zero-argument factory returning AgentProvider"
                     )
                 entry_name = normalize_provider_name(entry.name)
                 if provider.name != entry_name:
-                    raise ValueError(
-                        f"entry-point name {entry_name!r} does not match "
-                        f"provider name {provider.name!r}"
-                    )
+                    raise ValueError(f"entry-point name {entry_name!r} does not match provider name {provider.name!r}")
                 register_agent_provider(provider)
             except Exception as exc:  # noqa: BLE001 - isolate broken plugins
                 _plugin_errors[entry.name] = f"{type(exc).__name__}: {exc}"
@@ -162,10 +150,7 @@ def get_agent_provider(name: str) -> AgentProvider:
         available = ", ".join(sorted(_providers)) or "(none)"
         detail = _plugin_errors.get(normalized)
         suffix = f"; plugin error: {detail}" if detail else ""
-        raise ValueError(
-            f"unknown agent provider {normalized!r}; available: "
-            f"{available}{suffix}"
-        )
+        raise ValueError(f"unknown agent provider {normalized!r}; available: {available}{suffix}")
     return provider
 
 
@@ -244,11 +229,7 @@ def resolve_agent_runtime(
 ) -> AgentRuntimeConfig:
     """Resolve provider defaults into one complete runtime configuration."""
     registration = get_agent_provider(provider)
-    fallback = (
-        normalize_provider_name(fallback_provider)
-        if fallback_provider
-        else ""
-    )
+    fallback = normalize_provider_name(fallback_provider) if fallback_provider else ""
     if fallback == registration.name:
         fallback = ""
     if fallback:
@@ -258,8 +239,7 @@ def resolve_agent_runtime(
         model=model.strip() or registration.default_model,
         fallback_model=(
             registration.fallback_model
-            if (model.strip() or registration.default_model)
-            != registration.fallback_model
+            if (model.strip() or registration.default_model) != registration.fallback_model
             else ""
         ),
         executable=executable.strip(),
@@ -293,9 +273,7 @@ def create_registered_backend(
     except AgentProviderUnavailableError as exc:
         if not runtime.fallback_provider:
             raise
-        fallback_registration = get_agent_provider(
-            runtime.fallback_provider
-        )
+        fallback_registration = get_agent_provider(runtime.fallback_provider)
         fallback_runtime = replace(
             runtime,
             provider=fallback_registration.name,
@@ -341,9 +319,7 @@ def _prepare_with_model_fallback(
             usage=usage,
         )
     except AgentProviderUnavailableError as primary_error:
-        fallback_model = (
-            runtime.fallback_model or registration.fallback_model
-        ).strip()
+        fallback_model = (runtime.fallback_model or registration.fallback_model).strip()
         if not fallback_model or fallback_model == runtime.model:
             raise
         fallback_runtime = replace(
@@ -362,10 +338,7 @@ def _prepare_with_model_fallback(
         except AgentProviderUnavailableError as fallback_error:
             add_note = getattr(primary_error, "add_note", None)
             if callable(add_note):
-                add_note(
-                    f"fallback model {fallback_model!r} also unavailable: "
-                    f"{fallback_error}"
-                )
+                add_note(f"fallback model {fallback_model!r} also unavailable: {fallback_error}")
             raise primary_error from fallback_error
         setattr(
             backend,
@@ -389,12 +362,7 @@ def _prepare_backend(
     setattr(backend, "capabilities", registration.capabilities)
     if preflight and hasattr(backend, "preflight"):
         backend.preflight()
-    if (
-        preflight
-        and probe_cwd
-        and registration.capabilities.probe
-        and hasattr(backend, "probe")
-    ):
+    if preflight and probe_cwd and registration.capabilities.probe and hasattr(backend, "probe"):
         backend.probe(cwd=probe_cwd, usage=usage)
     return backend
 

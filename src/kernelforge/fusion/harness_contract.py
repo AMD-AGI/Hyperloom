@@ -21,10 +21,7 @@ def harness_contract(harness_path: str = "", env_flags: str = "") -> str:
     file and parses ONE JSON object from its stdout, so an author who does not
     produce it fails every validation attempt with "harness not found".
     """
-    where = (
-        f"at EXACTLY:\n    {harness_path}" if harness_path
-        else "at the harness path the task gives you."
-    )
+    where = f"at EXACTLY:\n    {harness_path}" if harness_path else "at the harness path the task gives you."
     flags = f"`{env_flags}`" if env_flags else "the fusion env flag(s)"
     return f"""
 ## Kernel-validation harness (MANDATORY — the loop runs THIS to score you)

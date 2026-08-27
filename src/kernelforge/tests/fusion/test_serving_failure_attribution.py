@@ -96,14 +96,21 @@ def _gate_verdict(monkeypatch, tmp_path, server_log: str):
         kept=True,
         best=vr,
         best_recipe=SimpleNamespace(
-            env_flag="X_FUSED", pattern_id="llm:x", source_file="/s.py",
+            env_flag="X_FUSED",
+            pattern_id="llm:x",
+            source_file="/s.py",
         ),
         termination_reason="",
     )
 
     cli_module.apply_serving_gate(
-        result, framework="vllm", out=tmp_path, gpu="0",
-        model_path="/m", isl=8, osl=8,
+        result,
+        framework="vllm",
+        out=tmp_path,
+        gpu="0",
+        model_path="/m",
+        isl=8,
+        osl=8,
     )
     return result
 
@@ -115,9 +122,7 @@ def test_the_gate_files_the_cuda_graph_lesson_for_a_real_fault(monkeypatch, tmp_
     assert "NOT CUDA-graph-capture safe" in result.best.note
 
 
-def test_the_gate_does_not_send_the_author_after_a_server_that_never_started(
-    monkeypatch, tmp_path
-) -> None:
+def test_the_gate_does_not_send_the_author_after_a_server_that_never_started(monkeypatch, tmp_path) -> None:
     """The wiring, not the classifier: a gate that never asks repeats the bug."""
     result = _gate_verdict(monkeypatch, tmp_path, AITER_LOG)
 
@@ -140,4 +145,3 @@ def test_an_env_boot_miss_stays_exportable_for_e2e(monkeypatch, tmp_path) -> Non
 
     assert result.kept is True
     assert result.best.kernel_speedup == 1.5
-

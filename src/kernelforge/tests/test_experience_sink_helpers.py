@@ -11,8 +11,7 @@ from kernelforge.knowledge import experience_sink as sink
 def test_resolve_operation_prefers_compute_kernel(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
-    monkeypatch.setattr(pmc, "derive_kernel_names",
-                        lambda _src: ["launch_wrapper", "my_gemm"])
+    monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: ["launch_wrapper", "my_gemm"])
     assert sink.resolve_operation("src", "/p/f.py") == "my_gemm"
 
 
@@ -27,8 +26,7 @@ def test_resolve_operation_falls_back_to_target_then_stem(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
-    assert sink.resolve_operation("", "/p/f.py",
-                                  target_functions=["", " op_x "]) == "op_x"
+    assert sink.resolve_operation("", "/p/f.py", target_functions=["", " op_x "]) == "op_x"
     assert sink.resolve_operation("", "/p/my_file.py", target_functions=[]) == "my_file"
 
 
@@ -38,14 +36,11 @@ def test_resolve_operation_fallback_is_order_independent(monkeypatch):
     import kernelforge.mcp_server.tools.pmc as pmc
 
     monkeypatch.setattr(pmc, "derive_kernel_names", lambda _src: [])
-    a = sink.resolve_operation("", "/p/f.py",
-                               target_functions=["gemm_kernel", "epilogue_kernel"])
-    b = sink.resolve_operation("", "/p/f.py",
-                               target_functions=["epilogue_kernel", "gemm_kernel"])
+    a = sink.resolve_operation("", "/p/f.py", target_functions=["gemm_kernel", "epilogue_kernel"])
+    b = sink.resolve_operation("", "/p/f.py", target_functions=["epilogue_kernel", "gemm_kernel"])
     assert a == b
     # launchers/wrappers are de-prioritized even when they sort first
-    c = sink.resolve_operation("", "/p/f.py",
-                               target_functions=["launch_gemm", "gemm_kernel"])
+    c = sink.resolve_operation("", "/p/f.py", target_functions=["launch_gemm", "gemm_kernel"])
     assert c == "gemm_kernel"
 
 
@@ -83,25 +78,34 @@ def test_detect_framework_explicit_override_wins_over_path():
     # A flattened/scratch workspace can drop the 'vllm/' dir from the path; an
     # explicit --framework must still yield the right framework so the slug does
     # not diverge between producer and consumer.
-    assert sink.detect_framework(
-        "/tmp/scratch/k.py",
-        framework_override="vllm",
-    ) == "vllm"
+    assert (
+        sink.detect_framework(
+            "/tmp/scratch/k.py",
+            framework_override="vllm",
+        )
+        == "vllm"
+    )
 
 
 def test_detect_framework_canonicalizes_aiter_meta_owner():
-    assert sink.detect_framework(
-        "/tmp/flattened/kernel.py",
-        framework_override="aiter_meta",
-    ) == "aiter"
+    assert (
+        sink.detect_framework(
+            "/tmp/flattened/kernel.py",
+            framework_override="aiter_meta",
+        )
+        == "aiter"
+    )
 
 
 def test_detect_framework_standalone_sentinel_is_unknown():
     # Explicit 'standalone' == a framework-less file == undetected path.
-    assert sink.detect_framework(
-        "/x/vllm/y/k.py",
-        framework_override="standalone",
-    ) == "unknown"
+    assert (
+        sink.detect_framework(
+            "/x/vllm/y/k.py",
+            framework_override="standalone",
+        )
+        == "unknown"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -170,12 +174,7 @@ def test_extract_input_dtypes_empty_on_missing_signature():
 
 
 def test_extract_input_dtypes_strips_comments():
-    src = (
-        "def f(\n"
-        "    x: float,  # the input\n"
-        "    y: int,  # count\n"
-        "):\n    pass\n"
-    )
+    src = "def f(\n    x: float,  # the input\n    y: int,  # count\n):\n    pass\n"
     dt = sink.extract_input_dtypes(src, "f", "triton")
     assert dt == {"x": "float", "y": "int"}
 
@@ -247,10 +246,12 @@ def test_extract_json_bad_inputs():
 
 def test_normalize_summary_defaults_and_category_clamp():
     assert sink._normalize_summary({}) == {
-        "category": "others", "strategy": "", "recipe": "", "lessons": "",
+        "category": "others",
+        "strategy": "",
+        "recipe": "",
+        "lessons": "",
     }
-    out = sink._normalize_summary({"category": "GEMM", "strategy": " s ",
-                                   "recipe": 5, "lessons": ""})
+    out = sink._normalize_summary({"category": "GEMM", "strategy": " s ", "recipe": 5, "lessons": ""})
     assert out["category"] == "gemm"
     assert out["strategy"] == "s"
     assert out["recipe"] == ""
@@ -258,12 +259,12 @@ def test_normalize_summary_defaults_and_category_clamp():
 
 def test_summarize_run_returns_defaults_on_llm_failure(monkeypatch):
     """Return deterministic defaults when the provider summary fails."""
+
     async def boom(*_a, **_k):
         raise RuntimeError("no sdk")
 
     monkeypatch.setattr(sink, "_query_llm", boom)
-    out = sink.summarize_run(config=object(), workspace="/w", op="op",
-                             digest="d", kernel_source="s")
+    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s")
     assert out == {"category": "others", "strategy": "", "recipe": "", "lessons": ""}
 
 
@@ -277,8 +278,7 @@ def test_summarize_run_parses_reply(monkeypatch):
 
     monkeypatch.setattr(sink, "_query_llm", reply)
     usage = object()
-    out = sink.summarize_run(config=object(), workspace="/w", op="op",
-                             digest="d", kernel_source="s", usage=usage)
+    out = sink.summarize_run(config=object(), workspace="/w", op="op", digest="d", kernel_source="s", usage=usage)
     assert out["category"] == "attention"
     assert out["strategy"] == "tile"
     assert captured["usage"] is usage
@@ -294,10 +294,6 @@ def test_summary_prompt_truncates_inputs():
 # diff parsing
 # --------------------------------------------------------------------------- #
 def test_changed_files_from_diff_dedups():
-    diff = (
-        "diff --git a/x.py b/x.py\n"
-        "diff --git a/y.c b/y.c\n"
-        "diff --git a/x.py b/x.py\n"
-    )
+    diff = "diff --git a/x.py b/x.py\ndiff --git a/y.c b/y.c\ndiff --git a/x.py b/x.py\n"
     assert sink._changed_files_from_diff(diff) == ["x.py", "y.c"]
     assert sink._changed_files_from_diff("") == []

@@ -63,9 +63,7 @@ _KNOWLEDGE_ROOT: Path | None = None
 
 def _run_config(gpu_type: str = "mi355x") -> Config:
     """A runtime config pointed at this test's own on-disk KB Store."""
-    knowledge = KnowledgeConfig.from_env(
-        {}, mode="local", local_root=_KNOWLEDGE_ROOT
-    )
+    knowledge = KnowledgeConfig.from_env({}, mode="local", local_root=_KNOWLEDGE_ROOT)
     return Config.from_env(
         workspace=str(_KNOWLEDGE_ROOT),
         gpu_target="gfx950",
@@ -221,9 +219,7 @@ def _compact_pointer(solution_slug: str = "") -> str:
         "this search; their full metadata and diffs are stored there."
     )
     if solution_slug:
-        pointer += (
-            f"\nRank 1 solution `{solution_slug}` is already applied and is the search start."
-        )
+        pointer += f"\nRank 1 solution `{solution_slug}` is already applied and is the search start."
     return pointer
 
 
@@ -286,9 +282,7 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
     assert consumer_kernel.read_text() == OPTIMIZED_SOURCE
     assert warm["applied_commit"] == _git(consumer, "rev-parse", "HEAD")
     assert warm["applied_commit"] != consumer_base
-    assert _git(consumer, "log", "-1", "--pretty=%s") == (
-        f"kb warm-start: apply {written['solution']}"
-    )
+    assert _git(consumer, "log", "-1", "--pretty=%s") == (f"kb warm-start: apply {written['solution']}")
 
     index, reference = _reference_artifacts(consumer)
     assert index.is_file()
@@ -318,9 +312,7 @@ def test_happy_path_applies_and_publishes_iteration_zero_recovery(
     )
 
     best_result = json.loads((consumer / "forge_experiments" / "best_result.json").read_text())
-    best_manifest = json.loads(
-        (consumer / "forge_experiments" / "best" / "manifest.json").read_text()
-    )
+    best_manifest = json.loads((consumer / "forge_experiments" / "best" / "manifest.json").read_text())
     caller_payload = json.loads(caller_result.read_text())
     checkpoint = checkpoints["consumer-run"]
     assert result is not None
@@ -381,9 +373,7 @@ def test_invalid_patch_persists_reference_and_preserves_pristine_consumer(
     assert written["written"] is True
     assert warm["candidate"] is True
     assert warm["applied"] is False
-    assert warm["reference_reason"] == (
-        "patch_touches_protected_path_or_not_applicable"
-    )
+    assert warm["reference_reason"] == ("patch_touches_protected_path_or_not_applicable")
     assert warm["num_references"] == 1
     assert warm["pristine_ms"] == 10.0
     assert warm["keep_baseline_ms"] == 10.0
@@ -520,12 +510,8 @@ def _declare_failing_task_suite(workspace: Path) -> None:
                 # kernel actually breaks.
                 "compile_command": [f"{sys.executable} -c 'pass'"],
                 "correctness_command": [
-                    f"{sys.executable} -c "
-                    + repr(
-                        "raise AssertionError('normalized max err 0.02468 "
-                        "exceeds 0.02')"
-                    )
-                ]
+                    f"{sys.executable} -c " + repr("raise AssertionError('normalized max err 0.02468 exceeds 0.02')")
+                ],
             }
         )
     )

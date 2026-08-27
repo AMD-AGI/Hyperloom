@@ -129,8 +129,7 @@ class TestSourceFilteringInLocate:
         body = "y, residual = self.input_layernorm(hidden_states, residual)\n"
         model, root = _fake_sglang(tmp_path, "fusedlm2", body)
         d = _candidate_diag({"gemm": 0.5, "add": 0.18, "rmsnorm": 0.12})
-        recipes = build_recipes(d, model_path=model, framework="sglang",
-                                framework_root=root, include_unconfirmed=True)
+        recipes = build_recipes(d, model_path=model, framework="sglang", framework_root=root, include_unconfirmed=True)
         residual = next((r for r in recipes if r.pattern_id == "residual_add_rmsnorm"), None)
         assert residual is not None and residual.already_satisfied is True
 
@@ -152,8 +151,7 @@ class TestMemoryChannelCalibration:
 
     def test_mem_gain_capped_by_measured_share(self):
         # Cannot save more than the chain's own measured memory traffic.
-        g = cal.predict_cuda_graph_on_gain(0.9, decode_batch=16, mem_share=0.05,
-                                           mem_saved_fraction=5.0)
+        g = cal.predict_cuda_graph_on_gain(0.9, decode_batch=16, mem_share=0.05, mem_saved_fraction=5.0)
         assert g <= 0.05
 
 
@@ -164,15 +162,24 @@ class TestBytesExtraction:
         return p
 
     def test_bytes_share_from_op_shapes(self, tmp_path):
-        p = self._trace(tmp_path, [
-            # add: 2 inputs of [16,2048] float(4B) = 2*16*2048*4 = 262144
-            {"cat": "cpu_op", "name": "aten::add",
-             "args": {"Input Dims": [[16, 2048], [16, 2048]], "Input type": ["float", "float"]}},
-            # rms_norm: 1 input [16,2048] bf16(2B) = 65536
-            {"cat": "cpu_op", "name": "aten::rms_norm",
-             "args": {"Input Dims": [[16, 2048]], "Input type": ["c10::BFloat16"]}},
-            {"cat": "kernel", "name": "Cijk_gemm", "dur": 100},  # kernels carry no shapes
-        ])
+        p = self._trace(
+            tmp_path,
+            [
+                # add: 2 inputs of [16,2048] float(4B) = 2*16*2048*4 = 262144
+                {
+                    "cat": "cpu_op",
+                    "name": "aten::add",
+                    "args": {"Input Dims": [[16, 2048], [16, 2048]], "Input type": ["float", "float"]},
+                },
+                # rms_norm: 1 input [16,2048] bf16(2B) = 65536
+                {
+                    "cat": "cpu_op",
+                    "name": "aten::rms_norm",
+                    "args": {"Input Dims": [[16, 2048]], "Input type": ["c10::BFloat16"]},
+                },
+                {"cat": "kernel", "name": "Cijk_gemm", "dur": 100},  # kernels carry no shapes
+            ],
+        )
         bs = load_op_bytes_from_kineto_trace(p)
         assert set(bs) == {"add", "rmsnorm"}
         assert abs(bs["add"] - 262144 / (262144 + 65536)) < 1e-6
@@ -223,22 +230,27 @@ def _fake_vllm(tmp_path, model_type: str, body: str):
 
 class TestCompilePassHelper:
     def test_qk_norm_rope_covered_on_vllm_only(self):
-        kw = dict(matched_categories=["rmsnorm", "rope"],
-                  text="fuse q_norm/k_norm rmsnorm with rope rotary_emb")
+        kw = dict(matched_categories=["rmsnorm", "rope"], text="fuse q_norm/k_norm rmsnorm with rope rotary_emb")
         assert covered_by_vllm_compile_pass(framework="vllm", **kw) == "qk_norm_rope"
         assert covered_by_vllm_compile_pass(framework="vllm-aiter", **kw) == "qk_norm_rope"
         assert covered_by_vllm_compile_pass(framework="sglang", **kw) == ""  # not vLLM
 
     def test_plain_norm_fusion_not_covered(self):
         # residual add + rmsnorm (no quant, no rope) is NOT a vLLM compile pass.
-        assert covered_by_vllm_compile_pass(
-            framework="vllm", matched_categories=["add", "rmsnorm"],
-            text="fold residual add into the following rmsnorm") == ""
+        assert (
+            covered_by_vllm_compile_pass(
+                framework="vllm",
+                matched_categories=["add", "rmsnorm"],
+                text="fold residual add into the following rmsnorm",
+            )
+            == ""
+        )
 
     def test_rope_kvcache_matches_by_keywords(self):
-        assert covered_by_vllm_compile_pass(
-            framework="vllm", matched_categories=[],
-            text="fuse rope with kv_cache write") == "fuse_rope_kvcache"
+        assert (
+            covered_by_vllm_compile_pass(framework="vllm", matched_categories=[], text="fuse rope with kv_cache write")
+            == "fuse_rope_kvcache"
+        )
 
 
 def _pass_enabled(flag: str) -> PassState:
@@ -248,22 +260,19 @@ def _pass_enabled(flag: str) -> PassState:
     be importable; a pass that exists but is OFF is covered in
     ``test_compile_pass_enable.py``.
     """
-    return PassState(flag=flag, present=True, enabled=True,
-                     config_file="/fw/vllm/config/compilation.py")
+    return PassState(flag=flag, present=True, enabled=True, config_file="/fw/vllm/config/compilation.py")
 
 
 class TestCompilePassGateInRoutes:
     def test_pattern_route_drops_qk_on_vllm_keeps_on_sglang(self, tmp_path):
-        body = ("def _normalize_qk(self):\n    q_norm = 1\n    k_norm = 1\n"
-                "    return self.rotary_emb(q_norm)\n")
+        body = "def _normalize_qk(self):\n    q_norm = 1\n    k_norm = 1\n    return self.rotary_emb(q_norm)\n"
         shares = {"gemm": 0.5, "rmsnorm": 0.12, "rope": 0.06, "add": 0.02}
         (tmp_path / "v").mkdir()
         (tmp_path / "s").mkdir()
         # vLLM: qk_norm_rope is an ENABLED compile pass -> dropped as already-satisfied.
         model_v, root_v = _fake_vllm(tmp_path / "v", "qklm", body)
         dv = _candidate_diag(shares)
-        rv = build_recipes(dv, model_path=model_v, framework="vllm", framework_root=root_v,
-                           pass_probe=_pass_enabled)
+        rv = build_recipes(dv, model_path=model_v, framework="vllm", framework_root=root_v, pass_probe=_pass_enabled)
         assert all(r.pattern_id != "qk_norm_rope" for r in rv)
         assert all(r.candidate_kind != "compile_pass" for r in rv)
         # sglang: no compile passes -> the pattern survives (control).
@@ -273,21 +282,28 @@ class TestCompilePassGateInRoutes:
         assert any(r.pattern_id == "qk_norm_rope" for r in rs)
 
     def test_discovery_route_drops_compile_covered_proposal(self):
-        payload = json.dumps([{
-            "name": "rope_kv", "env_flag": "FUSED_ROPE_KV",
-            "op_chain": "rotary_emb + kv_cache write",
-            "fusion_math": "apply rope then write kv_cache",
-            "priority": 0.9,
-        }, {
-            "name": "keep_me", "env_flag": "FUSED_X",
-            "op_chain": "scale add combine", "priority": 0.5,
-        }])
+        payload = json.dumps(
+            [
+                {
+                    "name": "rope_kv",
+                    "env_flag": "FUSED_ROPE_KV",
+                    "op_chain": "rotary_emb + kv_cache write",
+                    "fusion_math": "apply rope then write kv_cache",
+                    "priority": 0.9,
+                },
+                {
+                    "name": "keep_me",
+                    "env_flag": "FUSED_X",
+                    "op_chain": "scale add combine",
+                    "priority": 0.5,
+                },
+            ]
+        )
         # vLLM route drops the rope+kvcache proposal (fuse_rope_kvcache is enabled).
-        rv = parse_discovered_recipes(payload, model_type="m", framework="vllm",
-                                      source_file="/x.py", shapes={},
-                                      pass_probe=_pass_enabled)
+        rv = parse_discovered_recipes(
+            payload, model_type="m", framework="vllm", source_file="/x.py", shapes={}, pass_probe=_pass_enabled
+        )
         assert [r.pattern_id for r in rv] == ["llm:keep_me"]
         # sglang route keeps both (no compile passes there).
-        rs = parse_discovered_recipes(payload, model_type="m", framework="sglang",
-                                      source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(payload, model_type="m", framework="sglang", source_file="/x.py", shapes={})
         assert {r.pattern_id for r in rs} == {"llm:rope_kv", "llm:keep_me"}

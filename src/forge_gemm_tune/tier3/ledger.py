@@ -61,9 +61,7 @@ class TunerRecord:
     def eligible_for_trust(self) -> bool:
         """Whether it has earned a *review*. Never whether it is trusted."""
         return (
-            self.regressions == 0
-            and self.successes >= REQUIRED_SUCCESSES
-            and len(set(self.models)) >= REQUIRED_MODELS
+            self.regressions == 0 and self.successes >= REQUIRED_SUCCESSES and len(set(self.models)) >= REQUIRED_MODELS
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -141,7 +139,11 @@ def record_outcome(
             "tier3: generated tuner %s for %s has met the bar for review "
             "(%d successes across %d models, no regressions). It stays a "
             "candidate until an operator adds it to %s.",
-            digest, record.table, record.successes, len(set(record.models)), TRUST_ENV,
+            digest,
+            record.table,
+            record.successes,
+            len(set(record.models)),
+            TRUST_ENV,
         )
     return record
 

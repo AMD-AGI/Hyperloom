@@ -107,7 +107,10 @@ def _fit_m_values_to_budget(
     picked = sorted({m_values[round(i * step)] for i in range(per_nk)})
     log.info(
         "Dense BF16: trimming M values %d -> %d so %d NK pairs fit a budget of %d shapes",
-        len(m_values), len(picked), n_nk, budget,
+        len(m_values),
+        len(picked),
+        n_nk,
+        budget,
     )
     return picked
 
@@ -124,9 +127,7 @@ def _generate_untuned_csv(
         f.write("M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle\n")
         for m in m_values:
             for n, k in nk_shapes:
-                f.write(
-                    f"{m},{n},{k},False,{dtype},{dtype},False,False\n"
-                )
+                f.write(f"{m},{n},{k},False,{dtype},{dtype},False,False\n")
     log.info("Generated %d shapes to %s", len(m_values) * len(nk_shapes), csv_path)
     return csv_path
 
@@ -148,7 +149,9 @@ def _generate_untuned_csv_from_demand(
         for s in shapes:
             f.write(
                 "{M},{N},{K},{bias},{dt},{ot},{scaleAB},{bpre}\n".format(
-                    M=s["M"], N=s["N"], K=s["K"],
+                    M=s["M"],
+                    N=s["N"],
+                    K=s["K"],
                     bias=s.get("bias", "False"),
                     dt=s.get("dtype") or dtype,
                     ot=s.get("otype") or dtype,
@@ -262,19 +265,23 @@ def _parse_tuner_results(
         }
         default_us = defaults.get(key)
         if default_us is None:
-            entry.update({
-                "default_us": None,
-                "speedup": None,
-                "improved": False,
-                "tuned_unverified": True,
-            })
+            entry.update(
+                {
+                    "default_us": None,
+                    "speedup": None,
+                    "improved": False,
+                    "tuned_unverified": True,
+                }
+            )
         else:
             speedup = default_us / tuned_us
-            entry.update({
-                "default_us": default_us,
-                "speedup": round(speedup, 4),
-                "improved": speedup > 1.0,
-            })
+            entry.update(
+                {
+                    "default_us": default_us,
+                    "speedup": round(speedup, 4),
+                    "improved": speedup > 1.0,
+                }
+            )
         results.append(entry)
     return results
 
@@ -343,11 +350,7 @@ class SglangDenseBf16Tuner(BaseTuner):
 
     def _warn_about_unread_inputs(self) -> None:
         """Say which supplied shape sources this tuner will not read."""
-        supplied = [
-            name
-            for name in self._UNREAD_SHAPE_INPUTS
-            if getattr(self.ctx, name, None)
-        ]
+        supplied = [name for name in self._UNREAD_SHAPE_INPUTS if getattr(self.ctx, name, None)]
         if not supplied:
             return
         log.warning(
@@ -418,7 +421,10 @@ class SglangDenseBf16Tuner(BaseTuner):
         shapes = demand_shapes(entry, limit=budget)
         log.info(
             "Demand-driven shapes for %s: %d of %d distinct keys (budget %d, %d misses logged)",
-            self.name, len(shapes), entry.get("distinct_keys", 0), budget,
+            self.name,
+            len(shapes),
+            entry.get("distinct_keys", 0),
+            budget,
             entry.get("miss_count", 0),
         )
         return shapes
@@ -432,9 +438,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         and the run looks like it produced nothing rather than like it ran out
         of time.
         """
-        per_shape = (
-            _PER_SHAPE_BUDGET_THOROUGH_S if self.ctx.thorough else _PER_SHAPE_BUDGET_S
-        )
+        per_shape = _PER_SHAPE_BUDGET_THOROUGH_S if self.ctx.thorough else _PER_SHAPE_BUDGET_S
         outer = max(int(self.ctx.timeout_s), 1)
         ceiling = max(outer - _TIMEOUT_RESERVE_S, 1)
         return int(min(max(n_shapes, 1) * per_shape, ceiling))
@@ -464,23 +468,32 @@ class SglangDenseBf16Tuner(BaseTuner):
         if demand:
             n_expected = len(demand)
             untuned_csv = _generate_untuned_csv_from_demand(
-                demand, self.work_dir, dtype=dtype_str,
+                demand,
+                self.work_dir,
+                dtype=dtype_str,
             )
         else:
             # The derived cross product used to ignore the budget entirely, so a
             # thorough run generated ~20x the shapes its window could pay for.
             m_values = _fit_m_values_to_budget(
-                m_values, len(nk_shapes), self._shape_budget(),
+                m_values,
+                len(nk_shapes),
+                self._shape_budget(),
             )
             n_expected = len(nk_shapes) * len(m_values)
             log.info(
-                "Dense BF16 shapes: %d NK pairs × %d M values = %d total "
-                "(thorough=%s, budget=%d)",
-                len(nk_shapes), len(m_values), n_expected, self.ctx.thorough,
+                "Dense BF16 shapes: %d NK pairs × %d M values = %d total (thorough=%s, budget=%d)",
+                len(nk_shapes),
+                len(m_values),
+                n_expected,
+                self.ctx.thorough,
                 self._shape_budget(),
             )
             untuned_csv = _generate_untuned_csv(
-                nk_shapes, m_values, self.work_dir, dtype=dtype_str,
+                nk_shapes,
+                m_values,
+                self.work_dir,
+                dtype=dtype_str,
             )
 
         tuned_csv = self.work_dir / "tuned_dense_bf16.csv"
@@ -514,15 +527,24 @@ class SglangDenseBf16Tuner(BaseTuner):
             iters, warmup = min(self.ctx.iters, 50), min(self.ctx.warmup, 10)
 
         tail = [
-            "-i", str(untuned_csv),
-            "-o", str(tuned_csv),
-            "-o2", str(profile_csv),
-            "--indtype", "bf16",
-            "--outdtype", "bf16",
-            "--mp", str(self.ctx.mp),
-            "--iters", str(iters),
-            "--warmup", str(warmup),
-            "--timeout", str(batch_timeout),
+            "-i",
+            str(untuned_csv),
+            "-o",
+            str(tuned_csv),
+            "-o2",
+            str(profile_csv),
+            "--indtype",
+            "bf16",
+            "--outdtype",
+            "bf16",
+            "--mp",
+            str(self.ctx.mp),
+            "--iters",
+            str(iters),
+            "--warmup",
+            str(warmup),
+            "--timeout",
+            str(batch_timeout),
             "--shape_grouped",
             "-v",
             *libtype_args,
@@ -570,13 +592,18 @@ class SglangDenseBf16Tuner(BaseTuner):
             salvaged = _parse_tuner_results(tuned_csv, _parse_profile_defaults(profile_csv))
             if salvaged:
                 log.warning(
-                    "Dense BF16: timed out after %ds but %d of %d shapes were already "
-                    "written; keeping them",
-                    self.ctx.timeout_s, len(salvaged), n_expected,
+                    "Dense BF16: timed out after %ds but %d of %d shapes were already written; keeping them",
+                    self.ctx.timeout_s,
+                    len(salvaged),
+                    n_expected,
                 )
                 return self._build_result(
-                    salvaged, n_expected, tuned_csv, batch_timeout,
-                    rc=rc, forced_status="partial_output",
+                    salvaged,
+                    n_expected,
+                    tuned_csv,
+                    batch_timeout,
+                    rc=rc,
+                    forced_status="partial_output",
                 )
             return TuneResult(
                 tuner_name=self.name,
@@ -589,10 +616,7 @@ class SglangDenseBf16Tuner(BaseTuner):
         combined = f"{stderr or ''}\n{stdout or ''}"
         if _UNRECOGNIZED_ARG_MARKER in combined:
             rejected = next(
-                (
-                    ln.strip() for ln in combined.splitlines()
-                    if _UNRECOGNIZED_ARG_MARKER in ln
-                ),
+                (ln.strip() for ln in combined.splitlines() if _UNRECOGNIZED_ARG_MARKER in ln),
                 _UNRECOGNIZED_ARG_MARKER,
             )
             return TuneResult(
@@ -627,16 +651,17 @@ class SglangDenseBf16Tuner(BaseTuner):
                 artifact_path=str(tuned_csv) if tuned_csv.is_file() else "",
                 total_shapes=0,
                 expected_shapes=n_expected,
-                error=(
-                    f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} "
-                    f"({detail}): {stderr[-300:]}"
-                ),
+                error=(f"Tuner wrote 0 of {n_expected} shapes to {tuned_csv.name} ({detail}): {stderr[-300:]}"),
                 error_class="empty_output",
             )
 
         return self._build_result(
-            shape_results, n_expected, tuned_csv, batch_timeout,
-            rc=rc, not_finished=not_finished,
+            shape_results,
+            n_expected,
+            tuned_csv,
+            batch_timeout,
+            rc=rc,
+            not_finished=not_finished,
         )
 
     def _build_result(
@@ -665,7 +690,12 @@ class SglangDenseBf16Tuner(BaseTuner):
                 "Dense BF16: tuned %d of %d shapes (rc=%d, not_finished=%s, "
                 "%d dropped as inaccurate); the grouped batch budget of %ds was "
                 "likely exhausted",
-                total, n_expected, rc, not_finished, len(dropped), batch_timeout,
+                total,
+                n_expected,
+                rc,
+                not_finished,
+                len(dropped),
+                batch_timeout,
             )
             status = "partial_output"
         elif improved or unverified:
@@ -692,9 +722,13 @@ class SglangDenseBf16Tuner(BaseTuner):
             shape_results=shape_results,
             dropped_inaccurate=[
                 {
-                    "M": r.get("M"), "N": r.get("N"), "K": r.get("K"),
-                    "libtype": r.get("libtype"), "splitK": r.get("splitK"),
-                    "us": r.get("us"), "err_ratio": _row_err_ratio(r),
+                    "M": r.get("M"),
+                    "N": r.get("N"),
+                    "K": r.get("K"),
+                    "libtype": r.get("libtype"),
+                    "splitK": r.get("splitK"),
+                    "us": r.get("us"),
+                    "err_ratio": _row_err_ratio(r),
                 }
                 for r in dropped
             ],

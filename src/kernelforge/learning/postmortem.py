@@ -29,11 +29,11 @@ class Lesson:
     """A lesson extracted from an experiment."""
 
     title: str
-    category: str       # "pitfall", "optimization", "methodology", "config"
-    backend: str         # "ck", "flydsl", "triton", "aiter", "shared"
+    category: str  # "pitfall", "optimization", "methodology", "config"
+    backend: str  # "ck", "flydsl", "triton", "aiter", "shared"
     description: str
-    evidence: str        # What measurement/observation supports this
-    actionable: str      # What to do differently next time
+    evidence: str  # What measurement/observation supports this
+    actionable: str  # What to do differently next time
     experiment_id: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
 
@@ -68,99 +68,106 @@ class PostMortem:
         # 1. Find big regressions — these are pitfalls
         for i, it in enumerate(experiment.iterations[1:], 1):
             prev = experiment.iterations[i - 1]
-            if (it.wall_ms and prev.wall_ms and
-                    it.wall_ms > prev.wall_ms * 1.15):  # >15% regression
-                lessons.append(Lesson(
-                    title=f"Config regression: {it.config}",
-                    category="pitfall",
-                    backend=experiment.backend,
-                    description=(
-                        f"Iteration {it.iteration_id} regressed {prev.wall_ms:.3f} → "
-                        f"{it.wall_ms:.3f} ms (+{(it.wall_ms/prev.wall_ms - 1)*100:.0f}%)"
-                    ),
-                    evidence=f"Config: {it.config}, PMC: {it.pmc_diagnosis}",
-                    actionable=f"Avoid this configuration. Decision was: {it.decision}",
-                    experiment_id=experiment.experiment_id,
-                ))
+            if it.wall_ms and prev.wall_ms and it.wall_ms > prev.wall_ms * 1.15:  # >15% regression
+                lessons.append(
+                    Lesson(
+                        title=f"Config regression: {it.config}",
+                        category="pitfall",
+                        backend=experiment.backend,
+                        description=(
+                            f"Iteration {it.iteration_id} regressed {prev.wall_ms:.3f} → "
+                            f"{it.wall_ms:.3f} ms (+{(it.wall_ms / prev.wall_ms - 1) * 100:.0f}%)"
+                        ),
+                        evidence=f"Config: {it.config}, PMC: {it.pmc_diagnosis}",
+                        actionable=f"Avoid this configuration. Decision was: {it.decision}",
+                        experiment_id=experiment.experiment_id,
+                    )
+                )
 
         # 2. Find big improvements — these are optimizations
         for i, it in enumerate(experiment.iterations[1:], 1):
             prev = experiment.iterations[i - 1]
-            if (it.wall_ms and prev.wall_ms and
-                    it.wall_ms < prev.wall_ms * 0.85):  # >15% improvement
-                lessons.append(Lesson(
-                    title=f"Effective optimization: {it.decision}",
-                    category="optimization",
-                    backend=experiment.backend,
-                    description=(
-                        f"Iteration {it.iteration_id} improved {prev.wall_ms:.3f} → "
-                        f"{it.wall_ms:.3f} ms ({prev.wall_ms/it.wall_ms:.2f}x speedup)"
-                    ),
-                    evidence=f"Config: {it.config}, PMC: {it.pmc_diagnosis}",
-                    actionable="This optimization worked. Consider for similar kernels.",
-                    experiment_id=experiment.experiment_id,
-                ))
+            if it.wall_ms and prev.wall_ms and it.wall_ms < prev.wall_ms * 0.85:  # >15% improvement
+                lessons.append(
+                    Lesson(
+                        title=f"Effective optimization: {it.decision}",
+                        category="optimization",
+                        backend=experiment.backend,
+                        description=(
+                            f"Iteration {it.iteration_id} improved {prev.wall_ms:.3f} → "
+                            f"{it.wall_ms:.3f} ms ({prev.wall_ms / it.wall_ms:.2f}x speedup)"
+                        ),
+                        evidence=f"Config: {it.config}, PMC: {it.pmc_diagnosis}",
+                        actionable="This optimization worked. Consider for similar kernels.",
+                        experiment_id=experiment.experiment_id,
+                    )
+                )
 
         # 3. Occupancy transitions
         for i, it in enumerate(experiment.iterations[1:], 1):
             prev = experiment.iterations[i - 1]
             if it.vgpr and prev.vgpr:
                 # Crossed the 256 boundary
-                if (prev.vgpr <= 256 and it.vgpr > 256) or \
-                   (prev.vgpr > 256 and it.vgpr <= 256):
+                if (prev.vgpr <= 256 and it.vgpr > 256) or (prev.vgpr > 256 and it.vgpr <= 256):
                     direction = "dropped" if it.vgpr > 256 else "gained"
-                    lessons.append(Lesson(
-                        title=f"Occupancy {direction}: VGPR {prev.vgpr} → {it.vgpr}",
-                        category="pitfall" if direction == "dropped" else "optimization",
-                        backend=experiment.backend,
-                        description=(
-                            f"VGPR crossed 256 boundary: {prev.vgpr} → {it.vgpr}. "
-                            f"Wall time: {prev.wall_ms} → {it.wall_ms} ms"
-                        ),
-                        evidence="gfx950 occupancy=2 requires VGPR ≤ 256",
-                        actionable=(
-                            f"Watch for occupancy cliff. "
-                            f"{'Reduce register pressure.' if direction == 'dropped' else 'This register reduction paid off.'}"
-                        ),
-                        experiment_id=experiment.experiment_id,
-                    ))
+                    lessons.append(
+                        Lesson(
+                            title=f"Occupancy {direction}: VGPR {prev.vgpr} → {it.vgpr}",
+                            category="pitfall" if direction == "dropped" else "optimization",
+                            backend=experiment.backend,
+                            description=(
+                                f"VGPR crossed 256 boundary: {prev.vgpr} → {it.vgpr}. "
+                                f"Wall time: {prev.wall_ms} → {it.wall_ms} ms"
+                            ),
+                            evidence="gfx950 occupancy=2 requires VGPR ≤ 256",
+                            actionable=(
+                                f"Watch for occupancy cliff. "
+                                f"{'Reduce register pressure.' if direction == 'dropped' else 'This register reduction paid off.'}"
+                            ),
+                            experiment_id=experiment.experiment_id,
+                        )
+                    )
 
         # 4. SNR failures — correctness traps
         for it in experiment.iterations:
             if it.snr_db is not None and it.snr_db < DEFAULT_SNR_THRESHOLD_DB:
-                lessons.append(Lesson(
-                    title=f"Correctness failure: SNR {it.snr_db:.1f} dB",
-                    category="pitfall",
-                    backend=experiment.backend,
-                    description=(
-                        f"Config {it.config} produced SNR {it.snr_db:.1f} dB "
-                        f"(< the {DEFAULT_SNR_THRESHOLD_DB:g} dB pre-filter)"
-                    ),
-                    evidence=f"Iteration {it.iteration_id}",
-                    actionable="This configuration causes numerical issues. Do not use.",
-                    experiment_id=experiment.experiment_id,
-                ))
+                lessons.append(
+                    Lesson(
+                        title=f"Correctness failure: SNR {it.snr_db:.1f} dB",
+                        category="pitfall",
+                        backend=experiment.backend,
+                        description=(
+                            f"Config {it.config} produced SNR {it.snr_db:.1f} dB "
+                            f"(< the {DEFAULT_SNR_THRESHOLD_DB:g} dB pre-filter)"
+                        ),
+                        evidence=f"Iteration {it.iteration_id}",
+                        actionable="This configuration causes numerical issues. Do not use.",
+                        experiment_id=experiment.experiment_id,
+                    )
+                )
 
         # 5. Plateau analysis — what was the state when stuck
         if experiment.is_plateaued():
             last_few = experiment.iterations[-3:]
-            lessons.append(Lesson(
-                title=f"Plateau at {last_few[-1].wall_ms:.3f} ms",
-                category="methodology",
-                backend=experiment.backend,
-                description=(
-                    f"Plateaued after {len(experiment.iterations)} iterations. "
-                    f"Last 3 wall_ms: {[it.wall_ms for it in last_few]}"
-                ),
-                evidence=f"PMC at plateau: {last_few[-1].pmc_diagnosis}",
-                actionable=(
-                    "At this plateau, consider: "
-                    "1) Switch to a different backend, "
-                    "2) Try hybrid strategy, "
-                    "3) Move to module-level optimization"
-                ),
-                experiment_id=experiment.experiment_id,
-            ))
+            lessons.append(
+                Lesson(
+                    title=f"Plateau at {last_few[-1].wall_ms:.3f} ms",
+                    category="methodology",
+                    backend=experiment.backend,
+                    description=(
+                        f"Plateaued after {len(experiment.iterations)} iterations. "
+                        f"Last 3 wall_ms: {[it.wall_ms for it in last_few]}"
+                    ),
+                    evidence=f"PMC at plateau: {last_few[-1].pmc_diagnosis}",
+                    actionable=(
+                        "At this plateau, consider: "
+                        "1) Switch to a different backend, "
+                        "2) Try hybrid strategy, "
+                        "3) Move to module-level optimization"
+                    ),
+                    experiment_id=experiment.experiment_id,
+                )
+            )
 
         return lessons
 

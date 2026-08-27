@@ -57,13 +57,19 @@ def test_every_runnable_tuner_is_executed(tmp_path, monkeypatch):
         main,
         [
             "run",
-            "--model-path", str(model),
-            "--framework", "vllm",
-            "--precision", "fp8",
-            "--gpu-type", "mi300x",
-            "--tuner", "a8w8",
+            "--model-path",
+            str(model),
+            "--framework",
+            "vllm",
+            "--precision",
+            "fp8",
+            "--gpu-type",
+            "mi300x",
+            "--tuner",
+            "a8w8",
             "--skip-gpu-check",
-            "--output-dir", str(output),
+            "--output-dir",
+            str(output),
         ],
     )
 
@@ -91,12 +97,17 @@ def test_cli_resolves_auto_once_and_records_effective_gpu(tmp_path, monkeypatch)
         main,
         [
             "run",
-            "--model-path", str(model),
-            "--framework", "vllm",
-            "--precision", "bf16",
-            "--gpu-type", "auto",
+            "--model-path",
+            str(model),
+            "--framework",
+            "vllm",
+            "--precision",
+            "bf16",
+            "--gpu-type",
+            "auto",
             "--skip-gpu-check",
-            "--output-dir", str(output),
+            "--output-dir",
+            str(output),
         ],
     )
 
@@ -116,9 +127,7 @@ def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monk
     monkeypatch.setattr(
         model_analyzer,
         "analyze_model",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("model analysis must not start")
-        ),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("model analysis must not start")),
     )
     output = tmp_path / "output"
 
@@ -126,12 +135,17 @@ def test_cli_auto_detection_failure_aborts_before_model_or_tuning(tmp_path, monk
         main,
         [
             "run",
-            "--model-path", str(tmp_path / "model"),
-            "--framework", "vllm",
-            "--precision", "bf16",
-            "--gpu-type", "auto",
+            "--model-path",
+            str(tmp_path / "model"),
+            "--framework",
+            "vllm",
+            "--precision",
+            "bf16",
+            "--gpu-type",
+            "auto",
             "--skip-gpu-check",
-            "--output-dir", str(output),
+            "--output-dir",
+            str(output),
         ],
     )
 

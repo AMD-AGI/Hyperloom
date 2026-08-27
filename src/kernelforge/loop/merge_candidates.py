@@ -87,7 +87,7 @@ def attempted_pairs(plans: list[str]) -> frozenset[frozenset[int]]:
         text = str(plan or "").strip()
         if not text.startswith(MERGE_PLAN_PREFIX):
             continue
-        head = text[len(MERGE_PLAN_PREFIX):].split(":", 1)[0].strip()
+        head = text[len(MERGE_PLAN_PREFIX) :].split(":", 1)[0].strip()
         parts = head.split("+")
         if len(parts) != 2:
             continue
@@ -117,11 +117,7 @@ def case_spreads(
             if not isinstance(value, (int, float)) or float(value) <= 0.0:
                 continue
             per_case.setdefault(str(case_id), []).append(float(value))
-    return {
-        case_id: statistics.stdev(times)
-        for case_id, times in per_case.items()
-        if len(times) >= 2
-    }
+    return {case_id: statistics.stdev(times) for case_id, times in per_case.items() if len(times) >= 2}
 
 
 def cases_beating_reference(
@@ -246,7 +242,7 @@ def select_merge_pair(
     ordered = sorted(candidates, key=lambda item: item.iteration)
     chosen: tuple[tuple, tuple[MergeCandidate, MergeCandidate]] | None = None
     for index, first in enumerate(ordered):
-        for second in ordered[index + 1:]:
+        for second in ordered[index + 1 :]:
             if frozenset({first.iteration, second.iteration}) in already_attempted:
                 continue
             if not (first.winning_cases - second.winning_cases):

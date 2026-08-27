@@ -121,19 +121,23 @@ def _candidate_requests(
     """Build stage-1 requests as (path, params, hit_kind), all bounded pages."""
     requests: list[tuple[str, dict[str, Any], str]] = []
     for path in context.file_paths[:MAX_PATH_QUERIES]:
-        requests.append((
-            f"/repos/{context.repo}/prs",
-            {"file_path": path, "state": "all", "limit": 5},
-            HIT_FILE_PATH,
-        ))
+        requests.append(
+            (
+                f"/repos/{context.repo}/prs",
+                {"file_path": path, "state": "all", "limit": 5},
+                HIT_FILE_PATH,
+            )
+        )
     for phrase in context.keywords[:MAX_KEYWORD_QUERIES]:
         # One request per phrase: the server ILIKEs the whole query string, so
         # joining phrases would drive the hit count to zero.
-        requests.append((
-            "/search/prs",
-            {"q": phrase, "repo": context.repo, "limit": 20},
-            HIT_SEARCH,
-        ))
+        requests.append(
+            (
+                "/search/prs",
+                {"q": phrase, "repo": context.repo, "limit": 20},
+                HIT_SEARCH,
+            )
+        )
     return requests
 
 
@@ -163,12 +167,8 @@ def _collect_candidates(
         )
         stats["http_calls"] = stats.get("http_calls", 0) + len(outcomes)
         for (_, params, kind), outcome in zip(planned, outcomes):
-            failure, seen = _absorb(
-                outcome, kind, candidates, repo=context.repo
-            )
-            if failure and (
-                failure == REASON_CONTRACT_ERROR or not failure_reason
-            ):
+            failure, seen = _absorb(outcome, kind, candidates, repo=context.repo)
+            if failure and (failure == REASON_CONTRACT_ERROR or not failure_reason):
                 failure_reason = failure
             if not failure and outcome.payload is not None and seen == 0:
                 # A query that provably returned nothing is stable for a fixed
@@ -187,9 +187,7 @@ def _collect_candidates(
             return candidates, failure_reason or REASON_SKIPPED_DEADLINE
         stats["fallback_used"] = True
         try:
-            items = client.list_recent_prs(
-                context.repo, limit=FALLBACK_LIMIT, timeout_sec=remaining
-            )
+            items = client.list_recent_prs(context.repo, limit=FALLBACK_LIMIT, timeout_sec=remaining)
             stats["http_calls"] = stats.get("http_calls", 0) + 1
         except PRContractError as error:
             log.error("pr-monitor fallback contract error: %s", error)
@@ -247,16 +245,11 @@ def worth_floors() -> tuple[float, float]:
     """Read the (global, fallback-only) score floors from the environment."""
     return (
         float(os.environ.get("PR_KB_MIN_WORTH", "").strip() or DEFAULT_MIN_WORTH),
-        float(
-            os.environ.get("PR_KB_FALLBACK_MIN_WORTH", "").strip()
-            or FALLBACK_MIN_WORTH
-        ),
+        float(os.environ.get("PR_KB_FALLBACK_MIN_WORTH", "").strip() or FALLBACK_MIN_WORTH),
     )
 
 
-def _below_worth_floor(
-    reference: PRReference, floors: tuple[float, float]
-) -> bool:
+def _below_worth_floor(reference: PRReference, floors: tuple[float, float]) -> bool:
     """Apply the global or recent-only score floor by provenance."""
     minimum, fallback_minimum = floors
     worth = reference.worth_trying
@@ -265,9 +258,7 @@ def _below_worth_floor(
     return worth is not None and worth < minimum
 
 
-def _build_reference(
-    repo: str, number: int, detail: dict, hit_via: set[str]
-) -> PRReference | None:
+def _build_reference(repo: str, number: int, detail: dict, hit_via: set[str]) -> PRReference | None:
     """Build a reference, dropping explicit negative distill results."""
     distill = _distill_of(detail)
     status = str(distill.get("status") or "")
@@ -297,9 +288,7 @@ def _build_reference(
     )
 
 
-def component_relevance(
-    components: tuple[str, ...], interest: frozenset[str]
-) -> float:
+def component_relevance(components: tuple[str, ...], interest: frozenset[str]) -> float:
     """Return the fraction of components matching query terms."""
     if not components or not interest:
         return 0.0
@@ -312,9 +301,7 @@ def component_relevance(
     return matched / len(components)
 
 
-def filter_references_by_relevance(
-    references: list[PRReference], interest: frozenset[str]
-) -> list[PRReference]:
+def filter_references_by_relevance(references: list[PRReference], interest: frozenset[str]) -> list[PRReference]:
     """Keep exact path history and component-related search results."""
     if not interest:
         return references
@@ -331,6 +318,7 @@ def rank_references(
     references: list[PRReference], *, components_of_interest: frozenset[str] = frozenset()
 ) -> list[PRReference]:
     """Order by path hit, component relevance, score, merge state, and recency."""
+
     def sort_key(ref: PRReference) -> tuple:
         """Rank one reference; every element is descending-better."""
         return (
@@ -377,17 +365,14 @@ def discover(
         return SearchOutcome(reason=context.reason, stats={"http_calls": 0})
     top_k = top_k or int(os.environ.get("PR_KB_TOP_K", DEFAULT_TOP_K) or DEFAULT_TOP_K)
     candidate_cap = candidate_cap or int(
-        os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP)
-        or DEFAULT_CANDIDATE_CAP
+        os.environ.get("PR_KB_CANDIDATE_CAP", DEFAULT_CANDIDATE_CAP) or DEFAULT_CANDIDATE_CAP
     )
     if deadline is None:
         budget = budget_sec or float(os.environ.get("PR_KB_BUDGET_SEC", "30") or 30)
         deadline = time.monotonic() + budget
     stats: dict[str, Any] = {"http_calls": 0, "fallback_used": False}
 
-    candidates, failure_reason = _collect_candidates(
-        client, context, deadline=deadline, stats=stats
-    )
+    candidates, failure_reason = _collect_candidates(client, context, deadline=deadline, stats=stats)
     stats["candidates"] = len(candidates)
     if not candidates:
         reason = failure_reason or REASON_NO_CANDIDATE
@@ -423,9 +408,7 @@ def discover(
         if not isinstance(outcome.payload, dict):
             failure_reason = REASON_CONTRACT_ERROR
             continue
-        reference = _build_reference(
-            context.repo, number, outcome.payload, candidates[number]
-        )
+        reference = _build_reference(context.repo, number, outcome.payload, candidates[number])
         if reference is None:
             dropped += 1
             continue
@@ -440,9 +423,7 @@ def discover(
     interest = components_of_interest(context)
     relevant = filter_references_by_relevance(kept, interest)
     stats["relevance_dropped"] = len(kept) - len(relevant)
-    ranked = rank_references(
-        relevant, components_of_interest=interest
-    )
+    ranked = rank_references(relevant, components_of_interest=interest)
     stats["surfaced"] = len(ranked)
     if failure_reason == REASON_CONTRACT_ERROR:
         log.error("pr-monitor contract error during discovery for %s", context.repo)

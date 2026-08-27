@@ -95,9 +95,7 @@ def test_an_unknown_remote_backend_is_a_programming_error():
         KnowledgeConfig.from_env({}, remote_backend="gbrian")
 
 
-def test_a_runtime_config_without_knowledge_falls_back_to_the_environment(
-    monkeypatch, tmp_path
-):
+def test_a_runtime_config_without_knowledge_falls_back_to_the_environment(monkeypatch, tmp_path):
     monkeypatch.delenv("KNOWLEDGE_STORE_MODE", raising=False)
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", str(tmp_path))
 
@@ -119,9 +117,7 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
         mode="local",
         local_root=tmp_path / "knowledge",
     )
-    producer_config = Config(
-        workspace=str(workspace), knowledge_config=knowledge, gpu_type="mi355x"
-    )
+    producer_config = Config(workspace=str(workspace), knowledge_config=knowledge, gpu_type="mi355x")
 
     written = write_run_experience(
         config=producer_config,
@@ -150,9 +146,7 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
         },
     )
 
-    consumer_config = Config(
-        workspace=str(workspace), knowledge_config=knowledge, gpu_type="mi355x"
-    )
+    consumer_config = Config(workspace=str(workspace), knowledge_config=knowledge, gpu_type="mi355x")
     solution = read_best_solution(
         config=consumer_config,
         workspace=str(workspace),

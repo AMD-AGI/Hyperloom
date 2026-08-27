@@ -54,9 +54,9 @@ def wrap_command(cmd: Sequence[str]) -> list[str]:
 
 # Commands that should NOT go through RTK (we parse their raw output)
 _RTK_SKIP_COMMANDS = {
-    "rocprofv3",    # We parse the CSV output directly
-    "llvm-objdump", # We parse register info from disassembly
-    "readelf",      # We parse ELF notes
+    "rocprofv3",  # We parse the CSV output directly
+    "llvm-objdump",  # We parse register info from disassembly
+    "readelf",  # We parse ELF notes
 }
 
 

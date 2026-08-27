@@ -70,9 +70,7 @@ def rollback_unpublished_warm_start(
     """Restore pristine HEAD when warm-start has no authoritative commit point."""
     git("reset", "--hard", base_commit, cwd=workspace_dir)
     head = git("rev-parse", "HEAD", cwd=workspace_dir).stdout.strip()
-    dirty = git(
-        "status", "--porcelain", "--untracked-files=no", cwd=workspace_dir
-    ).stdout.strip()
+    dirty = git("status", "--porcelain", "--untracked-files=no", cwd=workspace_dir).stdout.strip()
     if head != base_commit or dirty:
         raise RuntimeError("warm-start rollback did not restore pristine workspace")
 
@@ -122,9 +120,7 @@ def publish_warm_start_recovery(
     patch = git("diff", base_commit, head, "--", ".", cwd=workspace_dir).stdout
     changed_files = [
         line.strip()
-        for line in git(
-            "diff", "--name-only", base_commit, head, "--", ".", cwd=workspace_dir
-        ).stdout.splitlines()
+        for line in git("diff", "--name-only", base_commit, head, "--", ".", cwd=workspace_dir).stdout.splitlines()
         if line.strip()
     ]
     if not patch.strip() or not changed_files:

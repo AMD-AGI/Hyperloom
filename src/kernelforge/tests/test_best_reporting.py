@@ -135,10 +135,7 @@ def test_manifest_withholds_improvement_when_slower_than_baseline(tmp_path):
 
     assert manifest["best_wall_ms"] == 1.2
     assert manifest["total_improved"] is False
-    assert (
-        "is not faster than the pristine baseline"
-        in manifest["aggregate_regression"]
-    )
+    assert "is not faster than the pristine baseline" in manifest["aggregate_regression"]
 
 
 def test_report_names_the_contradiction_the_manifest_withheld_the_badge_for(
@@ -228,9 +225,7 @@ def test_republish_over_a_pre_badge_manifest_supersedes_it(tmp_path):
         changed_files=["kernel.py"],
     )
     _downgrade_to_pre_badge_schema(tmp_path)
-    stale = json.loads(
-        (tmp_path / "forge_experiments" / "best" / "manifest.json").read_text()
-    )
+    stale = json.loads((tmp_path / "forge_experiments" / "best" / "manifest.json").read_text())
 
     republished = _publish(
         publisher,
@@ -241,16 +236,12 @@ def test_republish_over_a_pre_badge_manifest_supersedes_it(tmp_path):
         changed_files=["kernel.py"],
     )
 
-    published = json.loads(
-        (tmp_path / "forge_experiments" / "best" / "manifest.json").read_text()
-    )
+    published = json.loads((tmp_path / "forge_experiments" / "best" / "manifest.json").read_text())
     assert stale["total_improved"] is True
     assert published == republished
     assert published["schema_version"] == MANIFEST_SCHEMA_VERSION
     assert published["total_improved"] is False
-    assert "is not faster than the pristine baseline" in (
-        published["aggregate_regression"]
-    )
+    assert "is not faster than the pristine baseline" in (published["aggregate_regression"])
 
 
 def test_a_conflicting_publication_of_the_same_schema_still_raises(tmp_path):
@@ -319,9 +310,7 @@ def test_describes_current_best_is_false_when_manifest_or_bundle_is_missing(tmp_
         plan="first",
         changed_files=["kernel.py"],
     )
-    (
-        tmp_path / "forge_experiments" / "best" / "iter_001" / "benchmark.json"
-    ).unlink()
+    (tmp_path / "forge_experiments" / "best" / "iter_001" / "benchmark.json").unlink()
     assert not publisher.describes_current_best(iteration=1, commit_hash="commit-1")
 
 
@@ -358,13 +347,7 @@ def test_failed_manifest_replace_preserves_previous_best(tmp_path, monkeypatch):
         )
 
     assert manifest_path.read_bytes() == before
-    (
-        tmp_path
-        / "forge_experiments"
-        / "best"
-        / "iter_002"
-        / "publication.json"
-    ).unlink()
+    (tmp_path / "forge_experiments" / "best" / "iter_002" / "publication.json").unlink()
     monkeypatch.setattr(reporting, "atomic_write_text", original)
 
     recovered = _publish(
@@ -377,9 +360,7 @@ def test_failed_manifest_replace_preserves_previous_best(tmp_path, monkeypatch):
 
     assert recovered["iteration"] == 2
     assert json.loads(manifest_path.read_text()) == recovered
-    assert json.loads(
-        (tmp_path / "forge_experiments" / "best_result.json").read_text()
-    ) == recovered
+    assert json.loads((tmp_path / "forge_experiments" / "best_result.json").read_text()) == recovered
 
 
 def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
@@ -414,9 +395,7 @@ def test_retry_repairs_partial_derived_best_views(tmp_path, monkeypatch):
     )
 
     assert json.loads(result_path.read_text()) == recovered
-    assert "verified candidate" in (
-        tmp_path / "forge_experiments" / "optimization_report.md"
-    ).read_text()
+    assert "verified candidate" in (tmp_path / "forge_experiments" / "optimization_report.md").read_text()
 
 
 def test_retry_repairs_incomplete_orphan_bundle(tmp_path, monkeypatch):
@@ -564,9 +543,7 @@ def test_history_view_contains_every_attempt_while_final_report_stays_best_only(
 
     publisher.publish_history(events=events, candidate_metadata=metadata)
 
-    history = (
-        tmp_path / "forge_experiments" / "optimization_history.md"
-    ).read_text()
+    history = (tmp_path / "forge_experiments" / "optimization_history.md").read_text()
     assert "Iteration 1 — KEEP" in history
     assert "Iteration 2 — REVERT_PERF" in history
     assert "Iteration 3 — NO_CHANGES" in history

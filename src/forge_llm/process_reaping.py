@@ -126,14 +126,9 @@ class ReapReport:
         if self.unkillable:
             parts.append(f"pid(s) {list(self.unkillable)} survived SIGKILL")
         if self.foreign:
-            parts.append(
-                f"pid(s) {list(self.foreign)} are not this campaign's and "
-                "were left alone"
-            )
+            parts.append(f"pid(s) {list(self.foreign)} are not this campaign's and were left alone")
         if self.holding_device:
-            parts.append(
-                f"pid(s) {list(self.holding_device)} hold a device node"
-            )
+            parts.append(f"pid(s) {list(self.holding_device)} hold a device node")
         return f"{self.directory}: " + "; ".join(parts) if parts else ""
 
 
@@ -586,9 +581,7 @@ def _start_orphan_reaper() -> None:
     _track_spawned_children()
     _adopt_existing_children()
     _arm_sigchld()
-    threading.Thread(
-        target=_reaper_loop, name="forge-orphan-reaper", daemon=True
-    ).start()
+    threading.Thread(target=_reaper_loop, name="forge-orphan-reaper", daemon=True).start()
     # One pass up front: a subreaper installed by a second session inherits
     # whatever the first one left behind.
     _reap_inherited_orphans()
@@ -752,11 +745,7 @@ def _survey(resolved: str) -> _Survey:
         # alongside the flag to collect them. This process's own group is the
         # campaign itself plus whatever it is running attached, which is never a
         # leftover and is not the reaper's business.
-        return (
-            proc.pid != own_pid
-            and proc.pgid != own_pgid
-            and proc.state != "Z"
-        )
+        return proc.pid != own_pid and proc.pgid != own_pgid and proc.state != "Z"
 
     seeds: dict[int, int] = {}
     foreign: list[int] = []
@@ -766,9 +755,7 @@ def _survey(resolved: str) -> _Survey:
         # A process older than the campaign cannot have descended from it, so
         # no reading of the parent chain makes it ours.
         older = proc.starttime + 1 < own.starttime
-        if not older and (
-            proc.pid in ours or _carries_owner_tag(proc.pid, owner)
-        ):
+        if not older and (proc.pid in ours or _carries_owner_tag(proc.pid, owner)):
             seeds[proc.pid] = proc.starttime
         else:
             foreign.append(proc.pid)
@@ -872,9 +859,7 @@ def still_holding_device(holders: Mapping[int, int]) -> tuple[int, ...]:
         sorted(
             pid
             for pid, starttime in holders.items()
-            if (proc := _read_proc(pid)) is not None
-            and proc.starttime == starttime
-            and _holds_device(pid)
+            if (proc := _read_proc(pid)) is not None and proc.starttime == starttime and _holds_device(pid)
         )
     )
 
@@ -894,9 +879,7 @@ def owned_processes_under(directory: str | os.PathLike[str]) -> set[int]:
     return set(_survey(os.path.realpath(directory)).owned)
 
 
-async def reap_processes_under(
-    directory: str | os.PathLike[str], *, description: str
-) -> ReapReport:
+async def reap_processes_under(directory: str | os.PathLike[str], *, description: str) -> ReapReport:
     """Terminate this campaign's processes working under ``directory``.
 
     SIGTERM first, because a driver holding a GPU has teardown of its own to
@@ -925,18 +908,10 @@ async def reap_processes_under(
         reaped=reaped,
         unkillable=unkillable,
         foreign=foreign,
-        holding_device=tuple(
-            sorted(
-                pid
-                for pid in {*unkillable, *foreign}
-                if _holds_device(pid)
-            )
-        ),
+        holding_device=tuple(sorted(pid for pid in {*unkillable, *foreign} if _holds_device(pid))),
     )
     if report.contended:
-        log.warning(
-            "%s is still contended: %s", description, report.describe()
-        )
+        log.warning("%s is still contended: %s", description, report.describe())
     elif foreign:
         log.info("%s", report.describe())
     return report

@@ -45,11 +45,19 @@ class TestMatchPatterns:
 
 class TestResolveShapes:
     def test_reads_config(self, tmp_path):
-        (tmp_path / "config.json").write_text(json.dumps({
-            "model_type": "lfm2", "hidden_size": 2048,
-            "num_attention_heads": 16, "num_key_value_heads": 8,
-            "intermediate_size": 8192, "rms_norm_eps": 1e-5,
-        }), encoding="utf-8")
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "lfm2",
+                    "hidden_size": 2048,
+                    "num_attention_heads": 16,
+                    "num_key_value_heads": 8,
+                    "intermediate_size": 8192,
+                    "rms_norm_eps": 1e-5,
+                }
+            ),
+            encoding="utf-8",
+        )
         s = resolve_decode_shapes(tmp_path, decode_batch=16)
         assert s["model_type"] == "lfm2"
         assert s["hidden_size"] == 2048
@@ -65,9 +73,16 @@ class TestResolveShapes:
 class TestBuildRecipesAndManifest:
     def test_build_recipes_for_candidate(self, tmp_path):
         # Synthetic model_type -> source unresolved (hermetic; no source filtering).
-        (tmp_path / "config.json").write_text(json.dumps({
-            "model_type": "toylm", "hidden_size": 2048, "num_attention_heads": 16,
-        }), encoding="utf-8")
+        (tmp_path / "config.json").write_text(
+            json.dumps(
+                {
+                    "model_type": "toylm",
+                    "hidden_size": 2048,
+                    "num_attention_heads": 16,
+                }
+            ),
+            encoding="utf-8",
+        )
         d = _candidate_diag({"gemm": 0.45, "add": 0.18, "rmsnorm": 0.12})
         recipes = build_recipes(d, model_path=str(tmp_path), framework="sglang")
         assert recipes
@@ -78,11 +93,19 @@ class TestBuildRecipesAndManifest:
         assert residual.source_confirmed is None  # source unresolved
 
     def test_manifest_verdict_candidate(self, tmp_path):
-        (tmp_path / "config.json").write_text(json.dumps({"model_type": "toylm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8")
+        (tmp_path / "config.json").write_text(
+            json.dumps({"model_type": "toylm", "hidden_size": 2048, "num_attention_heads": 16}), encoding="utf-8"
+        )
         d = _candidate_diag({"gemm": 0.45, "add": 0.18, "rmsnorm": 0.12})
         recipes = build_recipes(d, model_path=str(tmp_path), framework="sglang")
-        m = build_manifest(framework="sglang", model_path=str(tmp_path), model_type="toylm",
-                           diagnosis=d, recipe=recipes[0], candidates=recipes)
+        m = build_manifest(
+            framework="sglang",
+            model_path=str(tmp_path),
+            model_type="toylm",
+            diagnosis=d,
+            recipe=recipes[0],
+            candidates=recipes,
+        )
         assert m["verdict"] == "candidate"
         assert m["fusion"]["pattern"] == "residual_add_rmsnorm"
         assert m["validation"] is None and m["artifacts"] is None
@@ -94,7 +117,6 @@ class TestBuildRecipesAndManifest:
 
     def test_manifest_verdict_no_opportunity(self, tmp_path):
         d = diagnose_from_shares({"gemm": 0.8, "attention": 0.15}, busy_fraction_of_wall=0.72)
-        m = build_manifest(framework="sglang", model_path=str(tmp_path), model_type="qwen3",
-                           diagnosis=d, recipe=None)
+        m = build_manifest(framework="sglang", model_path=str(tmp_path), model_type="qwen3", diagnosis=d, recipe=None)
         assert m["verdict"] == "no_opportunity"
         assert m["fusion_candidates"] == []

@@ -166,8 +166,8 @@ class TestCandidateCsvFallback:
         p.write_text(
             _CANDIDATE_HEADER + "\n"
             "gfx942,304,not_int,5120,5120,a8w8,1,1,10.0,k,1,1,0\n"  # bad M
-            "short,row\n"                                            # too short
-            "gfx942,304,64,5120,5120,a8w8,1,1,12.34,k,1,1,0\n",      # valid
+            "short,row\n"  # too short
+            "gfx942,304,64,5120,5120,a8w8,1,1,12.34,k,1,1,0\n",  # valid
             encoding="utf-8",
         )
         rows = _parse_candidate_csv(p)
@@ -196,9 +196,18 @@ class TestCandidateCsvFallback:
 
 def _report(results):
     return build_report(
-        results, [], profile=SimpleNamespace(model_path="/m/x"),
-        framework="vllm-aiter", precision="fp8", quant_type="blockscale",
-        gpu_type="mi355x", tp=1, conc=64, tokens=[1, 8], started_at="t", total_elapsed_s=1.0,
+        results,
+        [],
+        profile=SimpleNamespace(model_path="/m/x"),
+        framework="vllm-aiter",
+        precision="fp8",
+        quant_type="blockscale",
+        gpu_type="mi355x",
+        tp=1,
+        conc=64,
+        tokens=[1, 8],
+        started_at="t",
+        total_elapsed_s=1.0,
     )
 
 
@@ -217,9 +226,15 @@ class TestBuildReportStrictStatus:
         assert rep.micro_decision == "no_improvement"
 
     def test_empty_plus_candidate_is_candidate(self):
-        cand = _res("ok", total_shapes=4, improved_shapes=4, best_micro_speedup=3.85,
-                    env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", env_value="/tmp/c.csv",
-                    artifact_path="/tmp/c.csv")
+        cand = _res(
+            "ok",
+            total_shapes=4,
+            improved_shapes=4,
+            best_micro_speedup=3.85,
+            env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+            env_value="/tmp/c.csv",
+            artifact_path="/tmp/c.csv",
+        )
         rep = _report([_res("empty_output"), cand])
         assert rep.micro_decision == "candidate"
 
@@ -234,10 +249,12 @@ class TestBuildReportStrictStatus:
     def test_failed_plus_no_improvement_is_partial_failure(self):
         # The exact shape of the week-long blind spot: one tuner crashes, another
         # legitimately finds nothing, and the batch used to read as "no headroom".
-        rep = _report([
-            _res("failed", error="boom", error_class="subprocess_error"),
-            _res("no_improvement", total_shapes=2, name="fmoe_ck"),
-        ])
+        rep = _report(
+            [
+                _res("failed", error="boom", error_class="subprocess_error"),
+                _res("no_improvement", total_shapes=2, name="fmoe_ck"),
+            ]
+        )
         assert rep.micro_decision == "partial_failure"
         assert rep.failed_tuners[0]["error_class"] == "subprocess_error"
         assert rep.failed_tuners[0]["error"] == "boom"
@@ -250,9 +267,15 @@ class TestBuildReportStrictStatus:
     def test_candidate_outranks_partial_failure_but_failure_stays_visible(self):
         # A deployable artifact must not be thrown away because a sibling tuner
         # crashed -- but the crash still has to be reported.
-        cand = _res("ok", total_shapes=4, improved_shapes=4, best_micro_speedup=3.85,
-                    env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", env_value="/tmp/c.csv",
-                    artifact_path="/tmp/c.csv")
+        cand = _res(
+            "ok",
+            total_shapes=4,
+            improved_shapes=4,
+            best_micro_speedup=3.85,
+            env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+            env_value="/tmp/c.csv",
+            artifact_path="/tmp/c.csv",
+        )
         rep = _report([cand, _res("failed", error="boom", name="fmoe_ck")])
         assert rep.micro_decision == "candidate"
         assert rep.requires_e2e_validation is True
@@ -269,9 +292,13 @@ class TestBuildReportStrictStatus:
         # improvement (best==1.0) but candidate is forced so the freshly tuned
         # configs are validated end-to-end instead of dropped.
         new_shapes = _res(
-            "no_improvement", total_shapes=2, improved_shapes=0,
-            best_micro_speedup=1.0, candidate=True,
-            env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE", env_value="/tmp/c.csv",
+            "no_improvement",
+            total_shapes=2,
+            improved_shapes=0,
+            best_micro_speedup=1.0,
+            candidate=True,
+            env_var="AITER_CONFIG_GEMM_A8W8_BLOCKSCALE",
+            env_value="/tmp/c.csv",
             artifact_path="/tmp/c.csv",
         )
         rep = _report([new_shapes])

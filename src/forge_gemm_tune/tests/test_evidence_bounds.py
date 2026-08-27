@@ -25,9 +25,7 @@ _MISS = (
 
 
 def _log(n_keys: int, repeats: int = 1) -> str:
-    return "\n".join(
-        _MISS.format(m=m) for _ in range(repeats) for m in range(1, n_keys + 1)
-    )
+    return "\n".join(_MISS.format(m=m) for _ in range(repeats) for m in range(1, n_keys + 1))
 
 
 class TestUnbounded:
@@ -118,10 +116,9 @@ class TestKeySchemaMatchesInstalledAiter:
             "a8w8_blockscale_bpreshuffle_tuned_gemm.csv",
             "a4w4_blockscale_tuned_gemm.csv",
         ):
-            assert not [
-                c for c in ev.TABLE_KEY_SCHEMA[table]
-                if c not in ("M", "N", "K")
-            ], f"{table} gained a key column aiter does not have"
+            assert not [c for c in ev.TABLE_KEY_SCHEMA[table] if c not in ("M", "N", "K")], (
+                f"{table} gained a key column aiter does not have"
+            )
 
     def test_q_dtype_w_is_a_key_the_log_cannot_supply(self):
         # Both facts matter together: it belongs in the key, and evidence can

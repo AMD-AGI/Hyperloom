@@ -203,9 +203,7 @@ def _install_driver_doubles(monkeypatch: pytest.MonkeyPatch, kernel: Path) -> li
 
     def benchmark(_driver: str, *_args, **_kwargs) -> dict:
         source = kernel.read_text()
-        wall_ms = next(
-            value for marker, value in _DRIVER_MS.items() if marker in source
-        )
+        wall_ms = next(value for marker, value in _DRIVER_MS.items() if marker in source)
         measured.append(wall_ms)
         return {
             "success": True,
@@ -236,9 +234,7 @@ def _install_suite_driver_doubles(
 
     def benchmark(_driver: str, *_args, **_kwargs) -> dict:
         source = kernel.read_text()
-        case_times = next(
-            times for marker, times in _DRIVER_CASE_MS.items() if marker in source
-        )
+        case_times = next(times for marker, times in _DRIVER_CASE_MS.items() if marker in source)
         total_ms = sum(case_times.values())
         measured.append(total_ms)
         return {
@@ -271,10 +267,7 @@ def _records() -> LocalRewriteRecords:
 
 def _stored(canonical_id: str = CANONICAL_ID) -> dict[str, RewriteCandidate]:
     """Every recorded candidate for one identity, keyed by session id."""
-    return {
-        candidate.session_id: candidate
-        for candidate in _records().candidates(canonical_id, limit=50)
-    }
+    return {candidate.session_id: candidate for candidate in _records().candidates(canonical_id, limit=50)}
 
 
 def _session_id(status: dict) -> str:
@@ -284,9 +277,7 @@ def _session_id(status: dict) -> str:
 def _index_status(workspace: Path, rank: int) -> str:
     line = next(
         line
-        for line in (
-            workspace / "forge_experiments" / "kb_references" / "index.md"
-        ).read_text().splitlines()
+        for line in (workspace / "forge_experiments" / "kb_references" / "index.md").read_text().splitlines()
         if line.startswith(f"- Rank {rank}:")
     )
     return line.split("status `", 1)[1].rstrip("`")
@@ -300,18 +291,14 @@ class MergingKBStore(InMemoryKBStore):
         self.knowledge_writes: list[tuple[str, str, dict, str]] = []
 
     def put_knowledge(self, canonical_id, knowledge, *, session_id="", mode="merge"):
-        self.knowledge_writes.append(
-            (canonical_id, session_id, dict(knowledge), mode)
-        )
+        self.knowledge_writes.append((canonical_id, session_id, dict(knowledge), mode))
         key = (canonical_id, session_id)
         if mode == "merge" and key in self.knowledge:
             merged = dict(self.knowledge[key])
             merged.update(knowledge)
             self.knowledge[key] = merged
             return {"session_id": session_id, "mode": mode}
-        return super().put_knowledge(
-            canonical_id, knowledge, session_id=session_id, mode=mode
-        )
+        return super().put_knowledge(canonical_id, knowledge, session_id=session_id, mode=mode)
 
 
 @pytest.fixture(autouse=True)
@@ -442,8 +429,7 @@ def test_a_refused_measured_write_back_redacts_and_bounds_the_store_error(
     def refuse(*_args, **_kwargs):
         raise record_store.KBStoreError(
             f"PUT https://forge:{token}@kb.example/knowledge failed "
-            f"(sent Bearer {token}); the store said {token} expired"
-            + " and returned an unbounded body" * 20
+            f"(sent Bearer {token}); the store said {token} expired" + " and returned an unbounded body" * 20
         )
 
     monkeypatch.setattr(store, "put_knowledge", refuse)
@@ -478,9 +464,7 @@ def test_warm_start_adopts_the_best_measured_candidate_not_the_first_applied(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -499,13 +483,9 @@ def test_warm_start_adopts_the_best_measured_candidate_not_the_first_applied(
     assert measured == [10.0] * 3 + [8.0] * 3 + [5.0] * 3
     assert warm["applied_commit"] == _git(consumer, "rev-parse", "HEAD")
     assert warm["applied_commit"] != base
-    assert _git(consumer, "log", "-1", "--pretty=%s") == (
-        f"kb warm-start: apply {honest['solution']}"
-    )
+    assert _git(consumer, "log", "-1", "--pretty=%s") == (f"kb warm-start: apply {honest['solution']}")
     assert _git(consumer, "status", "--porcelain=v1", "--untracked-files=no") == ""
-    assert _git(consumer, "diff", "--name-only", base, "HEAD").splitlines() == [
-        CONSUMER_KERNEL_PATH.as_posix()
-    ]
+    assert _git(consumer, "diff", "--name-only", base, "HEAD").splitlines() == [CONSUMER_KERNEL_PATH.as_posix()]
     assert _session_id(inflated) in _stored()
 
 
@@ -525,9 +505,7 @@ def test_warm_start_writes_every_measured_speedup_back_to_the_kb(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, _base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -574,9 +552,7 @@ def test_warm_start_ranks_a_corrected_record_on_its_measured_value(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    first_consumer, first_kernel, _first_base = _initialize_workspace(
-        tmp_path, "consumer-first", CONSUMER_KERNEL_PATH
-    )
+    first_consumer, first_kernel, _first_base = _initialize_workspace(tmp_path, "consumer-first", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, first_kernel)
     _warm_start(first_consumer, first_kernel)
 
@@ -611,9 +587,7 @@ def test_warm_start_evaluates_a_later_record_that_outclaims_the_leader(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    first_consumer, first_kernel, _first_base = _initialize_workspace(
-        tmp_path, "consumer-first", CONSUMER_KERNEL_PATH
-    )
+    first_consumer, first_kernel, _first_base = _initialize_workspace(tmp_path, "consumer-first", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, first_kernel)
     _warm_start(first_consumer, first_kernel)
 
@@ -653,9 +627,7 @@ def test_warm_start_stops_evaluating_once_the_top_claim_is_confirmed(
         optimized_source=INFLATED_SOURCE,
         claimed_speedup=1.5,
     )
-    consumer, kernel, _base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -686,9 +658,7 @@ def test_warm_start_evaluates_no_more_candidates_than_the_bound(
             claimed_speedup=claim,
         )
     monkeypatch.setattr(integration, "_WARMSTART_TOP_K", 4)
-    consumer, kernel, _base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -719,9 +689,7 @@ def test_warm_start_reports_a_failed_measured_write_back_and_still_applies(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, kernel)
 
     def refuse(*_args, **_kwargs):
@@ -766,9 +734,7 @@ def test_warm_start_restores_the_worktree_when_no_candidate_is_adoptable(
         optimized_source=HONEST_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     _install_driver_doubles(monkeypatch, kernel)
     monkeypatch.setattr(integration, "_correctness_once", lambda *_a, **_k: False)
 
@@ -791,17 +757,13 @@ def test_the_lopsided_suite_clears_the_keep_threshold_it_regresses_against():
     """
     pristine = _DRIVER_CASE_MS["BLOCK_SIZE = 32"]
     lopsided = _DRIVER_CASE_MS["BLOCK_SIZE = 8"]
-    case_speedups = [
-        pristine[case_id] / lopsided[case_id] for case_id in pristine
-    ]
+    case_speedups = [pristine[case_id] / lopsided[case_id] for case_id in pristine]
     mean_case_speedup = sum(case_speedups) / len(case_speedups)
 
     assert min(case_speedups) < 1.0
     # Three identical measurements carry no spread, so the gate falls back to
     # its floor -- the weakest bar this revision could be asked to clear.
-    assert passes_keep_threshold(
-        [mean_case_speedup] * 3, best_mean_case_speedup=1.0
-    )
+    assert passes_keep_threshold([mean_case_speedup] * 3, best_mean_case_speedup=1.0)
     assert sum(lopsided.values()) > sum(pristine.values())
 
 
@@ -822,9 +784,7 @@ def test_warm_start_refuses_a_candidate_that_is_slower_over_the_whole_suite(
         optimized_source=LOPSIDED_SOURCE,
         claimed_speedup=3.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_suite_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -832,9 +792,7 @@ def test_warm_start_refuses_a_candidate_that_is_slower_over_the_whole_suite(
     assert warm["applied"] is False
     # Named apart from performance_failed: this candidate cleared the threshold.
     assert warm["reference_reason"] == "aggregate_regression"
-    assert _index_status(consumer, 1) == (
-        "rejected:aggregate_regression (measured 2.400000x recorded)"
-    )
+    assert _index_status(consumer, 1) == ("rejected:aggregate_regression (measured 2.400000x recorded)")
     # The suite was benchmarked, so the record is amended even though the
     # candidate lost: it claimed 3.0x and this consumer measured 2.4x.
     assert warm["measured_writebacks"] == [
@@ -879,9 +837,7 @@ def test_warm_start_tries_the_next_rank_after_an_aggregate_regression(
         optimized_source=BALANCED_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_suite_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
@@ -893,9 +849,7 @@ def test_warm_start_tries_the_next_rank_after_an_aggregate_regression(
     assert warm["mean_case_speedup"] == 2.0
     assert warm["pristine_ms"] == 101.0
     assert warm["keep_baseline_ms"] == 50.5
-    assert _index_status(consumer, 1) == (
-        "rejected:aggregate_regression (measured 2.400000x recorded)"
-    )
+    assert _index_status(consumer, 1) == ("rejected:aggregate_regression (measured 2.400000x recorded)")
     assert _index_status(consumer, 2) == "applied"
     assert measured == [101.0] * 3 + [125.25] * 3 + [50.5] * 3
     # Both candidates were benchmarked, so both records are amended in rank
@@ -932,18 +886,14 @@ def test_warm_start_writes_back_a_candidate_that_missed_the_keep_threshold(
         optimized_source=SLOWER_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)
 
     assert warm["applied"] is False
     assert warm["reference_reason"] == "performance_failed"
-    assert _index_status(consumer, 1) == (
-        "rejected:performance_failed (measured 0.800000x recorded)"
-    )
+    assert _index_status(consumer, 1) == ("rejected:performance_failed (measured 0.800000x recorded)")
     [writeback] = warm["measured_writebacks"]
     assert writeback["rank"] == 1
     assert writeback["solution_slug"] == slower["solution"]
@@ -981,9 +931,7 @@ def test_warm_start_reports_a_rejected_candidate_write_back_the_store_refused(
         optimized_source=LOPSIDED_SOURCE,
         claimed_speedup=3.0,
     )
-    consumer, kernel, _base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, _base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     _install_suite_driver_doubles(monkeypatch, kernel)
 
     def refuse(*_args, **_kwargs):
@@ -1005,9 +953,7 @@ def test_warm_start_reports_a_rejected_candidate_write_back_the_store_refused(
     assert integration.kb_read_status(warm)["measured_writeback_failures"] == [
         "RewriteRecordError: store rejected the amendment"
     ]
-    assert _index_status(consumer, 1) == (
-        "rejected:aggregate_regression (measured 2.400000x write-back refused)"
-    )
+    assert _index_status(consumer, 1) == ("rejected:aggregate_regression (measured 2.400000x write-back refused)")
     assert _stored()[_session_id(lopsided)].measured_speedup is None
     assert kernel.read_text() == PRISTINE_SOURCE
     assert _git(consumer, "status", "--porcelain=v1", "--untracked-files=no") == ""
@@ -1024,9 +970,7 @@ def test_warm_start_adopts_a_candidate_that_wins_the_suite_and_the_case_mean(
         optimized_source=BALANCED_SOURCE,
         claimed_speedup=2.0,
     )
-    consumer, kernel, base = _initialize_workspace(
-        tmp_path, "consumer", CONSUMER_KERNEL_PATH
-    )
+    consumer, kernel, base = _initialize_workspace(tmp_path, "consumer", CONSUMER_KERNEL_PATH)
     measured = _install_suite_driver_doubles(monkeypatch, kernel)
 
     warm = _warm_start(consumer, kernel)

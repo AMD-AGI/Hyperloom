@@ -48,10 +48,7 @@ def _load_example_driver(monkeypatch, ranks: str = "8"):
     for var in ("WORLD_SIZE", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("FORGE_NPROC_PER_NODE", ranks)
-    path = (
-        pathlib.Path(__file__).resolve().parents[1]
-        / "examples/aiter-allreduce-forge-loop/driver.py"
-    )
+    path = pathlib.Path(__file__).resolve().parents[1] / "examples/aiter-allreduce-forge-loop/driver.py"
     spec = importlib.util.spec_from_file_location("_example_driver", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules["_example_driver"] = module
@@ -157,10 +154,7 @@ def test_formal_correctness_checks_eager_and_graph_for_each_case(monkeypatch):
     args = driver.build_parser().parse_args([])
     assert driver.worker_main(args) == 0
     assert calls == [
-        (path, case.case_id, mode)
-        for mode in ("smoke", "stability")
-        for case in cases
-        for path in ("eager", "graph")
+        (path, case.case_id, mode) for mode in ("smoke", "stability") for case in cases for path in ("eager", "graph")
     ]
 
 
@@ -263,16 +257,12 @@ def test_a_self_relaunching_driver_stays_in_the_callers_group():
     detached launcher would survive the caller's group kill with its GPUs still
     allocated -- and no handler in the driver would ever run to release them.
     """
-    driver = pathlib.Path(__file__).resolve().parents[1] / (
-        "examples/aiter-allreduce-forge-loop/driver.py"
-    )
+    driver = pathlib.Path(__file__).resolve().parents[1] / ("examples/aiter-allreduce-forge-loop/driver.py")
     src = driver.read_text()
     start = src.index("def self_launch(")
-    launch = src[start:start + 2000]
+    launch = src[start : start + 2000]
     # Check the CALL, not the prose: the comment above it names the flag it is
     # deliberately not passing.
-    popen_line = next(
-        line for line in launch.splitlines() if "subprocess.Popen(" in line
-    )
+    popen_line = next(line for line in launch.splitlines() if "subprocess.Popen(" in line)
     assert "start_new_session" not in popen_line
     assert "cmd" in popen_line and "env=env" in popen_line

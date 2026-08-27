@@ -97,9 +97,7 @@ def byte_len(text: str) -> int:
 
 def render_entry(reference: PRReference) -> str:
     """Render every populated field within one shared byte budget."""
-    worth = (
-        "unknown" if reference.worth_trying is None else f"{reference.worth_trying:.2f}"
-    )
+    worth = "unknown" if reference.worth_trying is None else f"{reference.worth_trying:.2f}"
     state = "merged" if reference.is_merged else "open"
     header = (
         f"- {reference.repo}#{reference.number} ({state}, worth {worth}, "
@@ -136,20 +134,13 @@ def render_entry(reference: PRReference) -> str:
     if per_field < 3:
         return clip_bytes(header, MAX_ENTRY_BYTES)
     lines = [header]
-    lines.extend(
-        prefix + clip_bytes(value, per_field)
-        for prefix, (_, value) in zip(prefixes, fields)
-    )
+    lines.extend(prefix + clip_bytes(value, per_field) for prefix, (_, value) in zip(prefixes, fields))
     return clip_bytes("\n".join(lines), MAX_ENTRY_BYTES)
 
 
-def render_reference_set(
-    references: Iterable[PRReference], *, max_bytes: int = 0
-) -> str:
+def render_reference_set(references: Iterable[PRReference], *, max_bytes: int = 0) -> str:
     """Render a bounded block; zero bytes uses ``PR_KB_MAX_BYTES``."""
-    budget = max_bytes or int(
-        os.environ.get("PR_KB_MAX_BYTES", DEFAULT_MAX_BYTES) or DEFAULT_MAX_BYTES
-    )
+    budget = max_bytes or int(os.environ.get("PR_KB_MAX_BYTES", DEFAULT_MAX_BYTES) or DEFAULT_MAX_BYTES)
     entries = [render_entry(reference) for reference in references]
     entries = [entry for entry in entries if entry.strip()]
     if not entries:
@@ -193,10 +184,7 @@ class Snapshot:
 
 def entry_key(reference: PRReference) -> str:
     """Identity of one surfaced reference, including the head it was read at."""
-    return (
-        f"{reference.repo}#{reference.number}"
-        f"@{reference.head_sha or 'nohead'}:{reference.schema_version or '0'}"
-    )
+    return f"{reference.repo}#{reference.number}@{reference.head_sha or 'nohead'}:{reference.schema_version or '0'}"
 
 
 def query_key(kind: str, repo: str, value: str) -> str:
@@ -264,9 +252,7 @@ def entry_to_reference(entry: dict[str, Any]) -> PRReference | None:
     )
 
 
-def merge_references(
-    snapshot: Snapshot, references: Iterable[PRReference]
-) -> list[PRReference]:
+def merge_references(snapshot: Snapshot, references: Iterable[PRReference]) -> list[PRReference]:
     """Add unseen reference heads without rewriting cached entries."""
     added: list[PRReference] = []
     for reference in references:
@@ -278,9 +264,7 @@ def merge_references(
     return added
 
 
-def record_empty_query(
-    snapshot: Snapshot, key: str, *, ttl_hours: float = DEFAULT_EMPTY_TTL_HOURS
-) -> None:
+def record_empty_query(snapshot: Snapshot, key: str, *, ttl_hours: float = DEFAULT_EMPTY_TTL_HOURS) -> None:
     """Remember that a query returned nothing, so a refresh will not repeat it."""
     now = _now()
     snapshot.empty_queries[key] = {
@@ -332,8 +316,7 @@ def render_index(snapshot: Snapshot) -> str:
     lines = [
         "# Upstream PR references",
         "",
-        f"entries: {len(snapshot.entries)}   "
-        f"empty queries cached: {len(snapshot.empty_queries)}",
+        f"entries: {len(snapshot.entries)}   empty queries cached: {len(snapshot.empty_queries)}",
         "",
         "| PR | worth | merged | files | hit_via | head | fetched |",
         "| --- | --- | --- | --- | --- | --- | --- |",
@@ -394,13 +377,10 @@ class PRRefsResult:
 
 def _name_affinity(fork: str, candidate: str) -> int:
     """Rough ordering hint: shared word stems between two owner/repo strings."""
+
     def stems(label: str) -> set[str]:
         """Return significant owner/repository name fragments."""
-        return {
-            part
-            for part in re.split(r"[^0-9a-z]+", label.lower())
-            if len(part) >= 3
-        }
+        return {part for part in re.split(r"[^0-9a-z]+", label.lower()) if len(part) >= 3}
 
     return len(stems(fork) & stems(candidate))
 
@@ -420,10 +400,7 @@ def identify_repo_by_path(
     if not file_path or not tracked:
         return "", 0, ""
     ordered = sorted(tracked, key=lambda r: -_name_affinity(hint, r))
-    requests = [
-        (f"/repos/{repo}/prs", {"file_path": file_path, "state": "all", "limit": 1})
-        for repo in ordered
-    ]
+    requests = [(f"/repos/{repo}/prs", {"file_path": file_path, "state": "all", "limit": 1}) for repo in ordered]
     outcomes = client.get_many(requests, budget_sec=budget_sec)
     identified = ""
     failure_reason = ""
@@ -439,16 +416,12 @@ def identify_repo_by_path(
                     identified = repo
             except PRContractError:
                 failure = REASON_CONTRACT_ERROR
-        if failure and (
-            failure == REASON_CONTRACT_ERROR or not failure_reason
-        ):
+        if failure and (failure == REASON_CONTRACT_ERROR or not failure_reason):
             failure_reason = failure
     return identified, len(requests), failure_reason
 
 
-def _filter_cached_empties(
-    context: PRQueryContext, snapshot: Snapshot
-) -> tuple[PRQueryContext, int]:
+def _filter_cached_empties(context: PRQueryContext, snapshot: Snapshot) -> tuple[PRQueryContext, int]:
     """Drop query terms already proven empty for this repo."""
     paths = tuple(
         path
@@ -460,9 +433,7 @@ def _filter_cached_empties(
         for phrase in context.keywords
         if not is_query_empty(snapshot, query_key(HIT_SEARCH, context.repo, phrase))
     )
-    skipped = (len(context.file_paths) - len(paths)) + (
-        len(context.keywords) - len(keywords)
-    )
+    skipped = (len(context.file_paths) - len(paths)) + (len(context.keywords) - len(keywords))
     return replace(context, file_paths=paths, keywords=keywords), skipped
 
 
@@ -504,11 +475,7 @@ def collect_references(
         return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
 
     if not client.healthz(timeout_sec=remaining_sec(deadline)):
-        reason = (
-            REASON_SKIPPED_DEADLINE
-            if expired()
-            else REASON_SERVICE_UNREACHABLE
-        )
+        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
         return _degraded(snapshot, reason, top_k=top_k)
 
     if expired():
@@ -518,21 +485,17 @@ def collect_references(
         repos_payload = client.list_repos(timeout_sec=remaining_sec(deadline))
     except PRMonitorError as error:
         log.warning("pr-monitor repository lookup failed: %s", error)
-        reason = (
-            REASON_SKIPPED_DEADLINE
-            if expired()
-            else REASON_SERVICE_UNREACHABLE
-        )
+        reason = REASON_SKIPPED_DEADLINE if expired() else REASON_SERVICE_UNREACHABLE
         return _degraded(snapshot, reason, top_k=top_k)
     drift = check_whitelist(repos_payload)
     if not drift.clean:
         log.warning(
             "pr_refs: tracked repo drift (missing=%s unexpected=%s inactive=%s)",
-            drift.missing, drift.unexpected, drift.inactive,
+            drift.missing,
+            drift.unexpected,
+            drift.inactive,
         )
-    tracked = tuple(
-        str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name")
-    )
+    tracked = tuple(str(entry.get("repo_name")) for entry in repos_payload if entry.get("repo_name"))
 
     workspace = Path(workspace_dir).resolve()
     context = build_context(
@@ -553,8 +516,11 @@ def collect_references(
             return _degraded(snapshot, REASON_SKIPPED_DEADLINE, top_k=top_k)
         # Probe source ownership within the shared end-to-end budget.
         identified, probes, probe_reason = identify_repo_by_path(
-            client, context.file_paths[0], tracked,
-            hint=context.repo, budget_sec=remaining_sec(deadline),
+            client,
+            context.file_paths[0],
+            tracked,
+            hint=context.repo,
+            budget_sec=remaining_sec(deadline),
         )
         if not identified and expired():
             return _degraded(
@@ -566,7 +532,8 @@ def collect_references(
         if identified:
             log.info(
                 "pr_refs: %s is untracked; identified %s by source path",
-                context.repo, identified,
+                context.repo,
+                identified,
             )
             context = replace(context, repo=identified, reason="")
         elif probe_reason:
@@ -610,9 +577,7 @@ def collect_references(
     else:
         reason = REASON_NO_CANDIDATE
 
-    if probe_reason == REASON_CONTRACT_ERROR or (
-        probe_reason and not stats.get("degraded_reason")
-    ):
+    if probe_reason == REASON_CONTRACT_ERROR or (probe_reason and not stats.get("degraded_reason")):
         stats["degraded_reason"] = probe_reason
 
     # Re-render cached references so refreshes never retract prior context.
@@ -627,10 +592,7 @@ def collect_references(
         shown
         and reason
         and reason != REASON_NO_CANDIDATE
-        and (
-            reason == REASON_CONTRACT_ERROR
-            or stats.get("degraded_reason") != REASON_CONTRACT_ERROR
-        )
+        and (reason == REASON_CONTRACT_ERROR or stats.get("degraded_reason") != REASON_CONTRACT_ERROR)
     ):
         stats["degraded_reason"] = reason
     return PRRefsResult(
@@ -677,23 +639,17 @@ def _degraded(
     )
 
 
-def _ranked_from_snapshot(
-    snapshot: Snapshot, context: PRQueryContext, *, top_k: int
-) -> list[PRReference]:
+def _ranked_from_snapshot(snapshot: Snapshot, context: PRQueryContext, *, top_k: int) -> list[PRReference]:
     """Best TOP_K references the snapshot holds, ranked for this query."""
     references = [
-        reference
-        for reference in (entry_to_reference(e) for e in snapshot.entries.values())
-        if reference is not None
+        reference for reference in (entry_to_reference(e) for e in snapshot.entries.values()) if reference is not None
     ]
     if not references:
         return []
     limit = top_k or int(os.environ.get("PR_KB_TOP_K", "5") or 5)
     interest = components_of_interest(context)
     relevant = filter_references_by_relevance(references, interest)
-    ranked = rank_references(
-        relevant, components_of_interest=interest
-    )
+    ranked = rank_references(relevant, components_of_interest=interest)
     return ranked[:limit]
 
 

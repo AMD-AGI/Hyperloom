@@ -76,9 +76,7 @@ def _make_loop(workspace, kernel, driver, tracker, *, session_count, resume=Fals
         evolver=_NoopEvolver(),
         resume=resume,
     )
-    loop._time_remaining = (
-        lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0
-    )
+    loop._time_remaining = lambda: _AMPLE_BUDGET_SEC if len(loop.results) < session_count else 0.0
     return loop
 
 
@@ -172,12 +170,8 @@ def test_two_sessions_preserve_lineage_history_and_global_ids(tmp_path, monkeypa
         3,
         4,
     ]
-    best_manifest = json.loads(
-        (workspace / "forge_experiments" / "best" / "manifest.json").read_text()
-    )
-    best_report = (
-        workspace / "forge_experiments" / "optimization_report.md"
-    ).read_text()
+    best_manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
+    best_report = (workspace / "forge_experiments" / "optimization_report.md").read_text()
     assert best_manifest["iteration"] == 4
     assert best_manifest["best_wall_ms"] == 0.8
     assert "attempt 4" in best_report
@@ -221,9 +215,7 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
         nonlocal attempt
         attempt += 1
         session_sink["plan"] = f"candidate {attempt}"
-        session_sink["end_reason"] = (
-            "candidate_submitted" if attempt == 1 else "turn_cap"
-        )
+        session_sink["end_reason"] = "candidate_submitted" if attempt == 1 else "turn_cap"
         session_sink["turns"] = 10 if attempt == 1 else 100
         path = runner_module.Path(kernel_path)
         path.write_text(path.read_text() + f"\n# candidate {attempt}\n")
@@ -270,9 +262,7 @@ def test_published_keep_survives_interruption_resume_and_later_failure(
         )
 
     root = workspace / "forge_experiments"
-    manifest_after_interrupt = json.loads(
-        (root / "best" / "manifest.json").read_text()
-    )
+    manifest_after_interrupt = json.loads((root / "best" / "manifest.json").read_text())
     assert manifest_after_interrupt["iteration"] == 1
     assert manifest_after_interrupt["best_wall_ms"] == 0.9
 
@@ -374,11 +364,7 @@ def test_resume_recovers_keep_committed_before_state_checkpoint(tmp_path, monkey
     assert state.cumulative.kept == 1
     assert manifest["iteration"] == 1
     assert manifest["commit_hash"] == committed_head
-    assert len([
-        event
-        for event in events
-        if event["type"] == "iteration_result" and event["iter"] == 1
-    ]) == 1
+    assert len([event for event in events if event["type"] == "iteration_result" and event["iter"] == 1]) == 1
     assert not (root / "pending_keep.json").exists()
 
 
@@ -491,11 +477,7 @@ def test_resume_repairs_publication_after_state_advanced_once(tmp_path, monkeypa
     assert recovered.cumulative.iterations == 1
     assert recovered.cumulative.kept == 1
     assert manifest["iteration"] == 1
-    assert len([
-        event
-        for event in events
-        if event["type"] == "iteration_result" and event["iter"] == 1
-    ]) == 1
+    assert len([event for event in events if event["type"] == "iteration_result" and event["iter"] == 1]) == 1
     assert not (root / "pending_keep.json").exists()
 
 
@@ -564,9 +546,7 @@ def test_resume_rejects_pending_keep_with_unexpected_child_commit(
 
     async def editing_agent(kernel_path, _history, session_sink):
         session_sink["plan"] = "expected candidate"
-        runner_module.Path(kernel_path).write_text(
-            "def kernel():\n    return 2\n"
-        )
+        runner_module.Path(kernel_path).write_text("def kernel():\n    return 2\n")
         return "expected candidate"
 
     first = _make_loop(
@@ -742,11 +722,7 @@ asyncio.run(main())
 """
     repo_root = Path(__file__).resolve().parents[1]
     env = os.environ.copy()
-    env["PYTHONPATH"] = os.pathsep.join(
-        path
-        for path in (str(repo_root / "src"), env.get("PYTHONPATH", ""))
-        if path
-    )
+    env["PYTHONPATH"] = os.pathsep.join(path for path in (str(repo_root / "src"), env.get("PYTHONPATH", "")) if path)
     process = subprocess.Popen(
         [
             sys.executable,
@@ -768,9 +744,7 @@ asyncio.run(main())
         while not validation_started.exists():
             if process.poll() is not None:
                 stdout, stderr = process.communicate()
-                pytest.fail(
-                    f"subprocess exited before canonical validation:\n{stdout}\n{stderr}"
-                )
+                pytest.fail(f"subprocess exited before canonical validation:\n{stdout}\n{stderr}")
             if time.monotonic() >= deadline:
                 pytest.fail("subprocess did not reach canonical validation")
             time.sleep(0.01)

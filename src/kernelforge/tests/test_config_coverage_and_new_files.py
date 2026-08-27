@@ -64,9 +64,7 @@ def _keep_with_runs(
         _keep(iteration, case_times),
         bench_detail={
             "case_times": dict(case_times),
-            "measurements": [
-                {"success": True, "case_times": dict(run)} for run in runs
-            ],
+            "measurements": [{"success": True, "case_times": dict(run)} for run in runs],
         },
     )
 
@@ -83,9 +81,7 @@ def _context(workspace: Path, case_ids: tuple[str, ...]) -> OrchestrationContext
         objective="equal-weight mean case speedup",
         program_context="Optimize test kernel.",
         source_map_path=str(workspace / "kernel.py"),
-        cases=tuple(
-            CaseEvidence(case_id=case_id, latency_ms=1.0) for case_id in case_ids
-        ),
+        cases=tuple(CaseEvidence(case_id=case_id, latency_ms=1.0) for case_id in case_ids),
     )
 
 
@@ -122,9 +118,7 @@ def test_keep_without_case_timings_is_reported_not_dropped():
     assert coverage.keeps == (2,)
     assert "INCOMPLETE RECORD" in rendered
     assert "iteration(s) 1" in rendered
-    assert "config_coverage_partial_record" in (
-        loop._case_config_coverage_flags()["decode-t64"]
-    )
+    assert "config_coverage_partial_record" in (loop._case_config_coverage_flags()["decode-t64"])
 
 
 def test_only_keep_without_case_timings_never_reads_as_no_keep():
@@ -135,9 +129,7 @@ def test_only_keep_without_case_timings_never_reads_as_no_keep():
 
     assert "INCOMPLETE RECORD" in rendered
     assert "No KEEP with per-case timings" in rendered
-    assert loop._case_config_coverage_flags() == {
-        "decode-t64": ("config_coverage_partial_record",)
-    }
+    assert loop._case_config_coverage_flags() == {"decode-t64": ("config_coverage_partial_record",)}
 
 
 def test_unscored_case_is_outside_the_coverage_ledger():
@@ -235,9 +227,7 @@ def test_coverage_flags_reach_the_planning_context(tmp_path):
     loop = _coverage_loop({"decode-t64": 10.0, "prefill-t4096": 10.0})
     loop.results = [_keep(2, {"decode-t64": 10.0, "prefill-t4096": 8.0})]
 
-    context = loop._with_case_config_coverage(
-        _context(tmp_path, ("decode-t64", "prefill-t4096"))
-    )
+    context = loop._with_case_config_coverage(_context(tmp_path, ("decode-t64", "prefill-t4096")))
 
     flags = {case.case_id: case.flags for case in context.cases}
     assert "config_coverage_fallback" in flags["decode-t64"]
@@ -276,9 +266,7 @@ def test_keep_commits_only_the_allowlisted_new_file(tmp_path, monkeypatch, capsy
     assert "notes.txt" in capsys.readouterr().out
 
 
-def test_revert_removes_exactly_what_a_keep_would_have_committed(
-    tmp_path, monkeypatch, capsys
-):
+def test_revert_removes_exactly_what_a_keep_would_have_committed(tmp_path, monkeypatch, capsys):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     _write_new_files(workspace)
@@ -298,18 +286,14 @@ def test_staged_new_file_does_not_survive_a_revert(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     _write_new_files(workspace)
-    subprocess.run(
-        ["git", "add", "configs/tuned.json"], cwd=workspace, check=True
-    )
+    subprocess.run(["git", "add", "configs/tuned.json"], cwd=workspace, check=True)
 
     loop._git_discard_all_tracked_changes()
 
     assert not (workspace / "configs" / "tuned.json").exists()
 
 
-def test_new_file_outside_the_allowlist_is_reported_at_both_sites(
-    tmp_path, monkeypatch, capsys
-):
+def test_new_file_outside_the_allowlist_is_reported_at_both_sites(tmp_path, monkeypatch, capsys):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     _write_new_files(workspace)
 
@@ -339,9 +323,7 @@ def _new_file_agent(workspace: Path, name: str):
     return agent
 
 
-def test_new_file_only_candidate_is_named_and_taken_off_the_tree(
-    tmp_path, monkeypatch
-):
+def test_new_file_only_candidate_is_named_and_taken_off_the_tree(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
 
@@ -358,9 +340,7 @@ def test_new_file_only_candidate_is_named_and_taken_off_the_tree(
     assert "taken off the tree" in summary
 
 
-def test_new_file_only_candidate_outside_the_allowlist_is_still_reported(
-    tmp_path, monkeypatch
-):
+def test_new_file_only_candidate_outside_the_allowlist_is_still_reported(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
     asyncio.run(
@@ -407,9 +387,7 @@ def test_allowlist_cannot_admit_the_campaign_driver(tmp_path, monkeypatch):
     assert "driver.py" in refused
 
 
-def test_loop_output_is_not_reported_as_a_file_the_agent_created(
-    tmp_path, monkeypatch
-):
+def test_loop_output_is_not_reported_as_a_file_the_agent_created(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, build_dir="build")
     (workspace / "forge_experiments").mkdir()
@@ -420,9 +398,7 @@ def test_loop_output_is_not_reported_as_a_file_the_agent_created(
     assert loop._new_paths() == ([], [])
 
 
-def test_unlistable_workspace_raises_instead_of_reporting_no_new_files(
-    tmp_path, monkeypatch
-):
+def test_unlistable_workspace_raises_instead_of_reporting_no_new_files(tmp_path, monkeypatch):
     loop, _workspace = _make_loop(tmp_path, monkeypatch)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -432,9 +408,7 @@ def test_unlistable_workspace_raises_instead_of_reporting_no_new_files(
         loop._new_paths()
 
 
-def test_allowlist_pattern_does_not_admit_a_file_a_directory_deeper(
-    tmp_path, monkeypatch
-):
+def test_allowlist_pattern_does_not_admit_a_file_a_directory_deeper(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "configs" / "generated").mkdir(parents=True)
@@ -447,9 +421,7 @@ def test_allowlist_pattern_does_not_admit_a_file_a_directory_deeper(
     assert refused == ["configs/generated/tuned.json"]
 
 
-def test_bare_glob_does_not_admit_the_same_name_in_a_subdirectory(
-    tmp_path, monkeypatch
-):
+def test_bare_glob_does_not_admit_the_same_name_in_a_subdirectory(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["*.json"])
     (workspace / "nested").mkdir()
@@ -462,9 +434,7 @@ def test_bare_glob_does_not_admit_the_same_name_in_a_subdirectory(
     assert refused == ["nested/tuned.json"]
 
 
-@pytest.mark.parametrize(
-    "pattern", ["configs/**/*.json", "**/tuned.json", "../outside/*.json", "/etc/*"]
-)
+@pytest.mark.parametrize("pattern", ["configs/**/*.json", "**/tuned.json", "../outside/*.json", "/etc/*"])
 def test_allowlist_refuses_a_pattern_it_cannot_honour(pattern):
     with pytest.raises(ValueError):
         IterationConfig(
@@ -474,9 +444,7 @@ def test_allowlist_refuses_a_pattern_it_cannot_honour(pattern):
         )
 
 
-def test_new_file_whose_name_contains_a_newline_is_one_path(
-    tmp_path, monkeypatch
-):
+def test_new_file_whose_name_contains_a_newline_is_one_path(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "configs").mkdir()
@@ -501,9 +469,7 @@ def _unlistable(loop, monkeypatch):
     monkeypatch.setattr(loop, "_list_untracked", explode)
 
 
-def test_discard_still_restores_a_workspace_it_cannot_enumerate(
-    tmp_path, monkeypatch
-):
+def test_discard_still_restores_a_workspace_it_cannot_enumerate(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "kernel.py").write_text("def kernel():\n    return 99\n")
@@ -521,9 +487,7 @@ def test_unenumerable_workspace_does_not_force_a_discard(tmp_path, monkeypatch):
     assert loop._new_paths_need_discard() is False
 
 
-def test_keep_commit_refuses_a_workspace_it_cannot_enumerate(
-    tmp_path, monkeypatch
-):
+def test_keep_commit_refuses_a_workspace_it_cannot_enumerate(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     (workspace / "kernel.py").write_text("def kernel():\n    return 2\n")
     _unlistable(loop, monkeypatch)
@@ -532,9 +496,7 @@ def test_keep_commit_refuses_a_workspace_it_cannot_enumerate(
         loop._git_commit("keep: tracked edit only")
 
 
-def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(
-    tmp_path, monkeypatch
-):
+def test_revert_leaves_an_allowlisted_file_the_candidate_did_not_create(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "configs").mkdir()
@@ -670,9 +632,7 @@ def test_rendered_ledger_states_the_rule_it_applied():
     assert "floor alone" not in strong
 
 
-def test_forge_loop_option_reaches_the_campaign_and_survives_resume(
-    tmp_path, monkeypatch
-):
+def test_forge_loop_option_reaches_the_campaign_and_survives_resume(tmp_path, monkeypatch):
     """The allowlist has to arrive through the real construction path.
 
     A field only the tests can set is a field production never sets, and an
@@ -696,9 +656,7 @@ def test_forge_loop_option_reaches_the_campaign_and_survives_resume(
     ).commit_new_paths == ["configs/*.json"]
 
 
-def test_campaign_configuration_refuses_a_recursive_allowlist_pattern(
-    tmp_path, monkeypatch
-):
+def test_campaign_configuration_refuses_a_recursive_allowlist_pattern(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
     args = _base_args(workspace, kernel, driver)
@@ -720,11 +678,7 @@ def test_forge_loop_offers_the_option_and_prefers_the_campaigns_copy():
     """
     from kernelforge import cli
 
-    option = next(
-        param
-        for param in cli.forge_loop.params
-        if param.name == "commit_new_paths"
-    )
+    option = next(param for param in cli.forge_loop.params if param.name == "commit_new_paths")
     assert "--commit-new-path" in option.opts
     assert option.multiple
 
@@ -782,9 +736,7 @@ def test_floor_only_coverage_is_reported_as_such_to_the_planner():
     assert "config_coverage_floor_only" not in flags["decode-t64"]
 
 
-def test_v6_campaign_config_still_resumes_with_an_empty_allowlist(
-    tmp_path, monkeypatch
-):
+def test_v6_campaign_config_still_resumes_with_an_empty_allowlist(tmp_path, monkeypatch):
     """A campaign written before the allowlist existed has to keep resuming.
 
     ``save`` guards on ``load``, so a version this loop refuses to read is a
@@ -811,9 +763,7 @@ def test_v6_campaign_config_still_resumes_with_an_empty_allowlist(
     store.save(reloaded)
 
 
-def test_unreadable_campaign_config_schema_names_what_it_accepts(
-    tmp_path, monkeypatch
-):
+def test_unreadable_campaign_config_schema_names_what_it_accepts(tmp_path, monkeypatch):
     monkeypatch.setenv("GPU_TARGET", "gfx950")
     workspace, kernel, driver = _git_workspace(tmp_path)
     resolve_campaign(**_base_args(workspace, kernel, driver))
@@ -840,9 +790,7 @@ def test_matching_refuses_a_pattern_normalization_would_have_rejected():
         matches_commit_new_paths("configs/a.json", [" "])
 
 
-def test_enumeration_failure_is_reported_instead_of_read_as_silence(
-    tmp_path, monkeypatch
-):
+def test_enumeration_failure_is_reported_instead_of_read_as_silence(tmp_path, monkeypatch):
     """A stale or empty refusal list must not read as "nothing to report"."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
@@ -860,9 +808,7 @@ def test_enumeration_failure_is_reported_instead_of_read_as_silence(
     assert "git ls-files exited 128" in rendered
 
 
-def test_discard_that_cannot_enumerate_also_refreshes_the_report(
-    tmp_path, monkeypatch
-):
+def test_discard_that_cannot_enumerate_also_refreshes_the_report(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
     (workspace / "stray.txt").write_text("from the previous iteration\n")
@@ -876,9 +822,7 @@ def test_discard_that_cannot_enumerate_also_refreshes_the_report(
     assert "could not enumerate" in loop._render_uncommittable_new_paths()
 
 
-def test_retained_allowlisted_file_reaches_the_next_implementer(
-    tmp_path, monkeypatch
-):
+def test_retained_allowlisted_file_reaches_the_next_implementer(tmp_path, monkeypatch):
     """Leaving an operator's file behind is a leak, so it is not only printed."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, commit_new_paths=["configs/*.json"])
@@ -894,9 +838,7 @@ def test_retained_allowlisted_file_reaches_the_next_implementer(
     assert "did not create" in rendered
 
 
-def test_resume_recovery_does_not_delete_an_operators_new_file(
-    tmp_path, monkeypatch
-):
+def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeypatch):
     """Resume recovery discards, and it runs before the first iteration.
 
     A snapshot taken only at the top of the loop leaves that discard with
@@ -936,9 +878,7 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(
 
     assert (workspace / "forge_experiments" / "pending_keep.json").is_file()
 
-    resumed = _campaign_loop(
-        workspace, kernel, driver, tracker, session_count=0, resume=True
-    )
+    resumed = _campaign_loop(workspace, kernel, driver, tracker, session_count=0, resume=True)
     resumed.ic = replace(resumed.ic, commit_new_paths=["configs/*.json"])
     asyncio.run(resumed.run(agent_fn=None))
 

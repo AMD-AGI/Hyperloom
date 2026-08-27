@@ -60,7 +60,7 @@ class CandidateRecord:
     # Measurement
     wall_ms: float | None = None
     mean_case_speedup: float | None = None
-    bench_detail: dict | None = None      # raw bench_wallclock dict
+    bench_detail: dict | None = None  # raw bench_wallclock dict
     snr_db: float | None = None
     vgpr: int | None = None
     pmc_diagnosis: str = ""
@@ -204,11 +204,7 @@ class CandidateArchive:
         for filename in meta["files"].values():
             if filename is None:
                 continue
-            if (
-                not isinstance(filename, str)
-                or not filename
-                or Path(filename).name != filename
-            ):
+            if not isinstance(filename, str) or not filename or Path(filename).name != filename:
                 return "incomplete", None
             candidate_path = directory / filename
             try:
@@ -227,9 +223,7 @@ class CandidateArchive:
         return meta if status == "complete" else None
 
     def _quarantine_incomplete(self, directory: Path) -> bool:
-        quarantine = self.root / (
-            f".{directory.name}.incomplete-{os.getpid()}-{time.time_ns()}"
-        )
+        quarantine = self.root / (f".{directory.name}.incomplete-{os.getpid()}-{time.time_ns()}")
         try:
             os.replace(directory, quarantine)
             fsync_directory(self.root)
@@ -315,10 +309,7 @@ class CandidateArchive:
             if meta is not None:
                 complete.append((iteration, directory, meta))
 
-        expected = [
-            self._index_entry_from_meta(meta, directory)
-            for _iteration, directory, meta in sorted(complete)
-        ]
+        expected = [self._index_entry_from_meta(meta, directory) for _iteration, directory, meta in sorted(complete)]
         try:
             current = self._read_index_file()
         except UnicodeDecodeError:
@@ -333,18 +324,12 @@ class CandidateArchive:
             preserved = [
                 entry
                 for entry in current
-                if isinstance(entry.get("iter"), int)
-                and entry["iter"] in uncertain_iterations
+                if isinstance(entry.get("iter"), int) and entry["iter"] in uncertain_iterations
             ]
         reconciled_by_iteration = {
-            entry["iter"]: entry
-            for entry in preserved + expected
-            if isinstance(entry.get("iter"), int)
+            entry["iter"]: entry for entry in preserved + expected if isinstance(entry.get("iter"), int)
         }
-        reconciled = [
-            reconciled_by_iteration[iteration]
-            for iteration in sorted(reconciled_by_iteration)
-        ]
+        reconciled = [reconciled_by_iteration[iteration] for iteration in sorted(reconciled_by_iteration)]
 
         if not scan_unavailable and not uncertain_iterations and current != expected:
             try:
@@ -355,11 +340,7 @@ class CandidateArchive:
 
     def max_iteration(self) -> int:
         """Highest iteration backed by a complete candidate directory."""
-        return max([
-            int(entry["iter"])
-            for entry in self.load_index()
-            if isinstance(entry.get("iter"), int)
-        ], default=0)
+        return max([int(entry["iter"]) for entry in self.load_index() if isinstance(entry.get("iter"), int)], default=0)
 
     def reconcile_next_iteration(self, state_next_iteration: int) -> int:
         """Return a monotonic cursor that cannot collide with archived attempts."""
@@ -412,10 +393,12 @@ class CandidateArchive:
                     return None
                 if not self._quarantine_incomplete(d):
                     return None
-            temp_dir = Path(tempfile.mkdtemp(
-                dir=str(self.root),
-                prefix=f".iter_{rec.iteration:03d}.tmp-",
-            ))
+            temp_dir = Path(
+                tempfile.mkdtemp(
+                    dir=str(self.root),
+                    prefix=f".iter_{rec.iteration:03d}.tmp-",
+                )
+            )
 
             # 1) Full kernel snapshot — self-contained, readable as-is.
             if rec.kernel_source:
@@ -548,9 +531,7 @@ class CandidateArchive:
         if self._index_cache is None:
             return
         by_iter = {
-            existing["iter"]: existing
-            for existing in self._index_cache
-            if isinstance(existing.get("iter"), int)
+            existing["iter"]: existing for existing in self._index_cache if isinstance(existing.get("iter"), int)
         }
         if isinstance(entry.get("iter"), int):
             by_iter[entry["iter"]] = entry
@@ -580,19 +561,18 @@ class CandidateArchive:
         try:
             return (self._iter_dir(iteration) / filename).read_text()
         except Exception as e:
-            log.debug("archive: failed to read %s for iter %s: %s",
-                      filename, iteration, e)
+            log.debug("archive: failed to read %s for iter %s: %s", filename, iteration, e)
             return ""
 
     # Short, prompt-friendly label per decision.
     _OUTCOME_LABEL = {
         "KEEP": "KEEP*",
-        "REVERT_PERF": "slow",         # correct but not faster than best
+        "REVERT_PERF": "slow",  # correct but not faster than best
         "REVERT_VALIDATION": "wrong",  # failed correctness
         "REVERT_VALIDATION_TIMEOUT": "validation-timeout",
         "REVERT_VALIDATION_ERROR": "validation-error",
         "BUILD_FAILED": "build-fail",
-        "CRASH": "crash",              # raised an exception during the iteration
+        "CRASH": "crash",  # raised an exception during the iteration
     }
 
     @classmethod
@@ -631,9 +611,7 @@ class CandidateArchive:
         """
         keeps = [e for e in index if e.get("decision") == "KEEP"]
         near = sorted(
-            [e for e in index
-             if e.get("decision") == "REVERT_PERF"
-             and e.get("mean_case_speedup") is not None],
+            [e for e in index if e.get("decision") == "REVERT_PERF" and e.get("mean_case_speedup") is not None],
             key=lambda e: e["mean_case_speedup"],
             reverse=True,
         )[:near_miss_count]
@@ -696,8 +674,7 @@ class CandidateArchive:
         kept_speedups = [
             entry["mean_case_speedup"]
             for entry in index
-            if entry.get("decision") == "KEEP"
-            and entry.get("mean_case_speedup") is not None
+            if entry.get("decision") == "KEEP" and entry.get("mean_case_speedup") is not None
         ]
         best = max(kept_speedups) if kept_speedups else 1.0
 
@@ -718,23 +695,22 @@ class CandidateArchive:
         if baseline is not None:
             anchor += f", baseline={self._fmt_num(baseline, '.4f')} ms"
         out.append(f"### Trajectory ({len(index)} attempts;{anchor})")
-        out.append("legend: KEEP*=new best · slow=correct-but-not-faster · "
-                   "wrong=failed correctness · build-fail=didn't compile · "
-                   "crash=raised an exception")
+        out.append(
+            "legend: KEEP*=new best · slow=correct-but-not-faster · "
+            "wrong=failed correctness · build-fail=didn't compile · "
+            "crash=raised an exception"
+        )
         rows, capped = self._table_entries(index, max_table_rows)
-        out.append(f"{'iter':>4}  {'outcome':<10} {'raw_ms':>9} {'mean×':>7} "
-                   f"{'Δvs_best':>8}  plan")
+        out.append(f"{'iter':>4}  {'outcome':<10} {'raw_ms':>9} {'mean×':>7} {'Δvs_best':>8}  plan")
         if capped:
             out.append("  (older rows omitted — showing KEPT versions + most recent)")
         out.extend(self._row(e) for e in rows)
 
         # Layer 2 — curated full diffs.
-        selected = self._select_for_diffs(
-            index, max_full_diffs, near_miss_count, recent_count)
+        selected = self._select_for_diffs(index, max_full_diffs, near_miss_count, recent_count)
         if selected:
             out.append("")
-            out.append("### Notable prior solutions (full change diff vs the state "
-                       "each built on)")
+            out.append("### Notable prior solutions (full change diff vs the state each built on)")
             for e in selected:
                 it = e.get("iter", "?")
                 dec = self._label(e.get("decision", ""))
@@ -743,19 +719,19 @@ class CandidateArchive:
                 dtxt = self._fmt_num(e.get("delta_vs_best_pct"), "+.1f", "%")
                 plan = (e.get("plan") or "").replace("\n", " ").strip()[:80]
                 out.append("")
-                out.append(f"#### iter {it} — {dec} — wall={wtxt} ms, {sptxt}, "
-                           f"Δvs_best={dtxt} — \"{plan}\"")
+                out.append(f'#### iter {it} — {dec} — wall={wtxt} ms, {sptxt}, Δvs_best={dtxt} — "{plan}"')
                 diff = self.read_candidate_file(it, "change.diff")
                 if not diff.strip():
-                    out.append(f"(diff unavailable — full kernel at "
-                               f"iter_{it:03d}/kernel.py)")
+                    out.append(f"(diff unavailable — full kernel at iter_{it:03d}/kernel.py)")
                     continue
                 dlines = diff.splitlines()
                 trunc = ""
                 if len(dlines) > max_diff_lines:
                     dlines = dlines[:max_diff_lines]
-                    trunc = (f"\n... (truncated to {max_diff_lines} lines — Read "
-                             f"iter_{it:03d}/kernel.py for the full kernel)")
+                    trunc = (
+                        f"\n... (truncated to {max_diff_lines} lines — Read "
+                        f"iter_{it:03d}/kernel.py for the full kernel)"
+                    )
                 out.append("```diff")
                 out.append("\n".join(dlines) + trunc)
                 out.append("```")

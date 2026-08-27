@@ -15,6 +15,7 @@ from kernelforge.loop.experience import (
 
 # ── _extract_signature ────────────────────────────────────────────────────────
 
+
 def test_extract_signature_prefers_marker_line():
     text = "some prelude\nRuntimeError: invalid cast!\ntrailing noise"
     assert _extract_signature(text) == "RuntimeError: invalid cast!"
@@ -37,10 +38,10 @@ def test_extract_signature_truncates_to_180():
 
 # ── constraint distillation ───────────────────────────────────────────────────
 
+
 def test_distill_fastmath_bool(tmp_path):
     led = ExperienceLedger(str(tmp_path))
-    led.record_iteration(1, outcome="build-fail",
-                         error_text="got #arith.fastmath<True> attribute")
+    led.record_iteration(1, outcome="build-fail", error_text="got #arith.fastmath<True> attribute")
     assert any("FastMathFlags" in c for c in led.constraints)
 
 
@@ -74,10 +75,12 @@ def test_add_constraint_ignores_blank(tmp_path):
 
 # ── recording + rendering ──────────────────────────────────────────────────────
 
+
 def test_record_populates_entry_fields(tmp_path):
     led = ExperienceLedger(str(tmp_path))
     led.record_iteration(
-        3, outcome="REVERT_PERF",
+        3,
+        outcome="REVERT_PERF",
         diff_summary="  a.py | 2 +-  ",
         error_text="prelude\nAssertionError: not faster\n",
     )
@@ -90,9 +93,7 @@ def test_record_populates_entry_fields(tmp_path):
 
 def test_render_for_prompt_includes_constraints_and_recent(tmp_path):
     led = ExperienceLedger(str(tmp_path))
-    led.record_iteration(1, outcome="build-fail",
-                         error_text="invalid cast",
-                         diff_summary="k.py | 1 +")
+    led.record_iteration(1, outcome="build-fail", error_text="invalid cast", diff_summary="k.py | 1 +")
     rendered = led.render_for_prompt()
     assert "## Observed toolchain constraints" in rendered
     assert "## Recent iterations" in rendered
@@ -134,6 +135,7 @@ def test_diff_summary_capped_to_eight_lines(tmp_path):
 
 # ── flush ──────────────────────────────────────────────────────────────────────
 
+
 def test_flush_writes_file(tmp_path):
     led = ExperienceLedger(str(tmp_path))
     led.record_iteration(1, outcome="KEEP")
@@ -144,6 +146,7 @@ def test_flush_writes_file(tmp_path):
 
 
 # ── the shared distillation core ──────────────────────────────────────────────
+
 
 def test_both_ledgers_keep_their_own_truncation_and_cap():
     """One mechanism, two calibrations: the wording and limits stay per-ledger."""

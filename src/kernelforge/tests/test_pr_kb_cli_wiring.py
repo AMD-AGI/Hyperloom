@@ -66,21 +66,15 @@ def test_switch_is_independent_of_the_experience_kb_flag():
 def test_pr_context_is_wired_only_to_the_implementer():
     """Keep external PR text out of measured Analysis and planning evidence."""
     source = inspect.getsource(forge_loop.callback)
-    implementer = source[
-        source.index("agent_fn = make_agent_fn("):
-        source.index("effective_implementer =")
-    ]
-    analysis = source[
-        source.index("analysis_service = make_analysis_agent_service("):
-        source.index("analysis_mode =")
-    ]
+    implementer = source[source.index("agent_fn = make_agent_fn(") : source.index("effective_implementer =")]
+    analysis = source[source.index("analysis_service = make_analysis_agent_service(") : source.index("analysis_mode =")]
     orchestration = source[
-        source.index("orchestration_service = make_orchestration_service("):
-        source.index("supervisor_fn = make_supervisor_fn(")
+        source.index("orchestration_service = make_orchestration_service(") : source.index(
+            "supervisor_fn = make_supervisor_fn("
+        )
     ]
     supervisor = source[
-        source.index("supervisor_fn = make_supervisor_fn("):
-        source.index("loop_runner = IterationLoop(")
+        source.index("supervisor_fn = make_supervisor_fn(") : source.index("loop_runner = IterationLoop(")
     ]
 
     assert "pre_task_context=pr_task_context" in implementer
@@ -101,8 +95,7 @@ def test_help_text_mentions_the_default_being_off():
 def test_remote_url_is_read_from_the_workspace(tmp_path):
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(
-        ["git", "-C", str(tmp_path), "remote", "add", "origin",
-         "git@github.com:ROCm/aiter.git"],
+        ["git", "-C", str(tmp_path), "remote", "add", "origin", "git@github.com:ROCm/aiter.git"],
         check=True,
     )
 
@@ -129,9 +122,7 @@ def test_remote_lookup_failure_is_contained(monkeypatch, tmp_path):
 
 
 def test_refresh_event_carries_its_counters():
-    fields = _pr_refs_event_fields(
-        "", {"candidates": 5, "surfaced": 3, "injected_entries": 3, "http_calls": 8}
-    )
+    fields = _pr_refs_event_fields("", {"candidates": 5, "surfaced": 3, "injected_entries": 3, "http_calls": 8})
 
     assert fields["position"] == "A"
     assert fields["reason"] == "ok"
@@ -177,15 +168,18 @@ def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pr_monitor_refs, "collect_references", full_disk)
 
-    assert _collect_pr_references(
-        workspace_dir=str(tmp_path),
-        fellow="aiter",
-        git_remote="",
-        source_files=(),
-        operator_name="moe",
-        target_functions=(),
-        budget_sec=1.0,
-    ) is None
+    assert (
+        _collect_pr_references(
+            workspace_dir=str(tmp_path),
+            fellow="aiter",
+            git_remote="",
+            source_files=(),
+            operator_name="moe",
+            target_functions=(),
+            budget_sec=1.0,
+        )
+        is None
+    )
 
 
 def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
@@ -197,15 +191,18 @@ def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
 
     monkeypatch.setattr(pr_monitor_refs, "collect_references", unreachable)
 
-    assert _collect_pr_references(
-        workspace_dir=str(tmp_path),
-        fellow="aiter",
-        git_remote="",
-        source_files=(),
-        operator_name="moe",
-        target_functions=(),
-        budget_sec=1.0,
-    ) is None
+    assert (
+        _collect_pr_references(
+            workspace_dir=str(tmp_path),
+            fellow="aiter",
+            git_remote="",
+            source_files=(),
+            operator_name="moe",
+            target_functions=(),
+            budget_sec=1.0,
+        )
+        is None
+    )
 
 
 def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):

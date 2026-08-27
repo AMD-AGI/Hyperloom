@@ -6,6 +6,7 @@ budget without writing a byte, then reported "FAILED after 2 attempt(s)" — whi
 reads like the agent tried twice and failed, not like the second try never had a
 chance. A first attempt still always runs, however little time is left.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -35,18 +36,14 @@ def _patch_git(monkeypatch):
 def _prepare(workspace, driver, tmp_path, *, deadline_sec):
     return asyncio.run(
         task_preparer.prepare_task(
-            config=SimpleNamespace(
-                model="test-model", experiments_dir=str(tmp_path / "experiments")
-            ),
+            config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
             workspace_dir=str(workspace),
             kernel=str(workspace / "kernel.py"),
             driver=str(driver),
             program_md="# Task",
             target_functions=[],
             source_files=[str(workspace / "kernel.py")],
-            preflight=task_preparer.PreflightResult(
-                ok=False, correctness_ok=False, bench_ok=False, reasons=["nope"]
-            ),
+            preflight=task_preparer.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=["nope"]),
             deadline_sec=deadline_sec,
         )
     )
@@ -67,9 +64,7 @@ def _count_attempts(monkeypatch, *, burn_sec):
         raise asyncio.TimeoutError
 
     async def preflight(*_a, **_k):
-        return task_preparer.PreflightResult(
-            ok=False, correctness_ok=False, bench_ok=False, reasons=["still bad"]
-        )
+        return task_preparer.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=["still bad"])
 
     monkeypatch.setattr(task_preparer.time, "monotonic", fake_monotonic)
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", agent)

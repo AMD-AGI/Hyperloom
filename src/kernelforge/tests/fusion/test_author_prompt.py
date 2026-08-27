@@ -25,11 +25,11 @@ def _recipe():
 def test_prompt_contains_recipe_fields():
     p = build_author_prompt(_recipe(), framework="sglang", ab_hint="run the A/B")
     assert "residual_add_rmsnorm" in p
-    assert "LFM2_FUSED_RESIDUAL" in p          # env-gated by the recipe flag
+    assert "LFM2_FUSED_RESIDUAL" in p  # env-gated by the recipe flag
     assert "y, residual = norm(x, residual)" in p  # fusion math
-    assert "+ residual" in p and "RMSNorm(" in p   # source anchors
-    assert "Import the framework RMSNorm" in p      # eager reference (no re-derive)
-    assert "run the A/B" in p                       # validation hint
+    assert "+ residual" in p and "RMSNorm(" in p  # source anchors
+    assert "Import the framework RMSNorm" in p  # eager reference (no re-derive)
+    assert "run the A/B" in p  # validation hint
 
 
 def test_rocm_guard_present_when_native():

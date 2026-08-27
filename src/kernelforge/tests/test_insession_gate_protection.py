@@ -69,12 +69,8 @@ def test_non_target_implementation_edits_are_counted(tmp_path: Path):
 def test_bash_allows_readonly_diagnostics_with_dev_null(tmp_path: Path):
     gate, _workspace = _gate(tmp_path)
 
-    assert not gate._bash_may_modify_protected(
-        'find / -name "*.hsaco" -newermt "-20 min" 2>/dev/null | head'
-    )
-    assert not gate._bash_may_modify_protected(
-        'grep -R "task_runner.py" aiter/csrc 2>/dev/null | head'
-    )
+    assert not gate._bash_may_modify_protected('find / -name "*.hsaco" -newermt "-20 min" 2>/dev/null | head')
+    assert not gate._bash_may_modify_protected('grep -R "task_runner.py" aiter/csrc 2>/dev/null | head')
 
 
 def test_bash_allows_tmp_outputs_but_blocks_protected_writes(tmp_path: Path):
@@ -85,9 +81,7 @@ def test_bash_allows_tmp_outputs_but_blocks_protected_writes(tmp_path: Path):
     assert gate._bash_may_modify_protected("echo hacked 2>>forge_driver.py")
     assert gate._bash_may_modify_protected("echo hacked &>> forge_driver.py")
     assert gate._bash_may_modify_protected("sed -i s/pass/fail/ scripts/task_runner.py")
-    assert gate._bash_may_modify_protected(
-        f"python - <<'PY'\nopen('{workspace / 'config.yaml'}', 'w').write('x')\nPY"
-    )
+    assert gate._bash_may_modify_protected(f"python - <<'PY'\nopen('{workspace / 'config.yaml'}', 'w').write('x')\nPY")
 
 
 def test_bash_blocks_a_write_hidden_behind_a_wrapper_option(tmp_path: Path):
@@ -104,12 +98,8 @@ def test_bash_blocks_a_write_hidden_behind_a_wrapper_option(tmp_path: Path):
 
     assert gate._bash_may_modify_protected("env FOO=bar tee forge_driver.py")
     assert gate._bash_may_modify_protected("env -u FOO tee forge_driver.py")
-    assert gate._bash_may_modify_protected(
-        "timeout --signal=KILL 60 tee forge_driver.py"
-    )
-    assert gate._bash_may_modify_protected(
-        "env FOO=1 timeout 60 sudo tee forge_driver.py"
-    )
+    assert gate._bash_may_modify_protected("timeout --signal=KILL 60 tee forge_driver.py")
+    assert gate._bash_may_modify_protected("env FOO=1 timeout 60 sudo tee forge_driver.py")
 
 
 def test_bash_still_allows_running_the_driver_under_a_wrapper(tmp_path: Path):
@@ -120,9 +110,7 @@ def test_bash_still_allows_running_the_driver_under_a_wrapper(tmp_path: Path):
     """
     gate, _workspace = _gate(tmp_path)
 
-    assert not gate._bash_may_modify_protected(
-        "timeout 300 python3 forge_driver.py --warmup 3 --bench-mode"
-    )
+    assert not gate._bash_may_modify_protected("timeout 300 python3 forge_driver.py --warmup 3 --bench-mode")
     assert not gate._bash_may_modify_protected("env FOO=1 python3 forge_driver.py")
     assert not gate._bash_may_modify_protected("./configure --prefix=/usr")
 
@@ -163,7 +151,7 @@ def test_bash_blocks_protected_heredoc_write_with_resolved_variable(
 ):
     gate, workspace = _gate(tmp_path)
     command = f"""python3 - <<'PY'
-p = {str(workspace / 'forge_driver.py')!r}
+p = {str(workspace / "forge_driver.py")!r}
 open(p, 'w').write('hacked')
 PY
 """
@@ -190,7 +178,7 @@ def test_safe_heredoc_does_not_allow_a_later_python_payload(tmp_path: Path):
     command = f"""python3 - <<'PY'
 open('scratch.txt', 'w').write('safe')
 PY
-python3 -c "open({str(workspace / 'forge_driver.py')!r}, mode='wb').write(b'x')"
+python3 -c "open({str(workspace / "forge_driver.py")!r}, mode='wb').write(b'x')"
 """
 
     assert gate._bash_may_modify_protected(command)
@@ -213,8 +201,7 @@ def test_python_c_supports_path_open_mode_variants(tmp_path: Path):
     driver = workspace / "forge_driver.py"
 
     assert gate._bash_may_modify_protected(
-        f"python -c \"from pathlib import Path; "
-        f"Path({str(driver)!r}).open(mode='a+').write('x')\""
+        f"python -c \"from pathlib import Path; Path({str(driver)!r}).open(mode='a+').write('x')\""
     )
 
 
@@ -248,14 +235,8 @@ def test_python_rename_and_replace_apis_protect_both_paths(tmp_path: Path):
     commands = [
         f"python -c \"import os; os.rename({str(driver)!r}, 'saved.py')\"",
         f"python -c \"import os; os.replace('scratch.py', {str(driver)!r})\"",
-        (
-            "python -c \"from pathlib import Path; "
-            f"Path({str(driver)!r}).rename('saved.py')\""
-        ),
-        (
-            "python -c \"from pathlib import Path; "
-            f"Path('scratch.py').replace({str(driver)!r})\""
-        ),
+        (f"python -c \"from pathlib import Path; Path({str(driver)!r}).rename('saved.py')\""),
+        (f"python -c \"from pathlib import Path; Path('scratch.py').replace({str(driver)!r})\""),
     ]
 
     assert all(gate._bash_may_modify_protected(command) for command in commands)

@@ -68,9 +68,7 @@ def _supports(m: int, n: int, k: int, split_k: int, device: str = "cuda") -> boo
     return True
 
 
-def max_supported_splitk(
-    m: int, n: int, k: int, ceiling: int = 6, device: str = "cuda"
-) -> int | None:
+def max_supported_splitk(m: int, n: int, k: int, ceiling: int = 6, device: str = "cuda") -> int | None:
     """Max splitK in ``0..ceiling`` the production kernel accepts for (m,n,k).
 
     Returns ``None`` when the splitK=0 control fails (no GPU / aiter not

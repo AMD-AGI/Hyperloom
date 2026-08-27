@@ -184,9 +184,7 @@ def test_factory_uses_same_runtime_for_independent_critic_backend(
     assert service._plan_critic is not None
     assert service._plan_critic.backend is backends[1]
     assert service._plan_critic.backend is not service._agent.backend
-    assert service._plan_critic.backend.runtime is (
-        service._agent.backend.runtime
-    )
+    assert service._plan_critic.backend.runtime is (service._agent.backend.runtime)
     assert service._plan_critic.max_turns == 100
     assert service._plan_critic.timeout_sec == 600
 
@@ -285,11 +283,7 @@ class _QueuedBackend:
     async def run(self, spec, usage=None) -> AgentRunResult:
         self.specs.append(spec)
         result = self.results.pop(0)
-        return (
-            result
-            if isinstance(result, AgentRunResult)
-            else AgentRunResult(text=result)
-        )
+        return result if isinstance(result, AgentRunResult) else AgentRunResult(text=result)
 
 
 class _ResumableQueuedBackend(_QueuedBackend):
@@ -311,19 +305,13 @@ class _ResumableQueuedBackend(_QueuedBackend):
     ) -> AgentRunResult:
         self.resumes.append((spec, session_id, feedback))
         result = self.results.pop(0)
-        return (
-            result
-            if isinstance(result, AgentRunResult)
-            else AgentRunResult(text=result, session_id=session_id)
-        )
+        return result if isinstance(result, AgentRunResult) else AgentRunResult(text=result, session_id=session_id)
 
 
 @pytest.mark.asyncio
 async def test_dispatch_framework_binds_real_evidence_paths() -> None:
     raw = json.loads(_dispatch_payload())
-    raw["assignments"][0]["evidence_refs"][0]["path"] = (
-        "analysis/abc123/cases/case-a/analysis.md"
-    )
+    raw["assignments"][0]["evidence_refs"][0]["path"] = "analysis/abc123/cases/case-a/analysis.md"
     backend = _StaticBackend(json.dumps(raw))
     agent = OrchestrationAgent(
         backend=backend,
@@ -335,19 +323,10 @@ async def test_dispatch_framework_binds_real_evidence_paths() -> None:
     plan = await agent.plan_dispatch(_context(), _definitions())
 
     assert plan.assignments[0].role_id == "memory"
-    evidence_paths = {
-        reference.path
-        for reference in plan.assignments[0].evidence_refs
-    }
-    assert (
-        "analysis/abc123/cases/case-a/analysis.md"
-        not in evidence_paths
-    )
+    evidence_paths = {reference.path for reference in plan.assignments[0].evidence_refs}
+    assert "analysis/abc123/cases/case-a/analysis.md" not in evidence_paths
     assert "case:case-a" in evidence_paths
-    assert (
-        "analysis/abc123/profiles/case-a/summary.json"
-        in evidence_paths
-    )
+    assert "analysis/abc123/profiles/case-a/summary.json" in evidence_paths
 
 
 @pytest.mark.asyncio
@@ -414,9 +393,7 @@ def test_the_deadline_is_stated_before_the_probe_section_that_relies_on_it() -> 
         probe_setup=setup,
     )
 
-    assert system_prompt.index("Time limit") < system_prompt.index(
-        "Bounded measurement"
-    )
+    assert system_prompt.index("Time limit") < system_prompt.index("Bounded measurement")
 
 
 def test_specialist_prompt_is_free_form_read_only_and_scoped() -> None:
@@ -435,10 +412,7 @@ def test_specialist_prompt_is_free_form_read_only_and_scoped() -> None:
 
 def test_specialist_prompt_receives_stale_analysis_paths_and_commits() -> None:
     root = "/workspace/forge_experiments/analysis/abc123/generation-001"
-    diff = (
-        "/workspace/forge_experiments/analysis/deltas/"
-        "abc123_to_def456.patch"
-    )
+    diff = "/workspace/forge_experiments/analysis/deltas/abc123_to_def456.patch"
     context = replace(
         _context(),
         analysis_commit="def456",
@@ -476,10 +450,7 @@ def test_specialist_prompt_receives_stale_analysis_paths_and_commits() -> None:
     )
     payload = json.loads(user_prompt.split("\n\n", 1)[1])
     scoped = payload["context"]
-    paths = {
-        reference["path"]
-        for reference in scoped["evidence_refs"]
-    }
+    paths = {reference["path"] for reference in scoped["evidence_refs"]}
 
     assert scoped["canonical_commit"] == "def456"
     assert scoped["analysis_evidence"]["commit"] == "abc123"
@@ -536,9 +507,7 @@ async def test_specialist_converts_api_outage_to_typed_backend_failure() -> None
 async def test_specialist_converts_provider_exception_to_backend_failure() -> None:
     specialist = SpecialistAgent(
         definition=_definitions()["memory"],
-        backend=_StaticBackend(
-            error=AgentProviderUnavailableError("provider unavailable")
-        ),
+        backend=_StaticBackend(error=AgentProviderUnavailableError("provider unavailable")),
         timeout_sec=1,
         max_turns=2,
     )
@@ -646,9 +615,7 @@ async def test_dispatch_repairs_invalid_structured_response() -> None:
 
     assert plan.assignments[0].role_id == "memory"
     assert len(backend.specs) == 2
-    assert agent.structured_output_diagnostics["dispatch"][
-        "normalization_notes"
-    ]
+    assert agent.structured_output_diagnostics["dispatch"]["normalization_notes"]
 
 
 @pytest.mark.asyncio
@@ -677,9 +644,7 @@ async def test_dispatch_api_outage_propagates_typed_infrastructure_failure() -> 
 @pytest.mark.asyncio
 async def test_dispatch_provider_failure_is_typed_infrastructure() -> None:
     agent = OrchestrationAgent(
-        backend=_StaticBackend(
-            error=AgentProviderUnavailableError("provider unavailable")
-        ),
+        backend=_StaticBackend(error=AgentProviderUnavailableError("provider unavailable")),
         timeout_sec=1,
         max_turns=2,
         min_assignments=1,
@@ -709,15 +674,8 @@ async def test_diversify_dispatch_is_completed_by_framework() -> None:
     plan = await agent.plan_dispatch(context, _definitions())
 
     assert len(plan.assignments) == len(_definitions())
-    assert {
-        case_id
-        for assignment in plan.assignments
-        for case_id in assignment.target_case_ids
-    } == context.case_ids
-    assert any(
-        "added default role" in note
-        for note in plan.normalization_notes
-    )
+    assert {case_id for assignment in plan.assignments for case_id in assignment.target_case_ids} == context.case_ids
+    assert any("added default role" in note for note in plan.normalization_notes)
 
 
 @pytest.mark.asyncio
@@ -797,14 +755,7 @@ def _coverage(roles: list[str]) -> dict:
 
 def _partition(*grounds: str) -> str:
     """The round partition a lane round now buys before it synthesizes."""
-    return json.dumps(
-        {
-            "lanes": [
-                {"ground": ground, "reason": "one session's worth"}
-                for ground in grounds
-            ]
-        }
-    )
+    return json.dumps({"lanes": [{"ground": ground, "reason": "one session's worth"} for ground in grounds]})
 
 
 _GROUND_A = "chunk_intra.py: the MFMA issue schedule"
@@ -901,9 +852,7 @@ async def test_the_partition_reads_every_analysis_before_it_divides() -> None:
     )
 
     partition = json.loads(backend.specs[0].user_prompt)
-    assert [
-        item["role_id"] for item in partition["specialist_analyses"]
-    ] == ["compute", "memory"]
+    assert [item["role_id"] for item in partition["specialist_analyses"]] == ["compute", "memory"]
     assert agent.structured_output_diagnostics["partition"]["status"] == "planned"
 
 
@@ -915,9 +864,7 @@ async def test_a_replace_verdict_spends_one_lane_on_the_challenge() -> None:
     more regions of the same implementation would spend every lane refining the
     thing the critic just said to stop refining.
     """
-    backend = _PerCallBackend(
-        [_partition("validate the CK GEMM path", _GROUND_B), "# Lane A", "# Lane B"]
-    )
+    backend = _PerCallBackend([_partition("validate the CK GEMM path", _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -964,9 +911,7 @@ async def test_a_round_nobody_challenged_is_divided_as_usual() -> None:
     )
 
     assert "Give exactly one lane" not in backend.specs[0].system_prompt
-    assert agent.structured_output_diagnostics["partition"][
-        "challenger_requested"
-    ] is False
+    assert agent.structured_output_diagnostics["partition"]["challenger_requested"] is False
 
 
 @pytest.mark.asyncio
@@ -1027,10 +972,7 @@ async def test_the_partition_is_told_a_cross_cutting_move_is_one_lane() -> None:
     assert "never a\nnumber of pieces to cut one direction into" in partition
 
 
-_JOINT_GROUND = (
-    "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/"
-    "num_stages the launch passes with it"
-)
+_JOINT_GROUND = "chunk_intra.py: the BLOCK_H tile and the num_warps/waves_per_eu/num_stages the launch passes with it"
 _CROSS_CUTTING = "fuse the post kernel into the GEMM, deleting one dispatch"
 
 
@@ -1056,9 +998,7 @@ async def test_the_partition_keeps_a_launch_config_with_the_body_it_serves() -> 
     tile read 2.80 ms at the narrow tile's config and 1.28 ms at its own, so
     the split does not buy two attributable answers, it buys one wrong one.
     """
-    backend = _PerCallBackend(
-        [_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"]
-    )
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -1143,9 +1083,7 @@ async def test_a_joint_lane_with_no_fallback_is_said_out_loud(caplog) -> None:
     """
     backend = _PerCallBackend(
         [
-            _partition_lanes(
-                [_lane(_JOINT_GROUND, joint=True), _lane(_GROUND_B)]
-            ),
+            _partition_lanes([_lane(_JOINT_GROUND, joint=True), _lane(_GROUND_B)]),
             "# Lane A",
             "# Lane B",
         ]
@@ -1208,9 +1146,7 @@ async def test_the_round_records_which_lane_owns_its_widest_move() -> None:
     )
 
     assert "Name the largest move" in backend.specs[0].system_prompt
-    assert "largest cross-cutting move" in json.loads(
-        backend.specs[0].user_prompt
-    )["task"]
+    assert "largest cross-cutting move" in json.loads(backend.specs[0].user_prompt)["task"]
     move = agent.structured_output_diagnostics["partition"]["cross_cutting_move"]
     assert move == {
         "status": "assigned",
@@ -1264,9 +1200,7 @@ async def test_an_unowned_widest_move_is_in_the_round_s_output(caplog) -> None:
         "lane_id": 0,
         "unassigned_reason": "",
     }
-    assert any(
-        "no reason was given" in note for note in diagnostics["notes"]
-    )
+    assert any("no reason was given" in note for note in diagnostics["notes"])
     assert _CROSS_CUTTING in caplog.text
 
 
@@ -1309,10 +1243,7 @@ async def test_a_widest_move_naming_a_lane_the_round_lacks_is_unowned(
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["planned"] == 2
     assert diagnostics["cross_cutting_move"]["status"] == "unassigned"
-    assert any(
-        "which this partition of 2 lane(s) does not have" in note
-        for note in diagnostics["notes"]
-    )
+    assert any("which this partition of 2 lane(s) does not have" in note for note in diagnostics["notes"])
     assert "gave no lane its largest cross-cutting move" in caplog.text
 
 
@@ -1324,9 +1255,7 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
     the partition looked. Collapsing them would let a partition that skipped
     the question read exactly like one that answered it.
     """
-    backend = _PerCallBackend(
-        [_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"]
-    )
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -1345,10 +1274,7 @@ async def test_a_partition_that_named_no_widest_move_reports_that(caplog) -> Non
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["cross_cutting_move"] == {"status": "missing"}
-    assert any(
-        "named no largest cross-cutting move" in note
-        for note in diagnostics["notes"]
-    )
+    assert any("named no largest cross-cutting move" in note for note in diagnostics["notes"])
     assert "the partition named none" in caplog.text
 
 
@@ -1510,9 +1436,7 @@ async def test_a_move_naming_a_lane_that_is_not_a_number_is_unowned() -> None:
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["cross_cutting_move"]["status"] == "unassigned"
-    assert any(
-        "not a lane number" in note for note in diagnostics["notes"]
-    )
+    assert any("not a lane number" in note for note in diagnostics["notes"])
 
 
 @pytest.mark.asyncio
@@ -1526,9 +1450,7 @@ async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> Non
     """
     backend = _PerCallBackend(
         [
-            _partition_lanes(
-                [_lane(_JOINT_GROUND, joint="partial"), _lane(_GROUND_B)]
-            ),
+            _partition_lanes([_lane(_JOINT_GROUND, joint="partial"), _lane(_GROUND_B)]),
             "# Lane A",
             "# Lane B",
         ]
@@ -1550,10 +1472,7 @@ async def test_an_unreadable_joint_answer_is_recorded_not_just_narrowed() -> Non
 
     diagnostics = agent.structured_output_diagnostics["partition"]
     assert diagnostics["joint"] == []
-    assert any(
-        "'partial', which is not a boolean" in note
-        for note in diagnostics["notes"]
-    )
+    assert any("'partial', which is not a boolean" in note for note in diagnostics["notes"])
 
 
 @pytest.mark.asyncio
@@ -1615,9 +1534,7 @@ def test_an_answer_that_is_not_a_boolean_is_read_as_the_note_promises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() -> (
-    None
-):
+async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() -> None:
     """The lane list and the note are read by the same operator.
 
     A truthy non-boolean filed the lane under the round's joint lanes and under
@@ -1651,9 +1568,7 @@ async def test_a_lane_that_answered_joint_with_a_number_keeps_narrow_ground() ->
     assert diagnostics["joint"] == []
     assert diagnostics["grounds"][0]["joint"] is False
     assert json.loads(backend.specs[1].user_prompt)["lane"]["joint"] is False
-    assert any(
-        "1, which is not a boolean" in note for note in diagnostics["notes"]
-    )
+    assert any("1, which is not a boolean" in note for note in diagnostics["notes"])
 
 
 @pytest.mark.asyncio
@@ -1666,9 +1581,7 @@ async def test_a_launch_site_two_bodies_share_is_owned_by_one_lane() -> None:
     and stacks its candidates on -- is gone. Stacking then drops the second
     patch, which is one Implementer session bought and thrown away.
     """
-    backend = _PerCallBackend(
-        [_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"]
-    )
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "# Lane A", "# Lane B"])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -1899,9 +1812,7 @@ async def test_one_lost_lane_does_not_cost_the_round_its_healthy_plans() -> None
     outage, so asking for N lanes would multiply the chance of tripping the
     orchestration circuit breaker by N.
     """
-    backend = _OneLaneFailsBackend(
-        failing_ground=_GROUND_A, answer="# Lane B\nStage via LDS."
-    )
+    backend = _OneLaneFailsBackend(failing_ground=_GROUND_A, answer="# Lane B\nStage via LDS.")
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -1946,9 +1857,7 @@ async def test_a_round_that_loses_every_lane_is_still_a_planning_outage() -> Non
 @pytest.mark.asyncio
 async def test_a_lane_that_answered_with_nothing_is_reported(caplog) -> None:
     """A round narrowed by an empty answer must not look like a narrower round."""
-    backend = _PerCallBackend(
-        [_partition(_GROUND_A, _GROUND_B), "   ", "# Lane B\nStage via LDS."]
-    )
+    backend = _PerCallBackend([_partition(_GROUND_A, _GROUND_B), "   ", "# Lane B\nStage via LDS."])
     agent = OrchestrationAgent(backend=backend, timeout_sec=1, max_turns=2)
     outcomes = (
         await _outcome("compute", "Instruction issue is the limit."),
@@ -2056,16 +1965,12 @@ async def test_orchestration_service_dispatches_and_synthesizes() -> None:
     result = await service.run(_context())
 
     assert result.optimization_plan == plan_markdown
-    assert result.specialist_outcomes[0].content == (
-        "# Analysis\nVector loads are feasible."
-    )
+    assert result.specialist_outcomes[0].content == ("# Analysis\nVector loads are feasible.")
     assert len(orchestration_backend.specs) == 2
 
 
 @pytest.mark.asyncio
-async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(
-    tmp_path, monkeypatch
-) -> None:
+async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(tmp_path, monkeypatch) -> None:
     """The round's teardown finding has to leave the analysis phase.
 
     Reaping the probe tree answers nothing on its own: what a probe left on the
@@ -2083,9 +1988,7 @@ async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(
         )
 
     monkeypatch.setattr(specialists_module, "reap_processes_under", _leaked)
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), "# Optimization plan\nUse vector loads."]
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."])
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -2100,9 +2003,7 @@ async def test_a_leaked_probe_is_reported_to_the_loop_that_must_refuse(
                     backend=_StaticBackend("Memory analysis"),
                     timeout_sec=1,
                     max_turns=2,
-                    probe=SpecialistProbeConfig(
-                        scratch_root=str(tmp_path / "probe")
-                    ),
+                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
                 )
             },
             max_parallel=1,
@@ -2129,9 +2030,7 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(specialists_module, "reap_processes_under", _clean)
     service = OrchestrationService(
         agent=OrchestrationAgent(
-            backend=_QueuedBackend(
-                [_dispatch_payload(), "# Optimization plan\nUse vector loads."]
-            ),
+            backend=_QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."]),
             timeout_sec=1,
             max_turns=2,
             min_assignments=1,
@@ -2143,9 +2042,7 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
                     backend=_StaticBackend("Memory analysis"),
                     timeout_sec=1,
                     max_turns=2,
-                    probe=SpecialistProbeConfig(
-                        scratch_root=str(tmp_path / "probe")
-                    ),
+                    probe=SpecialistProbeConfig(scratch_root=str(tmp_path / "probe")),
                 )
             },
             max_parallel=1,
@@ -2160,9 +2057,7 @@ async def test_a_clean_probe_round_reports_no_hazard(tmp_path, monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_single_lane_without_critic_does_not_publish_a_draft() -> None:
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), "# Optimization plan\nUse vector loads."]
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."])
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -2194,15 +2089,9 @@ async def test_single_lane_without_critic_does_not_publish_a_draft() -> None:
 @pytest.mark.asyncio
 async def test_plan_critic_accepts_draft_without_revision() -> None:
     plan_markdown = "# Optimization plan\nImplement vector loads."
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), plan_markdown]
-    )
-    specialist_backend = _StaticBackend(
-        "# Analysis\nVector loads are feasible."
-    )
-    critic_backend = _StaticBackend(
-        "VERDICT: ACCEPT\n\nThe plan is worth executing."
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), plan_markdown])
+    specialist_backend = _StaticBackend("# Analysis\nVector loads are feasible.")
+    critic_backend = _StaticBackend("VERDICT: ACCEPT\n\nThe plan is worth executing.")
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -2258,9 +2147,7 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
             "# Lane plan\nCompute route, revised.",
         ]
     )
-    critic_backend = _StaticBackend(
-        "VERDICT: REVISE\n\nLane 2 repeats lane 1's change.\n" + _width_block()
-    )
+    critic_backend = _StaticBackend("VERDICT: REVISE\n\nLane 2 repeats lane 1's change.\n" + _width_block())
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -2305,18 +2192,14 @@ async def test_plan_critic_reviews_a_multi_lane_round_once() -> None:
     assert payload["draft_lane_plans"][0]["ground"] == _GROUND_A
     assert payload["draft_lane_plans"][1]["ground"] == _GROUND_B
     assert "draft_plan" not in payload
-    assert "not worth an Implementer session of its own" in (
-        critic_backend.specs[0].system_prompt
-    )
+    assert "not worth an Implementer session of its own" in (critic_backend.specs[0].system_prompt)
     # The verdict was about the round, so it reached every lane in it.
     assert result.optimization_plans == (
         "# Lane plan\nMemory route, revised.",
         "# Lane plan\nCompute route, revised.",
     )
     assert result.plan_revised is True
-    assert result.structured_output_diagnostics["plan_revision"]["status"] == (
-        "revised"
-    )
+    assert result.structured_output_diagnostics["plan_revision"]["status"] == ("revised")
 
 
 def _two_lane_critic_service(orchestration_backend, critic_backend):
@@ -2365,10 +2248,7 @@ async def test_the_round_reports_how_it_was_divided() -> None:
     )
     service = _two_lane_critic_service(
         orchestration_backend,
-        _StaticBackend(
-            "VERDICT: ACCEPT\n\nBoth lanes are worth a session.\n"
-            + _width_block()
-        ),
+        _StaticBackend("VERDICT: ACCEPT\n\nBoth lanes are worth a session.\n" + _width_block()),
     )
 
     result = await service.run(_context(), lanes=2)
@@ -2446,10 +2326,7 @@ async def test_a_lane_the_review_will_not_pay_for_is_not_published() -> None:
 async def test_a_dropped_lane_is_not_revised_first() -> None:
     """A revision turn spent on a lane that will not run is the whole cost."""
     backend, service = _two_lane_round(
-        "VERDICT: REVISE\n\n"
-        + _width_block(
-            {"lane_id": 1, "reason": "no profile supports its ground"}
-        ),
+        "VERDICT: REVISE\n\n" + _width_block({"lane_id": 1, "reason": "no profile supports its ground"}),
         revisions=["# Lane 2 revised"],
     )
 
@@ -2506,10 +2383,7 @@ async def test_a_round_collapsed_to_one_lane_cannot_be_narrowed() -> None:
     )
     service = _two_lane_critic_service(
         orchestration_backend,
-        _StaticBackend(
-            "VERDICT: ACCEPT\n\n"
-            + _width_block({"lane_id": 1, "reason": "not worth a session"})
-        ),
+        _StaticBackend("VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 1, "reason": "not worth a session"})),
     )
 
     result = await service.run(_context(), lanes=2)
@@ -2531,8 +2405,7 @@ async def test_a_challenged_round_refuses_narrowing_it_cannot_aim() -> None:
     being able to tell afterwards, so the challenge outranks the narrowing.
     """
     _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block({"lane_id": 2, "reason": "it duplicates lane 1"})
+        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it duplicates lane 1"})
     )
     context = replace(
         _context(),
@@ -2543,9 +2416,7 @@ async def test_a_challenged_round_refuses_narrowing_it_cannot_aim() -> None:
     result = await service.run(context, lanes=2)
 
     assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
-    assert result.structured_output_diagnostics["partition"][
-        "challenger_requested"
-    ] is True
+    assert result.structured_output_diagnostics["partition"]["challenger_requested"] is True
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "refused_challenger"
     assert narrowing["kept"] == 2
@@ -2593,18 +2464,14 @@ async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
     lane is worth its session could not tell a joint lane from any other, and
     the round's one linkage between the two decisions did not exist.
     """
-    _backend, service = _joint_lane_round(
-        "VERDICT: ACCEPT\n\n" + _width_block()
-    )
+    _backend, service = _joint_lane_round("VERDICT: ACCEPT\n\n" + _width_block())
 
     await service.run(_context(), lanes=2)
 
     critic_spec = service._plan_critic.backend.specs[0]
     lanes = json.loads(critic_spec.user_prompt)["draft_lane_plans"]
     assert lanes[0]["joint"] is True
-    assert lanes[0]["fallback"] == (
-        "re-tune num_warps at the current tile alone"
-    )
+    assert lanes[0]["fallback"] == ("re-tune num_warps at the current tile alone")
     assert lanes[1]["joint"] is False
     assert lanes[1]["fallback"] == ""
     assert "`joint` is true was given wider ground" in critic_spec.system_prompt
@@ -2612,9 +2479,7 @@ async def test_the_review_is_told_which_lane_the_partition_widened() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> (
-    None
-):
+async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> None:
     """The width is sunk; refusing the drop spends a session instead of saving one.
 
     The partition has already granted the wider ground by the time the review
@@ -2624,10 +2489,7 @@ async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> (
     of it.
     """
     _backend, service = _joint_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
-            {"lane_id": 1, "reason": "the tile rewrite is too large a bet"}
-        )
+        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 1, "reason": "the tile rewrite is too large a bet"})
     )
 
     result = await service.run(_context(), lanes=2)
@@ -2636,15 +2498,10 @@ async def test_a_drop_aimed_at_the_joint_lane_is_carried_out_and_recorded() -> (
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "narrowed"
     assert narrowing["kept"] == 1
-    assert narrowing["dropped"] == [
-        {"lane_id": 1, "reason": "the tile rewrite is too large a bet"}
-    ]
+    assert narrowing["dropped"] == [{"lane_id": 1, "reason": "the tile rewrite is too large a bet"}]
     assert narrowing["joint"] == [1]
     assert narrowing["dropped_joint"] == [1]
-    assert any(
-        "wider ground the partition bought" in note
-        for note in narrowing["notes"]
-    )
+    assert any("wider ground the partition bought" in note for note in narrowing["notes"])
     assert result.structured_output_diagnostics["lanes"]["published"] == 1
 
 
@@ -2656,10 +2513,7 @@ async def test_a_drop_aimed_past_the_joint_lane_leaves_the_widened_lane() -> Non
     separates that from a round with no joint lane at all.
     """
     _backend, service = _joint_lane_round(
-        "VERDICT: ACCEPT\n\n"
-        + _width_block(
-            {"lane_id": 2, "reason": "it is lane 1's staging in other words"}
-        )
+        "VERDICT: ACCEPT\n\n" + _width_block({"lane_id": 2, "reason": "it is lane 1's staging in other words"})
     )
 
     result = await service.run(_context(), lanes=2)
@@ -2680,9 +2534,7 @@ def _drafts(*joint: bool) -> list:
             text=f"# Lane {index + 1} draft",
             ground=_JOINT_GROUND if is_joint else f"{_GROUND_B} ({index + 1})",
             joint=is_joint,
-            fallback=(
-                "re-tune num_warps at the current tile alone" if is_joint else ""
-            ),
+            fallback=("re-tune num_warps at the current tile alone" if is_joint else ""),
         )
         for index, is_joint in enumerate(joint)
     ]
@@ -2693,9 +2545,7 @@ def _ruling(*drops: tuple[int, str]) -> PlanCriticOutcome:
     return PlanCriticOutcome(
         verdict="ACCEPT",
         review="VERDICT: ACCEPT",
-        lane_drops=tuple(
-            LaneDrop(lane_id=lane_id, reason=reason) for lane_id, reason in drops
-        ),
+        lane_drops=tuple(LaneDrop(lane_id=lane_id, reason=reason) for lane_id, reason in drops),
         narrowing_status="answered",
     )
 
@@ -2754,15 +2604,12 @@ def test_a_round_of_only_joint_lanes_still_narrows() -> None:
     assert diagnostics["kept"] == 1
     assert diagnostics["joint"] == [1, 2, 3]
     assert diagnostics["dropped_joint"] == [2, 3]
-    assert any(
-        "wider ground the partition bought" in note
-        for note in diagnostics["notes"]
-    )
+    assert any("wider ground the partition bought" in note for note in diagnostics["notes"])
 
 
 @pytest.mark.asyncio
 async def test_narrowing_the_round_cannot_read_names_what_it_kept() -> None:
-    """"The review wanted every lane" and "nobody could read it" differ."""
+    """ "The review wanted every lane" and "nobody could read it" differ."""
     _backend, service = _two_lane_round(
         "VERDICT: ACCEPT\n\n"
         + _width_block(
@@ -2785,9 +2632,7 @@ async def test_narrowing_the_round_cannot_read_names_what_it_kept() -> None:
 @pytest.mark.asyncio
 async def test_a_review_that_asks_for_nothing_leaves_the_round_alone() -> None:
     """The empty block is an answer; only it means "run every lane"."""
-    _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block()
-    )
+    _backend, service = _two_lane_round("VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block())
 
     result = await service.run(_context(), lanes=2)
 
@@ -2816,8 +2661,7 @@ async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
     The round still runs both lanes, and it says why.
     """
     _backend, service = _two_lane_round(
-        "VERDICT: REVISE\n\n"
-        "Lane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
+        "VERDICT: REVISE\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
         revisions=["# Lane 1 revised", "# Lane 2 revised"],
     )
 
@@ -2830,21 +2674,13 @@ async def test_a_round_whose_review_never_answered_on_width_says_so() -> None:
     assert narrowing["kept"] == 2
     assert narrowing["dropped"] == []
     assert narrowing["notes"] != []
-    assert any(
-        "no lane_narrowing block" in note for note in narrowing["notes"]
-    )
-    assert any(
-        "repair pass" in note for note in narrowing["notes"]
-    )
-    assert result.structured_output_diagnostics["plan_critic"][
-        "narrowing_status"
-    ] == "absent"
+    assert any("no lane_narrowing block" in note for note in narrowing["notes"])
+    assert any("repair pass" in note for note in narrowing["notes"])
+    assert result.structured_output_diagnostics["plan_critic"]["narrowing_status"] == "absent"
 
 
 @pytest.mark.asyncio
-async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> (
-    None
-):
+async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> None:
     """One repair call buys back an Implementer session the round would run.
 
     Same prose-only review as above, but the repair pass answers with the block
@@ -2861,8 +2697,7 @@ async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> (
     )
     critic_backend = _QueuedBackend(
         [
-            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives "
-            "lane 1's autotune lever.\n",
+            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
             _width_block(
                 {
                     "lane_id": 2,
@@ -2879,9 +2714,7 @@ async def test_a_round_narrows_on_a_ruling_its_review_was_asked_twice_for() -> (
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "narrowed"
     assert narrowing["block"] == "repaired"
-    assert narrowing["dropped"] == [
-        {"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}
-    ]
+    assert narrowing["dropped"] == [{"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}]
     assert result.structured_output_diagnostics["lanes"]["published"] == 1
     assert len(critic_backend.specs) == 2
 
@@ -2909,8 +2742,7 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     )
     critic_backend = _QueuedBackend(
         [
-            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives "
-            "lane 1's autotune lever.\n",
+            "VERDICT: ACCEPT\n\nLane 2 should be dropped: it re-derives lane 1's autotune lever.\n",
             _width_block(
                 {
                     "lane_id": 2,
@@ -2927,21 +2759,14 @@ async def test_a_narrowed_round_never_records_that_it_kept_every_lane(
     narrowing = result.structured_output_diagnostics["lane_narrowing"]
     assert narrowing["status"] == "narrowed"
     assert narrowing["kept"] == 1
-    assert narrowing["dropped"] == [
-        {"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}
-    ]
+    assert narrowing["dropped"] == [{"lane_id": 2, "reason": "it re-derives lane 1's autotune lever"}]
     # Each note says what reading the block found and leaves the outcome to
     # `status` and `dropped`, which is the only way the three can agree.
     assert narrowing["notes"] == [
         "the review ended with no lane_narrowing block",
-        "the review did not end with a readable width block; one repair pass "
-        "restated it",
+        "the review did not end with a readable width block; one repair pass restated it",
     ]
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
-    ]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert not [line for line in warnings if "not applied" in line]
     assert not [line for line in warnings if "keeps every lane" in line]
     assert "round narrowed from 2 lanes to 1" in caplog.text
@@ -2970,16 +2795,8 @@ async def test_a_narrowing_the_round_refused_is_still_reported_as_one(
         result = await service.run(_context(), lanes=2)
 
     assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
-    ]
-    assert [
-        line
-        for line in warnings
-        if "narrowing was not applied (refused_empty_round)" in line
-    ]
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [line for line in warnings if "narrowing was not applied (refused_empty_round)" in line]
 
 
 @pytest.mark.asyncio
@@ -2987,19 +2804,14 @@ async def test_a_review_that_asked_for_nothing_is_not_reported_as_a_failure(
     caplog,
 ) -> None:
     """The empty block is an answer, and answering costs the round nothing."""
-    _backend, service = _two_lane_round(
-        "VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block()
-    )
+    _backend, service = _two_lane_round("VERDICT: ACCEPT\n\nBoth lanes earn it.\n" + _width_block())
 
     with caplog.at_level(logging.INFO):
         result = await service.run(_context(), lanes=2)
 
     assert result.optimization_plans == ("# Lane 1 draft", "# Lane 2 draft")
     assert not [
-        record
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
-        and "narrowing" in record.getMessage()
+        record for record in caplog.records if record.levelno >= logging.WARNING and "narrowing" in record.getMessage()
     ]
     assert "plan critic asked for no narrowing" in caplog.text
 
@@ -3035,9 +2847,7 @@ async def test_the_round_records_what_each_planning_phase_cost() -> None:
     # The named phases account for the round without exceeding it; what they do
     # not cover stays visible as the difference rather than being distributed.
     assert sum(durations[name] for name in phases) <= durations["total"] + 0.01
-    assert durations["plan_critic"] == pytest.approx(
-        result.plan_critic.duration_sec, abs=0.001
-    )
+    assert durations["plan_critic"] == pytest.approx(result.plan_critic.duration_sec, abs=0.001)
     assert durations["plan_revision"] == pytest.approx(
         result.structured_output_diagnostics["plan_revision"]["duration_sec"],
         abs=0.001,
@@ -3047,9 +2857,7 @@ async def test_the_round_records_what_each_planning_phase_cost() -> None:
 @pytest.mark.asyncio
 async def test_a_round_that_never_partitioned_reports_no_partition_cost() -> None:
     """An absent phase is absent, not zero: zero would read as instant."""
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), "# Optimization plan\nUse vector loads."]
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), "# Optimization plan\nUse vector loads."])
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -3116,13 +2924,9 @@ async def test_a_lane_that_cannot_be_revised_keeps_its_draft() -> None:
 async def test_plan_critic_triggers_exactly_one_revision(verdict) -> None:
     draft = "# Optimization plan\nContinue VALU tuning."
     revised = "# Optimization plan\nBenchmark the existing GEMM path."
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), draft, revised]
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), draft, revised])
     specialist_backend = _StaticBackend("Algorithm analysis")
-    critic_backend = _StaticBackend(
-        f"VERDICT: {verdict}\n\nCompare the existing GEMM path."
-    )
+    critic_backend = _StaticBackend(f"VERDICT: {verdict}\n\nCompare the existing GEMM path.")
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -3158,14 +2962,10 @@ async def test_plan_critic_triggers_exactly_one_revision(verdict) -> None:
     assert len(orchestration_backend.specs) == 3
     assert orchestration_backend.specs[2].tool_policy.max_turns == 100
     assert orchestration_backend.specs[2].timeout_sec == 600
-    assert result.structured_output_diagnostics["plan_revision"][
-        "revision_mode"
-    ] == "fresh"
+    assert result.structured_output_diagnostics["plan_revision"]["revision_mode"] == "fresh"
     assert specialist_backend.calls == 1
     assert critic_backend.calls == 1
-    revision_payload = json.loads(
-        orchestration_backend.specs[2].user_prompt
-    )
+    revision_payload = json.loads(orchestration_backend.specs[2].user_prompt)
     assert revision_payload["draft_plan"] == draft
     assert revision_payload["critic_verdict"] == verdict
     assert "existing GEMM" in revision_payload["critic_review"]
@@ -3205,9 +3005,7 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend(
-                "VERDICT: REVISE\n\nCompare the existing GEMM path."
-            ),
+            backend=_StaticBackend("VERDICT: REVISE\n\nCompare the existing GEMM path."),
             timeout_sec=1,
         ),
     )
@@ -3228,13 +3026,9 @@ async def test_plan_revision_resumes_the_synthesis_session() -> None:
     assert revision_payload["draft_plan"] == draft
     # The resumed session already holds the planning bundle, and the revision
     # instructions are the system prompt; neither is copied back into the payload.
-    assert "For REPLACE, discard the dominated implementation route" in (
-        spec.system_prompt
-    )
+    assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
     assert "revision_instructions" not in revision_payload
-    revision_diagnostics = result.structured_output_diagnostics[
-        "plan_revision"
-    ]
+    revision_diagnostics = result.structured_output_diagnostics["plan_revision"]
     assert revision_diagnostics["status"] == "revised"
     assert revision_diagnostics["critic_verdict"] == "REVISE"
     assert revision_diagnostics["revision_mode"] == "resumed"
@@ -3280,9 +3074,7 @@ async def test_a_resumed_revision_carries_only_what_the_session_lacks() -> None:
     assert "existing GEMM" in payload["critic_review"]
     # The revision instructions are the system prompt, not a second copy inside
     # the payload; the rest of the bundle is already in the resumed session.
-    assert "For REPLACE, discard the dominated implementation route" in (
-        spec.system_prompt
-    )
+    assert "For REPLACE, discard the dominated implementation route" in (spec.system_prompt)
     for absent in (
         "revision_instructions",
         "context",
@@ -3365,9 +3157,7 @@ async def test_plan_revision_turn_cap_uses_non_executable_fallback(
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend(
-                "VERDICT: REVISE\n\nAdd a canonical comparison."
-            ),
+            backend=_StaticBackend("VERDICT: REVISE\n\nAdd a canonical comparison."),
             timeout_sec=1,
         ),
     )
@@ -3388,9 +3178,7 @@ async def test_plan_revision_turn_cap_uses_non_executable_fallback(
 @pytest.mark.asyncio
 async def test_plan_critic_error_uses_draft_without_revision() -> None:
     draft = "# Optimization plan\nUse vector loads."
-    orchestration_backend = _QueuedBackend(
-        [_dispatch_payload(), draft]
-    )
+    orchestration_backend = _QueuedBackend([_dispatch_payload(), draft])
     critic_backend = _StaticBackend(
         "provider error",
         end_reason="api_error",
@@ -3465,9 +3253,7 @@ async def test_plan_revision_failure_preserves_critic_in_fallback() -> None:
         ),
         definitions={"memory": _definitions()["memory"]},
         plan_critic=PlanCriticAgent(
-            backend=_StaticBackend(
-                "VERDICT: REVISE\n\nAdd a canonical comparison."
-            ),
+            backend=_StaticBackend("VERDICT: REVISE\n\nAdd a canonical comparison."),
             timeout_sec=1,
         ),
     )
@@ -3480,9 +3266,7 @@ async def test_plan_revision_failure_preserves_critic_in_fallback() -> None:
     assert draft in result.optimization_plan
     assert result.optimization_plan_executable is False
     assert result.plan_revised is False
-    assert result.structured_output_diagnostics["plan_revision"][
-        "status"
-    ] == "framework_fallback"
+    assert result.structured_output_diagnostics["plan_revision"]["status"] == "framework_fallback"
     assert len(orchestration_backend.specs) == 3
 
 
@@ -3497,9 +3281,7 @@ async def test_synthesis_failure_skips_critic_and_stays_non_executable() -> None
             ),
         ]
     )
-    critic_backend = _StaticBackend(
-        "VERDICT: REVISE\n\nThis must not run."
-    )
+    critic_backend = _StaticBackend("VERDICT: REVISE\n\nThis must not run.")
     service = OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -3534,9 +3316,7 @@ async def test_synthesis_failure_skips_critic_and_stays_non_executable() -> None
     assert result.structured_output_diagnostics["plan_critic"] == {
         "status": "skipped_synthesis_unavailable",
     }
-    assert result.structured_output_diagnostics["synthesis"][
-        "status"
-    ] == "unavailable"
+    assert result.structured_output_diagnostics["synthesis"]["status"] == "unavailable"
 
 
 @pytest.mark.asyncio
@@ -3566,12 +3346,8 @@ async def test_non_api_format_failure_still_produces_implementer_plan() -> None:
     result = await service.run(_context())
 
     assert result.optimization_plan.startswith("# Optimization plan")
-    assert "Successful specialist roles: (none)" in (
-        result.optimization_plan
-    )
-    assert "analysis/abc123/source_map.json" in (
-        result.optimization_plan
-    )
+    assert "Successful specialist roles: (none)" in (result.optimization_plan)
+    assert "analysis/abc123/source_map.json" in (result.optimization_plan)
     assert result.optimization_plan_executable is False
     # One plan, and that is what keeps a round nobody could synthesize out of
     # lane recovery: the loop only recovers a published set of two or more, so
@@ -3579,10 +3355,7 @@ async def test_non_api_format_failure_still_produces_implementer_plan() -> None:
     # executability by leaving it unset, which rests on exactly this.
     assert len(result.optimization_plans) == 1
     assert orchestration_backend.calls == 2
-    assert any(
-        "invalid dispatch JSON" in note
-        for note in result.dispatch_plan.normalization_notes
-    )
+    assert any("invalid dispatch JSON" in note for note in result.dispatch_plan.normalization_notes)
 
 
 @pytest.mark.asyncio
@@ -3672,9 +3445,7 @@ async def test_diversify_partial_coverage_still_produces_plan() -> None:
                 ),
                 "compute": SpecialistAgent(
                     definition=definitions["compute"],
-                    backend=_StaticBackend(
-                        error=RuntimeError("provider failed")
-                    ),
+                    backend=_StaticBackend(error=RuntimeError("provider failed")),
                     timeout_sec=1,
                     max_turns=2,
                 ),

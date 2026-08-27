@@ -72,12 +72,9 @@ def resolve_campaign(
     state_path = campaign_root / "run_state.json"
 
     campaign_inputs_supplied = any(
-        value not in (None, "")
-        for value in (kernel, driver, source_files, program_md_file, operator_name)
+        value not in (None, "") for value in (kernel, driver, source_files, program_md_file, operator_name)
     )
-    pending_retry = (
-        not resume and campaign_store.exists() and not state_path.is_file()
-    )
+    pending_retry = not resume and campaign_store.exists() and not state_path.is_file()
 
     program_text: str | None = None
     save_deferred = False
@@ -104,8 +101,7 @@ def resolve_campaign(
         if resolved_fellow != normalized:
             backend = normalized.removesuffix("-fellow")
             print(
-                f"Warning: Unknown fellow backend '{backend}'; "
-                f"falling back to '{resolved_fellow}'.",
+                f"Warning: Unknown fellow backend '{backend}'; falling back to '{resolved_fellow}'.",
                 file=sys.stderr,
             )
 
@@ -119,9 +115,7 @@ def resolve_campaign(
         if checkout_message:
             print(f"  [git] {checkout_message}")
 
-    existing_campaign: CampaignConfig | None = (
-        campaign_store.load() if pending_retry else None
-    )
+    existing_campaign: CampaignConfig | None = campaign_store.load() if pending_retry else None
     if existing_campaign is not None:
         validate_pending_campaign_head(str(workspace), existing_campaign.base_commit)
 
@@ -138,23 +132,17 @@ def resolve_campaign(
         driver=driver,
         source_files=parse_list(source_files),
         program_md_file=program_md_file,
-        base_commit=(
-            existing_campaign.base_commit if existing_campaign is not None else None
-        ),
+        base_commit=(existing_campaign.base_commit if existing_campaign is not None else None),
         target_functions=(parse_list(target_functions) or None),
         snr_threshold=snr_threshold,
         gpu_target=gpu_target,
-        gpu_type=(
-            existing_campaign.gpu_type if existing_campaign is not None else gpu_type
-        ),
+        gpu_type=(existing_campaign.gpu_type if existing_campaign is not None else gpu_type),
         git_branch=git_branch,
         fellow=resolved_fellow,
         task_type=task_type,
         framework=framework,
         operator_name=operator_name,
-        producer=(
-            existing_campaign.producer if existing_campaign is not None else producer
-        ),
+        producer=(existing_campaign.producer if existing_campaign is not None else producer),
     )
 
     if program_md_file:
@@ -162,9 +150,7 @@ def resolve_campaign(
 
     if existing_campaign is not None:
         if provisional_campaign != existing_campaign:
-            raise ValueError(
-                "pending campaign configuration does not match retry inputs"
-            )
+            raise ValueError("pending campaign configuration does not match retry inputs")
         campaign = existing_campaign
     else:
         campaign = provisional_campaign

@@ -32,8 +32,14 @@ def _recipe(pattern_id="residual_add_rmsnorm", env_flag="LFM2_FUSED_RESIDUAL", *
 
 def _vr(*, correct=True, kept=False, speedup=None, note="", max_abs_err=None) -> ValidationResult:
     return ValidationResult(
-        correctness_passed=correct, max_abs_err=max_abs_err, rtol=2e-2,
-        kernel_speedup=speedup, eager_us=None, fused_us=None, kept=kept, note=note,
+        correctness_passed=correct,
+        max_abs_err=max_abs_err,
+        rtol=2e-2,
+        kernel_speedup=speedup,
+        eager_us=None,
+        fused_us=None,
+        kept=kept,
+        note=note,
     )
 
 
@@ -55,7 +61,8 @@ class TestEarlyExit:
         campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2, note="KEPT")])
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="LFM2_FUSED_SWIGLU")],
-            framework="sglang", campaign_fn=campaign,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is True
@@ -68,15 +75,16 @@ class TestEarlyExit:
 
 class TestExperienceInjection:
     def test_a_failed_recipe_teaches_the_next_one(self, tmp_path):
-        campaign = _ScriptedCampaign([
-            _vr(correct=False,
-                note="PARITY FAILED: min SNR=12 dB | LESSON: accumulate in fp32",
-                max_abs_err=0.5),
-            _vr(kept=True, speedup=1.1, note="KEPT"),
-        ])
+        campaign = _ScriptedCampaign(
+            [
+                _vr(correct=False, note="PARITY FAILED: min SNR=12 dB | LESSON: accumulate in fp32", max_abs_err=0.5),
+                _vr(kept=True, speedup=1.1, note="KEPT"),
+            ]
+        )
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="LFM2_FUSED_SWIGLU")],
-            framework="sglang", campaign_fn=campaign,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is True
@@ -86,14 +94,16 @@ class TestExperienceInjection:
         assert "recipe 1" in second
 
     def test_compile_failure_distills_the_cuda_constraint(self, tmp_path):
-        campaign = _ScriptedCampaign([
-            _vr(correct=False,
-                note="COMPILE FAILED (module import): cuda_bf16.h | LESSON: author Triton"),
-            _vr(kept=True, speedup=1.05, note="KEPT"),
-        ])
+        campaign = _ScriptedCampaign(
+            [
+                _vr(correct=False, note="COMPILE FAILED (module import): cuda_bf16.h | LESSON: author Triton"),
+                _vr(kept=True, speedup=1.05, note="KEPT"),
+            ]
+        )
         run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="F2")],
-            framework="sglang", campaign_fn=campaign,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert "CUDA-only" in campaign.calls[1][1]
@@ -104,7 +114,9 @@ class TestBounds:
         campaign = _ScriptedCampaign([_vr(correct=False, note="PARITY FAILED")])
         recipes = [_recipe(pattern_id=f"p{i}", env_flag=f"F{i}") for i in range(5)]
         res = run_fusion_loop(
-            recipes, framework="sglang", campaign_fn=campaign,
+            recipes,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(max_recipes=2, output_dir=str(tmp_path)),
         )
         assert {h.recipe_index for h in res.history} == {0, 1}
@@ -114,7 +126,8 @@ class TestBounds:
         campaign = _ScriptedCampaign([_vr(correct=True, kept=False, speedup=1.0)])
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="F2")],
-            framework="sglang", campaign_fn=campaign,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         # Repeated authoring belongs to the campaign, so the loop never retries.
@@ -124,8 +137,10 @@ class TestBounds:
     def test_already_satisfied_recipe_skipped(self, tmp_path):
         campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2)])
         res = run_fusion_loop(
-            [_recipe(already_satisfied=True)], framework="sglang",
-            campaign_fn=campaign, config=LoopConfig(output_dir=str(tmp_path)),
+            [_recipe(already_satisfied=True)],
+            framework="sglang",
+            campaign_fn=campaign,
+            config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is False
         assert res.history == []
@@ -139,7 +154,8 @@ class TestRobustnessAndOutputs:
 
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="F2")],
-            framework="sglang", campaign_fn=boom,
+            framework="sglang",
+            campaign_fn=boom,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is False
@@ -147,13 +163,16 @@ class TestRobustnessAndOutputs:
         assert all("campaign crashed" in h.note for h in res.history)
 
     def test_best_near_miss_reported_when_nothing_kept(self, tmp_path):
-        campaign = _ScriptedCampaign([
-            _vr(correct=True, kept=False, speedup=1.01),
-            _vr(correct=True, kept=False, speedup=1.02),
-        ])
+        campaign = _ScriptedCampaign(
+            [
+                _vr(correct=True, kept=False, speedup=1.01),
+                _vr(correct=True, kept=False, speedup=1.02),
+            ]
+        )
         res = run_fusion_loop(
             [_recipe(), _recipe(pattern_id="swiglu", env_flag="F2")],
-            framework="sglang", campaign_fn=campaign,
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         assert res.kept is False
@@ -163,7 +182,9 @@ class TestRobustnessAndOutputs:
     def test_ledger_persisted_to_output_dir(self, tmp_path):
         campaign = _ScriptedCampaign([_vr(correct=False, note="PARITY FAILED: snr low")])
         run_fusion_loop(
-            [_recipe()], framework="sglang", campaign_fn=campaign,
+            [_recipe()],
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         ledger = tmp_path / "fusion_experience.md"
@@ -173,7 +194,9 @@ class TestRobustnessAndOutputs:
     def test_result_to_dict_shape(self, tmp_path):
         campaign = _ScriptedCampaign([_vr(kept=True, speedup=1.2)])
         res = run_fusion_loop(
-            [_recipe()], framework="sglang", campaign_fn=campaign,
+            [_recipe()],
+            framework="sglang",
+            campaign_fn=campaign,
             config=LoopConfig(output_dir=str(tmp_path)),
         )
         d = res.to_dict()

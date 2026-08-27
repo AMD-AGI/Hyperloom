@@ -47,6 +47,7 @@ MARGINAL_GAIN_WINDOW = 6
 # for the same reason as the empty-diff scan above.
 MARGINAL_GAIN_SCAN_WINDOW = 16
 
+
 @dataclass(frozen=True)
 class SearchPolicyDecision:
     """One auditable search-mode decision."""
@@ -61,6 +62,7 @@ class SearchPolicyDecision:
             raise ValueError(f"unsupported search mode: {self.mode}")
         if not self.reason_codes:
             raise ValueError("search policy reason_codes must not be empty")
+
 
 class SearchPolicyEngine:
     """Choose EXPLOIT or DIVERSIFY from durable, measured state."""
@@ -89,13 +91,9 @@ class SearchPolicyEngine:
         threshold = max(1, int(stall_threshold))
         residence = max(0, int(residence_iterations_remaining))
         empty_diffs = max(0, int(consecutive_no_changes))
-        window_gain = (
-            None if window_gain_ratio is None else float(window_gain_ratio)
-        )
+        window_gain = None if window_gain_ratio is None else float(window_gain_ratio)
         if window_gain is not None and not math.isfinite(window_gain):
-            raise ValueError(
-                f"window_gain_ratio must be finite: {window_gain_ratio!r}"
-            )
+            raise ValueError(f"window_gain_ratio must be finite: {window_gain_ratio!r}")
 
         # Outranks every other signal, mode residence included: those weigh how
         # promising the current direction is, while repeated empty diffs are

@@ -50,9 +50,7 @@ def canon_arch(value: str) -> str:
 def detect_arch(timeout_s: float = 15.0) -> str:
     """Best-effort local arch via ``rocminfo``; ``""`` when undetectable."""
     try:
-        completed = subprocess.run(
-            ["rocminfo"], capture_output=True, text=True, timeout=timeout_s, check=False
-        )
+        completed = subprocess.run(["rocminfo"], capture_output=True, text=True, timeout=timeout_s, check=False)
     except (OSError, subprocess.SubprocessError):
         return ""
     match = _GFX_RE.search(completed.stdout or "")

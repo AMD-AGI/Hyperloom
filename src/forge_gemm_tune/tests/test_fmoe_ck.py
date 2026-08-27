@@ -71,9 +71,7 @@ def _stub_dtype_resolution(monkeypatch) -> list[str]:
         resolved.append(alias)
         return {"fp8": "torch.float8_e4m3fn", "fp4x2": "torch.float4_e2m1fn_x2"}[alias]
 
-    monkeypatch.setattr(
-        "forge_gemm_tune.tuners._aiter_dense_common._aiter_dtype_str", _fake
-    )
+    monkeypatch.setattr("forge_gemm_tune.tuners._aiter_dense_common._aiter_dtype_str", _fake)
     return resolved
 
 
@@ -174,15 +172,13 @@ def test_fmoe_validate_passes_with_a_runtime_observed_key(tmp_path, monkeypatch)
     assert fm.FmoeCKTuner(ctx).validate() is None
 
 
-def _write_runtime_csv(tmp_path, *, inter_dim="512", q_a="torch.float8_e4m3fn",
-                       q_w="torch.float4_e2m1fn_x2"):
+def _write_runtime_csv(tmp_path, *, inter_dim="512", q_a="torch.float8_e4m3fn", q_w="torch.float4_e2m1fn_x2"):
     """A CSV shaped like one built from an observed aiter dispatch tuple."""
     path = tmp_path / "runtime_key.csv"
     rows = [fm._FMOE_CSV_HEADER]
     for token in (4, 512):
         rows.append(
-            f"{token},4096,{inter_dim},256,6,ActivationType.Silu,torch.bfloat16,"
-            f"{q_a},{q_w},QuantType.per_1x32,1,0"
+            f"{token},4096,{inter_dim},256,6,ActivationType.Silu,torch.bfloat16,{q_a},{q_w},QuantType.per_1x32,1,0"
         )
     path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return path
@@ -249,9 +245,7 @@ def test_missing_caller_csv_raises_rather_than_deriving(tmp_path, monkeypatch):
         (fm._FMOE_CSV_HEADER + "\n4,4096,512\n", "expected 12"),
     ],
 )
-def test_malformed_caller_csv_raises_rather_than_deriving(
-    tmp_path, monkeypatch, content, expected
-):
+def test_malformed_caller_csv_raises_rather_than_deriving(tmp_path, monkeypatch, content, expected):
     """Silently deriving a different key is what makes a tuned table unreachable."""
     _stub_dtype_resolution(monkeypatch)
     bad = tmp_path / "bad.csv"
@@ -266,9 +260,7 @@ def test_malformed_caller_csv_raises_rather_than_deriving(
     ("precision", "quant_type", "alias"),
     [("fp8", "blockscale", "fp8"), ("fp8", "per_token", "fp8"), ("fp4", "", "fp4x2")],
 )
-def test_fmoe_quantized_dtypes_exist_in_installed_aiter(
-    tmp_path, precision, quant_type, alias
-):
+def test_fmoe_quantized_dtypes_exist_in_installed_aiter(tmp_path, precision, quant_type, alias):
     """The emitted dtype must be a key of the installed aiter's dtype2str_dict;
     otherwise the MoE tuner aborts with a lookup error and tunes 0 shapes."""
     aiter = pytest.importorskip("aiter")

@@ -109,11 +109,7 @@ def operator_slug(logical_op_name: str) -> str:
     raw = str(logical_op_name or "").strip()
     if not raw:
         raise ValueError("logical operator name must not be empty")
-    if (
-        len(raw) <= _MAX_SLUG_CHARS
-        and _PLAIN_IDENTIFIER.fullmatch(raw)
-        and not keyword.iskeyword(raw)
-    ):
+    if len(raw) <= _MAX_SLUG_CHARS and _PLAIN_IDENTIFIER.fullmatch(raw) and not keyword.iskeyword(raw):
         return raw
     cleaned = re.sub(r"[^0-9A-Za-z_]+", "_", raw).strip("_")
     if cleaned[:1].isdigit():
@@ -135,10 +131,7 @@ def is_producer_owned_path(path: str) -> bool:
     with a producer prefix stays framework-owned.
     """
     for part in PurePosixPath(str(path).strip()).parts:
-        if any(
-            fnmatch.fnmatchcase(part, pattern)
-            for pattern in PRODUCER_OWNED_PATH_PATTERNS
-        ):
+        if any(fnmatch.fnmatchcase(part, pattern) for pattern in PRODUCER_OWNED_PATH_PATTERNS):
             return True
     return False
 
@@ -214,9 +207,7 @@ def _check_relative(field: str, value: str) -> None:
     if not value:
         raise ValueError(f"apply-back manifest field is empty: {field}")
     if value.startswith("/") or ".." in value.split("/"):
-        raise ValueError(
-            f"apply-back manifest path escapes the campaign root: {field}={value}"
-        )
+        raise ValueError(f"apply-back manifest path escapes the campaign root: {field}={value}")
 
 
 def validate_applyback_manifest(payload: dict) -> dict:
@@ -231,42 +222,27 @@ def validate_applyback_manifest(payload: dict) -> dict:
 
     version = payload.get("schema_version")
     if not _matches(version, int) or version not in ARTIFACT_SCHEMA_VERSIONS:
-        raise ValueError(
-            f"unsupported apply-back manifest schema version: {version!r}"
-        )
+        raise ValueError(f"unsupported apply-back manifest schema version: {version!r}")
 
     for field in _FORBIDDEN_MANIFEST_FIELDS:
         if field in payload:
-            raise ValueError(
-                f"apply-back manifest must not carry ambiguous field: {field}"
-            )
+            raise ValueError(f"apply-back manifest must not carry ambiguous field: {field}")
 
     for field, expected in _REQUIRED_MANIFEST_FIELDS.items():
         if field not in payload:
             raise ValueError(f"apply-back manifest is missing field: {field}")
         if not _matches(payload[field], expected):
-            raise ValueError(
-                f"apply-back manifest field has the wrong type: {field}="
-                f"{payload[field]!r}"
-            )
+            raise ValueError(f"apply-back manifest field has the wrong type: {field}={payload[field]!r}")
 
     if payload["artifact_kind"] != ARTIFACT_KIND_FRAMEWORK_APPLYBACK:
-        raise ValueError(
-            f"unsupported apply-back artifact kind: {payload['artifact_kind']!r}"
-        )
+        raise ValueError(f"unsupported apply-back artifact kind: {payload['artifact_kind']!r}")
     if payload["validation_scope"] != VALIDATION_SCOPE_REFERENCE:
-        raise ValueError(
-            f"unsupported apply-back validation scope: {payload['validation_scope']!r}"
-        )
+        raise ValueError(f"unsupported apply-back validation scope: {payload['validation_scope']!r}")
     if payload["framework"] not in SUPPORTED_FRAMEWORKS:
-        raise ValueError(
-            f"unsupported apply-back framework: {payload['framework']!r}"
-        )
+        raise ValueError(f"unsupported apply-back framework: {payload['framework']!r}")
     status = payload["integration_validation_status"]
     if status not in PRODUCER_INTEGRATION_STATUSES:
-        raise ValueError(
-            f"the producer may not publish integration validation status: {status!r}"
-        )
+        raise ValueError(f"the producer may not publish integration validation status: {status!r}")
     if not payload["commit_hash"]:
         raise ValueError("apply-back manifest is missing the apply-back commit")
     if not payload["base_commit"]:
@@ -275,14 +251,10 @@ def validate_applyback_manifest(payload: dict) -> dict:
         raise ValueError("apply-back manifest declares no changed files")
     for changed in payload["changed_files"]:
         if not isinstance(changed, str):
-            raise ValueError(
-                f"apply-back manifest changed file is not a path: {changed!r}"
-            )
+            raise ValueError(f"apply-back manifest changed file is not a path: {changed!r}")
         _check_relative("changed_files", changed)
         if is_producer_owned_path(changed):
-            raise ValueError(
-                f"apply-back manifest publishes producer-owned state: {changed}"
-            )
+            raise ValueError(f"apply-back manifest publishes producer-owned state: {changed}")
     for field in _RELATIVE_PATH_FIELDS:
         _check_relative(field, payload[field])
     return payload
@@ -297,23 +269,15 @@ def validate_applyback_outer_result(payload: dict) -> dict:
         if field not in payload:
             raise ValueError(f"apply-back outer result is missing field: {field}")
         if not _matches(payload[field], expected):
-            raise ValueError(
-                "apply-back outer result field has the wrong type: "
-                f"{field}={payload[field]!r}"
-            )
+            raise ValueError(f"apply-back outer result field has the wrong type: {field}={payload[field]!r}")
     if payload["success"] is not True or payload["applyback_ok"] is not True:
         raise ValueError("apply-back outer result does not publish a successful patch")
     if payload["applyback_required"] is not True:
         raise ValueError("apply-back outer result does not require framework integration")
     if payload["artifact_kind"] != ARTIFACT_KIND_FRAMEWORK_APPLYBACK:
-        raise ValueError(
-            f"unsupported apply-back outer artifact: {payload['artifact_kind']!r}"
-        )
+        raise ValueError(f"unsupported apply-back outer artifact: {payload['artifact_kind']!r}")
     if payload["artifact_schema_version"] not in ARTIFACT_SCHEMA_VERSIONS:
-        raise ValueError(
-            "unsupported apply-back outer schema version: "
-            f"{payload['artifact_schema_version']!r}"
-        )
+        raise ValueError(f"unsupported apply-back outer schema version: {payload['artifact_schema_version']!r}")
     for field in (
         "best_commit",
         "canonical_manifest",
@@ -324,9 +288,7 @@ def validate_applyback_outer_result(payload: dict) -> dict:
             raise ValueError(f"apply-back outer result field is empty: {field}")
     for temporary in payload["temporary_paths"]:
         if not isinstance(temporary, str):
-            raise ValueError(
-                f"apply-back temporary path is not a string: {temporary!r}"
-            )
+            raise ValueError(f"apply-back temporary path is not a string: {temporary!r}")
         _check_relative("temporary_paths", temporary)
     return payload
 
@@ -370,12 +332,8 @@ def applyback_contract_example() -> dict:
             "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
             "best_commit": applyback_commit,
             "canonical_manifest": "forge_experiments/rewrite_applyback/best/manifest.json",
-            "canonical_patch_path": (
-                "forge_experiments/rewrite_applyback/best/iter_000/forge.patch"
-            ),
-            "canonical_files_root": (
-                "forge_experiments/rewrite_applyback/best/iter_000/files"
-            ),
+            "canonical_patch_path": ("forge_experiments/rewrite_applyback/best/iter_000/forge.patch"),
+            "canonical_files_root": ("forge_experiments/rewrite_applyback/best/iter_000/files"),
             "temporary_paths": [f"{ATTEMPT_ROOT_DIR}/example"],
         }
     )

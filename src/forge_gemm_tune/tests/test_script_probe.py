@@ -59,6 +59,7 @@ def test_corrupt_probe_cache_costs_a_reprobe_not_a_crash(tmp_path, monkeypatch):
         (tmp_path / "deadbeef.json").write_text(payload, encoding="utf-8")
         assert sp._read_cache("deadbeef") is None
 
+
 _HELP = """usage: gemm_a16w16_tune.py [-h] [-i INPUT] [-o OUTPUT] [--libtype {all,asm}]
                            [--with-hipblaslt] [--mp MP] [-v]
 
@@ -93,6 +94,7 @@ def _fake_run(stdout="", stderr="", rc=0, calls=None):
         if calls is not None:
             calls.append(cmd)
         return subprocess.CompletedProcess(cmd, rc, stdout, stderr)
+
     return _run
 
 
@@ -128,7 +130,7 @@ class TestProbeScript:
         monkeypatch.setattr(sp.subprocess, "run", _fake_run(stdout=_HELP, calls=calls))
         script = _script(tmp_path)
         sp.probe_script(script)
-        sp._MEMO.clear()          # force the on-disk cache to be exercised
+        sp._MEMO.clear()  # force the on-disk cache to be exercised
         sp.probe_script(script)
         assert len(calls) == 1, "probe re-ran despite an unchanged script"
 
@@ -153,12 +155,14 @@ class TestProbeFailureIsPermissive:
     def test_subprocess_error(self, tmp_path, monkeypatch):
         def _boom(cmd, **kwargs):
             raise OSError("no interpreter")
+
         monkeypatch.setattr(sp.subprocess, "run", _boom)
         assert sp.probe_script(_script(tmp_path)).supports("--libtype")
 
     def test_timeout(self, tmp_path, monkeypatch):
         def _slow(cmd, **kwargs):
             raise subprocess.TimeoutExpired(cmd, 1)
+
         monkeypatch.setattr(sp.subprocess, "run", _slow)
         assert sp.probe_script(_script(tmp_path)).supports("--libtype")
 
@@ -179,9 +183,7 @@ class TestFilterArgs:
         assert out.ok and out.args == args and out.dropped == []
 
     def test_required_flag_rejected_is_reported(self):
-        out = sp.filter_args(
-            ["--libtype", "hipblaslt", "--with-hipblaslt"], _surface("--libtype")
-        )
+        out = sp.filter_args(["--libtype", "hipblaslt", "--with-hipblaslt"], _surface("--libtype"))
         assert not out.ok
         assert out.rejected_required == ["--with-hipblaslt"]
 

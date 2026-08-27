@@ -13,6 +13,7 @@ from kernelforge.tracker.schema import Experiment
 
 # ─── PostMortem ───
 
+
 def test_postmortem_empty_experiment(tmp_path):
     pm = PostMortem(tmp_path)
     assert pm.analyze(Experiment(experiment_id="e")) == []
@@ -76,12 +77,30 @@ def _seed_tuning_entries(db: TuningDatabase) -> None:
     """Seed the entries file directly (log() is a no-op with persistence off)."""
     entries = []
     for op in ["attention_fwd", "attention_bwd", "sla_fwd"]:
-        entries.append(dict(operation=op, backend="ck", gpu_target="gfx950",
-                            dtype="bf16", shape={"seq_len": 4096},
-                            config={"wpe": 2}, wall_ms=8.0, passed_correctness=True))
-        entries.append(dict(operation=op, backend="ck", gpu_target="gfx950",
-                            dtype="bf16", shape={"seq_len": 4096},
-                            config={"wpe": 3}, wall_ms=12.0, passed_correctness=True))
+        entries.append(
+            dict(
+                operation=op,
+                backend="ck",
+                gpu_target="gfx950",
+                dtype="bf16",
+                shape={"seq_len": 4096},
+                config={"wpe": 2},
+                wall_ms=8.0,
+                passed_correctness=True,
+            )
+        )
+        entries.append(
+            dict(
+                operation=op,
+                backend="ck",
+                gpu_target="gfx950",
+                dtype="bf16",
+                shape={"seq_len": 4096},
+                config={"wpe": 3},
+                wall_ms=12.0,
+                passed_correctness=True,
+            )
+        )
     with open(db._entries_path, "w") as f:
         for e in entries:
             f.write(json.dumps(e) + "\n")

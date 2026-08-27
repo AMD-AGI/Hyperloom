@@ -143,11 +143,7 @@ def _make_loop(
         kernel_file=str(kernel),
         driver_script=str(driver),
         baseline_wall_ms=1.0,
-        baseline_case_times=(
-            {"case": 1.0}
-            if baseline_case_times is None
-            else dict(baseline_case_times)
-        ),
+        baseline_case_times=({"case": 1.0} if baseline_case_times is None else dict(baseline_case_times)),
         max_time_hours=1.0,
         git_branch="test-loop",
         workspace_dir=str(workspace),
@@ -369,9 +365,7 @@ def test_a_near_miss_is_pinned_so_the_retrieval_map_points_at_it(
     # mean does not clear the t bound on its own scatter.
     scores = [1.00100, 1.00520, 1.00950]
 
-    assert not passes_keep_threshold(
-        scores, best_mean_case_speedup=1.0
-    )
+    assert not passes_keep_threshold(scores, best_mean_case_speedup=1.0)
 
     recorded = loop._record_iteration_outcome(
         _reverted_candidate(1, min(scores)),
@@ -527,9 +521,7 @@ def _stackable_workspace(loop, workspace, *, candidates=2):
 
     def _diff(old: str, new: str) -> str:
         kernel.write_text(canonical.replace(old, new))
-        diff = subprocess.run(
-            ["git", "diff"], cwd=workspace, capture_output=True, text=True
-        ).stdout
+        diff = subprocess.run(["git", "diff"], cwd=workspace, capture_output=True, text=True).stdout
         kernel.write_text(canonical)
         return diff
 
@@ -552,10 +544,7 @@ def _stackable_workspace(loop, workspace, *, candidates=2):
                         "prefill": 0.9 if case == "prefill" else 1.0,
                         "decode": 0.9 if case == "decode" else 1.0,
                     },
-                    "measurements": [
-                        {"success": True, "case_times": run, "unscored_cases": []}
-                        for run in runs
-                    ],
+                    "measurements": [{"success": True, "case_times": run, "unscored_cases": []} for run in runs],
                 },
                 change_diff=_diff(old, new),
                 plan=f"tune {case}",
@@ -633,9 +622,7 @@ async def test_a_fan_out_round_queues_one_candidate_per_lane(tmp_path, monkeypat
     kernel = workspace / "kernel.py"
     kernel.write_text("\n".join(f"line_{n} = {n}" for n in range(12)) + "\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "wide"], cwd=workspace, check=True, capture_output=True
-    )
+    subprocess.run(["git", "commit", "-m", "wide"], cwd=workspace, check=True, capture_output=True)
 
     await loop._fill_lane_queue(
         agent_factory=_lane_agent_factory(
@@ -660,13 +647,7 @@ def _published_plan(workspace):
     """Stand in for the planning chain with one durable plan on disk."""
 
     async def _plan(**_kwargs):
-        plan_path = (
-            workspace
-            / "forge_experiments"
-            / "orchestration"
-            / "iter_001"
-            / "optimization_plan.md"
-        )
+        plan_path = workspace / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.md"
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         plan_path.write_text("# Optimization plan\nVectorize loads.\n")
         return plan_path, ""
@@ -737,13 +718,7 @@ def _counting_plan(loop, workspace, rounds, *, plans=("a", "b"), unavailable=Fal
         if unavailable:
             return None, "OrchestrationInfrastructureError: backend unreachable"
         loop._last_lane_plans = list(plans)
-        plan_path = (
-            workspace
-            / "forge_experiments"
-            / "orchestration"
-            / f"iter_{iteration:03d}"
-            / "optimization_plan.md"
-        )
+        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         plan_path.write_text(f"# Optimization plan\n{plans[0]}\n")
         return plan_path, ""
@@ -762,9 +737,7 @@ def _fan_out_iteration(tmp_path, monkeypatch, rounds, **plan_kwargs):
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     loop.ic = replace(loop.ic, lanes=2)
-    monkeypatch.setattr(
-        loop, "_run_orchestration", _counting_plan(loop, workspace, rounds, **plan_kwargs)
-    )
+    monkeypatch.setattr(loop, "_run_orchestration", _counting_plan(loop, workspace, rounds, **plan_kwargs))
 
     asyncio.run(
         loop.run(
@@ -796,9 +769,7 @@ def test_a_planning_outage_is_not_paid_for_twice(tmp_path, monkeypatch):
     assert decisions == ["ORCHESTRATION_ERROR"]
 
 
-def test_a_round_that_could_only_plan_one_lane_spends_that_plan(
-    tmp_path, monkeypatch
-):
+def test_a_round_that_could_only_plan_one_lane_spends_that_plan(tmp_path, monkeypatch):
     """One plan is not too few to run; it is exactly what one session needs."""
     rounds: list[int] = []
 
@@ -808,9 +779,7 @@ def test_a_round_that_could_only_plan_one_lane_spends_that_plan(
     assert decisions == ["NO_CHANGES"]
 
 
-def test_lanes_that_produced_nothing_do_not_buy_the_round_again(
-    tmp_path, monkeypatch
-):
+def test_lanes_that_produced_nothing_do_not_buy_the_round_again(tmp_path, monkeypatch):
     """This round has already paid for planning and for every lane session."""
     rounds: list[int] = []
 
@@ -825,9 +794,7 @@ def test_lanes_that_produced_nothing_do_not_buy_the_round_again(
     assert decisions == ["NO_CHANGES"]
 
 
-def test_candidates_refused_at_intake_do_not_buy_the_round_again(
-    tmp_path, monkeypatch, capsys
-):
+def test_candidates_refused_at_intake_do_not_buy_the_round_again(tmp_path, monkeypatch, capsys):
     """The one path where every lane produced something and none of it counts.
 
     A candidate refused at the boundary has already cost its own session, and
@@ -836,13 +803,7 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(
     would answer a candidate that must not be measured by buying another one.
     """
     rounds: list[int] = []
-    tampered = (
-        "--- a/driver.py\n"
-        "+++ b/driver.py\n"
-        "@@ -1 +1 @@\n"
-        "-pass\n"
-        "+print('tampered')\n"
-    )
+    tampered = "--- a/driver.py\n+++ b/driver.py\n@@ -1 +1 @@\n-pass\n+print('tampered')\n"
 
     async def _rejected_candidates(**_kwargs):
         return [
@@ -863,9 +824,7 @@ def test_candidates_refused_at_intake_do_not_buy_the_round_again(
     assert "driver.py" in output
 
 
-def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(
-    tmp_path, monkeypatch
-):
+def test_a_lane_infrastructure_failure_does_not_buy_the_round_again(tmp_path, monkeypatch):
     """The plans survive a workspace that could not be copied; only lanes fail."""
     rounds: list[int] = []
 
@@ -955,9 +914,7 @@ def _round_admission_loop(
     return loop, workspace
 
 
-def test_a_round_the_budget_can_finish_is_admitted_unchanged(
-    tmp_path, monkeypatch
-):
+def test_a_round_the_budget_can_finish_is_admitted_unchanged(tmp_path, monkeypatch):
     rounds: list[int] = []
 
     loop, _ = _round_admission_loop(
@@ -971,21 +928,13 @@ def test_a_round_the_budget_can_finish_is_admitted_unchanged(
     assert loop.termination_reason != "round_budget_exhausted"
 
 
-def test_a_round_the_budget_cannot_finish_narrows_instead_of_starting(
-    tmp_path, monkeypatch
-):
+def test_a_round_the_budget_cannot_finish_narrows_instead_of_starting(tmp_path, monkeypatch):
     """A narrower round is worth more than a wide one that is killed halfway."""
     rounds: list[int] = []
     # A minute more than the single-lane round -- whose planning bound is the
     # seeded three-lane round less the two plan reads the Critic is spared --
     # and well short of what two lanes would cost.
-    remaining = (
-        2400.0
-        - 2 * PLAN_CRITIC_TIMEOUT_SEC
-        + ADMISSION_SESSION_SEC
-        + FIRST_ROUND_MEASUREMENT_SEC
-        + 60.0
-    )
+    remaining = 2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC + ADMISSION_SESSION_SEC + FIRST_ROUND_MEASUREMENT_SEC + 60.0
 
     loop, _ = _round_admission_loop(
         tmp_path,
@@ -999,13 +948,7 @@ def test_a_round_the_budget_cannot_finish_narrows_instead_of_starting(
 
 
 # One minute short of the cheapest round this campaign could plan.
-_UNAFFORDABLE_SEC = (
-    2400.0
-    - 2 * PLAN_CRITIC_TIMEOUT_SEC
-    + ADMISSION_SESSION_SEC
-    + FIRST_ROUND_MEASUREMENT_SEC
-    - 60.0
-)
+_UNAFFORDABLE_SEC = 2400.0 - 2 * PLAN_CRITIC_TIMEOUT_SEC + ADMISSION_SESSION_SEC + FIRST_ROUND_MEASUREMENT_SEC - 60.0
 
 
 def test_a_round_no_width_can_pay_for_ends_the_campaign(tmp_path, monkeypatch):
@@ -1021,14 +964,10 @@ def test_a_round_no_width_can_pay_for_ends_the_campaign(tmp_path, monkeypatch):
     assert rounds == []
     assert loop.results == []
     assert loop.termination_reason == "round_budget_exhausted"
-    assert LoopStateStore(str(workspace)).load().termination_reason == (
-        "round_budget_exhausted"
-    )
+    assert LoopStateStore(str(workspace)).load().termination_reason == ("round_budget_exhausted")
 
 
-def test_a_refused_round_is_reported_as_a_refusal_not_as_an_empty_round(
-    tmp_path, monkeypatch, capsys
-):
+def test_a_refused_round_is_reported_as_a_refusal_not_as_an_empty_round(tmp_path, monkeypatch, capsys):
     rounds: list[int] = []
 
     loop, _ = _round_admission_loop(
@@ -1080,17 +1019,19 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         capture_output=True,
         text=True,
     ).stdout.strip()
-    LoopStateStore(str(workspace)).save(RunState(
-        campaign_id="campaign",
-        baseline_case_times={"case": 1.0},
-        head_commit=head,
-        round_costs=RoundCostState(
-            rounds=3,
-            planning_total_sec=_BANKED_PLANNING_SEC,
-            total_sec=_BANKED_PLANNING_SEC + 600.0,
-            campaign_sec=_BANKED_CAMPAIGN_SEC,
-        ),
-    ))
+    LoopStateStore(str(workspace)).save(
+        RunState(
+            campaign_id="campaign",
+            baseline_case_times={"case": 1.0},
+            head_commit=head,
+            round_costs=RoundCostState(
+                rounds=3,
+                planning_total_sec=_BANKED_PLANNING_SEC,
+                total_sec=_BANKED_PLANNING_SEC + 600.0,
+                campaign_sec=_BANKED_CAMPAIGN_SEC,
+            ),
+        )
+    )
     # One iteration, then out -- so this session's own clock stays far below
     # the planning it inherited.
     monkeypatch.setattr(
@@ -1099,9 +1040,7 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
         lambda: 0.0 if loop.results else 12 * 3600.0,
     )
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     summary = loop._round_budget_summary()
     share = summary["planning_share_pct"]
@@ -1119,19 +1058,14 @@ def test_a_resumed_campaign_reports_a_planning_share_within_its_definition(
     # the published report both say it about the campaign now, and both stay
     # inside 100.
     printed = next(
-        line
-        for line in capsys.readouterr().out.splitlines()
-        if "Rounds planned across the campaign" in line
+        line for line in capsys.readouterr().out.splitlines() if "Rounds planned across the campaign" in line
     )
     matched = re.search(r"\((\d+(?:\.\d+)?)% of campaign wall-clock\)", printed)
     assert matched, printed
     assert 0 < float(matched.group(1)) <= 100.0
     report = "\n".join(_round_budget_lines(summary))
     assert f"- Planning share of campaign wall-clock: {share:.0f}%" in report
-    assert (
-        f"- Campaign wall-clock: {summary['campaign_sec'] / 60:.1f} min"
-        in report
-    )
+    assert f"- Campaign wall-clock: {summary['campaign_sec'] / 60:.1f} min" in report
 
     # And the campaign clock is durable, so the NEXT session inherits a span
     # that still covers the planning inside it rather than starting over.
@@ -1168,15 +1102,11 @@ def test_a_finished_round_records_what_its_planning_cost(tmp_path, monkeypatch):
     assert costs.recent[0].total_sec >= costs.recent[0].planning_sec
 
 
-def test_an_iteration_that_did_not_plan_records_no_round_cost(
-    tmp_path, monkeypatch
-):
+def test_an_iteration_that_did_not_plan_records_no_round_cost(tmp_path, monkeypatch):
     """A campaign with no orchestration never learns that planning is free."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     assert loop.results
     assert LoopStateStore(str(workspace)).load().round_costs.rounds == 0
@@ -1203,9 +1133,7 @@ async def test_a_lane_infrastructure_failure_falls_back_to_one_session(
     async def _no_room(**_kwargs):
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(
-        loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"])
-    )
+    monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
     monkeypatch.setattr(runner_module, "run_lanes", _no_room)
 
     await loop._fan_out_round(
@@ -1228,9 +1156,7 @@ async def test_a_programming_error_in_a_fan_out_round_is_not_swallowed(
     async def _wrong_call(**_kwargs):
         raise TypeError("session() got an unexpected keyword argument")
 
-    monkeypatch.setattr(
-        loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"])
-    )
+    monkeypatch.setattr(loop, "_run_orchestration", _lane_plans_available(loop, ["a", "b"]))
     monkeypatch.setattr(runner_module, "run_lanes", _wrong_call)
 
     with pytest.raises(TypeError):
@@ -1278,11 +1204,7 @@ async def test_a_lane_that_wrote_nothing_is_never_queued(tmp_path, monkeypatch):
 
 def _diff_of(workspace: Path, edit) -> str:
     """A patch for one edit, taken back off the tree once it is captured."""
-    restore = {
-        path: path.read_text()
-        for path in workspace.rglob("*.py")
-        if ".git" not in path.parts
-    }
+    restore = {path: path.read_text() for path in workspace.rglob("*.py") if ".git" not in path.parts}
     edit()
     diff = subprocess.run(
         ["git", "diff", "HEAD", "-M", "--", "."],
@@ -1319,9 +1241,7 @@ def test_a_lane_candidate_that_edits_the_driver_never_reaches_the_tree(
         workspace,
         lambda: driver.write_text("import time\nprint('bypass')\n"),
     )
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)
-    ]
+    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
 
     assert loop._take_lane_candidate() is None
     assert loop._lane_queue == []
@@ -1347,9 +1267,7 @@ def test_a_lane_candidate_that_renames_the_driver_away_is_rejected(
         )
 
     diff = _diff_of(workspace, _rename)
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="1", plan="move it aside", diff=diff)
-    ]
+    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="move it aside", diff=diff)]
 
     assert loop._take_lane_candidate() is None
     assert driver.is_file()
@@ -1371,12 +1289,8 @@ def test_a_lane_candidate_is_rejected_when_the_driver_stops_being_canonical(
         canonical_driver_sha256=hashlib.sha256(driver.read_bytes()).hexdigest(),
     )
     diff = _diff_of(workspace, lambda: driver.write_text("print('bypass')\n"))
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)
-    ]
-    monkeypatch.setattr(
-        runner_module, "is_protected_path", lambda *_args, **_kwargs: False
-    )
+    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tamper", diff=diff)]
+    monkeypatch.setattr(runner_module, "is_protected_path", lambda *_args, **_kwargs: False)
 
     assert loop._take_lane_candidate() is None
     assert loop._validate_driver_integrity(loop.run_state)
@@ -1389,9 +1303,7 @@ def test_a_tainted_workspace_driver_stops_the_lane_path(tmp_path, monkeypatch):
     loop.ic = replace(loop.ic, canonical_driver_sha256=hashlib.sha256(b"other").hexdigest())
     kernel = workspace / "kernel.py"
     diff = _diff_of(workspace, lambda: kernel.write_text("def kernel():\n    return 2\n"))
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="1", plan="tune it", diff=diff)
-    ]
+    loop._lane_queue = [runner_module.LaneResult(lane_id="1", plan="tune it", diff=diff)]
 
     with pytest.raises(ValueError, match="driver integrity"):
         loop._take_lane_candidate()
@@ -1430,16 +1342,7 @@ def test_a_queued_candidate_survives_a_keep_that_only_moved_its_context(
     """
     loop, workspace = _reduction_loop(tmp_path, monkeypatch)
     kernel = workspace / "kernel.py"
-    kernel.write_text(
-        "def kernel():\n"
-        "    a = 1\n"
-        "    b = 2\n"
-        "    c = 3\n"
-        "    y = 4\n"
-        "    d = 5\n"
-        "    e = 6\n"
-        "    return y\n"
-    )
+    kernel.write_text("def kernel():\n    a = 1\n    b = 2\n    c = 3\n    y = 4\n    d = 5\n    e = 6\n    return y\n")
     subprocess.run(["git", "add", "."], cwd=workspace, check=True, capture_output=True)
     subprocess.run(
         ["git", "commit", "-m", "wide kernel"],
@@ -1459,9 +1362,7 @@ def test_a_queued_candidate_survives_a_keep_that_only_moved_its_context(
         check=True,
         capture_output=True,
     )
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)
-    ]
+    loop._lane_queue = [runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
     taken = loop._take_lane_candidate()
 
@@ -1501,9 +1402,7 @@ def test_a_queued_candidate_that_edits_the_same_lines_is_still_dropped(
         check=True,
         capture_output=True,
     )
-    loop._lane_queue = [
-        runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)
-    ]
+    loop._lane_queue = [runner_module.LaneResult(lane_id="2", plan="tune y", diff=candidate)]
 
     assert loop._take_lane_candidate() is None
     assert kernel.read_text() == "def kernel():\n    y = 55\n    return y\n"
@@ -1535,9 +1434,7 @@ def test_a_stalled_run_stacks_two_rejected_gains(tmp_path, monkeypatch):
     assert "line_11 = 111" in (workspace / "kernel.py").read_text()
 
 
-def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(
-    tmp_path, monkeypatch
-):
+def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(tmp_path, monkeypatch):
     """The round's plan has only one consumer, and a stack is not it.
 
     A fan-out round can come back with an empty queue while still holding the
@@ -1550,9 +1447,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(
     attempt is deferred, not lost.
     """
     cases = {"prefill": 1.0, "decode": 1.0}
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, resume=True, baseline_case_times=cases
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, resume=True, baseline_case_times=cases)
     loop.ic = replace(loop.ic, lanes=2)
     _stackable_workspace(loop, workspace)
     subprocess.run(
@@ -1576,9 +1471,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(
     state.stall.unresolved_stall_iters = 2
     LoopStateStore(str(workspace)).save(state)
     rounds: list[int] = []
-    monkeypatch.setattr(
-        loop, "_run_orchestration", _counting_plan(loop, workspace, rounds)
-    )
+    monkeypatch.setattr(loop, "_run_orchestration", _counting_plan(loop, workspace, rounds))
 
     async def _no_candidates(**_kwargs):
         return []
@@ -1599,9 +1492,7 @@ def test_a_stack_does_not_take_an_iteration_that_is_holding_a_plan(
     assert [e["type"] for e in events if e["type"].startswith("merge_attempt")] == []
     # One round planned, and the iteration spent it rather than buying another.
     assert rounds == [2]
-    assert [
-        e.get("decision") for e in events if e["type"] == "iteration_result"
-    ] == ["NO_CHANGES"]
+    assert [e.get("decision") for e in events if e["type"] == "iteration_result"] == ["NO_CHANGES"]
     # Two things at once: the pair and the stall the branch needs were both in
     # place -- so the assertions above are about precedence, not about a stack
     # that could never have formed -- and the attempt is deferred, not retired.
@@ -1630,9 +1521,7 @@ def _three_candidate_workspace(loop, workspace):
 
     def _diff(old: str, new: str) -> str:
         kernel.write_text(canonical.replace(old, new))
-        diff = subprocess.run(
-            ["git", "diff"], cwd=workspace, capture_output=True, text=True
-        ).stdout
+        diff = subprocess.run(["git", "diff"], cwd=workspace, capture_output=True, text=True).stdout
         kernel.write_text(canonical)
         return diff
 
@@ -1642,10 +1531,7 @@ def _three_candidate_workspace(loop, workspace):
         (3, "line_11 = 11", "line_11 = 111", {"decode"}),
     )
     for iteration, old, new, wins in plan:
-        times = {
-            case: 0.9 if case in wins else 1.0
-            for case in ("prefill", "decode", "mixed")
-        }
+        times = {case: 0.9 if case in wins else 1.0 for case in ("prefill", "decode", "mixed")}
         loop.archive.record(
             CandidateRecord(
                 iteration=iteration,
@@ -1657,9 +1543,7 @@ def _three_candidate_workspace(loop, workspace):
                     "measurements": [
                         {
                             "success": True,
-                            "case_times": {
-                                case: value * jitter for case, value in times.items()
-                            },
+                            "case_times": {case: value * jitter for case, value in times.items()},
                             "unscored_cases": [],
                         }
                         for jitter in (1.0, 1.0005, 0.9995)
@@ -1759,9 +1643,7 @@ def test_a_streak_refusal_does_not_retire_the_pair(tmp_path, monkeypatch):
     assert {item.iteration for item in again} == {item.iteration for item in pair}
 
 
-def test_an_archive_that_lost_a_diff_says_so_and_does_not_claim_a_conflict(
-    tmp_path, monkeypatch
-):
+def test_an_archive_that_lost_a_diff_says_so_and_does_not_claim_a_conflict(tmp_path, monkeypatch):
     """A missing entry and a clashing patch ask for opposite responses.
 
     A clash is a fact about two candidates and says the archive is working. An
@@ -1826,9 +1708,7 @@ def test_stacking_never_discards_work_it_did_not_stage(tmp_path, monkeypatch):
     assert kernel.read_text() == uncommitted
 
 
-def test_a_supervisor_intervention_does_not_retire_a_stack_worth_measuring(
-    tmp_path, monkeypatch
-):
+def test_a_supervisor_intervention_does_not_retire_a_stack_worth_measuring(tmp_path, monkeypatch):
     """The stall a stack answers to is the one only a KEEP clears.
 
     A memo redirects the next Implementer session; it does not measure the two
@@ -1894,9 +1774,7 @@ def _stalled_loop_behind_a_full_queue(
             diff=_diff_of(
                 workspace,
                 lambda line=line: kernel.write_text(
-                    kernel.read_text().replace(
-                        f"line_{line} = {line}", f"line_{line} = {line}00"
-                    )
+                    kernel.read_text().replace(f"line_{line} = {line}", f"line_{line} = {line}00")
                 ),
             ),
         )
@@ -1929,9 +1807,7 @@ async def _reverting_iteration(_iteration, **_kwargs):
     )
 
 
-def test_a_queue_that_never_empties_does_not_starve_stacking(
-    tmp_path, monkeypatch
-):
+def test_a_queue_that_never_empties_does_not_starve_stacking(tmp_path, monkeypatch):
     """The queue holds the iteration only while it is still the thing working.
 
     A fan-out round refills whenever the queue drains, so on the thirty archived
@@ -1944,15 +1820,11 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(
     loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     events = LoopStateStore(str(workspace)).read_events()
     staged = [item for item in events if item.get("type") == "merge_attempt_staged"]
-    precedence = [
-        item for item in events if item.get("type") == "merge_took_precedence"
-    ]
+    precedence = [item for item in events if item.get("type") == "merge_took_precedence"]
 
     assert len(staged) == 1
     # The two counts answer different questions and the second cannot be read
@@ -1964,35 +1836,25 @@ def test_a_queue_that_never_empties_does_not_starve_stacking(
     assert [item.plan for item in loop._lane_queue] == ["tune line 5", "tune line 6"]
 
 
-def test_a_fresh_run_still_measures_the_candidates_it_bought(
-    tmp_path, monkeypatch
-):
+def test_a_fresh_run_still_measures_the_candidates_it_bought(tmp_path, monkeypatch):
     """Precedence is the stall's, not stacking's.
 
     A queued candidate is kept 55.1% of the time while the search is still
     producing and 33.7% from the stall threshold on; the first of those numbers
     is why the queue keeps the iteration until the run has stopped resolving.
     """
-    loop, workspace = _stalled_loop_behind_a_full_queue(
-        tmp_path, monkeypatch, stall=MERGE_ATTEMPT_STALL_THRESHOLD - 1
-    )
+    loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, stall=MERGE_ATTEMPT_STALL_THRESHOLD - 1)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     events = LoopStateStore(str(workspace)).read_events()
 
-    assert not [
-        item for item in events if item.get("type") == "merge_took_precedence"
-    ]
+    assert not [item for item in events if item.get("type") == "merge_took_precedence"]
     assert [item.plan for item in loop._lane_queue] == ["tune line 6"]
 
 
-def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(
-    tmp_path, monkeypatch
-):
+def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(tmp_path, monkeypatch):
     """A stack that cannot be built is not a turn anyone spent.
 
     The obstacle is still reported -- a selected pair that reaches no
@@ -2008,23 +1870,15 @@ def test_taking_precedence_and_failing_to_stage_costs_the_queue_nothing(
     )
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     events = LoopStateStore(str(workspace)).read_events()
 
-    assert [
-        item["obstacle"]
-        for item in events
-        if item.get("type") == "merge_attempt_declined"
-    ] == ["iteration 1's diff would not apply over the other's"]
-    assert not [
-        item for item in events if item.get("type") == "merge_took_precedence"
+    assert [item["obstacle"] for item in events if item.get("type") == "merge_attempt_declined"] == [
+        "iteration 1's diff would not apply over the other's"
     ]
-    assert not [
-        item for item in events if item.get("type") == "merge_attempt_staged"
-    ]
+    assert not [item for item in events if item.get("type") == "merge_took_precedence"]
+    assert not [item for item in events if item.get("type") == "merge_attempt_staged"]
     assert [item.plan for item in loop._lane_queue] == ["tune line 6"]
 
 
@@ -2057,14 +1911,10 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     them is defer, not drop: all four are still measured, in streaks of at most
     two, and the iteration the limit takes back goes to the queue.
     """
-    loop, workspace = _stalled_loop_behind_a_full_queue(
-        tmp_path, monkeypatch, candidates=4, iterations=5
-    )
+    loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, candidates=4, iterations=5)
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     # Each of those iterations has to have reached the KEEP gate and been
     # turned down there, because that is the outcome that leaves the stall
@@ -2075,13 +1925,8 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     assert [result.crashed for result in loop.results] == [False] * 5
 
     events = LoopStateStore(str(workspace)).read_events()
-    staged = [
-        item["iter"] for item in events
-        if item.get("type") == "merge_attempt_staged"
-    ]
-    precedence = [
-        item for item in events if item.get("type") == "merge_took_precedence"
-    ]
+    staged = [item["iter"] for item in events if item.get("type") == "merge_attempt_staged"]
+    precedence = [item for item in events if item.get("type") == "merge_took_precedence"]
 
     assert _longest_consecutive_run(staged) == MERGE_PRECEDENCE_STREAK_LIMIT
     # The limit defers a pair rather than refusing it: all four are still
@@ -2090,15 +1935,12 @@ def test_a_merge_streak_is_bounded_so_the_queue_is_reached(tmp_path, monkeypatch
     # And the iteration the limit took back went to the queue, which is one
     # shallower for the last two stacks than it was for the first two.
     assert [item["lane_queue_depth"] for item in precedence] == [2, 2, 1, 1]
-    assert [
-        (item["iter"], item["obstacle"])
-        for item in events
-        if item.get("type") == "merge_attempt_declined"
-    ] == [(
-        staged[1] + 1,
-        "2 stacked iterations have run back to back "
-        "without the queue being reached",
-    )]
+    assert [(item["iter"], item["obstacle"]) for item in events if item.get("type") == "merge_attempt_declined"] == [
+        (
+            staged[1] + 1,
+            "2 stacked iterations have run back to back without the queue being reached",
+        )
+    ]
 
 
 def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
@@ -2112,31 +1954,26 @@ def test_what_precedence_records_is_a_queue_depth(tmp_path, monkeypatch):
     entries could never have been measured at all and one is still queued when
     the run ends, against a recorded depth of three.
     """
-    loop, workspace = _stalled_loop_behind_a_full_queue(
-        tmp_path, monkeypatch, iterations=2
-    )
-    loop._lane_queue.insert(0, runner_module.LaneResult(
-        lane_id="surface",
-        plan="tune the driver",
-        diff=_diff_of(
-            workspace,
-            lambda: (workspace / "driver.py").write_text("print('bypass')\n"),
+    loop, workspace = _stalled_loop_behind_a_full_queue(tmp_path, monkeypatch, iterations=2)
+    loop._lane_queue.insert(
+        0,
+        runner_module.LaneResult(
+            lane_id="surface",
+            plan="tune the driver",
+            diff=_diff_of(
+                workspace,
+                lambda: (workspace / "driver.py").write_text("print('bypass')\n"),
+            ),
         ),
-    ))
+    )
     loop._persist_lane_queue()
     monkeypatch.setattr(loop, "run_one_iteration", _reverting_iteration)
 
-    asyncio.run(
-        loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     events = LoopStateStore(str(workspace)).read_events()
 
-    assert [
-        item["lane_queue_depth"]
-        for item in events
-        if item.get("type") == "merge_took_precedence"
-    ] == [3]
+    assert [item["lane_queue_depth"] for item in events if item.get("type") == "merge_took_precedence"] == [3]
     assert [item.plan for item in loop._lane_queue] == ["tune line 6"]
 
 
@@ -2480,9 +2317,7 @@ async def test_iteration_keeps_a_gain_that_repeats_across_all_three_runs(
 
     assert result.kept is True
     assert result.bench_detail["mean_case_speedup"] == pytest.approx(1.005)
-    assert result.bench_detail["measurement_mean_case_speedups"] == pytest.approx(
-        [1.005, 1.005, 1.005]
-    )
+    assert result.bench_detail["measurement_mean_case_speedups"] == pytest.approx([1.005, 1.005, 1.005])
     assert len(benchmark_calls) == 1
     assert benchmark_calls[0]["measurements"] == 3
 
@@ -2521,9 +2356,7 @@ def _canonical_workspace(tmp_path, command: str) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_snr_pass_with_failing_canonical_suite_is_reverted(
-    tmp_path, monkeypatch, capsys
-):
+async def test_snr_pass_with_failing_canonical_suite_is_reverted(tmp_path, monkeypatch, capsys):
     """The mla-decode run: 33.4 dB cleared forge's gate, 0.02468 broke the task's.
 
     The SNR probe passes, the candidate is 5% faster, and the task's own suite
@@ -2534,9 +2367,7 @@ async def test_snr_pass_with_failing_canonical_suite_is_reverted(
         tmp_path,
         "raise AssertionError('normalized max err 0.02468 too high')",
     )
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(), workspace_dir=workspace
-    )
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
 
     result = await loop.run_one_iteration(1)
 
@@ -2548,13 +2379,9 @@ async def test_snr_pass_with_failing_canonical_suite_is_reverted(
 
 
 @pytest.mark.asyncio
-async def test_canonical_suite_passing_keeps_the_faster_candidate(
-    tmp_path, monkeypatch
-):
+async def test_canonical_suite_passing_keeps_the_faster_candidate(tmp_path, monkeypatch):
     workspace = _canonical_workspace(tmp_path, "print('all cases PASS')")
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(), workspace_dir=workspace
-    )
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
 
     result = await loop.run_one_iteration(1)
 
@@ -2564,12 +2391,8 @@ async def test_canonical_suite_passing_keeps_the_faster_candidate(
 
 @pytest.mark.asyncio
 async def test_canonical_suite_output_reporting_failure_reverts(tmp_path, monkeypatch):
-    workspace = _canonical_workspace(
-        tmp_path, "print('mla-decode-bs64-kv8192: FAILED')"
-    )
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(), workspace_dir=workspace
-    )
+    workspace = _canonical_workspace(tmp_path, "print('mla-decode-bs64-kv8192: FAILED')")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=workspace)
 
     result = await loop.run_one_iteration(1)
 
@@ -2578,13 +2401,9 @@ async def test_canonical_suite_output_reporting_failure_reverts(tmp_path, monkey
 
 
 @pytest.mark.asyncio
-async def test_workspace_declaring_no_correctness_command_cannot_keep(
-    tmp_path, monkeypatch
-):
+async def test_workspace_declaring_no_correctness_command_cannot_keep(tmp_path, monkeypatch):
     tmp_path.joinpath("config.yaml").write_text('compile_command:\n  - "true"\n')
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(), workspace_dir=tmp_path
-    )
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
 
     result = await loop.run_one_iteration(1)
 
@@ -2593,17 +2412,13 @@ async def test_workspace_declaring_no_correctness_command_cannot_keep(
 
 
 @pytest.mark.asyncio
-async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(
-    tmp_path, monkeypatch, capsys
-):
+async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(tmp_path, monkeypatch, capsys):
     """Non-arena runs (flydsl, fusion, the examples) must keep working.
 
     There is no canonical suite to consult, so the SNR verdict still decides --
     but the operator is told the KEEP carries nothing else behind it.
     """
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(), workspace_dir=tmp_path
-    )
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(), workspace_dir=tmp_path)
 
     result = await loop.run_one_iteration(1)
 
@@ -2612,16 +2427,10 @@ async def test_workspace_without_a_config_keeps_on_the_snr_verdict_alone(
 
 
 @pytest.mark.asyncio
-async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(
-    tmp_path, monkeypatch
-):
+async def test_canonical_suite_is_skipped_for_a_candidate_that_is_not_faster(tmp_path, monkeypatch):
     """The suite is the expensive check; a slower candidate is reverted anyway."""
-    workspace = _canonical_workspace(
-        tmp_path, "raise AssertionError('this must never run')"
-    )
-    loop, _benchmark_calls = _measurement_loop(
-        monkeypatch, _faster_bench(candidate_ms=2.0), workspace_dir=workspace
-    )
+    workspace = _canonical_workspace(tmp_path, "raise AssertionError('this must never run')")
+    loop, _benchmark_calls = _measurement_loop(monkeypatch, _faster_bench(candidate_ms=2.0), workspace_dir=workspace)
 
     result = await loop.run_one_iteration(1)
 
@@ -2655,9 +2464,7 @@ async def test_iteration_keeps_winning_mean_despite_one_regressed_case(monkeypat
     result = await loop.run_one_iteration(1)
 
     assert result.kept is True
-    assert result.bench_detail["mean_case_speedup"] == pytest.approx(
-        (2.0 + 2.0 / 3.0) / 2.0
-    )
+    assert result.bench_detail["mean_case_speedup"] == pytest.approx((2.0 + 2.0 / 3.0) / 2.0)
 
 
 def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
@@ -2670,18 +2477,12 @@ def test_agent_error_is_reduced_and_persisted(tmp_path, monkeypatch):
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
     assert state.iteration == 1
     assert state.stall.no_improvement_iters == 1
     assert loop.monitor.no_improve_streak == 1
     assert decisions == ["AGENT_ERROR"]
-    history = (
-        workspace / "forge_experiments" / "optimization_history.md"
-    ).read_text()
+    history = (workspace / "forge_experiments" / "optimization_history.md").read_text()
     assert "Iteration 1 — AGENT_ERROR" in history
     assert loop.archive.load_index() == []
     assert loop.tracker.get(loop.experiment.experiment_id).iterations == []
@@ -2748,9 +2549,7 @@ def test_integrity_violation_restores_and_skips_canonical_validation(
         session_sink["integrity_violation"] = True
         session_sink["integrity_verdict"] = "violation"
         session_sink["integrity_reason"] = "modified nested/tests/oracle.bin"
-        session_sink["integrity_restore"] = lambda: protected.write_text(
-            "original\n"
-        )
+        session_sink["integrity_restore"] = lambda: protected.write_text("original\n")
         return "unsafe candidate"
 
     async def unexpected_validation(*_args, **_kwargs):
@@ -2798,10 +2597,7 @@ def test_a_contended_workspace_skips_the_canonical_measurement(
         Path(kernel_path).write_text("def kernel():\n    return 99\n")
         session_sink["plan"] = "a candidate nothing can measure"
         session_sink["end_reason"] = "candidate_submitted"
-        session_sink["workspace_contention"] = (
-            "pid(s) [4321] survived SIGKILL; "
-            "pid(s) [4321] hold a device node"
-        )
+        session_sink["workspace_contention"] = "pid(s) [4321] survived SIGKILL; pid(s) [4321] hold a device node"
         return "contended candidate"
 
     async def unexpected_validation(*_args, **_kwargs):
@@ -2843,9 +2639,7 @@ def _fake_device(monkeypatch, holders: dict[int, int]) -> dict[int, int]:
     def _read_proc(pid: int):
         if pid not in holders:
             return None
-        return process_reaping._Proc(
-            pid=pid, state="R", ppid=1, pgid=pid, starttime=holders[pid]
-        )
+        return process_reaping._Proc(pid=pid, state="R", ppid=1, pgid=pid, starttime=holders[pid])
 
     monkeypatch.setattr(process_reaping, "_read_proc", _read_proc)
     monkeypatch.setattr(process_reaping, "_holds_device", lambda pid: pid in holders)
@@ -2880,9 +2674,7 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
     monkeypatch.setattr(
         loop,
         "_run_orchestration",
-        _counting_plan(
-            loop, workspace, rounds, plans=("tune prefill", "tune decode")
-        ),
+        _counting_plan(loop, workspace, rounds, plans=("tune prefill", "tune decode")),
     )
 
     async def one_lane_left_something_running(lane_dir: Path) -> ReapReport:
@@ -2894,9 +2686,7 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
             )
         return ReapReport(directory=str(lane_dir))
 
-    monkeypatch.setattr(
-        fanout, "_reap_lane_processes", one_lane_left_something_running
-    )
+    monkeypatch.setattr(fanout, "_reap_lane_processes", one_lane_left_something_running)
 
     async def unexpected_validation(*_args, **_kwargs):
         raise AssertionError("a contended round must measure nothing")
@@ -2908,9 +2698,7 @@ def test_one_contended_lane_costs_the_whole_round_its_measurement(
             agent_fn=_no_change_agent,
             supervisor_fn=_unused_supervisor,
             orchestration_service=object(),
-            agent_factory=_lane_agent_factory(
-                {"tune prefill": ("return 1", "return 2")}
-            ),
+            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
         )
     )
 
@@ -2955,10 +2743,7 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
                 optimization_plans=("tune prefill", "tune decode"),
                 structured_output_diagnostics={
                     "probe_device_hazard": {
-                        "describe": (
-                            "pid(s) [4321] survived SIGKILL; "
-                            "pid(s) [4321] hold a device node"
-                        ),
+                        "describe": ("pid(s) [4321] survived SIGKILL; pid(s) [4321] hold a device node"),
                         "pids": [4321],
                     }
                 },
@@ -2974,9 +2759,7 @@ def test_a_leaked_probe_costs_the_round_its_measurement(tmp_path, monkeypatch):
             agent_fn=_no_change_agent,
             supervisor_fn=_unused_supervisor,
             orchestration_service=_ProbeLeakingService(),
-            agent_factory=_lane_agent_factory(
-                {"tune prefill": ("return 1", "return 2")}
-            ),
+            agent_factory=_lane_agent_factory({"tune prefill": ("return 1", "return 2")}),
         )
     )
 
@@ -3093,15 +2876,9 @@ def test_an_api_outage_is_not_recorded_as_an_agent_decision(tmp_path, monkeypatc
     asyncio.run(loop.run(agent_fn=api_failed_agent, supervisor_fn=_unused_supervisor))
 
     store = LoopStateStore(str(workspace))
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
     assert decisions == ["API_ERROR"]
-    history = (
-        workspace / "forge_experiments" / "optimization_history.md"
-    ).read_text()
+    history = (workspace / "forge_experiments" / "optimization_history.md").read_text()
     assert "Iteration 1 — API_ERROR" in history
 
 
@@ -3111,22 +2888,14 @@ def test_no_change_attempt_is_reduced_and_persisted(tmp_path, monkeypatch):
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
     assert state.iteration == 1
     assert state.stall.no_improvement_iters == 1
     assert loop.monitor.no_improve_streak == 1
     assert decisions == ["NO_CHANGES"]
-    history = (
-        workspace / "forge_experiments" / "optimization_history.md"
-    ).read_text()
+    history = (workspace / "forge_experiments" / "optimization_history.md").read_text()
     assert "Iteration 1 — NO_CHANGES" in history
-    lesson = (
-        workspace / "forge_experiments" / "lessons" / "iter_001.md"
-    ).read_text()
+    lesson = (workspace / "forge_experiments" / "lessons" / "iter_001.md").read_text()
     assert lesson.strip().startswith("SCOPE: measured on ")
     assert "OUTCOME: NO_CHANGES" in lesson
     assert loop.archive.load_index() == []
@@ -3150,13 +2919,7 @@ def test_optimization_plan_path_is_injected_before_implementer(
         captured["iteration"] = iteration
         captured["service"] = orchestration_service
         captured["lanes"] = lanes
-        plan_path = (
-            workspace
-            / "forge_experiments"
-            / "orchestration"
-            / "iter_001"
-            / "optimization_plan.md"
-        )
+        plan_path = workspace / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.md"
         plan_path.parent.mkdir(parents=True)
         plan_path.write_text("# Optimization plan\nVectorize loads.\n")
         return plan_path, ""
@@ -3218,9 +2981,7 @@ def test_orchestration_context_publishes_the_campaign_editable_sources(
     editable file, and the planner has to be told so.
     """
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.run_state = RunState(
-        head_commit=loop._git("rev-parse", "HEAD").splitlines()[0]
-    )
+    loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
     kernel = str((workspace / "kernel.py").resolve())
     tuned_csv = str((workspace / "configs" / "tuned_shapes.csv").resolve())
     sibling = str((workspace / "pkg" / "dispatch_limits.py").resolve())
@@ -3246,9 +3007,7 @@ def test_orchestration_context_editable_sources_cover_a_single_file_task(
 ):
     """A single-file task leaves ``source_files`` empty; the anchor is still it."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    loop.run_state = RunState(
-        head_commit=loop._git("rev-parse", "HEAD").splitlines()[0]
-    )
+    loop.run_state = RunState(head_commit=loop._git("rev-parse", "HEAD").splitlines()[0])
     loop.config = SimpleNamespace(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
@@ -3278,18 +3037,11 @@ def test_lessons_are_orchestration_evidence_and_handoff_is_audit_only(
     context = loop._build_orchestration_context()
     evidence = {item.kind: item for item in context.evidence_refs}
 
-    assert evidence["lesson_directory"].path.endswith(
-        "forge_experiments/lessons"
-    )
-    assert evidence["latest_lesson"].path.endswith(
-        "lessons/iter_001.md"
-    )
+    assert evidence["lesson_directory"].path.endswith("forge_experiments/lessons")
+    assert evidence["latest_lesson"].path.endswith("lessons/iter_001.md")
     assert "run_state" in evidence
     assert "iteration_handoff" not in evidence
-    handoff = json.loads(
-        (workspace / "forge_experiments" / "handoffs" / "iter_001.json")
-        .read_text()
-    )
+    handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
     assert handoff["canonical_verdict"] == "NO_CHANGES"
     assert handoff["lesson_path"].endswith("lessons/iter_001.md")
     assert handoff["search_policy"]["mode"] == "EXPLOIT"
@@ -3317,9 +3069,7 @@ def test_implementer_receives_partial_analysis_artifact_catalog(
             replace(
                 base.cases[0],
                 bottleneck="memory-latency",
-                profile_summary_path=str(
-                    workspace / "normalized_metrics.json"
-                ),
+                profile_summary_path=str(workspace / "normalized_metrics.json"),
                 flags=(
                     "analysis_checkpoint_normalized_only",
                     "analysis_static_only",
@@ -3344,15 +3094,8 @@ def test_implementer_receives_partial_analysis_artifact_catalog(
     assert "normalized_metrics.json" in rendered
     assert "analysis_checkpoint_normalized_only" in rendered
     assert "STATIC_ONLY" in rendered
-    supervisor_context = json.loads(
-        loop._build_supervisor_evidence_context(2)
-    )
-    supervisor_paths = {
-        item["path"]
-        for item in supervisor_context["orchestration_context"][
-            "evidence_refs"
-        ]
-    }
+    supervisor_context = json.loads(loop._build_supervisor_evidence_context(2))
+    supervisor_paths = {item["path"] for item in supervisor_context["orchestration_context"]["evidence_refs"]}
     assert str(catalog) in supervisor_paths
 
 
@@ -3382,9 +3125,7 @@ def test_runner_uses_analysis_checkpoint_after_session_failure(
                 cases=(
                     replace(
                         context.cases[0],
-                        flags=(
-                            "analysis_checkpoint_raw_profile_only",
-                        ),
+                        flags=("analysis_checkpoint_raw_profile_only",),
                     ),
                 ),
                 evidence_refs=(
@@ -3397,18 +3138,11 @@ def test_runner_uses_analysis_checkpoint_after_session_failure(
                 ),
             )
 
-    context = asyncio.run(
-        loop._resolve_analysis_context(FailingAnalysisService())
-    )
+    context = asyncio.run(loop._resolve_analysis_context(FailingAnalysisService()))
 
     assert context is loop._active_analysis_context
-    assert any(
-        reference.path == str(catalog)
-        for reference in context.evidence_refs
-    )
-    assert "analysis_checkpoint_raw_profile_only" in (
-        context.cases[0].flags
-    )
+    assert any(reference.path == str(catalog) for reference in context.evidence_refs)
+    assert "analysis_checkpoint_raw_profile_only" in (context.cases[0].flags)
 
 
 def test_failed_initial_analysis_retries_next_planning_iteration(
@@ -3476,11 +3210,7 @@ def test_failed_initial_analysis_retries_next_planning_iteration(
     assert recovered.evidence_commit == head
     assert loop.run_state.analysis.last_attempt_status == "success"
     events = loop.state_store.read_events()
-    decisions = [
-        (event["iter"], event["reasons"])
-        for event in events
-        if event["type"] == "analysis_refresh_decision"
-    ]
+    decisions = [(event["iter"], event["reasons"]) for event in events if event["type"] == "analysis_refresh_decision"]
     assert decisions == [
         (1, ["INITIAL_ANALYSIS"]),
         (1, ["ALREADY_ATTEMPTED_THIS_ITERATION"]),
@@ -3523,9 +3253,7 @@ def test_exhausted_analysis_session_budget_is_not_retried(
     assert calls == 1
     assert loop.run_state.analysis.last_attempt_status == "exhausted"
     decisions = [
-        event["reasons"]
-        for event in loop.state_store.read_events()
-        if event["type"] == "analysis_refresh_decision"
+        event["reasons"] for event in loop.state_store.read_events() if event["type"] == "analysis_refresh_decision"
     ]
     assert decisions == [
         ["INITIAL_ANALYSIS"],
@@ -3546,12 +3274,7 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()
     evidence_commit = loop._git("rev-parse", "HEAD").splitlines()[0]
-    commit_root = (
-        workspace
-        / "forge_experiments"
-        / "analysis"
-        / evidence_commit
-    )
+    commit_root = workspace / "forge_experiments" / "analysis" / evidence_commit
     generation = commit_root / "generation-001"
     generation.mkdir(parents=True)
     report = generation / "report.md"
@@ -3577,9 +3300,7 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
             }
         )
     )
-    (commit_root / "published.json").write_text(
-        json.dumps({"generation_root": generation.name})
-    )
+    (commit_root / "published.json").write_text(json.dumps({"generation_root": generation.name}))
 
     kernel = workspace / "kernel.py"
     kernel.write_text("def kernel():\n    return 2\n")
@@ -3659,12 +3380,8 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
         async def ensure_bundle(self, *_args, **_kwargs):
             raise AssertionError("sub-threshold reuse must not refresh")
 
-    context = asyncio.run(
-        loop._resolve_analysis_context(AnalysisService())
-    )
-    evidence_paths = {
-        reference.path for reference in context.evidence_refs
-    }
+    context = asyncio.run(loop._resolve_analysis_context(AnalysisService()))
+    evidence_paths = {reference.path for reference in context.evidence_refs}
     analysis_paths = {
         str(generation.resolve()),
         str(catalog.resolve()),
@@ -3684,13 +3401,8 @@ def test_stale_published_analysis_paths_survive_resume_style_reuse(
     assert "bottleneck=memory" in rendered
     assert f"evidence={case_profile.resolve()}" in rendered
     supervisor = json.loads(loop._build_supervisor_evidence_context(2))
-    assert (
-        supervisor["orchestration_context"]["analysis_evidence"]["commit"]
-        == evidence_commit
-    )
-    assert supervisor["artifact_paths"]["analysis_bundle"] == str(
-        generation.resolve()
-    )
+    assert supervisor["orchestration_context"]["analysis_evidence"]["commit"] == evidence_commit
+    assert supervisor["artifact_paths"]["analysis_bundle"] == str(generation.resolve())
 
 
 def test_warm_start_search_policy_is_exploit_and_persisted(
@@ -3736,7 +3448,7 @@ def test_completed_diversify_cycle_enters_bounded_exploit_residence(
             mean_case_speedup=1.2,
             commit_hash="warm-commit",
             source="warm_start",
-        )
+        ),
     )
     loop.handoff_store = runner_module.HandoffStore(str(workspace))
     loop.run_state.stall.unresolved_stall_iters = 1
@@ -3886,17 +3598,11 @@ def test_a_flat_window_of_keeps_diversifies_a_campaign_that_never_stalled(
     )
     loop.handoff_store = runner_module.HandoffStore(str(workspace))
     for offset in range(MARGINAL_GAIN_WINDOW + 1):
-        loop.state_store.append_event(
-            _kept_outcome(offset + 1, 1.50 + 0.005 * offset)
-        )
+        loop.state_store.append_event(_kept_outcome(offset + 1, 1.50 + 0.005 * offset))
 
     decision = loop._update_search_policy(MARGINAL_GAIN_WINDOW + 2)
     persisted = loop.state_store.load()
-    recorded = [
-        event
-        for event in loop.state_store.read_events()
-        if event.get("type") == "search_policy_decision"
-    ]
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
 
     assert loop.run_state.stall.no_improvement_iters == 0
     assert decision.mode == SEARCH_MODE_DIVERSIFY
@@ -3913,19 +3619,13 @@ def test_a_diversification_starts_the_marginal_gain_window_again():
     Otherwise the same flat outcomes are still in reach once mode residence
     expires, and the campaign diversifies again on evidence it already spent.
     """
-    older = [
-        _kept_outcome(offset + 1, 1.50 + 0.005 * offset)
-        for offset in range(MARGINAL_GAIN_WINDOW + 1)
-    ]
+    older = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
     diversified = _kept_outcome(
         MARGINAL_GAIN_WINDOW + 2,
         1.54,
         mode=SEARCH_MODE_DIVERSIFY,
     )
-    after = [
-        _kept_outcome(MARGINAL_GAIN_WINDOW + 3 + offset, 1.54)
-        for offset in range(MARGINAL_GAIN_WINDOW - 1)
-    ]
+    after = [_kept_outcome(MARGINAL_GAIN_WINDOW + 3 + offset, 1.54) for offset in range(MARGINAL_GAIN_WINDOW - 1)]
 
     assert IterationLoop._exploit_window_gain(
         older,
@@ -3953,20 +3653,14 @@ def test_a_diversification_that_concluded_nothing_is_still_a_boundary(
     the campaign diversifies again on evidence it already spent -- with only
     mode residence left to brake it.
     """
-    older = [
-        _kept_outcome(offset + 1, 1.50 + 0.005 * offset)
-        for offset in range(MARGINAL_GAIN_WINDOW + 1)
-    ]
+    older = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
     failed = make_event(
         "iteration_result",
         MARGINAL_GAIN_WINDOW + 2,
         decision=failed_decision,
         search_mode=SEARCH_MODE_DIVERSIFY,
     )
-    after = [
-        _kept_outcome(MARGINAL_GAIN_WINDOW + 3 + offset, 1.54)
-        for offset in range(MARGINAL_GAIN_WINDOW - 1)
-    ]
+    after = [_kept_outcome(MARGINAL_GAIN_WINDOW + 3 + offset, 1.54) for offset in range(MARGINAL_GAIN_WINDOW - 1)]
 
     assert IterationLoop._exploit_window_gain(
         [*older, failed, *after],
@@ -3989,10 +3683,7 @@ def test_an_exploit_outcome_that_concluded_nothing_is_transparent():
             decision="AGENT_ERROR",
             search_mode=SEARCH_MODE_EXPLOIT,
         ),
-    ] + [
-        _kept_outcome(offset + 3, 1.505 + 0.005 * offset)
-        for offset in range(MARGINAL_GAIN_WINDOW)
-    ]
+    ] + [_kept_outcome(offset + 3, 1.505 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW)]
 
     assert IterationLoop._exploit_window_gain(
         events,
@@ -4003,10 +3694,7 @@ def test_an_exploit_outcome_that_concluded_nothing_is_transparent():
 
 def test_a_supervisor_direction_gets_a_window_of_its_own():
     """Outcomes recorded before an intervention cannot judge what it injected."""
-    events = [
-        _kept_outcome(offset + 1, 1.50 + 0.005 * offset)
-        for offset in range(MARGINAL_GAIN_WINDOW + 1)
-    ]
+    events = [_kept_outcome(offset + 1, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW + 1)]
 
     assert IterationLoop._exploit_window_gain(
         events,
@@ -4034,8 +3722,7 @@ def test_a_window_without_a_usable_anchor_names_why(anchor, reason):
     against every floor. They are different facts and are reported as such.
     """
     events = [_kept_outcome(1, anchor)] + [
-        _kept_outcome(offset + 2, 1.50 + 0.005 * offset)
-        for offset in range(MARGINAL_GAIN_WINDOW)
+        _kept_outcome(offset + 2, 1.50 + 0.005 * offset) for offset in range(MARGINAL_GAIN_WINDOW)
     ]
 
     assert IterationLoop._exploit_window_gain(
@@ -4073,11 +3760,7 @@ def test_an_unevaluable_window_says_so_in_the_decision_event(
         loop.state_store.append_event(_kept_outcome(offset + 1, None))
 
     decision = loop._update_search_policy(MARGINAL_GAIN_WINDOW + 2)
-    recorded = [
-        event
-        for event in loop.state_store.read_events()
-        if event.get("type") == "search_policy_decision"
-    ]
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
 
     assert decision.mode == SEARCH_MODE_EXPLOIT
     assert "window_gain_ratio" not in recorded[-1]
@@ -4097,11 +3780,7 @@ def test_a_short_window_says_so_rather_than_saying_nothing(
     loop.state_store.append_event(_kept_outcome(1, 1.50))
 
     loop._update_search_policy(2)
-    recorded = [
-        event
-        for event in loop.state_store.read_events()
-        if event.get("type") == "search_policy_decision"
-    ]
+    recorded = [event for event in loop.state_store.read_events() if event.get("type") == "search_policy_decision"]
 
     assert recorded[-1]["window_gain_unavailable"] == "short_window"
 
@@ -4128,11 +3807,7 @@ def test_repeated_empty_diffs_escalate_before_the_generic_stall_threshold(
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
 
     assert decisions == ["NO_CHANGES", "NO_CHANGES", "NO_CHANGES"]
     assert state.stall.unresolved_stall_iters < loop.ic.supervise_after
@@ -4181,11 +3856,7 @@ def test_the_empty_diff_streak_survives_a_reworded_plan_headline(
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
 
     assert decisions == ["NO_CHANGES", "NO_CHANGES", "NO_CHANGES"]
     assert observed_modes == ["EXPLOIT", "EXPLOIT", "DIVERSIFY"]
@@ -4219,11 +3890,7 @@ def test_api_outage_does_not_break_the_empty_diff_streak(tmp_path, monkeypatch):
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
 
     assert decisions == ["NO_CHANGES", "API_ERROR", "NO_CHANGES", "NO_CHANGES"]
     assert observed_modes == ["EXPLOIT", "EXPLOIT", "EXPLOIT", "DIVERSIFY"]
@@ -4256,11 +3923,7 @@ def test_a_crashed_session_does_not_break_the_empty_diff_streak(
 
     store = LoopStateStore(str(workspace))
     state = store.load()
-    decisions = [
-        event.get("decision")
-        for event in store.read_events()
-        if event.get("type") == "iteration_result"
-    ]
+    decisions = [event.get("decision") for event in store.read_events() if event.get("type") == "iteration_result"]
 
     assert decisions == ["NO_CHANGES", "AGENT_ERROR", "NO_CHANGES", "NO_CHANGES"]
     assert observed_modes == ["EXPLOIT", "EXPLOIT", "EXPLOIT", "DIVERSIFY"]
@@ -4290,11 +3953,7 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
     async def outage_agent(_kernel_path, _history, session_sink):
         session_sink["plan"] = plan
         observed_modes.append(loop.run_state.search_mode)
-        observed_streaks.append(
-            loop._consecutive_no_changes(
-                loop.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)
-            )
-        )
+        observed_streaks.append(loop._consecutive_no_changes(loop.state_store.recent_results(NO_CHANGES_STREAK_WINDOW)))
         if 1 <= len(loop.results) <= 5:
             session_sink["end_reason"] = runner_module.EXHAUSTED_END_REASON
             return "agent session ended with an API error"
@@ -4305,14 +3964,8 @@ def test_an_outage_run_cannot_push_the_first_empty_diff_out_of_the_window(
     reopened = LoopStateStore(str(workspace))
     live = reopened.load()
     events = reopened.read_events()
-    decisions = [
-        event.get("decision")
-        for event in events
-        if event.get("type") == "iteration_result"
-    ]
-    resumed_streak = loop._consecutive_no_changes(
-        reopened.recent_results(NO_CHANGES_STREAK_WINDOW)
-    )
+    decisions = [event.get("decision") for event in events if event.get("type") == "iteration_result"]
+    resumed_streak = loop._consecutive_no_changes(reopened.recent_results(NO_CHANGES_STREAK_WINDOW))
 
     assert decisions == ["NO_CHANGES"] + ["API_ERROR"] * 5 + ["NO_CHANGES"] * 2
     # Without this the run would not exercise the distinction: a window counted
@@ -4339,19 +3992,13 @@ def test_the_outcome_window_is_servable_from_the_cache_or_refused(tmp_path):
     store = LoopStateStore(str(tmp_path))
     for iteration in range(1, NO_CHANGES_STREAK_WINDOW + 2):
         store.append_event(make_event("iteration_started", iteration))
-        store.append_event(
-            make_event("iteration_result", iteration, decision="NO_CHANGES")
-        )
+        store.append_event(make_event("iteration_result", iteration, decision="NO_CHANGES"))
 
     window = store.recent_results(NO_CHANGES_STREAK_WINDOW)
 
     assert NO_CHANGES_STREAK_WINDOW <= _RECENT_RESULT_CACHE
-    assert [event["iter"] for event in window] == list(
-        range(2, NO_CHANGES_STREAK_WINDOW + 2)
-    )
-    assert LoopStateStore(str(tmp_path)).recent_results(
-        NO_CHANGES_STREAK_WINDOW
-    ) == window
+    assert [event["iter"] for event in window] == list(range(2, NO_CHANGES_STREAK_WINDOW + 2))
+    assert LoopStateStore(str(tmp_path)).recent_results(NO_CHANGES_STREAK_WINDOW) == window
     with pytest.raises(ValueError, match="exceeds the cached outcome bound"):
         store.recent_results(_RECENT_RESULT_CACHE + 1)
 
@@ -4393,9 +4040,7 @@ def test_orchestration_persists_optimization_plan_without_decision_json(
 
     assert error == ""
     assert plan_path is not None
-    assert plan_path.read_text() == (
-        "# Optimization plan\nVectorize global loads.\n"
-    )
+    assert plan_path.read_text() == ("# Optimization plan\nVectorize global loads.\n")
     assert not (plan_path.parent / "draft_plan.md").exists()
     assert not (plan_path.parent / "critic_review.md").exists()
 
@@ -4413,10 +4058,7 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
     )
     critic = PlanCriticOutcome(
         verdict="REVISE",
-        review=(
-            "VERDICT: REVISE\n\n"
-            "Compare the existing GEMM path."
-        ),
+        review=("VERDICT: REVISE\n\nCompare the existing GEMM path."),
     )
     result = SimpleNamespace(
         optimization_plans=("# Final plan\nBenchmark GEMM.",),
@@ -4442,24 +4084,16 @@ def test_orchestration_persists_critic_draft_review_and_final_paths(
         )
     )
     root = workspace / "forge_experiments" / "orchestration" / "iter_001"
-    diagnostics = json.loads(
-        (root / "structured_output.json").read_text()
-    )
+    diagnostics = json.loads((root / "structured_output.json").read_text())
 
     assert error == ""
     assert plan_path is not None
-    assert (root / "draft_plan.md").read_text().startswith(
-        "# Draft plan"
-    )
-    assert (root / "critic_review.md").read_text().startswith(
-        "VERDICT: REVISE"
-    )
+    assert (root / "draft_plan.md").read_text().startswith("# Draft plan")
+    assert (root / "critic_review.md").read_text().startswith("VERDICT: REVISE")
     assert plan_path.read_text().startswith("# Final plan")
     assert diagnostics["plan_revised"] is True
     assert diagnostics["artifact_paths"] == {
-        "critic_review": str(
-            (root / "critic_review.md").resolve()
-        ),
+        "critic_review": str((root / "critic_review.md").resolve()),
         "draft_plan": str((root / "draft_plan.md").resolve()),
         "final_plan": str(plan_path.resolve()),
     }
@@ -4480,10 +4114,7 @@ def test_framework_fallback_plan_does_not_complete_diversify_cycle(
         gpu_target="gfx942",
     )
     result = SimpleNamespace(
-        optimization_plans=(
-            "# Optimization plan\n"
-            "Inspect the evidence and formulate an optimization.",
-        ),
+        optimization_plans=("# Optimization plan\nInspect the evidence and formulate an optimization.",),
         optimization_plan_executable=False,
         optimization_plan_draft="",
         dispatch_plan=None,
@@ -4504,9 +4135,7 @@ def test_framework_fallback_plan_does_not_complete_diversify_cycle(
         )
     )
     loop._apply_iteration_planning_state(
-        optimization_plan_created=bool(
-            plan_path and loop._last_orchestration_plan_executable
-        )
+        optimization_plan_created=bool(plan_path and loop._last_orchestration_plan_executable)
     )
 
     assert error == ""
@@ -4562,9 +4191,7 @@ def test_orchestration_plan_persistence_error_propagates(
             )
         )
     root = workspace / "forge_experiments" / "orchestration" / "iter_001"
-    diagnostics = json.loads(
-        (root / "structured_output.json").read_text()
-    )
+    diagnostics = json.loads((root / "structured_output.json").read_text())
 
     assert "final_plan" not in diagnostics["artifact_paths"]
     assert not (root / "optimization_plan.md").exists()
@@ -4658,12 +4285,7 @@ def test_keep_defers_incremental_analysis_until_next_request(
     class Bundle:
         def __init__(self, analysis_commit):
             self.analysis_commit = analysis_commit
-            self.root = (
-                workspace
-                / "forge_experiments"
-                / "analysis"
-                / analysis_commit
-            )
+            self.root = workspace / "forge_experiments" / "analysis" / analysis_commit
             self.root.mkdir(parents=True, exist_ok=True)
             (self.root / "manifest.json").write_text("{}")
             self.outcome = SimpleNamespace(
@@ -4751,17 +4373,10 @@ def test_small_keeps_reuse_analysis_until_cumulative_gain_reaches_threshold(
     loop.run_state.analysis.evidence_mean_case_speedup = 1.0
     loop.run_state.analysis.evidence_status = "profiled"
     loop._last_published_analysis_commit = initial_commit
-    initial_root = (
-        workspace
-        / "forge_experiments"
-        / "analysis"
-        / initial_commit
-    )
+    initial_root = workspace / "forge_experiments" / "analysis" / initial_commit
     initial_generation = initial_root / "generation-001"
     initial_generation.mkdir(parents=True)
-    (initial_root / "published.json").write_text(
-        json.dumps({"generation_root": initial_generation.name})
-    )
+    (initial_root / "published.json").write_text(json.dumps({"generation_root": initial_generation.name}))
     loop._active_analysis_context = replace(
         loop._build_orchestration_context(),
         evidence_commit=initial_commit,
@@ -4791,12 +4406,7 @@ def test_small_keeps_reuse_analysis_until_cumulative_gain_reaches_threshold(
     class Bundle:
         def __init__(self, analysis_commit):
             self.analysis_commit = analysis_commit
-            self.root = (
-                workspace
-                / "forge_experiments"
-                / "analysis"
-                / analysis_commit
-            )
+            self.root = workspace / "forge_experiments" / "analysis" / analysis_commit
             self.root.mkdir(parents=True, exist_ok=True)
             self.manifest = {"status": "READY"}
             self.outcome = SimpleNamespace(
@@ -4950,6 +4560,7 @@ def test_missing_cumulative_diff_degrades_without_forcing_refresh(
         return original_git(*args, **kwargs)
 
     monkeypatch.setattr(analysis_evidence, "git", fail_analysis_diff)
+
     class AnalysisService:
         profiling_enabled = True
 
@@ -4987,20 +4598,13 @@ def test_missing_cumulative_diff_degrades_without_forcing_refresh(
         assert context.cumulative_diff_path == ""
         assert "simulated diff failure" in context.cumulative_diff_error
     assert loop.persistence_degraded is True
-    decisions = [
-        event
-        for event in loop.state_store.read_events()
-        if event["type"] == "analysis_refresh_decision"
-    ]
+    decisions = [event for event in loop.state_store.read_events() if event["type"] == "analysis_refresh_decision"]
     assert [event["reasons"] for event in decisions[-3:]] == [
         ["CUMULATIVE_GAIN_BELOW_THRESHOLD"],
         ["ANALYSIS_ATTEMPTS_EXHAUSTED"],
         ["ANALYSIS_ATTEMPTS_EXHAUSTED"],
     ]
-    assert all(
-        "simulated diff failure" in event["cumulative_diff_error"]
-        for event in decisions[-3:]
-    )
+    assert all("simulated diff failure" in event["cumulative_diff_error"] for event in decisions[-3:])
 
 
 def test_analysis_refresh_event_failure_marks_persistence_degraded(
@@ -5015,9 +4619,7 @@ def test_analysis_refresh_event_failure_marks_persistence_degraded(
     )
     loop.run_state = RunState()
     loop.state_store = SimpleNamespace(
-        append_event=lambda _event: (_ for _ in ()).throw(
-            OSError("event log unavailable")
-        )
+        append_event=lambda _event: (_ for _ in ()).throw(OSError("event log unavailable"))
     )
     context = loop._build_orchestration_context()
 
@@ -5033,10 +4635,7 @@ def test_analysis_refresh_event_failure_marks_persistence_degraded(
     )
 
     assert loop.persistence_degraded is True
-    assert any(
-        "event log unavailable" in error
-        for error in loop.persistence_errors
-    )
+    assert any("event log unavailable" in error for error in loop.persistence_errors)
 
 
 def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
@@ -5052,13 +4651,7 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
     loop.state_store = LoopStateStore(str(workspace))
     loop.run_state = RunState()
     evidence_commit = loop._git("rev-parse", "HEAD").splitlines()[0]
-    old_bundle = (
-        workspace
-        / "forge_experiments"
-        / "analysis"
-        / evidence_commit
-        / "generation-001"
-    )
+    old_bundle = workspace / "forge_experiments" / "analysis" / evidence_commit / "generation-001"
     old_bundle.mkdir(parents=True)
     loop.run_state.analysis.evidence_commit = evidence_commit
     loop.run_state.analysis.evidence_mean_case_speedup = 1.0
@@ -5094,12 +4687,7 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
     )
     loop.best_mean_case_speedup = 1.05
     apply_input_paths = set()
-    current_bundle = (
-        workspace
-        / "forge_experiments"
-        / "analysis"
-        / canonical_commit
-    )
+    current_bundle = workspace / "forge_experiments" / "analysis" / canonical_commit
     current_bundle.mkdir(parents=True)
 
     class Bundle:
@@ -5114,9 +4702,7 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
         )
 
         def apply(self, context):
-            apply_input_paths.update(
-                reference.path for reference in context.evidence_refs
-            )
+            apply_input_paths.update(reference.path for reference in context.evidence_refs)
             return replace(
                 context,
                 evidence_refs=(
@@ -5138,12 +4724,8 @@ def test_partial_bundle_does_not_inherit_prior_commit_evidence_refs(
         def apply_checkpoint(self, context):
             return context
 
-    context = asyncio.run(
-        loop._resolve_analysis_context(AnalysisService())
-    )
-    result_paths = {
-        reference.path for reference in context.evidence_refs
-    }
+    context = asyncio.run(loop._resolve_analysis_context(AnalysisService()))
+    result_paths = {reference.path for reference in context.evidence_refs}
 
     assert str(old_bundle) not in apply_input_paths
     assert str(old_bundle) not in result_paths
@@ -5248,12 +4830,7 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
     class Bundle:
         def __init__(self, commit):
             self.analysis_commit = commit
-            self.root = (
-                workspace
-                / "forge_experiments"
-                / "analysis"
-                / commit
-            )
+            self.root = workspace / "forge_experiments" / "analysis" / commit
             self.root.mkdir(parents=True, exist_ok=True)
             self.manifest = {"status": "READY"}
             self.outcome = SimpleNamespace(
@@ -5280,9 +4857,7 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
         nonlocal agent_calls
         agent_calls += 1
         session_sink["plan"] = f"candidate {agent_calls}"
-        Path(kernel_path).write_text(
-            f"def kernel():\n    return {agent_calls + 1}\n"
-        )
+        Path(kernel_path).write_text(f"def kernel():\n    return {agent_calls + 1}\n")
         return "candidate ready"
 
     async def canonical_result(iteration, plan=""):
@@ -5303,10 +4878,7 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
     async def supervisor(**kwargs):
         supervisor_contexts.append(json.loads(kwargs["evidence_context"]))
         assert len(analysis_calls) == 2
-        assert (
-            loop.run_state.analysis.evidence_commit
-            == loop.run_state.best.commit_hash
-        )
+        assert loop.run_state.analysis.evidence_commit == loop.run_state.best.commit_hash
         return ""
 
     monkeypatch.setattr(loop, "run_one_iteration", canonical_result)
@@ -5321,25 +4893,15 @@ def test_loop_refreshes_stale_analysis_before_supervisor(
 
     assert len(analysis_calls) == 2
     assert len(supervisor_contexts) == 1
-    evidence = supervisor_contexts[0]["orchestration_context"][
-        "analysis_evidence"
-    ]
+    evidence = supervisor_contexts[0]["orchestration_context"]["analysis_evidence"]
     assert evidence["commit"] == loop.run_state.best.commit_hash
     assert evidence["stale"] is False
     events = LoopStateStore(str(workspace)).read_events()
     refresh_events = [
-        event
-        for event in events
-        if event["type"] == "analysis_refresh_decision"
-        and event["action"] == "refresh"
+        event for event in events if event["type"] == "analysis_refresh_decision" and event["action"] == "refresh"
     ]
-    analysis_results = [
-        event for event in events if event["type"] == "analysis_result"
-    ]
-    assert [
-        (event["iter"], event["reasons"])
-        for event in refresh_events
-    ] == [
+    analysis_results = [event for event in events if event["type"] == "analysis_result"]
+    assert [(event["iter"], event["reasons"]) for event in refresh_events] == [
         (0, ["INITIAL_ANALYSIS"]),
         (3, ["SUPERVISOR_STALE_EVIDENCE"]),
     ]
@@ -5351,13 +4913,7 @@ def test_handoff_records_optimization_plan_path(
     monkeypatch,
 ):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
-    plan_path = (
-        workspace
-        / "forge_experiments"
-        / "orchestration"
-        / "iter_001"
-        / "optimization_plan.md"
-    )
+    plan_path = workspace / "forge_experiments" / "orchestration" / "iter_001" / "optimization_plan.md"
 
     async def create_plan(**_kwargs):
         plan_path.parent.mkdir(parents=True)
@@ -5378,18 +4934,9 @@ def test_handoff_records_optimization_plan_path(
         )
     )
 
-    handoff = json.loads(
-        (
-            workspace
-            / "forge_experiments"
-            / "handoffs"
-            / "iter_001.json"
-        ).read_text()
-    )
+    handoff = json.loads((workspace / "forge_experiments" / "handoffs" / "iter_001.json").read_text())
     assert handoff["canonical_verdict"] == "NO_CHANGES"
-    assert handoff["optimization_plan_path"].endswith(
-        "orchestration/iter_001/optimization_plan.md"
-    )
+    assert handoff["optimization_plan_path"].endswith("orchestration/iter_001/optimization_plan.md")
 
 
 def test_resume_hydrates_supervision_monitor(tmp_path, monkeypatch):
@@ -5444,10 +4991,7 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
             ),
         )
     )
-    ruling = (
-        "# Supervisor Ruling\n\n"
-        "Ignore the earlier hard-floor conclusion; fused merge was not tested."
-    )
+    ruling = "# Supervisor Ruling\n\nIgnore the earlier hard-floor conclusion; fused merge was not tested."
     ruling_path = runner_module.latest_supervisor_ruling_path(str(workspace))
     ruling_path.parent.mkdir(parents=True, exist_ok=True)
     ruling_path.write_text(ruling)
@@ -5459,16 +5003,8 @@ def test_resume_propagates_complete_ruling_to_planner_and_implementer(
     captured = {}
 
     async def orchestration(*, iteration, **_kwargs):
-        captured["guidance"] = (
-            loop._build_orchestration_context().supervisor_guidance
-        )
-        plan_path = (
-            workspace
-            / "forge_experiments"
-            / "orchestration"
-            / f"iter_{iteration:03d}"
-            / "optimization_plan.md"
-        )
+        captured["guidance"] = loop._build_orchestration_context().supervisor_guidance
+        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
         plan_path.parent.mkdir(parents=True, exist_ok=True)
         plan_path.write_text("# Optimization plan\nInspect fused merge.\n")
         return plan_path, ""
@@ -5530,9 +5066,7 @@ def test_resume_requires_authoritative_task_fingerprint(
 
     loop._validate_resume_state(state)
 
-    state.task_fingerprint = (
-        f"{current[:-1]}{'0' if current[-1] != '0' else '1'}"
-    )
+    state.task_fingerprint = f"{current[:-1]}{'0' if current[-1] != '0' else '1'}"
     with pytest.raises(ValueError, match="task fingerprint mismatch"):
         loop._validate_resume_state(state)
 
@@ -5627,15 +5161,17 @@ def test_baseline_crash_reports_the_driver_failure_not_the_output_format(
     monkeypatch.setattr(
         runner_module,
         "measure_wallclock",
-        _static_bench({
-            "success": False,
-            "message": "BENCH CRASHED (exit 1)",
-            "output": (
-                "Traceback (most recent call last):\n"
-                "FileNotFoundError: could not locate the invocation "
-                "specification JSON\n"
-            ),
-        }),
+        _static_bench(
+            {
+                "success": False,
+                "message": "BENCH CRASHED (exit 1)",
+                "output": (
+                    "Traceback (most recent call last):\n"
+                    "FileNotFoundError: could not locate the invocation "
+                    "specification JSON\n"
+                ),
+            }
+        ),
     )
 
     assert asyncio.run(loop._measure_baseline()) is None
@@ -5672,12 +5208,14 @@ def test_baseline_without_case_lines_names_the_missing_contract(
     monkeypatch.setattr(
         runner_module,
         "measure_wallclock",
-        _static_bench({
-            "success": True,
-            "median_ms": 5.5635,
-            "message": "BENCH: mean=5.5635 ms",
-            "case_times": {},
-        }),
+        _static_bench(
+            {
+                "success": True,
+                "median_ms": 5.5635,
+                "message": "BENCH: mean=5.5635 ms",
+                "case_times": {},
+            }
+        ),
     )
 
     assert asyncio.run(loop._measure_baseline()) is None
@@ -5698,12 +5236,14 @@ def test_baseline_without_aggregate_line_is_not_silent(
     monkeypatch.setattr(
         runner_module,
         "measure_wallclock",
-        _static_bench({
-            "success": True,
-            "median_ms": None,
-            "message": "BENCH: cases only",
-            "case_times": {"case": 1.0},
-        }),
+        _static_bench(
+            {
+                "success": True,
+                "median_ms": None,
+                "message": "BENCH: cases only",
+                "case_times": {"case": 1.0},
+            }
+        ),
     )
 
     assert asyncio.run(loop._measure_baseline()) is None
@@ -5724,10 +5264,7 @@ def test_baseline_case_coverage_drift_names_the_cases(
     async def bench(**_kwargs):
         return {
             "success": False,
-            "message": (
-                "MEASUREMENT CASE COVERAGE MISMATCH: "
-                "expected=['case_001', 'case_002'], got=['case_001']"
-            ),
+            "message": ("MEASUREMENT CASE COVERAGE MISMATCH: expected=['case_001', 'case_002'], got=['case_001']"),
         }
 
     monkeypatch.setattr(runner_module, "measure_wallclock", bench)
@@ -5775,10 +5312,12 @@ def test_resume_restores_baselines_before_best_publication_reconcile(
     observed = []
 
     def inspect_reconcile():
-        observed.append((
-            loop.ic.baseline_wall_ms,
-            loop.ic.pristine_baseline_wall_ms,
-        ))
+        observed.append(
+            (
+                loop.ic.baseline_wall_ms,
+                loop.ic.pristine_baseline_wall_ms,
+            )
+        )
 
     monkeypatch.setattr(loop, "_reconcile_best_publication", inspect_reconcile)
     monkeypatch.setattr(loop, "_time_remaining", lambda: 0.0)
@@ -5985,9 +5524,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
         histories.append(history)
         if agent_calls == 1:
             loop._supervisor_ruling = stale_ruling
-            ruling_path = runner_module.latest_supervisor_ruling_path(
-                str(workspace)
-            )
+            ruling_path = runner_module.latest_supervisor_ruling_path(str(workspace))
             ruling_path.parent.mkdir(parents=True, exist_ok=True)
             ruling_path.write_text(stale_ruling)
         session_sink["plan"] = "repeat candidate"
@@ -6022,9 +5559,7 @@ def test_empty_supervisor_expires_prior_ruling_without_resetting_stall(
     assert "Mode: DIVERSIFY" in histories[1]
     assert stale_ruling not in histories[1]
     assert loop._supervisor_ruling == ""
-    assert not runner_module.latest_supervisor_ruling_path(
-        str(workspace)
-    ).exists()
+    assert not runner_module.latest_supervisor_ruling_path(str(workspace)).exists()
 
 
 def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
@@ -6053,13 +5588,7 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
 
     async def orchestration(*, iteration, **_kwargs):
         orchestration_calls.append(iteration)
-        plan_path = (
-            workspace
-            / "forge_experiments"
-            / "orchestration"
-            / f"iter_{iteration:03d}"
-            / "optimization_plan.md"
-        )
+        plan_path = workspace / "forge_experiments" / "orchestration" / f"iter_{iteration:03d}" / "optimization_plan.md"
         plan_path.parent.mkdir(parents=True)
         plan_path.write_text(f"# Optimization plan {iteration}\n")
         loop._latest_optimization_plan_path = str(plan_path)
@@ -6108,17 +5637,10 @@ def test_free_form_supervisor_ruling_still_creates_fresh_plan_each_iteration(
     assert "hard-floor conclusion is not supported" in histories[2]
     assert len(supervisor_evidence) == 1
     evidence = json.loads(supervisor_evidence[0])
-    assert evidence["latest_optimization_plan"].endswith(
-        "iter_001/optimization_plan.md"
-    )
+    assert evidence["latest_optimization_plan"].endswith("iter_001/optimization_plan.md")
     assert "orchestration_context" in evidence
-    assert (
-        evidence["orchestration_context"]["search_policy"]["mode"]
-        == "EXPLOIT"
-    )
-    assert evidence["artifact_paths"]["latest_lesson"].endswith(
-        "lessons/iter_001.md"
-    )
+    assert evidence["orchestration_context"]["search_policy"]["mode"] == "EXPLOIT"
+    assert evidence["artifact_paths"]["latest_lesson"].endswith("lessons/iter_001.md")
     assert "latest_handoff" not in evidence["artifact_paths"]
 
     supervisor_root = workspace / "forge_experiments" / "supervisor"
@@ -6148,9 +5670,7 @@ def _runner_orchestration_service(
         description="Memory specialist",
         instructions="Analyze memory access behavior.",
     )
-    specialist_backend = _OrchestrationTestBackend(
-        [specialist_result or AgentRunResult(text="Use vector loads.")]
-    )
+    specialist_backend = _OrchestrationTestBackend([specialist_result or AgentRunResult(text="Use vector loads.")])
     return OrchestrationService(
         agent=OrchestrationAgent(
             backend=orchestration_backend,
@@ -6206,9 +5726,7 @@ def test_orchestration_failure_skips_implementer_without_fallback(
     )
 
     assert implementer_called is False
-    assert results[0].validation_summary.startswith(
-        "ORCHESTRATION ERROR"
-    )
+    assert results[0].validation_summary.startswith("ORCHESTRATION ERROR")
     state = LoopStateStore(str(workspace)).load()
     assert state.cumulative.orchestration_errors == 1
     assert state.stall.no_improvement_iters == 0
@@ -6227,9 +5745,7 @@ def test_consecutive_orchestration_errors_open_circuit(
         experiments_dir=workspace / "forge_experiments",
         gpu_target="gfx942",
     )
-    backend = _OrchestrationTestBackend(
-        [_orchestration_api_failure() for _ in range(3)]
-    )
+    backend = _OrchestrationTestBackend([_orchestration_api_failure() for _ in range(3)])
     service = _runner_orchestration_service(backend)
 
     async def implementer(*_args, **_kwargs):
@@ -6266,9 +5782,7 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         gpu_target="gfx942",
     )
     first.config = runtime_config
-    first_backend = _OrchestrationTestBackend(
-        [_orchestration_api_failure() for _ in range(3)]
-    )
+    first_backend = _OrchestrationTestBackend([_orchestration_api_failure() for _ in range(3)])
     asyncio.run(
         first.run(
             agent_fn=_no_change_agent,
@@ -6289,15 +5803,11 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(failed_probe.results) < 5 else 0.0,
     )
-    failed_backend = _OrchestrationTestBackend(
-        [_orchestration_api_failure()]
-    )
+    failed_backend = _OrchestrationTestBackend([_orchestration_api_failure()])
     failed_results = asyncio.run(
         failed_probe.run(
             agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(
-                failed_backend
-            ),
+            orchestration_service=_runner_orchestration_service(failed_backend),
             supervisor_fn=_unused_supervisor,
         )
     )
@@ -6336,17 +5846,13 @@ def test_orchestration_failed_resume_allows_one_half_open_probe(
                     }
                 )
             ),
-            AgentRunResult(
-                text="# Optimization plan\nVectorize global loads."
-            ),
+            AgentRunResult(text="# Optimization plan\nVectorize global loads."),
         ]
     )
     successful_results = asyncio.run(
         successful_probe.run(
             agent_fn=_no_change_agent,
-            orchestration_service=_runner_orchestration_service(
-                successful_backend
-            ),
+            orchestration_service=_runner_orchestration_service(successful_backend),
             supervisor_fn=_unused_supervisor,
         )
     )
@@ -6382,9 +5888,7 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
         "_time_remaining",
         lambda: _AMPLE_BUDGET_SEC if len(second.results) < 1 else 0.0,
     )
-    second_results = asyncio.run(
-        second.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor)
-    )
+    second_results = asyncio.run(second.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
     resumed = LoopStateStore(str(workspace)).load()
     assert [result.iteration for result in second_results] == [2]
@@ -6397,8 +5901,7 @@ def test_two_loop_instances_resume_global_iteration_and_fresh_budget(tmp_path, m
     assert second.experiment.parent_experiment_id == first_experiment.experiment_id
     assert second.experiment.segment_index == 2
     baseline_events = [
-        event for event in LoopStateStore(str(workspace)).read_events()
-        if event["type"] == "baseline_measured"
+        event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "baseline_measured"
     ]
     assert len(baseline_events) == 1
 
@@ -6409,11 +5912,13 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     store = LoopStateStore(str(workspace))
     state = store.load()
     interrupted_iteration = state.next_iteration
-    store.append_event(make_event(
-        "iteration_started",
-        interrupted_iteration,
-        phase=state.phase,
-    ))
+    store.append_event(
+        make_event(
+            "iteration_started",
+            interrupted_iteration,
+            phase=state.phase,
+        )
+    )
 
     resumed = IterationLoop(
         first.ic,
@@ -6429,12 +5934,8 @@ def test_resume_advances_past_abruptly_started_event(tmp_path, monkeypatch):
     )
     results = asyncio.run(resumed.run(agent_fn=_no_change_agent))
 
-    assert [result.iteration for result in results] == [
-        interrupted_iteration + 1
-    ]
-    assert LoopStateStore(str(workspace)).load().next_iteration == (
-        interrupted_iteration + 2
-    )
+    assert [result.iteration for result in results] == [interrupted_iteration + 1]
+    assert LoopStateStore(str(workspace)).load().next_iteration == (interrupted_iteration + 2)
 
 
 def test_validated_warm_start_is_immediately_recoverable_without_keep(
@@ -6480,14 +5981,7 @@ def test_validated_warm_start_is_immediately_recoverable_without_keep(
     )
 
     state = LoopStateStore(str(workspace)).load()
-    manifest = json.loads(
-        (
-            workspace
-            / "forge_experiments"
-            / "best"
-            / "manifest.json"
-        ).read_text()
-    )
+    manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
     assert state.best.source == "warm_start"
     assert state.best.commit_hash == warm_commit
     assert state.best.wall_ms == 0.8
@@ -6560,9 +6054,7 @@ def test_validated_warm_start_reuses_cli_prepublication(
         "mean_case_speedup": 1.25,
         "best_iteration": 0,
         "best_commit": warm_commit,
-        "best_manifest": str(
-            workspace / "forge_experiments" / "best" / "manifest.json"
-        ),
+        "best_manifest": str(workspace / "forge_experiments" / "best" / "manifest.json"),
     }
 
     def duplicate_publication(*_args, **_kwargs):
@@ -6576,18 +6068,9 @@ def test_validated_warm_start_reuses_cli_prepublication(
         )
     )
 
-    persisted_manifest = json.loads(
-        (
-            workspace
-            / "forge_experiments"
-            / "best"
-            / "manifest.json"
-        ).read_text()
-    )
+    persisted_manifest = json.loads((workspace / "forge_experiments" / "best" / "manifest.json").read_text())
     assert persisted_manifest == manifest
-    assert not list(
-        (workspace / "forge_experiments" / "best").glob(".iter_000.corrupt-*")
-    )
+    assert not list((workspace / "forge_experiments" / "best").glob(".iter_000.corrupt-*"))
 
 
 def test_keep_with_missing_diagnostic_wall_time_completes(
@@ -6782,11 +6265,7 @@ def test_a_snapshot_write_failure_records_degradation_and_continues(
 
     asyncio.run(loop.run(agent_fn=_no_change_agent, supervisor_fn=_unused_supervisor))
 
-    events = [
-        event
-        for event in LoopStateStore(str(workspace)).read_events()
-        if event["type"] == "pr_refs_refreshed"
-    ]
+    events = [event for event in LoopStateStore(str(workspace)).read_events() if event["type"] == "pr_refs_refreshed"]
     assert len(events) == 1
     assert events[0]["reason"] == "ok"
     assert events[0]["degraded_reason"] == "local_failure"
@@ -7034,6 +6513,7 @@ def test_mean_case_speedup_metric_preserves_raw_mean_for_diagnostics():
 
 # ── lesson recording ──────────────────────────────────────────────────────────
 
+
 def _lesson_result(**overrides) -> IterationResult:
     base = dict(
         iteration=3,
@@ -7066,15 +6546,17 @@ def test_record_lesson_writes_narrative_and_outcome(tmp_path, monkeypatch):
     store = _attach_lessons(loop, workspace)
     loop.best_wall_ms = 1.2
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _fake_summarizer,
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _fake_summarizer,
+            },
+        )
+    )
 
     text = store.read(3)
     assert "BLOCK_N 128" in text
@@ -7088,18 +6570,20 @@ def test_record_lesson_falls_back_to_gate_findings(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=4,
-        result=_lesson_result(iteration=4),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": None,
-            "plan": "x",
-            "findings": "compile error: invalid cast\n---\ncorrect but not faster",
-        },
-        diff_summary="kernel.py | 3 +-",
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=4,
+            result=_lesson_result(iteration=4),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": None,
+                "plan": "x",
+                "findings": "compile error: invalid cast\n---\ncorrect but not faster",
+            },
+            diff_summary="kernel.py | 3 +-",
+        )
+    )
 
     text = store.read(4)
     assert "invalid cast" in text
@@ -7112,18 +6596,20 @@ def test_record_lesson_outcome_only_records_machine_verdict(tmp_path, monkeypatc
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=4,
-        result=_lesson_result(iteration=4),
-        decision="REVERT_PERF",
-        # Nothing to summarize and nothing observed: no narrative is possible.
-        session_sink={
-            "session_started": True,
-            "summarize": None,
-            "plan": "x",
-        },
-        diff_summary="",
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=4,
+            result=_lesson_result(iteration=4),
+            decision="REVERT_PERF",
+            # Nothing to summarize and nothing observed: no narrative is possible.
+            session_sink={
+                "session_started": True,
+                "summarize": None,
+                "plan": "x",
+            },
+            diff_summary="",
+        )
+    )
 
     # An outcome-only document still says what the outcome was measured under.
     assert store.read(4).strip().startswith("SCOPE: measured on ")
@@ -7134,31 +6620,26 @@ _THREE_CASES = {"decode-t1": 1.0, "decode-t64": 2.0, "prefill-t16384": 3.0}
 
 
 async def _scoped_summarizer(_prompt: str) -> str:
-    return (
-        "swept split-K on decode-t1; every point slower\n"
-        "HELD-FIXED: BLOCK_N=16, num_warps=8"
-    )
+    return "swept split-K on decode-t1; every point slower\nHELD-FIXED: BLOCK_N=16, num_warps=8"
 
 
-def test_record_lesson_scopes_the_negative_to_the_measured_suite(
-    tmp_path, monkeypatch
-):
+def test_record_lesson_scopes_the_negative_to_the_measured_suite(tmp_path, monkeypatch):
     """The whole suite was measured, and the session said what it pinned."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
 
     scope = store.scope_of(3)
     assert scope.cases == ("decode-t1", "decode-t64", "prefill-t16384")
@@ -7176,25 +6657,23 @@ async def _unreachable_summarizer(_prompt: str) -> str:
     )
 
 
-def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(
-    tmp_path, monkeypatch, capsys
-):
+def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(tmp_path, monkeypatch, capsys):
     """The claim closes nothing until the experiment it names is actually run."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _unreachable_summarizer,
-            "plan": "transpose the LDS read",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _unreachable_summarizer,
+                "plan": "transpose the LDS read",
+            },
+        )
+    )
 
     from kernelforge.loop.lessons import UNDISPROVEN_CLAIM
 
@@ -7202,9 +6681,7 @@ def test_record_lesson_carries_an_undisproven_cannot_into_the_scope(
     assert "feasibility claim not disproved" in store.read(3)
     assert "without running the experiment" in capsys.readouterr().out
     assert "VALIDITY: RE-OPENABLE (undisproven feasibility claim)" in (
-        store.render_for_prompt(
-            current_cases=tuple(_THREE_CASES), kernel_source="BLOCK_N = 16\n"
-        )
+        store.render_for_prompt(current_cases=tuple(_THREE_CASES), kernel_source="BLOCK_N = 16\n")
     )
 
 
@@ -7218,59 +6695,55 @@ async def _refuted_summarizer(_prompt: str) -> str:
     )
 
 
-def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(
-    tmp_path, monkeypatch, capsys
-):
+def test_record_lesson_carries_a_refuted_cannot_as_an_open_direction(tmp_path, monkeypatch, capsys):
     """The session's own experiment killed its premise; the axis is reachable.
 
     Scoring this as an obligation discharged would leave the record IN SCOPE
     and still suppressing the direction the same line proved open.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _refuted_summarizer,
-            "plan": "transpose the LDS read",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _refuted_summarizer,
+                "plan": "transpose the LDS read",
+            },
+        )
+    )
 
     from kernelforge.loop.lessons import is_claim_disproved
 
     assert is_claim_disproved(store.scope_of(3).disproof)
     assert "feasibility claim disproved by a build-only screen" in store.read(3)
     assert "shown reachable" in capsys.readouterr().out
-    rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="BLOCK_N = 16\n"
-    )
+    rendered = store.render_for_prompt(current_cases=tuple(_THREE_CASES), kernel_source="BLOCK_N = 16\n")
     assert "VALIDITY: RE-OPEN (feasibility claim disproved)" in rendered
     assert "VALIDITY: IN SCOPE" not in rendered
 
 
 def test_record_lesson_keeps_a_restricted_lanes_scope(tmp_path, monkeypatch):
     """A lane told to touch one case measured one case; the ban stays there."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "waves_per_eu on prefill-t16384 only",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "waves_per_eu on prefill-t16384 only",
+            },
+        )
+    )
 
     scope = store.scope_of(3)
     assert scope.cases == ("prefill-t16384",)
@@ -7279,32 +6752,31 @@ def test_record_lesson_keeps_a_restricted_lanes_scope(tmp_path, monkeypatch):
 
 def test_record_lesson_says_when_no_premise_was_recorded(tmp_path, monkeypatch):
     """A session that pinned nothing it could name leaves a re-openable record."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _fake_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _fake_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
 
     assert store.scope_of(3).held_fixed == ()
     assert "held fixed (not recorded)" in store.read(3)
     assert "VALIDITY: RE-OPENABLE" in store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
 
 
-def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(
-    tmp_path, monkeypatch, capsys
-):
+def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(tmp_path, monkeypatch, capsys):
     """An I/O failure must not become a factual claim about the source.
 
     ``_read_source_file`` collapses an unreadable file to "", which scans as a
@@ -7312,20 +6784,20 @@ def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(
     every stored negative re-opened, and no way to tell that from a kernel that
     really did move on.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
     Path(loop.ic.kernel_file).unlink()
 
     assert loop._read_kernel_source() == ""
@@ -7340,13 +6812,9 @@ def test_an_unreadable_kernel_is_not_reported_as_a_kernel_that_dropped_it(
     assert "not assigned in the kernel source checked" not in rendered
 
 
-def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(
-    tmp_path, monkeypatch
-):
+def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(tmp_path, monkeypatch):
     """The loop's own prompt build must carry the distinction, not just the store."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, session_count=2, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, session_count=2, baseline_case_times=_THREE_CASES)
     _stub_measurement(monkeypatch, walls=[0.5, 0.9])
 
     kernel = Path(loop.ic.kernel_file)
@@ -7356,10 +6824,7 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(
     async def summarizer(_prompt: str) -> str:
         # The next prompt is built before the next session touches the file.
         kernel.unlink()
-        return (
-            "swept split-K on decode-t1; every point slower\n"
-            "HELD-FIXED: BLOCK_N=16"
-        )
+        return "swept split-K on decode-t1; every point slower\nHELD-FIXED: BLOCK_N=16"
 
     async def agent_fn(_kernel_path, experiment_history, session_sink):
         prompts.append(experiment_history)
@@ -7380,68 +6845,62 @@ def test_an_unreadable_kernel_reaches_the_prompt_as_unchecked(
 async def _positive_summarizer(_prompt: str) -> str:
     # Complies with the summary prompt's contract: the record itself states
     # that no direction it covers measured worse.
-    return (
-        "widened the tile on every case; 1.2x, nothing measured worse\n"
-        "NEGATIVES: none"
-    )
+    return "widened the tile on every case; 1.2x, nothing measured worse\nNEGATIVES: none"
 
 
-def test_a_pin_that_moved_to_a_sibling_file_is_not_reported_as_dropped(
-    tmp_path, monkeypatch
-):
+def test_a_pin_that_moved_to_a_sibling_file_is_not_reported_as_dropped(tmp_path, monkeypatch):
     """Tile and dispatch constants live outside the anchor kernel.
 
     The implementer prompt says so itself. Checking only the anchor turns a
     constant that moved into a constant the task no longer assigns, which
     re-opens every negative measured under it.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     sibling = workspace / "tiles.py"
     sibling.write_text('CONFIG = {"BLOCK_N": 16}\nnum_warps = 8\n')
     loop.ic.source_files.append(str(sibling))
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
 
     sources = loop._kernel_source_for_scope()
     assert sources is not None and len(sources) == 2
     rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source=sources,
+        current_cases=tuple(_THREE_CASES),
+        kernel_source=sources,
     )
     assert "VALIDITY: IN SCOPE" in rendered
     assert "not assigned in the kernel source checked" not in rendered
 
 
-def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(
-    tmp_path, monkeypatch
-):
+def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(tmp_path, monkeypatch):
     """A syntax error is "not checked", never "the constant is gone"."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
     Path(loop.ic.kernel_file).write_text("def kernel(:\n    return 1\n")
 
     rendered = store.render_for_prompt(
@@ -7452,9 +6911,7 @@ def test_a_source_that_cannot_be_parsed_is_not_a_source_that_dropped_the_pin(
     assert "not assigned in the kernel source checked" not in rendered
 
 
-def test_an_iteration_that_measured_no_negative_is_not_reopenable(
-    tmp_path, monkeypatch
-):
+def test_an_iteration_that_measured_no_negative_is_not_reopenable(tmp_path, monkeypatch):
     """Nothing in the document was closed, so there is nothing to re-open.
 
     Only the summarizer writes HELD-FIXED:, and only for a direction that
@@ -7462,57 +6919,57 @@ def test_an_iteration_that_measured_no_negative_is_not_reopenable(
     positive iteration RE-OPENABLE and degrades the store to "nothing is
     settled".
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(kept=True, mean_case_speedup=1.2),
-        decision="KEEP",
-        session_sink={
-            "session_started": True,
-            "summarize": _positive_summarizer,
-            "plan": "widen the tile",
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(kept=True, mean_case_speedup=1.2),
+            decision="KEEP",
+            session_sink={
+                "session_started": True,
+                "summarize": _positive_summarizer,
+                "plan": "widen the tile",
+                "findings": "",
+            },
+        )
+    )
 
     scope = store.scope_of(3)
     assert scope.carries_negative is False
     assert scope.held_fixed == ()
     rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
     assert "VALIDITY: IN SCOPE" in rendered
     assert "VALIDITY: RE-OPENABLE" not in rendered
 
 
-def test_an_in_session_gate_rejection_is_a_measured_negative(
-    tmp_path, monkeypatch
-):
+def test_an_in_session_gate_rejection_is_a_measured_negative(tmp_path, monkeypatch):
     """A rejection the agent hit is a negative even when the loop kept nothing."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="NO_CHANGES",
-        session_sink={
-            "session_started": True,
-            "summarize": _positive_summarizer,
-            "plan": "widen the tile",
-            "findings": "correct but not faster: 0.97x\n---\ncompile error",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="NO_CHANGES",
+            session_sink={
+                "session_started": True,
+                "summarize": _positive_summarizer,
+                "plan": "widen the tile",
+                "findings": "correct but not faster: 0.97x\n---\ncompile error",
+            },
+        )
+    )
 
     assert store.scope_of(3).carries_negative is True
     assert "VALIDITY: RE-OPENABLE" in store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
 
 
@@ -7531,9 +6988,7 @@ async def _unmarked_summarizer(_prompt: str) -> str:
     return "tried a few things and submitted the tile widening"
 
 
-def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(
-    tmp_path, monkeypatch
-):
+def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(tmp_path, monkeypatch):
     """The loop kept a candidate; the record says four directions measured worse.
 
     Those four are invisible to the loop — they were reverted before the
@@ -7542,117 +6997,113 @@ def test_a_kept_iteration_that_measured_negatives_in_session_is_reopenable(
     SCOPE. That promotes four negatives measured under unknown constants into a
     standing ban. The document's own marker is what the loop has to read.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(kept=True, mean_case_speedup=1.2),
-        decision="KEEP",
-        session_sink={
-            "session_started": True,
-            "summarize": _in_session_negative_summarizer,
-            "plan": "widen the tile",
-            # The in-session gate allowed on the first Stop, so it logged
-            # nothing: findings cannot catch these either.
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(kept=True, mean_case_speedup=1.2),
+            decision="KEEP",
+            session_sink={
+                "session_started": True,
+                "summarize": _in_session_negative_summarizer,
+                "plan": "widen the tile",
+                # The in-session gate allowed on the first Stop, so it logged
+                # nothing: findings cannot catch these either.
+                "findings": "",
+            },
+        )
+    )
 
     scope = store.scope_of(3)
     assert scope.carries_negative is True
     assert scope.held_fixed == ()
 
     rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
     assert "VALIDITY: RE-OPENABLE" in rendered
     assert "no measured negative" not in store.read(3)
     assert "the constants it was measured under were not recorded" in rendered
 
 
-def test_a_document_without_the_marker_is_unknown_not_negative_free(
-    tmp_path, monkeypatch
-):
+def test_a_document_without_the_marker_is_unknown_not_negative_free(tmp_path, monkeypatch):
     """No marker means nobody answered, and the note must not answer for it."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(kept=True, mean_case_speedup=1.2),
-        decision="KEEP",
-        session_sink={
-            "session_started": True,
-            "summarize": _unmarked_summarizer,
-            "plan": "widen the tile",
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(kept=True, mean_case_speedup=1.2),
+            decision="KEEP",
+            session_sink={
+                "session_started": True,
+                "summarize": _unmarked_summarizer,
+                "plan": "widen the tile",
+                "findings": "",
+            },
+        )
+    )
 
     assert store.scope_of(3).carries_negative is None
     rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
     assert "no measured negative" not in store.read(3)
     assert "whether anything measured worse was not recorded" in rendered
     assert "VALIDITY: RE-OPENABLE" in rendered
 
 
-def test_a_record_that_never_answered_the_disproof_question_says_so(
-    tmp_path, monkeypatch, capsys
-):
+def test_a_record_that_never_answered_the_disproof_question_says_so(tmp_path, monkeypatch, capsys):
     """An unanswered question is the state no verdict fires on, so it is printed.
 
     Nothing reads the prose for "cannot", so a session that ignored the marker
     leaves any feasibility claim in its record resting on the citation rule
     alone. That is the one degradation an operator cannot see in the verdict.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(kept=True, mean_case_speedup=1.2),
-        decision="KEEP",
-        session_sink={
-            "session_started": True,
-            "summarize": _unmarked_summarizer,
-            "plan": "widen the tile",
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(kept=True, mean_case_speedup=1.2),
+            decision="KEEP",
+            session_sink={
+                "session_started": True,
+                "summarize": _unmarked_summarizer,
+                "plan": "widen the tile",
+                "findings": "",
+            },
+        )
+    )
 
     assert store.scope_of(3).disproof is None
     assert "recorded as unchecked" in capsys.readouterr().out
 
 
-def test_the_loops_own_negative_overrides_a_record_that_claims_none(
-    tmp_path, monkeypatch
-):
+def test_the_loops_own_negative_overrides_a_record_that_claims_none(tmp_path, monkeypatch):
     """Machine truth beats prose: a REVERT is a negative whatever the text says."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _positive_summarizer,   # writes "NEGATIVES: none"
-            "plan": "widen the tile",
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _positive_summarizer,  # writes "NEGATIVES: none"
+                "plan": "widen the tile",
+                "findings": "",
+            },
+        )
+    )
 
     assert store.scope_of(3).carries_negative is True
 
@@ -7663,100 +7114,90 @@ def test_a_crash_is_a_measured_negative(tmp_path, monkeypatch):
     A session cut off before the Stop hook also leaves no findings, so nothing
     else in the loop's view would report this iteration as having gone wrong.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(crashed=True, validation_passed=False,
-                              mean_case_speedup=None),
-        decision="CRASH",
-        session_sink={
-            "session_started": True,
-            "summarize": _positive_summarizer,   # writes "NEGATIVES: none"
-            "plan": "widen the tile",
-            "findings": "",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(crashed=True, validation_passed=False, mean_case_speedup=None),
+            decision="CRASH",
+            session_sink={
+                "session_started": True,
+                "summarize": _positive_summarizer,  # writes "NEGATIVES: none"
+                "plan": "widen the tile",
+                "findings": "",
+            },
+        )
+    )
 
     assert store.scope_of(3).carries_negative is True
     assert "VALIDITY: RE-OPENABLE" in store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source="",
+        current_cases=tuple(_THREE_CASES),
+        kernel_source="",
     )
 
 
 def test_a_build_failure_is_a_measured_negative(tmp_path, monkeypatch):
-    loop, _workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
-    assert loop._loop_measured_a_negative(
-        "BUILD_FAILED", _lesson_result(validation_passed=False), {}
-    ) is True
+    loop, _workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
+    assert loop._loop_measured_a_negative("BUILD_FAILED", _lesson_result(validation_passed=False), {}) is True
     assert loop._loop_measured_a_negative("KEEP", _lesson_result(), {}) is False
-    assert loop._loop_measured_a_negative(
-        "NO_CHANGES", _lesson_result(mean_case_speedup=None), {}
-    ) is False
+    assert loop._loop_measured_a_negative("NO_CHANGES", _lesson_result(mean_case_speedup=None), {}) is False
 
 
-def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(
-    tmp_path, monkeypatch
-):
+def test_a_machine_written_document_is_decided_by_the_loops_verdict_alone(tmp_path, monkeypatch):
     """The loop authored it, so the loop's view of it is complete.
 
     A fallback document contains what the loop observed and nothing else, so
     there is no unseen reverted direction for a marker to report — and no
     summarizer to write one.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(kept=True, mean_case_speedup=1.2),
-        decision="KEEP",
-        session_sink={
-            "session_started": True,
-            "summarize": None,
-            "plan": "widen the tile",
-            "findings": "",
-        },
-        diff_summary="kernel.py | 3 +-",
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(kept=True, mean_case_speedup=1.2),
+            decision="KEEP",
+            session_sink={
+                "session_started": True,
+                "summarize": None,
+                "plan": "widen the tile",
+                "findings": "",
+            },
+            diff_summary="kernel.py | 3 +-",
+        )
+    )
 
     assert "(no agent summary)" in store.read(3)
     assert store.scope_of(3).carries_negative is False
 
 
-def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(
-    tmp_path, monkeypatch, capsys
-):
+def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(tmp_path, monkeypatch, capsys):
     """Part of the declared source went unchecked; say that, do not guess.
 
     Dropping the unreadable file leaves the survivors looking like the whole
     declared set, so a constant living in the missing one reads as deleted.
     """
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     sibling = workspace / "tiles.py"
-    sibling.write_text('BLOCK_N = 16\nnum_warps = 8\n')
+    sibling.write_text("BLOCK_N = 16\nnum_warps = 8\n")
     loop.ic.source_files.append(str(sibling))
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
     sibling.unlink()
 
     sources = loop._kernel_source_for_scope()
@@ -7764,57 +7205,55 @@ def test_one_unreadable_sibling_does_not_indict_the_constant_it_holds(
     assert "source unreadable" in capsys.readouterr().out
 
     rendered = store.render_for_prompt(
-        current_cases=tuple(_THREE_CASES), kernel_source=sources,
+        current_cases=tuple(_THREE_CASES),
+        kernel_source=sources,
     )
     assert "BLOCK_N was not checked" in rendered
     assert "not assigned in the kernel source checked" not in rendered
 
 
-def test_an_unscored_case_is_not_recorded_as_a_case_that_was_measured(
-    tmp_path, monkeypatch
-):
+def test_an_unscored_case_is_not_recorded_as_a_case_that_was_measured(tmp_path, monkeypatch):
     """Scoring excluded the noisy case, so nothing was measured on it."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     loop._unscored_cases = {"decode-t64"}
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
 
     scope = store.scope_of(3)
     assert scope.cases == ("decode-t1", "prefill-t16384")
     assert scope.lane_restricted is False
 
 
-def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(
-    tmp_path, monkeypatch
-):
+def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(tmp_path, monkeypatch):
     """The render path validates against the scored suite, not every case."""
     from kernelforge.loop.lessons import LessonScope, LessonStore
 
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     loop.ic.preloop_baseline_unscored_cases = ["decode-t64"]
     _stub_measurement(monkeypatch, walls=[0.5])
 
     store = LessonStore(str(workspace))
     store.write(1, "swept split-K; every point slower")
-    store.append_scope(1, LessonScope(
-        cases=("decode-t1", "prefill-t16384"),
-        held_fixed=(("BLOCK_N", "16"),),
-        carries_negative=True,
-    ))
+    store.append_scope(
+        1,
+        LessonScope(
+            cases=("decode-t1", "prefill-t16384"),
+            held_fixed=(("BLOCK_N", "16"),),
+            carries_negative=True,
+        ),
+    )
 
     prompts: list[str] = []
 
@@ -7832,51 +7271,49 @@ def test_an_unscored_case_does_not_reopen_a_stored_negative_in_the_prompt(
 
 def test_a_scope_that_cannot_be_written_says_so(tmp_path, monkeypatch, capsys):
     """A failed append leaves an unscoped document; the operator hears about it."""
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     monkeypatch.setattr(store, "append_scope", lambda *_a, **_k: False)
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _fake_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _fake_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
 
     out = capsys.readouterr().out
     assert "scope not recorded for iter 3" in out
     assert "no held-fixed constants recorded" not in out
 
 
-def test_handoff_carries_the_scope_of_the_iterations_lesson(
-    tmp_path, monkeypatch
-):
+def test_handoff_carries_the_scope_of_the_iterations_lesson(tmp_path, monkeypatch):
     """The planner reads handoffs; a refutation quoted from one needs its scope."""
     from kernelforge.loop.handoffs import HandoffStore
 
-    loop, workspace = _make_loop(
-        tmp_path, monkeypatch, baseline_case_times=_THREE_CASES
-    )
+    loop, workspace = _make_loop(tmp_path, monkeypatch, baseline_case_times=_THREE_CASES)
     store = _attach_lessons(loop, workspace)
     loop.run_state = RunState()
     loop.handoff_store = HandoffStore(str(workspace))
 
-    asyncio.run(loop._record_lesson(
-        iteration=3,
-        result=_lesson_result(),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _scoped_summarizer,
-            "plan": "sweep split-K",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=3,
+            result=_lesson_result(),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _scoped_summarizer,
+                "plan": "sweep split-K",
+            },
+        )
+    )
     loop._record_iteration_handoff(
         iteration=3,
         decision="REVERT_PERF",
@@ -7890,9 +7327,7 @@ def test_handoff_carries_the_scope_of_the_iterations_lesson(
     assert store.scope_of(3) is not None
 
 
-def test_handoff_plan_is_unchanged_when_no_lesson_was_written(
-    tmp_path, monkeypatch
-):
+def test_handoff_plan_is_unchanged_when_no_lesson_was_written(tmp_path, monkeypatch):
     from kernelforge.loop.handoffs import HandoffStore
 
     loop, workspace = _make_loop(tmp_path, monkeypatch)
@@ -7917,19 +7352,19 @@ def test_record_lesson_skips_an_empty_iteration(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=5,
-        result=_lesson_result(iteration=5),
-        decision="NO_CHANGES",
-        session_sink={"session_started": False, "summarize": None},
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=5,
+            result=_lesson_result(iteration=5),
+            decision="NO_CHANGES",
+            session_sink={"session_started": False, "summarize": None},
+        )
+    )
 
     assert store.existing_iterations() == []
 
 
-def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(
-    tmp_path, monkeypatch
-):
+def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(tmp_path, monkeypatch):
     """A started, cut-off session must not disappear just because it has no diff."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
@@ -7937,23 +7372,25 @@ def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(
     async def broken(_prompt: str) -> str:
         raise RuntimeError("resume handle expired")
 
-    asyncio.run(loop._record_lesson(
-        iteration=10,
-        result=_lesson_result(
+    asyncio.run(
+        loop._record_lesson(
             iteration=10,
-            session_end_reason="turn_cap",
-            turns=40,
-            wall_ms=None,
-            snr_db=None,
-        ),
-        decision="NO_CHANGES",
-        session_sink={
-            "session_started": True,
-            "summarize": broken,
-            "findings": "",
-            "progress_log": [],
-        },
-    ))
+            result=_lesson_result(
+                iteration=10,
+                session_end_reason="turn_cap",
+                turns=40,
+                wall_ms=None,
+                snr_db=None,
+            ),
+            decision="NO_CHANGES",
+            session_sink={
+                "session_started": True,
+                "summarize": broken,
+                "findings": "",
+                "progress_log": [],
+            },
+        )
+    )
 
     text = store.read(10)
     assert text.strip() == (
@@ -7965,33 +7402,33 @@ def test_record_lesson_keeps_outcome_when_no_diff_summary_fails(
     )
 
 
-def test_record_lesson_uses_progress_when_no_diff_summary_is_unavailable(
-    tmp_path, monkeypatch
-):
+def test_record_lesson_uses_progress_when_no_diff_summary_is_unavailable(tmp_path, monkeypatch):
     """Machine-captured provider progress is the no-diff narrative fallback."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=11,
-        result=_lesson_result(
+    asyncio.run(
+        loop._record_lesson(
             iteration=11,
-            session_end_reason="turn_cap",
-            turns=40,
-        ),
-        decision="NO_CHANGES",
-        session_sink={
-            "session_started": True,
-            "summarize": None,
-            "plan": "evaluate wider vector loads",
-            "findings": "",
-            "progress_log": [
-                "tool: Read kernel.py",
-                "progress: not supported by codex backend",
-                "tool: Bash python driver.py --bench BLOCK_N=128",
-            ],
-        },
-    ))
+            result=_lesson_result(
+                iteration=11,
+                session_end_reason="turn_cap",
+                turns=40,
+            ),
+            decision="NO_CHANGES",
+            session_sink={
+                "session_started": True,
+                "summarize": None,
+                "plan": "evaluate wider vector loads",
+                "findings": "",
+                "progress_log": [
+                    "tool: Read kernel.py",
+                    "progress: not supported by codex backend",
+                    "tool: Bash python driver.py --bench BLOCK_N=128",
+                ],
+            },
+        )
+    )
 
     text = store.read(11)
     assert text.startswith("(no agent summary) last observed:")
@@ -8009,19 +7446,19 @@ def test_record_lesson_without_an_agent_session(tmp_path, monkeypatch):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
 
-    asyncio.run(loop._record_lesson(
-        iteration=6,
-        result=_lesson_result(iteration=6),
-        decision="KEEP",
-        session_sink={},
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=6,
+            result=_lesson_result(iteration=6),
+            decision="KEEP",
+            session_sink={},
+        )
+    )
 
     assert store.existing_iterations() == []
 
 
-def test_record_lesson_skips_the_summarizer_with_no_time_left(
-    tmp_path, monkeypatch
-):
+def test_record_lesson_skips_the_summarizer_with_no_time_left(tmp_path, monkeypatch):
     """With no time to produce it, record the objective outcome alone."""
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
@@ -8033,23 +7470,23 @@ def test_record_lesson_skips_the_summarizer_with_no_time_left(
         started["n"] += 1
         return "should not run"
 
-    asyncio.run(loop._record_lesson(
-        iteration=7,
-        result=_lesson_result(iteration=7),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": counting_summarizer,
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=7,
+            result=_lesson_result(iteration=7),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": counting_summarizer,
+            },
+        )
+    )
 
     assert started["n"] == 0
     assert "OUTCOME: REVERT_PERF" in store.read(7)
 
 
-def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(
-    tmp_path, monkeypatch
-):
+def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(tmp_path, monkeypatch):
     """The last iteration of a session is the one whose record matters most.
 
     The loop stops admitting implementer sessions well before the clock runs out
@@ -8063,15 +7500,17 @@ def test_record_lesson_still_summarizes_when_no_session_can_be_admitted(
     monkeypatch.setattr(loop, "_time_remaining", lambda: 600.0)
     assert loop._is_budget_exhausted() is True
 
-    asyncio.run(loop._record_lesson(
-        iteration=9,
-        result=_lesson_result(iteration=9),
-        decision="REVERT_PERF",
-        session_sink={
-            "session_started": True,
-            "summarize": _fake_summarizer,
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=9,
+            result=_lesson_result(iteration=9),
+            decision="REVERT_PERF",
+            session_sink={
+                "session_started": True,
+                "summarize": _fake_summarizer,
+            },
+        )
+    )
 
     assert "BLOCK_N 128" in store.read(9)
 
@@ -8083,16 +7522,18 @@ def test_record_lesson_survives_a_failing_summarizer(tmp_path, monkeypatch, caps
     async def broken(_prompt: str) -> str:
         raise RuntimeError("session gone")
 
-    asyncio.run(loop._record_lesson(
-        iteration=8,
-        result=_lesson_result(iteration=8),
-        decision="CRASH",
-        session_sink={
-            "session_started": True,
-            "summarize": broken,
-            "findings": "boom",
-        },
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=8,
+            result=_lesson_result(iteration=8),
+            decision="CRASH",
+            session_sink={
+                "session_started": True,
+                "summarize": broken,
+                "findings": "boom",
+            },
+        )
+    )
 
     assert "OUTCOME: CRASH" in store.read(8)
     # The reason must reach the operator, not just log.debug: an outcome-only
@@ -8102,9 +7543,7 @@ def test_record_lesson_survives_a_failing_summarizer(tmp_path, monkeypatch, caps
     assert "session gone" in printed
 
 
-def test_record_lesson_falls_back_when_summary_cannot_be_persisted(
-    tmp_path, monkeypatch, capsys
-):
+def test_record_lesson_falls_back_when_summary_cannot_be_persisted(tmp_path, monkeypatch, capsys):
     loop, workspace = _make_loop(tmp_path, monkeypatch)
     store = _attach_lessons(loop, workspace)
     real_write = store.write
@@ -8117,17 +7556,19 @@ def test_record_lesson_falls_back_when_summary_cannot_be_persisted(
         return real_write(iteration, text)
 
     monkeypatch.setattr(store, "write", fail_first_write)
-    asyncio.run(loop._record_lesson(
-        iteration=12,
-        result=_lesson_result(iteration=12),
-        decision="REVERT_VALIDATION",
-        session_sink={
-            "session_started": True,
-            "summarize": _fake_summarizer,
-            "findings": "compile error: invalid cast",
-        },
-        diff_summary="kernel.py | 2 +-",
-    ))
+    asyncio.run(
+        loop._record_lesson(
+            iteration=12,
+            result=_lesson_result(iteration=12),
+            decision="REVERT_VALIDATION",
+            session_sink={
+                "session_started": True,
+                "summarize": _fake_summarizer,
+                "findings": "compile error: invalid cast",
+            },
+            diff_summary="kernel.py | 2 +-",
+        )
+    )
 
     text = store.read(12)
     assert writes["count"] >= 2
@@ -8144,27 +7585,40 @@ def test_decision_label_matches_every_outcome():
     from kernelforge.loop.runner import _decision_label
 
     assert _decision_label(_lesson_result(crashed=True)) == "CRASH"
-    assert _decision_label(_lesson_result(
-        validation_passed=False, validation_summary="BUILD FAILED: boom"
-    )) == "BUILD_FAILED"
-    assert _decision_label(_lesson_result(
-        validation_passed=False, validation_summary="stage 3 failed"
-    )) == "REVERT_VALIDATION"
-    assert _decision_label(_lesson_result(
-        validation_passed=False,
-        validation_summary="full suite timed out",
-        validation_outcome="timeout",
-    )) == "REVERT_VALIDATION_TIMEOUT"
-    assert _decision_label(_lesson_result(
-        validation_passed=False,
-        validation_summary="driver crashed",
-        validation_outcome="driver_error",
-    )) == "REVERT_VALIDATION_ERROR"
+    assert (
+        _decision_label(_lesson_result(validation_passed=False, validation_summary="BUILD FAILED: boom"))
+        == "BUILD_FAILED"
+    )
+    assert (
+        _decision_label(_lesson_result(validation_passed=False, validation_summary="stage 3 failed"))
+        == "REVERT_VALIDATION"
+    )
+    assert (
+        _decision_label(
+            _lesson_result(
+                validation_passed=False,
+                validation_summary="full suite timed out",
+                validation_outcome="timeout",
+            )
+        )
+        == "REVERT_VALIDATION_TIMEOUT"
+    )
+    assert (
+        _decision_label(
+            _lesson_result(
+                validation_passed=False,
+                validation_summary="driver crashed",
+                validation_outcome="driver_error",
+            )
+        )
+        == "REVERT_VALIDATION_ERROR"
+    )
     assert _decision_label(_lesson_result(kept=True)) == "KEEP"
     assert _decision_label(_lesson_result(kept=False)) == "REVERT_PERF"
 
 
 # ── end-to-end: agent session -> lesson document -> next prompt ───────────────
+
 
 class _StubStage:
     def __init__(self, stage, name, snr_db):
@@ -8184,6 +7638,7 @@ class _StubReport:
 
 def _stub_measurement(monkeypatch, walls):
     """Stub build/validate/bench so the loop runs without a GPU."""
+
     async def fake_validation(**_kwargs):
         return _StubReport()
 
@@ -8213,9 +7668,7 @@ def _stub_measurement(monkeypatch, walls):
     monkeypatch.setattr(runner_module, "check_registers", fake_registers)
 
 
-def test_lesson_flows_from_one_iteration_into_the_next_prompt(
-    tmp_path, monkeypatch
-):
+def test_lesson_flows_from_one_iteration_into_the_next_prompt(tmp_path, monkeypatch):
     """Lock the whole chain the feature exists for.
 
     agent edits -> session_sink["summarize"] -> lessons/iter_NNN.md
@@ -8255,7 +7708,7 @@ def test_lesson_flows_from_one_iteration_into_the_next_prompt(
     # ...and the second iteration's prompt carried it, plus the absolute path
     # of the directory holding the full history.
     assert len(prompts) == 2
-    assert "vectorized the global load" not in prompts[0]   # nothing to inject yet
+    assert "vectorized the global load" not in prompts[0]  # nothing to inject yet
     assert "128-bit loads" in prompts[1]
     assert "Implementer session records from recent iterations" in prompts[1]
     lessons_dir = str((workspace / "forge_experiments" / "lessons").resolve())
@@ -8314,9 +7767,7 @@ def test_the_anti_gaming_boundary_is_stated_wherever_it_is_enforced():
         assert marker in source, f"rule block missing: {marker}"
         # The prompts are wrapped source literals, so a clause can be split across
         # lines; compare on collapsed whitespace rather than the wrapped text.
-        block = " ".join(
-            source[source.index(marker) : source.index(marker) + 900].split()
-        )
+        block = " ".join(source[source.index(marker) : source.index(marker) + 900].split())
         assert "are NOT gaming" in block, f"boundary not stated near: {marker}"
         assert "read the harness" in block, f"no read-before-refusing near: {marker}"
         assert "not a reason" in block, f"assumption not rejected near: {marker}"

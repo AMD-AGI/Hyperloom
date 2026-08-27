@@ -92,10 +92,7 @@ def _profile_has_derivable_shapes(ctx: TuneContext) -> bool:
     profile = getattr(ctx, "profile", None)
     if profile is None:
         return False
-    return (
-        int(getattr(profile, "hidden_size", 0) or 0) >= 1
-        and int(getattr(profile, "intermediate_size", 0) or 0) >= 1
-    )
+    return int(getattr(profile, "hidden_size", 0) or 0) >= 1 and int(getattr(profile, "intermediate_size", 0) or 0) >= 1
 
 
 def validate_dense_tuner_inputs(ctx: TuneContext, script_key: str, *, script_label: str) -> str | None:
@@ -185,8 +182,8 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
         return []
     if not any(c in rows[0] for c in _ERR_RATIO_COLUMNS):
         log.warning(
-            "%s has no accuracy column; deploying without the numerical filter "
-            "(aiter schema drift?)", tuned_csv,
+            "%s has no accuracy column; deploying without the numerical filter (aiter schema drift?)",
+            tuned_csv,
         )
         return []
 
@@ -212,7 +209,9 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
         log.error(
             "%d inaccurate row(s) could not be removed from %s (%s); the original "
             "artifact is untouched and is NOT filtered",
-            len(dropped), tuned_csv, exc,
+            len(dropped),
+            tuned_csv,
+            exc,
         )
         try:
             tmp.unlink(missing_ok=True)
@@ -224,9 +223,15 @@ def drop_inaccurate_rows(tuned_csv: Path) -> list[dict[str, str]]:
         log.error(
             "dropping M=%s N=%s K=%s (%s, splitK=%s, %sus) from %s -- aiter "
             "measured err_ratio=%s, above the %.2f limit",
-            row.get("M"), row.get("N"), row.get("K"), row.get("libtype"),
-            row.get("splitK"), row.get("us"), tuned_csv.name,
-            _row_err_ratio(row), _MAX_ERR_RATIO,
+            row.get("M"),
+            row.get("N"),
+            row.get("K"),
+            row.get("libtype"),
+            row.get("splitK"),
+            row.get("us"),
+            tuned_csv.name,
+            _row_err_ratio(row),
+            _MAX_ERR_RATIO,
         )
     return dropped
 
@@ -239,11 +244,7 @@ def _demand_budget(ctx: TuneContext) -> int:
         override = 0
     if override > 0:
         return override
-    cost = (
-        _DEMAND_PER_SHAPE_COST_THOROUGH_S
-        if getattr(ctx, "thorough", False)
-        else _DEMAND_PER_SHAPE_COST_S
-    )
+    cost = _DEMAND_PER_SHAPE_COST_THOROUGH_S if getattr(ctx, "thorough", False) else _DEMAND_PER_SHAPE_COST_S
     usable = max(int(getattr(ctx, "timeout_s", 0)) - _DEMAND_RESERVE_S, cost)
     return max(1, usable // cost)
 
@@ -289,7 +290,11 @@ def _demand_input_csv(
             fh.write(row + "\n")
     log.info(
         "%s: %d demand shapes (of %d distinct keys, budget %d) -> %s",
-        tuner_name, len(shapes), entry.get("distinct_keys", 0), budget, out,
+        tuner_name,
+        len(shapes),
+        entry.get("distinct_keys", 0),
+        budget,
+        out,
     )
     return out
 
@@ -527,7 +532,12 @@ def _ensure_decode_m_coverage(
     log.info(
         "Fast-mode decode coverage: %d of %d dispatch group(s) lacked a decode-band "
         "M (grid %s for conc=%s); appended %d row(s), original %d row(s) untouched",
-        len(uncovered), len(group_order), decode_m, ctx.conc, len(additions), len(body),
+        len(uncovered),
+        len(group_order),
+        decode_m,
+        ctx.conc,
+        len(additions),
+        len(body),
     )
     return out
 
@@ -580,6 +590,7 @@ def _augment_with_config_m_values(
 
     isl = max(ctx.tokens) if ctx.tokens else 0
     from ..dense_shapes import compute_dense_m_values
+
     config_m = compute_dense_m_values(ctx.conc, thorough=ctx.thorough, isl=isl)
     all_m = sorted(set(config_m) | profile_m)
 
@@ -605,7 +616,10 @@ def _augment_with_config_m_values(
 
     log.info(
         "Augmented shapes: %d M values × %d NK pairs = %d shapes (profile had %d M values)",
-        len(all_m), len(profile_nk), len(seen), len(profile_m),
+        len(all_m),
+        len(profile_nk),
+        len(seen),
+        len(profile_m),
     )
     return out
 
@@ -649,7 +663,11 @@ def _conform_csv_columns(
                 continue
             m, n, k = parts[idx["M"]], parts[idx["N"]], parts[idx["K"]]
             if needs_q_dtype_w:
-                q = parts[idx["Q_DTYPE_W"]] if has_q and idx["Q_DTYPE_W"] < len(parts) else (default_q_dtype or _aiter_fp8_dtype_str())
+                q = (
+                    parts[idx["Q_DTYPE_W"]]
+                    if has_q and idx["Q_DTYPE_W"] < len(parts)
+                    else (default_q_dtype or _aiter_fp8_dtype_str())
+                )
                 f.write(f"{m},{n},{k},{q}\n")
             else:
                 f.write(f"{m},{n},{k}\n")
@@ -657,9 +675,7 @@ def _conform_csv_columns(
     return out
 
 
-def _derive_input_csv_from_config(
-    ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False
-) -> Path | None:
+def _derive_input_csv_from_config(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool = False) -> Path | None:
     """Synthesize an untuned CSV from the model config when none was supplied.
 
     Returns None when the profile lacks the dimensions needed to derive shapes.
@@ -703,7 +719,10 @@ def _derive_input_csv_from_config(
     isl = max(ctx.tokens) if ctx.tokens else 0
     m_values = compute_dense_m_values(ctx.conc, thorough=ctx.thorough, isl=isl)
     return write_mnk_untuned_csv(
-        nk_shapes, m_values, work_dir, needs_q_dtype_w=needs_q_dtype_w,
+        nk_shapes,
+        m_values,
+        work_dir,
+        needs_q_dtype_w=needs_q_dtype_w,
     )
 
 
@@ -764,10 +783,10 @@ _STDOUT_KV_RE = re.compile(
 # no_improvement, skipping E2E validation of the freshly tuned configs).
 _COMPARE_TABLE_RE = re.compile(
     r"\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)\s*"
-    r"\|\s*(N/A|[\d.]+)\s*"           # Pre (default) us -- "N/A" for a NEW shape
-    r"\|\s*([\d.]+)\s*"               # Post (tuned) us
-    r"\|\s*(N/A|-?[\d.]+)\s*%?\s*"    # Improve % ("N/A"/no % for NEW; may be <0)
-    r"\|\s*(\S+)",                    # Action/Reason token (UPDATE, NEW, SKIP, ...)
+    r"\|\s*(N/A|[\d.]+)\s*"  # Pre (default) us -- "N/A" for a NEW shape
+    r"\|\s*([\d.]+)\s*"  # Post (tuned) us
+    r"\|\s*(N/A|-?[\d.]+)\s*%?\s*"  # Improve % ("N/A"/no % for NEW; may be <0)
+    r"\|\s*(\S+)",  # Action/Reason token (UPDATE, NEW, SKIP, ...)
     re.IGNORECASE,
 )
 
@@ -794,18 +813,20 @@ def _parse_tuner_stdout(stdout: str, stderr: str) -> list[dict[str, Any]]:
             in_would_update = False
         m = _STDOUT_KV_RE.search(line)
         if m:
-            results.append({
-                "M": int(m.group(1)),
-                "N": int(m.group(2)),
-                "K": int(m.group(3)),
-                "default_us": float(m.group(4)),
-                "tuned_us": float(m.group(5)),
-                "speedup": float(m.group(6)),
-                # The KV-format line reports a speedup but never carries the
-                # "Would update"/"Updated" tokens, so treat speedup>1.0 as the
-                # improvement signal (keeping the tokens as an explicit override).
-                "improved": float(m.group(6)) > 1.0 or "Would update" in line or "Updated" in line,
-            })
+            results.append(
+                {
+                    "M": int(m.group(1)),
+                    "N": int(m.group(2)),
+                    "K": int(m.group(3)),
+                    "default_us": float(m.group(4)),
+                    "tuned_us": float(m.group(5)),
+                    "speedup": float(m.group(6)),
+                    # The KV-format line reports a speedup but never carries the
+                    # "Would update"/"Updated" tokens, so treat speedup>1.0 as the
+                    # improvement signal (keeping the tokens as an explicit override).
+                    "improved": float(m.group(6)) > 1.0 or "Would update" in line or "Updated" in line,
+                }
+            )
             continue
         t = _COMPARE_TABLE_RE.search(line)
         if t:
@@ -817,27 +838,31 @@ def _parse_tuner_stdout(stdout: str, stderr: str) -> list[dict[str, Any]]:
                 # It IS a real tuned config though, so flag it is_new; the caller
                 # forces an E2E candidate so the new config is validated end-to-end
                 # rather than silently dropped as no_improvement.
-                results.append({
+                results.append(
+                    {
+                        "M": int(t.group(1)),
+                        "N": int(t.group(2)),
+                        "K": int(t.group(3)),
+                        "default_us": None,
+                        "tuned_us": post,
+                        "speedup": None,
+                        "improved": False,
+                        "is_new": True,
+                    }
+                )
+                continue
+            pre = float(pre_tok)
+            results.append(
+                {
                     "M": int(t.group(1)),
                     "N": int(t.group(2)),
                     "K": int(t.group(3)),
-                    "default_us": None,
+                    "default_us": pre,
                     "tuned_us": post,
-                    "speedup": None,
-                    "improved": False,
-                    "is_new": True,
-                })
-                continue
-            pre = float(pre_tok)
-            results.append({
-                "M": int(t.group(1)),
-                "N": int(t.group(2)),
-                "K": int(t.group(3)),
-                "default_us": pre,
-                "tuned_us": post,
-                "speedup": round(pre / post, 4) if post > 0 else 1.0,
-                "improved": action == "UPDATE" or in_would_update,
-            })
+                    "speedup": round(pre / post, 4) if post > 0 else 1.0,
+                    "improved": action == "UPDATE" or in_would_update,
+                }
+            )
     return results
 
 
@@ -896,20 +921,22 @@ def _parse_candidate_csv(candidate_path: Path | str | None) -> list[dict[str, An
             tuned_us = float(parts[ui])
         except (ValueError, IndexError):
             continue  # unparseable row
-        results.append({
-            "M": m,
-            "N": n,
-            "K": k,
-            "tuned_us": tuned_us,
-            "default_us": None,
-            "speedup": None,
-            # No comparable default was measured in this aiter output mode, so we
-            # cannot claim the tuned config beats the stock kernel. Mark the shape
-            # tuned-but-unverified (improved=False) so no micro win is reported;
-            # the caller sends it to E2E on the strength of tuned_unverified.
-            "improved": False,
-            "tuned_unverified": True,
-        })
+        results.append(
+            {
+                "M": m,
+                "N": n,
+                "K": k,
+                "tuned_us": tuned_us,
+                "default_us": None,
+                "speedup": None,
+                # No comparable default was measured in this aiter output mode, so we
+                # cannot claim the tuned config beats the stock kernel. Mark the shape
+                # tuned-but-unverified (improved=False) so no micro win is reported;
+                # the caller sends it to E2E on the strength of tuned_unverified.
+                "improved": False,
+                "tuned_unverified": True,
+            }
+        )
     return results
 
 
@@ -930,23 +957,23 @@ def _summarize_shape_results(shape_results: list[dict[str, Any]]) -> dict[str, A
     total = len(shape_results)
     if total == 0:
         return {
-            "status": "empty_output", "total": 0, "n_improved": 0,
-            "n_unverified": 0, "best": 1.0, "avg": 1.0,
+            "status": "empty_output",
+            "total": 0,
+            "n_improved": 0,
+            "n_unverified": 0,
+            "best": 1.0,
+            "avg": 1.0,
         }
     improved = [r for r in shape_results if r.get("improved")]
     # Tuned, but with nothing to compare against (new shape, or the candidate-CSV
     # fallback). Counted separately so a report cannot read "improved 0/N" as
     # "measured N shapes and none got faster".
-    unverified = [
-        r for r in shape_results if r.get("is_new") or r.get("tuned_unverified")
-    ]
+    unverified = [r for r in shape_results if r.get("is_new") or r.get("tuned_unverified")]
     # A speedup may be None in the candidate-CSV fallback path (no comparable
     # default is available), so guard the numeric comparison. Improved rows
     # still make the status "ok" even when speedups are unknown.
     speedups = [
-        r["speedup"]
-        for r in shape_results
-        if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
+        r["speedup"] for r in shape_results if isinstance(r.get("speedup"), (int, float)) and r["speedup"] > 1.0
     ]
     return {
         "status": "ok" if (improved or unverified) else "no_improvement",
@@ -990,9 +1017,9 @@ def run_aiter_dense_tuner(
     needs_q_dtype_w = tuner_name in ("a8w8", "a8w8_bpreshuffle")
     # Demand outranks every other shape source: it is the set of keys the runtime
     # asked for and did not have. Everything else is inference about that set.
-    input_csv = _demand_input_csv(
-        ctx, work_dir, tuner_name, needs_q_dtype_w=needs_q_dtype_w
-    ) or _resolve_input_csv(ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w)
+    input_csv = _demand_input_csv(ctx, work_dir, tuner_name, needs_q_dtype_w=needs_q_dtype_w) or _resolve_input_csv(
+        ctx, work_dir, needs_q_dtype_w=needs_q_dtype_w
+    )
     if input_csv is None:
         return TuneResult(
             tuner_name=tuner_name,
@@ -1007,12 +1034,17 @@ def run_aiter_dense_tuner(
     # Flags shared by every shape (everything except -i/-o). aiter --timeout is
     # injected below to activate mp_tuner's per-candidate GPU-fault isolation.
     base_args = [
-        "-o2", str(profile_csv),
-        "--mp", str(ctx.mp),
+        "-o2",
+        str(profile_csv),
+        "--mp",
+        str(ctx.mp),
         "--compare",
-        "--iters", str(ctx.iters),
-        "--warmup", str(ctx.warmup),
-        "--min_improvement_pct", str(ctx.min_improvement_pct),
+        "--iters",
+        str(ctx.iters),
+        "--warmup",
+        str(ctx.warmup),
+        "--min_improvement_pct",
+        str(ctx.min_improvement_pct),
         "-v",
     ]
     if extra_args:
@@ -1038,6 +1070,7 @@ def run_aiter_dense_tuner(
     aiter_root = resolve_aiter_root()
 
     import time
+
     run_start_time = time.time()
 
     iso_candidate: Path | None = None
@@ -1045,23 +1078,34 @@ def run_aiter_dense_tuner(
         # Per-shape process isolation + provenance-keyed fault blocklist.
         blocklist = _tr.FaultBlocklist(
             getattr(ctx, "faulted_blocklist_path", None),
-            {"gpu_type": ctx.gpu_type, "quant_type": getattr(ctx, "quant_type", ""),
-             "tp": getattr(ctx, "tp", 1), "tuner": tuner_name},
+            {
+                "gpu_type": ctx.gpu_type,
+                "quant_type": getattr(ctx, "quant_type", ""),
+                "tp": getattr(ctx, "tp", 1),
+                "tuner": tuner_name,
+            },
         )
         rc, stdout, stderr, iso_candidate = _tr.run_isolated(
-            script=str(script), base_args=base_args, input_csv=input_csv,
-            tuned_stem=tuned_csv.stem, work_dir=work_dir, aiter_root=aiter_root,
-            outer_timeout_s=ctx.timeout_s, task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
-            gpu_ids=getattr(ctx, "gpu_ids", "") or "", blocklist=blocklist,
+            script=str(script),
+            base_args=base_args,
+            input_csv=input_csv,
+            tuned_stem=tuned_csv.stem,
+            work_dir=work_dir,
+            aiter_root=aiter_root,
+            outer_timeout_s=ctx.timeout_s,
+            task_timeout_s=_tr.DEFAULT_TASK_TIMEOUT_S,
+            gpu_ids=getattr(ctx, "gpu_ids", "") or "",
+            blocklist=blocklist,
         )
     else:
         # Default single invocation, now with --timeout so a faulting candidate
         # is isolated by aiter instead of hanging the whole run.
-        cmd = _tr.with_task_timeout(
-            ["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args]
-        )
+        cmd = _tr.with_task_timeout(["python3", str(script), "-i", str(input_csv), "-o", str(tuned_csv), *base_args])
         rc, stdout, stderr = run_subprocess(
-            cmd, cwd=aiter_root, timeout_s=ctx.timeout_s, log_file=work_dir / "tune.log",
+            cmd,
+            cwd=aiter_root,
+            timeout_s=ctx.timeout_s,
+            log_file=work_dir / "tune.log",
         )
 
     if rc == 124:
@@ -1158,9 +1202,7 @@ def run_aiter_dense_tuner(
             else:
                 log.info("archived compare report for %s to %s", tuner_name, dest)
             try:
-                shape_results = _parse_tuner_stdout(
-                    compare_report.read_text(encoding="utf-8", errors="replace"), ""
-                )
+                shape_results = _parse_tuner_stdout(compare_report.read_text(encoding="utf-8", errors="replace"), "")
             except OSError:
                 shape_results = []
         else:
@@ -1194,8 +1236,7 @@ def run_aiter_dense_tuner(
     # serving even when it won its comparison.
     dropped_inaccurate = drop_inaccurate_rows(Path(artifact))
     if dropped_inaccurate:
-        shape_results = _forget_shapes_that_lost_their_row(
-            shape_results, dropped_inaccurate)
+        shape_results = _forget_shapes_that_lost_their_row(shape_results, dropped_inaccurate)
 
     if any(r.get("is_new") or r.get("tuned_unverified") for r in shape_results):
         force_candidate = True
@@ -1207,7 +1248,8 @@ def run_aiter_dense_tuner(
     if n_dropped:
         log.info(
             "deployed artifact: dropped %d row(s) that were compared and did not win, %d kept",
-            n_dropped, n_kept,
+            n_dropped,
+            n_kept,
         )
 
     summary = _summarize_shape_results(shape_results)
@@ -1227,9 +1269,13 @@ def run_aiter_dense_tuner(
         shape_results=shape_results,
         dropped_inaccurate=[
             {
-                "M": r.get("M"), "N": r.get("N"), "K": r.get("K"),
-                "libtype": r.get("libtype"), "splitK": r.get("splitK"),
-                "us": r.get("us"), "err_ratio": _row_err_ratio(r),
+                "M": r.get("M"),
+                "N": r.get("N"),
+                "K": r.get("K"),
+                "libtype": r.get("libtype"),
+                "splitK": r.get("splitK"),
+                "us": r.get("us"),
+                "err_ratio": _row_err_ratio(r),
             }
             for r in dropped_inaccurate
         ],
@@ -1253,18 +1299,14 @@ def _forget_shapes_that_lost_their_row(
     trustworthy comparison behind them. Under-claiming here is the safe
     direction.
     """
-    poisoned = {
-        (str(r.get("M")), str(r.get("N")), str(r.get("K"))) for r in dropped_rows
-    }
-    kept = [
-        r for r in shape_results
-        if (str(r.get("M")), str(r.get("N")), str(r.get("K"))) not in poisoned
-    ]
+    poisoned = {(str(r.get("M")), str(r.get("N")), str(r.get("K"))) for r in dropped_rows}
+    kept = [r for r in shape_results if (str(r.get("M")), str(r.get("N")), str(r.get("K"))) not in poisoned]
     if len(kept) != len(shape_results):
         log.warning(
             "not reporting %d shape(s) whose best row was dropped as numerically "
             "wrong; %d shape(s) still have deployable results",
-            len(shape_results) - len(kept), len(kept),
+            len(shape_results) - len(kept),
+            len(kept),
         )
     return kept
 
@@ -1479,7 +1521,9 @@ def _stem_matches(tuner_name: str, filename: str) -> bool:
 
 
 def _find_latest_compare_report_impl(
-    tuner_name: str, start_time: float, compare_dir: Path,
+    tuner_name: str,
+    start_time: float,
+    compare_dir: Path,
 ) -> Path | None:
     """Find the most recent compare report from ``compare_dir`` for THIS run.
 
@@ -1491,7 +1535,8 @@ def _find_latest_compare_report_impl(
     if not compare_dir.is_dir():
         return None
     reports = [
-        p for p in compare_dir.glob("*.compare.txt")
+        p
+        for p in compare_dir.glob("*.compare.txt")
         if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
     ]
     if not reports:
@@ -1520,7 +1565,8 @@ def _find_latest_candidate(tuner_name: str, start_time: float) -> Path | None:
     if not compare_dir.is_dir():
         return None
     candidates = [
-        p for p in compare_dir.glob("*.candidate.csv")
+        p
+        for p in compare_dir.glob("*.candidate.csv")
         if p.stat().st_mtime > start_time and _stem_matches(tuner_name, p.name)
     ]
     if not candidates:

@@ -269,14 +269,8 @@ class AgentRunSpec:
         return replace(
             self,
             model=self.model.strip() or runtime.model,
-            timeout_sec=(
-                self.timeout_sec
-                if self.timeout_sec is not None
-                else runtime.timeout_sec
-            ),
-            reasoning_effort=(
-                self.reasoning_effort.strip() or runtime.reasoning_effort
-            ),
+            timeout_sec=(self.timeout_sec if self.timeout_sec is not None else runtime.timeout_sec),
+            reasoning_effort=(self.reasoning_effort.strip() or runtime.reasoning_effort),
             env={**_session_environment.get(), **self.env},
         )
 

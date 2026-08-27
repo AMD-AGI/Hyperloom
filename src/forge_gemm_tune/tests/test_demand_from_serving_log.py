@@ -100,5 +100,6 @@ class TestDerivingDemand:
         report = load_demand(cli._demand_from_serving_log(src, out))
         shapes = demand_shapes(demand_for_tuner(report, "sglang_dense_bf16"))
         assert [(s["M"], s["N"], s["K"]) for s in shapes] == [
-            (512, 6144, 4096), (1024, 6144, 4096),
+            (512, 6144, 4096),
+            (1024, 6144, 4096),
         ]

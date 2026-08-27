@@ -27,11 +27,7 @@ TOLERANT_COMMANDS = {"forge-loop", "forge-rewrite-by-flydsl"}
 
 
 def test_only_the_cross_repo_entry_points_tolerate_unknown_options():
-    tolerant = {
-        name
-        for name, command in main.commands.items()
-        if isinstance(command, TolerantCommand)
-    }
+    tolerant = {name for name, command in main.commands.items() if isinstance(command, TolerantCommand)}
 
     assert tolerant == TOLERANT_COMMANDS
 

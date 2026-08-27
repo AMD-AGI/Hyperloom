@@ -45,6 +45,7 @@ def _within(path: str, root: str) -> bool:
         return False
     return True
 
+
 _VLLM_PASS_PROBE_MARKER = "FORGE_VLLM_PASS_PROBE "
 
 # Resolves each flag the way a real run does, which is NOT the annotation default:
@@ -147,10 +148,7 @@ class PassState:
         ``None`` attribute as ``False``, and acting on that would claim a pass
         that is really enabled.
         """
-        return (
-            self.present and self.enabled is False
-            and bool(self.config_file) and not self.error
-        )
+        return self.present and self.enabled is False and bool(self.config_file) and not self.error
 
     @property
     def claimable(self) -> bool:
@@ -217,9 +215,7 @@ def _launcher_interpreter(launcher_exe: str) -> str:
     return exe if Path(exe).exists() else ""
 
 
-def resolve_target_runtime(
-    framework: str, *, framework_root: str = "", launcher_exe: str = ""
-) -> TargetRuntime:
+def resolve_target_runtime(framework: str, *, framework_root: str = "", launcher_exe: str = "") -> TargetRuntime:
     """Pin the install that will be probed, edited and served.
 
     ``error`` is set (and the caller must not edit anything) when the launcher
@@ -228,15 +224,16 @@ def resolve_target_runtime(
     """
     exe = launcher_exe or shutil.which("vllm") or ""
     if not exe:
-        return TargetRuntime(framework=framework, require_root=framework_root,
-                             error="no vllm launcher on PATH")
+        return TargetRuntime(framework=framework, require_root=framework_root, error="no vllm launcher on PATH")
     python = _launcher_interpreter(exe)
     if not python:
-        return TargetRuntime(framework=framework, launcher_exe=exe,
-                             require_root=framework_root,
-                             error=f"cannot determine the interpreter behind {exe}")
-    return TargetRuntime(framework=framework, python=python, launcher_exe=exe,
-                         require_root=framework_root)
+        return TargetRuntime(
+            framework=framework,
+            launcher_exe=exe,
+            require_root=framework_root,
+            error=f"cannot determine the interpreter behind {exe}",
+        )
+    return TargetRuntime(framework=framework, python=python, launcher_exe=exe, require_root=framework_root)
 
 
 def _marker_payload(stdout: str) -> Optional[dict]:
@@ -246,7 +243,7 @@ def _marker_payload(stdout: str) -> Optional[dict]:
         if idx < 0:
             continue
         try:
-            payload = json.loads(line[idx + len(_VLLM_PASS_PROBE_MARKER):])
+            payload = json.loads(line[idx + len(_VLLM_PASS_PROBE_MARKER) :])
         except json.JSONDecodeError:
             continue
         if isinstance(payload, dict):
@@ -256,7 +253,10 @@ def _marker_payload(stdout: str) -> Optional[dict]:
 
 @lru_cache(maxsize=8)
 def probe_pass_states(
-    flags: tuple[str, ...], *, python: str = "", require_root: str = "",
+    flags: tuple[str, ...],
+    *,
+    python: str = "",
+    require_root: str = "",
     timeout_s: int = DEFAULT_PROBE_TIMEOUT_S,
 ) -> Mapping[str, PassState]:
     """Resolved state of every requested ``PassConfig`` flag, in ONE subprocess.
@@ -282,7 +282,9 @@ def probe_pass_states(
     try:
         proc = subprocess.run(
             [python or sys.executable, "-c", _PROBE_SRC, *wanted],
-            capture_output=True, text=True, timeout=timeout_s,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return _all(error=f"{type(exc).__name__}: {exc}")
@@ -296,9 +298,12 @@ def probe_pass_states(
     error = str(payload.get("error") or "")
     if require_root and not _within(config_file, require_root):
         return _all(
-            error=(f"probed vLLM config {config_file or '<unknown>'} is outside the "
-                   f"requested framework root {require_root}"),
-            config_file=config_file, package_root=package_root,
+            error=(
+                f"probed vLLM config {config_file or '<unknown>'} is outside the "
+                f"requested framework root {require_root}"
+            ),
+            config_file=config_file,
+            package_root=package_root,
         )
     values = payload.get("flags")
     values = values if isinstance(values, dict) else {}
@@ -318,26 +323,37 @@ def probe_pass_states(
             source=str(item.get("source") or ""),
             package_root=package_root,
         )
-        log.debug("vLLM pass %s: present=%s enabled=%s source=%s file=%s error=%s", flag,
-                  states[flag].present, states[flag].enabled, states[flag].source,
-                  config_file, error)
+        log.debug(
+            "vLLM pass %s: present=%s enabled=%s source=%s file=%s error=%s",
+            flag,
+            states[flag].present,
+            states[flag].enabled,
+            states[flag].source,
+            config_file,
+            error,
+        )
     return MappingProxyType(states)
 
 
 def probe_pass_state(
-    flag: str, *, python: str = "", require_root: str = "",
+    flag: str,
+    *,
+    python: str = "",
+    require_root: str = "",
     timeout_s: int = DEFAULT_PROBE_TIMEOUT_S,
 ) -> PassState:
     """Resolved state of a single ``PassConfig`` flag (see :func:`probe_pass_states`)."""
     if not flag:
         return PassState(flag=flag, error="no config flag")
-    got = probe_pass_states((flag,), python=python, require_root=require_root,
-                            timeout_s=timeout_s).get(flag)
+    got = probe_pass_states((flag,), python=python, require_root=require_root, timeout_s=timeout_s).get(flag)
     return got if got is not None else PassState(flag=flag, error="no probe result")
 
 
 def verify_pass_enabled(
-    flag: str, *, python: str = "", require_root: str = "",
+    flag: str,
+    *,
+    python: str = "",
+    require_root: str = "",
     timeout_s: int = DEFAULT_PROBE_TIMEOUT_S,
 ) -> PassState:
     """Re-read a flag AFTER editing, bypassing the cache.
@@ -347,8 +363,7 @@ def verify_pass_enabled(
     assumed: an unconfirmed flip would export a patch with no behavioural effect.
     """
     probe_pass_states.cache_clear()
-    return probe_pass_state(flag, python=python, require_root=require_root,
-                            timeout_s=timeout_s)
+    return probe_pass_state(flag, python=python, require_root=require_root, timeout_s=timeout_s)
 
 
 def _disabled_default_re(flag: str) -> re.Pattern[str]:
@@ -373,8 +388,7 @@ def enable_pass_in_source(config_file: str, flag: str) -> bool:
     except OSError as exc:
         log.warning("cannot read vLLM pass config %s: %s", config_file, exc)
         return False
-    new_text, count = _disabled_default_re(flag).subn(
-        lambda m: f"{m.group('pre')}True{m.group('post')}", text, count=1)
+    new_text, count = _disabled_default_re(flag).subn(lambda m: f"{m.group('pre')}True{m.group('post')}", text, count=1)
     if not count:
         return False
     try:

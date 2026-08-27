@@ -124,9 +124,7 @@ def test_claude_probe_checks_selected_model_with_configured_gateway(
     result = backend.probe(cwd=str(tmp_path))
 
     assert result.text == "OK"
-    assert captured["command"][captured["command"].index("--model") + 1] == (
-        "claude-opus-5"
-    )
+    assert captured["command"][captured["command"].index("--model") + 1] == ("claude-opus-5")
     assert captured["kwargs"]["cwd"] == str(tmp_path)
 
 
@@ -238,9 +236,7 @@ def test_prepare_claude_environment_expands_header_env_refs(monkeypatch):
 
     _prepare_claude_environment()
 
-    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
-        "Ocp-Apim-Subscription-Key: expanded-secret\nuser: alice"
-    )
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == ("Ocp-Apim-Subscription-Key: expanded-secret\nuser: alice")
 
 
 def test_prepare_claude_environment_leaves_plain_headers_alone(monkeypatch):
@@ -258,9 +254,7 @@ def test_prepare_claude_environment_rewrites_json_headers(monkeypatch):
 
     _prepare_claude_environment()
 
-    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == (
-        "Ocp-Apim-Subscription-Key: sub123\nuser: alice"
-    )
+    assert os.environ["ANTHROPIC_CUSTOM_HEADERS"] == ("Ocp-Apim-Subscription-Key: sub123\nuser: alice")
 
 
 def test_prepare_claude_environment_keeps_unparseable_headers(monkeypatch):

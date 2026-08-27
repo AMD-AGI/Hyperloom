@@ -16,6 +16,7 @@ from kernelforge.fellows.constants import FELLOW_BACKENDS, resolve_language_dir
 
 # ─── _is_aiter_operator ───
 
+
 def test_is_aiter_operator_true():
     assert _is_aiter_operator("repository", ["/work/aiter/ops/triton/x.py"])
     assert _is_aiter_operator("image_kernel", ["/repo/aiter/csrc/pa/k.cpp"])
@@ -32,6 +33,7 @@ def test_is_aiter_operator_false_cases():
 
 
 # ─── build_single_fellow_prompt ───
+
 
 def test_build_single_fellow_prompt_unknown():
     config = Config(gpu_target="gfx950")
@@ -55,6 +57,7 @@ def test_build_single_fellow_prompt_supports_every_registered_backend():
 
 
 # ─── resolve_language_dir ───
+
 
 def test_resolve_language_dir_matches_backend_named_folders(tmp_path):
     (tmp_path / "languages" / "triton").mkdir(parents=True)
@@ -82,7 +85,8 @@ def test_build_single_fellow_prompt_aiter_operator():
     config = Config(gpu_target="gfx950")
     # AITER operator path exercises include_aiter=True branch.
     prompt = build_single_fellow_prompt(
-        config, "ck-fellow",
+        config,
+        "ck-fellow",
         task_type="repository",
         source_paths=["/work/aiter/ops/ck/gemm.py"],
     )

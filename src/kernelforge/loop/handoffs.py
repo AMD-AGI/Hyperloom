@@ -33,11 +33,7 @@ class IterationHandoff:
     candidate_archive: str = ""
 
     def __post_init__(self) -> None:
-        if (
-            isinstance(self.iteration, bool)
-            or not isinstance(self.iteration, int)
-            or self.iteration <= 0
-        ):
+        if isinstance(self.iteration, bool) or not isinstance(self.iteration, int) or self.iteration <= 0:
             raise ValueError("handoff iteration must be a positive integer")
         if not self.analysis_commit.strip():
             raise ValueError("handoff analysis_commit is required")
@@ -119,9 +115,7 @@ class HandoffStore:
             raise ValueError(f"handoff must be an object: {path}")
         if payload.get("schema_version") != HANDOFF_SCHEMA_VERSION:
             raise ValueError(
-                "unsupported handoff schema: "
-                f"expected v{HANDOFF_SCHEMA_VERSION}, "
-                f"got {payload.get('schema_version')!r}"
+                f"unsupported handoff schema: expected v{HANDOFF_SCHEMA_VERSION}, got {payload.get('schema_version')!r}"
             )
         if payload.get("complete") is not True:
             raise ValueError(f"incomplete handoff: {path}")
@@ -143,13 +137,9 @@ class HandoffStore:
         missing = expected - set(payload)
         unknown = set(payload) - expected
         if missing:
-            raise ValueError(
-                "handoff missing fields: " + ", ".join(sorted(missing))
-            )
+            raise ValueError("handoff missing fields: " + ", ".join(sorted(missing)))
         if unknown:
-            raise ValueError(
-                "handoff has unknown fields: " + ", ".join(sorted(unknown))
-            )
+            raise ValueError("handoff has unknown fields: " + ", ".join(sorted(unknown)))
         return payload
 
     def latest(self) -> tuple[Path, dict[str, Any]] | None:

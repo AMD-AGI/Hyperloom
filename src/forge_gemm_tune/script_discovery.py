@@ -97,7 +97,8 @@ def discover_tuner_script(tuner_name: str, csrc: Path | None = None) -> Path | N
         if found is not None:
             log.info(
                 "%s: no hinted path matched; found %s by search (aiter layout changed?)",
-                tuner_name, found,
+                tuner_name,
+                found,
             )
             return found
     return None
@@ -133,9 +134,5 @@ def unwired_scripts(csrc: Path | None = None) -> dict[str, Path]:
     tuner stayed pointed at a dead path.
     """
     all_scripts = inventory(csrc)
-    wired = {
-        script.stem
-        for name in TUNER_SCRIPT_HINTS
-        if (script := discover_tuner_script(name, csrc)) is not None
-    }
+    wired = {script.stem for name in TUNER_SCRIPT_HINTS if (script := discover_tuner_script(name, csrc)) is not None}
     return {stem: path for stem, path in all_scripts.items() if stem not in wired}

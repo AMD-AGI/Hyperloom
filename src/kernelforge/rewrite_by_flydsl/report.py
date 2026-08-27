@@ -97,14 +97,10 @@ def build_result(
     experiment_id = optimize_result.get("experiment_id") if optimize_result else None
     applyback = applyback_result or {}
     applyback_ok = bool(applyback.get("ok")) if applyback_result is not None else False
-    flydsl_best_commit = str(
-        (optimize_result.get("best_commit") if optimize_result else "") or ""
-    )
+    flydsl_best_commit = str((optimize_result.get("best_commit") if optimize_result else "") or "")
     # With apply-back required this key means the apply-back commit and nothing
     # else; the standalone best is reported only as flydsl_best_commit.
-    best_commit = str(applyback.get("best_commit") or "") or (
-        "" if applyback_required else flydsl_best_commit
-    )
+    best_commit = str(applyback.get("best_commit") or "") or ("" if applyback_required else flydsl_best_commit)
 
     speedup = None
     if port_ok and source_ms and flydsl_best_ms and flydsl_best_ms > 0:
@@ -127,11 +123,7 @@ def build_result(
         experiment_id=experiment_id,
         port_attempts=port_attempts,
         success=bool(
-            port_ok
-            and (
-                not applyback_required
-                or (applyback.get("ok") if applyback_result is not None else False)
-            )
+            port_ok and (not applyback_required or (applyback.get("ok") if applyback_result is not None else False))
         ),
         baseline_ms=source_ms,
         best_ms=flydsl_best_ms,
@@ -145,18 +137,10 @@ def build_result(
         artifacts=list(applyback.get("artifacts") or []),
         # Only a published apply-back bundle carries an artifact kind; an interim
         # or failed run must not name one.
-        artifact_kind=(
-            protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK if applyback_ok else ""
-        ),
-        artifact_schema_version=(
-            protocol.ARTIFACT_SCHEMA_VERSION if applyback_ok else 0
-        ),
+        artifact_kind=(protocol.ARTIFACT_KIND_FRAMEWORK_APPLYBACK if applyback_ok else ""),
+        artifact_schema_version=(protocol.ARTIFACT_SCHEMA_VERSION if applyback_ok else 0),
         canonical_manifest=str(applyback.get("manifest_path") or ""),
-        canonical_patch_path=str(
-            applyback.get("canonical_patch_path")
-            or applyback.get("patch_path")
-            or ""
-        ),
+        canonical_patch_path=str(applyback.get("canonical_patch_path") or applyback.get("patch_path") or ""),
         canonical_files_root=str(applyback.get("canonical_files_root") or ""),
         canonical_result_path=str(applyback.get("canonical_result_path") or ""),
         forge_workspace=str(applyback.get("forge_workspace") or ""),
@@ -164,9 +148,7 @@ def build_result(
         applyback_required=applyback_required,
         applyback_ok=applyback_ok,
         applyback_error=str(applyback.get("error") or ""),
-        terminated_for_deadline=bool(
-            optimize_result.get("terminated_for_deadline")
-        ) if optimize_result else False,
+        terminated_for_deadline=bool(optimize_result.get("terminated_for_deadline")) if optimize_result else False,
         failure_class=failure_class,
         failure_detail=failure_detail,
         temporary_paths=list(temporary_paths or []),

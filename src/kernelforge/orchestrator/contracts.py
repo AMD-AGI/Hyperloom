@@ -59,19 +59,11 @@ def calculate_evidence_gain(
     current_mean_case_speedup: float | None,
 ) -> float | None:
     """Return canonical gain since evidence collection, when scores are valid."""
-    if (
-        evidence_mean_case_speedup is None
-        or current_mean_case_speedup is None
-    ):
+    if evidence_mean_case_speedup is None or current_mean_case_speedup is None:
         return None
     evidence = float(evidence_mean_case_speedup)
     current = float(current_mean_case_speedup)
-    if (
-        not math.isfinite(evidence)
-        or not math.isfinite(current)
-        or evidence <= 0
-        or current <= 0
-    ):
+    if not math.isfinite(evidence) or not math.isfinite(current) or evidence <= 0 or current <= 0:
         return None
     return current / evidence - 1.0
 
@@ -277,9 +269,7 @@ class OrchestrationContext:
                 "commit": evidence_commit,
                 "status": self.evidence_status or "current",
                 "stale": self.evidence_stale,
-                "mean_case_speedup_at_collection": (
-                    self.evidence_mean_case_speedup
-                ),
+                "mean_case_speedup_at_collection": (self.evidence_mean_case_speedup),
                 "current_mean_case_speedup": self.current_mean_case_speedup,
                 "gain_since_collection": gain_since_evidence,
                 "cumulative_diff_path": self.cumulative_diff_path,
@@ -306,8 +296,7 @@ class OrchestrationContext:
             },
             "cases": [case.to_dict() for case in self.cases if case.case_id in selected],
             "evidence_refs": [
-                ref.to_dict()
-                for ref in (self.evidence_refs if evidence_refs is None else evidence_refs)
+                ref.to_dict() for ref in (self.evidence_refs if evidence_refs is None else evidence_refs)
             ],
         }
 
@@ -557,12 +546,7 @@ class PlanCriticOutcome:
 
     def render_artifact(self) -> str:
         if self.error:
-            return (
-                "STATUS: CRITIC_ERROR\n\n"
-                "ERROR: "
-                f"{self.error}\n\n"
-                "The draft plan was used without critic enforcement."
-            )
+            return f"STATUS: CRITIC_ERROR\n\nERROR: {self.error}\n\nThe draft plan was used without critic enforcement."
         return self.review.strip()
 
 
@@ -678,9 +662,7 @@ class OrchestrationRunResult:
             allow_empty=True,
         )
         if not isinstance(self.optimization_plan_executable, bool):
-            raise ValueError(
-                "orchestration optimization_plan_executable must be a boolean"
-            )
+            raise ValueError("orchestration optimization_plan_executable must be a boolean")
         if not isinstance(self.plan_revised, bool):
             raise ValueError("orchestration plan_revised must be a boolean")
 

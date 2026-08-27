@@ -53,9 +53,7 @@ class AttemptWorkspace:
             raise ValueError("the FlyDSL kernel name must not be empty")
         candidate = (self.root / cleaned).resolve()
         if not candidate.is_relative_to(self.root):
-            raise ValueError(
-                f"the FlyDSL kernel name escapes the attempt directory: {name}"
-            )
+            raise ValueError(f"the FlyDSL kernel name escapes the attempt directory: {name}")
         return candidate
 
 
@@ -67,10 +65,7 @@ def create_attempt_workspace(
     """Create this attempt's private directory under the caller's workspace."""
     attempt = AttemptWorkspace(
         workspace=Path(workspace).resolve(),
-        attempt_id=(
-            attempt_id
-            or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"
-        ),
+        attempt_id=(attempt_id or f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}"),
     )
     attempt.root.mkdir(parents=True, exist_ok=True)
     return attempt
@@ -83,11 +78,7 @@ def export_import_path(attempt: AttemptWorkspace) -> None:
     them spawns all inherit this process environment, so exporting it once here
     is what lets a driver keep importing the candidate by module name.
     """
-    entries = [
-        entry
-        for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep)
-        if entry
-    ]
+    entries = [entry for entry in os.environ.get("PYTHONPATH", "").split(os.pathsep) if entry]
     root = str(attempt.root)
     if root in entries:
         return

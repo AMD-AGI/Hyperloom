@@ -87,10 +87,7 @@ class DeviceHazard:
         """One line naming what is holding the device and what found it."""
         if not self.still_held_by:
             return self.detail
-        return (
-            f"{self.detail}; pid(s) {list(self.still_held_by)} still hold a "
-            "device node"
-        )
+        return f"{self.detail}; pid(s) {list(self.still_held_by)} still hold a device node"
 
     def to_dict(self) -> dict:
         return {
@@ -106,10 +103,7 @@ class DeviceHazard:
     def from_dict(cls, record: dict) -> "DeviceHazard":
         return cls(
             detail=str(record["detail"]),
-            holders={
-                int(pid): int(start)
-                for pid, start in dict(record["holders"]).items()
-            },
+            holders={int(pid): int(start) for pid, start in dict(record["holders"]).items()},
             found_iteration=int(record["found_iteration"]),
             blocked_iterations=int(record["blocked_iterations"]),
             last_blocked_iteration=int(record["last_blocked_iteration"]),
@@ -128,11 +122,7 @@ class DeviceHazardLog:
     """
 
     def __init__(self, workspace_dir: str | Path) -> None:
-        self.path = (
-            Path(workspace_dir).resolve()
-            / "forge_experiments"
-            / "device_hazard.json"
-        )
+        self.path = Path(workspace_dir).resolve() / "forge_experiments" / "device_hazard.json"
         self._hazard = self._load()
 
     @property
@@ -146,9 +136,7 @@ class DeviceHazardLog:
 
     def _load(self) -> DeviceHazard | None:
         try:
-            return DeviceHazard.from_dict(
-                json.loads(self.path.read_text(encoding="utf-8"))
-            )
+            return DeviceHazard.from_dict(json.loads(self.path.read_text(encoding="utf-8")))
         except (OSError, ValueError, KeyError, TypeError):
             log.debug("no readable device hazard at %s", self.path)
             return None
@@ -162,8 +150,7 @@ class DeviceHazardLog:
             atomic_write_json(self.path, hazard.to_dict())
         except OSError as error:
             log.warning(
-                "device hazard not durable (%s); a restart will measure "
-                "without knowing the device was held",
+                "device hazard not durable (%s); a restart will measure without knowing the device was held",
                 error,
             )
 
@@ -175,9 +162,7 @@ class DeviceHazardLog:
         except OSError:
             log.debug("could not remove %s", self.path, exc_info=True)
 
-    def record(
-        self, *, iteration: int, detail: str, pids: Iterable[int]
-    ) -> DeviceHazard:
+    def record(self, *, iteration: int, detail: str, pids: Iterable[int]) -> DeviceHazard:
         """Record that ``pids`` left the device unsafe to measure on.
 
         Which of them actually hold a device node is resolved now, while they

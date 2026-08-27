@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .aiter_script_map import TUNER_SCRIPT_HINTS as _TUNER_SCRIPT_HINTS
+
 # Re-exported: these used to live here, and both callers and tests import them
 # from this module. They moved to the leaf so ``script_discovery`` can reach
 # them without importing this module back.
@@ -42,6 +43,7 @@ def sha256_file(path: str | Path | None) -> str:
     except OSError:
         return ""
 
+
 # Sentinel markers for stdout JSON output (Hyperloom parses between these)
 RESULT_SENTINEL_BEGIN = "FORGE_GEMM_TUNE_RESULT_BEGIN"
 RESULT_SENTINEL_END = "FORGE_GEMM_TUNE_RESULT_END"
@@ -50,9 +52,7 @@ RESULT_SENTINEL_END = "FORGE_GEMM_TUNE_RESULT_END"
 # one source of truth. Kept as a plain mapping for callers that only want the
 # expected location; resolution itself goes through script_discovery, which falls
 # back to searching when aiter has moved the file.
-AITER_TUNER_SCRIPTS = {
-    name: rels[0] for name, rels in _TUNER_SCRIPT_HINTS.items() if rels
-}
+AITER_TUNER_SCRIPTS = {name: rels[0] for name, rels in _TUNER_SCRIPT_HINTS.items() if rels}
 
 # Environment variable names for tuned config outputs
 TUNER_ENV_VARS = {
@@ -75,6 +75,7 @@ TUNER_ENV_VARS = {
 @dataclass
 class GpuInfo:
     """GPU status from rocm-smi."""
+
     gpu_id: int
     temperature: str
     power: str
@@ -103,7 +104,9 @@ def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showuse", "--showmemuse", "--showtemp", "--showpower", "--json"],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
         if proc.returncode != 0:
             log.warning("rocm-smi returned %d", proc.returncode)
@@ -116,15 +119,17 @@ def check_gpu_status(skip: bool = False) -> list[GpuInfo]:
             gpu_id = int(key.replace("card", ""))
             util_str = str(info.get("GPU use (%)", info.get("GPU Utilization (%)", "0")))
             util_val = float(util_str.replace("%", "").strip() or "0")
-            gpus.append(GpuInfo(
-                gpu_id=gpu_id,
-                temperature=str(info.get("Temperature (Sensor edge) (C)", "")),
-                power=str(info.get("Average Graphics Package Power (W)", "")),
-                utilization=util_str,
-                memory_used=str(info.get("VRAM Total Used Memory (B)", "")),
-                memory_total=str(info.get("VRAM Total Memory (B)", "")),
-                busy=util_val > 50.0,
-            ))
+            gpus.append(
+                GpuInfo(
+                    gpu_id=gpu_id,
+                    temperature=str(info.get("Temperature (Sensor edge) (C)", "")),
+                    power=str(info.get("Average Graphics Package Power (W)", "")),
+                    utilization=util_str,
+                    memory_used=str(info.get("VRAM Total Used Memory (B)", "")),
+                    memory_total=str(info.get("VRAM Total Memory (B)", "")),
+                    busy=util_val > 50.0,
+                )
+            )
         return gpus
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError) as exc:
         log.warning("GPU check failed: %s", exc)

@@ -102,6 +102,7 @@ def _spec(**overrides) -> AgentRunSpec:
 
 # ── session id capture ────────────────────────────────────────────────────────
 
+
 def test_run_captures_the_session_id(monkeypatch):
     captured: dict = {}
     backend = _backend(
@@ -198,11 +199,15 @@ def test_opus_5_uses_max_effort_adaptive_thinking_and_fallback():
         thinking_budget_tokens=3000,
     )
 
-    asyncio.run(backend.run(_spec(
-        model=DEFAULT_CLAUDE_MODEL,
-        reasoning_effort="max",
-        tool_policy=policy,
-    )))
+    asyncio.run(
+        backend.run(
+            _spec(
+                model=DEFAULT_CLAUDE_MODEL,
+                reasoning_effort="max",
+                tool_policy=policy,
+            )
+        )
+    )
 
     kwargs = captured["options"].kwargs
     assert kwargs["model"] == "claude-opus-5"
@@ -245,11 +250,15 @@ def test_legacy_claude_model_uses_fixed_thinking_budget():
         thinking_budget_tokens=3000,
     )
 
-    asyncio.run(backend.run(_spec(
-        model="claude-opus-4-5-20251101",
-        reasoning_effort="high",
-        tool_policy=policy,
-    )))
+    asyncio.run(
+        backend.run(
+            _spec(
+                model="claude-opus-4-5-20251101",
+                reasoning_effort="high",
+                tool_policy=policy,
+            )
+        )
+    )
 
     assert captured["options"].kwargs["thinking"] == {
         "type": "enabled",
@@ -259,13 +268,12 @@ def test_legacy_claude_model_uses_fixed_thinking_budget():
 
 # ── resume ────────────────────────────────────────────────────────────────────
 
+
 def test_resume_passes_the_session_id_and_new_prompt():
     captured: dict = {}
     backend = _backend([_result_message(session_id="sess-abc")], captured)
 
-    result = asyncio.run(
-        backend.resume(_spec(), "sess-abc", "write your lesson now")
-    )
+    result = asyncio.run(backend.resume(_spec(), "sess-abc", "write your lesson now"))
 
     assert captured["options"].kwargs["resume"] == "sess-abc"
     assert captured["prompt"] == "write your lesson now"
@@ -292,9 +300,7 @@ def test_resume_honours_this_turns_policy_not_the_original():
     backend = _backend([_result_message(session_id="s")], captured)
 
     read_only = _spec(
-        tool_policy=AgentToolPolicy(
-            read=True, search=True, write=False, shell=False, max_turns=4
-        ),
+        tool_policy=AgentToolPolicy(read=True, search=True, write=False, shell=False, max_turns=4),
         system_prompt="summarizer role",
     )
     asyncio.run(backend.resume(read_only, "s", "prompt"))
@@ -327,6 +333,7 @@ def test_provider_omits_max_turns_for_time_limited_session():
 
 # ── the summarizer the agent layer hands back ─────────────────────────────────
 
+
 class _RecordingBackend:
     capabilities = SimpleNamespace(resumable=True)
 
@@ -342,9 +349,7 @@ def test_summarizer_resumes_read_only_and_without_hooks():
     backend = _RecordingBackend()
     implementer_spec = _spec(hooks=object(), writable=True, protected_globs=["driver.py"])
 
-    summarize = _make_session_summarizer(
-        backend=backend, spec=implementer_spec, session_id="sess-1", usage="usage-obj"
-    )
+    summarize = _make_session_summarizer(backend=backend, spec=implementer_spec, session_id="sess-1", usage="usage-obj")
     reply = asyncio.run(summarize("record your lesson"))
     assert reply == "lesson text"
 
@@ -372,30 +377,25 @@ def test_summarizer_resumes_read_only_and_without_hooks():
 
 
 def test_summarizer_is_none_without_a_session_id():
-    summarize = _make_session_summarizer(
-        backend=_RecordingBackend(), spec=_spec(), session_id="", usage=None
-    )
+    summarize = _make_session_summarizer(backend=_RecordingBackend(), spec=_spec(), session_id="", usage=None)
     assert summarize is None
 
 
 def test_summarizer_is_none_for_a_non_resumable_provider():
     backend = _RecordingBackend()
     backend.capabilities = SimpleNamespace(resumable=False)
-    summarize = _make_session_summarizer(
-        backend=backend, spec=_spec(), session_id="s", usage=None
-    )
+    summarize = _make_session_summarizer(backend=backend, spec=_spec(), session_id="s", usage=None)
     assert summarize is None
 
 
 def test_summarizer_is_none_when_the_backend_cannot_resume():
     backend = SimpleNamespace(capabilities=SimpleNamespace(resumable=True))
-    summarize = _make_session_summarizer(
-        backend=backend, spec=_spec(), session_id="s", usage=None
-    )
+    summarize = _make_session_summarizer(backend=backend, spec=_spec(), session_id="s", usage=None)
     assert summarize is None
 
 
 # ── workspace guard ───────────────────────────────────────────────────────────
+
 
 def _guarded_repo(tmp_path: Path) -> tuple[Path, Path]:
     root = tmp_path / "workspace"
@@ -424,11 +424,15 @@ def test_a_session_that_edits_a_protected_file_is_rejected(tmp_path):
     backend._query = edit_the_driver
 
     with pytest.raises(Exception, match="forge_driver.py"):
-        asyncio.run(backend.run(_spec(
-            cwd=str(root),
-            target_files=[str(kernel)],
-            driver_script=str(root / "forge_driver.py"),
-        )))
+        asyncio.run(
+            backend.run(
+                _spec(
+                    cwd=str(root),
+                    target_files=[str(kernel)],
+                    driver_script=str(root / "forge_driver.py"),
+                )
+            )
+        )
 
     assert (root / "forge_driver.py").read_text() == "pass\n"
 
@@ -444,11 +448,15 @@ def test_a_session_that_stays_in_its_target_reports_what_it_changed(tmp_path):
     backend = _backend([], captured)
     backend._query = edit_the_kernel
 
-    result = asyncio.run(backend.run(_spec(
-        cwd=str(root),
-        target_files=[str(kernel)],
-        driver_script=str(root / "forge_driver.py"),
-    )))
+    result = asyncio.run(
+        backend.run(
+            _spec(
+                cwd=str(root),
+                target_files=[str(kernel)],
+                driver_script=str(root / "forge_driver.py"),
+            )
+        )
+    )
 
     assert result.file_changes == ["kernel.py"]
     assert result.target_edit_count == 1

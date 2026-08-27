@@ -277,11 +277,7 @@ def ordered_fusion_boundaries_from_trace(
             return
         key = tuple((str(item["category"]), normalized_name(str(item["name"]))) for item in segment)
         interior_count = max(0, len(segment) - 2)
-        if (
-            len(segment) == 3
-            and categories[0] == "gemm"
-            and categories[1] in LAUNCH_BOUND_CATEGORIES
-        ):
+        if len(segment) == 3 and categories[0] == "gemm" and categories[1] in LAUNCH_BOUND_CATEGORIES:
             boundary_kind = "epilogue"
         elif categories[0] in compute_categories:
             boundary_kind = "compute_boundary"
@@ -399,9 +395,7 @@ _OPERATOR_MARKERS = (
     "attention",
 )
 _OPERATOR_PATTERN = re.compile(r"`([A-Za-z_][A-Za-z0-9_.:]*)`")
-_DECLARED_OPERATOR_PATTERN = re.compile(
-    r"^operator:\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*$", re.MULTILINE
-)
+_DECLARED_OPERATOR_PATTERN = re.compile(r"^operator:\s*([A-Za-z_][A-Za-z0-9_.:]*)\s*$", re.MULTILINE)
 
 # Parsed knowledge documents, keyed by (path, mtime_ns, size) so an unchanged
 # knowledge base is not re-read and re-parsed on every discovery run.
@@ -516,11 +510,7 @@ def existing_operator_hints_from_knowledge(
             for terms in boundary_terms:
                 evidence_overlap = len(terms & paragraph_tokens)
                 operator_overlap = len(op_terms & terms)
-                candidate_score = (
-                    operator_overlap * 100.0
-                    + evidence_overlap * 10.0
-                    - entry["paragraph_length"] / 500.0
-                )
+                candidate_score = operator_overlap * 100.0 + evidence_overlap * 10.0 - entry["paragraph_length"] / 500.0
                 if entry["is_declared"]:
                     candidate_score += 500.0
                 score = max(score, candidate_score)
@@ -633,9 +623,7 @@ def _declared_terms(item: Any, field: str, vocab: frozenset[str]) -> list[str]:
         raw = [raw]
     if not isinstance(raw, (list, tuple)):
         return []
-    return sorted(
-        {token for entry in raw if (token := str(entry).strip().lower().replace("-", "_")) in vocab}
-    )
+    return sorted({token for entry in raw if (token := str(entry).strip().lower().replace("-", "_")) in vocab})
 
 
 def declared_ops(item: Any) -> list[str]:
@@ -695,8 +683,7 @@ def build_discovery_prompt(
             line += f"\n    fusable-span={' -> '.join(fusable)}"
         if terminal:
             line += (
-                f"\n    NOTE: fuse the prologue only; do NOT include the terminal "
-                f"{terminal} kernel in the fused chain."
+                f"\n    NOTE: fuse the prologue only; do NOT include the terminal {terminal} kernel in the fused chain."
             )
         line += f"\n    kernels: {' | '.join(boundary.get('kernels', []))[:500]}"
         return line
@@ -1012,9 +999,7 @@ def parse_discovered_recipes(
         #
         # Either way ``identity_text`` above is untouched, so the key's category
         # segment still comes from the declaration alone.
-        gate_text = (
-            " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
-        )
+        gate_text = " ".join([*declared, *traits]) if traits else " ".join([*declared, defining_text])
         # Recover the op categories: from the declaration when there is one, else
         # from the prose via the fixed, model-agnostic vocabulary. The KB keys on
         # this, and ``op_chain`` is not kept on the Recipe, so it has to happen
@@ -1235,9 +1220,7 @@ def _protected_file_snapshot(
                 path.stat().st_mode & 0o777 if exists else 0,
             )
         except OSError as exc:
-            raise DiscoverySafetyError(
-                f"cannot snapshot protected discovery source {path}: {exc}"
-            ) from exc
+            raise DiscoverySafetyError(f"cannot snapshot protected discovery source {path}: {exc}") from exc
     return snapshot
 
 
@@ -1262,9 +1245,7 @@ def _restore_changed_protected_files(
             elif path.exists() or path.is_symlink():
                 path.unlink()
         except OSError as exc:
-            raise DiscoverySafetyError(
-                f"discovery modified protected source {path} and restore failed: {exc}"
-            ) from exc
+            raise DiscoverySafetyError(f"discovery modified protected source {path} and restore failed: {exc}") from exc
     return changed
 
 
@@ -1289,15 +1270,11 @@ def _run_agent_discovery_once(
     except BaseException as exc:
         changed = _restore_changed_protected_files(snapshot)
         if changed:
-            raise DiscoverySafetyError(
-                "discovery agent modified protected source: " + ", ".join(changed)
-            ) from exc
+            raise DiscoverySafetyError("discovery agent modified protected source: " + ", ".join(changed)) from exc
         raise
     changed = _restore_changed_protected_files(snapshot)
     if changed:
-        raise DiscoverySafetyError(
-            "discovery agent modified protected source: " + ", ".join(changed)
-        )
+        raise DiscoverySafetyError("discovery agent modified protected source: " + ", ".join(changed))
     return result
 
 
@@ -1328,9 +1305,7 @@ def registered_agent_llm_fn(
     """
     import time as _time
 
-    selected_model = (
-        model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
-    )
+    selected_model = model.strip() or str(getattr(getattr(backend, "runtime", None), "model", "")).strip()
     resolved_attempts = (
         int(attempts)
         if attempts is not None
@@ -1394,9 +1369,7 @@ def registered_agent_llm_fn(
         if not log_path:
             return
         with contextlib.suppress(OSError):
-            Path(log_path).write_text(
-                "\n".join([*progress, text]).strip() + "\n", encoding="utf-8"
-            )
+            Path(log_path).write_text("\n".join([*progress, text]).strip() + "\n", encoding="utf-8")
 
     def _fn(prompt: str) -> str:
         started_at = clock()
@@ -1442,24 +1415,20 @@ def registered_agent_llm_fn(
                 if usable and end_reason != "sdk_error":
                     if cut_short:
                         log.warning(
-                            "discovery Agent ended with %s but its proposals parsed; "
-                            "using them", end_reason,
+                            "discovery Agent ended with %s but its proposals parsed; using them",
+                            end_reason,
                         )
                     _record_transcript(progress, text)
                     return text
                 last_error = (
-                    f"{backend.name} returned no final text"
-                    if not text
-                    else f"{backend.name} ended with {end_reason}"
+                    f"{backend.name} returned no final text" if not text else f"{backend.name} ended with {end_reason}"
                 )
                 last_kind = API_ERROR
             except DiscoverySafetyError:
                 raise
             except Exception as exc:  # noqa: BLE001 - classified below
                 if is_agent_safety_error(exc):
-                    raise DiscoverySafetyError(
-                        "discovery Agent safety violation: " + str(exc)
-                    ) from exc
+                    raise DiscoverySafetyError("discovery Agent safety violation: " + str(exc)) from exc
                 last_kind = classify_llm_error(exc)
                 last_error = f"{type(exc).__name__}: {str(exc)[:240]}"
                 if last_kind not in RETRYABLE_KINDS:
@@ -1495,8 +1464,7 @@ def registered_agent_llm_fn(
             )
         _record_transcript(progress, last_error)
         raise LlmUnavailableError(
-            f"discovery Agent produced no usable answer in "
-            f"{max(1, resolved_attempts)} attempt(s): {last_error}",
+            f"discovery Agent produced no usable answer in {max(1, resolved_attempts)} attempt(s): {last_error}",
             kind=last_kind,
             attempts=max(1, resolved_attempts),
         )
@@ -1537,6 +1505,7 @@ def _chat_shaped_client(completions: Any) -> Any:
     chat = type("_Chat", (), {"completions": completions})()
     return type("_Client", (), {"chat": chat})()
 
+
 def _anthropic_text(message: Any) -> str:
     """Concatenate the text blocks of a Messages reply, ignoring the rest.
 
@@ -1546,11 +1515,7 @@ def _anthropic_text(message: Any) -> str:
     blocks = getattr(message, "content", None)
     if not isinstance(blocks, list):
         return ""
-    return "".join(
-        str(getattr(b, "text", "") or "")
-        for b in blocks
-        if getattr(b, "type", "") == "text"
-    )
+    return "".join(str(getattr(b, "text", "") or "") for b in blocks if getattr(b, "type", "") == "text")
 
 
 class _AnthropicChatCompletions:
@@ -1565,8 +1530,7 @@ class _AnthropicChatCompletions:
     def __init__(self, client: Any) -> None:
         self._client = client
 
-    def create(self, *, model: str, temperature: float, max_tokens: int,
-               messages: list[dict[str, str]]) -> Any:
+    def create(self, *, model: str, temperature: float, max_tokens: int, messages: list[dict[str, str]]) -> Any:
         # APIStatusError carries status_code, which classify_llm_error reads
         # before it falls back to scanning the message, so a 401/403/413 stops
         # on the first attempt instead of consuming the retry budget.
@@ -1600,9 +1564,7 @@ def _anthropic_client(*, timeout_s: int, verify: bool) -> Any | None:
     import httpx
     from anthropic import Anthropic
 
-    credential = (
-        {"auth_token": key} if gateway.key_env == "ANTHROPIC_AUTH_TOKEN" else {"api_key": key}
-    )
+    credential = {"auth_token": key} if gateway.key_env == "ANTHROPIC_AUTH_TOKEN" else {"api_key": key}
     sdk = Anthropic(
         base_url=normalize_anthropic_base_url(gateway.base_url),
         default_headers=gateway.headers or None,
@@ -1701,12 +1663,8 @@ def default_llm_fn(
             model=model,
             max_tokens=resolved_max_tokens,
             attempts=int(env_setting("FORGE_FUSION_LLM_ATTEMPTS", DEFAULT_ATTEMPTS, cast=int)),
-            base_delay_sec=float(
-                env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)
-            ),
-            max_delay_sec=float(
-                env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)
-            ),
+            base_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_BASE_SEC", DEFAULT_BASE_DELAY_SEC, cast=float)),
+            max_delay_sec=float(env_setting("FORGE_FUSION_LLM_RETRY_MAX_SEC", DEFAULT_MAX_DELAY_SEC, cast=float)),
         )
         if log_path:
             with contextlib.suppress(OSError):

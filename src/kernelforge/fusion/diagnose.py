@@ -188,16 +188,36 @@ def load_op_busy_from_kineto_trace(
 # ``args["Input type"]`` (torch scalar-type names + a few C++ aliases). Unknown /
 # non-tensor entries contribute 0 bytes (they are scalars or metadata).
 _DTYPE_BYTES: dict[str, int] = {
-    "float": 4, "float32": 4, "f32": 4,
-    "double": 8, "float64": 8,
-    "half": 2, "float16": 2, "f16": 2, "c10::half": 2,
-    "bfloat16": 2, "c10::bfloat16": 2, "bf16": 2,
-    "long": 8, "int64": 8, "long int": 8,
-    "int": 4, "int32": 4,
-    "short": 2, "int16": 2,
-    "char": 1, "int8": 1, "signed char": 1, "unsigned char": 1,
-    "byte": 1, "uint8": 1, "bool": 1,
-    "c10::float8_e4m3fn": 1, "c10::float8_e5m2": 1, "float8": 1, "fp8": 1,
+    "float": 4,
+    "float32": 4,
+    "f32": 4,
+    "double": 8,
+    "float64": 8,
+    "half": 2,
+    "float16": 2,
+    "f16": 2,
+    "c10::half": 2,
+    "bfloat16": 2,
+    "c10::bfloat16": 2,
+    "bf16": 2,
+    "long": 8,
+    "int64": 8,
+    "long int": 8,
+    "int": 4,
+    "int32": 4,
+    "short": 2,
+    "int16": 2,
+    "char": 1,
+    "int8": 1,
+    "signed char": 1,
+    "unsigned char": 1,
+    "byte": 1,
+    "uint8": 1,
+    "bool": 1,
+    "c10::float8_e4m3fn": 1,
+    "c10::float8_e5m2": 1,
+    "float8": 1,
+    "fp8": 1,
 }
 
 
@@ -304,27 +324,14 @@ def diagnose_from_shares(
     visible at all. The downstream validate/loop measures the real speedup and is
     the true filter.
     """
-    shares = {
-        str(k).strip().lower(): float(v)
-        for k, v in (category_shares or {}).items()
-        if v is not None
-    }
-    bytes_share = {
-        str(k).strip().lower(): float(v)
-        for k, v in (category_bytes_share or {}).items()
-        if v is not None
-    }
+    shares = {str(k).strip().lower(): float(v) for k, v in (category_shares or {}).items() if v is not None}
+    bytes_share = {str(k).strip().lower(): float(v) for k, v in (category_bytes_share or {}).items() if v is not None}
     lb_share = sum(v for k, v in shares.items() if k in LAUNCH_BOUND_CATEGORIES)
     # When the trace exposed op shapes, ground the predicted cg-ON gain in the
     # MEASURED launch-bound memory-traffic share; otherwise fall back to the flat
     # launch-share discount (mem_share=None keeps the legacy behavior).
-    lb_mem_share = (
-        sum(v for k, v in bytes_share.items() if k in LAUNCH_BOUND_CATEGORIES)
-        if bytes_share else None
-    )
-    predicted = predict_cuda_graph_on_gain(
-        lb_share, decode_batch=decode_batch, mem_share=lb_mem_share
-    )
+    lb_mem_share = sum(v for k, v in bytes_share.items() if k in LAUNCH_BOUND_CATEGORIES) if bytes_share else None
+    predicted = predict_cuda_graph_on_gain(lb_share, decode_batch=decode_batch, mem_share=lb_mem_share)
     dominant = [
         k
         for k, _ in sorted(
@@ -336,8 +343,14 @@ def diagnose_from_shares(
 
     def _diag(is_candidate: bool, reason: str) -> Diagnosis:
         return Diagnosis(
-            lb_share, busy_fraction_of_wall, dominant, kernels_per_step, shares,
-            is_candidate, reason, predicted_e2e_gain=predicted,
+            lb_share,
+            busy_fraction_of_wall,
+            dominant,
+            kernels_per_step,
+            shares,
+            is_candidate,
+            reason,
+            predicted_e2e_gain=predicted,
             category_bytes_share=bytes_share,
         )
 
@@ -394,6 +407,5 @@ def diagnose_trace(
     bytes_share = load_op_bytes_from_kineto_trace(trace_path)
     kps = n_kernels / decode_steps if decode_steps > 0 else n_kernels
     return diagnose_from_shares(
-        shares, busy_fraction_of_wall=busy, kernels_per_step=kps,
-        category_bytes_share=bytes_share, **kwargs
+        shares, busy_fraction_of_wall=busy, kernels_per_step=kps, category_bytes_share=bytes_share, **kwargs
     )

@@ -83,9 +83,7 @@ class AnalysisSessionJournal:
                 isinstance(state.get("session"), dict),
             )
             if not all(expected):
-                raise ValueError(
-                    "analysis session inputs do not match durable checkpoint"
-                )
+                raise ValueError("analysis session inputs do not match durable checkpoint")
             return state
 
         state = {

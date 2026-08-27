@@ -32,8 +32,7 @@ from forge_gemm_tune.tuners.base import TuneContext
 # Real header written by csrc/gemm_a16w16/gemm_a16w16_tune.py for both the
 # tuned (-o) and the full-candidate profile (-o2) CSV.
 _HDR = (
-    "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,"
-    "libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
+    "gfx,cu_num,M,N,K,bias,dtype,outdtype,scaleAB,bpreshuffle,libtype,solidx,splitK,us,kernelName,err_ratio,tflops,bw"
 )
 
 _NK = [(4096, 4096)]
@@ -99,8 +98,7 @@ def _permissive_surface(script):
     return ScriptSurface(str(script), frozenset(), False)
 
 
-def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None, stderr="",
-          surface=None):
+def _prep(tmp_path, monkeypatch, *, tuned_rows, profile_rows=(), rc=1, root=None, stderr="", surface=None):
     """Wire the tuner so run() executes without aiter, and capture its argv.
 
     ``tuned_rows=None`` means the tuner wrote no CSV at all, as happens when the
@@ -128,6 +126,7 @@ def _run(tmp_path, **ctx_kwargs):
 
 
 # ── script resolution: the gradlib path is gone for good ─────────────────────
+
 
 class TestScriptResolution:
     def test_prefers_direct_tuner_over_shim(self, tmp_path):
@@ -264,9 +263,7 @@ class TestValidateCannotEscapeExecute:
         ["auto", [32], {"n": 32}, "32.0"],
         ids=["string", "list", "dict", "float-string"],
     )
-    def test_a_malformed_config_yields_a_result_not_a_traceback(
-        self, tmp_path, monkeypatch, bad_heads
-    ):
+    def test_a_malformed_config_yields_a_result_not_a_traceback(self, tmp_path, monkeypatch, bad_heads):
         tuner = self._tuner(tmp_path, monkeypatch, {"num_attention_heads": bad_heads})
 
         result = tuner.execute()
@@ -276,9 +273,7 @@ class TestValidateCannotEscapeExecute:
 
     def test_a_clean_config_still_runs(self, tmp_path, monkeypatch):
         """The guard must not swallow the ordinary path."""
-        tuner = self._tuner(
-            tmp_path, monkeypatch, {"num_attention_heads": 32, "num_key_value_heads": 8}
-        )
+        tuner = self._tuner(tmp_path, monkeypatch, {"num_attention_heads": 32, "num_key_value_heads": 8})
 
         assert tuner.validate() is None
 
@@ -309,6 +304,7 @@ class TestRunNamesTheInputsItIgnores:
 
 # ── the one flag that decides whether anything gets tuned at all ─────────────
 
+
 class TestWithHipblasltFlag:
     def test_fast_mode_enables_hipblaslt(self, tmp_path, monkeypatch):
         cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
@@ -335,6 +331,7 @@ class TestWithHipblasltFlag:
 
 # ── --timeout is a whole-batch budget under --shape_grouped ──────────────────
 
+
 class TestBatchTimeout:
     def test_scales_with_shape_count(self, tmp_path):
         tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=100_000))
@@ -351,9 +348,7 @@ class TestBatchTimeout:
         # reached its own timeout and never flushed what it had.
         for timeout_s in (1, 30, 60, 120, 180, 240):
             for thorough in (False, True):
-                tuner = sd.SglangDenseBf16Tuner(
-                    _ctx(tmp_path, timeout_s=timeout_s, thorough=thorough)
-                )
+                tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=timeout_s, thorough=thorough))
                 assert 1 <= tuner._batch_timeout_s(8) <= timeout_s, (timeout_s, thorough)
 
 
@@ -422,9 +417,7 @@ class TestShapeBudgetIsModeAware:
         thorough = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=3_600, thorough=True))
 
         assert fast._shape_budget() == (3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_S
-        assert thorough._shape_budget() == (
-            (3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S
-        )
+        assert thorough._shape_budget() == ((3_600 - sd._TIMEOUT_RESERVE_S) // sd._PER_SHAPE_COST_THOROUGH_S)
         # The whole point: an hour buys far fewer shapes when every backend is
         # searched, and claiming otherwise is what produced empty results.
         assert thorough._shape_budget() < fast._shape_budget()
@@ -533,12 +526,15 @@ class TestDerivedShapesRespectTheBudget:
 
 # ── row count, not exit code, decides the outcome ────────────────────────────
 
+
 class TestRowCountCriterion:
     def test_nonzero_rc_with_all_rows_is_ok(self, tmp_path, monkeypatch):
         # gemm_a16w16_tune.py exits 1 even when every shape tuned. Failing on
         # rc != 0 threw away complete, usable results.
         _prep(
-            tmp_path, monkeypatch, rc=1,
+            tmp_path,
+            monkeypatch,
+            rc=1,
             tuned_rows=[
                 _row(1, 4096, 4096, "hipblaslt", 9.36),
                 _row(512, 4096, 4096, "hipblaslt", 27.44),
@@ -569,10 +565,18 @@ class TestRowCountCriterion:
         _prep(tmp_path, monkeypatch, rc=1, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
         res = _run(tmp_path)
         report = build_report(
-            results=[res], skipped=[], profile=_ctx(tmp_path).profile,
-            framework="sglang", precision="bf16", quant_type="none",
-            gpu_type="mi355x", tp=1, conc=64, tokens=[1, 512],
-            started_at="2026-01-01T00:00:00Z", total_elapsed_s=1.0,
+            results=[res],
+            skipped=[],
+            profile=_ctx(tmp_path).profile,
+            framework="sglang",
+            precision="bf16",
+            quant_type="none",
+            gpu_type="mi355x",
+            tp=1,
+            conc=64,
+            tokens=[1, 512],
+            started_at="2026-01-01T00:00:00Z",
+            total_elapsed_s=1.0,
         )
         assert report.micro_decision == "candidate"
         assert report.requires_e2e_validation is True
@@ -588,7 +592,9 @@ class TestOuterTimeoutKeepsWhatWasWritten:
 
     def test_partial_rows_survive_a_timeout(self, tmp_path, monkeypatch):
         _prep(
-            tmp_path, monkeypatch, rc=124,
+            tmp_path,
+            monkeypatch,
+            rc=124,
             tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)],
         )
         res = _run(tmp_path)
@@ -616,7 +622,9 @@ class TestHelpProbeGate:
     def test_missing_with_hipblaslt_fails_before_running(self, tmp_path, monkeypatch):
         ran: list = []
         cap = _prep(
-            tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)],
+            tmp_path,
+            monkeypatch,
+            tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)],
             surface=lambda s: ScriptSurface(str(s), frozenset({"-i", "-o", "-o2", "--libtype"}), True),
         )
         monkeypatch.setattr(sd, "run_subprocess", lambda cmd, **k: ran.append(cmd) or (0, "", ""))
@@ -630,10 +638,24 @@ class TestHelpProbeGate:
     def test_droppable_flag_is_removed_not_fatal(self, tmp_path, monkeypatch):
         # -v only affects log verbosity, so a script that does not take it should
         # still be run -- without it.
-        accepted = {"-i", "-o", "-o2", "--indtype", "--outdtype", "--mp", "--iters",
-                    "--warmup", "--timeout", "--shape_grouped", "--libtype", "--with-hipblaslt"}
+        accepted = {
+            "-i",
+            "-o",
+            "-o2",
+            "--indtype",
+            "--outdtype",
+            "--mp",
+            "--iters",
+            "--warmup",
+            "--timeout",
+            "--shape_grouped",
+            "--libtype",
+            "--with-hipblaslt",
+        }
         cap = _prep(
-            tmp_path, monkeypatch, tuned_rows=[
+            tmp_path,
+            monkeypatch,
+            tuned_rows=[
                 _row(1, 4096, 4096, "hipblaslt", 9.36),
                 _row(512, 4096, 4096, "hipblaslt", 27.44),
             ],
@@ -646,10 +668,14 @@ class TestHelpProbeGate:
 
     def test_unreadable_help_does_not_block_the_run(self, tmp_path, monkeypatch):
         # Permissive surface (probed=False) is what _prep installs by default.
-        cap = _prep(tmp_path, monkeypatch, tuned_rows=[
-            _row(1, 4096, 4096, "hipblaslt", 9.36),
-            _row(512, 4096, 4096, "hipblaslt", 27.44),
-        ])
+        cap = _prep(
+            tmp_path,
+            monkeypatch,
+            tuned_rows=[
+                _row(1, 4096, 4096, "hipblaslt", 9.36),
+                _row(512, 4096, 4096, "hipblaslt", 27.44),
+            ],
+        )
         res = _run(tmp_path)
         assert res.status == "ok"
         assert "--with-hipblaslt" in cap["cmd"] and "-v" in cap["cmd"]
@@ -666,8 +692,7 @@ class TestRejectedArgument:
     """
 
     _STDERR = (
-        "usage: gemm_a16w16_tune.py [-h] ...\n"
-        "gemm_a16w16_tune.py: error: unrecognized arguments: --with-hipblaslt\n"
+        "usage: gemm_a16w16_tune.py [-h] ...\ngemm_a16w16_tune.py: error: unrecognized arguments: --with-hipblaslt\n"
     )
 
     def test_rejected_argument_is_failed_not_empty_output(self, tmp_path, monkeypatch):
@@ -686,7 +711,10 @@ class TestRejectedArgument:
         # Even if a stale CSV from an earlier run is lying around, a rejected
         # argument means this invocation searched the wrong space.
         _prep(
-            tmp_path, monkeypatch, rc=2, stderr=self._STDERR,
+            tmp_path,
+            monkeypatch,
+            rc=2,
+            stderr=self._STDERR,
             tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)],
         )
         res = _run(tmp_path)
@@ -695,12 +723,14 @@ class TestRejectedArgument:
 
 # ── "no baseline" is not "no gain" ───────────────────────────────────────────
 
+
 class TestUnverifiedShapes:
     def test_hipblaslt_only_has_no_baseline(self, tmp_path, monkeypatch):
         # With --libtype hipblaslt the profile holds hipblaslt candidates only,
         # so torch is never timed and no shape can show a micro speedup.
         _prep(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             tuned_rows=[
                 _row(1, 4096, 4096, "hipblaslt", 9.36),
                 _row(512, 4096, 4096, "hipblaslt", 27.44),
@@ -722,7 +752,8 @@ class TestUnverifiedShapes:
         # --libtype all does time torch, which is exactly the kernel serving
         # falls back to, so the comparison is meaningful.
         _prep(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             tuned_rows=[
                 _row(1, 4096, 4096, "flydsl", 8.0),
                 _row(512, 4096, 4096, "flydsl", 20.0),
@@ -743,7 +774,8 @@ class TestUnverifiedShapes:
     def test_infinite_torch_time_is_not_a_baseline(self, tmp_path, monkeypatch):
         # aiter writes `inf` for a candidate that never ran inside the budget.
         _prep(
-            tmp_path, monkeypatch,
+            tmp_path,
+            monkeypatch,
             tuned_rows=[_row(1, 4096, 4096, "flydsl", 8.0)],
             profile_rows=[_row(1, 4096, 4096, "torch", "inf")],
         )
@@ -753,11 +785,16 @@ class TestUnverifiedShapes:
 
     def test_profile_defaults_ignore_non_torch_rows(self, tmp_path):
         p = tmp_path / "p.csv"
-        p.write_text(_csv([
-            _row(1, 4096, 4096, "hipblaslt", 9.0),
-            _row(1, 4096, 4096, "torch", 12.0),
-            _row(1, 4096, 4096, "torch", 11.0),
-        ]), encoding="utf-8")
+        p.write_text(
+            _csv(
+                [
+                    _row(1, 4096, 4096, "hipblaslt", 9.0),
+                    _row(1, 4096, 4096, "torch", 12.0),
+                    _row(1, 4096, 4096, "torch", 11.0),
+                ]
+            ),
+            encoding="utf-8",
+        )
         # Only torch rows count, and the best of them wins.
         assert sd._parse_profile_defaults(p) == {(1, 4096, 4096): 11.0}
 

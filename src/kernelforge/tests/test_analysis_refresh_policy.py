@@ -90,9 +90,7 @@ def test_failed_attempt_retries_only_in_later_planning_iteration():
     )
 
     assert same_iteration.refresh is False
-    assert same_iteration.reasons == (
-        "ALREADY_ATTEMPTED_THIS_ITERATION",
-    )
+    assert same_iteration.reasons == ("ALREADY_ATTEMPTED_THIS_ITERATION",)
     assert next_iteration.refresh is True
     assert next_iteration.reasons == ("RETRY_FAILED_ANALYSIS",)
 

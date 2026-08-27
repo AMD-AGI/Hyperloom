@@ -7,6 +7,7 @@ driver byte-identical (same sha256 in ``driver_before.py`` /
 operator-facing failure quoted preflight reasons — making a driver nobody had
 touched look like a botched repair. These tests pin the distinction.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -27,9 +28,7 @@ def _workspace(tmp_path):
 
 
 def _failing_preflight(reason="driver missing"):
-    return task_preparer.PreflightResult(
-        ok=False, correctness_ok=False, bench_ok=False, reasons=[reason]
-    )
+    return task_preparer.PreflightResult(ok=False, correctness_ok=False, bench_ok=False, reasons=[reason])
 
 
 def _patch_git(monkeypatch):
@@ -44,9 +43,7 @@ def _patch_git(monkeypatch):
 def _run(workspace, driver, audit_dir):
     return asyncio.run(
         task_preparer.prepare_task(
-            config=SimpleNamespace(
-                model="test-model", experiments_dir=str(audit_dir)
-            ),
+            config=SimpleNamespace(model="test-model", experiments_dir=str(audit_dir)),
             workspace_dir=str(workspace),
             kernel=str(workspace / "kernel.py"),
             driver=str(driver),
@@ -100,9 +97,7 @@ def test_edited_attempt_keeps_the_original_wording(tmp_path, monkeypatch):
     async def failing_preflight(*_a, **_k):
         return _failing_preflight("bench mode produced no timing")
 
-    monkeypatch.setattr(
-        task_preparer, "_run_prepare_agent", agent_that_edits_then_times_out
-    )
+    monkeypatch.setattr(task_preparer, "_run_prepare_agent", agent_that_edits_then_times_out)
     monkeypatch.setattr(task_preparer, "_preflight_async", failing_preflight)
 
     result = _run(workspace, driver, tmp_path / "experiments")
@@ -131,8 +126,7 @@ def test_audit_records_whether_the_driver_was_edited(tmp_path, monkeypatch):
     _run(workspace, driver, experiments)
 
     event = json.loads(
-        (experiments / "task_preparation" / "attempt_01" / "agent_event.json")
-        .read_text(encoding="utf-8")
+        (experiments / "task_preparation" / "attempt_01" / "agent_event.json").read_text(encoding="utf-8")
     )
     assert event["status"] == "timeout"
     assert event["driver_edited"] is False
@@ -219,14 +213,14 @@ def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
     kernel.write_text("__global__ void k() {}\n", encoding="utf-8")
     driver = workspace / "driver.py"
     driver.write_text(
-        '#!/usr/bin/env python3\n'
+        "#!/usr/bin/env python3\n"
         '"""Auto-generated Forge compile-only driver."""\n'
-        'import subprocess, sys\n'
-        'def main():\n'
+        "import subprocess, sys\n"
+        "def main():\n"
         '    print("correctness: UNVERIFIED (compile-only)")\n'
         '    print("compile_only: True")\n'
         '    print("wall_ms: 0.001")\n'
-        'main()\n',
+        "main()\n",
         encoding="utf-8",
     )
 
@@ -238,7 +232,9 @@ def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
         target_functions=[],
         source_files=[],
         preflight=task_preparer.PreflightResult(
-            ok=False, correctness_ok=False, bench_ok=False,
+            ok=False,
+            correctness_ok=False,
+            bench_ok=False,
             reasons=["no SNR"],
         ),
     )
@@ -251,33 +247,28 @@ def test_compile_only_driver_is_detected_and_flagged_in_evidence(tmp_path):
 def test_compile_only_detection_ignores_comments_and_docstrings():
     """A driver that mentions compile_only in a comment or docstring must NOT be flagged."""
     comment_driver = (
-        '#!/usr/bin/env python3\n'
-        '# This driver replaces the old compile_only: True stub.\n'
-        'import torch\n'
-        'def main():\n'
+        "#!/usr/bin/env python3\n"
+        "# This driver replaces the old compile_only: True stub.\n"
+        "import torch\n"
+        "def main():\n"
         '    print("SNR: 80.0 dB")\n'
-        'main()\n'
+        "main()\n"
     )
     assert task_preparer._is_compile_only_driver(comment_driver) is False
 
     docstring_driver = (
-        '#!/usr/bin/env python3\n'
+        "#!/usr/bin/env python3\n"
         '"""\n'
-        'compile_only: True\n'
+        "compile_only: True\n"
         '"""\n'
-        'import torch\n'
-        'def main():\n'
+        "import torch\n"
+        "def main():\n"
         '    print("SNR: 80.0 dB")\n'
-        'main()\n'
+        "main()\n"
     )
     assert task_preparer._is_compile_only_driver(docstring_driver) is False
 
-    real_stub = (
-        '#!/usr/bin/env python3\n'
-        'def main():\n'
-        '    print("compile_only: True")\n'
-        'main()\n'
-    )
+    real_stub = '#!/usr/bin/env python3\ndef main():\n    print("compile_only: True")\nmain()\n'
     assert task_preparer._is_compile_only_driver(real_stub) is True
 
 
@@ -306,7 +297,9 @@ def test_regular_driver_keeps_non_conforming_heading(tmp_path):
 def test_all_failures_are_timeouts_property():
     """Timeout-only preflight failures get a JIT hint, crashes don't."""
     timeout_only = task_preparer.PreflightResult(
-        ok=False, correctness_ok=False, bench_ok=False,
+        ok=False,
+        correctness_ok=False,
+        bench_ok=False,
         reasons=[
             "correctness mode produced no SNR/allclose metric (TIMEOUT after 120s)",
             "bench mode produced no timing (TIMEOUT after 300s)",
@@ -316,7 +309,9 @@ def test_all_failures_are_timeouts_property():
     assert timeout_only.all_failures_are_timeouts is True
 
     crash_only = task_preparer.PreflightResult(
-        ok=False, correctness_ok=False, bench_ok=False,
+        ok=False,
+        correctness_ok=False,
+        bench_ok=False,
         reasons=[
             "correctness mode produced no SNR/allclose metric (DRIVER CRASHED (exit 1))",
             "bench mode produced no timing (BENCH CRASHED (exit 1))",
@@ -325,7 +320,9 @@ def test_all_failures_are_timeouts_property():
     assert crash_only.all_failures_are_timeouts is False
 
     mixed = task_preparer.PreflightResult(
-        ok=False, correctness_ok=False, bench_ok=False,
+        ok=False,
+        correctness_ok=False,
+        bench_ok=False,
         reasons=[
             "correctness mode produced no SNR/allclose metric (TIMEOUT after 120s)",
             "bench mode produced no timing (BENCH CRASHED (exit 1))",
@@ -334,12 +331,16 @@ def test_all_failures_are_timeouts_property():
     assert mixed.all_failures_are_timeouts is False
 
     passing = task_preparer.PreflightResult(
-        ok=True, correctness_ok=True, bench_ok=True,
+        ok=True,
+        correctness_ok=True,
+        bench_ok=True,
     )
     assert passing.all_failures_are_timeouts is False
 
     graph_probe_timeout = task_preparer.PreflightResult(
-        ok=False, correctness_ok=True, bench_ok=True,
+        ok=False,
+        correctness_ok=True,
+        bench_ok=True,
         reasons=[
             "could not verify graph timing (probe failed): benchmark timed out",
         ],
@@ -347,7 +348,9 @@ def test_all_failures_are_timeouts_property():
     assert graph_probe_timeout.all_failures_are_timeouts is True
 
     graph_probe_failed_not_timeout = task_preparer.PreflightResult(
-        ok=False, correctness_ok=True, bench_ok=True,
+        ok=False,
+        correctness_ok=True,
+        bench_ok=True,
         reasons=[
             "could not verify graph timing (probe failed): exit code 1",
         ],
@@ -382,8 +385,7 @@ def test_exception_path_tracks_driver_edits(tmp_path, monkeypatch):
     assert "never edited the driver" not in result.message
 
     event = json.loads(
-        (tmp_path / "experiments" / "task_preparation" / "attempt_01" / "agent_event.json")
-        .read_text(encoding="utf-8")
+        (tmp_path / "experiments" / "task_preparation" / "attempt_01" / "agent_event.json").read_text(encoding="utf-8")
     )
     assert event["status"] == "error"
     assert event["driver_edited"] is True
@@ -408,7 +410,9 @@ def test_jit_timeout_retry_tells_agent_not_to_rewrite(tmp_path, monkeypatch):
 
     async def timeout_preflight(*_a, **_k):
         return task_preparer.PreflightResult(
-            ok=False, correctness_ok=False, bench_ok=False,
+            ok=False,
+            correctness_ok=False,
+            bench_ok=False,
             reasons=[
                 "correctness mode produced no SNR/allclose metric (TIMEOUT after 120s)",
                 "bench mode produced no timing (TIMEOUT after 300s)",
@@ -451,7 +455,9 @@ def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
 
     async def passing_preflight(*_a, **_k):
         return task_preparer.PreflightResult(
-            ok=True, correctness_ok=True, bench_ok=True,
+            ok=True,
+            correctness_ok=True,
+            bench_ok=True,
         )
 
     monkeypatch.setattr(task_preparer, "_run_prepare_agent", agent_that_writes_a_passing_driver)
@@ -459,9 +465,7 @@ def test_external_driver_prepare_publishes_on_success(tmp_path, monkeypatch):
 
     result = asyncio.run(
         task_preparer.prepare_task(
-            config=SimpleNamespace(
-                model="test-model", experiments_dir=str(tmp_path / "experiments")
-            ),
+            config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
             workspace_dir=str(workspace),
             kernel=str(workspace / "kernel.py"),
             driver=str(driver),
@@ -503,9 +507,7 @@ def test_external_driver_prepare_rolls_back_on_failure(tmp_path, monkeypatch):
 
     result = asyncio.run(
         task_preparer.prepare_task(
-            config=SimpleNamespace(
-                model="test-model", experiments_dir=str(tmp_path / "experiments")
-            ),
+            config=SimpleNamespace(model="test-model", experiments_dir=str(tmp_path / "experiments")),
             workspace_dir=str(workspace),
             kernel=str(workspace / "kernel.py"),
             driver=str(driver),

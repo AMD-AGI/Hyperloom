@@ -5,6 +5,7 @@ baseline shard so the preflight skips the multi-minute cold CK compile. The
 warm source is resolved from FORGE_AITER_WARM_JIT_DIR (or the installed aiter
 package), so we point it at a tmp dir here and exercise every branch.
 """
+
 from __future__ import annotations
 
 from kernelforge.loop import aiter_cache

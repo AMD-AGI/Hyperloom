@@ -20,21 +20,37 @@ from kernelforge.loop.archive import CandidateArchive, CandidateRecord
 
 def _seed(archive: CandidateArchive) -> None:
     # A kept baseline, then a recent crashing attempt.
-    archive.record(CandidateRecord(
-        iteration=1, commit_hash="aaaaaaa", decision="KEEP", kept=True,
-        validation_passed=True, wall_ms=1.0, plan="vectorize global loads",
-        kernel_source="def k():\n    return 0\n",
-        change_diff="+ vectorized load\n",
-        baseline_wall_ms=2.0, best_wall_ms_before=2.0,
-    ))
-    archive.record(CandidateRecord(
-        iteration=2, commit_hash="bbbbbbb", decision="CRASH", kept=False,
-        validation_passed=False, wall_ms=None, plan="risky shared-mem rewrite",
-        kernel_source="def k():\n    raise RuntimeError\n",
-        change_diff="+ CRASH_DIFF_MARKER risky shared-mem change\n",
-        validation_text="iteration crashed: boom\nTraceback (most recent call last)\n",
-        baseline_wall_ms=2.0, best_wall_ms_before=1.0,
-    ))
+    archive.record(
+        CandidateRecord(
+            iteration=1,
+            commit_hash="aaaaaaa",
+            decision="KEEP",
+            kept=True,
+            validation_passed=True,
+            wall_ms=1.0,
+            plan="vectorize global loads",
+            kernel_source="def k():\n    return 0\n",
+            change_diff="+ vectorized load\n",
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=2.0,
+        )
+    )
+    archive.record(
+        CandidateRecord(
+            iteration=2,
+            commit_hash="bbbbbbb",
+            decision="CRASH",
+            kept=False,
+            validation_passed=False,
+            wall_ms=None,
+            plan="risky shared-mem rewrite",
+            kernel_source="def k():\n    raise RuntimeError\n",
+            change_diff="+ CRASH_DIFF_MARKER risky shared-mem change\n",
+            validation_text="iteration crashed: boom\nTraceback (most recent call last)\n",
+            baseline_wall_ms=2.0,
+            best_wall_ms_before=1.0,
+        )
+    )
 
 
 def test_crash_decision_label():
@@ -116,13 +132,15 @@ def test_record_failure_before_publish_leaves_no_final_directory(
 
     monkeypatch.setattr(archive, "_write_text", fail_metadata_write, raising=False)
 
-    recorded = archive.record(CandidateRecord(
-        iteration=1,
-        decision="KEEP",
-        kept=True,
-        kernel_source="candidate kernel\n",
-        change_diff="candidate diff\n",
-    ))
+    recorded = archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="KEEP",
+            kept=True,
+            kernel_source="candidate kernel\n",
+            change_diff="candidate diff\n",
+        )
+    )
 
     assert recorded is None
     assert not archive._iter_dir(1).exists()
@@ -136,25 +154,21 @@ def test_record_replaces_legacy_partial_directory_and_repairs_index(tmp_path):
     partial.mkdir()
     (partial / "kernel.py").write_text("stale partial kernel\n")
     stale = {"iter": 1, "decision": "KEEP", "dir": "iter_001"}
-    archive.index_path.write_text(
-        json.dumps(stale) + "\n" + json.dumps(stale) + "\n"
-    )
+    archive.index_path.write_text(json.dumps(stale) + "\n" + json.dumps(stale) + "\n")
 
-    recorded = archive.record(CandidateRecord(
-        iteration=1,
-        decision="REVERT_PERF",
-        kernel_source="replacement kernel\n",
-    ))
+    recorded = archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="REVERT_PERF",
+            kernel_source="replacement kernel\n",
+        )
+    )
 
     assert recorded == archive._iter_dir(1)
     assert archive.read_candidate_file(1, "kernel.py") == "replacement kernel\n"
     assert archive.load_meta(1)["decision"] == "REVERT_PERF"
     assert [entry["iter"] for entry in archive.load_index()] == [1]
-    persisted = [
-        json.loads(line)
-        for line in archive.index_path.read_text().splitlines()
-        if line.strip()
-    ]
+    persisted = [json.loads(line) for line in archive.index_path.read_text().splitlines() if line.strip()]
     assert [entry["iter"] for entry in persisted] == [1]
 
 
@@ -162,21 +176,27 @@ def test_record_replaces_directory_with_malformed_completion_marker(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     partial = archive._iter_dir(1)
     partial.mkdir()
-    (partial / "meta.json").write_text(json.dumps({
-        "archive_format": "invalid",
-        "complete": True,
-        "iteration": 1,
-        "decision": "KEEP",
-        "kept": True,
-        "validation_passed": True,
-        "files": {},
-    }))
+    (partial / "meta.json").write_text(
+        json.dumps(
+            {
+                "archive_format": "invalid",
+                "complete": True,
+                "iteration": 1,
+                "decision": "KEEP",
+                "kept": True,
+                "validation_passed": True,
+                "files": {},
+            }
+        )
+    )
 
-    recorded = archive.record(CandidateRecord(
-        iteration=1,
-        decision="REVERT_VALIDATION",
-        validation_text="replacement record\n",
-    ))
+    recorded = archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="REVERT_VALIDATION",
+            validation_text="replacement record\n",
+        )
+    )
 
     assert recorded == archive._iter_dir(1)
     assert archive.load_meta(1)["decision"] == "REVERT_VALIDATION"
@@ -186,18 +206,12 @@ def test_load_index_rebuilds_missing_entries_and_removes_duplicates(tmp_path):
     archive = CandidateArchive(str(tmp_path))
     _seed(archive)
     first = archive.load_index()[0]
-    archive.index_path.write_text(
-        json.dumps(first) + "\n" + json.dumps(first) + "\n{malformed\n"
-    )
+    archive.index_path.write_text(json.dumps(first) + "\n" + json.dumps(first) + "\n{malformed\n")
 
     rebuilt = archive.load_index()
 
     assert [entry["iter"] for entry in rebuilt] == [1, 2]
-    persisted = [
-        json.loads(line)
-        for line in archive.index_path.read_text().splitlines()
-        if line.strip()
-    ]
+    persisted = [json.loads(line) for line in archive.index_path.read_text().splitlines() if line.strip()]
     assert [entry["iter"] for entry in persisted] == [1, 2]
 
 
@@ -269,11 +283,13 @@ def test_transient_existing_meta_read_does_not_replace_healthy_candidate(
 
     monkeypatch.setattr(Path, "read_text", transient_read)
 
-    recorded = archive.record(CandidateRecord(
-        iteration=1,
-        decision="REVERT_PERF",
-        kernel_source="replacement kernel\n",
-    ))
+    recorded = archive.record(
+        CandidateRecord(
+            iteration=1,
+            decision="REVERT_PERF",
+            kernel_source="replacement kernel\n",
+        )
+    )
 
     assert recorded is None
     assert archive._iter_dir(1).is_dir()
@@ -288,11 +304,7 @@ def test_invalid_utf8_index_is_rebuilt_from_complete_metadata(tmp_path):
     rebuilt = archive.load_index()
 
     assert [entry["iter"] for entry in rebuilt] == [1, 2]
-    persisted = [
-        json.loads(line)
-        for line in archive.index_path.read_text().splitlines()
-        if line.strip()
-    ]
+    persisted = [json.loads(line) for line in archive.index_path.read_text().splitlines() if line.strip()]
     assert [entry["iter"] for entry in persisted] == [1, 2]
 
 
@@ -305,12 +317,14 @@ def test_index_append_failure_is_surfaced_and_recoverable(tmp_path, monkeypatch)
     monkeypatch.setattr(archive, "_append_index", fail_append)
 
     with pytest.raises(OSError, match="simulated index append failure"):
-        archive.record(CandidateRecord(
-            iteration=1,
-            decision="KEEP",
-            kept=True,
-            kernel_source="durable candidate\n",
-        ))
+        archive.record(
+            CandidateRecord(
+                iteration=1,
+                decision="KEEP",
+                kept=True,
+                kernel_source="durable candidate\n",
+            )
+        )
 
     assert archive.load_meta(1)["decision"] == "KEEP"
     recovered = CandidateArchive(str(tmp_path))

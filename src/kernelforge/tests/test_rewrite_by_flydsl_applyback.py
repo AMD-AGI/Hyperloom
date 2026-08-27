@@ -53,9 +53,7 @@ def available_agent_provider(isolated_agent_provider_registry):
 
     def factory(runtime):
         """Refuse construction; callers monkeypatch create_registered_backend."""
-        raise AssertionError(
-            "create_registered_backend must be monkeypatched by the test"
-        )
+        raise AssertionError("create_registered_backend must be monkeypatched by the test")
 
     agent_registry.register_agent_provider(
         agent_registry.AgentProvider(
@@ -88,9 +86,7 @@ def _repo_spec(tmp_path):
     base = _git(repo, "rev-parse", "HEAD")
     kernel = repo / "kernel.py"
     kernel.write_text(
-        "import flydsl\n\n"
-        "def build_softmax_module(*args):\n"
-        "    return lambda *launch_args, **launch_kwargs: None\n"
+        "import flydsl\n\ndef build_softmax_module(*args):\n    return lambda *launch_args, **launch_kwargs: None\n"
     )
     spec = RewriteSpec(
         op_name="softmax",
@@ -113,14 +109,9 @@ def test_applyback_agent_patch_is_published_in_forge_compatible_bundle(
     async def fake_agent(**kwargs):
         worktree = kwargs["worktree"]
         (worktree / "softmax.py").write_text(
-            "from flydsl_softmax import run_softmax\n\n"
-            "def softmax(x):\n"
-            "    return run_softmax(x)\n"
+            "from flydsl_softmax import run_softmax\n\ndef softmax(x):\n    return run_softmax(x)\n"
         )
-        (worktree / "flydsl_softmax.py").write_text(
-            "def run_softmax(x):\n"
-            "    return x\n"
-        )
+        (worktree / "flydsl_softmax.py").write_text("def run_softmax(x):\n    return x\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", fake_agent)
@@ -143,9 +134,7 @@ def test_applyback_agent_patch_is_published_in_forge_compatible_bundle(
     patch = namespace / "best" / "iter_000" / "forge.patch"
     assert patch.is_file()
     assert "flydsl_softmax.py" in patch.read_text()
-    manifest = json.loads(
-        (namespace / "best" / "manifest.json").read_text()
-    )
+    manifest = json.loads((namespace / "best" / "manifest.json").read_text())
     assert manifest["patch_path"] == "rewrite_applyback/best/iter_000/forge.patch"
     assert manifest["artifact_dir"] == "rewrite_applyback/best/iter_000"
     assert manifest["schema_version"] == 2
@@ -165,17 +154,13 @@ def test_applyback_agent_patch_is_published_in_forge_compatible_bundle(
     assert _git(repo, "rev-parse", result.commit_ref) == result.best_commit
     assert sorted(manifest["changed_files"]) == ["flydsl_softmax.py", "softmax.py"]
     assert result.canonical_patch_path == str(patch)
-    assert result.canonical_files_root == str(
-        namespace / "best" / "iter_000" / "files"
-    )
+    assert result.canonical_files_root == str(namespace / "best" / "iter_000" / "files")
     assert result.canonical_result_path == str(namespace / "result.json")
     assert json.loads((namespace / "result.json").read_text()) == manifest
     assert result.forge_workspace == str(repo)
     assert result.artifacts == [str(patch)]
     assert result.import_validation_modules == ["softmax"]
-    assert (
-        namespace / "best" / "iter_000" / "files" / "flydsl_softmax.py"
-    ).is_file()
+    assert (namespace / "best" / "iter_000" / "files" / "flydsl_softmax.py").is_file()
     # The nested standalone forge-loop namespace stays entirely untouched.
     assert not (campaign / "best").exists()
     assert not (campaign / "best_result.json").exists()
@@ -224,9 +209,7 @@ def test_applyback_publication_leaves_the_standalone_best_intact(
     standalone = _seed_standalone_forge_loop_best(repo)
 
     async def fake_agent(**kwargs):
-        (kwargs["worktree"] / "softmax.py").write_text(
-            "def softmax(x):\n    return x * 1\n"
-        )
+        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", fake_agent)
@@ -243,13 +226,9 @@ def test_applyback_publication_leaves_the_standalone_best_intact(
     campaign = repo / "forge_experiments"
     assert json.loads((campaign / "best_result.json").read_text()) == standalone
     assert json.loads((campaign / "best" / "manifest.json").read_text()) == standalone
-    assert (campaign / "best" / "iter_007" / "forge.patch").read_text() == (
-        "standalone flydsl patch\n"
-    )
+    assert (campaign / "best" / "iter_007" / "forge.patch").read_text() == ("standalone flydsl patch\n")
     # A standalone iteration far ahead must not shift the apply-back numbering.
-    published = json.loads(
-        (campaign / "rewrite_applyback" / "result.json").read_text()
-    )
+    published = json.loads((campaign / "rewrite_applyback" / "result.json").read_text())
     assert published["iteration"] == 0
     assert published["commit_hash"] == result.best_commit
     assert published["flydsl_best_commit"] == "standalone-flydsl-best"
@@ -280,9 +259,7 @@ def test_applyback_failure_publishes_no_canonical_result(tmp_path, monkeypatch):
     assert result.canonical_result_path == ""
     namespace = repo / "forge_experiments" / "rewrite_applyback"
     assert not namespace.exists()
-    assert json.loads(
-        (repo / "forge_experiments" / "best_result.json").read_text()
-    ) == standalone
+    assert json.loads((repo / "forge_experiments" / "best_result.json").read_text()) == standalone
     assert Path(result.diagnostic_path).is_dir()
 
 
@@ -299,9 +276,7 @@ def test_applyback_retries_from_a_fresh_worktree_with_prior_failure(
         prior_failures.append(kwargs["prior_failure"])
         if len(worktrees) == 1:
             return "fake", "fake-model"
-        (kwargs["worktree"] / "softmax.py").write_text(
-            "def softmax(x):\n    return x * 1\n"
-        )
+        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x * 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", second_attempt_integrates)
@@ -346,17 +321,13 @@ def test_applyback_publications_increment_within_their_own_namespace(tmp_path):
     assert files_root == str(namespace / "best" / "iter_001" / "files")
     assert result_path == str(namespace / "result.json")
     # Each published version is immutable; the pointers move, the bundles do not.
-    assert (namespace / "best" / "iter_000" / "forge.patch").read_text() == (
-        "framework patch 0\n"
-    )
+    assert (namespace / "best" / "iter_000" / "forge.patch").read_text() == ("framework patch 0\n")
     assert Path(patch_path).read_text() == "framework patch 1\n"
     published = json.loads(Path(result_path).read_text())
     assert published["iteration"] == 1
     assert published["artifact_dir"] == "rewrite_applyback/best/iter_001"
     assert json.loads(Path(manifest_path).read_text()) == published
-    assert (
-        namespace / "best" / "iter_001" / "files" / "softmax.py"
-    ).read_text() == "def softmax(x):\n    return x\n"
+    assert (namespace / "best" / "iter_001" / "files" / "softmax.py").read_text() == "def softmax(x):\n    return x\n"
 
 
 def test_applyback_pins_the_commit_under_a_slug_derived_ref(tmp_path, monkeypatch):
@@ -364,9 +335,7 @@ def test_applyback_pins_the_commit_under_a_slug_derived_ref(tmp_path, monkeypatc
     spec.op_name = "vllm::softmax"
 
     async def integrate(**kwargs):
-        (kwargs["worktree"] / "softmax.py").write_text(
-            "def softmax(x):\n    return x + 1\n"
-        )
+        (kwargs["worktree"] / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", integrate)
@@ -380,10 +349,7 @@ def test_applyback_pins_the_commit_under_a_slug_derived_ref(tmp_path, monkeypatc
 
     assert result.ok is True
     # One normalization rule, shared with the builder symbol.
-    assert result.commit_ref == (
-        f"refs/forge-rewrite/applyback/{spec.operator_slug}"
-        f"-{result.best_commit[:12]}"
-    )
+    assert result.commit_ref == (f"refs/forge-rewrite/applyback/{spec.operator_slug}-{result.best_commit[:12]}")
     assert "::" not in result.commit_ref
     assert _git(repo, "rev-parse", result.commit_ref) == result.best_commit
 
@@ -474,9 +440,7 @@ def test_patched_import_failure_rejects_a_syntax_valid_patch(
 
     async def breaks_import(**kwargs):
         (kwargs["worktree"] / "softmax.py").write_text(
-            "from dependency_that_is_not_installed import run\n\n"
-            "def softmax(x):\n"
-            "    return run(x)\n"
+            "from dependency_that_is_not_installed import run\n\ndef softmax(x):\n    return run(x)\n"
         )
         return "fake", "fake-model"
 
@@ -502,10 +466,7 @@ def test_applyback_timeout_preserves_non_publishable_diagnostics(
 
     async def timing_out_agent(**kwargs):
         worktree = kwargs["worktree"]
-        (worktree / "softmax.py").write_text(
-            "def softmax(x):\n"
-            "    return x + 1\n"
-        )
+        (worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
         kwargs["progress_log"].append("tool:Bash focused smoke test")
         raise asyncio.TimeoutError
 
@@ -548,10 +509,7 @@ def test_applyback_host_validation_rejects_test_edits(tmp_path, monkeypatch):
     async def edits_test(**kwargs):
         worktree = kwargs["worktree"]
         (worktree / "softmax.py").write_text("def softmax(x):\n    return x + 1\n")
-        (worktree / "tests" / "test_softmax.py").write_text(
-            "def test_softmax():\n"
-            "    assert True\n"
-        )
+        (worktree / "tests" / "test_softmax.py").write_text("def test_softmax():\n    assert True\n")
         return "fake", "fake-model"
 
     monkeypatch.setattr(applyback, "_run_agent", edits_test)
@@ -767,10 +725,7 @@ def test_applyback_shell_hook_enforces_convergence_budget():
             None,
         )
     )
-    assert (
-        benchmark["hookSpecificOutput"]["permissionDecision"]
-        == "deny"
-    )
+    assert benchmark["hookSpecificOutput"]["permissionDecision"] == "deny"
 
     too_long = asyncio.run(
         callback(
@@ -802,9 +757,13 @@ def test_applyback_shell_hook_enforces_convergence_budget():
     )
     assert focused == {}
 
-    finalizing_callback = applyback._make_applyback_hooks(
-        deadline_monotonic=time.monotonic() + 60,
-    ).pre_tool_use[0].callback
+    finalizing_callback = (
+        applyback._make_applyback_hooks(
+            deadline_monotonic=time.monotonic() + 60,
+        )
+        .pre_tool_use[0]
+        .callback
+    )
     late_read = asyncio.run(
         finalizing_callback(
             {

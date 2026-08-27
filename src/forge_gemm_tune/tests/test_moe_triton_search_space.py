@@ -84,10 +84,7 @@ class TestBlockSizeK256:
         # The seeds pin three measured winners; the grid is what finds the next
         # one, so promoting them must not turn --thorough back into the seeds.
         seeded = {tuple(sorted(c.items())) for c in mt._SEED_CONFIGS}
-        grid_only = [
-            c for c in mt.build_search_space(True)
-            if tuple(sorted(c.items())) not in seeded
-        ]
+        grid_only = [c for c in mt.build_search_space(True) if tuple(sorted(c.items())) not in seeded]
         assert len(grid_only) > len(mt._SEED_CONFIGS)
         assert any(c["BLOCK_SIZE_K"] == 256 for c in grid_only)
 

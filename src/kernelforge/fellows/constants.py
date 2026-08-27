@@ -45,9 +45,7 @@ _BACKEND_LANGUAGE_DIRS: dict[str, tuple[str, ...]] = {
 }
 
 
-def resolve_language_dirs(
-    backend: str, local_knowledge_root: Path | str
-) -> tuple[str, ...]:
+def resolve_language_dirs(backend: str, local_knowledge_root: Path | str) -> tuple[str, ...]:
     """Return the languages/ subdirectories serving ``backend``, in reading order.
 
     Each candidate is filtered on existence, so a checkout missing one folder

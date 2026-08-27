@@ -128,15 +128,9 @@ class Config:
         self.agent_backend = (self.agent_backend or "auto").strip().lower()
         if self.agent_backend != "auto":
             get_agent_provider(self.agent_backend)
-        self.agent_reasoning_effort = (
-            self.agent_reasoning_effort or "high"
-        ).strip()
-        self.agent_sandbox_mode = (
-            self.agent_sandbox_mode or "bypass"
-        ).strip().lower()
-        self.agent_fallback_provider = (
-            self.agent_fallback_provider or ""
-        ).strip().lower()
+        self.agent_reasoning_effort = (self.agent_reasoning_effort or "high").strip()
+        self.agent_sandbox_mode = (self.agent_sandbox_mode or "bypass").strip().lower()
+        self.agent_fallback_provider = (self.agent_fallback_provider or "").strip().lower()
         if self.agent_fallback_provider:
             get_agent_provider(self.agent_fallback_provider)
         if self.agent_timeout_sec <= 0:
@@ -144,12 +138,11 @@ class Config:
         if self.specialist_probe_max <= 0:
             raise ValueError("specialist_probe_max must be greater than zero")
         if self.specialist_probe_budget_sec <= 0:
-            raise ValueError(
-                "specialist_probe_budget_sec must be greater than zero"
-            )
-        if self.specialist_probe_scratch_root and not Path(
+            raise ValueError("specialist_probe_budget_sec must be greater than zero")
+        if (
             self.specialist_probe_scratch_root
-        ).expanduser().is_absolute():
+            and not Path(self.specialist_probe_scratch_root).expanduser().is_absolute()
+        ):
             raise ValueError(
                 "specialist_probe_scratch_root must be an absolute path: "
                 f"{self.specialist_probe_scratch_root!r} would resolve against "
@@ -175,9 +168,7 @@ class Config:
         # direct construction or `from_env(include_mori_kb=...)`) always
         # wins over the environment.
         if self.include_mori_kb is None:
-            self.include_mori_kb = os.getenv(
-                "KERNELFORGE_INCLUDE_MORI_KB", ""
-            ).strip().lower() in ("1", "true", "yes")
+            self.include_mori_kb = os.getenv("KERNELFORGE_INCLUDE_MORI_KB", "").strip().lower() in ("1", "true", "yes")
 
     def agent_runtime(self):
         """Resolve the selected provider into one complete runtime config."""
@@ -216,13 +207,7 @@ class Config:
             )
         return cls(
             gpu_target=overrides.get("gpu_target", os.getenv("GPU_TARGET", "gfx942")),
-            gpu_type=str(
-                overrides["gpu_type"]
-                if "gpu_type" in overrides
-                else "mi355x"
-            )
-            .strip()
-            .lower(),
+            gpu_type=str(overrides["gpu_type"] if "gpu_type" in overrides else "mi355x").strip().lower(),
             producer=str(overrides.get("producer", "")).strip().lower(),
             workspace=overrides.get("workspace", os.getenv("KERNEL_WORKSPACE", "")),
             agent_backend=overrides.get(
@@ -231,12 +216,9 @@ class Config:
             ),
             agent_model=overrides.get(
                 "agent_model",
-                os.getenv("FORGE_AGENT_MODEL", "").strip()
-                or os.getenv("KERNEL_AGENTS_MODEL", "").strip(),
+                os.getenv("FORGE_AGENT_MODEL", "").strip() or os.getenv("KERNEL_AGENTS_MODEL", "").strip(),
             ),
-            agent_cli=overrides.get(
-                "agent_cli", os.getenv("FORGE_AGENT_CLI", "")
-            ),
+            agent_cli=overrides.get("agent_cli", os.getenv("FORGE_AGENT_CLI", "")),
             agent_timeout_sec=int(
                 overrides.get(
                     "agent_timeout_sec",
@@ -251,24 +233,16 @@ class Config:
                 "agent_sandbox_mode",
                 os.getenv("FORGE_AGENT_SANDBOX_MODE", "bypass"),
             ),
-            agent_precheck=overrides.get(
-                "agent_precheck", _env_bool("FORGE_AGENT_PRECHECK", True)
-            ),
+            agent_precheck=overrides.get("agent_precheck", _env_bool("FORGE_AGENT_PRECHECK", True)),
             agent_fallback_provider=overrides.get(
                 "agent_fallback_provider",
                 os.getenv("FORGE_AGENT_FALLBACK_PROVIDER", "claude"),
             ),
-            agent_options=overrides.get(
-                "agent_options"
-            ) if "agent_options" in overrides else _env_json_object(
-                "FORGE_AGENT_OPTIONS_JSON"
-            ),
-            max_turns=int(
-                overrides.get("max_turns", 500)
-            ),
-            specialist_probe=overrides.get(
-                "specialist_probe", _env_bool("FORGE_SPECIALIST_PROBE", True)
-            ),
+            agent_options=overrides.get("agent_options")
+            if "agent_options" in overrides
+            else _env_json_object("FORGE_AGENT_OPTIONS_JSON"),
+            max_turns=int(overrides.get("max_turns", 500)),
+            specialist_probe=overrides.get("specialist_probe", _env_bool("FORGE_SPECIALIST_PROBE", True)),
             specialist_probe_max=int(
                 overrides.get(
                     "specialist_probe_max",

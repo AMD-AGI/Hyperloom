@@ -53,10 +53,7 @@ def test_capabilities_are_independent_between_calls():
 def test_plain_identifier_names_keep_their_symbol():
     assert protocol.operator_slug("softmax") == "softmax"
     assert protocol.builder_symbol("softmax") == "build_softmax_module"
-    assert (
-        protocol.builder_symbol("mxfp8_grouped_gemm")
-        == "build_mxfp8_grouped_gemm_module"
-    )
+    assert protocol.builder_symbol("mxfp8_grouped_gemm") == "build_mxfp8_grouped_gemm_module"
 
 
 @pytest.mark.parametrize(
@@ -146,9 +143,7 @@ def test_driver_environment_carries_the_producer_owned_facts():
     assert environment == {
         "KERNELFORGE_REWRITE_SOURCE_KERNEL": "/ws/softmax.py",
         "KERNELFORGE_REWRITE_CANDIDATE_KERNEL": "/ws/.forge_rewrite/kernel.py",
-        "KERNELFORGE_REWRITE_BUILDER_SYMBOL": protocol.builder_symbol(
-            "vllm::softmax"
-        ),
+        "KERNELFORGE_REWRITE_BUILDER_SYMBOL": protocol.builder_symbol("vllm::softmax"),
         "KERNELFORGE_REWRITE_LOGICAL_OP": "vllm::softmax",
     }
 
@@ -233,9 +228,7 @@ def test_the_ambiguous_correctness_key_is_rejected():
 
 def test_the_producer_may_not_claim_integration_passed():
     with pytest.raises(ValueError, match="may not publish integration"):
-        protocol.validate_applyback_manifest(
-            _manifest(integration_validation_status="passed")
-        )
+        protocol.validate_applyback_manifest(_manifest(integration_validation_status="passed"))
 
 
 @pytest.mark.parametrize(
@@ -267,23 +260,16 @@ def test_a_non_object_manifest_is_rejected():
 
 def test_the_manifest_names_the_producer_owned_path_it_refuses():
     with pytest.raises(ValueError, match="producer-owned state"):
-        protocol.validate_applyback_manifest(
-            _manifest(changed_files=["forge_experiments/run_state.json"])
-        )
+        protocol.validate_applyback_manifest(_manifest(changed_files=["forge_experiments/run_state.json"]))
     # The bundle's own paths live under the campaign root and stay publishable.
-    assert protocol.validate_applyback_manifest(_manifest())["artifact_dir"] == (
-        "rewrite_applyback/best/iter_000"
-    )
+    assert protocol.validate_applyback_manifest(_manifest())["artifact_dir"] == ("rewrite_applyback/best/iter_000")
 
 
 def test_applyback_contract_example_validates_both_documents():
     example = protocol.applyback_contract_example()
 
     assert protocol.validate_applyback_manifest(example["manifest"]) is example["manifest"]
-    assert (
-        protocol.validate_applyback_outer_result(example["outer_result"])
-        is example["outer_result"]
-    )
+    assert protocol.validate_applyback_outer_result(example["outer_result"]) is example["outer_result"]
     assert example["manifest"]["commit_hash"] == example["outer_result"]["best_commit"]
     assert example["manifest"]["framework"] == "vllm"
 

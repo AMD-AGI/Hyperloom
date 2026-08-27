@@ -83,17 +83,11 @@ def _canonical_source_path(path: str, workspace: str, framework: str) -> str:
         resolved = Path(workspace) / resolved
     resolved = resolved.resolve()
     owner = canonical_owner_framework(framework)
-    aliases = {
-        alias
-        for alias, canonical in _OWNER_ALIASES.items()
-        if canonical == owner
-    }
+    aliases = {alias for alias, canonical in _OWNER_ALIASES.items() if canonical == owner}
     lowered = [part.lower() for part in resolved.parts]
-    owner_indexes = [
-        index for index, part in enumerate(lowered) if part in aliases
-    ]
+    owner_indexes = [index for index, part in enumerate(lowered) if part in aliases]
     if owner != _UNKNOWN and owner_indexes:
-        suffix = _strip_optional_src(tuple(resolved.parts[owner_indexes[-1] + 1:]))
+        suffix = _strip_optional_src(tuple(resolved.parts[owner_indexes[-1] + 1 :]))
         return Path(owner, *suffix).as_posix()
 
     relative = Path(_workspace_relative(str(resolved), workspace))
@@ -124,9 +118,7 @@ def canonical_editable_source_map(
         relative = _workspace_relative(str(raw), workspace)
         previous = mapping.get(canonical)
         if previous is not None and previous != relative:
-            raise ValueError(
-                f"ambiguous canonical editable source path: {canonical}"
-            )
+            raise ValueError(f"ambiguous canonical editable source path: {canonical}")
         mapping[canonical] = relative
     return dict(sorted(mapping.items()))
 
@@ -139,12 +131,14 @@ def canonical_editable_source_paths(
     framework: str,
 ) -> list[str]:
     """Return sorted package-relative paths for the declared source hints."""
-    return list(canonical_editable_source_map(
-        workspace=workspace,
-        kernel_path=kernel_path,
-        source_files=source_files,
-        framework=framework,
-    ))
+    return list(
+        canonical_editable_source_map(
+            workspace=workspace,
+            kernel_path=kernel_path,
+            source_files=source_files,
+            framework=framework,
+        )
+    )
 
 
 def derive_implementation_symbols(
@@ -155,6 +149,7 @@ def derive_implementation_symbols(
     source_contents: dict[str, str] | None = None,
 ) -> list[str]:
     """Derive stable symbols from the declared implementation entry points."""
+
     def stable(names: Iterable[str]) -> set[str]:
         return {
             value

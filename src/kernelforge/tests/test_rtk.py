@@ -8,4 +8,3 @@ command with a missing binary. This pins prefix()/wrap_command consistency with
 is_available(), independent of whether rtk happens to be installed."""
 
 from __future__ import annotations
-

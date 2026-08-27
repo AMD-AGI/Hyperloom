@@ -44,18 +44,14 @@ class TestComputeTokenCoverage:
 
 class TestComputeDenseGemmShapes:
     def test_basic_shapes(self):
-        shapes = compute_dense_gemm_shapes(
-            hidden_size=4096, intermediate_size=11008, tokens=[1, 64], tp=1
-        )
+        shapes = compute_dense_gemm_shapes(hidden_size=4096, intermediate_size=11008, tokens=[1, 64], tp=1)
         assert (1, 11008, 4096) in shapes  # gate/up
         assert (1, 4096, 11008) in shapes  # down
         assert (64, 11008, 4096) in shapes
         assert (64, 4096, 11008) in shapes
 
     def test_tp_splits_intermediate(self):
-        shapes = compute_dense_gemm_shapes(
-            hidden_size=4096, intermediate_size=11008, tokens=[1], tp=2
-        )
+        shapes = compute_dense_gemm_shapes(hidden_size=4096, intermediate_size=11008, tokens=[1], tp=2)
         assert (1, 5504, 4096) in shapes  # inter/tp
         assert (1, 4096, 5504) in shapes
 

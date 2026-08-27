@@ -40,6 +40,7 @@ def test_default_llm_fn_passes_apim_default_headers(monkeypatch):
     class _Resp:
         class _C:
             message = type("M", (), {"content": '[{"name":"x"}]'})()
+
         choices = [_C()]
 
     class _Completions:
@@ -60,8 +61,9 @@ def test_default_llm_fn_passes_apim_default_headers(monkeypatch):
 
     fn = default_llm_fn()
     fn("prompt")
-    assert captured.get("default_headers") == {"Ocp-Apim-Subscription-Key": "sub-key"}, \
+    assert captured.get("default_headers") == {"Ocp-Apim-Subscription-Key": "sub-key"}, (
         "OpenAI client must carry the APIM subscription header"
+    )
 
 
 def _install_capturing_openai(monkeypatch):
@@ -71,14 +73,13 @@ def _install_capturing_openai(monkeypatch):
     class _Resp:
         class _C:
             message = type("M", (), {"content": "[]"})()
+
         choices = [_C()]
 
     class _FakeClient:
         def __init__(self, **k):
             captured.update(k)
-            self.chat = type(
-                "Chat", (), {"completions": type("Cmp", (), {"create": lambda self, **k: _Resp()})()}
-            )()
+            self.chat = type("Chat", (), {"completions": type("Cmp", (), {"create": lambda self, **k: _Resp()})()})()
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
@@ -209,10 +210,15 @@ def test_anthropic_reply_skips_thinking_blocks(monkeypatch):
     # A thinking-enabled deployment puts a thinking block first; reading
     # content[0] would hand discovery an empty string and lose the answer.
     _anthropic_only(monkeypatch)
-    _install_anthropic_transport(monkeypatch, payload=_messages_reply([
-        {"type": "thinking", "thinking": "hmm", "signature": "sig"},
-        {"type": "text", "text": '[{"name":"x"}]'},
-    ]))
+    _install_anthropic_transport(
+        monkeypatch,
+        payload=_messages_reply(
+            [
+                {"type": "thinking", "thinking": "hmm", "signature": "sig"},
+                {"type": "text", "text": '[{"name":"x"}]'},
+            ]
+        ),
+    )
 
     assert default_llm_fn()("prompt") == '[{"name":"x"}]'
 
@@ -256,9 +262,7 @@ def test_anthropic_auth_token_uses_bearer_not_x_api_key(monkeypatch):
         (413, "that was a lot of tokens", CONTEXT_LENGTH),
     ],
 )
-def test_anthropic_http_status_drives_failure_classification(
-    monkeypatch, status, body, expected_kind
-):
+def test_anthropic_http_status_drives_failure_classification(monkeypatch, status, body, expected_kind):
     _anthropic_only(monkeypatch)
     monkeypatch.setenv("FORGE_FUSION_LLM_ATTEMPTS", "4")
     calls = _install_anthropic_transport(monkeypatch, status=status, body=body)
@@ -298,8 +302,7 @@ def test_openai_line_wins_on_the_direct_path(monkeypatch):
 
 
 def test_neither_line_configured_still_raises_not_configured(monkeypatch):
-    for var in ("OPENAI_BASE_URL", "OPENAI_API_KEY",
-                "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    for var in ("OPENAI_BASE_URL", "OPENAI_API_KEY", "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
         monkeypatch.delenv(var, raising=False)
 
     with pytest.raises(LlmUnavailableError) as excinfo:
@@ -309,8 +312,8 @@ def test_neither_line_configured_still_raises_not_configured(monkeypatch):
 
 def _candidate_diag():
     return diagnose_from_shares(
-        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08},
-        busy_fraction_of_wall=0.21)
+        {"gemm": 0.4, "add": 0.14, "elementwise": 0.14, "cast": 0.13, "mul": 0.08}, busy_fraction_of_wall=0.21
+    )
 
 
 # ── hot_kernels_from_trace edge cases ────────────────────────────────────────
@@ -322,27 +325,40 @@ def test_hot_kernels_events_not_list(tmp_path):
 
 def test_hot_kernels_skips_bad_dur_and_nonpositive(tmp_path):
     p = tmp_path / "d.trace.json"
-    p.write_text(json.dumps({"traceEvents": [
-        {"cat": "kernel", "name": "a", "dur": "notnum"},
-        {"cat": "kernel", "name": "b", "dur": 0},
-        {"cat": "kernel", "name": "c", "dur": -5},
-        {"cat": "cpu_op", "name": "skip", "dur": 100},
-        {"cat": "kernel", "name": "mul_kernel", "dur": 20},
-    ]}))
+    p.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "kernel", "name": "a", "dur": "notnum"},
+                    {"cat": "kernel", "name": "b", "dur": 0},
+                    {"cat": "kernel", "name": "c", "dur": -5},
+                    {"cat": "cpu_op", "name": "skip", "dur": 100},
+                    {"cat": "kernel", "name": "mul_kernel", "dur": 20},
+                ]
+            }
+        )
+    )
     hot = hot_kernels_from_trace(p)
     assert [h["name"] for h in hot] == ["mul_kernel"]
 
 
 def test_hot_kernels_total_zero_returns_empty(tmp_path):
     p = tmp_path / "d.trace.json"
-    p.write_text(json.dumps({"traceEvents": [
-        {"cat": "kernel", "name": "a", "dur": 0},
-    ]}))
+    p.write_text(
+        json.dumps(
+            {
+                "traceEvents": [
+                    {"cat": "kernel", "name": "a", "dur": 0},
+                ]
+            }
+        )
+    )
     assert hot_kernels_from_trace(p) == []
 
 
 def test_hot_kernels_gz(tmp_path):
     import gzip
+
     p = tmp_path / "d.trace.json.gz"
     with gzip.open(p, "wt", encoding="utf-8") as fh:
         json.dump({"traceEvents": [{"cat": "kernel", "name": "mul_k", "dur": 10}]}, fh)
@@ -371,8 +387,7 @@ def test_extract_skips_invalid_array_then_salvages():
 
 def test_parse_anchor_as_string_coerced():
     text = '[{"name":"x","env_flag":"F","source_anchors":"single_anchor"}]'
-    rs = parse_discovered_recipes(text, model_type="m", framework="f",
-                                  source_file="/x.py", shapes={})
+    rs = parse_discovered_recipes(text, model_type="m", framework="f", source_file="/x.py", shapes={})
     assert rs[0].source_hints == ["single_anchor"]
 
 
@@ -380,8 +395,7 @@ def test_parse_anchor_as_string_coerced():
 def test_default_llm_fn_no_gateway_raises(monkeypatch):
     # An unconfigured gateway is an environment fault, not a finding about the
     # model; returning "" here used to land as verdict no_opportunity.
-    for k in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN",
-              "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+    for k in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.delenv(k, raising=False)
     fn = default_llm_fn()
     with pytest.raises(LlmUnavailableError) as excinfo:
@@ -466,8 +480,14 @@ def test_default_llm_fn_uses_the_resolved_pair(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
-    for k in ("OPENAI_BASE_URL", "ANTHROPIC_BASE_URL", "OPENAI_API_KEY",
-              "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "SAFE_API_KEY"):
+    for k in (
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "SAFE_API_KEY",
+    ):
         monkeypatch.delenv(k, raising=False)
 
     # A retired key alongside a base URL is not a pair: no client, no call.
@@ -519,6 +539,7 @@ def test_default_llm_fn_retries_then_raises(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
     monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     import time
+
     monkeypatch.setattr(time, "sleep", lambda *_: None)
 
     fn = default_llm_fn()
@@ -549,14 +570,21 @@ def test_default_llm_fn_setup_failure_raises(monkeypatch):
 # ── discover_recipes source-read failures ────────────────────────────────────
 def test_discover_recipes_empty_source_file(tmp_path):
     d = _candidate_diag()
-    rs = discover_recipes(d, model_type="m", framework="f", source_file="",
-                          shapes={}, trace_path="/x", llm_fn=lambda p: "[]")
+    rs = discover_recipes(
+        d, model_type="m", framework="f", source_file="", shapes={}, trace_path="/x", llm_fn=lambda p: "[]"
+    )
     assert rs == []
 
 
 def test_discover_recipes_unreadable_source(tmp_path):
     d = _candidate_diag()
-    rs = discover_recipes(d, model_type="m", framework="f",
-                          source_file=str(tmp_path / "nope.py"),
-                          shapes={}, trace_path="/x", llm_fn=lambda p: "[]")
+    rs = discover_recipes(
+        d,
+        model_type="m",
+        framework="f",
+        source_file=str(tmp_path / "nope.py"),
+        shapes={},
+        trace_path="/x",
+        llm_fn=lambda p: "[]",
+    )
     assert rs == []

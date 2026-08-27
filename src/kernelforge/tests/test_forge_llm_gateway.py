@@ -66,12 +66,15 @@ def test_blank_value_is_not_configured(clean_env, var, blank):
     assert not resolve_openai_gateway().is_complete()
 
 
-@pytest.mark.parametrize("configured", [
-    "https://gw.example/llm-proxy",
-    "https://gw.example/llm-proxy/",
-    "https://gw.example/llm-proxy/v1",
-    "https://api.openai.com/v1",
-])
+@pytest.mark.parametrize(
+    "configured",
+    [
+        "https://gw.example/llm-proxy",
+        "https://gw.example/llm-proxy/",
+        "https://gw.example/llm-proxy/v1",
+        "https://api.openai.com/v1",
+    ],
+)
 def test_base_url_is_used_exactly_as_configured(clean_env, configured):
     """No route suffix is appended and no path is rewritten.
 
@@ -99,9 +102,7 @@ def test_the_anthropic_line_is_never_borrowed(clean_env):
     # Its own pair is what turns the line on, and the Anthropic headers stay out.
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
-    assert resolve_openai_gateway() == LlmGateway(
-        "https://gw.example/llm-proxy/v1", "OPENAI_API_KEY", {}
-    )
+    assert resolve_openai_gateway() == LlmGateway("https://gw.example/llm-proxy/v1", "OPENAI_API_KEY", {})
 
 
 def test_retired_keys_are_not_credentials(clean_env):
@@ -126,18 +127,12 @@ def test_expand_env_refs(monkeypatch):
 
 def test_parse_custom_headers_lines_json_and_envref(monkeypatch):
     # newline-delimited "Name: value"
-    assert parse_custom_headers("Ocp-Apim-Subscription-Key: abc123") == {
-        "Ocp-Apim-Subscription-Key": "abc123"
-    }
+    assert parse_custom_headers("Ocp-Apim-Subscription-Key: abc123") == {"Ocp-Apim-Subscription-Key": "abc123"}
     # JSON object form
-    assert parse_custom_headers('{"Ocp-Apim-Subscription-Key": "abc123"}') == {
-        "Ocp-Apim-Subscription-Key": "abc123"
-    }
+    assert parse_custom_headers('{"Ocp-Apim-Subscription-Key": "abc123"}') == {"Ocp-Apim-Subscription-Key": "abc123"}
     # ${VAR} expansion from env
     monkeypatch.setenv("SUBKEY", "xyz")
-    assert parse_custom_headers("Ocp-Apim-Subscription-Key: ${SUBKEY}") == {
-        "Ocp-Apim-Subscription-Key": "xyz"
-    }
+    assert parse_custom_headers("Ocp-Apim-Subscription-Key: ${SUBKEY}") == {"Ocp-Apim-Subscription-Key": "xyz"}
     # malformed JSON (starts with { but invalid) falls back to line parsing,
     # matching Hyperloom's behavior.
     assert parse_custom_headers('{"broken: value') == {'{"broken': "value"}

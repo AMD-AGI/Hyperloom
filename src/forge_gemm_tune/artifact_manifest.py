@@ -100,18 +100,20 @@ def build_artifact_manifest(
 
     tuners: list[dict[str, Any]] = []
     for r in results:
-        tuners.append({
-            "tuner": r.tuner_name,
-            "status": r.status,
-            "backend_env": r.env_var,
-            "artifact_path": r.artifact_path,
-            "csv_sha256": sha256_file(r.artifact_path),
-            "total_shapes": r.total_shapes,
-            "improved_shapes": r.improved_shapes,
-            "best_micro_speedup": round(r.best_micro_speedup, 4),
-            "avg_micro_speedup": round(r.avg_micro_speedup, 4),
-            "shape_results": r.shape_results,
-        })
+        tuners.append(
+            {
+                "tuner": r.tuner_name,
+                "status": r.status,
+                "backend_env": r.env_var,
+                "artifact_path": r.artifact_path,
+                "csv_sha256": sha256_file(r.artifact_path),
+                "total_shapes": r.total_shapes,
+                "improved_shapes": r.improved_shapes,
+                "best_micro_speedup": round(r.best_micro_speedup, 4),
+                "avg_micro_speedup": round(r.avg_micro_speedup, 4),
+                "shape_results": r.shape_results,
+            }
+        )
 
     return {
         "schema_version": TUNING_ARTIFACT_SCHEMA_VERSION,

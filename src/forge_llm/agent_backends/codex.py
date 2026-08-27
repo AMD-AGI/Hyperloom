@@ -37,6 +37,8 @@ _TOML_BARE_KEY_RE = re.compile(r"[A-Za-z0-9_-]+")
 
 DEFAULT_CODEX_MODEL = "gpt-5.6"
 FALLBACK_CODEX_MODEL = "gpt-5.5"
+
+
 class CodexBackendError(AgentProviderError):
     """Base error for Codex backend failures."""
 
@@ -178,8 +180,7 @@ def _provider_overrides(gateway: LlmGateway) -> list[str]:
 def _codex_instructions(spec: AgentRunSpec) -> str:
     """Adapt shared system instructions to Codex SDK capabilities."""
     write_guidance = (
-        "Use your native patch/edit capability for the files the current request "
-        "explicitly allows you to change."
+        "Use your native patch/edit capability for the files the current request explicitly allows you to change."
         if spec.writable
         else ("This is a read-only session. Do not edit, create, delete, or rename any file.")
     )
@@ -347,9 +348,7 @@ def _load_codex_sdk() -> Any:
     try:
         import openai_codex
     except ImportError as exc:
-        raise CodexUnavailableError(
-            "Codex Python SDK is not installed; install kernelforge[codex]"
-        ) from exc
+        raise CodexUnavailableError("Codex Python SDK is not installed; install kernelforge[codex]") from exc
     return openai_codex
 
 
@@ -394,13 +393,9 @@ class CodexBackend:
         self._configured_codex_bin = (
             codex_bin or self.runtime.executable or os.environ.get("FORGE_AGENT_CLI", "").strip()
         )
-        self.codex_bin = (
-            str(Path(self._configured_codex_bin).expanduser()) if self._configured_codex_bin else ""
-        )
+        self.codex_bin = str(Path(self._configured_codex_bin).expanduser()) if self._configured_codex_bin else ""
         self.gateway = gateway
-        self.bypass_sandbox = (
-            self.runtime.sandbox_mode == "bypass" if bypass_sandbox is None else bypass_sandbox
-        )
+        self.bypass_sandbox = self.runtime.sandbox_mode == "bypass" if bypass_sandbox is None else bypass_sandbox
         self._preflight_done = False
         self._codex_home_owner: Any = None
         self._codex_home = ""
@@ -448,9 +443,7 @@ class CodexBackend:
         if self._preflight_done:
             return
         sdk = _load_codex_sdk()
-        if self.codex_bin and (
-            not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK)
-        ):
+        if self.codex_bin and (not Path(self.codex_bin).is_file() or not os.access(self.codex_bin, os.X_OK)):
             raise CodexUnavailableError(f"Codex SDK runtime is not executable: {self.codex_bin}")
         _provider_overrides(self._effective_gateway())
         if self.codex_bin:
@@ -462,12 +455,8 @@ class CodexBackend:
                     check=False,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
-                raise CodexUnavailableError(
-                    f"Codex SDK runtime version check failed: {exc}"
-                ) from exc
-            version_text = (
-                b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
-            )
+                raise CodexUnavailableError(f"Codex SDK runtime version check failed: {exc}") from exc
+            version_text = b"\n".join([version.stdout, version.stderr]).decode(errors="replace").strip()
             if version.returncode != 0 or not re.search(
                 r"\bcodex(?:-cli)?\b",
                 version_text,
@@ -487,9 +476,7 @@ class CodexBackend:
                 )
             )
         except Exception as exc:
-            raise CodexUnavailableError(
-                f"Codex SDK app-server initialization failed: {exc}"
-            ) from exc
+            raise CodexUnavailableError(f"Codex SDK app-server initialization failed: {exc}") from exc
         finally:
             if client is not None:
                 client.close()
@@ -505,9 +492,7 @@ class CodexBackend:
         roles_dir.mkdir(parents=True, exist_ok=True)
         overrides = ["features.multi_agent=true"]
         for role_name, role in raw_roles.items():
-            if not isinstance(role_name, str) or not re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9_]*", role_name
-            ):
+            if not isinstance(role_name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", role_name):
                 raise CodexExecutionError(f"invalid Codex agent role name: {role_name!r}")
             description = role.description or f"Forge {role_name} specialist"
             instructions = role.instructions
@@ -554,17 +539,13 @@ class CodexBackend:
             return []
         overrides: list[str] = []
         for server_name, server in raw_servers.items():
-            if not isinstance(server_name, str) or not re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9_]*", server_name
-            ):
+            if not isinstance(server_name, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", server_name):
                 raise CodexExecutionError(f"invalid Codex MCP server name: {server_name!r}")
             command = server.command.strip()
             command_args = list(server.args)
             if not command:
                 raise CodexExecutionError(f"Codex MCP server {server_name!r} requires a command")
-            if not isinstance(command_args, list) or not all(
-                isinstance(value, str) for value in command_args
-            ):
+            if not isinstance(command_args, list) or not all(isinstance(value, str) for value in command_args):
                 raise CodexExecutionError(f"Codex MCP server {server_name!r} args must be strings")
 
             prefix = f"mcp_servers.{server_name}"
@@ -576,16 +557,10 @@ class CodexBackend:
                 ]
             )
             if server.env:
-                if not all(
-                    isinstance(key, str) and isinstance(value, str)
-                    for key, value in server.env.items()
-                ):
-                    raise CodexExecutionError(
-                        f"Codex MCP server {server_name!r} env must contain strings"
-                    )
+                if not all(isinstance(key, str) and isinstance(value, str) for key, value in server.env.items()):
+                    raise CodexExecutionError(f"Codex MCP server {server_name!r} env must contain strings")
                 encoded_env = ",".join(
-                    f"{_toml_key(key)}={_toml_string(value)}"
-                    for key, value in sorted(server.env.items())
+                    f"{_toml_key(key)}={_toml_string(value)}" for key, value in sorted(server.env.items())
                 )
                 overrides.append(f"{prefix}.env={{{encoded_env}}}")
             startup_timeout = server.startup_timeout_sec
@@ -735,13 +710,11 @@ class CodexBackend:
                 if not completed.wait(timeout_sec):
                     with contextlib.suppress(Exception):
                         turn.interrupt()
-                    raise CodexUnavailableError(
-                        f"Codex gateway precheck timed out after {timeout_sec}s"
-                    )
+                    raise CodexUnavailableError(f"Codex gateway precheck timed out after {timeout_sec}s")
                 if "error" in outcome:
-                    raise CodexUnavailableError(
-                        f"Codex gateway precheck failed: {outcome['error']}"
-                    ) from outcome["error"]
+                    raise CodexUnavailableError(f"Codex gateway precheck failed: {outcome['error']}") from outcome[
+                        "error"
+                    ]
                 result = _normalize_sdk_result(
                     outcome["result"],
                     thread.id,

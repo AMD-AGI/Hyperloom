@@ -189,12 +189,15 @@ def test_the_rejected_invocation_is_paid_once_per_driver(tmp_path):
 
 def test_a_whole_suite_spread_is_not_offered_as_this_case_s(tmp_path):
     """Its wall_ms lines timed every case the driver ran, not the one asked for."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("wall_ms: 0.400000")
 print("wall_ms: 4.100000")
 print("case_ms: sq64 0.500000")
 print("case_ms: sq7211 4.000000")
-""")
+""",
+    )
     result = _sweep(driver)
     assert result["success"], result
     assert result["case_selection"] == SELECTION_WHOLE_SUITE
@@ -214,11 +217,14 @@ def test_a_driver_that_honours_the_flag_is_untouched_by_the_retry(tmp_path):
 
 def test_a_driver_that_fails_either_way_reports_no_time(tmp_path):
     """Failing without the flag too means the configuration broke, not the flag."""
-    driver, tally = _counting_driver(tmp_path, """
+    driver, tally = _counting_driver(
+        tmp_path,
+        """
 import sys
 print("triton compile error: out of LDS", file=sys.stderr)
 sys.exit(1)
-""")
+""",
+    )
     result = _sweep(driver)
     assert result["success"] is False
     assert result["case_selection"] == SELECTION_REJECTED
@@ -266,11 +272,14 @@ def test_a_declared_case_the_flag_still_refused_does_memoise(tmp_path):
 
 def test_a_timeout_is_not_a_flag_rejection_and_is_not_retried(tmp_path):
     """A retry would spend the probe's whole budget a second time over."""
-    driver, tally = _counting_driver(tmp_path, """
+    driver, tally = _counting_driver(
+        tmp_path,
+        """
 import time
 time.sleep(30)
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, timeout_sec=1)
     assert result["success"] is False
     assert "TIMEOUT after 1s" in result["message"]
@@ -279,11 +288,14 @@ print("case_ms: sq64 0.500000")
 
 
 def test_sweep_runs_outside_the_tree_it_measures(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 import pathlib
 pathlib.Path("side_effect.txt").write_text("x")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver)
     assert result["success"], result
     assert not (tmp_path / "side_effect.txt").exists()
@@ -294,11 +306,14 @@ print("case_ms: sq64 0.500000")
 
 
 def test_unrunnable_configuration_reports_no_time(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 import sys
 print("triton compile error: out of LDS", file=sys.stderr)
 sys.exit(1)
-""")
+""",
+    )
     result = _sweep(driver, constants={"BLOCK_H": 512})
     assert result["success"] is False
     assert result["kind"] == EXPLORATORY_KIND
@@ -317,10 +332,13 @@ def test_missing_case_is_a_failure_and_names_what_came_back(tmp_path):
 
 
 def test_duplicate_case_timing_is_a_failure(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("case_ms: sq64 0.500000")
 print("case_ms: sq64 9.000000")
-""")
+""",
+    )
     result = _sweep(driver)
     assert result["success"] is False
     assert "MORE THAN ONCE" in result["message"]
@@ -335,29 +353,38 @@ def test_nonpositive_case_timing_is_a_failure(tmp_path):
 
 
 def test_timeout_reports_no_time(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 import time
 time.sleep(30)
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, timeout_sec=1)
     assert result["success"] is False
     assert "TIMEOUT after 1s" in result["message"]
     assert "case_ms" not in result
 
 
-@pytest.mark.parametrize("constants", [
-    {"path": 1},                    # not an upper-case identifier
-    {"BLOCK_H": "16; rm -rf /"},
-    {"BLOCK_H": "16 32"},
-])
+@pytest.mark.parametrize(
+    "constants",
+    [
+        {"path": 1},  # not an upper-case identifier
+        {"BLOCK_H": "16; rm -rf /"},
+        {"BLOCK_H": "16 32"},
+    ],
+)
 def test_unusable_constants_are_rejected_before_the_driver_runs(tmp_path, constants):
     marker = tmp_path / "ran.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import pathlib
 pathlib.Path({str(marker)!r}).write_text("x")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants=constants)
     assert result["success"] is False
     assert "case_ms" not in result
@@ -366,7 +393,9 @@ print("case_ms: sq64 0.500000")
 
 def test_a_constant_cannot_reach_the_variable_it_is_named_after(tmp_path):
     seen = tmp_path / "seen.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import os, pathlib
 pathlib.Path({str(seen)!r}).write_text(repr((
     os.environ.get("LD_PRELOAD", ""),
@@ -374,7 +403,8 @@ pathlib.Path({str(seen)!r}).write_text(repr((
 )))
 print("sweep_const: LD_PRELOAD evil.so")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"LD_PRELOAD": "evil.so"})
     assert result["success"], result
     assert seen.read_text() == repr(("", "evil.so"))
@@ -388,10 +418,13 @@ def test_invalid_case_id_is_rejected(tmp_path):
 
 def test_a_constant_nothing_read_is_a_failure_not_a_null_result(tmp_path):
     """The default timing of a knob nobody consumed is not a measurement of it."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("wall_ms: 0.500000")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"BLOCK_H": 32})
     assert result["success"] is False
     assert result["kind"] == EXPLORATORY_KIND
@@ -401,10 +434,13 @@ print("case_ms: sq64 0.500000")
 
 
 def test_only_the_unread_constant_is_named(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("sweep_const: BLOCK_H 32")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"BLOCK_H": 32, "NUM_WARPS": 4})
     assert result["success"] is False
     assert "NOTHING READ NUM_WARPS" in result["message"]
@@ -413,10 +449,13 @@ print("case_ms: sq64 0.500000")
 
 def test_a_constant_read_at_a_different_value_is_a_failure(tmp_path):
     """A source that clamps the value swept a configuration nobody asked for."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("sweep_const: BLOCK_H 64")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"BLOCK_H": 512})
     assert result["success"] is False
     assert "READ A DIFFERENT CONFIGURATION" in result["message"]
@@ -436,7 +475,9 @@ _THIRD_PARTY_KNOB = "GPTOSS_SWIGLU_MXFP4_BF16_BOUND"
 def _knob_driver(tmp_path: pathlib.Path) -> tuple[str, pathlib.Path]:
     """Read the knob under both names, report which one arrived, echo forge's."""
     seen = tmp_path / "seen.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import os, pathlib
 verbatim = os.environ.get({_THIRD_PARTY_KNOB!r}, "")
 prefixed = os.environ.get({SWEEP_ENV_PREFIX + _THIRD_PARTY_KNOB!r}, "")
@@ -444,15 +485,14 @@ pathlib.Path({str(seen)!r}).write_text(repr((verbatim, prefixed)))
 if prefixed:
     print("sweep_const: {_THIRD_PARTY_KNOB} %s" % prefixed)
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     return driver, seen
 
 
 def test_verbatim_names_reach_a_knob_the_source_already_reads(tmp_path):
     driver, seen = _knob_driver(tmp_path)
-    result = _sweep(
-        driver, constants={_THIRD_PARTY_KNOB: 512}, prefix_constants=False
-    )
+    result = _sweep(driver, constants={_THIRD_PARTY_KNOB: 512}, prefix_constants=False)
     assert result["success"], result
     assert seen.read_text() == repr(("512", ""))
     assert result["case_ms"] == pytest.approx(0.5)
@@ -468,13 +508,14 @@ def test_by_default_a_constant_still_reaches_only_the_sweep_namespace(tmp_path):
 
 def test_a_verbatim_knob_that_echoes_nothing_is_reported_not_refused(tmp_path):
     """A third-party knob prints no sweep_const line; refusing measures nothing."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("wall_ms: 0.500000")
 print("case_ms: sq64 0.500000")
-""")
-    result = _sweep(
-        driver, constants={_THIRD_PARTY_KNOB: 512}, prefix_constants=False
+""",
     )
+    result = _sweep(driver, constants={_THIRD_PARTY_KNOB: 512}, prefix_constants=False)
     assert result["success"], result
     assert result["case_ms"] == pytest.approx(0.5)
     assert result["override_consumption"] == {_THIRD_PARTY_KNOB: "unread"}
@@ -483,10 +524,13 @@ print("case_ms: sq64 0.500000")
 
 
 def test_only_the_unechoed_verbatim_knob_is_marked_unread(tmp_path):
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("sweep_const: BLOCK_H 32")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(
         driver,
         constants={"BLOCK_H": 32, _THIRD_PARTY_KNOB: 512},
@@ -494,7 +538,8 @@ print("case_ms: sq64 0.500000")
     )
     assert result["success"], result
     assert result["override_consumption"] == {
-        "BLOCK_H": "consumed", _THIRD_PARTY_KNOB: "unread",
+        "BLOCK_H": "consumed",
+        _THIRD_PARTY_KNOB: "unread",
     }
     assert _THIRD_PARTY_KNOB in result["message"].split("UNCONFIRMED")[1]
     assert "BLOCK_H," not in result["message"].split("UNCONFIRMED")[1]
@@ -502,10 +547,13 @@ print("case_ms: sq64 0.500000")
 
 def test_a_verbatim_knob_read_at_a_different_value_is_still_a_failure(tmp_path):
     """Silence is unconfirmed; a wrong echo is a configuration nobody asked for."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 print("sweep_const: BLOCK_H 64")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"BLOCK_H": 512}, prefix_constants=False)
     assert result["success"] is False
     assert "READ A DIFFERENT CONFIGURATION" in result["message"]
@@ -515,37 +563,42 @@ print("case_ms: sq64 0.500000")
 def test_a_verbatim_name_is_still_checked_before_the_driver_runs(tmp_path):
     """No prefix to hide behind: the name goes straight into the child's env."""
     marker = tmp_path / "ran.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import pathlib
 pathlib.Path({str(marker)!r}).write_text("x")
 print("case_ms: sq64 0.500000")
-""")
-    result = _sweep(
-        driver, constants={"BLOCK_H": "16 32"}, prefix_constants=False
+""",
     )
+    result = _sweep(driver, constants={"BLOCK_H": "16 32"}, prefix_constants=False)
     assert result["success"] is False
     assert "case_ms" not in result
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("name", [
-    "PATH",                 # the interpreter that starts the driver
-    "HIP_VISIBLE_DEVICES",  # spellable, and it would time another lane's GPU
-    "LD_PRELOAD",
-    "PYTHONPATH",
-    "AITER_JIT_DIR",        # the cache isolation the number is attributed by
-    "FORGE_NPROC_PER_NODE",
-])
-def test_a_verbatim_sweep_cannot_reach_what_the_measurement_runs_on(
-    tmp_path, name
-):
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PATH",  # the interpreter that starts the driver
+        "HIP_VISIBLE_DEVICES",  # spellable, and it would time another lane's GPU
+        "LD_PRELOAD",
+        "PYTHONPATH",
+        "AITER_JIT_DIR",  # the cache isolation the number is attributed by
+        "FORGE_NPROC_PER_NODE",
+    ],
+)
+def test_a_verbatim_sweep_cannot_reach_what_the_measurement_runs_on(tmp_path, name):
     """The prefix guaranteed this by construction; verbatim mode by name."""
     marker = tmp_path / "ran.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import pathlib
 pathlib.Path({str(marker)!r}).write_text("x")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={name: "1"}, prefix_constants=False)
     assert result["success"] is False
     assert name in result["message"]
@@ -553,29 +606,33 @@ print("case_ms: sq64 0.500000")
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("name", [
-    "HOME",                       # moves ~/.triton/cache and every dotfile cache
-    "XDG_CACHE_HOME",             # the same, for anything honouring the spec
-    "TRITON_HOME",                # ~/.triton relocated by name instead of by HOME
-    "TORCH_EXTENSIONS_DIR",
-    "PYTORCH_KERNEL_CACHE_PATH",
-    "CC",                         # a different compiler is a different binary
-    "CXX",
-    "CXXFLAGS",                   # and so is the same compiler at -O0
-    "HIPCC_COMPILE_FLAGS_APPEND",
-])
-def test_a_verbatim_sweep_cannot_move_the_cache_or_change_the_compiler(
-    tmp_path, name
-):
+@pytest.mark.parametrize(
+    "name",
+    [
+        "HOME",  # moves ~/.triton/cache and every dotfile cache
+        "XDG_CACHE_HOME",  # the same, for anything honouring the spec
+        "TRITON_HOME",  # ~/.triton relocated by name instead of by HOME
+        "TORCH_EXTENSIONS_DIR",
+        "PYTORCH_KERNEL_CACHE_PATH",
+        "CC",  # a different compiler is a different binary
+        "CXX",
+        "CXXFLAGS",  # and so is the same compiler at -O0
+        "HIPCC_COMPILE_FLAGS_APPEND",
+    ],
+)
+def test_a_verbatim_sweep_cannot_move_the_cache_or_change_the_compiler(tmp_path, name):
     """Same class as the device and toolchain names already refused: each of
     these makes the probe compile, or compile against, something other than
     what the gate will read, so the number would not describe this source."""
     marker = tmp_path / "ran.txt"
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import pathlib
 pathlib.Path({str(marker)!r}).write_text("x")
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={name: "1"}, prefix_constants=False)
     assert result["success"] is False
     assert name in result["message"]
@@ -583,17 +640,19 @@ print("case_ms: sq64 0.500000")
     assert not marker.exists()
 
 
-@pytest.mark.parametrize("name", ["HSA_XNACK", "AMD_SERIALIZE_KERNEL",
-                                  "TRITON_DEBUG"])
+@pytest.mark.parametrize("name", ["HSA_XNACK", "AMD_SERIALIZE_KERNEL", "TRITON_DEBUG"])
 def test_the_open_tuning_families_stay_sweepable_verbatim(tmp_path, name):
     """The reserved list must not swallow the knobs a sweep exists to vary: a
     runtime tuning variable changes how the source runs, which is the question,
     not what the source is."""
-    driver = _driver(tmp_path, f"""
+    driver = _driver(
+        tmp_path,
+        f"""
 import os
 print("sweep_const: {name} %s" % os.environ[{name!r}])
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={name: "1"}, prefix_constants=False)
     assert result["success"], result
     assert result["override_consumption"] == {name: "consumed"}
@@ -601,18 +660,19 @@ print("case_ms: sq64 0.500000")
 
 def test_the_reserved_names_are_reserved_only_verbatim(tmp_path):
     """Under the prefix they collide with nothing, so nothing needs refusing."""
-    driver = _driver(tmp_path, """
+    driver = _driver(
+        tmp_path,
+        """
 import os
 print("sweep_const: PATH %s" % os.environ["FORGE_SWEEP_PATH"])
 print("case_ms: sq64 0.500000")
-""")
+""",
+    )
     result = _sweep(driver, constants={"PATH": "1"})
     assert result["success"], result
 
 
-def test_an_inherited_sweep_variable_is_not_reported_as_this_sweep_s(
-    tmp_path, monkeypatch
-):
+def test_an_inherited_sweep_variable_is_not_reported_as_this_sweep_s(tmp_path, monkeypatch):
     """A FORGE_SWEEP_* left in this process is not a constant this point set."""
     monkeypatch.setenv(SWEEP_ENV_PREFIX + "STALE", "99")
     result = _sweep(_driver(tmp_path, _NARROWING_DRIVER), constants={"BLOCK_H": 32})
@@ -625,9 +685,9 @@ def test_a_one_case_suite_reached_without_the_flag_is_not_called_narrowed(
     tmp_path,
 ):
     """The flag was never accepted, so nothing here says the driver honoured it."""
-    driver = _driver(tmp_path, _FLAG_REJECTING_DRIVER.replace(
-        'print("case_ms: sq7211 4.000000")', 'print("wall_ms: 0.500000")'
-    ))
+    driver = _driver(
+        tmp_path, _FLAG_REJECTING_DRIVER.replace('print("case_ms: sq7211 4.000000")', 'print("wall_ms: 0.500000")')
+    )
     result = _sweep(driver)
     assert result["success"], result
     assert result["case_selection"] == SELECTION_WHOLE_SUITE
@@ -668,9 +728,7 @@ def test_aggregation_refuses_an_exploratory_measurement():
 def test_scoring_refuses_an_exploratory_measurement():
     benchmark = {"success": True, "measurements": [_exploratory_measurement()]}
     with pytest.raises(CaseCoverageError, match="exploratory sweep"):
-        calculate_measurement_case_speedups(
-            benchmark, {"sq64": 1.0}, expected_measurements=1
-        )
+        calculate_measurement_case_speedups(benchmark, {"sq64": 1.0}, expected_measurements=1)
 
 
 # ---------- the contract the primitive asks drivers to satisfy -------------
@@ -679,21 +737,17 @@ def test_scoring_refuses_an_exploratory_measurement():
 def _reference_template_main(monkeypatch, argv: list[str]):
     """Execute the reference driver template's ``main`` off the device."""
     torch = types.ModuleType("torch")
-    torch.cuda = types.SimpleNamespace(
-        is_available=lambda: True, synchronize=lambda: None
-    )
+    torch.cuda = types.SimpleNamespace(is_available=lambda: True, synchronize=lambda: None)
     torch.manual_seed = lambda *_args: None
     harness = types.ModuleType("graph_harness")
     harness.cuda_graph_bench = lambda *_a, **_k: {"times_ms": [0.5]}
     kernel = types.ModuleType("your_kernel_module")
     kernel.your_entry_point = lambda *_a, **_k: None
-    for name, module in (("torch", torch), ("graph_harness", harness),
-                         ("your_kernel_module", kernel)):
+    for name, module in (("torch", torch), ("graph_harness", harness), ("your_kernel_module", kernel)):
         monkeypatch.setitem(sys.modules, name, module)
 
     namespace: dict = {"__file__": "driver_template.py"}
-    exec(compile(task_preparer.REFERENCE_DRIVER_TEMPLATE,
-                 "driver_template.py", "exec"), namespace)
+    exec(compile(task_preparer.REFERENCE_DRIVER_TEMPLATE, "driver_template.py", "exec"), namespace)
     namespace["CASES"].update({"sq64": {"M": 8, "N": 8}, "sq7211": {"M": 8, "N": 9}})
     benched: list[str] = []
     namespace["_run_bench"] = lambda _d, case_id, *_a: benched.append(case_id)
@@ -702,17 +756,13 @@ def _reference_template_main(monkeypatch, argv: list[str]):
 
 
 def test_reference_template_rejects_an_undeclared_sweep_case(monkeypatch, capsys):
-    status, benched = _reference_template_main(
-        monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq999"]
-    )
+    status, benched = _reference_template_main(monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq999"])
     assert status == 1
     assert benched == []
     assert "unknown case sq999" in capsys.readouterr().out
 
 
 def test_reference_template_benchmarks_only_the_requested_case(monkeypatch):
-    status, benched = _reference_template_main(
-        monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq7211"]
-    )
+    status, benched = _reference_template_main(monkeypatch, ["--bench-mode", SWEEP_CASE_FLAG, "sq7211"])
     assert status == 0
     assert benched == ["sq7211"]

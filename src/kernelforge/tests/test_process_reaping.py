@@ -55,9 +55,7 @@ pytestmark = pytest.mark.skipif(
 # itself ready is one whose /proc cwd is the directory under test.
 _READY = "import sys; sys.stdout.write('ready\\n'); sys.stdout.flush(); "
 _SLEEPS = _READY + "import time; time.sleep(120)"
-_IGNORES_SIGTERM = (
-    "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " + _SLEEPS
-)
+_IGNORES_SIGTERM = "import signal; signal.signal(signal.SIGTERM, signal.SIG_IGN); " + _SLEEPS
 # Announces and falls off the end, leaving a zombie until its parent reaps it.
 _EXITS = _READY
 # The same, with a status worth reading back: what an owner loses if something
@@ -131,8 +129,7 @@ def _starts_a_child_in(directory: Path, *, then_exits: bool = False) -> str:
         + repr(then_exits)
         + ")\n"
         "sys.stdout.write('ready %d\\n' % child.pid)\n"
-        "sys.stdout.flush()\n"
-        + tail
+        "sys.stdout.flush()\n" + tail
     )
 
 
@@ -291,9 +288,7 @@ async def test_a_child_outside_the_workspace_is_left_running(tmp_path, spawn):
     assert bystander.poll() is None
 
 
-async def test_the_callers_own_process_group_is_never_signalled(
-    tmp_path, spawn, monkeypatch
-):
+async def test_the_callers_own_process_group_is_never_signalled(tmp_path, spawn, monkeypatch):
     """The loop that awaits the reaper can itself be running in the workspace.
 
     A child that did not detach shares this process's group, and the campaign
@@ -313,9 +308,7 @@ async def test_the_callers_own_process_group_is_never_signalled(
     assert report.contended is False
 
 
-async def test_a_child_that_ignores_sigterm_is_killed_within_the_grace_window(
-    tmp_path, spawn
-):
+async def test_a_child_that_ignores_sigterm_is_killed_within_the_grace_window(tmp_path, spawn):
     """A hung driver never handles SIGTERM; SIGKILL is what frees the device."""
     child = spawn(tmp_path, _IGNORES_SIGTERM)
 
@@ -346,9 +339,7 @@ async def test_the_lane_teardown_reaps_the_same_way(tmp_path, spawn):
     assert report.contended is False
 
 
-async def test_an_orphaned_grandchild_is_still_this_campaign_s_to_reap(
-    tmp_path, spawn
-):
+async def test_an_orphaned_grandchild_is_still_this_campaign_s_to_reap(tmp_path, spawn):
     """The case that cwd-based ownership got right for the wrong reason.
 
     Agent commands are started detached on purpose, so the shell above a
@@ -374,9 +365,7 @@ async def test_an_orphaned_grandchild_is_still_this_campaign_s_to_reap(
     assert processes_under(str(tmp_path)) == set()
 
 
-async def test_a_process_of_ours_that_moved_out_of_the_workspace_is_reaped(
-    tmp_path, spawn
-):
+async def test_a_process_of_ours_that_moved_out_of_the_workspace_is_reaped(tmp_path, spawn):
     """cwd is the scope, not the ownership -- and a process can leave the scope.
 
     A benchmark that chdir'd into ``/tmp`` still holds the device it opened
@@ -400,9 +389,7 @@ async def test_a_process_of_ours_that_moved_out_of_the_workspace_is_reaped(
     await _wait_gone(moved)
 
 
-async def test_the_shell_above_a_process_in_the_workspace_is_reaped_too(
-    tmp_path, spawn
-):
+async def test_the_shell_above_a_process_in_the_workspace_is_reaped_too(tmp_path, spawn):
     """The detached shell is what will start the next command.
 
     Killing only the benchmark leaves its shell free to launch another one into
@@ -423,9 +410,7 @@ async def test_the_shell_above_a_process_in_the_workspace_is_reaped_too(
     await _wait_gone(working)
 
 
-async def test_a_process_that_is_not_ours_is_reported_and_left_running(
-    tmp_path, spawn, monkeypatch
-):
+async def test_a_process_that_is_not_ours_is_reported_and_left_running(tmp_path, spawn, monkeypatch):
     """The reviewed bug, at the level it was actually wrong.
 
     A human's shell, a parallel campaign, or a leftover from a run that crashed
@@ -446,9 +431,7 @@ async def test_a_process_that_is_not_ours_is_reported_and_left_running(
     assert report.contended is False
 
 
-async def test_a_process_holding_a_device_makes_the_directory_contended(
-    tmp_path, spawn, monkeypatch
-):
+async def test_a_process_holding_a_device_makes_the_directory_contended(tmp_path, spawn, monkeypatch):
     """What separates "something is here" from "do not measure".
 
     The reaper cannot kill what is not this campaign's, and the loop cannot
@@ -457,9 +440,7 @@ async def test_a_process_holding_a_device_makes_the_directory_contended(
     """
     device = tmp_path / "fake-device"
     device.write_text("")
-    monkeypatch.setattr(
-        process_reaping, "_DEVICE_PREFIXES", (str(device),)
-    )
+    monkeypatch.setattr(process_reaping, "_DEVICE_PREFIXES", (str(device),))
     _disown(monkeypatch)
     holder = spawn(tmp_path, _holds_open(device))
 
@@ -471,9 +452,7 @@ async def test_a_process_holding_a_device_makes_the_directory_contended(
     assert str(holder.pid) in report.describe()
 
 
-async def test_a_process_that_survives_sigkill_makes_the_directory_contended(
-    tmp_path, spawn, monkeypatch
-):
+async def test_a_process_that_survives_sigkill_makes_the_directory_contended(tmp_path, spawn, monkeypatch):
     """SIGKILL cannot be declined, but it can be un-completable.
 
     An uninterruptible-sleep process stuck in a driver ioctl stays on the
@@ -510,9 +489,7 @@ async def test_a_process_that_appears_during_the_grace_window_is_asked_first(
     """
     scans = [{11: 100}, {11: 100, 22: 200}, {22: 200}, {}]
     sent: list[tuple[int, signal.Signals]] = []
-    monkeypatch.setattr(
-        process_reaping, "_survey", lambda _: _Survey(scans.pop(0), ())
-    )
+    monkeypatch.setattr(process_reaping, "_survey", lambda _: _Survey(scans.pop(0), ()))
     monkeypatch.setattr(
         process_reaping,
         "_signal",
@@ -526,9 +503,7 @@ async def test_a_process_that_appears_during_the_grace_window_is_asked_first(
     assert unkillable == ()
 
 
-async def test_a_zombie_is_not_mistaken_for_something_holding_the_device(
-    tmp_path, spawn
-):
+async def test_a_zombie_is_not_mistaken_for_something_holding_the_device(tmp_path, spawn):
     """Being a subreaper means collecting orphans, and orphans become zombies.
 
     Nothing in the campaign waits on them, so they accumulate. A zombie holds
@@ -569,9 +544,7 @@ def test_installing_the_reaper_tags_the_children_it_will_have(monkeypatch):
     assert install_child_subreaper() is install_child_subreaper()
 
 
-async def test_an_inherited_orphan_is_collected_rather_than_left_a_zombie(
-    tmp_path, spawn
-):
+async def test_an_inherited_orphan_is_collected_rather_than_left_a_zombie(tmp_path, spawn):
     """The other half of asking for ``PR_SET_CHILD_SUBREAPER``.
 
     The flag makes this process the parent of every orphaned descendant, and a
@@ -599,9 +572,7 @@ async def test_an_inherited_orphan_is_collected_rather_than_left_a_zombie(
     await _wait_collected(orphan)
 
 
-async def test_collecting_orphans_leaves_this_process_s_own_children_alone(
-    tmp_path, spawn
-):
+async def test_collecting_orphans_leaves_this_process_s_own_children_alone(tmp_path, spawn):
     """The way a reaper like this goes wrong, pinned.
 
     ``waitpid(-1)`` would clear the zombies, and would also take the exit status
@@ -629,9 +600,7 @@ async def test_a_child_started_through_asyncio_is_recorded_before_it_can_die():
     asserts the seam still holds rather than trusting that it does.
     """
     install_child_subreaper()
-    proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-c", "raise SystemExit(7)"
-    )
+    proc = await asyncio.create_subprocess_exec(sys.executable, "-c", "raise SystemExit(7)")
 
     assert proc.pid in process_reaping._spawned_children
 
@@ -684,9 +653,7 @@ def test_a_child_spawned_outside_subprocess_is_recorded_too():
     assert child.exitcode == 7
 
 
-async def test_a_child_that_predates_the_flag_is_not_taken_for_an_orphan(
-    tmp_path, spawn
-):
+async def test_a_child_that_predates_the_flag_is_not_taken_for_an_orphan(tmp_path, spawn):
     """Nothing was reparented here before the flag was armed.
 
     So every child that already existed at that moment was forked here and is
@@ -735,9 +702,7 @@ def test_orphans_are_collected_without_an_event_loop_or_the_main_thread():
 def test_a_missing_proc_answers_empty_rather_than_raising(tmp_path, monkeypatch):
     """Reaping is best-effort on a host that cannot report process cwds."""
     real_isdir = os.path.isdir
-    monkeypatch.setattr(
-        os.path, "isdir", lambda path: False if path == "/proc" else real_isdir(path)
-    )
+    monkeypatch.setattr(os.path, "isdir", lambda path: False if path == "/proc" else real_isdir(path))
 
     assert processes_under(str(tmp_path)) == set()
     report = asyncio.run(_reap_workspace_processes(str(tmp_path)))

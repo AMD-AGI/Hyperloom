@@ -50,11 +50,7 @@ def test_capabilities_answer_over_a_real_subprocess():
         cwd=Path(__file__).resolve().parent,
         env={
             **os.environ,
-            "PYTHONPATH": (
-                str(_SOURCE_ROOT)
-                + os.pathsep
-                + os.environ.get("PYTHONPATH", "")
-            ),
+            "PYTHONPATH": (str(_SOURCE_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", "")),
         },
     )
 
@@ -87,10 +83,7 @@ def test_applyback_contract_query_uses_the_producer_schema():
 
 
 def test_the_logical_op_name_and_its_deprecated_alias_are_one_option():
-    parameters = {
-        parameter.name: parameter
-        for parameter in _rewrite_command().params
-    }
+    parameters = {parameter.name: parameter for parameter in _rewrite_command().params}
     logical = parameters["op_name"]
 
     assert "--logical-op-name" in logical.opts
@@ -117,11 +110,16 @@ def _invoke_rewrite(monkeypatch, tmp_path, name_flag, extra_args=()):
         main,
         [
             "forge-rewrite-by-flydsl",
-            "--source-kernel", str(source),
-            "--driver", str(driver),
-            name_flag, "vllm::softmax",
-            "--workspace", str(tmp_path),
-            "--experiments-dir", str(tmp_path / "exp"),
+            "--source-kernel",
+            str(source),
+            "--driver",
+            str(driver),
+            name_flag,
+            "vllm::softmax",
+            "--workspace",
+            str(tmp_path),
+            "--experiments-dir",
+            str(tmp_path / "exp"),
             *extra_args,
         ],
     )
@@ -248,15 +246,23 @@ def test_driver_preparation_options_are_forwarded(monkeypatch, tmp_path):
         main,
         [
             "forge-rewrite-by-flydsl",
-            "--source-kernel", str(source),
-            "--driver", str(tmp_path / "driver.py"),
+            "--source-kernel",
+            str(source),
+            "--driver",
+            str(tmp_path / "driver.py"),
             "--no-prepare-driver",
-            "--invocation-spec-file", str(invocation),
-            "--applyback-import-module", "sample.ops.softmax",
-            "--max-applyback-attempts", "3",
-            "--logical-op-name", "softmax",
-            "--workspace", str(tmp_path),
-            "--experiments-dir", str(tmp_path / "exp"),
+            "--invocation-spec-file",
+            str(invocation),
+            "--applyback-import-module",
+            "sample.ops.softmax",
+            "--max-applyback-attempts",
+            "3",
+            "--logical-op-name",
+            "softmax",
+            "--workspace",
+            str(tmp_path),
+            "--experiments-dir",
+            str(tmp_path / "exp"),
         ],
     )
 
@@ -281,12 +287,18 @@ def test_a_framework_outside_the_handshake_is_rejected(monkeypatch, tmp_path):
         main,
         [
             "forge-rewrite-by-flydsl",
-            "--source-kernel", str(source),
-            "--driver", str(driver),
-            "--logical-op-name", "softmax",
-            "--workspace", str(tmp_path),
-            "--experiments-dir", str(tmp_path / "exp"),
-            "--framework", "cuda",
+            "--source-kernel",
+            str(source),
+            "--driver",
+            str(driver),
+            "--logical-op-name",
+            "softmax",
+            "--workspace",
+            str(tmp_path),
+            "--experiments-dir",
+            str(tmp_path / "exp"),
+            "--framework",
+            "cuda",
         ],
     )
 
@@ -313,12 +325,18 @@ def test_an_advertised_framework_is_accepted(monkeypatch, tmp_path, framework):
         main,
         [
             "forge-rewrite-by-flydsl",
-            "--source-kernel", str(source),
-            "--driver", str(driver),
-            "--logical-op-name", "softmax",
-            "--workspace", str(tmp_path),
-            "--experiments-dir", str(tmp_path / "exp"),
-            "--framework", framework.upper(),
+            "--source-kernel",
+            str(source),
+            "--driver",
+            str(driver),
+            "--logical-op-name",
+            "softmax",
+            "--workspace",
+            str(tmp_path),
+            "--experiments-dir",
+            str(tmp_path / "exp"),
+            "--framework",
+            framework.upper(),
         ],
     )
 

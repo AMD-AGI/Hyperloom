@@ -142,9 +142,7 @@ class _CanonicalSuite:
         return (self.compile_step, self.correctness_step)
 
 
-def _declared_commands(
-    path: Path, document: dict[str, Any], key: str
-) -> tuple[str, ...] | str:
+def _declared_commands(path: Path, document: dict[str, Any], key: str) -> tuple[str, ...] | str:
     """Return the declared command list, or the reason it is unusable."""
     declared = document.get(key)
     if not declared:
@@ -156,25 +154,17 @@ def _declared_commands(
     if not isinstance(declared, (list, tuple)) or not all(
         isinstance(command, str) and command.strip() for command in declared
     ):
-        return (
-            f"{path} declares {key!r} as {declared!r}; the arena runs it as a "
-            "list of shell command strings"
-        )
+        return f"{path} declares {key!r} as {declared!r}; the arena runs it as a list of shell command strings"
     return tuple(str(command) for command in declared)
 
 
-def _declared_timeout(
-    path: Path, document: dict[str, Any], key: str, arena_default_sec: int
-) -> int | str:
+def _declared_timeout(path: Path, document: dict[str, Any], key: str, arena_default_sec: int) -> int | str:
     """Return the declared timeout in seconds, or the reason it is unusable."""
     raw_timeout = document.get(key, arena_default_sec)
     try:
         timeout_sec = int(raw_timeout)
     except (TypeError, ValueError):
-        return (
-            f"{path} declares {key!r}: {raw_timeout!r}, which is not a number "
-            "of seconds"
-        )
+        return f"{path} declares {key!r}: {raw_timeout!r}, which is not a number of seconds"
     if timeout_sec <= 0:
         return f"{path} declares a non-positive {key!r}: {raw_timeout!r}"
     return timeout_sec
@@ -205,9 +195,7 @@ def _load_suite(workspace_dir: str) -> _CanonicalSuite | str | None:
     compile_commands = _declared_commands(path, document, "compile_command")
     if isinstance(compile_commands, str):
         return compile_commands
-    compile_timeout = _declared_timeout(
-        path, document, "compile_timeout", ARENA_DEFAULT_COMPILE_TIMEOUT_SEC
-    )
+    compile_timeout = _declared_timeout(path, document, "compile_timeout", ARENA_DEFAULT_COMPILE_TIMEOUT_SEC)
     if isinstance(compile_timeout, str):
         return compile_timeout
 
@@ -221,12 +209,8 @@ def _load_suite(workspace_dir: str) -> _CanonicalSuite | str | None:
         return correctness_timeout
 
     return _CanonicalSuite(
-        compile_step=_CompileStep(
-            commands=compile_commands, timeout_sec=compile_timeout
-        ),
-        correctness_step=_CorrectnessStep(
-            commands=correctness_commands, timeout_sec=correctness_timeout
-        ),
+        compile_step=_CompileStep(commands=compile_commands, timeout_sec=compile_timeout),
+        correctness_step=_CorrectnessStep(commands=correctness_commands, timeout_sec=correctness_timeout),
     )
 
 
@@ -267,15 +251,11 @@ async def _run_canonical_suite(
                 start_new_session=True,
             )
             try:
-                stdout, stderr = await communicate_process_group(
-                    proc, timeout=timeout_sec
-                )
+                stdout, stderr = await communicate_process_group(proc, timeout=timeout_sec)
             except asyncio.TimeoutError:
                 return CanonicalCorrectnessResult(
                     passed=False,
-                    detail=(
-                        f"{step.label}: {command!r} timed out after {timeout_sec}s"
-                    ),
+                    detail=(f"{step.label}: {command!r} timed out after {timeout_sec}s"),
                     output=f"canonical {step.label} command timed out: {command}",
                     outcome="timeout",
                 )
@@ -289,14 +269,10 @@ async def _run_canonical_suite(
             if step.reports_failure(output):
                 return CanonicalCorrectnessResult(
                     passed=False,
-                    detail=(
-                        f"{step.label}: {command!r} reported failure in its output"
-                    ),
+                    detail=(f"{step.label}: {command!r} reported failure in its output"),
                     output=output[-_OUTPUT_TAIL_CHARS:],
                 )
-        passed_steps.append(
-            f"{step.label}: {len(step.commands)} command(s) under {timeout_sec}s"
-        )
+        passed_steps.append(f"{step.label}: {len(step.commands)} command(s) under {timeout_sec}s")
 
     return CanonicalCorrectnessResult(passed=True, detail="; ".join(passed_steps))
 
@@ -323,8 +299,7 @@ async def accept_candidate(
     that would otherwise be accepted, never as a pre-filter.
     """
     print(
-        f"  [canonical] Running the arena's acceptance suite (compilation, then "
-        f"correctness) for {candidate_label}..."
+        f"  [canonical] Running the arena's acceptance suite (compilation, then correctness) for {candidate_label}..."
     )
     result = await _run_canonical_suite(
         workspace_dir,

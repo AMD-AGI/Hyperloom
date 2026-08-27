@@ -76,17 +76,39 @@ SWEEP_ENV_PREFIX = "FORGE_SWEEP_"
 # probe list also forwards -- those are runtime tuning knobs, which is exactly
 # what a sweep is for. A member of an open family is named here only when it
 # selects a cache rather than tunes a run.
-_RESERVED_ENV_NAMES = frozenset({
-    "PATH", "HOME", "VIRTUAL_ENV", "CONDA_PREFIX", "TMPDIR",
-    "ROCM_PATH", "HIP_PATH", "HIP_PLATFORM", "HIP_CLANG_PATH",
-    "PYTORCH_ROCM_ARCH", "GPU_TARGET",
-    "CC", "CXX", "CFLAGS", "CXXFLAGS", "LDFLAGS", "CPATH", "LIBRARY_PATH",
-    "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES",
-    "GPU_DEVICE_ORDINAL",
-    "TRITON_CACHE_DIR", "TRITON_HOME", "TORCHINDUCTOR_CACHE_DIR",
-    "TORCH_EXTENSIONS_DIR", "PYTORCH_KERNEL_CACHE_PATH",
-    "AITER_ROOT_DIR", "AITER_JIT_DIR",
-})
+_RESERVED_ENV_NAMES = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "VIRTUAL_ENV",
+        "CONDA_PREFIX",
+        "TMPDIR",
+        "ROCM_PATH",
+        "HIP_PATH",
+        "HIP_PLATFORM",
+        "HIP_CLANG_PATH",
+        "PYTORCH_ROCM_ARCH",
+        "GPU_TARGET",
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "LDFLAGS",
+        "CPATH",
+        "LIBRARY_PATH",
+        "HIP_VISIBLE_DEVICES",
+        "ROCR_VISIBLE_DEVICES",
+        "CUDA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
+        "TRITON_CACHE_DIR",
+        "TRITON_HOME",
+        "TORCHINDUCTOR_CACHE_DIR",
+        "TORCH_EXTENSIONS_DIR",
+        "PYTORCH_KERNEL_CACHE_PATH",
+        "AITER_ROOT_DIR",
+        "AITER_JIT_DIR",
+    }
+)
 
 # Whole namespaces rather than named members: FORGE_ is forge's own and a source
 # reads nothing under it that prefixed mode does not already reach, LD_ is the
@@ -144,27 +166,20 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         if not isinstance(measurement, dict):
             return {
                 "success": False,
-                "message": (
-                    f"MEASUREMENT {index}/{len(measurements)} "
-                    "DID NOT RETURN A RESULT"
-                ),
+                "message": (f"MEASUREMENT {index}/{len(measurements)} DID NOT RETURN A RESULT"),
                 "measurements": measurements,
             }
         if measurement.get("kind") == EXPLORATORY_KIND:
             return {
                 "success": False,
-                "message": (
-                    f"MEASUREMENT {index}/{len(measurements)} IS AN EXPLORATORY "
-                    "SWEEP, WHICH CANNOT BE SCORED"
-                ),
+                "message": (f"MEASUREMENT {index}/{len(measurements)} IS AN EXPLORATORY SWEEP, WHICH CANNOT BE SCORED"),
                 "measurements": measurements,
             }
         if not measurement.get("success"):
             return {
                 "success": False,
                 "message": (
-                    f"MEASUREMENT {index}/{len(measurements)} FAILED: "
-                    f"{measurement.get('message', 'benchmark failed')}"
+                    f"MEASUREMENT {index}/{len(measurements)} FAILED: {measurement.get('message', 'benchmark failed')}"
                 ),
                 "output": measurement.get("output", ""),
                 "measurements": measurements,
@@ -179,8 +194,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
             return {
                 "success": False,
                 "message": (
-                    "MEASUREMENT CASE COVERAGE MISMATCH: "
-                    f"expected={sorted(expected_cases)}, got={sorted(case_ids)}"
+                    f"MEASUREMENT CASE COVERAGE MISMATCH: expected={sorted(expected_cases)}, got={sorted(case_ids)}"
                 ),
                 "measurements": measurements,
             }
@@ -198,8 +212,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
             return {
                 "success": False,
                 "message": (
-                    "MEASUREMENT UNSCORED CASE MISMATCH: "
-                    f"expected={sorted(expected_unscored)}, got={sorted(unscored)}"
+                    f"MEASUREMENT UNSCORED CASE MISMATCH: expected={sorted(expected_unscored)}, got={sorted(unscored)}"
                 ),
                 "measurements": measurements,
             }
@@ -221,20 +234,11 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         if isinstance(wall, (int, float)) and math.isfinite(float(wall)):
             wall_samples.append(float(wall))
 
-    case_times = {
-        case_id: statistics.median(values)
-        for case_id, values in case_samples.items()
-    }
+    case_times = {case_id: statistics.median(values) for case_id, values in case_samples.items()}
     # Reported, never scored, so the last measurement stands rather than a
     # median that would have to be taken field by field.
-    case_bandwidth: dict[str, dict[str, float | int]] = dict(
-        measurements[-1].get("case_bandwidth") or {}
-    )
-    representative_wall = (
-        statistics.median(wall_samples)
-        if len(wall_samples) == len(measurements)
-        else None
-    )
+    case_bandwidth: dict[str, dict[str, float | int]] = dict(measurements[-1].get("case_bandwidth") or {})
+    representative_wall = statistics.median(wall_samples) if len(wall_samples) == len(measurements) else None
     return {
         "success": True,
         "median_ms": representative_wall,
@@ -243,10 +247,7 @@ def aggregate_benchmark_measurements(measurements: list[dict]) -> dict:
         "case_bandwidth": case_bandwidth,
         "measurement_count": len(measurements),
         "measurements": measurements,
-        "message": (
-            f"BENCH: {len(measurements)} independent measurements, "
-            "per-case median"
-        ),
+        "message": (f"BENCH: {len(measurements)} independent measurements, per-case median"),
     }
 
 
@@ -306,8 +307,7 @@ def calculate_mean_case_speedup(
         missing = sorted(baseline_ids - candidate_ids)
         unexpected = sorted(candidate_ids - baseline_ids)
         raise CaseCoverageError(
-            "candidate case coverage differs from baseline: "
-            f"missing={missing}, unexpected={unexpected}"
+            f"candidate case coverage differs from baseline: missing={missing}, unexpected={unexpected}"
         )
     excluded = {str(c) for c in (unscored_cases or ())}
     speedups: list[float] = []
@@ -320,17 +320,13 @@ def calculate_mean_case_speedup(
             or not math.isfinite(float(baseline_ms))
             or float(baseline_ms) <= 0.0
         ):
-            raise CaseCoverageError(
-                f"baseline case {case_id!r} has invalid timing"
-            )
+            raise CaseCoverageError(f"baseline case {case_id!r} has invalid timing")
         if (
             not isinstance(candidate_ms, (int, float))
             or not math.isfinite(float(candidate_ms))
             or float(candidate_ms) <= 0.0
         ):
-            raise CaseCoverageError(
-                f"candidate missing valid timing for baseline case {case_id!r}"
-            )
+            raise CaseCoverageError(f"candidate missing valid timing for baseline case {case_id!r}")
         speedups.append(float(baseline_ms) / float(candidate_ms))
     if not speedups:
         # Every case excluded means there is nothing to score against.
@@ -349,19 +345,12 @@ def calculate_measurement_case_speedups(
     if not isinstance(benchmark, dict) or not benchmark.get("success"):
         raise CaseCoverageError("benchmark measurements are unavailable")
     measurements = benchmark.get("measurements")
-    if (
-        not isinstance(measurements, list)
-        or len(measurements) != expected_measurements
-    ):
-        raise CaseCoverageError(
-            f"exactly {expected_measurements} benchmark measurements are required"
-        )
+    if not isinstance(measurements, list) or len(measurements) != expected_measurements:
+        raise CaseCoverageError(f"exactly {expected_measurements} benchmark measurements are required")
     scores: list[float] = []
     for index, measurement in enumerate(measurements, start=1):
         if isinstance(measurement, dict) and measurement.get("kind") == EXPLORATORY_KIND:
-            raise CaseCoverageError(
-                f"measurement {index} is an exploratory sweep, which cannot be scored"
-            )
+            raise CaseCoverageError(f"measurement {index} is an exploratory sweep, which cannot be scored")
         if not isinstance(measurement, dict) or not measurement.get("success"):
             raise CaseCoverageError(f"measurement {index} failed")
         score = calculate_mean_case_speedup(
@@ -370,9 +359,7 @@ def calculate_measurement_case_speedups(
             measurement.get("unscored_cases"),
         )
         if score is None:
-            raise CaseCoverageError(
-                f"measurement {index} has no mean case speedup"
-            )
+            raise CaseCoverageError(f"measurement {index} has no mean case speedup")
         scores.append(float(score))
     return scores
 
@@ -427,8 +414,10 @@ async def bench_wallclock(
         lines, else ``{}``.
     """
     args = (driver_args or []) + [
-        "--warmup", str(warmup_iters),
-        "--iters", str(bench_iters),
+        "--warmup",
+        str(warmup_iters),
+        "--iters",
+        str(bench_iters),
         "--bench-mode",
     ]
     if repeat > 1:
@@ -501,10 +490,7 @@ async def bench_wallclock(
     if duplicate_case_ids:
         return {
             "success": False,
-            "message": (
-                "DUPLICATE CASE TIMINGS: "
-                + ", ".join(sorted(duplicate_case_ids))
-            ),
+            "message": ("DUPLICATE CASE TIMINGS: " + ", ".join(sorted(duplicate_case_ids))),
             "output": full_output[-1500:],
         }
 
@@ -539,16 +525,13 @@ async def bench_wallclock(
             "case_times": case_times,
             "unscored_cases": unscored_cases,
             "case_bandwidth": case_bandwidth,
-            "message": (
-                f"BENCH: median={median:.4f} ms "
-                f"(min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"
-            ),
+            "message": (f"BENCH: median={median:.4f} ms (min={min(times):.4f}, max={max(times):.4f}, n={len(times)})"),
         }
         if on_result:
             on_result(result)
         return result
     elif agg_match:
-        stat_label = agg_match.group(1)          # "median_ms" or "mean_ms"
+        stat_label = agg_match.group(1)  # "median_ms" or "mean_ms"
         agg_value = float(agg_match.group(2))
         stat_name = "mean" if stat_label == "mean_ms" else "median"
         result = {
@@ -568,8 +551,10 @@ async def bench_wallclock(
     else:
         return {
             "success": False,
-            "message": ("NO TIMING DATA in output. Driver must print 'wall_ms: X.XX' "
-                        "per iteration or a single 'median_ms: X.XX' / 'mean_ms: X.XX' summary."),
+            "message": (
+                "NO TIMING DATA in output. Driver must print 'wall_ms: X.XX' "
+                "per iteration or a single 'median_ms: X.XX' / 'mean_ms: X.XX' summary."
+            ),
             "output": full_output[-1500:],
         }
 
@@ -625,15 +610,11 @@ def _sweep_environment(
     for name, value in (constants or {}).items():
         key = str(name)
         if not _CONSTANT_NAME_RE.match(key):
-            raise ValueError(
-                f"constant name {name!r} is not an upper-case identifier"
-            )
+            raise ValueError(f"constant name {name!r} is not an upper-case identifier")
         text = str(int(value)) if isinstance(value, bool) else str(value)
         if not _CONSTANT_VALUE_RE.match(text):
             raise ValueError(f"constant {key} has an unusable value {value!r}")
-        if not prefix_constants and (
-            key in _RESERVED_ENV_NAMES or key.startswith(_RESERVED_ENV_PREFIXES)
-        ):
+        if not prefix_constants and (key in _RESERVED_ENV_NAMES or key.startswith(_RESERVED_ENV_PREFIXES)):
             raise ValueError(
                 f"constant {key} would overwrite a variable this measurement "
                 f"runs on, not a knob of the kernel; a verbatim sweep may only "
@@ -644,9 +625,7 @@ def _sweep_environment(
     return env, dict(sorted(exported.items()))
 
 
-async def _sweep_run(
-    cmd: list[str], env: dict[str, str], timeout_sec: int
-) -> tuple[int | None, str]:
+async def _sweep_run(cmd: list[str], env: dict[str, str], timeout_sec: int) -> tuple[int | None, str]:
     """Run one driver invocation in a scratch directory that is then removed.
 
     Returns ``(returncode, combined output)``; a returncode of ``None`` is a
@@ -665,9 +644,7 @@ async def _sweep_run(
             start_new_session=True,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                proc.communicate(), timeout=timeout_sec
-            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
         except asyncio.TimeoutError:
             await kill_process_group(proc)
             return None, ""
@@ -780,17 +757,18 @@ async def sweep_case(
     if not case or len(case.split()) != 1:
         return _sweep_failure(f"INVALID CASE ID {case_id!r}")
     try:
-        env, exported = _sweep_environment(
-            constants, prefix_constants=prefix_constants
-        )
+        env, exported = _sweep_environment(constants, prefix_constants=prefix_constants)
     except ValueError as error:
         return _sweep_failure(str(error).upper())
     described = ", ".join(f"{k}={v}" for k, v in exported.items()) or "no overrides"
 
     base_cmd = [
-        sys.executable, driver_script,
-        "--warmup", str(warmup_iters),
-        "--iters", str(bench_iters),
+        sys.executable,
+        driver_script,
+        "--warmup",
+        str(warmup_iters),
+        "--iters",
+        str(bench_iters),
         "--bench-mode",
     ]
     memo_key = _case_flag_memo_key(base_cmd)
@@ -812,13 +790,9 @@ async def sweep_case(
             constants=exported,
         )
     if returncode != 0:
-        retried = (
-            f" (also exit {flag_exit} with {SWEEP_CASE_FLAG})"
-            if flag_exit is not None else ""
-        )
+        retried = f" (also exit {flag_exit} with {SWEEP_CASE_FLAG})" if flag_exit is not None else ""
         return _sweep_failure(
-            f"{described}: CONFIGURATION DID NOT RUN (exit {returncode})"
-            f"{retried}",
+            f"{described}: CONFIGURATION DID NOT RUN (exit {returncode}){retried}",
             case_id=case,
             constants=exported,
             case_selection=SELECTION_REJECTED,
@@ -827,9 +801,7 @@ async def sweep_case(
 
     echoed = dict(_SWEEP_ECHO_RE.findall(full_output))
     unread = sorted(name for name in exported if name not in echoed)
-    consumption = {
-        name: ("consumed" if name in echoed else "unread") for name in exported
-    }
+    consumption = {name: ("consumed" if name in echoed else "unread") for name in exported}
     if unread and prefix_constants:
         return _sweep_failure(
             f"{described}: NOTHING READ {', '.join(unread)} -- no "
@@ -847,8 +819,7 @@ async def sweep_case(
     )
     if diverged:
         return _sweep_failure(
-            f"{described}: DRIVER READ A DIFFERENT CONFIGURATION "
-            f"({'; '.join(diverged)})",
+            f"{described}: DRIVER READ A DIFFERENT CONFIGURATION ({'; '.join(diverged)})",
             case_id=case,
             constants=exported,
             override_consumption=consumption,
@@ -873,7 +844,8 @@ async def sweep_case(
         misnamed = (
             f" -- {SWEEP_CASE_FLAG} was rejected (exit {flag_exit}) for a case "
             "this driver does not declare, which is the case id and not the flag"
-            if flag_exit is not None else ""
+            if flag_exit is not None
+            else ""
         )
         return _sweep_failure(
             f"{described}: DRIVER REPORTED NO TIMING FOR CASE {case!r} "
@@ -901,8 +873,7 @@ async def sweep_case(
     case_ms = seen[case]
     if not math.isfinite(case_ms) or case_ms <= 0.0:
         return _sweep_failure(
-            f"{described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE "
-            f"{case!r}: {case_ms}",
+            f"{described}: DRIVER REPORTED AN UNUSABLE TIME FOR CASE {case!r}: {case_ms}",
             case_id=case,
             constants=exported,
             output=full_output[-1500:],
@@ -916,10 +887,7 @@ async def sweep_case(
     # otherwise report itself as a driver that honoured a flag it never saw.
     selected_by_flag = carried_flag and flag_exit is None
     narrowed = set(seen) == {case}
-    selection = (
-        SELECTION_NARROWED if (selected_by_flag and narrowed)
-        else SELECTION_WHOLE_SUITE
-    )
+    selection = SELECTION_NARROWED if (selected_by_flag and narrowed) else SELECTION_WHOLE_SUITE
     result = {
         "success": True,
         "kind": EXPLORATORY_KIND,
@@ -940,12 +908,13 @@ async def sweep_case(
     notes = []
     if selection == SELECTION_WHOLE_SUITE:
         how = (
-            f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run "
-            "without it and"
+            f"rejected {SWEEP_CASE_FLAG} (exit {flag_exit}), so it was re-run without it and"
             if flag_exit is not None
-            else (f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked "
-                  "again and" if rejected_before
-                  else f"ignored {SWEEP_CASE_FLAG} and")
+            else (
+                f"is known to reject {SWEEP_CASE_FLAG}, so it was not asked again and"
+                if rejected_before
+                else f"ignored {SWEEP_CASE_FLAG} and"
+            )
         )
         notes.append(f"driver {how} ran its whole suite: {', '.join(sorted(seen))}")
     if unread:
@@ -963,14 +932,13 @@ async def sweep_case(
             "the wall_ms lines time the driver's whole suite rather than this "
             "case, so this point has no measured spread of its own and a small "
             "difference against it means nothing"
-            if samples else
-            "no per-iteration wall_ms lines came back: this point has no "
+            if samples
+            else "no per-iteration wall_ms lines came back: this point has no "
             "measured spread, so a small difference against it means nothing"
         )
     suffix = "".join(f" [{note}]" for note in notes)
     result["message"] = (
-        f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms "
-        f"at {described}{suffix}"
+        f"SWEEP (EXPLORATORY, NOT AN ACCEPTANCE RESULT): {case} = {case_ms:.6f} ms at {described}{suffix}"
     )
     return result
 
@@ -984,21 +952,31 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             "Exploratory only: the acceptance gate refuses these measurements."
         ),
     )
-    parser.add_argument("--driver", required=True,
-                        help="the same driver (or lock wrapper) the gate runs")
-    parser.add_argument("--case", required=True,
-                        help="one CASE_ID from the task's scored cases")
-    parser.add_argument("--set", action="append", default=[], metavar="NAME=VALUE",
-                        help=(f"dispatch constant, exported as {SWEEP_ENV_PREFIX}NAME; "
-                              f"the source must echo '{SWEEP_ECHO}: NAME VALUE' when "
-                              "it reads one"))
-    parser.add_argument("--verbatim-names", action="store_true",
-                        help=(f"export each --set name as-is instead of under "
-                              f"{SWEEP_ENV_PREFIX}, to reach a knob the source "
-                              "already defines; the echo then becomes a report "
-                              "rather than a requirement, and a name the "
-                              "measurement itself runs on (PATH, "
-                              "HIP_VISIBLE_DEVICES, ...) is refused"))
+    parser.add_argument("--driver", required=True, help="the same driver (or lock wrapper) the gate runs")
+    parser.add_argument("--case", required=True, help="one CASE_ID from the task's scored cases")
+    parser.add_argument(
+        "--set",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help=(
+            f"dispatch constant, exported as {SWEEP_ENV_PREFIX}NAME; "
+            f"the source must echo '{SWEEP_ECHO}: NAME VALUE' when "
+            "it reads one"
+        ),
+    )
+    parser.add_argument(
+        "--verbatim-names",
+        action="store_true",
+        help=(
+            f"export each --set name as-is instead of under "
+            f"{SWEEP_ENV_PREFIX}, to reach a knob the source "
+            "already defines; the echo then becomes a report "
+            "rather than a requirement, and a name the "
+            "measurement itself runs on (PATH, "
+            "HIP_VISIBLE_DEVICES, ...) is refused"
+        ),
+    )
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--timeout", type=int, default=120)
@@ -1012,15 +990,17 @@ def _sweep_cli(argv: list[str] | None = None) -> int:
             return 2
         constants[name.strip()] = value.strip()
 
-    result = asyncio.run(sweep_case(
-        driver_script=args.driver,
-        case_id=args.case,
-        constants=constants,
-        warmup_iters=args.warmup,
-        bench_iters=args.iters,
-        timeout_sec=args.timeout,
-        prefix_constants=not args.verbatim_names,
-    ))
+    result = asyncio.run(
+        sweep_case(
+            driver_script=args.driver,
+            case_id=args.case,
+            constants=constants,
+            warmup_iters=args.warmup,
+            bench_iters=args.iters,
+            timeout_sec=args.timeout,
+            prefix_constants=not args.verbatim_names,
+        )
+    )
     print(result["message"], flush=True)
     if not result["success"] and result.get("output"):
         print(result["output"], flush=True)

@@ -10,6 +10,7 @@ from kernelforge.tracker.schema import Iteration
 
 # ─── ExperimentTracker ───
 
+
 def test_on_complete_callback_fires(tmp_path):
     tracker = ExperimentTracker(tmp_path)
     exp = tracker.create(task_id="t", backend="ck")
@@ -70,6 +71,7 @@ def test_list_experiments_skips_json_that_is_not_an_experiment_record(tmp_path):
 
 def test_get_missing_raises(tmp_path):
     import pytest
+
     tracker = ExperimentTracker(tmp_path)
     with pytest.raises(FileNotFoundError):
         tracker.get("does_not_exist")
@@ -84,8 +86,7 @@ def test_summary_delegates(tmp_path):
 
 
 def test_iteration_roundtrip_dict():
-    it = Iteration(iteration_id=1, config={"BLOCK_M": 128}, snr_db=35.0,
-                   wall_ms=1.2)
+    it = Iteration(iteration_id=1, config={"BLOCK_M": 128}, snr_db=35.0, wall_ms=1.2)
     d = it.to_dict()
     assert "iteration_id" in d
     # Falsy/empty fields are dropped for compactness.

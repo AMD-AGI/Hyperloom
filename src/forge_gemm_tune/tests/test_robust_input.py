@@ -181,9 +181,7 @@ def test_resolve_input_csv_covers_decode_m_for_prefill_only_manifest(tmp_path, m
         out.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr(
-        "forge_gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv
-    )
+    monkeypatch.setattr("forge_gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
     ctx = _ctx(tmp_path, shapes_manifest=manifest, conc=64, tokens=[16, 512])
     out = _resolve_input_csv(ctx, tmp_path)
     m_values = {int(r.split(",")[0]) for r in out.read_text(encoding="utf-8").strip().splitlines()[1:]}
@@ -230,7 +228,7 @@ def test_decode_coverage_is_decided_per_dispatch_group(tmp_path):
     csv.write_text(
         "M,N,K\n"
         "16,8704,3072\n32,8704,3072\n64,8704,3072\n"  # fully covered
-        "2095,10240,3072\n",                          # prefill only
+        "2095,10240,3072\n",  # prefill only
         encoding="utf-8",
     )
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=64)
@@ -257,9 +255,7 @@ def test_decode_coverage_ignores_m_outside_the_decode_grid(tmp_path):
     ("recorded", "expected_added"),
     [(64, {16, 32, 128, 256}), (128, {16, 32, 64, 256})],
 )
-def test_one_decode_grid_member_does_not_cover_the_other_buckets(
-    tmp_path, recorded, expected_added
-):
+def test_one_decode_grid_member_does_not_cover_the_other_buckets(tmp_path, recorded, expected_added):
     """A tuned M=64 row is never consulted for runtime M=16 or M=32: each probes
     its own exact/padded keys. Holding one grid member is not coverage."""
     csv = tmp_path / "untuned.csv"
@@ -289,8 +285,8 @@ def test_decode_coverage_preserves_row_order_and_q_dtype(tmp_path):
     csv = tmp_path / "untuned.csv"
     csv.write_text(
         "M,N,K,q_dtype_w\n"
-        "2095,10240,3072,torch.float8_e4m3fn\n"   # hottest
-        "2095,8704,3072,torch.bfloat16\n",        # colder, different dtype
+        "2095,10240,3072,torch.float8_e4m3fn\n"  # hottest
+        "2095,8704,3072,torch.bfloat16\n",  # colder, different dtype
         encoding="utf-8",
     )
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=8)
@@ -310,9 +306,7 @@ def test_decode_coverage_preserves_row_order_and_q_dtype(tmp_path):
 def test_decode_coverage_does_not_cross_m_between_groups(tmp_path):
     """A prefill M recorded for one projection must not appear under another."""
     csv = tmp_path / "untuned.csv"
-    csv.write_text(
-        "M,N,K\n2095,10240,3072\n4096,8704,3072\n", encoding="utf-8"
-    )
+    csv.write_text("M,N,K\n2095,10240,3072\n4096,8704,3072\n", encoding="utf-8")
     ctx = _ctx(tmp_path, untuned_csv=csv, conc=8)
 
     groups = _group_m(_resolve_input_csv(ctx, tmp_path))
@@ -328,20 +322,50 @@ def test_decode_coverage_does_not_cross_m_between_groups(tmp_path):
 # mirror's behaviour under test everywhere; comparing against the live aiter
 # stays as the drift detector wherever aiter is present.
 _PADDED_M_OBSERVED: tuple[tuple[int, int, int], ...] = (
-    (1, 16, 1), (2, 16, 2), (3, 16, 4), (4, 16, 4), (8, 16, 8),
-    (15, 16, 16), (16, 16, 16), (17, 32, 32), (24, 32, 32), (31, 32, 32),
-    (32, 32, 32), (33, 48, 64), (48, 48, 64), (64, 64, 64), (96, 96, 128),
-    (100, 112, 128), (127, 128, 128), (128, 128, 128), (129, 144, 256),
-    (192, 192, 256), (240, 240, 256), (241, 256, 256), (255, 256, 256),
-    (256, 256, 256), (257, 288, 512), (288, 288, 512), (512, 512, 512),
-    (513, 544, 1024), (1024, 1024, 1024), (2048, 2048, 2048),
-    (2095, 2112, 4096), (4096, 4096, 4096),
+    (1, 16, 1),
+    (2, 16, 2),
+    (3, 16, 4),
+    (4, 16, 4),
+    (8, 16, 8),
+    (15, 16, 16),
+    (16, 16, 16),
+    (17, 32, 32),
+    (24, 32, 32),
+    (31, 32, 32),
+    (32, 32, 32),
+    (33, 48, 64),
+    (48, 48, 64),
+    (64, 64, 64),
+    (96, 96, 128),
+    (100, 112, 128),
+    (127, 128, 128),
+    (128, 128, 128),
+    (129, 144, 256),
+    (192, 192, 256),
+    (240, 240, 256),
+    (241, 256, 256),
+    (255, 256, 256),
+    (256, 256, 256),
+    (257, 288, 512),
+    (288, 288, 512),
+    (512, 512, 512),
+    (513, 544, 1024),
+    (1024, 1024, 1024),
+    (2048, 2048, 2048),
+    (2095, 2112, 4096),
+    (4096, 4096, 4096),
     # Past the 32->64 step at M=1024 and the 64->128 step at M=4096. The values
     # above happen to be multiples of both 32 and 64, so they cannot tell a
     # two-tier mirror from aiter's four tiers; these can.
-    (1025, 1088, 2048), (1040, 1088, 2048), (1056, 1088, 2048),
-    (1057, 1088, 2048), (2049, 2112, 4096), (4097, 4224, 8192),
-    (4128, 4224, 8192), (8193, 8320, 16384), (10000, 10112, 16384),
+    (1025, 1088, 2048),
+    (1040, 1088, 2048),
+    (1056, 1088, 2048),
+    (1057, 1088, 2048),
+    (2049, 2112, 4096),
+    (4097, 4224, 8192),
+    (4128, 4224, 8192),
+    (8193, 8320, 16384),
+    (10000, 10112, 16384),
 )
 
 
@@ -349,13 +373,20 @@ _PADDED_M_OBSERVED: tuple[tuple[int, int, int], ...] = (
 #: of two: past M=8192 a wide N collapses the bucket to 8192, so the mirror
 #: needs N to answer at all. Sampled on both sides of the N>4096 branch.
 _PADDED_M_GL1_OBSERVED: tuple[tuple[int, int, int], ...] = (
-    (1025, 8704, 2048), (1025, 2048, 2048),
-    (2049, 8704, 4096), (2049, 2048, 4096),
-    (4097, 8704, 8192), (4097, 2048, 8192),
-    (8192, 8704, 8192), (8192, 2048, 8192),
-    (8193, 8704, 8192), (8193, 2048, 16384),
-    (10000, 8704, 8192), (10000, 2048, 16384),
-    (16384, 8704, 8192), (16384, 2048, 16384),
+    (1025, 8704, 2048),
+    (1025, 2048, 2048),
+    (2049, 8704, 4096),
+    (2049, 2048, 4096),
+    (4097, 8704, 8192),
+    (4097, 2048, 8192),
+    (8192, 8704, 8192),
+    (8192, 2048, 8192),
+    (8193, 8704, 8192),
+    (8193, 2048, 16384),
+    (10000, 8704, 8192),
+    (10000, 2048, 16384),
+    (16384, 8704, 8192),
+    (16384, 2048, 16384),
 )
 
 
@@ -402,9 +433,7 @@ def test_padded_m_mirror_matches_installed_aiter():
     for m, _gl0, _pow2 in _PADDED_M_OBSERVED:
         assert ac._padded_m_gl0(m) == get_padded_m(m, n, k, 0), f"gl=0 mismatch at M={m}"
     for m, n_i, _gl1 in _PADDED_M_GL1_OBSERVED:
-        assert ac._padded_m_gl1(m, n_i) == get_padded_m(m, n_i, k, 1), (
-            f"gl=1 mismatch at M={m} N={n_i}"
-        )
+        assert ac._padded_m_gl1(m, n_i) == get_padded_m(m, n_i, k, 1), f"gl=1 mismatch at M={m} N={n_i}"
 
 
 def test_aiter_dtype_str_rejects_a_dtype_outside_aiters_table(monkeypatch):
@@ -444,9 +473,7 @@ def test_manifest_keeps_curated_shapes_in_thorough_mode(tmp_path, monkeypatch):
         out.write_text("M,N,K\n2095,8704,3072\n", encoding="utf-8")
         return out
 
-    monkeypatch.setattr(
-        "forge_gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv
-    )
+    monkeypatch.setattr("forge_gemm_tune.shape_manifest.write_manifest_untuned_csv", _fake_manifest_csv)
     ctx = _ctx(tmp_path, shapes_manifest=manifest, thorough=True, conc=8, tokens=[1024])
 
     m_values = _group_m(_resolve_input_csv(ctx, tmp_path))[("8704", "3072")]
@@ -553,6 +580,7 @@ def test_resolve_input_csv_conforms_supplied_csv(tmp_path, stub_fp8_dtype):
 def test_cli_tokens_accepts_bracketed_list():
     # Defense: forge tolerates a bracketed token string (e.g. "[4, 8, 64]").
     from click.testing import CliRunner  # noqa: F401  (import guarded below)
+
     # Parse exactly like cli.run does.
     tokens = "[4, 8, 64]"
     tokens_clean = tokens.strip().strip("[](){}")

@@ -214,10 +214,7 @@ class VllmDenseTunableopTuner(BaseTuner):
     env_var = TUNER_ENV_VARS["vllm_dense_tunableop"]
 
     def validate(self) -> str | None:
-        if not (
-            self.ctx.tunableop_input or self.ctx.shapes_json
-            or getattr(self.ctx, "demand_json", None)
-        ):
+        if not (self.ctx.tunableop_input or self.ctx.shapes_json or getattr(self.ctx, "demand_json", None)):
             return (
                 "Requires --tunableop-input (from PYTORCH_TUNABLEOP_RECORD_UNTUNED=1), "
                 "--shapes-json, or --demand for GEMM shapes"
@@ -268,9 +265,9 @@ class VllmDenseTunableopTuner(BaseTuner):
                 borrowed.extend(demand_shapes(other, limit=_DEMAND_SHAPE_LIMIT))
             if borrowed:
                 log.info(
-                    "%s: no demand of its own; taking %d dense shape(s) the "
-                    "runtime missed on other dense tables",
-                    self.name, len(borrowed[:_DEMAND_SHAPE_LIMIT]),
+                    "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
+                    self.name,
+                    len(borrowed[:_DEMAND_SHAPE_LIMIT]),
                 )
             shapes = borrowed[:_DEMAND_SHAPE_LIMIT]
         if not shapes:
@@ -280,8 +277,9 @@ class VllmDenseTunableopTuner(BaseTuner):
         op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
         if op is None:
             log.warning(
-                "%s: no TunableOp record type for precision %r, so demand cannot "
-                "be turned into an input file", self.name, precision,
+                "%s: no TunableOp record type for precision %r, so demand cannot be turned into an input file",
+                self.name,
+                precision,
             )
             return None
 
@@ -300,7 +298,9 @@ class VllmDenseTunableopTuner(BaseTuner):
         out.write_text("\n".join(lines) + "\n", encoding="utf-8")
         log.info(
             "%s: %d demand shape(s) written as TunableOp records -> %s",
-            self.name, len(lines), out,
+            self.name,
+            len(lines),
+            out,
         )
         return out
 

@@ -69,9 +69,7 @@ class LlmGateway:
         """Build one from a config mapping, ignoring unknown keys."""
         raw_headers = mapping.get("headers")
         headers = (
-            {str(k).strip(): str(v).strip() for k, v in raw_headers.items()}
-            if isinstance(raw_headers, Mapping)
-            else {}
+            {str(k).strip(): str(v).strip() for k, v in raw_headers.items()} if isinstance(raw_headers, Mapping) else {}
         )
         return cls(
             base_url=str(mapping.get("base_url") or "").strip(),
@@ -114,11 +112,7 @@ def parse_custom_headers(raw: str | None) -> dict[str, str]:
         with contextlib.suppress(json.JSONDecodeError):
             obj = json.loads(expanded)
             if isinstance(obj, dict):
-                headers = {
-                    str(k).strip(): str(v).strip()
-                    for k, v in obj.items()
-                    if str(k).strip()
-                }
+                headers = {str(k).strip(): str(v).strip() for k, v in obj.items() if str(k).strip()}
                 parsed_json = True
     if not parsed_json:
         for line in expanded.splitlines():
@@ -138,9 +132,12 @@ def parse_custom_headers(raw: str | None) -> dict[str, str]:
     # legitimately contain commas, so splitting on them would corrupt real values.
     for name, value in headers.items():
         if _PACKED_PAIR_RE.search(value):
-            log.warning("custom header %r value %r looks like it packs more headers on one "
-                        "line; put each on its own line (comma-separated is not split)",
-                        name, value)
+            log.warning(
+                "custom header %r value %r looks like it packs more headers on one "
+                "line; put each on its own line (comma-separated is not split)",
+                name,
+                value,
+            )
     return headers
 
 

@@ -36,16 +36,19 @@ def _write_trace(path, events, gz=False):
 class TestHotKernels:
     def test_ranks_and_filters_compute(self, tmp_path):
         p = tmp_path / "d.trace.json"
-        _write_trace(p, [
-            {"cat": "kernel", "name": "Cijk_gemm", "ts": 0, "dur": 100},        # gemm -> filtered
-            {"cat": "kernel", "name": "vectorized_elementwise mul", "ts": 100, "dur": 40},
-            {"cat": "kernel", "name": "bfloat16tofloat32_copy", "ts": 200, "dur": 30},
-            {"cat": "kernel", "name": "rotary_embedding_kernel", "ts": 300, "dur": 10},
-        ])
+        _write_trace(
+            p,
+            [
+                {"cat": "kernel", "name": "Cijk_gemm", "ts": 0, "dur": 100},  # gemm -> filtered
+                {"cat": "kernel", "name": "vectorized_elementwise mul", "ts": 100, "dur": 40},
+                {"cat": "kernel", "name": "bfloat16tofloat32_copy", "ts": 200, "dur": 30},
+                {"cat": "kernel", "name": "rotary_embedding_kernel", "ts": 300, "dur": 10},
+            ],
+        )
         hot = hot_kernels_from_trace(p, launch_bound_only=True)
         names = [h["name"] for h in hot]
-        assert not any("Cijk_gemm" in n for n in names)      # compute filtered out
-        assert hot[0]["category"] == "mul"                   # highest launch-bound share first
+        assert not any("Cijk_gemm" in n for n in names)  # compute filtered out
+        assert hot[0]["category"] == "mul"  # highest launch-bound share first
         assert all(0 <= h["share"] <= 1 for h in hot)
 
     def test_missing_trace_safe(self, tmp_path):
@@ -89,11 +92,7 @@ class TestOrderedFusionBoundaries:
 
         boundaries = ordered_fusion_boundaries_from_trace(p)
 
-        match = next(
-            row
-            for row in boundaries
-            if row["categories"] == ["gemm", "activation", "gemm"]
-        )
+        match = next(row for row in boundaries if row["categories"] == ["gemm", "activation", "gemm"])
         assert match["count"] == 2
         assert match["boundary_kind"] == "epilogue"
         assert match["launches_removed_upper_bound"] == 1
@@ -184,8 +183,7 @@ class TestExistingOperatorHints:
         knowledge = tmp_path / "knowledge"
         knowledge.mkdir()
         (knowledge / "kv.md").write_text(
-            "QK norm, RoPE, and cache write use "
-            "`fused_qk_norm_rope_cache_pts_quant_shuffle`.\n",
+            "QK norm, RoPE, and cache write use `fused_qk_norm_rope_cache_pts_quant_shuffle`.\n",
             encoding="utf-8",
         )
         (knowledge / "gemm.md").write_text(
@@ -225,8 +223,7 @@ class TestExistingOperatorHints:
             encoding="utf-8",
         )
         (knowledge / "stats.md").write_text(
-            "`fused_layer_normalization_stats` collects normalization statistics "
-            "for offline calibration.\n",
+            "`fused_layer_normalization_stats` collects normalization statistics for offline calibration.\n",
             encoding="utf-8",
         )
         boundaries = [
@@ -296,18 +293,20 @@ class TestDiscoveryPrompt:
         d = _candidate_diag()
         hot = [{"name": "vectorized_elementwise mul", "category": "mul", "share": 0.14, "count": 60, "avg_us": 3.2}]
         p = build_discovery_prompt(
-            model_type="zaya", framework="sglang",
+            model_type="zaya",
+            framework="sglang",
             source_text="class CCA:\n    def _normalize_qk(self, q, k): ...\n",
-            diagnosis=d, hot_kernels=hot, shapes={"hidden_size": 2048},
+            diagnosis=d,
+            hot_kernels=hot,
+            shapes={"hidden_size": 2048},
         )
         # Includes the measured profile + the real source.
         assert "launch_bound_share" in p and "vectorized_elementwise mul" in p
-        assert "_normalize_qk" in p                # the real source is embedded
-        assert "ZAYA_FUSED_" in p                  # asks for a model-prefixed flag
+        assert "_normalize_qk" in p  # the real source is embedded
+        assert "ZAYA_FUSED_" in p  # asks for a model-prefixed flag
         # Must NOT hand the model the answer (no template names).
         low = p.lower()
-        for leak in ("residual_add_rmsnorm", "swiglu", "silu", " residualscaling",
-                     "cca qk", "grouped-mean"):
+        for leak in ("residual_add_rmsnorm", "swiglu", "silu", " residualscaling", "cca qk", "grouped-mean"):
             assert leak not in low, f"answer-encoding leaked into prompt: {leak}"
 
     def test_prompt_includes_ordered_boundaries_and_existing_operator_evidence(self):
@@ -399,30 +398,35 @@ class TestDiscoveryPrompt:
 
 class TestParse:
     def test_parses_fenced_json_and_prefixes_flag(self):
-        payload = json.dumps([{
-            "name": "cca_qk", "env_flag": "FUSED_QK",
-            "op_chain": "_add_grouped_qk_means + _normalize_qk",
-            "source_anchors": ["_normalize_qk", "_add_grouped_qk_means"],
-            "fusion_math": "grouped mean then rmsnorm then temp",
-            "eager_reference": "import CCA._normalize_qk",
-            "priority": 0.9, "rationale": "dominant elementwise tail",
-        }])
+        payload = json.dumps(
+            [
+                {
+                    "name": "cca_qk",
+                    "env_flag": "FUSED_QK",
+                    "op_chain": "_add_grouped_qk_means + _normalize_qk",
+                    "source_anchors": ["_normalize_qk", "_add_grouped_qk_means"],
+                    "fusion_math": "grouped mean then rmsnorm then temp",
+                    "eager_reference": "import CCA._normalize_qk",
+                    "priority": 0.9,
+                    "rationale": "dominant elementwise tail",
+                }
+            ]
+        )
         text = "Here is my analysis.\n```json\n" + payload + "\n```\n"
         recipes = parse_discovered_recipes(
-            text, model_type="zaya", framework="sglang",
-            source_file="/sgl/models/zaya.py", shapes={"hidden_size": 2048})
+            text, model_type="zaya", framework="sglang", source_file="/sgl/models/zaya.py", shapes={"hidden_size": 2048}
+        )
         assert len(recipes) == 1
         r = recipes[0]
         assert r.pattern_id == "llm:cca_qk"
-        assert r.env_flag == "ZAYA_FUSED_QK"       # normalized + model-prefixed
+        assert r.env_flag == "ZAYA_FUSED_QK"  # normalized + model-prefixed
         assert "_normalize_qk" in r.source_hints
         assert r.source_confirmed is True
         assert r.trigger_share == 0.9
 
     def test_ranks_by_priority(self):
-        text = ('[{"name":"a","priority":0.3},{"name":"b","priority":0.8}]')
-        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang",
-                                      source_file="/x.py", shapes={})
+        text = '[{"name":"a","priority":0.3},{"name":"b","priority":0.8}]'
+        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
         assert [r.pattern_id for r in rs] == ["llm:b", "llm:a"]
 
     def test_preserves_existing_operator_integration_plan(self):
@@ -505,32 +509,40 @@ class TestParse:
         # Response cut off at max_tokens mid-3rd-object: array never closes, but
         # the 2 complete objects before the cut must still be recovered.
         text = (
-            '```json\n[\n'
+            "```json\n[\n"
             '  {"name": "a", "env_flag": "ZAYA_FUSED_A", "priority": 0.9},\n'
             '  {"name": "b", "env_flag": "ZAYA_FUSED_B", "priority": 0.5},\n'
             '  {"name": "c", "env_flag": "ZAYA_FUSED_C", "rationale": "this got cut o'
         )
-        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang",
-                                      source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(text, model_type="zaya", framework="sglang", source_file="/x.py", shapes={})
         assert [r.pattern_id for r in rs] == ["llm:a", "llm:b"]  # 2 salvaged, ranked
         assert rs[0].env_flag == "ZAYA_FUSED_A"
 
     def test_no_json_returns_empty(self):
-        assert parse_discovered_recipes("no json here", model_type="zaya",
-                                        framework="sglang", source_file="/x.py", shapes={}) == []
+        assert (
+            parse_discovered_recipes(
+                "no json here", model_type="zaya", framework="sglang", source_file="/x.py", shapes={}
+            )
+            == []
+        )
 
     def test_bare_array_without_fence(self):
-        rs = parse_discovered_recipes('prose [{"name":"x","env_flag":"ZAYA_FUSED_X"}] tail',
-                                      model_type="zaya", framework="sglang",
-                                      source_file="/x.py", shapes={})
+        rs = parse_discovered_recipes(
+            'prose [{"name":"x","env_flag":"ZAYA_FUSED_X"}] tail',
+            model_type="zaya",
+            framework="sglang",
+            source_file="/x.py",
+            shapes={},
+        )
         assert len(rs) == 1 and rs[0].env_flag == "ZAYA_FUSED_X"
 
 
 class TestDiscoverRecipes:
     def test_end_to_end_with_fake_llm(self, tmp_path):
         src = tmp_path / "zaya.py"
-        src.write_text("class CCA:\n    def _normalize_qk(self): ...\n    def _add_grouped_qk_means(self): ...\n",
-                       encoding="utf-8")
+        src.write_text(
+            "class CCA:\n    def _normalize_qk(self): ...\n    def _add_grouped_qk_means(self): ...\n", encoding="utf-8"
+        )
         trace = tmp_path / "d.trace.json"
         _write_trace(trace, [{"cat": "kernel", "name": "vectorized_elementwise mul", "ts": 0, "dur": 40}])
         d = _candidate_diag()
@@ -539,14 +551,22 @@ class TestDiscoverRecipes:
 
         def fake_llm(prompt: str) -> str:
             captured["prompt"] = prompt
-            return ('[{"name":"cca_qk","env_flag":"FUSED_QK",'
-                    '"op_chain":"_add_grouped_qk_means + _normalize_qk",'
-                    '"source_anchors":["_normalize_qk"],"fusion_math":"m",'
-                    '"eager_reference":"import CCA._normalize_qk","priority":0.9}]')
+            return (
+                '[{"name":"cca_qk","env_flag":"FUSED_QK",'
+                '"op_chain":"_add_grouped_qk_means + _normalize_qk",'
+                '"source_anchors":["_normalize_qk"],"fusion_math":"m",'
+                '"eager_reference":"import CCA._normalize_qk","priority":0.9}]'
+            )
 
         recipes = discover_recipes(
-            d, model_type="zaya", framework="sglang", source_file=str(src),
-            shapes={"hidden_size": 2048}, trace_path=str(trace), llm_fn=fake_llm)
+            d,
+            model_type="zaya",
+            framework="sglang",
+            source_file=str(src),
+            shapes={"hidden_size": 2048},
+            trace_path=str(trace),
+            llm_fn=fake_llm,
+        )
         assert len(recipes) == 1
         assert recipes[0].env_flag == "ZAYA_FUSED_QK"
         assert "_normalize_qk" in captured["prompt"]  # real source reached the LLM
@@ -567,9 +587,7 @@ class TestDiscoverRecipes:
         )
         knowledge = tmp_path / "knowledge"
         knowledge.mkdir()
-        (knowledge / "gemm.md").write_text(
-            "Gate/up GEMM with SiLU uses `gemm_a16w16_gated`.\n", encoding="utf-8"
-        )
+        (knowledge / "gemm.md").write_text("Gate/up GEMM with SiLU uses `gemm_a16w16_gated`.\n", encoding="utf-8")
         captured = {}
 
         def fake_llm(prompt: str) -> str:
@@ -616,9 +634,14 @@ class TestDiscoverRecipes:
             return "[]"
 
         discover_recipes(
-            _candidate_diag(), model_type="toy", framework="sglang",
-            source_file=str(src), shapes={}, trace_path=str(trace),
-            llm_fn=fake_llm, max_fusions=3,
+            _candidate_diag(),
+            model_type="toy",
+            framework="sglang",
+            source_file=str(src),
+            shapes={},
+            trace_path=str(trace),
+            llm_fn=fake_llm,
+            max_fusions=3,
         )
 
         assert "identify up to 3 CONTIGUOUS op chains" in captured["prompt"]
@@ -636,8 +659,12 @@ class TestDiscoverRecipes:
 
         def run():
             discover_recipes(
-                _candidate_diag(), model_type="toy", framework="sglang",
-                source_file=str(src), shapes={}, trace_path=str(trace),
+                _candidate_diag(),
+                model_type="toy",
+                framework="sglang",
+                source_file=str(src),
+                shapes={},
+                trace_path=str(trace),
                 llm_fn=fake_llm,
             )
             return captured["prompt"]
@@ -659,7 +686,16 @@ class TestDiscoverRecipes:
             called["n"] += 1
             return "[]"
 
-        assert discover_recipes(d, model_type="zaya", framework="sglang",
-                                source_file="/x.py", shapes={}, trace_path="/x",
-                                llm_fn=fake_llm) == []
+        assert (
+            discover_recipes(
+                d,
+                model_type="zaya",
+                framework="sglang",
+                source_file="/x.py",
+                shapes={},
+                trace_path="/x",
+                llm_fn=fake_llm,
+            )
+            == []
+        )
         assert called["n"] == 0  # not a candidate -> LLM never called

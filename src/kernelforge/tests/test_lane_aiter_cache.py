@@ -111,9 +111,7 @@ def _implementer_through(backend):
                     system_prompt="implementer",
                     user_prompt=plan,
                     cwd=str(Path(kernel_path).parent),
-                    tool_policy=AgentToolPolicy(
-                        read=True, write=True, shell=True, max_turns=8
-                    ),
+                    tool_policy=AgentToolPolicy(read=True, write=True, shell=True, max_turns=8),
                 )
             )
             return plan
@@ -181,24 +179,16 @@ async def test_two_concurrent_lanes_are_spawned_with_different_aiter_caches(
 
     await _run_lanes(
         tmp_path,
-        _lane_factory(config, workspace, _implementer_through(
-            _recording_claude_backend(spawned)
-        )),
+        _lane_factory(config, workspace, _implementer_through(_recording_claude_backend(spawned))),
         ("1", "2"),
     )
 
     assert len(spawned) == 2
     for key in ("AITER_ROOT_DIR", "AITER_JIT_DIR", "FORGE_AITER_CACHE_ROOT"):
         assert len({env[key] for env in spawned}) == 2, key
-    assert str(campaign.aiter_root_dir) not in {
-        env["AITER_ROOT_DIR"] for env in spawned
-    }
-    assert str(campaign.aiter_jit_dir) not in {
-        env["AITER_JIT_DIR"] for env in spawned
-    }
-    assert str(campaign.cache_root) not in {
-        env["FORGE_AITER_CACHE_ROOT"] for env in spawned
-    }
+    assert str(campaign.aiter_root_dir) not in {env["AITER_ROOT_DIR"] for env in spawned}
+    assert str(campaign.aiter_jit_dir) not in {env["AITER_JIT_DIR"] for env in spawned}
+    assert str(campaign.cache_root) not in {env["FORGE_AITER_CACHE_ROOT"] for env in spawned}
 
 
 async def test_a_lane_cache_is_created_beside_the_lane_copy(tmp_path):
@@ -213,9 +203,7 @@ async def test_a_lane_cache_is_created_beside_the_lane_copy(tmp_path):
 
     await _run_lanes(
         tmp_path,
-        _lane_factory(config, workspace, _implementer_through(
-            _recording_claude_backend(spawned)
-        )),
+        _lane_factory(config, workspace, _implementer_through(_recording_claude_backend(spawned))),
         ("1",),
     )
 
@@ -239,9 +227,7 @@ async def test_running_lanes_leaves_the_campaign_cache_selected(tmp_path):
 
     await _run_lanes(
         tmp_path,
-        _lane_factory(config, workspace, _implementer_through(
-            _recording_claude_backend([])
-        )),
+        _lane_factory(config, workspace, _implementer_through(_recording_claude_backend([]))),
         ("1", "2"),
     )
 
@@ -259,13 +245,9 @@ async def test_a_lane_denied_its_own_cache_is_refused_rather_than_shared(tmp_pat
     config, workspace = _campaign(tmp_path)
     aiter_cache.configure_aiter_cache_isolation(tmp_path / "experiments")
     lane_dir = _lane_dir(tmp_path, "1")
-    lane_dir.with_name(
-        lane_dir.name + cli._LANE_AITER_CACHE_SUFFIX
-    ).write_text("not a directory\n")
+    lane_dir.with_name(lane_dir.name + cli._LANE_AITER_CACHE_SUFFIX).write_text("not a directory\n")
 
-    factory = _lane_factory(
-        config, workspace, _implementer_through(_recording_claude_backend([]))
-    )
+    factory = _lane_factory(config, workspace, _implementer_through(_recording_claude_backend([])))
 
     with pytest.raises(OSError):
         factory(str(lane_dir), str(lane_dir / SERIALIZED_DRIVER_NAME))

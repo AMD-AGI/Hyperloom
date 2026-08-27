@@ -110,6 +110,7 @@ def test_turn_budget_is_configurable(tmp_path, monkeypatch: pytest.MonkeyPatch) 
 
 def _backend_returning(results: list, calls: list):
     """A backend replaying ``results``, one per call."""
+
     class Backend:
         name = "claude"
         capabilities = AgentCapabilities(sandbox=True, requires_workspace_cwd=True)
@@ -137,7 +138,9 @@ def test_proposals_survive_a_session_that_hit_the_turn_ceiling(tmp_path) -> None
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text=PROPOSALS, end_reason="turn_cap")], calls),
-        model="m", timeout_s=10, workdir=str(tmp_path),
+        model="m",
+        timeout_s=10,
+        workdir=str(tmp_path),
     )
 
     assert fn("DISCOVERY PROMPT") == PROPOSALS
@@ -147,11 +150,13 @@ def test_proposals_survive_a_session_that_hit_the_turn_ceiling(tmp_path) -> None
 def test_a_cut_short_session_with_no_proposals_still_fails(tmp_path) -> None:
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
-        _backend_returning(
-            [AgentRunResult(text="I could not finish reading", end_reason="turn_cap")], calls
-        ),
-        model="m", timeout_s=10, workdir=str(tmp_path),
-        attempts=2, base_delay_sec=0, max_delay_sec=0,
+        _backend_returning([AgentRunResult(text="I could not finish reading", end_reason="turn_cap")], calls),
+        model="m",
+        timeout_s=10,
+        workdir=str(tmp_path),
+        attempts=2,
+        base_delay_sec=0,
+        max_delay_sec=0,
     )
 
     with pytest.raises(discover_module.LlmUnavailableError):
@@ -165,8 +170,13 @@ def test_a_failed_discovery_leaves_a_transcript(tmp_path) -> None:
     calls: list = []
     fn = discover_module.registered_agent_llm_fn(
         _backend_returning([AgentRunResult(text="", end_reason="turn_cap")], calls),
-        model="m", timeout_s=10, workdir=str(tmp_path), log_path=str(log_path),
-        attempts=2, base_delay_sec=0, max_delay_sec=0,
+        model="m",
+        timeout_s=10,
+        workdir=str(tmp_path),
+        log_path=str(log_path),
+        attempts=2,
+        base_delay_sec=0,
+        max_delay_sec=0,
     )
 
     with pytest.raises(discover_module.LlmUnavailableError):

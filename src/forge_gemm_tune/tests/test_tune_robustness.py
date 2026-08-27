@@ -150,9 +150,16 @@ class TestRunIsolatedProfileMerge:
         monkeypatch.setattr(tr, "_latest_candidate", lambda *a, **k: None)
 
         rc, out, err, cand = tr.run_isolated(
-            script="x.py", base_args=base_args, input_csv=str(untuned),
-            tuned_stem="t", work_dir=tmp_path, aiter_root=str(tmp_path),
-            outer_timeout_s=60, task_timeout_s=30, gpu_ids="", blocklist=None,
+            script="x.py",
+            base_args=base_args,
+            input_csv=str(untuned),
+            tuned_stem="t",
+            work_dir=tmp_path,
+            aiter_root=str(tmp_path),
+            outer_timeout_s=60,
+            task_timeout_s=30,
+            gpu_ids="",
+            blocklist=None,
         )
         assert rc == 0
         body = shared_profile.read_text(encoding="utf-8")
