@@ -101,6 +101,15 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
             value = str(resolved_env.get(name) or "").strip()
             if value:
                 os.environ.setdefault(name, value)
+    # The authoring child inherits this process's environment, not the resolved
+    # copy above, so the tag has to be merged in here or the run arrives at the
+    # gateway anonymous. It is merged rather than copied from ``resolved_env``
+    # because that copy has been through ``_expand_env_refs``: writing it back
+    # would publish the operator's gateway secret in this process's environment,
+    # whereas merging preserves the ``${VAR}`` the child resolves for itself.
+    from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
+
+    inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     # Only set it when actually running as root so we do not defeat the guard
     # for non-root sessions that never needed the escape hatch.

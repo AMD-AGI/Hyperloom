@@ -1158,6 +1158,8 @@ async def run_codex_turn(
     codex_bin: str = "",
     output_schema: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    component: str = "",
+    operation: str = "",
 ) -> CodexSessionResult:
     """Run one non-interactive Codex turn in a session of its own.
 
@@ -1180,6 +1182,9 @@ async def run_codex_turn(
         output_schema (dict[str, Any] | None): JSON schema the final response
             must match.
         env (dict[str, str] | None): Values overlaid on ``os.environ``.
+        component (str): Producer label for the turn's calls; ``""`` disables
+            attribution tagging.
+        operation (str): What the turn is being run to do.
 
     Returns:
         CodexSessionResult: The normalized turn outcome.
@@ -1204,6 +1209,8 @@ async def run_codex_turn(
         base_url_env=base_url_env,
         codex_bin=codex_bin,
         env=env,
+        component=component,
+        operation=operation,
     )
     await session.start()
     result: CodexSessionResult | None = None

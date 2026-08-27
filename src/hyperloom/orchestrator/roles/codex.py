@@ -467,6 +467,8 @@ class CodexBackend:
                 sandbox_mode=self.sandbox_mode,
                 codex_bin=self.codex_bin,
                 env=self.env,
+                component="orchestration",
+                operation="orchestrate_turn",
             )
             self._thread_seeded = False
             try:
