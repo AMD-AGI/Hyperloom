@@ -73,6 +73,15 @@ DEADLINE_12H_S="${DEADLINE_12H_S:-46800}"  # 12h + 1h buffer = 13h
 DEADLINE_FIELD="${DEADLINE_FIELD:-timeout}"
 leg_deadline_s() { case "$1" in *-3h) echo "$DEADLINE_3H_S" ;; *-12h) echo "$DEADLINE_12H_S" ;; esac; }
 
+# SaFE caps the derived k8s object name at 44 chars (see create_workload), so we can
+# NOT embed the full CI_VERSION (e.g. 1.0.0.dev202608270954+ci) in every workload name
+# -- it would blow the limit and, once truncated, collide across legs (the leg suffix
+# gets cut). Instead build "e2e-<leg>-<short version hash>": the human-readable leg
+# stays intact up front, and a 6-hex digest of CI_VERSION disambiguates across runs
+# without length risk. All legs of one run share the same VERSION_TAG.
+VERSION_TAG="$(printf '%s' "$CI_VERSION" | sha1sum | cut -c1-6)"
+workload_name() { printf 'e2e-%s-%s' "$1" "$VERSION_TAG"; }  # $1 = leg (or "docker-host")
+
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"
 : "${SAFE_API_KEY:?SAFE_API_KEY is required}"
 : "${SAFE_WORKSPACE_ID:?SAFE_WORKSPACE_ID is required}"
@@ -146,11 +155,16 @@ common_env_json() {
 create_workload() {
   local name="$1" resources="$2" env="$3" privileged="$4" entry_b64="$5" deadline_s="${6:-}"
   local body resp code json wid dl_json="{}"
-  # SaFE derives the k8s object name from displayName, which must be an RFC 1123
-  # subdomain (lowercase alphanumerics, '-', '.'; start/end alphanumeric). CI_VERSION
-  # contains '+' (e.g. 1.0.0.dev...+ci), which is illegal and 422s the create. Fold
-  # any illegal char to '-', lowercase, and collapse/trim leading-trailing dashes.
-  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
+  # SaFE derives the k8s object name from displayName and enforces (via the
+  # vworkload admission webhook, STRICTER than plain RFC 1123): 1-44 chars, lower
+  # case alphanumerics or '-', MUST start with an ALPHABETIC char and end with an
+  # alphanumeric. So a leading digit or a '.'/'+' (both in CI_VERSION, e.g.
+  # 1.0.0.dev...+ci) is illegal, and the full "e2e-<CI_VERSION>-<leg>" easily
+  # exceeds 44. Fold every illegal char to '-', lowercase, collapse/trim dashes,
+  # then cap at 44 chars re-trimming any trailing dash the cut may leave.
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/-+/-/g; s/^[^a-z]+//; s/-+$//')"
+  name="${name:0:44}"; name="${name%%-}"
+  [ -n "$name" ] || name="e2e"
   # Attach the pod hard-deadline when both a field name and a value are set.
   if [ -n "$DEADLINE_FIELD" ] && [ -n "$deadline_s" ]; then
     dl_json="$(jq -n --arg k "$DEADLINE_FIELD" --argjson v "$deadline_s" '{($k): $v}')"
@@ -213,7 +227,7 @@ for leg in $REQ_TASKS; do
         | jq --arg leg "$leg" '. + {LEG_ID:$leg, HYPERLOOM_RUN_MODE:"baremetal"}')"
       entry="$(bootstrap_entry_b64 "")"
       dl="$(leg_deadline_s "$leg")"
-      wid="$(create_workload "e2e-${CI_VERSION}-${leg}" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
+      wid="$(create_workload "$(workload_name "$leg")" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
       DISPATCH["$leg"]="$wid"
       summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU, deadline $((dl/3600))h)"
       ;;
@@ -266,7 +280,7 @@ if [ "$want_docker_host" = 1 ]; then
   for leg in $docker_legs; do
     case "$leg" in *-12h) host_dl="$DEADLINE_12H_S" ;; esac
   done
-  wid="$(create_workload "e2e-${CI_VERSION}-docker-host" "$host_resources" "$host_env" true "$entry" "$host_dl")"
+  wid="$(create_workload "$(workload_name "docker-host")" "$host_resources" "$host_env" true "$entry" "$host_dl")"
   # Every docker leg shares the one host workloadId; the poll distinguishes them by
   # reading each leg's own session dir on NFS.
   for leg in $docker_legs; do
