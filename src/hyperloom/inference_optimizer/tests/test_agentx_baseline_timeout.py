@@ -117,18 +117,14 @@ def test_overhead_tracks_the_warmup_grace_the_operator_set(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
     grown = 14400 - AGENTX_CANON_WARMUP_GRACE_SEC
-    assert agentx_baseline_timeout_sec() == (
-        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown
-    )
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
 
 
 def test_canonical_grace_reproduces_the_measured_constant(monkeypatch):
     """Splitting the constant must not move it: same inputs, same number."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
-    assert agentx_baseline_timeout_sec() == (
-        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
-    )
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
 
 
 def test_explicit_overhead_outranks_the_derivation(monkeypatch):
@@ -153,9 +149,7 @@ def test_unparseable_grace_falls_back_to_canonical(monkeypatch, bad):
     """A typo in the grace must not shrink the cap below the measured default."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
-    assert agentx_baseline_timeout_sec() == (
-        AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC
-    )
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
 
 
 def test_explicit_cap_wins_outright(monkeypatch):

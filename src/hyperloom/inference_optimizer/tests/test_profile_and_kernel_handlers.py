@@ -915,8 +915,7 @@ def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound
     # The override is still honored verbatim; this is a visibility fix only.
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert any(
-        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message
-        for r in caplog.records
+        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message for r in caplog.records
     ), [r.message for r in caplog.records]
 
 

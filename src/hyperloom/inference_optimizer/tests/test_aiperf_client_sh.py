@@ -650,9 +650,7 @@ def test_reduced_warmup_is_flagged_non_canonical(tmp_path):
     assert r.returncode == 0, r.stderr
     out = _result(res)
     assert out["submission_valid"] is False
-    assert any(
-        "warmup_per_lane=1" in x for x in out["submission_invalid_reasons"]
-    ), out["submission_invalid_reasons"]
+    assert any("warmup_per_lane=1" in x for x in out["submission_invalid_reasons"]), out["submission_invalid_reasons"]
 
 
 def test_reduced_warmup_grace_is_flagged_non_canonical(tmp_path):
@@ -662,9 +660,7 @@ def test_reduced_warmup_grace_is_flagged_non_canonical(tmp_path):
     assert r.returncode == 0, r.stderr
     out = _result(res)
     assert out["submission_valid"] is False
-    assert any(
-        "warmup_grace=60s" in x for x in out["submission_invalid_reasons"]
-    ), out["submission_invalid_reasons"]
+    assert any("warmup_grace=60s" in x for x in out["submission_invalid_reasons"]), out["submission_invalid_reasons"]
 
 
 def test_canonical_warmup_is_not_flagged(tmp_path):
@@ -724,9 +720,9 @@ def test_raised_failed_request_threshold_is_flagged_non_canonical(tmp_path):
     assert r.returncode == 0, r.stderr
     out = _result(res)
     assert out["submission_valid"] is False
-    assert any(
-        "failed_request_threshold=0.5" in x for x in out["submission_invalid_reasons"]
-    ), out["submission_invalid_reasons"]
+    assert any("failed_request_threshold=0.5" in x for x in out["submission_invalid_reasons"]), out[
+        "submission_invalid_reasons"
+    ]
 
 
 def test_tightened_failed_request_threshold_is_not_flagged(tmp_path):
