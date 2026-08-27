@@ -437,10 +437,16 @@ def _resolve_framework_root(
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
+        # The allowlist does not necessarily hold it: it discovers the unprefixed
+        # env var, while the session root also answers to <FRAMEWORK>_REPO_PATH
+        # and <FRAMEWORK>_DIR. Leaving it out turns the tree under optimisation
+        # into a non-candidate, and default_root cannot stand in -- that is
+        # consulted only for a create-only set, which has no pre-image to match.
+        candidates = [Path(session_root), *roots] if session_root else list(roots)
         resolution = resolve_patch_apply_root(
             texts,
             explicit_root=explicit_path,
-            candidate_roots=tuple(roots),
+            candidate_roots=tuple(candidates),
             default_root=Path(session_root) if session_root else None,
         )
         if resolution.root is None:

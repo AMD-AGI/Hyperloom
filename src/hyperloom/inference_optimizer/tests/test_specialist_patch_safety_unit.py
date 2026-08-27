@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.orchestrator.specialists import patch_safety as ps
+from hyperloom.orchestrator.specialists import runner
 
 
 _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"
@@ -433,3 +434,45 @@ def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
     assert len(dropped) == 1
     assert dropped[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
     assert grounding[str(diff_file)] == ps.GROUND_AMBIGUOUS_ROOT
+
+
+# ---- grounding root selection ----------------------------------------------
+def test_grounding_root_uses_a_harvest_the_whole_set_agrees_on():
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/wt/patches/_worktree_diff.patch"],
+        patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
+    )
+    assert root == Path("/sgl-workspace/sglang")
+
+
+def test_grounding_root_declines_when_a_hand_authored_patch_rides_along():
+    """Its target tree is unknown; the harvest root would drop it as a mismatch."""
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/wt/patches/_worktree_diff.patch", "/wt/patches/manual.patch"],
+        patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
+    )
+    assert root is None
+
+
+def test_grounding_root_declines_when_harvests_disagree():
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/a.patch", "/b.patch"],
+        patch_roots={"/a.patch": "/tree/one", "/b.patch": "/tree/two"},
+    )
+    assert root is None
+
+
+def test_grounding_root_prefers_a_declared_source_root():
+    root = runner._grounding_explicit_root(
+        declared="/declared/tree",
+        patches=["/a.patch"],
+        patch_roots={"/a.patch": "/harvested/tree"},
+    )
+    assert root == Path("/declared/tree")
+
+
+def test_grounding_root_declines_for_an_empty_set():
+    assert runner._grounding_explicit_root(declared="", patches=[], patch_roots={}) is None

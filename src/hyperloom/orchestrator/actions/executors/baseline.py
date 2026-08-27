@@ -1225,11 +1225,17 @@ def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
         if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
     }
     if len(recorded) == 1:
-        allowed = allowlisted_explicit_root(recorded.pop(), allowlist=resolve_source_file_allowlist())
+        sole = recorded.pop()
+        allowed = allowlisted_explicit_root(sole, allowlist=resolve_source_file_allowlist())
         if allowed is not None:
             return str(allowed)
+        reason = f"recorded apply root {sole!r} is not usable"
+    elif recorded:
+        reason = f"patches record {len(recorded)} apply roots"
+    else:
+        reason = "no recorded apply root"
 
-    log.info("warm replay: no recorded apply root; resolving from patch targets")
+    log.info("warm replay: %s; resolving from patch targets", reason)
     root = _resolve_framework_root(
         resolve_session_framework_root() or None,
         patch_texts=_patch_texts_from_warm_params(params),

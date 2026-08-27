@@ -170,6 +170,36 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
     return tuple(out)
 
 
+def _grounding_explicit_root(
+    *,
+    declared: str,
+    patches: list[str],
+    patch_roots: dict[str, str],
+) -> Path | None:
+    """Return the root to ground the whole patch set against, or ``None``.
+
+    ``vet_patches`` grounds one set against one root, so a harvested root can
+    stand in only when every patch was harvested and they agree on it. A
+    hand-authored patch alongside a harvest has an unknown target tree, and
+    grounding it against the harvest root drops it as a mismatch rather than
+    matching it against the candidates.
+
+    Args:
+        declared: ``framework_source_root`` from the task params, if any.
+        patches: The deduplicated patch set about to be vetted.
+        patch_roots: Apply roots recorded for harvested patches.
+
+    Returns:
+        Path | None: The root, or None to fall back to candidate matching.
+    """
+    if declared:
+        return Path(declared)
+    if not patches or any(patch not in patch_roots for patch in patches):
+        return None
+    roots = set(patch_roots.values())
+    return Path(roots.pop()) if len(roots) == 1 else None
+
+
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
     """True when ``path`` resolves inside one of the specialist sandbox bases.
 
@@ -1351,23 +1381,19 @@ class SpecialistRunner:
                 _proposal.setdefault("scope", prep.profile.scope)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
-        # the rest, and scan for smuggled claims. A harvested patch already knows
-        # its root, so it is grounded against that one tree; only a hand-authored
-        # patch, whose target tree is unknown, is matched against the candidates.
+        # the rest, and scan for smuggled claims. Grounding is per set, not per
+        # patch, so the root below applies to all of them or to none.
         collected_roots = dict(patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
         candidate_roots = _sibling_checkouts(
             tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
             base_checkout,
         )
-        explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
-        harvested_roots = set(collected_roots.values())
-        if explicit_value:
-            explicit_root: Path | None = Path(explicit_value)
-        elif len(harvested_roots) == 1:
-            explicit_root = Path(harvested_roots.pop())
-        else:
-            explicit_root = None
+        explicit_root = _grounding_explicit_root(
+            declared=str((ctx.task.params or {}).get("framework_source_root") or "").strip(),
+            patches=deduped,
+            patch_roots=collected_roots,
+        )
         kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
