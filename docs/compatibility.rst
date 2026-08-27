@@ -53,7 +53,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
-| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), Atom, xDiT, plus |
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), plus             |
 |                     | ``custom`` for your own benchmark script               |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
