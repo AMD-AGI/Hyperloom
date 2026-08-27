@@ -51,7 +51,7 @@ _VLLM_NATIVE_PROFILER_MIN_VERSION: tuple[int, ...] = (0, 26)
 
 # Required in ``vllm/config/profiler.py`` for the server to accept the flags.
 _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
-    "capture_torch_profiler_dir",
+    "capture_torch_profiler",
     "detailed_trace_annotation",
 )
 

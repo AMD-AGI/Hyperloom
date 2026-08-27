@@ -14,7 +14,7 @@
 #      vllm_*.sh when PROFILE=1.
 # These are required for TraceLens fusion / roofline analysis.
 #
-# Issue #194 §4: `capture_torch_profiler_dir` and `detailed_trace_annotation`
+# Issue #194 §4: `capture_torch_profiler` and `detailed_trace_annotation`
 # ship upstream from vLLM 0.26; below that they come from the TraceLens
 # patch set at
 # TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_patches/.
@@ -22,9 +22,9 @@
 # Hyperloom's runtime patcher (HYPERLOOM_ENABLE_PATCH=1, default) tries
 # to apply the matching `config_vllm_v<version>.patch` against the
 # in-container vLLM install at the start of every profile. Capture
-# sidecars land under <torch_profiler_dir>/capture_traces, driven by the
-# `capture_torch_profiler_dir` path Magpie's TraceLens route supplies. If
-# patching succeeds, materialize_config_with_envs auto-appends
+# sidecars land under <torch_profiler_dir>/capture_traces when
+# `capture_torch_profiler` is enabled. If patching succeeds,
+# materialize_config_with_envs auto-appends capture_torch_profiler and
 # detailed_trace_annotation to EXTRA_VLLM_ARGS; if it fails (version
 # unsupported, fs read-only, already-patched fork, etc.) we fall back to
 # today's safe behaviour: only delay_iterations / max_iterations +

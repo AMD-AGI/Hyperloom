@@ -52,6 +52,38 @@ def test_native_local_build_is_accepted_without_patching(tmp_path, monkeypatch):
     assert calls == []
 
 
+_V028_PROFILER_PY_SNIPPET = """
+    capture_torch_profiler: bool = False
+    \"\"\"If `True`, enables a torch profiler during CUDA graph capture on rank 0.
+    Traces are saved to a `capture_traces` subdirectory under `torch_profiler_dir`.
+    Requires `profiler` to be set to 'torch'.\"\"\"
+
+    detailed_trace_annotation: bool = False
+    \"\"\"If `True`, uses detailed annotations with roofline metrics (sk, sqsq,
+    sqsk) in profiler trace events. If `False`, uses simple annotations with
+    only context/generation request counts and token counts.
+    Disabled by default.\"\"\"
+"""
+
+
+def test_native_v028_profiler_py_is_accepted_without_patching(tmp_path, monkeypatch):
+    """Regression: upstream v0.28 uses ``capture_torch_profiler`` (bool), not ``_dir``."""
+    sentinel = tmp_path / "vllm" / "config" / "profiler.py"
+    sentinel.parent.mkdir(parents=True, exist_ok=True)
+    sentinel.write_text(_V028_PROFILER_PY_SNIPPET, encoding="utf-8")
+    monkeypatch.setattr(sp, "_discover_vllm_install", lambda: ("0.28.0", tmp_path))
+    calls = _forbid_patching(monkeypatch)
+    assert sp.ensure_vllm_patched_for_tracelens(tmp_path / "tracelens") is True
+    assert calls == []
+
+
+def test_legacy_capture_torch_profiler_dir_substring_does_not_satisfy_sentinel(tmp_path):
+    """``torch_profiler_dir`` alone must not be mistaken for graph-capture support."""
+    path = Path(tmp_path) / "profiler.py"
+    path.write_text("torch_profiler_dir: str = ''\n", encoding="utf-8")
+    assert sp._markers_present(path, sp._VLLM_PROFILER_SENTINELS) is False
+
+
 def test_native_version_missing_the_fields_fails_soft(tmp_path, monkeypatch):
     # A 0.26 build without the upstream fields would reject the flags, and the
     # patch set does not cover it, so the caller has to drop them.

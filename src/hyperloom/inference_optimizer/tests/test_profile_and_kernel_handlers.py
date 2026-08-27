@@ -980,7 +980,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     tmp_path,
     monkeypatch,
 ):
-    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains detailed_trace_annotation on top of the default iteration count."""
+    """Patcher True for vLLM ⇒ EXTRA_VLLM_ARGS gains capture + annotation flags on top of iteration bounds."""
     import yaml
 
     _clear_workload_env(monkeypatch)
@@ -990,7 +990,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
-    assert "--profiler-config.detailed_trace_annotation True" in extra, extra
+    assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
@@ -1012,6 +1012,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     extra = envs["EXTRA_VLLM_ARGS"]
     assert "--profiler-config.delay_iterations 6080" in extra, extra
+    assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
     assert envs["HYPERLOOM_PROFILE_DEGRADED_REASON"] == "tracelens_runtime_patch_unavailable"
