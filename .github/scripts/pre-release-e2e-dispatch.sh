@@ -64,6 +64,11 @@ TARGET_GAIN="${TARGET_GAIN:-100}"
 HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"
+# SaFE workload scheduling priority (Spec.Priority, an int): High=2, Med=1, Low=0
+# (Primus-SaFE common/constant.go). The scheduler orders the queue by this value, and
+# the webhook clamps it into [0,2]. These release-gate legs hold 8 GPUs for up to 14h
+# and block the release, so run them High so they aren't starved behind dev workloads.
+PRIORITY="${PRIORITY:-2}"
 DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
 # Pod hard-timeout (design: 3h leg -> 3+1h, 12h leg -> 12+1h). SaFE terminates the
@@ -193,6 +198,7 @@ create_workload() {
     --arg name "$name" --arg ws "$SAFE_WORKSPACE_ID" --arg img "$AUTHORING_IMAGE" \
     --arg entry "$entry_b64" --argjson res "$resources" --argjson env "$env" \
     --argjson priv "$privileged" --argjson dl "$dl_json" \
+    --argjson prio "$PRIORITY" \
     '{
       displayName: $name,
       workspaceId: $ws,
@@ -201,6 +207,7 @@ create_workload() {
       images: [$img],
       entryPoints: [$entry],
       env: $env,
+      priority: $prio,
       useWorkspaceStorage: true
     } + (if $priv then {privileged:true} else {} end) + $dl')"
   resp="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' -X POST "$API" \
