@@ -78,12 +78,20 @@ def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
         return LEVER_ENABLEMENT
     if evidence.get("pr_url") or evidence.get("pr_lead"):
         return LEVER_UPSTREAM_PR
+    # What came back outranks what was asked for. A specialist is told which
+    # gap to close, never which lever to move, so a mandate that went out
+    # asking for a source patch routinely comes back holding server args -- and
+    # crediting the source arm for a configuration win puts a lesson with no
+    # changed files in the framework KB.
+    touches_source = bool(evidence.get("patch_name") or evidence.get("patches_applied") or evidence.get("patch_path"))
+    if not touches_source and (evidence.get("extra_server_args") or evidence.get("extra_envs")):
+        return LEVER_CONFIG
     # A candidate id names a PR unless it is the candidate-free local arm, which
     # authors against the live source with no upstream lead to attribute to.
     candidate_id = str(evidence.get("framework_agent_candidate_id") or "")
     if candidate_id:
         return LEVER_SOURCE_PATCH if candidate_id.startswith("local_explore:") else LEVER_UPSTREAM_PR
-    if evidence.get("patch_name") or evidence.get("specialist_task_id") or evidence.get("patches_applied"):
+    if touches_source or evidence.get("specialist_task_id"):
         return LEVER_SOURCE_PATCH
     return ""
 
