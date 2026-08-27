@@ -926,8 +926,6 @@ def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
     caplog,
 ):
     """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
-    import yaml
-
     _clear_workload_env(monkeypatch)
     monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
