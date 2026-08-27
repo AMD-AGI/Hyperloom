@@ -229,9 +229,8 @@ class EnablementParams(CoordinatorCollaborator):
                 "were dropped because their target file(s) do not exist in ANY "
                 "allowlisted framework source tree. Targets: "
                 + "; ".join(grounding_drops[:4])
-                + ". Use artifacts_written (whole-file install to an absolute "
-                "allowlisted path) instead of a unified diff, or verify the "
-                "target path with Glob/Read first."
+                + ". Verify the target path with Glob/Read inside the worktree "
+                "before authoring the diff."
             )
             notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
         if spanned_roots:
