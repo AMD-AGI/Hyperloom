@@ -5460,6 +5460,7 @@ def _write_trace(
     phases=None,
     unique_names=True,
     omit_host_steps=(),
+    omit_device_steps=(),
     extra_events=None,
 ):
     """Build a minimal torch-profiler trace with GPU step annotations.
@@ -5472,8 +5473,10 @@ def _write_trace(
 
     ``unique_names=False`` omits the per-step ``g_sk`` field, reproducing the
     framework builds whose step annotations repeat verbatim; the two timelines
-    then cannot be paired by name. ``omit_host_steps`` drops the host-side
-    annotation for the given step indices.
+    then cannot be paired by name. ``omit_host_steps`` and ``omit_device_steps``
+    drop one side's annotation for the given step indices, which is how real
+    captures arrive: most measured rank traces carry every host ``step[...]``
+    against only a handful of device ones.
     """
     # torch stamps metadata with the profiler-open ts, i.e. always before any
     # cut point -- reproduce that, it is what made a naive ts filter drop it.
@@ -5497,17 +5500,18 @@ def _write_trace(
         events.append(
             {"ph": "X", "cat": "cpu_op", "name": f"launch_{i}", "pid": 1, "tid": 1, "ts": host_ts + 0.1, "dur": 1.0}
         )
-        events.append(
-            {
-                "ph": "X",
-                "cat": "gpu_user_annotation",
-                "name": name,
-                "pid": 5,
-                "tid": 7,
-                "ts": ts,
-                "dur": dur,
-            }
-        )
+        if i not in omit_device_steps:
+            events.append(
+                {
+                    "ph": "X",
+                    "cat": "gpu_user_annotation",
+                    "name": name,
+                    "pid": 5,
+                    "tid": 7,
+                    "ts": ts,
+                    "dur": dur,
+                }
+            )
         events.append(
             {
                 "ph": "X",
@@ -5735,14 +5739,14 @@ def test_pretrim_pairs_timelines_by_position_not_by_name(tmp_path):
     assert "launch_1" in launches
 
 
-def test_pretrim_refuses_when_host_step_annotations_are_missing(tmp_path):
-    """Without a host annotation per device step the timelines cannot be paired.
+def test_pretrim_refuses_when_the_timelines_hold_different_step_counts(tmp_path):
+    """Unequal step counts make positional pairing meaningless, either way round.
 
     Falling back to a single cut is the outcome the split-cut design exists to
-    avoid, so the trim is refused and the reason recorded instead.
+    avoid, so the trim is refused and the counts recorded instead.
     """
     src = _write_trace(
-        tmp_path / "r.trace.json.gz",
+        tmp_path / "fewer_host.trace.json.gz",
         [15_781_320.0] + [32_944.0] * 20,
         omit_host_steps=(1, 2),
     )
@@ -5751,9 +5755,33 @@ def test_pretrim_refuses_when_host_step_annotations_are_missing(tmp_path):
     trimmed, report = tla.pretrim_startup_transient(src, dst)
 
     assert trimmed is False
-    assert report["reason"] == "host_steps_missing"
-    assert report["steps"] == 21
-    assert report["host_steps"] == 19
+    assert report["reason"] == "timeline_step_count_mismatch"
+    assert (report["steps"], report["host_steps"]) == (21, 19)
+    assert not dst.exists()
+
+
+def test_pretrim_refuses_when_device_step_annotations_are_missing(tmp_path):
+    """More host steps than device steps is the shape real captures arrive in.
+
+    Measured rank traces carry every host ``step[...]`` against a fraction of
+    the device ones, and the gaps are not at the tail. Indexing the host list by
+    the device position then resolves to some earlier step, putting the host cut
+    before the transient and leaving its host side in the window -- and a guard
+    that only rejects *too few* host entries lets it through, because there are
+    more of them, not fewer.
+    """
+    src = _write_trace(
+        tmp_path / "fewer_device.trace.json.gz",
+        [15_781_320.0] + [32_944.0] * 20,
+        omit_device_steps=(5, 9, 13),
+    )
+    dst = tmp_path / "r.pretrimmed.trace.json.gz"
+
+    trimmed, report = tla.pretrim_startup_transient(src, dst)
+
+    assert trimmed is False
+    assert report["reason"] == "timeline_step_count_mismatch"
+    assert (report["steps"], report["host_steps"]) == (18, 21)
     assert not dst.exists()
 
 

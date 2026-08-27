@@ -1096,11 +1096,18 @@ def _host_step_starts(events: list[Any]) -> list[float]:
     names are the framework's and are not unique: a build that omits the
     cumulative-sequence-length fields repeats ``step[DECODE bs=36]`` for every
     step at that batch size, and keying on it silently pairs the surviving step
-    with the *first* step of the capture. Both timelines carry one annotation per
-    step in execution order, so the Nth host entry is the Nth device step
-    whatever the names say. Indexing from the front also tolerates the host's
-    trailing extras: a capture can stop with launches already issued for a step
-    whose device span never landed.
+    with the *first* step of the capture.
+
+    Positional pairing needs the two timelines to hold one annotation per step,
+    and that is a property of the capture rather than something this can assume.
+    Across 32 measured per-rank captures only 5 held it; the other 27 carried
+    128 host ``step[...]`` annotations against a single device one, with the
+    step's own *children* (``scheduler.run_batch``, ``copy_result_to_cpu``)
+    projected onto the device 127 times each. Whatever produces that, the
+    missing entries are not a tail: the Nth host start is then some earlier
+    step's, and both the count check and the ordering check downstream would
+    pass while the host cut lands too early. The caller therefore requires the
+    counts to match exactly and refuses the trim otherwise.
 
     Args:
         events (list[Any]): ``traceEvents`` from a torch-profiler trace.
@@ -1313,13 +1320,16 @@ def pretrim_startup_transient(
     # dropped step's post-barrier kernels behind as orphans.
     gpu_cut = spans[dropped][0]
     host_starts = _host_step_starts(events)
-    if len(host_starts) < len(spans):
-        # Without one host annotation per device step the two timelines cannot be
-        # paired positionally, and pairing by name is not an alternative (see
-        # `_host_step_starts`). Refuse rather than fall back to a single cut,
-        # which is the outcome this split exists to avoid.
+    if len(host_starts) != len(spans):
+        # Exact equality, not "enough host entries": a capture that carries more
+        # host annotations than device ones is missing them from the middle, not
+        # the tail (see `_host_step_starts`), so the Nth host start belongs to
+        # some earlier step and the host cut silently lands too early. Pairing by
+        # name is not an alternative either. Refuse rather than approximate --
+        # the caller keeps the untrimmed trace, which is the state this whole
+        # step was added to improve on but never worse than it.
         return False, {
-            "reason": "host_steps_missing",
+            "reason": "timeline_step_count_mismatch",
             "steps": len(spans),
             "host_steps": len(host_starts),
         }
