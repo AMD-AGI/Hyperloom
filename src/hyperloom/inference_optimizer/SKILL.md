@@ -239,30 +239,38 @@ brief:
   20%). Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is
   already inside that fraction, since charge-back rebuilds the allotment from
   the time left at phase entry; there is no session-remaining arm.
-- **Plateau advisory**: per-arm OPTIMIZE and KERNEL_AGENT plateau signals
-  are computed every tick and rendered as advisory in the orchestration
-  prompt. They do NOT drive phase advance — the LLM may emit
+- **Plateau**: both arms' signals and KERNEL_AGENT's are computed every tick
+  and rendered in the orchestration prompt. One arm dry is advisory — the
+  phase stays open on the other lever. **Both arms dry advances the phase**
+  via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
+  LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. IR-6 force-exit and the
-  per-phase budget remain the only hard advance gates.
+  when it judges further effort unproductive.
 
-### FRAMEWORK_AGENT phase (Coordinator-internal)
+### FRAMEWORK_AGENT phase — the optimisation phase
 
-Runs inside OPTIMIZE (`--no-framework-agent` skips the whole phase). The
-Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework_agent` action. It discovers a candidate batch **once** via
-`fa phase-discover`; then each exploration processes exactly **one**
-candidate, with the agent ranking the still-available candidates and
-picking the one most likely to raise throughput (LLM ranker, with a
-deterministic discovery-order fallback). The chosen candidate is
-Critic-gated, then `git apply`d against the live framework_source_roots
-and benchmarked; KEEP commits to the live tree (next candidate stacks on
-top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), **plateau (5 consecutive benchmarked candidate tests
-with no KEEP)**, the per-phase budget cap,
-or an empty discovery batch. Resume skips completed candidates by
-idempotency key. The launcher only chooses whether the phase runs
-(`--no-framework-agent`).
+One phase, two arms (`--no-framework-agent` skips it entirely).
+
+The **configuration arm** runs server-arg / env grids, sourced by specialist
+fan-out. The **source arm** lands upstream PRs and specialist-authored
+patches. They are worked in parallel and rotate on their own plateau
+judgement, not on a wall-clock split.
+
+The source arm's supply is the `candidate_discovery_specialist`: it surveys
+the allowlisted repos, ranks what it finds against the stack and the tried
+ledger, and judges each entry — already present, not applicable, or worth a
+bench and by which route. The pump takes that batch in the order given; it
+does not re-rank or re-audit. When discovery comes back empty its full retry
+budget, the local-exploration arm authors against profile evidence instead;
+with that off too, the source arm reports itself dry.
+
+Every diff lands through `integrate_patch`, with `patch_source` naming where
+it came from. KEEP commits to the live tree so the next candidate stacks on
+top; REVERT does `git reset --hard`. Resume skips completed candidates by
+idempotency key.
+
+The phase exits when both arms are dry, on the per-phase budget cap, or on the
+IR-6 force-exit gate.
 
 ### IR-8 — `--framework atom` is single-node only
 
