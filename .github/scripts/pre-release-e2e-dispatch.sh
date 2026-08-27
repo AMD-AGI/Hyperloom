@@ -44,9 +44,11 @@
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
 #                     (default 14400 = 3+1h / 46800 = 12+1h). The docker host
 #                     pod uses the MAX over its legs. SaFE kills the pod at the
-#                     deadline; poll then judges that leg FAIL.
-#   DEADLINE_FIELD    SaFE payload field for the deadline (default
-#                     activeDeadlineSeconds; set "" to omit). TODO(owner): confirm.
+#                     deadline; poll then judges that leg FAIL. Timing starts when
+#                     the workload is DISPATCHED, not when it is queued.
+#   DEADLINE_FIELD    SaFE payload field for the deadline (default `timeout`, the
+#                     authoritative WorkloadSpec.Timeout field, integer seconds,
+#                     top-level in the create-workload body; set "" to omit).
 #   SAFE_CACERT / SAFE_INSECURE    TLS to the API (CA bundle / skip-verify)
 set -euo pipefail
 
@@ -58,13 +60,17 @@ DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
 # Pod hard-timeout (design: 3h leg -> 3+1h, 12h leg -> 12+1h). SaFE terminates the
 # workload at the deadline; the poll then sees a non-Succeeded terminal / missing
-# report and judges that leg FAIL. Given per duration:
+# report and judges that leg FAIL. The deadline is counted from DISPATCH (not queue)
+# time, so the +1h buffer absorbs bootstrap/setup/agent overhead. Given per duration:
 DEADLINE_3H_S="${DEADLINE_3H_S:-14400}"    # 3h + 1h buffer  = 4h
 DEADLINE_12H_S="${DEADLINE_12H_S:-46800}"  # 12h + 1h buffer = 13h
-# The SaFE API field that carries the pod deadline. TODO(owner): confirm the real
-# field name/placement against the SaFE Authoring API; k8s convention is
-# activeDeadlineSeconds (integer seconds). Set DEADLINE_FIELD="" to omit entirely.
-DEADLINE_FIELD="${DEADLINE_FIELD:-activeDeadlineSeconds}"
+# The SaFE API field that carries the pod deadline. Confirmed against the Primus-SaFE
+# codebase: the create-workload body embeds WorkloadSpec inline, whose `timeout`
+# (integer seconds, top-level, from dispatch time) is enforced by WorkloadTTLController
+# for ALL workload kinds incl. Authoring. Set DEADLINE_FIELD="" to omit (then the pod
+# survival cap falls back to the workspace's per-scope maxRuntime, or the poll-side
+# GLOBAL_TIMEOUT_S if none). Ref: apis/pkg/apis/amd/v1/workload_types.go WorkloadSpec.Timeout.
+DEADLINE_FIELD="${DEADLINE_FIELD:-timeout}"
 leg_deadline_s() { case "$1" in *-3h) echo "$DEADLINE_3H_S" ;; *-12h) echo "$DEADLINE_12H_S" ;; esac; }
 
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"
