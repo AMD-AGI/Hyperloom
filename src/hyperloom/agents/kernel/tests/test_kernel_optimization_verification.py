@@ -131,6 +131,34 @@ def test_structured_shape_cases_parse_moe_args():
     assert cases["supplementary_shapes"] == []
 
 
+def test_captured_shapes_block_claims_measurement_only_for_a_measurement():
+    """The block tells the backend not to invent shapes, so it has to be honest
+    about where these came from: a graph replay records no arguments, and the
+    dims may have been reconstructed by the candidate review. Whether they were
+    measured is exactly what a later reader needs when the tuned kernel turns
+    out not to move end-to-end throughput.
+    """
+    measured = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": "torch_trace"})
+    assert "TraceLens-captured" in measured
+    assert "do NOT invent" in measured
+
+    for provenance in ("review_backfill", "review_derived"):
+        reviewed = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": provenance})
+        assert "TraceLens-captured" not in reviewed
+        assert "reconstructed" in reviewed
+        assert provenance in reviewed
+        # The instruction itself does not soften: choosing its own shapes is
+        # what the backend does when this block is absent.
+        assert "do NOT invent" in reviewed
+
+
+def test_captured_shapes_block_is_empty_without_dims():
+    """No block means the backend picks its own shapes -- the state this whole
+    path exists to get out of.
+    """
+    assert ko._build_captured_shapes_block({"shapes": []}) == ""
+
+
 def test_structured_shape_cases_prefer_input_shapes():
     candidate = {
         "name": "aiter::ck_moe_stage2",
@@ -228,6 +256,11 @@ def test_structured_shape_cases_falls_back_to_input_shapes_when_group_rows_empty
 
 
 def test_build_prompt_includes_structured_shape_contract():
+    """The runtime-metadata block promotes ``input_shapes`` into a shape contract.
+
+    Rendered through the full prompt: the metadata block is GEAK's, and forge is
+    handed the same operands through its invocation spec instead.
+    """
     shape = "(15360,8,768) bf16<br>(128,1536,2048) bf16"
     candidate = {
         "name": "aiter::ck_moe_stage2",
@@ -238,7 +271,7 @@ def test_build_prompt_includes_structured_shape_contract():
         "input_shapes": [{"call_num": 48, "shape": shape}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+    prompt = ko.build_prompt(candidate, _args())
 
     assert "when `benchmark_shape_cases` is present" in prompt
     assert '"benchmark_shape_cases"' in prompt
@@ -262,13 +295,134 @@ def test_build_prompt_omits_structured_shape_cases_without_program_output():
         "shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
     }
 
-    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+    prompt = ko.build_prompt(candidate, _args())
     metadata_json = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     metadata = json.loads(metadata_json)
 
     assert "benchmark_shape_cases" not in metadata
     assert "Shapes:" in prompt
     assert "when `benchmark_shape_cases` is present" not in prompt
+
+
+def test_build_prompt_forge_keeps_the_target_arch_and_the_harness_paths(tmp_path):
+    """Three blocks left the forge shape by omission, not by design.
+
+    The comment above ``forge_sections`` lists what it removes and why, and none
+    of these were on it. ``hardware_notes`` carries the ROCm arch, so without it
+    an agent can emit a gfx942 intrinsic for a gfx950 host and the rewrite does
+    not compile; ``bench_block`` names the harnesses the trace resolved and is
+    the only channel by which a review-verified ``benchmark_files`` reaches this
+    backend at all.
+    """
+    bench = tmp_path / "test_gemm.py"
+    bench.write_text("def test_gemm(): pass\n", encoding="utf-8")
+    candidate = {
+        "name": "gemm_afp4wfp4",
+        "source_file": "/tmp/gemm_afp4wfp4.py",
+        "source_type": "python",
+        "benchmark_files": [str(bench)],
+        "target_platform": "mi355x",
+    }
+
+    prompt = ko.build_prompt(candidate, _args(), backend="forge")
+
+    assert "Hardware notes" in prompt
+    assert str(bench) in prompt
+    # Still without the sections that fight forge's own workspace guard.
+    assert "optimization_report.md" not in prompt
+    assert "optimized_versions/" not in prompt
+
+
+def test_build_prompt_forge_falls_back_to_the_full_analysis(tmp_path):
+    """The forge shape keeps "the trace evidence forge cannot derive".
+
+    The hypothesis block is built from TraceLens p-items, so a kernel the trace
+    ranked without one renders it empty and ``analysis.md`` is the only place
+    that evidence exists. Building the fallback after the forge early return
+    dropped it for exactly those rows -- the ones with the least other context.
+    """
+    report = tmp_path / "analysis.md"
+    report.write_text("# Analysis\n\nMemory bound on the sparse path.\n", encoding="utf-8")
+    candidate = _candidate(trace_report_path=str(report))
+    candidate.pop("tracelens_hypothesis", None)
+
+    forge = ko.build_prompt(candidate, _args(), backend="forge")
+    geak = ko.build_prompt(candidate, _args())
+
+    assert "Memory bound on the sparse path." in forge
+    assert "TraceLens Context" in forge
+    assert "Memory bound on the sparse path." in geak
+
+
+def test_build_prompt_forge_multinode_states_the_constraint_without_the_geak_recipe(monkeypatch):
+    """The GPU-less constraint is shared; the procedure under it is not.
+
+    The multi-node block routes measurements through ``kernel-bench`` and names
+    ``optimized_versions/`` and ``optimization_report.md`` -- the two paths
+    forge's workspace guard refuses, and the reason the deliverable contract was
+    dropped. Handing forge the whole block put them straight back, so a
+    multi-node forge run lost its first iteration exactly as before.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    prompt = ko.build_prompt(_candidate(), _args(), backend="forge")
+
+    assert "this node has no GPU" in prompt
+    assert "optimization_report.md" not in prompt
+    assert "optimized_versions/" not in prompt
+    assert "kernel-bench" not in prompt
+
+
+def test_build_prompt_geak_multinode_keeps_its_dispatch_recipe(monkeypatch):
+    """GEAK brings no benchmark of its own, so it still needs the procedure."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_NODES", "2")
+    prompt = ko.build_prompt(_candidate(), _args())
+
+    assert "kernel-bench" in prompt
+    assert "optimization_report.md" in prompt
+
+
+def test_build_prompt_forge_drops_the_geak_harness_and_keeps_trace_evidence():
+    """Forge is handed trace evidence only, not the harness it does not run.
+
+    The dropped sections are not merely redundant there. The deliverable files
+    land as new untracked paths that forge's workspace guard refuses, costing the
+    iteration that wrote them, and the A/B recipes stand up a second benchmark
+    beside the driver its own gate scores. Asserting their absence is what keeps
+    a later edit from reintroducing either through the shared prompt.
+    """
+    candidate = {
+        "name": "aiter::ck_moe_stage2",
+        "source_file": "/tmp/gemm_moe_ck2stages.cu",
+        "source_type": "hip_cpp",
+        "kernel_repo": "/tmp/aiter",
+        "gpu_pct": 24.3,
+        "device_kernel_name": "ck_moe_stage2_kernel",
+        "source_resolution_method": "op_to_source",
+        "input_shapes": [{"call_num": 48, "shape": "(15360,8,768) bf16"}],
+    }
+
+    forge = ko.build_prompt(candidate, _args(), backend="forge")
+    full = ko.build_prompt(candidate, _args())
+
+    # Absent from forge, still present for the backend that needs them.
+    for token in (
+        "optimization_report.md",
+        "optimized_versions/",
+        "mini-swe-agent step",
+        "cpp_extension.load",
+        "structured context for GEAK",
+        "IMPORTANT — sandbox rules",
+    ):
+        assert token not in forge, token
+        assert token in full, token
+
+    # Kept: what forge cannot derive from the kernel or its invocation spec.
+    assert "DEVICE KERNEL FOCUS" in forge
+    assert "ck_moe_stage2_kernel" in forge
+    assert "Preserve function name" in forge
+    assert forge.startswith("# TASK: Optimize the `aiter::ck_moe_stage2` kernel")
+    # A skipped section must not leave a run of blank lines behind.
+    assert "\n\n\n" not in forge
 
 
 def test_benchmark_available_alone_does_not_pass_correctness(tmp_path):
@@ -1019,6 +1173,65 @@ def test_resolve_deploy_repo_root_from_absolute_installed_source(tmp_path):
         str(source),
         descriptors,
     ) == str(deploy_root)
+
+
+def test_resolve_deploy_repo_root_anchors_on_the_traced_source(tmp_path):
+    """A tie between two ancestors is broken by the source the trace resolved.
+
+    aiter ships the same relative path under both ``ops/triton`` and
+    ``ops/triton/_triton_kernels``, holding two different files, and forge roots
+    its worktree at the deeper one -- so the exported entry ``gemm/basic/k.py``
+    exists under two ancestors of the traced source. The walk alone finds two
+    matches and refuses, reporting a correct rewrite as an unresolvable
+    artifact. Which of the two defines the kernel is not a guess: it is what
+    ``target_file`` says.
+    """
+    pkg = tmp_path / "site-packages" / "aiter" / "ops" / "triton"
+    shallow = pkg / "gemm" / "basic" / "k.py"
+    deep = pkg / "_triton_kernels" / "gemm" / "basic" / "k.py"
+    for path, body in ((shallow, "shallow\n"), (deep, "deep\n")):
+        path.parent.mkdir(parents=True)
+        path.write_text(body)
+    descriptors = [
+        {"op": "write", "path": "gemm/basic/k.py", "is_new": False},
+        {"op": "write", "path": "graph_harness.py", "is_new": True},
+    ]
+
+    # Both ancestors carry the relative path, so the walk cannot decide.
+    assert shallow.exists() and deep.exists()
+    assert ko.resolve_deploy_repo_root(str(deep), descriptors) == str(pkg / "_triton_kernels")
+    # The shallower copy anchors on its own root, not on whichever comes first.
+    assert ko.resolve_deploy_repo_root(str(shallow), descriptors) == str(pkg)
+
+
+def test_resolve_deploy_repo_root_anchor_still_requires_the_preimage(tmp_path):
+    """The anchor concludes nothing the preimage check would not confirm.
+
+    Stripping a descriptor off the traced path is only a candidate root. A
+    descriptor set that does not belong to that tree has to fall through, or the
+    anchor would hand a backend a root it never verified.
+    """
+    deploy_root = tmp_path / "site-packages"
+    source = deploy_root / "pkg" / "ops" / "k.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("kernel\n")
+
+    # Tail matches the traced path, but the sibling preimage is absent, so the
+    # derived root fails the check and no ancestor satisfies it either.
+    descriptors = [
+        {"op": "write", "path": "ops/k.py", "is_new": False},
+        {"op": "write", "path": "ops/missing_sibling.py", "is_new": False},
+    ]
+    assert ko.resolve_deploy_repo_root(str(source), descriptors) == ""
+
+    # A traversal entry is refused rather than resolved by subtraction.
+    assert (
+        ko.resolve_deploy_repo_root(
+            str(source),
+            [{"op": "write", "path": "../etc/passwd", "is_new": False}],
+        )
+        == ""
+    )
 
 
 def test_build_patch_snapshot_returns_none_when_content_unavailable(tmp_path):

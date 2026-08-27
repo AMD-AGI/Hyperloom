@@ -310,11 +310,11 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def trusted_explicit_root(
+def allowlisted_explicit_root(
     explicit: str,
     allowlist: tuple[str, ...] | None = None,
 ) -> Path | None:
-    """Resolve a declared framework root, or ``None`` when it is not trusted.
+    """Resolve a declared framework root, or ``None`` when it is not allowlisted.
 
     A root outside the allowlisted source scope is refused whatever its tree
     holds, so callers must ask this before blaming the patches for not
@@ -328,7 +328,7 @@ def trusted_explicit_root(
 
     Returns:
         The resolved directory, or ``None`` when it is unreadable, absent, or
-        outside the trusted source scope.
+        outside the allowlisted source scope.
     """
     try:
         resolved = Path(explicit).resolve()
@@ -373,17 +373,41 @@ def _read_patch_texts(patch_paths: list[Path] | None) -> list[str]:
     return texts
 
 
+def _sole_patch_root(done_payload: dict[str, Any] | None) -> str | None:
+    """Return the one apply root recorded for every patch, or ``None``.
+
+    A set spanning two trees has no single apply root, so it falls back to
+    resolution rather than silently picking one.
+
+    Args:
+        done_payload: The originating specialist's done payload, if any.
+
+    Returns:
+        The sole recorded root, or ``None``.
+    """
+    raw = (done_payload or {}).get("patch_roots")
+    if not isinstance(raw, dict):
+        return None
+    roots = {str(v) for v in raw.values() if str(v).strip()}
+    return roots.pop() if len(roots) == 1 else None
+
+
 def _resolve_framework_root(
     explicit: str | None,
     patch_paths: list[Path] | None = None,
     patch_texts: list[str] | None = None,
+    recorded_root: str | None = None,
 ) -> Path | None:
     """Pick one unambiguous framework root under the shared Patch rules.
 
-    With patches to place, the decision is
-    :func:`~...specialists.patch_safety.resolve_patch_apply_root`'s and it fails
-    closed. Without any, there is nothing to match a tree against, so the
-    session's declared root wins and the allowlist order is the last resort.
+    A ``recorded_root`` — carried from the authoring stage through
+    ``done_payload["patch_roots"]`` — is authoritative and skips probing
+    entirely. It is rejected outright when it falls outside the allowlist,
+    exactly as a declared ``explicit`` root is.
+
+    Without a recorded root, the decision falls through to
+    :func:`~...specialists.patch_safety.resolve_patch_apply_root`. Without any
+    patches to place, the session's declared root wins.
 
     Args:
         explicit: Declared framework root. Rejected when it resolves outside
@@ -391,15 +415,20 @@ def _resolve_framework_root(
         patch_paths: Patch files to place; unreadable ones are skipped.
         patch_texts: Patch diffs already in memory, placed alongside
             ``patch_paths``.
+        recorded_root: The apply root recorded at authoring time, if any.
 
     Returns:
         The resolved root, or ``None`` when the patches name no single tree.
     """
     allowlist = resolve_source_file_allowlist()
     roots = [Path(root) for root in allowlist]
+
+    if recorded_root:
+        return allowlisted_explicit_root(recorded_root, allowlist=allowlist)
+
     explicit_path: Path | None = None
     if explicit:
-        explicit_path = trusted_explicit_root(explicit, allowlist=allowlist)
+        explicit_path = allowlisted_explicit_root(explicit, allowlist=allowlist)
         if explicit_path is None:
             return None
 
@@ -408,14 +437,16 @@ def _resolve_framework_root(
     has_patch_input = bool(patch_paths or patch_texts)
     if has_patch_input:
         session_root = resolve_session_framework_root()
-        candidates = [
-            *roots,
-            *((Path(session_root),) if session_root else ()),
-        ]
+        # The allowlist does not necessarily hold it: it discovers the unprefixed
+        # env var, while the session root also answers to <FRAMEWORK>_REPO_PATH
+        # and <FRAMEWORK>_DIR. Leaving it out turns the tree under optimisation
+        # into a non-candidate, and default_root cannot stand in -- that is
+        # consulted only for a create-only set, which has no pre-image to match.
+        candidates = [Path(session_root), *roots] if session_root else list(roots)
         resolution = resolve_patch_apply_root(
             texts,
             explicit_root=explicit_path,
-            candidate_roots=candidates,
+            candidate_roots=tuple(candidates),
             default_root=Path(session_root) if session_root else None,
         )
         if resolution.root is None:
@@ -1171,6 +1202,9 @@ class _ArtifactSpec:
             absolute target is converted to this relative form). Used for
             reporting AND as the framework-relative key for the durable KEEP
             source snapshot.
+        root: The allowlisted root ``rel_target`` is relative to. The KEEP
+            source snapshot is keyed on one root, so an artifact installed into
+            a different tree than the patches must be recognisable as such.
         kind: Free-form artifact kind label (e.g. ``config_json``).
         description: Free-form human description.
     """
@@ -1178,11 +1212,12 @@ class _ArtifactSpec:
     source: Path
     target: Path
     rel_target: str
+    root: Path
     kind: str = ""
     description: str = ""
 
 
-def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
+def _resolve_artifact_target(rel_target: str) -> tuple[Path, str, Path] | None:
     """Resolve an artifact target (framework-relative, or absolute) to a path.
 
     A relative target picks the allowlisted framework root whose tree already
@@ -1196,10 +1231,9 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
             relative, or an absolute path inside an allowlisted root).
 
     Returns:
-        A ``(absolute_target, framework_relative_target)`` tuple, or ``None``
-        when nothing resolves safely. ``framework_relative_target`` is the path
-        relative to the matched root (POSIX). Callers MUST persist THIS as the
-        artifact ``rel_target`` so the durable KEEP source snapshot captures the
+        A ``(absolute_target, framework_relative_target, root)`` tuple, or
+        ``None`` when nothing resolves safely. Callers MUST persist the relative
+        target AND the root so the durable KEEP source snapshot captures the
         installed file even when the author used an absolute path.
     """
     rel = (rel_target or "").strip()
@@ -1215,7 +1249,7 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
         cand = Path(rel).resolve()
         for root in roots:
             if _is_within(cand, root):
-                return cand, cand.relative_to(root).as_posix()
+                return cand, cand.relative_to(root).as_posix(), root
         return None
     # Prefer a root whose tree already holds the target's parent dir.
     for root in roots:
@@ -1223,12 +1257,12 @@ def _resolve_artifact_target(rel_target: str) -> tuple[Path, str] | None:
         if not _is_within(cand, root):
             continue
         if cand.parent.is_dir():
-            return cand, cand.relative_to(root).as_posix()
+            return cand, cand.relative_to(root).as_posix(), root
     # Fall back to the first root that keeps the path contained.
     for root in roots:
         cand = (root / rel).resolve()
         if _is_within(cand, root):
-            return cand, cand.relative_to(root).as_posix()
+            return cand, cand.relative_to(root).as_posix(), root
     return None
 
 
@@ -1295,12 +1329,13 @@ def _resolve_artifact_specs(
         if resolved is None:
             errors.append({"artifact": tgt_rel, "error": "target_unresolved_or_escapes_root"})
             continue
-        target, rel_norm = resolved
+        target, rel_norm, root = resolved
         specs.append(
             _ArtifactSpec(
                 source=src_resolved,
                 target=target,
                 rel_target=rel_norm,
+                root=root,
                 kind=str(entry.get("kind") or "").strip(),
                 description=str(entry.get("description") or "").strip(),
             )
@@ -2223,19 +2258,20 @@ class IntegratePatchExecutor:
         framework_root = _resolve_framework_root(
             explicit_framework_root,
             patch_paths=patch_paths,
+            recorded_root=_sole_patch_root(done_payload),
         )
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                # An untrusted root is refused on that ground alone; only a
-                # trusted one that simply lacks the files is the patches' fault.
-                trusted_root = trusted_explicit_root(explicit_framework_root)
-                if trusted_root is not None:
+                # A non-allowlisted root is refused on that ground alone; only
+                # an allowlisted one that simply lacks the files is the patches' fault.
+                allowed_root = allowlisted_explicit_root(explicit_framework_root)
+                if allowed_root is not None:
                     if not _read_patch_texts(patch_paths):
                         _error_class = "patch_unreadable"
                         _error = "no patch file could be read; verify paths and permissions"
                     else:
-                        missing_records = _preflight_missing_targets(trusted_root, patch_paths)
+                        missing_records = _preflight_missing_targets(allowed_root, patch_paths)
                         if missing_records:
                             _error_class = "patch_target_missing"
                             _error = missing_records
@@ -3333,15 +3369,34 @@ class IntegratePatchExecutor:
         source_manifest_path = ""
         source_target_files: list[str] = []
         source_base_sha = ""
+        source_snapshot_complete = False
+        source_import_root_val = ""
         try:
             from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
+            from ._patch_snapshot import _patch_touched_paths_split
 
             if framework_root is not None:
                 _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
                 if _cp is not None and getattr(_cp, "returncode", 1) == 0:
                     source_base_sha = (_cp.stdout or "").strip()
-                rel_paths = list(_patch_touched_paths(framework_root, applied))
-                rel_paths += [str(a.get("rel_target") or "") for a in (applied_artifacts or []) if isinstance(a, dict)]
+                upserted_patch, deleted_patch = _patch_touched_paths_split(framework_root, applied)
+                declared_ops = {r: "upsert" for r in upserted_patch}
+                declared_ops.update({r: "delete" for r in deleted_patch})
+                rel_paths = upserted_patch + deleted_patch
+                # An artifact installed into a sibling tree is not addressable by
+                # a rel path under this root, so it belongs to no snapshot here.
+                rel_paths += [
+                    str(a["rel_target"])
+                    for a in (applied_artifacts or [])
+                    if isinstance(a, dict)
+                    and a.get("rel_target")
+                    and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
+                ]
+                from ...framework.adapters import get_adapter
+
+                source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
+                    str(framework_root)
+                )
                 dest = (
                     self.session_dir
                     / "optimization_stack"
@@ -3355,6 +3410,8 @@ class IntegratePatchExecutor:
                     dest_dir=dest,
                     provenance="integrate_patch",
                     extra={"specialist_task_id": specialist_task_id},
+                    declared_ops=declared_ops,
+                    import_root=source_import_root_val,
                 )
                 if snap:
                     source_snapshot_dir = str(snap.get("snapshot_dir") or "")
@@ -3365,6 +3422,7 @@ class IntegratePatchExecutor:
                         for item in (snap.get("files") or [])
                         if isinstance(item, dict) and item.get("rel")
                     ]
+                    source_snapshot_complete = bool(snap.get("complete"))
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
@@ -3399,6 +3457,8 @@ class IntegratePatchExecutor:
                 "workspace": str(output_root),
                 "source_snapshot": source_snapshot_dir,
                 "source_manifest": source_manifest_path,
+                "source_snapshot_complete": source_snapshot_complete,
+                "source_import_root": source_import_root_val,
                 "target_files": source_target_files,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,
@@ -3973,7 +4033,7 @@ class IntegratePatchExecutor:
                     target_str,
                 )
                 continue
-            target, _ = resolved
+            target = resolved[0]
             # Set before the write so a copy that raises still counts as dirtying.
             self._ip_base_artifact_replayed = True
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -4017,6 +4077,7 @@ class IntegratePatchExecutor:
                     {
                         "target": str(spec.target),
                         "rel_target": spec.rel_target,
+                        "root": str(spec.root),
                         "kind": spec.kind,
                         "existed": existed,
                         "backup": backup_path,

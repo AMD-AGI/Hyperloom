@@ -778,8 +778,12 @@ rewrite (each with a `skip_reason`); they are off-limits, not targets.
   request{target_agent: 'kernel_agent', kind: 'run_optimization',
           params: {kernel_id: <picked kernel_id>,
                    source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <trace_analyze_done.candidates_path>,
-                   budget_minutes: 60}}
+                   candidates_path: <trace_analyze_done.candidates_path>}}
+
+  Budget policy: DO NOT add a `budget_minutes` field. The Coordinator owns
+  the per-optimization wall clock and applies the same value it uses for its
+  own dispatch; naming one here pins the backend to this template's number
+  instead, which is how a raised operator budget got silently discarded.
 
   Backend policy: DO NOT add a `backends` field. Current GEAK owns the
   KERNEL phase by default. Forge per-kernel mode is available only when the
@@ -806,7 +810,7 @@ allowed action until the patch lands on `optimization_stack`:
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
   while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with zero attempts and `gpu_pct >= 10%`, the
+  (reusable hot kernels with zero attempts and `gpu_pct >= 5%`, the
   default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
   drain them with `run_optimization{candidates_path: <from
   last_trace_analyze>}` (the batch handler fans out automatically).

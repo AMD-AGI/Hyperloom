@@ -195,7 +195,8 @@ The following variables control the kernel optimization backend ladder.
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `60`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `60` leaves roughly 30 minutes of real iteration. |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `90`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `90` leaves roughly 45 minutes of real iteration. |
+| `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` | `5.0`                     | GPU-time share a reusable hot kernel must clear to be worth a dispatch, in percent. Three readers share it and must agree, or the report explains a skip the dispatcher never made: the batch filter that selects candidates, the phase-advance gate that decides KERNEL still owes work, and the report's unattempted-reason breakdown. It was `10.0` until a 60-layer sparse-MoE decoder showed the assumption behind that number — that hot kernels concentrate — does not hold: nothing but a graph-launch wrapper reached double digits, the largest real operator sat at 9.47%, and the batch dispatcher selected nothing for six hours. Lower it when a trace's rewritable candidates cluster below the default and the operators above them are vendor binaries; a dropped candidate is reported as `below_min_gpu_pct=<value>` rather than as a failed attempt. |
 | `AITER_LOG_TUNED_CONFIG`       | `1` (set for every serving run) | Makes aiter log each tuned-config lookup it *hits*, not only the ones it misses. Two checks have no input without it: the GEMM demand list, which learns the shapes the runtime actually asks for (config-derived shapes covered 0.4% of them), and the apply verdict, which cannot tell "the tuned table was never read" from "it was read and did not help". A scan of 60 production logs found it set in none of them, so it is now injected by default. An operator value wins — set `0` to turn hit logging off, at the cost of both checks going inconclusive. Every miss already prints a line regardless of this setting; hit logging adds roughly one line per lookup that succeeds. |
 | `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
 
@@ -242,115 +243,116 @@ symbols are opaque binaries and never qualify.
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the
 trace-derived launcher frame, then a name grep. All three are deterministic and
-require no configuration. Agent analysis might add the model-backed tiers below.
+require no configuration. Agent analysis might add the review stage below.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
 
-Two model-backed tiers might sit on top of the deterministic ladder when
-`--analysis-route agent` is used. The `deterministic` route never invokes either
-tier. Agent-route network calls require an explicit
-`HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
-endpoint. The tiers differ in scope, authority, and data exposure; the
-constraints of one do not apply to the other.
+### Candidate review
 
-Neither can fail a run: no model configured, a gateway error, a timeout or an
-unparseable reply all leave the deterministic result standing.
+One agent session may audit the finished candidate table when
+`--analysis-route agent` is used. The `deterministic` route never runs it, and
+keeps its no-model guarantee by not reaching the stage at all.
 
-### Fallback tier
+The stage is tool-enabled rather than a completion call because the deterministic
+tiers' real failure mode is not coming up empty but coming up confidently wrong,
+and a model ranking paths by keyword off a prompt assembled in advance cannot
+tell the difference — it never sees what a kernel actually *is*.
 
-**When it runs.** Only for a candidate whose `source_file` is still empty after
-all three deterministic tiers, and whose GPU share is at least 5%.
+**What it is handed: paths, not contents.** The raw table, the resolution audit,
+the TraceLens report, the model directory and the framework source roots — as
+locations. The session reads with `Read`, `Grep` and `Glob`, so it opens what the
+evidence leads it to instead of what was guessed to be relevant, and can confirm
+a file defines the kernel it is credited with. A mangled vendor symbol is
+demangled by the host before the session starts and arrives in the table as
+`device_kernel_name_demangled` — that was the one job a shell was granted for,
+so granting one is no longer necessary.
 
-**What it sends.** One chat completion per such candidate, containing the kernel
-symbol and every shortlisted path. The shortlist comes from a relaxed grep over
-the known framework roots. **File contents are not sent unless
-`HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it** (see [Source egress](#source-egress));
-with it, each path is accompanied by its first 40 lines, capped at 2000
-characters.
+**It cannot write to the code under optimization.** That is the whole guarantee,
+and there is no detection layer behind it. On the Claude backend `Write` is the
+answer channel and is refused outside the run directory; every other tool,
+including any shell, is denied by a default-deny callback, so a tool introduced
+by a later SDK arrives refused rather than pre-authorised — and an SDK that will
+not accept that callback gets no session at all. On the Codex backend the
+containment is the OS sandbox: this stage states `workspace-write` rather than
+inheriting the deployment's mode, so it cannot run under a configured
+`bypass` (see [Codex (OpenAI) agent sandbox](#codex-openai-agent-sandbox)). The
+two are not equivalent — Codex has a shell and its own file tools, confined by
+the sandbox rather than refused per call — and the mode in force is logged,
+because the backend is chosen by credentials rather than by an operator.
 
-**What it costs.** One call per qualifying candidate, 60-second ceiling, no
-retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
-setting. Claude uses `CLAUDE_MODEL`, then the project-wide
-`DEFAULT_CLAUDE_MODEL`. Model settings are never borrowed across providers.
+**What it costs.** One session per analysis, not one call per candidate. 900
+seconds per attempt and two attempts by default. On the Claude backend each wait
+for the next SDK message is bounded separately, because a stalled gateway would
+otherwise hold the full window (see
+`HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` and
+`HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC`, which this stage reuses). The Codex
+entry point is one-shot and exposes no stream to bound, so a stalled Codex review
+costs the full 900 seconds. `--dry-run` skips the stage entirely: it plans, and
+nothing dispatches from the table it publishes.
 
-**Authority: selection only.** The model might return one of the exact shortlist
-strings and nothing else. An invented path is rejected, as is any answer below
-0.7 confidence. This is deliberate — an LLM-produced sentinel written into
-`source_file` is what broke this pipeline originally.
-
-### Review tier
-
-The fallback only fires on an empty `source_file`, so it cannot catch the
-deterministic tiers' actual failure mode: not coming up empty, but coming up
-*confidently wrong*. Measured across historical sessions, only 59% of
-verifiable resolutions mention the kernel they claim to define, and
-`aten::fill_` alone has been resolved to four unrelated business files — each a
-real, existing, root-resident source file passing every mechanical check.
-
-**When it runs.** On the whole resolution table, including entries already
-filled in by the deterministic tiers. Entries below 1% GPU share are skipped.
-
-**What it sends.** A single chat completion carrying up to 40 entries at once.
-For each entry it includes the kernel symbol, GPU share, current path and
-deciding tier. File contents follow the same rule as the fallback tier: nothing
-is sent unless `HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it. When it does, one
-call can ship up to 40 file heads, considerably more than the fallback tier
-sends per call — which is why the switch is global rather than per-tier.
-
-**What it costs.** One call per run (not per candidate), 180-second ceiling, no
-retry. Same provider and model resolution as the fallback tier. The response
-must include every sent `kernel_id` exactly once. A missing, duplicate or extra
-ID rejects the whole batch so a truncated response cannot masquerade as a
-complete review.
+**Model and backend.** `HYPERLOOM_LLM_SOURCE_MODEL` overrides everything. With
+it unset the backend follows the configured credentials — Anthropic-only selects
+Claude, an OpenAI side selects Codex — and the model comes from `CLAUDE_MODEL`
+or `CODEX_MODEL` respectively. Model settings are never borrowed across
+backends.
 
 <div class="callout warn">
 
-**Authority: it might rewrite, and it has no confidence threshold.** Unlike the
-fallback tier, this one is not restricted to a shortlist — it can replace any
-entry's path with any path, or drop a resolved entry back to unresolved. There
-is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
-exist on disk **and** its resolved target must sit under a known framework root.
-Symlinks cannot escape that boundary. TraceLens-style
-`path.py(247): function` answers are split into a bare, openable path plus line
-and function metadata. An unverifiable path is rejected and the original
-stands. Curated `op_to_source` verdicts — including `non_rewritable` and
-`no_kernel` — are authoritative and cannot be replaced by model review.
+**Authority: proposals, bounded four ways.** The session may revise where a
+kernel lives, supply the operand dims a graph-launched kernel never recorded,
+correct a harness list, and refuse a candidate as not worth a session. It may
+not touch what the trace measured — GPU share, durations, call counts, the keys
+a row is joined by — because the impact ranking and the closing gain figure are
+computed from those.
+
+- A revised path must resolve under a known framework root; symlinks cannot
+  escape it. TraceLens-style `path.py(247): function` answers are split into an
+  openable path plus line and function metadata, and an unverifiable path is
+  rejected with the original left standing. A proposed harness path is held to
+  the same test — existence alone would let a proposal point the measurement at
+  a file outside the traced tree, and a backend runs what that list names.
+- A candidate the active finder already resolved is not overridable: reading the
+  tree cannot beat knowing which symbol the binary exports. Nor is one matched to
+  a vendor operator playbook, whatever tier resolved the path the playbook anchor
+  replaced — its `source_file` points at a task bundle, and pointing it back at
+  framework source would route the candidate to a backend with nothing to
+  rewrite there.
+- A restrictive routability hint is honoured, a permissive one is not —
+  `classify_patchability` stays the only gate that admits a kernel, so a hint
+  cannot talk it into dispatching something the deterministic rules rejected. A
+  refusal carrying no stated reason is dropped as an echo of the input.
+- Operand dims are taken only where the trace recorded none, and carry their own
+  provenance: a session cannot claim `torch_trace` for a dim it derived.
 
 </div>
 
-Every revision records `previous_source_file` and `previous_method`, so a bad
-review is auditable and reversible, and `review_notes` lists every applied and
-rejected change. The batch is staged before it is committed, so an exception
-while validating one revision leaves every entry untouched. Failures — no model
-configured, gateway error, timeout, unparseable reply — leave the deterministic
-table untouched and are recorded in `review_notes`.
+The stage cannot fail a run. No model configured, a gateway error, a timeout, an
+unparseable reply or an unforeseen fault all leave the deterministic table
+standing and record an error-severity trace-health warning: losing the audit
+costs some candidates, while failing the run costs the hours of benchmarking
+behind the trace.
 
-Accepted revisions are folded back into `hot_kernels`, all metadata derived from
-the old path is cleared, and patchability is recomputed. The resolution JSON is
-the audit view of the same effective candidate state, not a detached suggestion.
+**Artifacts.** `kernel_candidates.raw.json` is the deterministic table,
+`kernel_candidates.json` the reviewed one, and
+`kernel_candidates_revisions.json` records what changed and why — so a bad
+dispatch can be traced to the stage that caused it. Only the reviewed table is
+resolvable as a backend's candidate source. A completed review also rebuilds
+`kernel_source_resolution.json`, so the artifact a human reads and the table a
+backend is handed cannot name different files for the same kernel.
 
 ### Source egress
 
-Both tiers call an external model provider, so what leaves the host is a
-deliberate boundary rather than a side effect of building a useful prompt.
+The session reads the tree on the host rather than being handed a prompt
+assembled from file contents up front, so what leaves is whatever it quotes back
+to the model. It cannot write to that tree — see the tool scope above — so this
+section is about disclosure only. Two boundaries apply to the material the prompt
+does carry.
 
-**Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
-`claude_agent_sdk`. Claude requests use the native Claude
-Agent SDK with all repository, shell, and web tools denied.
-`kernel_source_resolution.json` records the provider, model, source-preview
-decision, outcome and endpoint hostname. It never records keys, custom
-headers, URL userinfo, query parameters or the full prompt.
-
-**Repository source is not sent by default.** The file heads described above are
-withheld unless `HYPERLOOM_LLM_SOURCE_PREVIEW` is set to `1`/`true`/`yes`/`on`.
-Without it both tiers still see candidate paths, which carry most of the
-selection signal; with it, a review call can ship up to 40 file heads.
-
-**The serving command line is never forwarded verbatim.** The tiers need backend
-flags — the same MoE operator dispatches differently under
+**The serving command line is never forwarded verbatim.** The stage needs
+backend flags — the same MoE operator dispatches differently under
 `--moe-runner-backend triton` and `aiter` — but `EXTRA_*_ARGS` also carries
 credentials, model paths and user data. It is therefore tokenised, and only
 flags on an explicit allowlist of backend selectors survive. A denied flag
@@ -370,30 +372,7 @@ metadata and credential-shaped values are dropped.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied). Common provider aliases are normalized to the canonical audit value. |
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional source-resolution model override. Otherwise resolves only from the selected provider's own model variables; no cross-provider fallback. |
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PREVIEW` | Unset (off) | Authorise sending the first 40 lines of candidate source files to the model provider. Applies to both the fallback and review tiers. Leave unset unless the provider is an approved destination for repository content. |
-
-### How fallback failures surface
-
-The fallback tier is advisory and never fails a run. Every
-outcome is recorded on the candidate as `source_resolution_reason`, so a skip
-can be told apart from a genuine failure:
-
-| `source_resolution_reason` | Meaning |
-|----------------------------|---------|
-| *(absent)* | Resolved before fallback, so the tier was not reached |
-| `llm_fallback_skipped: deterministic route` | Deterministic analysis explicitly prohibited model tiers |
-| `llm_fallback_skipped: gpu_pct ...` | Candidate below the 5% GPU-share floor; no call made |
-| `llm_fallback_skipped: no provider configured` | No `HYPERLOOM_LLM_SOURCE_PROVIDER`; settled before the shortlist grep, so an unconfigured tier costs nothing |
-| `llm_fallback_no_shortlist` | Grep found nothing to choose from; no call made |
-| `llm_fallback_declined: ...` | Model answered but the pick was rejected (invented path, low confidence, or refusal) |
-| `llm_fallback_error: ...` | Call failed — import error, gateway rejection, or timeout |
-
-Accepted answers are stamped `source_resolution_method="llm_fallback"` alongside
-a `source_resolution_confidence`, so they can be audited separately from
-deterministic resolutions. Failures in the trace-launcher tier are recorded the
-same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional candidate-review model override. With it unset the model comes from `CLAUDE_MODEL` or `CODEX_MODEL`, whichever matches the backend the configured credentials select; there is no cross-backend fallback. |
 
 ---
 

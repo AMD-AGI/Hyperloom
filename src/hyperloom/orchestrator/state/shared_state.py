@@ -53,12 +53,12 @@ import math
 import os
 import shlex
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
@@ -319,7 +319,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 5
+LATEST_STATE_SCHEMA_VERSION: int = 6
 
 #: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
 #: name. A state written before that rename spells them the old way, and the
@@ -337,6 +337,15 @@ _FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
     "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
     "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
     "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
+}
+
+#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
+#: current name. The old spelling tied the switch to GEMM tuning, which stopped
+#: being true once the dispatch moved into the shared entry tail. Without this
+#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
+#: a resumed opt-out session would silently start dispatching again.
+_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
+    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
 }
 
 #: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
@@ -542,8 +551,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     geak_result: dict[str, Any] = field(default_factory=dict)
     # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
     explore_enabled: bool = True
-    # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
-    continue_kernel_after_gemm: bool = True
+    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
+    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
+    # only governs the entry's own dispatch: orchestration can still request
+    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
+    auto_kernel_opt_enabled: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -1094,6 +1106,51 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
 
+    #: Fields of :meth:`profile_workload_context` that say *what was profiled*.
+    #: The rest -- ``server_args``, ``extra_envs``, ``remove_args``,
+    #: ``unset_envs``, ``args_mode`` -- say how the profile task was
+    #: parameterized, and are only populated when the recorder had those params
+    #: to hand. Two call sites record the same trace differently for that reason
+    #: alone, so comparing them makes a perfectly fresh trace read as stale.
+    #: ``serving_config`` is excluded here too: it has its own comparison, which
+    #: comes from ``current_best`` on both sides and is therefore symmetric.
+    #:
+    #: ``ClassVar`` because a bare annotation would make this constant a
+    #: dataclass field: it would be written into every ``state.json``, accepted
+    #: back from disk, and writable through ``apply_changes`` since a constant
+    #: is not something ``CORE_STATE_FIELDS`` thinks to lock. None of that
+    #: changes behaviour while the sole reader goes through ``cls``, which is
+    #: exactly what makes it worth closing -- it decides trace staleness, so an
+    #: instance-scoped read added later would let a stored value govern whether
+    #: a profile is reused or re-run.
+    PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
+        "framework",
+        "precision",
+        "model_path",
+        "tp",
+        "conc",
+        "isl",
+        "osl",
+        "max_model_len",
+    )
+
+    @classmethod
+    def profile_workload_identity(cls, context: Any) -> dict[str, Any]:
+        """Project a workload context down to what identifies the profiled run.
+
+        Args:
+            context (Any): A :meth:`profile_workload_context` result, or
+                anything else (treated as carrying no identity).
+
+        Returns:
+            dict[str, Any]: The identity fields, missing ones included as
+            ``None`` so a recorded context and a freshly built one compare
+            equal when they describe the same workload.
+        """
+        if not isinstance(context, Mapping):
+            return {}
+        return {key: context.get(key) for key in cls.PROFILE_WORKLOAD_IDENTITY_KEYS}
+
     def profile_workload_context(
         self,
         overrides: dict[str, Any] | None = None,
@@ -1372,7 +1429,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         incoming_version = int(raw.get("schema_version") or 1)
 
         # Filter to known fields; unknown keys dropped, missing keys default.
-        known = {f for f in cls.__dataclass_fields__}
+        # ``fields()`` rather than ``__dataclass_fields__``: the latter also
+        # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
+        # state.json naming one would raise here instead of being ignored.
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
         # A pre-telemetry state may already have completed EXPLORE segments,
         # but their exact sum cannot be reconstructed once phase_history has
@@ -1405,7 +1465,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         if incoming_version < 4:
             # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = set(EnablementRound.__dataclass_fields__)
+            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
             flat = {
                 k[len("enablement_") :]: v
                 for k, v in raw.items()
@@ -1447,6 +1507,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     else entry
                     for entry in stack
                 ]
+
+        if incoming_version < 6:
+            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
+            # reasoning as the v5 block: the old spelling is not a dataclass
+            # field, so the filter above has already dropped it, and a state
+            # holding both spellings is mid-migration with the current one
+            # winning.
+            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
+                if legacy in raw and current not in raw:
+                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -2419,8 +2489,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
             core_fields = CORE_STATE_FIELDS
         applied: dict[str, Any] = {}
+        # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is
+        # not writable here. CORE_STATE_FIELDS locks the session fields someone
+        # thought to lock, and nobody thinks to lock a constant.
+        writable = {f.name for f in fields(self)}
         for key, value in changes.items():
-            if key not in self.__dataclass_fields__:
+            if key not in writable:
                 continue
             if key in core_fields:
                 log.warning(

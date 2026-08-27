@@ -1132,9 +1132,8 @@ class FrameworkPhase(PhaseHandler):
                 "were dropped because their target file(s) do not exist in ANY "
                 "allowlisted framework source tree. Targets: "
                 + "; ".join(grounding_drops[:4])
-                + ". Use artifacts_written (whole-file install to an absolute "
-                "allowlisted path) instead of a unified diff, or verify the "
-                "target path with Glob/Read first."
+                + ". Verify the target path with Glob/Read inside the worktree "
+                "before authoring the diff."
             )
             notes = (drop_note + "\n\n" + notes).strip() if notes else drop_note
         if spanned_roots:
@@ -1961,6 +1960,7 @@ class FrameworkPhase(PhaseHandler):
             return
 
         # Under cap: store the retry context for the dispatcher to pick up.
+        vetting_drops_raw = res.get("patches_dropped_by_grounding")
         retry_ctx: dict[str, Any] = {
             "cand_id": cand_id,
             "batch_id": batch_id,
@@ -1971,6 +1971,8 @@ class FrameworkPhase(PhaseHandler):
             "candidate": candidate,
             "specialist_task_id": str(res.get("specialist_task_id") or ""),
         }
+        if isinstance(vetting_drops_raw, list) and vetting_drops_raw:
+            retry_ctx["vetting_drops"] = [str(d) for d in vetting_drops_raw[:8]]
         pending = getattr(state, "apply_fail_retry_pending", None) or []
         if not isinstance(pending, list):
             pending = []
@@ -1990,6 +1992,7 @@ class FrameworkPhase(PhaseHandler):
         attempt: int = 1,
         retry_feedback: "list[dict[str, Any]] | None" = None,
         critic_feedback: "dict[str, Any] | None" = None,
+        vetting_drops: "list[str] | None" = None,
     ) -> str:
         """Dispatch a fresh authoring specialist for an apply-failure retry.
 
@@ -2022,6 +2025,17 @@ class FrameworkPhase(PhaseHandler):
         state = self.shared_state
 
         feedback_lines: list[str] = []
+        if vetting_drops:
+            feedback_lines.append("")
+            feedback_lines.append(
+                "PATCH GROUNDING FAILURE: the prior round's patches were dropped by "
+                "the safety gate before reaching integration. The worktree contains "
+                "the correct framework tree — edit files there and the diff is "
+                "harvested automatically. Do not switch to the artifacts_written "
+                "channel to avoid the gate."
+            )
+            feedback_lines.append("Dropped targets: " + "; ".join(vetting_drops[:4]))
+            feedback_lines.append("")
         if retry_feedback:
             feedback_lines.append("")
             feedback_lines.append(
@@ -2182,6 +2196,7 @@ class FrameworkPhase(PhaseHandler):
             candidate = ctx.get("candidate") or {}
             specialist_task_id = str(ctx.get("specialist_task_id") or "")
             retry_feedback = list(ctx.get("retry_feedback") or [])
+            vetting_drops = list(ctx.get("vetting_drops") or [])
             try:
                 await self._enqueue_author_specialist(
                     lane=lane,
@@ -2189,6 +2204,7 @@ class FrameworkPhase(PhaseHandler):
                     specialist_task_id=specialist_task_id,
                     attempt=attempt,
                     retry_feedback=retry_feedback,
+                    vetting_drops=vetting_drops or None,
                 )
             except Exception:  # noqa: BLE001 — never wedge the dispatcher
                 log.exception(

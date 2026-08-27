@@ -4525,27 +4525,73 @@ def test_batch_candidates_default_min_gpu_pct_matches_sharedstate_gate(
     session_dir,
     _candidates_factory,
 ):
-    """``_batch_kernel_candidates`` default (10.0) must match ``SharedState.untried_hot_reusable_kernels``'s gate so a sub-threshold kernel can't sneak in via task_group fallback.
+    """The dispatch batch and the phase-advance gate must apply the same GPU floor.
 
-    k006/k008 straddle the shared ``_DEFAULT_HOT_KERNEL_MIN_GPU_PCT`` (10.0) by a
-    hair, so the two gates drifting apart in either direction fails this test.
+    ``_batch_kernel_candidates`` decides what a dispatch actually runs;
+    ``SharedState.untried_hot_reusable_kernels`` decides whether KERNEL still
+    owes work and what the report calls unattempted. Drift either way is a live
+    defect: a lower batch floor advances the phase past kernels it would still
+    dispatch, a lower state floor holds the phase open on kernels no dispatch
+    will ever pick up. So assert the two selections are equal, not merely that
+    each contains what this test expected.
+
+    The straddling pair is derived from the shipped default instead of written
+    in. Hardcoding it is what let this test go on asserting a 10% boundary at a
+    5% default, and pinning the default's own value is already
+    ``test_untried_hot_kernels_returns_only_reusable_above_threshold``'s job.
+
+    Every candidate gets its own source file. When two share one, the batch
+    side's op-fanout dedup merges the weaker away and the exclusion passes for a
+    reason the floor had no part in -- which is how the 10% assertion above kept
+    passing at a 5% default.
     """
-    cpath = _candidates_factory(
-        [
-            {"kernel_id": "k001", "gpu_pct": 38.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k006", "gpu_pct": 9.87, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-            {"kernel_id": "k008", "gpu_pct": 10.13, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-        ]
+    from hyperloom.orchestrator.state.kernel_decision_settings import (
+        _DEFAULT_HOT_KERNEL_MIN_GPU_PCT as floor,
     )
-    # Default 10.0 filters out k006 (9.87) but keeps k001 (38) and k008 (10.13).
-    out = krh._batch_kernel_candidates(
-        {"candidates_path": cpath},
-        session_dir=session_dir,
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    margin = 0.13
+    assert floor - margin > 0, f"floor {floor} too small to straddle by {margin}"
+    hot_kernels = [
+        {
+            "kernel_id": "k001",
+            "gpu_pct": round(floor + 30.0, 2),
+            "reusable_native_kernel": True,
+            "source_file": "/p/moe_op.py",
+        },
+        {
+            "kernel_id": "k006",
+            "gpu_pct": round(floor - margin, 2),
+            "reusable_native_kernel": True,
+            "source_file": "/p/rmsnorm.py",
+        },
+        {
+            "kernel_id": "k008",
+            "gpu_pct": round(floor + margin, 2),
+            "reusable_native_kernel": True,
+            "source_file": "/p/silu_and_mul.py",
+        },
+    ]
+    cpath = _candidates_factory(hot_kernels)
+
+    state = SharedState.load_or_init(session_dir)
+    state.last_trace_analyze = {"hot_kernels": hot_kernels, "task_groups": []}
+    state.save(session_dir)
+
+    skipped: dict[str, str] = {}
+    batch_ids = sorted(
+        c.get("kernel_id")
+        for c in krh._batch_kernel_candidates(
+            {"candidates_path": cpath},
+            session_dir=session_dir,
+            skipped_out=skipped,
+        )
     )
-    out_ids = sorted(c.get("kernel_id") for c in out)
-    assert "k006" not in out_ids, out_ids
-    assert "k001" in out_ids
-    assert "k008" in out_ids
+
+    assert batch_ids == ["k001", "k008"], (batch_ids, skipped)
+    # The floor, not the dedup, has to be what dropped the sub-threshold row.
+    assert "below_min_gpu_pct" in skipped.get("k006", ""), skipped
+    assert sorted(state.untried_hot_reusable_kernels()) == batch_ids
 
 
 def test_in_flight_kernel_ids_returns_running_only(session_dir):

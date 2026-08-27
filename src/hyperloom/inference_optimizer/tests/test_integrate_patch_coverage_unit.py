@@ -109,7 +109,7 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ip,
         "_resolve_framework_root",
-        lambda explicit, patch_paths=None: None,
+        lambda explicit, patch_paths=None, patch_texts=None, recorded_root=None: None,
     )
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
@@ -1185,6 +1185,7 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []
@@ -1287,6 +1288,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []

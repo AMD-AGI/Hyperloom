@@ -163,6 +163,7 @@ _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
+_CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
@@ -758,6 +759,9 @@ class ClaudeBackend:
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
+        cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
+        if cli_path:
+            kwargs["cli_path"] = cli_path
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         if resume_session_id:

@@ -66,7 +66,7 @@ def test_duplicate_matching_roots_are_rejected_as_ambiguous(tmp_path):
     _git("-C", str(base), "-c", "user.email=a@b", "-c", "user.name=x", "commit", "-qam", "drift")
 
     res = _ps.ground_patch_text(_diff("f.py"), base_checkout=base, candidate_roots=(other,))
-    assert res.verdict == _ps.GROUND_MISSING_TARGET
+    assert res.verdict == _ps.GROUND_AMBIGUOUS_ROOT
     assert res.detail.startswith("ambiguous_root:")
     assert res.is_garbage
 

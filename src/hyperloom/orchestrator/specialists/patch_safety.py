@@ -283,6 +283,28 @@ def patch_targets_missing(
     return missing
 
 
+def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Keep only the outermost of any nested match, leaving disjoint ones alone.
+
+    An editable install puts a package parent inside its own checkout, so
+    ``/sgl-workspace/sglang`` and ``/sgl-workspace/sglang/python`` both hold a
+    ``python/sglang/...`` target at different strip levels. They are one tree,
+    and the outer root is the one whose strip level matches ``git diff`` output.
+
+    Args:
+        roots: Match candidates from :func:`resolve_patch_apply_root`.
+
+    Returns:
+        Roots with any descendant of another entry removed.
+    """
+    resolved = {root: root.resolve() for root in roots}
+    return tuple(
+        root
+        for root in roots
+        if not any(other != resolved[root] and other in resolved[root].parents for other in resolved.values())
+    )
+
+
 def resolve_patch_apply_root(
     patch_texts: Sequence[str],
     *,
@@ -382,6 +404,8 @@ def resolve_patch_apply_root(
     matches = tuple(root for root in roots if not any(patch_targets_missing(text, root) for text in texts))
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
+    if len(matches) > 1:
+        matches = _collapse_nested_roots(matches)
     if len(matches) > 1:
         return PatchRootResolution(None, "ambiguous_root", matches)
     return PatchRootResolution(matches[0], matches=matches)
@@ -606,6 +630,7 @@ GROUND_STALE = "stale"  # valid diff but does not apply to clean base
 GROUND_NOT_DIFF = "not_diff"  # not a unified diff (no hunk header)
 GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
+GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
 
 
@@ -633,6 +658,7 @@ class PatchGroundingResult:
             GROUND_NOT_DIFF,
             GROUND_PATH_ESCAPE,
             GROUND_MISSING_TARGET,
+            GROUND_AMBIGUOUS_ROOT,
         )
 
 
@@ -688,6 +714,8 @@ def ground_patch_text(
         detail = resolution.reason
         if resolution.matches:
             detail += ": " + ", ".join(str(root) for root in resolution.matches)
+        if resolution.reason == "ambiguous_root":
+            return PatchGroundingResult(GROUND_AMBIGUOUS_ROOT, detail)
         return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
     root = resolution.root
     try:
@@ -733,8 +761,18 @@ class PatchSafetyReport:
             out.append(
                 "patch_safety_missing_target:"
                 + ",".join(d.get("detail", d["path"]) for d in missing[:4])
-                + " — author patches against files that exist in the framework "
-                "source tree (inspect it with Glob/Grep first)."
+                + " — the patch names a file that does not exist in any"
+                " allowlisted framework source tree; verify the target path"
+                " with Glob/Grep before authoring the diff."
+            )
+        ambiguous = [d for d in self.dropped if d.get("verdict") == GROUND_AMBIGUOUS_ROOT]
+        if ambiguous:
+            out.append(
+                "patch_safety_ambiguous_root:"
+                + ",".join(d.get("detail", d["path"]) for d in ambiguous[:4])
+                + " — the patch targets match more than one disjoint source"
+                " tree; declare an explicit framework_source_root so the"
+                " correct tree is selected without guessing."
             )
         stale = [p for p, v in self.grounding.items() if v == GROUND_STALE]
         if stale:
@@ -897,8 +935,9 @@ def vet_patches(
             detail = resolution.reason
             if resolution.matches:
                 detail += ": " + ", ".join(str(r) for r in resolution.matches)
-            grounding[path] = GROUND_MISSING_TARGET
-            dropped.append({"path": path, "verdict": GROUND_MISSING_TARGET, "detail": detail})
+            verdict = GROUND_AMBIGUOUS_ROOT if resolution.reason == "ambiguous_root" else GROUND_MISSING_TARGET
+            grounding[path] = verdict
+            dropped.append({"path": path, "verdict": verdict, "detail": detail})
             continue
         res = ground_patch_text(text, base_checkout=None, explicit_root=resolution.root)
         grounding[path] = res.verdict
@@ -917,6 +956,7 @@ __all__ = [
     "CrossDomainRule",
     "FORBIDDEN_PAYLOAD_FIELDS",
     "FORBIDDEN_PROPOSAL_FIELDS",
+    "GROUND_AMBIGUOUS_ROOT",
     "GROUND_APPLIES",
     "GROUND_MISSING_TARGET",
     "GROUND_NOT_DIFF",

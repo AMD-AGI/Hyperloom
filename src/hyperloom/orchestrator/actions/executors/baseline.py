@@ -1208,11 +1208,34 @@ def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
 
 
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets."""
+    """Return the framework root whose tree holds the warm-replay patch targets.
+
+    A Recipe records the root each patch was applied into. Records written before
+    that field existed carry none, and only those fall back to probing the
+    patch text against the allowlist.
+    """
     if not params.get("patches"):
         return ""
-    from .integrate_patch import _resolve_framework_root
+    from ...framework.paths import resolve_source_file_allowlist
+    from .integrate_patch import _resolve_framework_root, allowlisted_explicit_root
 
+    recorded = {
+        str(entry.get("framework_root") or "").strip()
+        for entry in params["patches"]
+        if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
+    }
+    if len(recorded) == 1:
+        sole = recorded.pop()
+        allowed = allowlisted_explicit_root(sole, allowlist=resolve_source_file_allowlist())
+        if allowed is not None:
+            return str(allowed)
+        reason = f"recorded apply root {sole!r} is not usable"
+    elif recorded:
+        reason = f"patches record {len(recorded)} apply roots"
+    else:
+        reason = "no recorded apply root"
+
+    log.info("warm replay: %s; resolving from patch targets", reason)
     root = _resolve_framework_root(
         resolve_session_framework_root() or None,
         patch_texts=_patch_texts_from_warm_params(params),

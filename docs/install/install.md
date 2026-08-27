@@ -394,8 +394,8 @@ framework, so nothing needs to be installed inside the container beyond
 Hyperloom's runtime deps. The following images are recommended:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
 
 Start a long-running container from the repo root, mounting it at the same path
 so `.env`, logs, and session artifacts stay valid:

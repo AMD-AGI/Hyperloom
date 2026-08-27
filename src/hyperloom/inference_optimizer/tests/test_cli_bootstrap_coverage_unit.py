@@ -28,7 +28,7 @@ def _args(**overrides):
         osl=1024,
         max_model_len=13312,
         no_kernel=False,
-        continue_kernel_after_gemm=True,
+        auto_kernel_opt=True,
         target_summary="",
         target_gain=60.0,
         target_tput=None,
