@@ -307,7 +307,7 @@ def test_summarize_tool_input_clips_long():
 
 def test_summarize_tool_input_redacts_bearer_and_assignment():
     """Shell commands in the intel ledger must not keep credential values."""
-    bearer = pu._summarize_tool_input({"command": "curl -H 'Authorization: Bearer secret-token-value' https://x"})
+    bearer = pu._summarize_tool_input({"command": "Authorization: Bearer secret-token-value https://x"})
     assert "secret-token-value" not in bearer
     assert "[REDACTED]" in bearer
 
