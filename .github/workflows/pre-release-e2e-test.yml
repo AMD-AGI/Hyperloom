@@ -254,16 +254,18 @@ jobs:
           chmod +x .github/scripts/pre-release-e2e-poll.sh
           .github/scripts/pre-release-e2e-poll.sh
 
-      - name: Cancel workloads on job cancel
+      - name: Stop workloads on job cancel
         if: cancelled()
         env:
           SAFE_API_BASE: ${{ vars.SAFE_API_BASE }}
           SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
         run: |
-          [ -f "$DISPATCH_MAP" ] || { echo "no dispatch map; nothing to cancel"; exit 0; }
+          # Policy: stop, don't delete (frees GPUs, keeps the record + pod fs for
+          # inspection; SaFE has no restart, so clean up Stopped records manually).
+          [ -f "$DISPATCH_MAP" ] || { echo "no dispatch map; nothing to stop"; exit 0; }
           for wid in $(jq -r '.[]' "$DISPATCH_MAP" | sort -u); do
-            echo "cancelling workload $wid"
-            curl -sS -k -o /dev/null -w 'DELETE %{http_code}\n' -X DELETE \
+            echo "stopping workload $wid"
+            curl -sS -k -o /dev/null -w 'STOP %{http_code}\n' -X POST \
               -H "Authorization: Bearer ${SAFE_API_KEY}" \
-              "${SAFE_API_BASE%/}/api/v1/workloads/${wid}" || true
+              "${SAFE_API_BASE%/}/api/v1/workloads/${wid}/stop" || true
           done

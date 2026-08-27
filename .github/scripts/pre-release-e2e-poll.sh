@@ -317,5 +317,25 @@ summary "$gate_line"
 # Final sticky report: the completed table plus the gate verdict.
 report_upsert "$(printf '%s\n\n%s\n' "$(report_body Complete "$(done_count)" "${#LEGS[@]}")" "$gate_line")"
 
+# ---- reclaim: STOP (not delete) every workload -----------------------------
+# Policy: stop, don't delete. This frees the GPUs immediately (so a 3h leg that
+# finished early doesn't idle-hold its card until the SaFE `timeout` deadline) while
+# KEEPING the workload record + its pod filesystem for post-hoc inspection. SaFE has
+# no `start` endpoint, so these are not resumable; clean up Stopped records manually.
+# Verified 2026-08-27: POST /api/v1/workloads/{id}/stop exists and returns 200.
+stop_workloads() {
+  local wid seen=""
+  for leg in "${LEGS[@]}"; do
+    wid="${WID[$leg]}"
+    # docker legs share one host workload -> stop each unique id once.
+    case " $seen " in *" $wid "*) continue ;; esac
+    seen="${seen} ${wid}"
+    code="$(curl -sS "${tls[@]}" -o /dev/null -w '%{http_code}' -X POST \
+      "$API/$wid/stop" "${auth[@]}" 2>/dev/null || echo 000)"
+    summary "• stopped workload \`$wid\` (HTTP $code)"
+  done
+}
+stop_workloads || true
+
 [ "$fail" -eq 0 ] && exit 0
 exit 1
