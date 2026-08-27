@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
+"""Cover the source arm's enqueue and give-up bookkeeping.
 
-Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
-on success), ``_enqueue_framework_agent_task`` and
+Tests ``_enqueue_framework_agent_task`` and
 ``_record_framework_agent_phase_done`` (the give-up summary row, whether the
 reason is the retry limit or a clean empty payload) by binding them to a
 minimal Coordinator stub.

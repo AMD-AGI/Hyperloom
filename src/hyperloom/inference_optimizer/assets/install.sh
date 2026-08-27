@@ -269,11 +269,9 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
-    optimize-time, candidate discovery via `fa phase-discover`) is provided
-    by this same editable install (tree-reform.MD P2.5 promoted
-    framework-agent into src/hyperloom/agents/framework/, so it no longer
-    has its own separate installer/venv to chain to).
+  - The `fa` CLI is provided by this same editable install; framework-agent
+    lives in src/hyperloom/agents/framework/ and has no separate
+    installer/venv to chain to.
 
 Options:
   --check-only           Verify only, do not install
