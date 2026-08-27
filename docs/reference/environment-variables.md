@@ -263,15 +263,35 @@ tell the difference — it never sees what a kernel actually *is*.
 
 **What it is handed: paths, not contents.** The raw table, the resolution audit,
 the TraceLens report, the model directory and the framework source roots — as
-locations. The session has `Read`, `Grep`, `Glob` and `Bash`, so it opens what
-the evidence leads it to instead of what was guessed to be relevant, and can
-confirm a file defines the kernel it is credited with.
+locations. The session reads with `Read`, `Grep` and `Glob`, so it opens what the
+evidence leads it to instead of what was guessed to be relevant, and can confirm
+a file defines the kernel it is credited with. A mangled vendor symbol is
+demangled by the host before the session starts and arrives in the table as
+`device_kernel_name_demangled` — that was the one job a shell was granted for,
+so granting one is no longer necessary.
+
+**It cannot write to the code under optimization.** That is the whole guarantee,
+and there is no detection layer behind it. On the Claude backend `Write` is the
+answer channel and is refused outside the run directory; every other tool,
+including any shell, is denied by a default-deny callback, so a tool introduced
+by a later SDK arrives refused rather than pre-authorised — and an SDK that will
+not accept that callback gets no session at all. On the Codex backend the
+containment is the OS sandbox: this stage states `workspace-write` rather than
+inheriting the deployment's mode, so it cannot run under a configured
+`bypass` (see [Codex (OpenAI) agent sandbox](#codex-openai-agent-sandbox)). The
+two are not equivalent — Codex has a shell and its own file tools, confined by
+the sandbox rather than refused per call — and the mode in force is logged,
+because the backend is chosen by credentials rather than by an operator.
 
 **What it costs.** One session per analysis, not one call per candidate. 900
-seconds per attempt and two attempts by default; each wait for the next SDK
-message is bounded separately, because a stalled gateway would otherwise hold
-the full window (see `HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` and
-`HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC`, which this stage reuses).
+seconds per attempt and two attempts by default. On the Claude backend each wait
+for the next SDK message is bounded separately, because a stalled gateway would
+otherwise hold the full window (see
+`HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` and
+`HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC`, which this stage reuses). The Codex
+entry point is one-shot and exposes no stream to bound, so a stalled Codex review
+costs the full 900 seconds. `--dry-run` skips the stage entirely: it plans, and
+nothing dispatches from the table it publishes.
 
 **Model and backend.** `HYPERLOOM_LLM_SOURCE_MODEL` overrides everything. With
 it unset the backend follows the configured credentials — Anthropic-only selects
@@ -291,7 +311,9 @@ computed from those.
 - A revised path must resolve under a known framework root; symlinks cannot
   escape it. TraceLens-style `path.py(247): function` answers are split into an
   openable path plus line and function metadata, and an unverifiable path is
-  rejected with the original left standing.
+  rejected with the original left standing. A proposed harness path is held to
+  the same test — existence alone would let a proposal point the measurement at
+  a file outside the traced tree, and a backend runs what that list names.
 - A candidate the active finder already resolved is not overridable: reading the
   tree cannot beat knowing which symbol the binary exports. Nor is one matched to
   a vendor operator playbook, whatever tier resolved the path the playbook anchor
@@ -302,8 +324,8 @@ computed from those.
   `classify_patchability` stays the only gate that admits a kernel, so a hint
   cannot talk it into dispatching something the deterministic rules rejected. A
   refusal carrying no stated reason is dropped as an echo of the input.
-- The session can run shell commands, so the candidate source files are
-  fingerprinted around it and a review that modified them is discarded whole.
+- Operand dims are taken only where the trace recorded none, and carry their own
+  provenance: a session cannot claim `torch_trace` for a dim it derived.
 
 </div>
 
@@ -317,14 +339,17 @@ behind the trace.
 `kernel_candidates.json` the reviewed one, and
 `kernel_candidates_revisions.json` records what changed and why — so a bad
 dispatch can be traced to the stage that caused it. Only the reviewed table is
-resolvable as a backend's candidate source.
+resolvable as a backend's candidate source. A completed review also rebuilds
+`kernel_source_resolution.json`, so the artifact a human reads and the table a
+backend is handed cannot name different files for the same kernel.
 
 ### Source egress
 
-The session runs on the host and reads the tree itself, so what leaves is
-whatever it quotes back to the model rather than a prompt assembled from file
-contents up front. Two boundaries still apply to the material the prompt does
-carry.
+The session reads the tree on the host rather than being handed a prompt
+assembled from file contents up front, so what leaves is whatever it quotes back
+to the model. It cannot write to that tree — see the tool scope above — so this
+section is about disclosure only. Two boundaries apply to the material the prompt
+does carry.
 
 **The serving command line is never forwarded verbatim.** The stage needs
 backend flags — the same MoE operator dispatches differently under
