@@ -305,6 +305,27 @@ def test_summarize_tool_input_clips_long():
     assert len(out) <= 241
 
 
+def test_summarize_tool_input_redacts_bearer_and_assignment():
+    """Shell commands in the intel ledger must not keep credential values."""
+    bearer = pu._summarize_tool_input({"command": "curl -H 'Authorization: Bearer secret-token-value' https://x"})
+    assert "secret-token-value" not in bearer
+    assert "[REDACTED]" in bearer
+
+    assigned = pu._summarize_tool_input({"command": "OPENAI_API_KEY=sk-live-abcdef curl https://x"})
+    assert "sk-live-abcdef" not in assigned
+    assert "[REDACTED]" in assigned
+
+
+def test_summarize_tool_input_redacts_before_clipping():
+    """A secret near the clip boundary is masked on the full string first."""
+    cmd = "Authorization: Bearer secret-token-value " + ("x" * 300)
+    out = pu._summarize_tool_input({"command": cmd})
+    assert "secret-token-value" not in out
+    assert "[REDACTED]" in out
+    assert out.endswith("…")
+    assert len(out) <= 241
+
+
 # ---- parse_claude_stream_json_usage ----
 
 
