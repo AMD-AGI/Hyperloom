@@ -264,6 +264,8 @@ def test_sweep_ot_handles_bad_value():
         }
     )
     assert out.skipped is False
+    assert out.decisions[0].kind == "attempted"
+    assert not any("Best point" in f for f in out.key_facts)
 
 
 # ---- kernel_lifecycle -----------------------------------------------------

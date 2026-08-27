@@ -67,7 +67,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         except (TypeError, ValueError):
             return 0.0
 
-    best = max(successes, key=_ot, default=None)
+    best = max((v for v in successes if _ot(v) > 0), key=_ot, default=None)
 
     facts: list[str] = []
     facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}, skipped={len(skipped)}.")

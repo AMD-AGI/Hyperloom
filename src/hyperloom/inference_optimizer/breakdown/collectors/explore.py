@@ -15,6 +15,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.orchestrator.state.optimization_journal import (
     classify_change_kind,
     operation_kind_for,
@@ -284,6 +285,25 @@ def _scan_sweep_variants(session_dir: Path) -> list[Path]:
 
 _UNREADABLE_REPORT = "benchmark_report.json unreadable or not a JSON object"
 _SUCCESS_FALSE_FALLBACK = "benchmark_report.json recorded success=false"
+_SWEEP_ERROR_LIMIT = 500
+
+
+def _clip_sweep_error(text: str) -> str:
+    """Redact secrets and cap length for a SweepPoint ``error`` string.
+
+    Breakdown collectors persist diagnostic text at ``[:500]``. Grid-runner's
+    ``_report_errors_summary`` uses 2000; this layer follows the collector
+    convention so a 3k-character report error cannot land verbatim in
+    ``session_breakdown.json``.
+
+    Args:
+        text (str): Raw failure reason.
+
+    Returns:
+        str: Redacted text, truncated to ``_SWEEP_ERROR_LIMIT``.
+    """
+    redacted = redact_secret_values(text)
+    return redacted[:_SWEEP_ERROR_LIMIT] if redacted else redacted
 
 
 def _sweep_report_error(report_data: dict[str, Any]) -> str:
@@ -297,16 +317,16 @@ def _sweep_report_error(report_data: dict[str, Any]) -> str:
         report_data (dict[str, Any]): A parsed ``benchmark_report.json`` object.
 
     Returns:
-        str: A non-empty reason string.
+        str: A non-empty, redacted, length-capped reason string.
     """
     singular = str(report_data.get("error") or "").strip()
     if singular:
-        return singular
+        return _clip_sweep_error(singular)
     errors = report_data.get("errors")
     if isinstance(errors, list):
         joined = "; ".join(str(item).strip() for item in errors if str(item).strip())
         if joined:
-            return joined
+            return _clip_sweep_error(joined)
     return _SUCCESS_FALSE_FALLBACK
 
 
@@ -319,15 +339,35 @@ def _abort_reason_error(abort: dict[str, Any] | None) -> str:
 
     Returns:
         str: ``"<error_class>: <error>"`` when both are present, otherwise
-        whichever field is non-empty, otherwise a fallback.
+        whichever field is non-empty, otherwise a fallback. Always redacted
+        and length-capped.
     """
     if not isinstance(abort, dict):
         return "abort_reason.json unreadable or not a JSON object"
     error_class = str(abort.get("error_class") or "").strip()
     detail = str(abort.get("error") or "").strip()
     if error_class and detail:
-        return f"{error_class}: {detail}"
-    return error_class or detail or "abort_reason.json present without error detail"
+        raw = f"{error_class}: {detail}"
+    else:
+        raw = error_class or detail or "abort_reason.json present without error detail"
+    return _clip_sweep_error(raw)
+
+
+def _abort_error_if_present(variant_dir: Path, warnings: list[str]) -> str | None:
+    """Return a clipped abort-marker reason when ``abort_reason.json`` exists.
+
+    Args:
+        variant_dir (Path): Sweep variant directory.
+        warnings (list[str]): Shared warnings list (mutated on parse failure).
+
+    Returns:
+        str | None: Formatted abort error, or None when the marker is absent.
+    """
+    abort_path = variant_dir / "abort_reason.json"
+    if not abort_path.is_file():
+        return None
+    abort = _load_json_safe(abort_path, warnings, require_dict=True)
+    return _abort_reason_error(abort)
 
 
 def _shape_sweep_point(
@@ -373,18 +413,18 @@ def _shape_sweep_point(
     out_tput = ttft = tpot = e2el = None
     error: str | None = None
     if report is None:
-        abort_path = variant_dir / "abort_reason.json"
-        if abort_path.is_file():
-            abort = _load_json_safe(abort_path, warnings, require_dict=True)
+        abort_error = _abort_error_if_present(variant_dir, warnings)
+        if abort_error is not None:
             status = "failed"
-            error = _abort_reason_error(abort)
+            error = abort_error
         else:
             status = "skipped"
     else:
         report_data = _load_json_safe(report, warnings, require_dict=True)
         if report_data is None:
             status = "failed"
-            error = _UNREADABLE_REPORT
+            abort_error = _abort_error_if_present(variant_dir, warnings)
+            error = abort_error if abort_error is not None else _UNREADABLE_REPORT
         else:
             out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
             if report_data.get("success") is False:
