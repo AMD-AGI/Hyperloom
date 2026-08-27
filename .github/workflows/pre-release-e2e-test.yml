@@ -25,7 +25,8 @@ name: Pre-release E2E test
 # Variables (non-secret): PRE_E2E_SAFE_API_BASE, PRE_E2E_SAFE_WORKSPACE_ID,
 #   PRE_E2E_AUTHORING_IMAGE, PRE_E2E_NFS_ROOT, PRE_E2E_MODEL_3H_PATH,
 #   PRE_E2E_MODEL_12H_PATH, PRE_E2E_CLAUDE_MODEL, PRE_E2E_CLAUDE_CLI_VERSION,
-#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_SAFE_INSECURE.
+#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_ANTHROPIC_CUSTOM_HEADERS
+#   (APIM gateways: `Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}`), PRE_E2E_SAFE_INSECURE.
 # Nothing below hard-codes an environment value; all are `${{ secrets.* }}` /
 # `${{ vars.* }}` references. TODO(owner): populate these before first real run.
 
@@ -255,6 +256,12 @@ jobs:
       CLAUDE_CLI_VERSION: ${{ vars.PRE_E2E_CLAUDE_CLI_VERSION }}
       ANTHROPIC_API_KEY: ${{ secrets.PRE_E2E_ANTHROPIC_API_KEY }} # GitHub Secret path (design §9 D)
       ANTHROPIC_BASE_URL: ${{ vars.PRE_E2E_ANTHROPIC_BASE_URL }}
+      # Extra request headers for gateways that authenticate on a header of their own
+      # (AMD APIM wants Ocp-Apim-Subscription-Key, else `401 missing subscription key`).
+      # The Claude CLI reads ANTHROPIC_CUSTOM_HEADERS; ${ANTHROPIC_API_KEY} is expanded
+      # in-pod so the one secret covers both bearer + subscription-key. Header name is
+      # non-sensitive -> a Variable. e.g. `Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}`
+      ANTHROPIC_CUSTOM_HEADERS: ${{ vars.PRE_E2E_ANTHROPIC_CUSTOM_HEADERS }}
       # per-leg GitHub commit status
       GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       GH_STATUS_REPO: ${{ github.repository }}

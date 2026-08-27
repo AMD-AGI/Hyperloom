@@ -2,17 +2,19 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 #
-# Pre-release E2E: create the SaFE Authoring workloads that run the packaged wheel
+# Pre-release E2E: create the SaFE PyTorchJob workloads that run the packaged wheel
 # through the real user path (Claude CLI + setup skill + demo skill). Unlike the PR
 # smoke test (.github/scripts/ci-e2e-dispatch.sh), which uses the orchestration
 # endpoint (POST /api/v1/orchestration/workloads, kind=hyperloom) to dispatch a git
-# SHA, this dispatches GENERIC Authoring pods (POST /api/v1/workloads,
-# kind=Authoring) whose entrypoint is the bootstrap script. See
+# SHA, this dispatches GENERIC pods (POST /api/v1/workloads) whose entrypoint is the
+# bootstrap script. kind=PyTorchJob, NOT Authoring: the Authoring mutating webhook
+# rewrites EntryPoints to `sleep infinity`, so an Authoring pod would never run our
+# bootstrap; PyTorchJob honors the submitted entrypoint. See
 # hyperloom-pre-release-e2e-ci-design.md §7.
 #
 # It creates 5 workloads for the 8 legs:
-#   * 4x non-privileged 1-GPU Authoring  (one per baremetal leg)
-#   * 1x privileged   8-GPU Authoring    (docker host; 4 nested containers, GPU 0-3)
+#   * 4x non-privileged 1-GPU PyTorchJob  (one per baremetal leg)
+#   * 1x privileged   8-GPU PyTorchJob    (docker host; 4 nested containers, GPU 0-3)
 # and writes a dispatch map (leg -> workloadId) to $DISPATCH_MAP for the poll step.
 #
 # Requires: bash, curl, jq on the (self-hosted, in-network) runner.
@@ -37,8 +39,8 @@
 #   TASKS             comma-separated leg subset (default: all 8)
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
-#   HOST_CPU / HOST_MEM / HOST_SHM  privileged host resource request
-#                     (default 128 / 512Gi / 256Gi)
+#   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
+#                     (default 128 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod)
 #   LEG_CPU  / LEG_MEM              baremetal leg resource request
 #                     (default 32 / 128Gi)
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
@@ -54,7 +56,13 @@ set -euo pipefail
 
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
-HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-512Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
+# Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128,
+# mem 2048Gi, ephemeral 1792Gi. The privileged DinD host runs nested docker with the
+# vfs storage driver (no layer dedup), so 8 ROCm images x full copies blow past a small
+# ephemeral limit -- our first run was EVICTED at ephemeralStorage 200Gi. 1792Gi matches
+# the reference host and leaves headroom for vfs image blowup + model/wheel scratch.
+HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
+HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"
 DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
@@ -137,6 +145,7 @@ common_env_json() {
     --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
+    --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     '{
       CI_VERSION: $civ,
       NFS_ROOT: $nfs,
@@ -147,7 +156,9 @@ common_env_json() {
       CLAUDE_MODEL: $cmodel,
       CLAUDE_CLI_VERSION: $cver,
       ANTHROPIC_API_KEY_B64: $keyb64
-    } + (if $baseurl == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)'
+    }
+    + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)
+    + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS: $cheaders} end)'
 }
 
 # POST one workload; echo the workloadId.
@@ -169,6 +180,15 @@ create_workload() {
   if [ -n "$DEADLINE_FIELD" ] && [ -n "$deadline_s" ]; then
     dl_json="$(jq -n --arg k "$DEADLINE_FIELD" --argjson v "$deadline_s" '{($k): $v}')"
   fi
+  # kind PyTorchJob, NOT Authoring: SaFE's mutating webhook (mutateAuthoring)
+  # unconditionally overwrites an Authoring workload's EntryPoints to `sleep infinity`,
+  # so our bootstrap entrypoint would never auto-run -- every leg would idle until
+  # something exec'd in. PyTorchJob is not in that mutate switch, so it HONORS the
+  # submitted entryPoints (run via launcher.sh) and bootstrap runs as the pod command.
+  # version stays "v1"; NO `group` field (webhook clears group, workload_webhook.go:260).
+  # privileged / 8-GPU / useWorkspaceStorage / timeout are all kind-agnostic (driven by
+  # request fields, not kind) -- confirmed against Primus-SaFE source. Pod name is
+  # <workloadId>-master-0, main container `pytorch`.
   body="$(jq -n \
     --arg name "$name" --arg ws "$SAFE_WORKSPACE_ID" --arg img "$AUTHORING_IMAGE" \
     --arg entry "$entry_b64" --argjson res "$resources" --argjson env "$env" \
@@ -176,7 +196,7 @@ create_workload() {
     '{
       displayName: $name,
       workspaceId: $ws,
-      groupVersionKind: {kind:"Authoring", version:"v1"},
+      groupVersionKind: {kind:"PyTorchJob", version:"v1"},
       resources: [$res],
       images: [$img],
       entryPoints: [$entry],
@@ -243,7 +263,8 @@ done
 # ---- docker legs: one privileged 8-GPU host running all requested docker legs ----
 if [ "$want_docker_host" = 1 ]; then
   host_resources="$(jq -n --arg cpu "$HOST_CPU" --arg mem "$HOST_MEM" --arg shm "$HOST_SHM" \
-    '{replica:1, gpu:"8", cpu:$cpu, memory:$mem, sharedMemory:$shm, ephemeralStorage:"200Gi"}')"
+    --arg eph "$HOST_EPHEMERAL" \
+    '{replica:1, gpu:"8", cpu:$cpu, memory:$mem, sharedMemory:$shm, ephemeralStorage:$eph}')"
   # The host env carries the per-leg GPU map so the host bootstrap launches the right
   # nested containers via docker-run-hyperloom.sh <gpu_index> <leg>.
   docker_legs=""; gpu_map="{}"
@@ -264,6 +285,7 @@ if [ "$want_docker_host" = 1 ]; then
     --arg tgain "$TARGET_GAIN" --arg cmodel "$CLAUDE_MODEL" --arg cver "$CLAUDE_CLI_VERSION" \
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
+    --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg legs "$docker_legs" --argjson gpumap "$gpu_map" \
     '{
       CI_VERSION:$civ, NFS_ROOT:$nfs,
@@ -271,9 +293,15 @@ if [ "$want_docker_host" = 1 ]; then
       TARGET_GAIN:$tgain, CLAUDE_MODEL:$cmodel, CLAUDE_CLI_VERSION:$cver,
       ANTHROPIC_API_KEY_B64:$keyb64,
       HYPERLOOM_RUN_MODE:"docker",
+      E2E_DOCKER_HOST:"1",
       DOCKER_LEGS:$legs, DOCKER_GPU_MAP:($gpumap|tostring)
-    } + (if $baseurl == "" then {} else {ANTHROPIC_BASE_URL:$baseurl} end)')"
-  entry="$(bootstrap_entry_b64 "E2E_DOCKER_HOST=1;")"
+    }
+    + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL:$baseurl} end)
+    + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS:$cheaders} end)')"
+  # E2E_DOCKER_HOST=1 travels in the workload `env` (above), NOT as a command prefix:
+  # under PyTorchJob the entrypoint actually runs, and a `VAR=1;` prefix followed by a
+  # separate `exec bash` would NOT export VAR into the bootstrap's environment.
+  entry="$(bootstrap_entry_b64 "")"
   # The one host pod runs a mix of 3h and 12h nested legs, so its deadline must be
   # the MAX over the legs it hosts (a 3h deadline would kill a still-running 12h leg).
   host_dl="$DEADLINE_3H_S"
