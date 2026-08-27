@@ -84,8 +84,8 @@ run_leg() {
   set +a
   export PYTHONPATH="${root}:${PYTHONPATH:-}"
 
-  local setup_prompt="${PROMPTS_DIR}/setup-${run_mode}-${backend}.txt"
-  local demo_prompt;   demo_prompt="${PROMPTS_DIR}/demo-${hours}h.txt"
+  local setup_prompt="${PROMPTS_DIR}/setup-${run_mode}-${backend}.md"
+  local demo_prompt;   demo_prompt="${PROMPTS_DIR}/demo-${hours}h.md"
   [ -f "$setup_prompt" ] || { log "ERROR: missing $setup_prompt"; return 1; }
   [ -f "$demo_prompt" ]  || { log "ERROR: missing $demo_prompt"; return 1; }
 
