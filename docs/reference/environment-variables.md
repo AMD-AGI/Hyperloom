@@ -607,6 +607,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Primary switch (default **off**) for live Langfuse trace push. See details below. |
+| `HYPERLOOM_LLM_ATTRIBUTION` | Names the gateway whose attribution headers every LLM call should carry (default **unset**, emitting none). See details below. |
 
 **`HYPERLOOM_LANGFUSE_ENABLE`** details:
 
@@ -716,6 +717,43 @@ To get the single "total tokens for this run" number, read
 or `.total_in_out` (visible prompt+completion only). Read
 `.total_reasoning_out` on its own when comparing a reasoning model against a
 non-reasoning one — the latter reports `0` there.
+
+### Gateway attribution (`HYPERLOOM_LLM_ATTRIBUTION`)
+
+`token_usage` above is Hyperloom's own account of its spend, assembled from
+calls that report themselves to the ledger. The gateway keeps a second account,
+from the calls it actually metered, and the two disagree whenever a component
+spends without a ledger producer. This variable makes the gateway's account
+readable along the same axes, by tagging every outbound call with who made it.
+
+Set it to the name of the gateway in front of the deployment; `litellm` is the
+only preset today. Leave it unset (the default) and nothing is emitted.
+
+```bash
+export HYPERLOOM_LLM_ATTRIBUTION=litellm
+```
+
+Each call then carries, on headers that gateway understands:
+
+| Field | Value |
+|-------|-------|
+| `application` | Always `hyperloom`, to separate this product's spend on a shared gateway. |
+| `session` | `CLAW_SESSION_ID`, the same id `session_breakdown.json` records — this is what joins the two accounts. |
+| `component` | The producer, from the same vocabulary as `token_usage.by_component`. |
+| `phase` | The phase the run had reached, matching `token_usage.by_phase`. |
+| `type` | The action executing inside that phase, e.g. `kernel_opt`. |
+| `operation` | What the individual call was for, e.g. `generate_candidate`. |
+
+For LiteLLM these arrive as `x-litellm-tags` (a comma-separated list landing in
+the `request_tags` column of `LiteLLM_SpendLogs`) and `x-litellm-trace-id` (the
+session id, which sets the `session_id` column and propagates to nested calls).
+A spend report can then be grouped by component or phase, or reconciled against
+`token_usage` for one session.
+
+Fields with per-call cardinality (a task or kernel id) are deliberately not in
+the tag list: one tag per task would give the rollup as many buckets as there
+are tasks. Supporting another gateway means adding a preset in
+`src/hyperloom/common/llm_attribution.py`, not setting a different string here.
 
 ---
 

@@ -906,8 +906,11 @@ class SpecialistSubprocessDispatcher:
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
-        # The child spends against the gateway under this task; tag it so the
-        # spend can be read back per task instead of as one specialist total.
+        # The child spends against the gateway, so tag it or its spend lands
+        # under no component at all. The task is offered but no preset selects
+        # it: one tag per task would give the spend rollup as many buckets as
+        # there are tasks, which is the opposite of what it is read for. Reading
+        # spend per task needs a header of its own, not a value in this one.
         inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
 
         backend = ""
