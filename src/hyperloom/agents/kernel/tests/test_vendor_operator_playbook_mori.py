@@ -51,6 +51,7 @@ import tracelens_analysis as tla  # noqa: E402
 import forge_submit  # noqa: E402
 import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
+    load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
     _reset_vendor_operator_playbooks_cache,
@@ -369,7 +370,7 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
     assert "source_file_superseded_by_playbook" not in out[0]
 
 
-def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog):
+def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog, tmp_path):
     """The anchorless entry is kept out of the pipeline, not guarded against.
 
     Every consumer of a match overrides ``source_file`` with the anchor, so an
@@ -381,20 +382,26 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     the review was refused it. Refusing the entry at load makes the shape
     unreachable instead.
     """
-    import _vendor_operator_playbooks as vop
-
-    registry = {
-        "playbooks": [
-            {"id": "with-anchor", "kernel_anchor": "mori_ep_config.py"},
-            {"id": "no-anchor", "role": "dispatch"},
-            {"id": "blank-anchor", "kernel_anchor": "   "},
-        ]
-    }
-    monkeypatch.setattr(vop.Path, "read_text", lambda _self, **_kw: json.dumps(registry))
-    vop._reset_vendor_operator_playbooks_cache()
-    with caplog.at_level(logging.WARNING, logger=vop.log.name):
-        loaded = vop.load_vendor_operator_playbooks()
-    vop._reset_vendor_operator_playbooks_cache()
+    registry = tmp_path / "vendor_operator_playbooks.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "playbooks": [
+                    {"id": "with-anchor", "kernel_anchor": "mori_ep_config.py"},
+                    {"id": "no-anchor", "role": "dispatch"},
+                    {"id": "blank-anchor", "kernel_anchor": "   "},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Redirect the registry rather than patching ``Path.read_text``, which is
+    # ``pathlib.Path``'s and would answer for every read in the process.
+    monkeypatch.setattr("_vendor_operator_playbooks._REGISTRY_PATH", registry)
+    _reset_vendor_operator_playbooks_cache()
+    with caplog.at_level(logging.WARNING, logger="_vendor_operator_playbooks"):
+        loaded = load_vendor_operator_playbooks()
+    _reset_vendor_operator_playbooks_cache()
 
     assert [entry["id"] for entry in loaded] == ["with-anchor"]
     assert "no-anchor" in caplog.text

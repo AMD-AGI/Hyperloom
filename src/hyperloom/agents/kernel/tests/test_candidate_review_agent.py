@@ -29,6 +29,11 @@ from pathlib import Path
 
 import pytest
 
+# One import style per module: CodeQL flags mixing ``import x`` with
+# ``from x import y``, and reaching the module object is what the sandbox tests
+# need in order to substitute its turn runner.
+import hyperloom.common.codex_session as codex_session
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import _candidate_review_agent as cra  # noqa: E402
@@ -887,9 +892,7 @@ class TestTheCodexBackendIsContainedToo:
             captured.update(kwargs)
             return type("R", (), {"error": ""})()
 
-        import hyperloom.common.codex_session as cs
-
-        monkeypatch.setattr(cs, "run_codex_turn", _fake_turn)
+        monkeypatch.setattr(codex_session, "run_codex_turn", _fake_turn)
         asyncio.run(
             cra._run_codex_session(
                 "prompt",
@@ -908,10 +911,9 @@ class TestTheCodexBackendIsContainedToo:
     def test_a_bypass_deployment_does_not_reach_the_review(self, monkeypatch, tmp_path):
         """Stating the mode outranks the environment, so bypass cannot apply."""
         monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
-        from hyperloom.common.codex_session import resolve_codex_sandbox_mode
-
         captured = self._captured(monkeypatch, tmp_path)
-        assert resolve_codex_sandbox_mode(sandbox_mode=captured["sandbox_mode"]) != "bypass"
+        resolved = codex_session.resolve_codex_sandbox_mode(sandbox_mode=captured["sandbox_mode"])
+        assert resolved != "bypass"
 
     def test_the_containment_in_force_is_recorded(self, monkeypatch, tmp_path):
         """Which backend ran is otherwise invisible to the operator."""
@@ -920,9 +922,7 @@ class TestTheCodexBackendIsContainedToo:
         async def _fake_turn(**_kwargs):
             return type("R", (), {"error": ""})()
 
-        import hyperloom.common.codex_session as cs
-
-        monkeypatch.setattr(cs, "run_codex_turn", _fake_turn)
+        monkeypatch.setattr(codex_session, "run_codex_turn", _fake_turn)
         asyncio.run(
             cra._run_codex_session(
                 "prompt",
