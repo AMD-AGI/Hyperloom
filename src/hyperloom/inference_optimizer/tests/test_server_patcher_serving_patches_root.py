@@ -11,7 +11,8 @@ so the resolution order is asserted directly here.
 
 Before KernelForge was vendored into Hyperloom this read ``$FORGE_PATH`` and
 nothing else, so an unset env var meant "no patches". The packaged tree is now
-the normal answer.
+the normal answer, and the only override left is ``$KERNELFORGE_PROJECT_ROOT``,
+which substitutes the whole data tree rather than a repository checkout.
 """
 
 from __future__ import annotations
@@ -23,16 +24,20 @@ import pytest
 from hyperloom.orchestrator.actions.executors._server_patcher import _resolve_serving_patches_root
 
 
-def _fake_checkout(root: Path) -> Path:
+def _fake_tree(root: Path) -> Path:
     tree = root / "serving_patches"
     (tree / "sglang").mkdir(parents=True)
     return tree
 
 
-def test_packaged_tree_is_used_when_nothing_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The stock install must resolve without any environment at all."""
-    monkeypatch.delenv("FORGE_PATH", raising=False)
+@pytest.fixture(autouse=True)
+def _no_ambient_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A developer's own data-tree override must not decide these assertions."""
+    monkeypatch.delenv("KERNELFORGE_PROJECT_ROOT", raising=False)
 
+
+def test_packaged_tree_is_used_when_nothing_is_configured() -> None:
+    """The stock install must resolve without any environment at all."""
     resolved = _resolve_serving_patches_root(None)
 
     assert resolved is not None, "the packaged serving_patches tree did not resolve"
@@ -44,48 +49,79 @@ def test_packaged_tree_is_used_when_nothing_is_configured(monkeypatch: pytest.Mo
     assert resolved.parent == packaged_data_root()
 
 
-def test_forge_path_checkout_wins_over_the_packaged_tree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A dev override is the whole reason $FORGE_PATH survives."""
-    tree = _fake_checkout(tmp_path / "KernelForge")
-    monkeypatch.setenv("FORGE_PATH", str(tmp_path / "KernelForge"))
+def test_explicit_root_wins_over_the_packaged_tree(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """The caller-supplied root is the highest-precedence override.
 
-    assert _resolve_serving_patches_root(None) == tree
-
-
-def test_explicit_root_wins_over_the_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    tree = _fake_checkout(tmp_path / "explicit")
-    monkeypatch.setenv("FORGE_PATH", str(_fake_checkout(tmp_path / "env").parent))
-
-    assert _resolve_serving_patches_root(tmp_path / "explicit") == tree
-
-
-def test_a_checkout_without_the_tree_falls_through_to_the_package(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """A $FORGE_PATH that predates serving_patches must not disable the patch.
-
-    The override is a preference, not a veto: pointing at an older checkout
-    used to leave the resolver with nothing, which silently dropped the patch.
+    Patching SGLang from anywhere other than the shipped tree is worth a line
+    in the log: every failure on this path is silent, so an override that wins
+    should not be something you discover by reading a diff months later.
     """
-    empty = tmp_path / "old-checkout"
-    empty.mkdir()
-    monkeypatch.setenv("FORGE_PATH", str(empty))
+    tree = _fake_tree(tmp_path / "explicit")
 
-    resolved = _resolve_serving_patches_root(None)
+    with caplog.at_level("WARNING"):
+        assert _resolve_serving_patches_root(tmp_path / "explicit") == tree
+
+    assert any("not the one packaged with kernelforge" in record.message for record in caplog.records)
+
+
+def test_an_explicit_root_without_the_tree_falls_through_to_the_package(tmp_path: Path) -> None:
+    """The override is a preference, not a veto.
+
+    Pointing at a root that carries no ``serving_patches`` used to leave the
+    resolver with nothing, which silently dropped the patch entirely.
+    """
+    empty = tmp_path / "no-patches-here"
+    empty.mkdir()
+
+    resolved = _resolve_serving_patches_root(empty)
 
     assert resolved is not None
     assert resolved.is_dir()
 
 
+def test_project_root_override_wins_and_is_logged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``$KERNELFORGE_PROJECT_ROOT`` is the surviving env-var override.
+
+    It is how an air-gapped operator drops in a newer sglang patch ahead of an
+    image rebuild, so it must beat the packaged copy -- and say that it did.
+    """
+    project_root = tmp_path / "kernelforge-project"
+    tree = _fake_tree(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
+
+    with caplog.at_level("WARNING"):
+        assert _resolve_serving_patches_root(None) == tree
+
+    assert any("KERNELFORGE_PROJECT_ROOT override" in record.message for record in caplog.records)
+
+
+def test_a_project_root_without_the_tree_falls_through_to_the_package(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A data-tree substitution that carries no patches must not disable them."""
+    project_root = tmp_path / "partial-project"
+    project_root.mkdir()
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
+
+    resolved = _resolve_serving_patches_root(None)
+
+    assert resolved is not None
+    assert resolved.is_dir()
+    from kernelforge.resources import packaged_data_root
+
+    assert resolved.parent == packaged_data_root()
+
+
 def test_missing_kernelforge_is_fail_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     """Hyperloom must stay usable on a host without the forge extra installed."""
-    monkeypatch.delenv("FORGE_PATH", raising=False)
     import builtins
 
     real_import = builtins.__import__
 
     def no_kernelforge(name, *args, **kwargs):
-        if name == "kernelforge.resources" or name.split(".")[0] == "kernelforge":
+        if name.split(".")[0] == "kernelforge":
             raise ImportError("kernelforge is not installed")
         return real_import(name, *args, **kwargs)
 

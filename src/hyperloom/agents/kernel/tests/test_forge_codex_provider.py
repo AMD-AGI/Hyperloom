@@ -80,7 +80,6 @@ def _capture_forge_loop_argv(
         captured["command"] = command
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
@@ -136,7 +135,6 @@ def _capture_rewrite_argv(
         captured["env"] = kwargs.get("env") or {}
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 

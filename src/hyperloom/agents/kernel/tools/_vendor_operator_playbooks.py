@@ -27,7 +27,6 @@ from __future__ import annotations
 import copy
 import functools
 import json
-import os
 from pathlib import Path
 from typing import Any
 
@@ -181,9 +180,8 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     ``/nonexistent-forge-path`` root -- existed only to keep the value
     path-shaped when no checkout was around; it dressed "the env var is unset"
     up as "the file is missing", which is a different and much quieter failure.
-    A ``$FORGE_PATH`` checkout still wins when it is set, regardless of whether
-    the file exists there yet, so a developer can point the analysis at a
-    work-in-progress bundle.
+    An operator substituting a bundle points ``$KERNELFORGE_PROJECT_ROOT`` at a
+    tree holding it; :func:`resource_path` honours that ahead of the package.
 
     Args:
         playbook: A matched playbook entry (as returned by
@@ -201,16 +199,10 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     if not anchor:
         return ""
     relative = f"{bundle}/{anchor}" if bundle else anchor
-    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if forge_root:
-        candidate = Path(forge_root) / relative
-        # Returned even when the file isn't there yet: this analysis host
-        # may lack the KernelForge checkout the apply stage will actually
-        # run against, but the path must still be absolute and anchored at
-        # a real, known root rather than silently falling through to a
-        # bare relative string.
-        return str(candidate)
-    # No checkout: the bundle is packaged, so this resolves to a real file.
-    from kernelforge.resources import resource_path
+    # The bundle is packaged, so this resolves to a real file. ``missing_ok``
+    # still yields an absolute, package-anchored path for a bundle this
+    # installation does not carry, rather than a bare relative string that a
+    # later ``Path(...).resolve()`` would reinterpret against some other CWD.
+    from kernelforge.resources import default_project_root, resource_path
 
-    return str(resource_path(relative, missing_ok=True))
+    return str(resource_path(relative, default_project_root(), missing_ok=True))

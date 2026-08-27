@@ -110,7 +110,6 @@ def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
 
 def _stub_submit_environment(monkeypatch) -> None:
     """Neutralize everything submit does outside the loop/recovery contract."""
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
 def test_observed_regression_score_is_preserved_for_diagnostics():
@@ -642,7 +641,6 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
@@ -738,7 +736,12 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # kernel's experience by the former, and declines to read or write without
     # it, so a run that carried only the target would accumulate nothing.
     assert captured["env"]["GPU_TYPE"] == "mi355x"
-    assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+    # KernelForge ships in this distribution now, so the child imports it from
+    # the same install as the parent and no checkout root is grafted onto
+    # PYTHONPATH. Asserting the graft is *gone* -- rather than that some value
+    # is present -- is what keeps a resurrected override from silently
+    # shadowing the packaged copy.
+    assert captured["env"].get("PYTHONPATH") == os.environ.get("PYTHONPATH")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert captured["popen_kwargs"]["stdout"] is subprocess.PIPE
@@ -798,7 +801,6 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         def communicate(self, timeout=None):
             return "", "Error: No such option '--future-option'.\n"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(
         forge_submit.subprocess,
@@ -864,7 +866,6 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         commands.append(command)
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
@@ -1022,7 +1023,6 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         checkpoint_json.write_text(json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh}))
         return "partial stdout", "partial stderr"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
@@ -1927,7 +1927,6 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
     def forbidden_popen(*_args, **_kwargs):
         raise AssertionError("a campaign must not start on unclearable artifacts")
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", forbidden_popen)
 
@@ -2313,7 +2312,7 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
         stdout="loading kernelforge...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
     )
 
-    capabilities = _flydsl_rewrite.probe_capabilities(forge_root="/forge/src")
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True
     assert capabilities.reason == "capability_ok"
@@ -2326,7 +2325,10 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
         "forge-rewrite-by-flydsl",
         "--capabilities-json",
     ]
-    assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+    # The child inherits this process's environment untouched: the producer is
+    # the installed kernelforge, so there is no root left to graft onto
+    # PYTHONPATH.
+    assert captured["env"] == os.environ
 
 
 @pytest.mark.parametrize(
@@ -2366,13 +2368,8 @@ def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
 
 
 def test_installed_producer_capabilities_are_accepted():
-    producer_root = forge_submit._ensure_forge_on_path()
-    if not producer_root:
-        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
-
-    capabilities = _flydsl_rewrite.probe_capabilities(
-        forge_root=producer_root,
-    )
+    """Unstubbed: the producer ships in this distribution, so it is always here."""
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert set(capabilities.frameworks) == {"aiter", "vllm", "sglang"}
@@ -2392,45 +2389,20 @@ def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
     assert "rc=2" in capabilities.detail
 
 
-def _installed_producer_root() -> str:
-    """Return the source root of a KernelForge that speaks the rewrite command.
-
-    Resolves ``$FORGE_PATH`` the same way ``forge_submit`` does, then requires
-    the rewrite command itself: a checkout predating the rewrite route answers
-    the module but not the command, and must skip rather than fail.
-    """
-    root = forge_submit._ensure_forge_on_path()
-    if not root:
-        return ""
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "kernelforge.cli",
-            _flydsl_rewrite.REWRITE_COMMAND,
-            _flydsl_rewrite.CAPABILITIES_FLAG,
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
-        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
-    )
-    return root if proc.returncode == 0 else ""
-
-
 def test_capability_payload_matches_the_installed_producer():
     """The real producer must satisfy this consumer, unstubbed.
 
     Every other capability test builds the payload itself, so both halves of
-    this cross-repo contract can drift into agreeing only with their own
-    fixtures. This runs the installed producer and pins its payload against the
-    fixture, which is the one check that catches a rename on either side.
-    """
-    root = _installed_producer_root()
-    if not root:
-        pytest.skip("no KernelForge with forge-rewrite-by-flydsl resolvable from $FORGE_PATH")
+    this contract can drift into agreeing only with their own fixtures. This
+    runs the installed producer and pins its payload against the fixture, which
+    is the one check that catches a rename on either side.
 
-    capabilities = _flydsl_rewrite.probe_capabilities(forge_root=root)
+    It used to resolve the producer from ``$FORGE_PATH`` and skip when that
+    named no checkout carrying the rewrite command -- so in practice it never
+    ran. The producer is part of this distribution now, and a missing rewrite
+    command is a real failure rather than a reason to skip.
+    """
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert capabilities.reason == "capability_ok"
@@ -2453,7 +2425,6 @@ def test_capability_payload_matches_the_installed_producer():
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
         timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
     )
     published = _flydsl_rewrite._decode_capability_payload(proc.stdout)
@@ -3170,7 +3141,6 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
@@ -3283,7 +3253,6 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         terminated["pid"] = proc.pid
         return "partial stdout", "killed"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: HangingProcess())
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
@@ -3337,7 +3306,6 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
             result_json.write_text(json.dumps({"success": True, "from": "sidecar"}))
             return '__FORGE_RESULT__{"success": true, "from": "sentinel"}', ""
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: FakeProcess())
 

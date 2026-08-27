@@ -356,7 +356,6 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
                 "",
             )
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", FakePopen)
 
@@ -429,7 +428,6 @@ def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
                 timeout=timeout,
             )
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
 

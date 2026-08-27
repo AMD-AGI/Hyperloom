@@ -292,7 +292,7 @@ def _validated_capabilities(payload: dict[str, Any] | None) -> RewriteCapabiliti
     )
 
 
-def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
+def probe_capabilities() -> RewriteCapabilities:
     """Ask the installed producer what rewrite contract it speaks.
 
     The answer is cached for the process: it describes the installed
@@ -300,21 +300,15 @@ def probe_capabilities(*, forge_root: str = "") -> RewriteCapabilities:
     per attempt. ``--capabilities-json`` is an eager short-circuit option, so a
     failure here is reported as-is and never re-tried with guessed arguments.
 
-    Args:
-        forge_root: Directory holding ``kernelforge``, prepended to the child
-            ``PYTHONPATH``; empty relies on an installed package.
-
     Returns:
         The validated :class:`RewriteCapabilities` for this process.
     """
-    cache_key = forge_root or "<installed>"
+    cache_key = "<installed>"
     cached = _CAPABILITY_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
     child_env = dict(os.environ)
-    if forge_root:
-        child_env["PYTHONPATH"] = forge_root + os.pathsep + child_env.get("PYTHONPATH", "")
     cmd = [sys.executable, "-m", "kernelforge.cli", REWRITE_COMMAND, CAPABILITIES_FLAG]
     try:
         proc = subprocess.run(
@@ -483,7 +477,6 @@ def evaluate_rewrite_route(
     attempt_id: str,
     timeout_s: int,
     invocation_spec_file: str = "",
-    forge_root: str = "",
     capability_probe: Callable[..., RewriteCapabilities] | None = None,
 ) -> RewriteDecision:
     """Decide whether one prepared Forge attempt may take the rewrite route.
@@ -509,7 +502,6 @@ def evaluate_rewrite_route(
         timeout_s: Remaining wall-clock budget for the attempt.
         invocation_spec_file: Recorded invocation evidence the producer's
             driver-preparation stage authors the measurement driver from.
-        forge_root: Directory holding ``kernelforge`` for the probe child.
         capability_probe: Injection point for the capability probe.
 
     Returns:
@@ -562,7 +554,7 @@ def evaluate_rewrite_route(
         return RewriteDecision(False, "target_functions_missing", "no implementation symbol resolved")
 
     probe = capability_probe or probe_capabilities
-    capabilities = probe(forge_root=forge_root)
+    capabilities = probe()
     if not capabilities.supported:
         return RewriteDecision(False, capabilities.reason, capabilities.detail, capabilities=capabilities)
     if canonical_framework not in capabilities.frameworks:

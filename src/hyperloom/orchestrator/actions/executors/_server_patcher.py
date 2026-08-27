@@ -333,8 +333,8 @@ def ensure_sglang_patched_for_ck_blockscale(
     unpatched tree).
 
     Args:
-        kernelforge_root: KernelForge checkout root override; falls back to
-            ``$FORGE_PATH``, then to the packaged tree, when ``None``.
+        kernelforge_root: Explicit ``serving_patches`` parent override; falls
+            back to the packaged tree when ``None``.
 
     Returns:
         True if the SGLang install carries the CK-routing patch at exit, False
@@ -811,9 +811,6 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# KernelForge root env var (single canonical var; CI/local both export it).
-_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = ("FORGE_PATH",)
-
 # CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the
 # KernelForge-owned patch; all three must be present to count as patched.
 _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
@@ -826,11 +823,19 @@ _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
 def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
     """Resolve KernelForge's ``serving_patches`` tree; fail-soft.
 
-    Precedence: an explicit KernelForge root, then a ``$FORGE_PATH`` checkout,
-    then the tree packaged inside the installed ``kernelforge``. The packaged
-    copy is the normal answer -- KernelForge ships in this distribution now, so
-    an unset ``FORGE_PATH`` no longer means "no patches available", which is
-    what the previous env-only resolver silently concluded.
+    Precedence: an explicit KernelForge root, then whatever
+    :func:`kernelforge.resources.resource_path` resolves -- a
+    ``$KERNELFORGE_PROJECT_ROOT`` tree carrying its own ``serving_patches``,
+    else the copy packaged inside the installed ``kernelforge``. The packaged
+    copy is the normal answer: KernelForge ships in this distribution now, so
+    no environment is a precondition. The old ``$FORGE_PATH`` branch is gone --
+    it pointed at the pre-inlining repository layout, so any value that still
+    satisfied it shadowed the packaged tree with an archived one.
+
+    Every miss on this path is silent by design (an unpatched tree just leaves
+    ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` no-opping), so an override that wins is
+    logged at WARNING: patching SGLang from somewhere other than the shipped
+    tree is not something to discover by reading a diff months later.
 
     ``kernelforge`` is imported inside the function on purpose: Hyperloom must
     stay importable on a host where the forge extra was not installed, and this
@@ -844,26 +849,33 @@ def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
         The ``serving_patches`` directory, or ``None`` when nothing resolves to
         a real directory.
     """
-    roots: list[Path] = []
     if arg:
-        roots.append(Path(arg))
-    else:
-        for var in _KERNELFORGE_ROOT_ENV_VARS:
-            env = os.environ.get(var, "").strip()
-            if env:
-                roots.append(Path(env))
-    for root in roots:
-        candidate = root / "serving_patches"
+        candidate = Path(arg) / "serving_patches"
         if candidate.is_dir():
+            log.warning(
+                "_server_patcher: patching SGLang from an explicit serving_patches tree at %s, "
+                "not the one packaged with kernelforge",
+                candidate,
+            )
             return candidate
 
     try:
-        from kernelforge.resources import resource_path
+        from kernelforge.resources import default_project_root, packaged_data_root, resource_path
 
-        packaged = resource_path("serving_patches", missing_ok=True)
+        resolved = resource_path("serving_patches", default_project_root(), missing_ok=True)
+        packaged_root = packaged_data_root()
     except ImportError:
         return None
-    return packaged if packaged.is_dir() else None
+    if not resolved.is_dir():
+        return None
+    if resolved.parent != packaged_root:
+        log.warning(
+            "_server_patcher: patching SGLang from %s (KERNELFORGE_PROJECT_ROOT override), "
+            "not the tree packaged with kernelforge at %s",
+            resolved,
+            packaged_root / "serving_patches",
+        )
+    return resolved
 
 
 def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
@@ -875,8 +887,8 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     and assembles the ``fp8_utils.py`` sentinel markers.
 
     Args:
-        arg: KernelForge checkout root override, or ``None`` to use
-            ``$FORGE_PATH`` / the packaged tree.
+        arg: Explicit ``serving_patches`` parent override, or ``None`` to use
+            the packaged tree.
 
     Returns:
         _PatchPlan | None: A fully-resolved plan, or ``None`` on any fail-soft
@@ -886,8 +898,8 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     serving_patches_root = _resolve_serving_patches_root(arg)
     if serving_patches_root is None:
         log.info(
-            "_server_patcher: no KernelForge serving_patches tree (checked FORGE_PATH and the "
-            "packaged kernelforge) — skip SGLang fp8 block-scale CK patch "
+            "_server_patcher: no KernelForge serving_patches tree resolved from the packaged "
+            "kernelforge — skip SGLang fp8 block-scale CK patch "
             "(SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched tree)"
         )
         return None

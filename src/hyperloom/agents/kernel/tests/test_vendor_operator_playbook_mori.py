@@ -315,8 +315,14 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
 _real_resolve_vendor_task_bundle = forge_submit._resolve_vendor_task_bundle
 
 
-def _write_fake_mori_bundle(forge_path: Path) -> Path:
-    bundle = forge_path / "examples" / "mori_ep_dispatch_combine"
+def _write_fake_mori_bundle(project_root: Path) -> Path:
+    """Plant a substitute bundle where ``resource_path`` looks before the package.
+
+    ``$KERNELFORGE_PROJECT_ROOT`` is the surviving override now that $FORGE_PATH
+    is gone: the layout under it mirrors the packaged data tree, so the same
+    relative path resolves against either.
+    """
+    bundle = project_root / "examples" / "mori_ep_dispatch_combine"
     bundle.mkdir(parents=True)
     (bundle / "mori_ep_config.py").write_text("def get_ep_launch_config():\n    return {}\n", encoding="utf-8")
     (bundle / "driver.py").write_text("# real, hand-written mori driver\n", encoding="utf-8")
@@ -344,10 +350,9 @@ def _stub_run_loop(monkeypatch, captured_calls: list[dict]):
 
 
 def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch, tmp_path):
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     captured: list[dict] = []
@@ -479,10 +484,9 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
 
 def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(monkeypatch, tmp_path):
     """dispatch+combine invoke KernelForge as ONE Forge session, not two."""
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     captured: list[dict] = []
@@ -602,8 +606,6 @@ def test_submit_vendor_playbook_runs_from_the_packaged_bundle_without_forge_path
     goes back to skipping, every mori vendor-playbook attempt silently does
     nothing on a stock install.
     """
-    monkeypatch.delenv("FORGE_PATH", raising=False)
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     calls: list[dict] = []
     _stub_run_loop(monkeypatch, calls)
 
@@ -637,11 +639,10 @@ def test_submit_vendor_playbook_skips_when_the_bundle_cannot_be_resolved(monkeyp
     """An unresolvable bundle is still a fail-soft skip, not an exception.
 
     The packaged tree makes this unreachable in practice; the branch stays
-    because a $FORGE_PATH override or a truncated install can still produce it,
-    and the caller contract is "write a result, never raise past the claim".
+    because a $KERNELFORGE_PROJECT_ROOT override or a truncated install can
+    still produce it, and the caller contract is "write a result, never raise
+    past the claim".
     """
-    monkeypatch.delenv("FORGE_PATH", raising=False)
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", lambda relative: tmp_path / "absent" / relative)
 
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
@@ -682,10 +683,9 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
     catch-all wrapper in _submit_vendor_playbook rather than one of the
     pre-existing specific except clauses.
     """
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     def _boom(_output_dir, _source_file):
@@ -743,29 +743,31 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
     assert combine_result["skipped"] is True
 
 
-def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch):
+def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
     """A relative ``source_file`` stand-in is later reinterpreted by
     ``Path(...).resolve()`` against whatever the apply-stage process's CWD
     happens to be, not against the KernelForge bundle it was meant to name
     -- resolve_kernel_anchor_path() must never return a bare relative string,
-    with or without FORGE_PATH set (PR #1191 review finding #8).
+    whether it resolves against the packaged tree or against an operator's
+    $KERNELFORGE_PROJECT_ROOT substitution (PR #1191 review finding #8).
     """
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     assert playbook is not None
 
-    monkeypatch.delenv("FORGE_PATH", raising=False)
-    anchor_no_forge_path = resolve_kernel_anchor_path(playbook)
-    assert anchor_no_forge_path
-    assert Path(anchor_no_forge_path).is_absolute()
+    packaged_anchor = resolve_kernel_anchor_path(playbook)
+    assert packaged_anchor
+    assert Path(packaged_anchor).is_absolute()
     # With the bundle packaged, the stand-in names a file that actually exists
     # rather than a synthetic /nonexistent-forge-path placeholder.
-    assert Path(anchor_no_forge_path).is_file()
+    assert Path(packaged_anchor).is_file()
 
-    monkeypatch.setenv("FORGE_PATH", "/some/checkout/of/KernelForge")
-    anchor_with_forge_path = resolve_kernel_anchor_path(playbook)
-    assert anchor_with_forge_path
-    assert Path(anchor_with_forge_path).is_absolute()
-    assert anchor_with_forge_path.startswith("/some/checkout/of/KernelForge")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
+    overridden_anchor = resolve_kernel_anchor_path(playbook)
+    assert overridden_anchor
+    assert Path(overridden_anchor).is_absolute()
+    assert overridden_anchor.startswith(str(project_root))
 
 
 def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(monkeypatch, tmp_path):
@@ -777,10 +779,9 @@ def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass
     SNR validation had already passed inside forge-loop (PR #1191 review
     finding #5).
     """
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
     _stub_run_loop(monkeypatch, [])
 
@@ -820,7 +821,6 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
     The transient failure used to be "FORGE_PATH unset", which no longer fails
     at all now that the bundle is packaged; it is injected directly instead.
     """
-    monkeypatch.delenv("FORGE_PATH", raising=False)
     monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", lambda relative: tmp_path / "absent" / relative)
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     candidate = _mori_dispatch_candidate(
@@ -862,12 +862,11 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
     stale_mtime = time.time() - forge_submit._VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S - 1.0
     os.utime(result_path, (stale_mtime, stale_mtime))
 
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     # Lift the injected failure so the retry can actually resolve a bundle.
     monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", _real_resolve_vendor_task_bundle)
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
     captured: list[dict] = []
     _stub_run_loop(monkeypatch, captured)

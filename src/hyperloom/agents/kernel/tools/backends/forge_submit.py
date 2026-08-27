@@ -154,29 +154,6 @@ class _RetainedWorkspaceCollision(FileExistsError):
     """The requested workspace path already contains a retained attempt."""
 
 
-def _ensure_forge_on_path() -> str:
-    """Prepend a $FORGE_PATH checkout of `kernelforge` to sys.path (dev override).
-
-    KernelForge ships inside this distribution, so the installed package is the
-    normal path and the env var being unset is the normal case -- this function
-    then does nothing and returns "". $FORGE_PATH survives as a developer
-    override for running the orchestrator against a working checkout of forge
-    without reinstalling; it resolves the dir containing the `kernelforge`
-    package (a repo root, its `src/`, or the package dir itself).
-
-    Returns the path inserted, or "".
-    """
-    root = (os.environ.get("FORGE_PATH") or "").strip()
-    if not root:
-        return ""
-    for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
-        if os.path.isfile(os.path.join(cand, "kernelforge", "__init__.py")):
-            if cand not in sys.path:
-                sys.path.insert(0, cand)
-            return cand
-    return ""
-
-
 # Platform -> gfx target.
 _PLATFORM_TO_GFX = {
     "mi300x": "gfx942",
@@ -2773,8 +2750,7 @@ def _run_loop_via_cli(
     checkpoint for recovery.
 
     The child runs ``python -m kernelforge.cli forge-loop`` against the
-    installed package; a $FORGE_PATH checkout, when set, is prepended to its
-    PYTHONPATH as a developer override.
+    installed package, which ships inside this distribution.
     """
     import json as _json
 
@@ -2789,10 +2765,7 @@ def _run_loop_via_cli(
             raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
         if stale_path.exists():
             raise RuntimeError(f"stale Forge recovery artifact still exists: {stale_path}")
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
     # Fellow stability defaults scoped to this child env only.
@@ -3062,10 +3035,7 @@ def _run_rewrite_via_cli(
     if result_json.exists():
         raise RuntimeError(f"stale rewrite result still exists: {result_json}")
 
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
     _apply_fellow_env(env)
@@ -3916,10 +3886,7 @@ def _run_vendor_playbook_loop_via_cli(
         except OSError as exc:
             raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
 
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
     _apply_fellow_env(env)
@@ -4063,11 +4030,11 @@ def _run_vendor_playbook_loop_via_cli(
 def _resolve_vendor_task_bundle(relative: str) -> Path | None:
     """Locate a vendor playbook's task bundle under KernelForge's ``examples/``.
 
-    The bundle ships inside the installed ``kernelforge`` package, so the normal
-    path needs no environment at all -- this used to hard-fail with "FORGE_PATH
-    is not set", which is no longer a precondition. A $FORGE_PATH checkout still
-    wins when it is set and actually holds the bundle: that is the developer
-    override for iterating on a playbook without reinstalling.
+    The bundle ships inside the installed ``kernelforge`` package, so this needs
+    no environment at all -- it used to hard-fail with "FORGE_PATH is not set",
+    which is no longer a precondition. An operator who must substitute a bundle
+    without reinstalling points ``$KERNELFORGE_PROJECT_ROOT`` at a tree holding
+    it, which :func:`resource_path` honours ahead of the packaged copy.
 
     Returns ``None`` for an empty ``relative``. ``missing_ok`` keeps a bundle
     the package does not carry reportable as a concrete path, which the caller
@@ -4076,15 +4043,9 @@ def _resolve_vendor_task_bundle(relative: str) -> Path | None:
     if not relative:
         return None
 
-    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if forge_root:
-        override = Path(forge_root) / relative
-        if override.is_dir():
-            return override
+    from kernelforge.resources import default_project_root, resource_path
 
-    from kernelforge.resources import resource_path
-
-    return resource_path(relative, missing_ok=True)
+    return resource_path(relative, default_project_root(), missing_ok=True)
 
 
 def _run_claimed_vendor_playbook(
@@ -4542,11 +4503,6 @@ def submit(
     # the value reaches the caller, so mutating it there is visible to them.
     finalized_result: dict[str, Any] = {}
     try:
-        # Honour a $FORGE_PATH dev checkout, if any. Empty is the normal case:
-        # the loop runs in a subprocess against the installed kernelforge, which
-        # need not be importable in this process.
-        forge_root = _ensure_forge_on_path()
-
         shapes = _shapes_from_candidate(candidate)
         grouped_cases = task_group_shape_cases(candidate)
         requires_multi_case_driver = len(grouped_cases) > 1
@@ -4584,7 +4540,6 @@ def submit(
             attempt_id=output_dir.name,
             timeout_s=timeout_s,
             invocation_spec_file=invocation_spec_file,
-            forge_root=forge_root,
         )
         if not rewrite_route.eligible and rewrite_route.reason != "route_disabled":
             log.info(

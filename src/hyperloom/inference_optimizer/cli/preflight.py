@@ -201,7 +201,7 @@ def _load_dotenv_fallback() -> None:
 
     Always parses ``.env`` and loads any key not already present in the
     environment, regardless of whether LLM credentials are already set (so
-    operational vars like ``TRACELENS_ROOT`` / ``FORGE_PATH`` are also picked up).
+    operational vars like ``TRACELENS_ROOT`` / ``GEAK_ROOT`` are also picked up).
     """
     env_file = _resolve_dotenv_file()
     if env_file is None:

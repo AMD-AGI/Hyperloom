@@ -4356,7 +4356,7 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 def _forge_fusion_available() -> bool:
     """Check that KernelForge's fusion pipeline is importable.
 
-    Probes the subpackage rather than ``kernelforge``: a $FORGE_PATH checkout
+    Probes the subpackage rather than ``kernelforge``: an installation
     predating the fusion absorption would satisfy the parent import and only
     fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
     because the tool is invoked through ``sys.executable -m``.
