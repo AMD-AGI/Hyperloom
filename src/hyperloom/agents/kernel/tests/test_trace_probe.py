@@ -406,3 +406,48 @@ def test_summary_line_names_verdict_and_findings(tmp_path):
     assert probe.VERDICT_UNUSABLE in line
     assert probe.GRAPH_REPLAY_UNDER_RECORDED in line
     assert "graph_replay_coverage=" in line
+
+
+# --------------------------------------------------------------------------- #
+# Wiring: which files the skew probe is allowed to compare
+# --------------------------------------------------------------------------- #
+
+
+def test_rank_traces_for_skew_drops_capture_and_split_output(tmp_path):
+    """Only per-rank workload traces reach the skew probe.
+
+    A GLM capture directory carried 424 discovered files, nearly all of them
+    ``capture_traces/bs_*``. Capture sidecars are written one batch size at a
+    time while the graph is built, so their first timestamps are seconds apart
+    on a perfectly healthy profile -- comparing them would make the skew check
+    fire on every run.
+    """
+    import tracelens_analysis as tla
+
+    root = tmp_path / "torch_trace"
+    (root / "capture_traces").mkdir(parents=True)
+    (root / "trace_split").mkdir(parents=True)
+    ranks = [root / f"1787.0-TP-{i}.trace.json.gz" for i in range(3)]
+    sidecars = [root / "capture_traces" / f"bs_{b}_rank0.json.gz" for b in (8, 16, 32)]
+    splits = [root / "trace_split" / "mixed_steady_state_x.trace.json.gz"]
+    for p in ranks + sidecars + splits:
+        p.write_bytes(b"")
+
+    kept = tla.rank_traces_for_skew(ranks + sidecars + splits, root)
+
+    assert sorted(p.name for p in kept) == sorted(p.name for p in ranks)
+
+
+def test_rank_traces_for_skew_is_capped(tmp_path):
+    """A rank count in the hundreds means the input is not a rank set."""
+    import tracelens_analysis as tla
+
+    root = tmp_path / "torch_trace"
+    root.mkdir(parents=True)
+    many = []
+    for i in range(tla._TRACE_PROBE_MAX_RANKS + 20):
+        p = root / f"1787.0-TP-{i}.trace.json.gz"
+        p.write_bytes(b"")
+        many.append(p)
+
+    assert len(tla.rank_traces_for_skew(many, root)) == tla._TRACE_PROBE_MAX_RANKS

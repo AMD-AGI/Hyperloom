@@ -95,6 +95,10 @@ from _roofline_source import (
     PLACEHOLDER as _RL_PLACEHOLDER,
 )
 
+# Semantic trace-validity probe. Advisory: it appends to trace_health_warnings[]
+# and nothing in this module branches on what it finds -- see the call site.
+import _trace_probe
+
 # Shared canonical analysis.md renderer so the deterministic route emits the same
 # section structure + table schemas as the bypass route.
 from _analysis_md import render_report
@@ -989,6 +993,11 @@ _SPLIT_DIR_NAME = "trace_split"
 #: which is a real capture problem rather than a selection one.
 _KERNEL_PROBE_LIMIT = 8
 
+#: Rank traces the start-skew probe will peek at. A TP deployment tops out well
+#: below this; a longer list means the input is not a rank set and the check has
+#: nothing to say about it.
+_TRACE_PROBE_MAX_RANKS = 16
+
 #: Cumulative bytes of candidate traces the preflight will deserialise before
 #: giving up. Only the failing path spends this: with size ordering a healthy
 #: capture answers on the first probe. It exists because production rank traces
@@ -1107,6 +1116,35 @@ def _count_kernels_if_readable(path: Path) -> tuple[bool, int]:
     if not isinstance(payload, dict) or not isinstance(payload.get("traceEvents"), list):
         return False, 0
     return True, 0
+
+
+def rank_traces_for_skew(trace_files: list[Path], trace_input: Path) -> list[Path]:
+    """Narrow discovered traces to the per-rank workload files.
+
+    The cross-rank start-skew probe compares each file's first timestamp, which
+    is only meaningful across the ranks of one capture window. ``trace_files``
+    is a wider set than that: it also holds graph-capture sidecars and splitter
+    output. A GLM capture directory here held 424 entries, nearly all of them
+    ``capture_traces/bs_*``, and those are written one batch size at a time
+    while the graph is being built -- their first timestamps are legitimately
+    seconds apart, so handing them to a skew check reports skew on every healthy
+    profile.
+
+    Also capped: the probe reads one file head per entry, and a rank count in
+    the hundreds means the input is not a rank set to begin with.
+
+    Args:
+        trace_files: Candidates from :func:`discover_trace_inputs`.
+        trace_input: The ``--trace-input`` path, used to bound classification.
+
+    Returns:
+        Up to :data:`_TRACE_PROBE_MAX_RANKS` workload traces, discovery order
+        preserved.
+    """
+    root = _capture_classification_root(trace_input)
+    return [p for p in trace_files if not _is_capture_fragment(p, root) and not _is_derived_trace(p, root)][
+        :_TRACE_PROBE_MAX_RANKS
+    ]
 
 
 def _trace_input_sort_key(path: Path, root: Path | None = None) -> tuple[int, int, str]:
@@ -7471,6 +7509,33 @@ def main() -> int:
                     "'unreadable' above are truncated or corrupt, which is a "
                     "different problem in the same place."
                 )
+
+        # Semantic validity probe. Runs on the file the analysis will actually
+        # read, after the promotion above has settled which one that is, so the
+        # findings describe the analysed trace rather than a sibling.
+        #
+        # Observation only: findings are appended to trace_health_warnings[] with
+        # blocking capped at warning, and nothing below branches on them. The
+        # route this sits on is the one where six of six reference runs carried a
+        # rank-skew barrier and three of three sessions had their first roofline
+        # suppressed by the compute gate, with no check anywhere reporting why.
+        # Recording that is worth a pass over the trace; acting on thresholds
+        # drawn from seven sessions is not, yet.
+        if not args.dry_run and _trace_probe.probe_enabled():
+            try:
+                probe_result = _trace_probe.probe_file(analysis_trace_path)
+                append_log(log_path, probe_result.summary_line())
+                trace_health_warnings.extend(probe_result.to_health_warnings())
+                # Cross-rank skew reads only each file's head, so it is affordable
+                # even when the capture has eight ranks.
+                skew_result = _trace_probe.probe_start_skew(
+                    rank_traces_for_skew(trace_files, trace_input),
+                )
+                if skew_result.findings:
+                    append_log(log_path, skew_result.summary_line())
+                    trace_health_warnings.extend(skew_result.to_health_warnings())
+            except Exception as exc:  # noqa: BLE001 - the probe never blocks analysis
+                append_log(log_path, f"trace_probe: skipped ({type(exc).__name__}: {exc})")
 
         if not args.dry_run:
             update_status(
