@@ -1134,7 +1134,11 @@ class FrameworkPhase(CoordinatorCollaborator):
             "domain": domain,
             "source_phase": "FRAMEWORK_AGENT",
             "gap_canonical_id": gap_cid,
-            "lever_kind": LEVER_SOURCE_PATCH,
+            # No ``lever_kind``: this arm asks for a gap to be closed, not for a
+            # particular lever, and the mandate never reaches the specialist
+            # prompt anyway. Declaring one here only pre-committed the
+            # attribution to a source patch, which the deliverable is free to
+            # not be. ``patch_lever_kind`` reads what actually came back.
             "gap_symptom": (gap or "Author a framework source patch from live source + profile evidence"),
             "gap_layer": "framework",
             "framework": framework,
