@@ -72,6 +72,11 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
     the discovery lane re-keyed every request identically and re-fetched one
     finished task on every tick. Both read as "the phase ran" in a history row
     and as nothing at all in the task registry.
+
+    No backend runs specialists here, so what the arms produce is a dispatch,
+    not a result. That is the whole assertion: the empty-discovery streak is
+    deliberately not read, because in this harness the round fails to run
+    rather than running and finding nothing.
     """
     coord = _coordinator(session_dir)
     try:
@@ -85,9 +90,6 @@ async def test_a_baseline_carries_the_run_into_the_optimisation_phase_with_work(
         state = coord.shared_state
         assert state.phase == ps.PHASE_FRAMEWORK_AGENT
         assert state.phase_budget_pct[ps.PHASE_FRAMEWORK_AGENT] > 0.0
-        # Discovery came back empty its full budget, so the arm below it took
-        # over -- the ladder, walked rather than arranged.
-        assert state.framework_agent_empty_discoveries >= 1
         queued = await coord.tasks.queued()
         running = await coord.tasks.running()
         kinds = {str((t.params or {}).get("task_kind") or "") for t in (*queued, *running)}

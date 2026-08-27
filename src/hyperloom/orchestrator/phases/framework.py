@@ -2378,25 +2378,27 @@ class FrameworkPhase(CoordinatorCollaborator):
         Minimum supply only; Orchestration dispatches the same specialist
         whenever it judges the upstream lane worth pursuing.
 
-        Declines once discovery has come back empty
-        ``DISCOVER_FAILURE_RETRY_LIMIT`` times in a row. Without that the lane
-        would always answer "asked again", the pump would return on every tick,
-        and neither the local-exploration pivot below it nor
-        ``framework_agent_phase_done`` could ever be reached -- the source arm
-        would have no way to report itself plateaued.
+        Declines once discovery has spent ``DISCOVER_FAILURE_RETRY_LIMIT`` on
+        either counter: rounds that came back empty, or rounds that could not
+        run at all. Without that the lane would always answer "asked again",
+        the pump would return on every tick, and neither the local-exploration
+        pivot below it nor ``framework_agent_phase_done`` could be reached --
+        the source arm would have no way to report itself plateaued.
 
         Args:
             reason: Why discovery is being requested; carried into the mandate.
 
         Returns:
             True when a discovery task was created or is already in flight;
-            False once the empty-result streak says there is nothing left to find.
+            False once either budget says there is nothing more to get.
         """
         from ..framework import client as _fa_client
 
         state = self.shared_state
+        limit = int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT)
         empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0)
-        if empties >= int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+        failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0)
+        if empties >= limit or failures >= limit:
             return False
         if await self._candidate_discovery_inflight():
             return True
@@ -2424,10 +2426,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         await self.tasks.create_or_return_existing(
             kind="specialist",
             params=params,
-            # The empty-result count is part of the key: the registry returns
-            # the row a key already names, so a fixed key would re-fetch the
-            # finished first attempt and the streak could never advance.
-            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}:r{empties}",
+            # The round count is part of the key: the registry returns the row
+            # a key already names, so a fixed key would re-fetch the finished
+            # first attempt and neither streak could advance.
+            idempotency_key=f"candidate-discovery:{reason}{self._cycle_idem_suffix()}:r{empties + failures}",
             requires_lanes=lanes,
             lease_ttl_sec=ttl,
             side_effects=["writes_results"],
@@ -2451,22 +2453,28 @@ class FrameworkPhase(CoordinatorCollaborator):
             task: The completed specialist task.
             done_payload: Its ``specialist_done`` payload.
             run_error: The task's error, if it did not complete. A round that
-                failed reports nothing about what is out there, so it must not
-                count toward the streak that retires the lane.
+                failed reports nothing about what is out there, so it counts
+                against its own budget rather than the empty-result streak.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("candidate_discovery")):
             return
+        state = self.shared_state
         if run_error:
+            failures = int(getattr(state, "framework_agent_discover_failures", 0) or 0) + 1
+            state.framework_agent_discover_failures = failures
             log.warning(
-                "FRAMEWORK: discovery task=%s failed, not counted as an empty round: %s",
+                "FRAMEWORK: discovery task=%s failed (streak=%d): %s",
                 getattr(task, "task_id", ""),
+                failures,
                 run_error[:200],
             )
+            state.save(self.session_dir)
             return
         proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
         candidates = self._candidates_from_discovery_proposals(proposals or [])
-        state = self.shared_state
+        # A round that ran is proof the lane works, whatever it came back with.
+        state.framework_agent_discover_failures = 0
         if not candidates:
             empties = int(getattr(state, "framework_agent_empty_discoveries", 0) or 0) + 1
             state.framework_agent_empty_discoveries = empties
