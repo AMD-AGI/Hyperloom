@@ -451,3 +451,39 @@ def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
 
     with pytest.raises(RuntimeError):
         asyncio.run(stub._pump_framework_agent_phase())
+
+
+def test_a_lane_that_cannot_run_retires_on_its_own_budget(tmp_path: Path):
+    """Failed rounds get their own counter, a fresh key, and the same limit.
+
+    Not counting a failure toward the empty streak is right -- it found
+    nothing because it never looked -- but it must still count somewhere. With
+    neither counter moving, the idempotency key never changes, so every retry
+    re-fetches the settled failure and the lane asks forever without running.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+    keys = []
+
+    for _ in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+        assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+        keys.append(stub.tasks.created[-1]["idempotency_key"])
+        stub.tasks._queued.clear()
+        stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="no runner")
+
+    assert len(set(keys)) == len(keys)
+    assert stub.shared_state.framework_agent_empty_discoveries == 0
+    assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+
+
+def test_a_round_that_ran_clears_the_failure_streak(tmp_path: Path):
+    """Whatever it came back with, it proves the lane works."""
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+
+    stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="no runner")
+    assert stub.shared_state.framework_agent_discover_failures == 1
+
+    stub._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
+    assert stub.shared_state.framework_agent_discover_failures == 0
+    assert stub.shared_state.framework_agent_empty_discoveries == 1
