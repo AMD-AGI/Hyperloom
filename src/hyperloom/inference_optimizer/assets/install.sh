@@ -746,9 +746,14 @@ import hyperloom.inference_optimizer  # noqa: F401
 PY
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       # PyYAML: hard import-time dep of the CLI startup path. llm extra
-      # (claude-agent-sdk/openai/httpx): Coordinator backends.
+      # (claude-agent-sdk/openai/httpx/openai-codex): Coordinator backends and,
+      # for openai-codex, the agent runtime the forge fellow uses on an
+      # OpenAI-only deployment. click/anthropic: the built-in kernel-opt agent
+      # (`kernelforge`), which ships in this wheel and used to be installed
+      # separately from a KernelForge checkout.
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
-        "PyYAML>=6.0" "claude-agent-sdk>=0.2.110" "openai>=1.50" "httpx>=0.27"
+        "PyYAML>=6.0" "claude-agent-sdk>=0.2.110" "openai>=1.50" "httpx>=0.27" \
+        "openai-codex>=0.144" "click>=8.0" "anthropic>=0.40"
       # web extra only when critic web tools are enabled (off by default).
       if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
         "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "markdownify>=0.11" "cachetools>=5.3"
@@ -760,6 +765,7 @@ PY
       warn "claude_agent_sdk not importable after runtime dep install (Coordinator will fail)"
       [ "$CHECK_ONLY" -eq 1 ] || die "claude_agent_sdk missing"
     fi
+    _check_kernelforge_ready
     return 0
   fi
   log "ensuring inference_optimizer package + claude_agent_sdk extras"
@@ -774,6 +780,31 @@ PY
   else
     warn "claude_agent_sdk not importable after install (Coordinator will fail)"
     [ "$CHECK_ONLY" -eq 1 ] || die "claude_agent_sdk missing"
+  fi
+  _check_kernelforge_ready
+}
+
+# Readiness probe for the built-in kernel-opt agent. It replaces the step that
+# pip-installed forge as a separate distribution from a KernelForge checkout
+# found via an env pointer: there is no checkout and no separate distribution
+# any more, so there is nothing to install -- only something to verify. The
+# three imports are the ones whose absence used to be found late:
+#   kernelforge.cli      forge-loop's entry point (the 2026-07-28 ModuleNotFoundError)
+#   kernelforge.fusion   forge-fuse, which imports fine only if the tree is complete
+#   openai_codex         the agent runtime for an OpenAI-only deployment; without
+#                        it the provider fallback silently becomes a claude run
+#                        that dies at its first turn on "Not logged in"
+_check_kernelforge_ready() {
+  if "$PYTHON" -c "import kernelforge.cli, kernelforge.fusion" >/dev/null 2>&1; then
+    log "kernelforge (built-in kernel-opt agent) OK"
+  else
+    warn "kernelforge not importable after install; forge kernel attempts will fail"
+    [ "$CHECK_ONLY" -eq 1 ] || die "kernelforge missing"
+  fi
+  if "$PYTHON" -c "import openai_codex" >/dev/null 2>&1; then
+    log "openai_codex OK"
+  else
+    warn "openai_codex not importable; an OpenAI-only deployment cannot construct the forge codex provider"
   fi
 }
 
@@ -793,95 +824,16 @@ ensure_forge_gemm_tune() {
   fi
 }
 
-# --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
-# forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike kernelforge.gemm_tune — which ships inside this distribution —
-# `kernel_agents` was only packaged by the KernelForge *root* pyproject and was
-# never installed here. So
-# forge-loop relied entirely on $FORGE_PATH being present and prepended to the
-# child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
-# unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
-# `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
-# attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
-# import succeed regardless of FORGE_PATH, and it is now the ONLY way to get the
-# fusion pipeline: `kernel-agents forge-fuse` lives in the root package since
-# forge_fusion was absorbed into it.
-_kernel_forge_root() {
-  # KernelForge repo root that actually contains kernel_agents. Keyed on
-  # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
-  # var that forge_submit reads at runtime and local_setup.sh exports).
-  local c="${FORGE_PATH:-}"
-  [ -n "$c" ] || return 1
-  if [ -f "${c%/}/pyproject.toml" ] && [ -f "${c%/}/src/kernel_agents/__init__.py" ]; then
-    printf '%s\n' "${c%/}"
-    return 0
-  fi
-  return 1
-}
-
-ensure_kernel_agents() {
-  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER.
-  # install.sh frequently runs at setup time under the
-  # default geak backend, so a backend gate here would skip the install; a later
-  # forge session whose child has no FORGE_PATH would then still hit
-  # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
-  # "checkout present at install time, FORGE_PATH absent at runtime" case.
-  local root
-  if ! root="$(_kernel_forge_root)"; then
-    log "kernel_agents: FORGE_PATH not set / no KernelForge checkout there; skipping optional forge-loop install"
-    return 0
-  fi
-  # The provider SDK is part of the readiness check, not just the CLI import: a
-  # pod that already has kernel_agents but no openai_codex would skip the install
-  # and leave the OpenAI-only side with a codex provider it cannot construct.
-  # kernel_agents.fusion for the same reason: a checkout from before fusion was
-  # absorbed imports the CLI fine and then fails at forge-fuse.
-  if "$PYTHON" -c "import kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-      >/dev/null 2>&1; then
-    log "kernel_agents already importable; skipping install (codex SDK present)"
-    return 0
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "kernel_agents / codex SDK not importable (check-only; would install from ${root})"
-    return 0
-  fi
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: ${PYTHON} -m pip install ${root}[claude,codex]"
-    return 0
-  fi
-  log "ensuring kernel_agents from ${root} (forge-loop backend)"
-  # Deliberately NON-editable (no -e): ${root} is a shared, often read-only
-  # KernelForge checkout used by concurrent sessions. A non-editable install
-  # builds in a temp dir and never writes egg-info/build artifacts back into the
-  # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own kernelforge.gemm_tune install (see _incontainer.sh: "Non-editable installs
-  # build in a temp dir and never write to the read-only shared checkout").
-  # Installing the root also provides kernelforge.gemm_tune and the fusion pipeline.
-  # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
-  # that directory and its sub-pyproject were removed when fusion was absorbed.
-  #
-  # Both provider extras: the forge fellow runs on the claude CLI when an
-  # Anthropic side is configured and on the codex SDK when the deployment is
-  # OpenAI-only. Installing only the base package leaves openai_codex absent, and
-  # KernelForge's provider fallback then turns that into a silent claude run that
-  # dies at its first turn on "Not logged in".
-  "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-    && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
-    || die "kernel_agents / codex SDK import failed after install from ${root}"
-}
-
-# --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
+# --- 1c. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
 # forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
 # and only falls back to the thin rocprofv3 "PMC" path when the tool is absent.
 # KernelForge's resolve_rocpc() looks for the tool at
 # `<ROCM_PATH>/libexec/rocprofiler-compute/rocprof_compute_base.py`; the stock
 # vllm/sglang ROCm serving images ship rocprofv3 but NOT rocprofiler-compute, so
 # every forge run silently degrades to PMC (no roofline -> optimization-potential
-# is always estimable=NO). The Python deps rocprof-compute needs are already
-# pulled in by the KernelForge root install (its base deps cover dash/kaleido/
-# matplotlib/plotille/tqdm); the only missing piece is the system tool itself,
-# which pip cannot provide — it comes from the ROCm apt package.
+# is always estimable=NO). Two pieces are needed: the profiler's Python deps
+# (the `forge-profiling` extra, Step 0) and the system tool itself, which pip
+# cannot provide — it comes from the ROCm apt package (Step 1).
 #
 # This step is FAIL-SOFT by design: forge still works on the PMC path, so a
 # missing/failed rocprof-compute must NOT abort the install. Every branch logs
@@ -993,25 +945,43 @@ _ensure_pandas_lt3_for_rocpc() {
 }
 
 ensure_rocprof_compute() {
-  # Gate on the KernelForge checkout ONLY (via _kernel_forge_root, mirroring
-  # ensure_kernel_agents), NOT on KERNEL_OPT_BACKEND_ORDER. install.sh runs at
+  # UNCONDITIONAL, not gated on KERNEL_OPT_BACKEND_ORDER: install.sh runs at
   # setup time under the default geak backend — the carrier sets
   # KERNEL_OPT_BACKEND_ORDER=forge only later on the optimize command, AFTER
   # install.sh has finished (_incontainer.sh) — so a backend gate here would skip
   # the install and a later forge session would still profile on the PMC path.
   # rocprof-compute (~11 MB) + pandas<3 are only useful for forge but harmless
-  # otherwise (pandas<3 is conflict-free), so keying on the checkout is the safe,
+  # otherwise (pandas<3 is conflict-free), so running always is the safe,
   # ordering-independent choice. The backend value is logged for context only.
-  local root
-  if ! root="$(_kernel_forge_root)"; then
-    log "rocprof-compute: FORGE_PATH not set / no KernelForge checkout there; skipping optional roofline-profiling deps (forge, if enabled later, uses the PMC fallback)"
-    return 0
-  fi
-  log "rocprof-compute: KernelForge checkout present at ${root} (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}'); ensuring roofline profiling deps"
+  #
+  # This used to be gated on the presence of a KernelForge checkout. Vendoring
+  # forge in removed the checkout, which would have turned the gate into a
+  # permanent skip: roofline profiling silently uninstalled on every pod.
+  log "rocprof-compute: ensuring roofline profiling deps (KERNEL_OPT_BACKEND_ORDER='${KERNEL_OPT_BACKEND_ORDER:-}')"
 
   local rocm_root base
   rocm_root="${ROCM_PATH:-/opt/rocm}"
   base="${rocm_root%/}/libexec/rocprofiler-compute/rocprof_compute_base.py"
+
+  # --- Step 0: the profiler's Python dependencies ---
+  # The tool is a Python program: without dash/kaleido/matplotlib/plotille/tqdm
+  # and friends it does not run at all. These live in the `forge-profiling`
+  # extra. The comment above used to claim the KernelForge root install pulled
+  # them in as base deps; it did not — they were in KernelForge's own
+  # `profiling` extra, which that install never requested, so this has been
+  # missing on every pod. Fail-soft like the rest of this function.
+  if [ "$CHECK_ONLY" -eq 1 ]; then
+    warn "rocprof-compute: check-only — would install '${REPO_ROOT}[forge-profiling]'"
+  elif [ "$DRY_RUN" -eq 1 ]; then
+    log "would run: ${PYTHON} -m pip install '${REPO_ROOT}[forge-profiling]'"
+  elif [ -n "${REPO_ROOT:-}" ] && [ -f "${REPO_ROOT%/}/pyproject.toml" ]; then
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${REPO_ROOT}[forge-profiling]" \
+      || warn "rocprof-compute: installing the forge-profiling extra failed; profiling will degrade to the PMC path. Check pip/network."
+  else
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
+      "hyperloom-inference_optimizer[forge-profiling]" \
+      || warn "rocprof-compute: installing the forge-profiling extra failed; profiling will degrade to the PMC path. Check pip/network."
+  fi
 
   # --- Step 1: ensure the rocprof-compute tool exists ---
   # It is a ROCm system package (pip cannot provide it). Idempotent: skip the apt
@@ -1627,7 +1597,6 @@ chain_kernel_agent() {
 
 ensure_inference_optimizer
 ensure_forge_gemm_tune
-ensure_kernel_agents
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
 # InferenceX clones + the chained kernel-agent GEAK/TraceLens clones).
@@ -1686,8 +1655,8 @@ chain_kernel_agent
 # step (chain_kernel_agent included; nothing below installs packages). This makes
 # the pandas<3 pin the final word (no later `pip install` can re-pull pandas>=3)
 # and its own re-check the truthful end state, not a premature false-positive.
-# Gated on the KernelForge checkout (not the backend): the default-geak install a
-# later forge session inherits still gets rocprof-compute + pandas<3.
+# Unconditional (not gated on the backend): the default-geak install a later
+# forge session inherits still gets rocprof-compute + pandas<3.
 ensure_rocprof_compute
 # tree-reform.MD P2.5: framework-agent was promoted into
 # src/hyperloom/agents/framework/ (single hyperloom distribution), so the

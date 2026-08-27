@@ -325,18 +325,29 @@ def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
     assert env["FORGE_CLAUDE_BIN"] == "/usr/local/bin/claude"
 
 
-def test_install_sh_installs_the_codex_extra():
-    """install.sh must install kernelforge with the codex SDK extra.
+def test_install_sh_installs_the_codex_runtime():
+    """install.sh must install the codex agent runtime, and verify it.
 
     Without it ``FORGE_AGENT_BACKEND=codex`` raises CodexUnavailableError
-    ("Codex Python SDK is not installed; install kernelforge[codex]"), which
-    the provider fallback then converts into a silent Claude run.
+    ("Codex Python SDK is not installed"), which the provider fallback then
+    converts into a silent Claude run.
+
+    This used to assert on a ``kernelforge[claude,codex]`` install line, from
+    when forge was a separate distribution installed from a checkout. forge now
+    ships in this distribution: the editable path gets ``openai-codex`` through
+    ``[test]`` -> ``[runtime]`` -> ``[llm]``, and the packaged-wheel path names
+    it explicitly. Both then run the same readiness probe.
     """
     install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
-    assert "[claude,codex]" in text, (
-        "kernelforge must be installed with both provider extras so either credential shape has a working forge fellow"
+    assert "openai-codex>=0.144" in text, (
+        "the packaged-wheel install path must pull in the codex agent runtime explicitly "
+        "(the bare wheel ships no third-party deps)"
+    )
+    assert "import openai_codex" in text, (
+        "install.sh must verify the codex runtime imports; a missing one silently "
+        "downgrades an OpenAI-only deployment to a Claude run that dies on 'Not logged in'"
     )
 
 
