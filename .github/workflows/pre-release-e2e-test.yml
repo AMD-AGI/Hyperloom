@@ -25,8 +25,12 @@ name: Pre-release E2E test
 # Variables (non-secret): PRE_E2E_SAFE_API_BASE, PRE_E2E_SAFE_WORKSPACE_ID,
 #   PRE_E2E_AUTHORING_IMAGE, PRE_E2E_NFS_ROOT, PRE_E2E_MODEL_3H_PATH,
 #   PRE_E2E_MODEL_12H_PATH, PRE_E2E_CLAUDE_MODEL, PRE_E2E_CLAUDE_CLI_VERSION,
-#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_ANTHROPIC_CUSTOM_HEADERS
-#   (APIM gateways: `Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}`), PRE_E2E_SAFE_INSECURE.
+#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_SAFE_INSECURE.
+#   PRE_E2E_ANTHROPIC_CUSTOM_HEADERS is NOT required: when a gateway base URL is set,
+#   the bootstrap defaults the AMD APIM header to
+#   `Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}` (the value is just the key,
+#   which already reaches the pod). Set this variable only to OVERRIDE that default
+#   for a gateway with a different header convention.
 # Nothing below hard-codes an environment value; all are `${{ secrets.* }}` /
 # `${{ vars.* }}` references. TODO(owner): populate these before first real run.
 

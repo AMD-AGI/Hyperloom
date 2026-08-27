@@ -92,12 +92,22 @@ run_leg() {
       [ -n "${ANTHROPIC_BASE_URL:-}" ] && echo "ANTHROPIC_BASE_URL=${ANTHROPIC_BASE_URL}"
       # Gateways like AMD's APIM (llm-api.amd.com) reject the bearer key alone with
       # "401 Access denied due to missing subscription key" -- they need an
-      # Ocp-Apim-Subscription-Key header. The Claude CLI reads ANTHROPIC_CUSTOM_HEADERS
-      # (newline-delimited "Name: value") and sends it on every request; ${VAR} is
-      # expanded so the one key covers both the bearer and the subscription header.
-      # Double-quote in .env (space+colon in an unquoted value is parsed as a command
-      # on source -> exit 127). See docs/reference/authentication.md "extra headers".
-      [ -n "${ANTHROPIC_CUSTOM_HEADERS:-}" ] && echo "ANTHROPIC_CUSTOM_HEADERS=\"${ANTHROPIC_CUSTOM_HEADERS}\""
+      # Ocp-Apim-Subscription-Key header whose value is the SAME key. The Claude CLI
+      # reads ANTHROPIC_CUSTOM_HEADERS (newline-delimited "Name: value") and sends it
+      # on every request; ${ANTHROPIC_API_KEY} is expanded in-pod so the one key
+      # covers both bearer + subscription. The header NAME is fixed and non-secret and
+      # its value carries no NEW secret (the key already arrives via *_B64), so we
+      # default it here rather than requiring a repo variable -- one less "forgot to
+      # configure it -> 401" trap. This matches Hyperloom's own llm_config.py contract
+      # (parse_custom_headers expands ${VAR}). An externally-supplied
+      # ANTHROPIC_CUSTOM_HEADERS still wins, for a gateway with a different convention.
+      # Only emitted when a gateway base URL is set (direct api.anthropic.com needs no
+      # subscription header). Double-quote in .env (space+colon unquoted -> exit 127).
+      if [ -n "${ANTHROPIC_CUSTOM_HEADERS:-}" ]; then
+        echo "ANTHROPIC_CUSTOM_HEADERS=\"${ANTHROPIC_CUSTOM_HEADERS}\""
+      elif [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+        echo 'ANTHROPIC_CUSTOM_HEADERS="Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}"'
+      fi
       echo "CLAUDE_MODEL=${CLAUDE_MODEL}"
       echo "USER_DATA_PATH=${session}"
       echo "HYPERLOOM_RUN_MODE=${run_mode}"
