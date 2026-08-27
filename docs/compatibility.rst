@@ -49,7 +49,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
 +---------------------+--------------------------------------------------------+
-| ROCm Version        | 7.2.x, 10.0.0                                          |
+| ROCm Version        | 7.2.x                                                  |
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
@@ -113,10 +113,10 @@ The following inference frameworks are supported:
      - ROCm version
      - Notes
    * - SGLang
-     - 7.2.4, 10.0.0
+     - 7.2.4
      - Default framework; recommended docker/bare-metal stack uses ``rocm724`` (see below)
    * - vLLM
-     - 7.2.3, 10.0.0
+     - 7.2.3
      - Do not mix frameworks within one session
    * - ``custom``
      - Host-defined
@@ -165,7 +165,7 @@ Hyperloom does not install ROCm or torch itself.
      - Recommended
      - Notes
    * - ROCm
-     - 7.2.x, 10.0.0
+     - 7.2.x
      - The patch level differs per framework and is the same in both setup modes: the vLLM stack uses ROCm 7.2.3 and the SGLang stack uses ROCm 7.2.4 (see the note below).
    * - Python
      - 3.12
