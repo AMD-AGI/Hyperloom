@@ -1,6 +1,6 @@
 .. meta::
    :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT), container images, and component dependencies.
-   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI308X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
+   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI325X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
 
 ******************************
 Hyperloom compatibility matrix
@@ -45,7 +45,7 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Requirement         | Support                                                |
 +=====================+========================================================+
-| AMD Instinct™ GPU   | MI300X, MI308X, MI325X, MI355X                         |
+| AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
 +---------------------+--------------------------------------------------------+
@@ -100,13 +100,6 @@ The following table lists the validated Hyperloom version and component combinat
 
    See the `TraceLens documentation <https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html>`_ for more information.
 
-.. note::
-
-   MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
-   keeps the resolved GPU types distinct (``mi308x``, ``mi325x``), but Magpie
-   benchmark rendering reuses the MI300X runner scripts and image family unless a
-   dedicated image is supplied.
-
 Inference frameworks
 --------------------
 
@@ -144,11 +137,11 @@ uses a private registry mirror, set the registry prefix accordingly.
    * - Image
      - GPU
    * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821``
-     - MI300X / MI308X / MI325X
+     - MI300X / MI325X
    * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.27.1``
-     - MI300X / MI308X / MI325X / MI355X
+     - MI300X / MI325X / MI355X
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.
