@@ -1,6 +1,6 @@
 .. meta::
    :description: Compatibility matrix for Hyperloom: supported AMD Instinct GPUs, inference frameworks (SGLang, vLLM, Atom, xDiT), container images, and component dependencies.
-   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI308X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
+   :keywords: Hyperloom, compatibility, AMD Instinct, MI300X, MI325X, MI355X, SGLang, vLLM, Atom, xDiT, ROCm, container images, GPU support
 
 ******************************
 Hyperloom compatibility matrix
@@ -45,15 +45,15 @@ The following table lists the minimum requirements for running Hyperloom.
 +---------------------+--------------------------------------------------------+
 | Requirement         | Support                                                |
 +=====================+========================================================+
-| AMD Instinct™ GPU   | MI300X, MI308X, MI325X, MI355X                         |
+| AMD Instinct™ GPU   | MI300X, MI325X, MI355X                                 |
 +---------------------+--------------------------------------------------------+
 | Operating System    | Ubuntu 22.04, Ubuntu 24.04                             |
 +---------------------+--------------------------------------------------------+
-| ROCm Version        | 7.2.x, 10.0                                            |
+| ROCm Version        | 7.2.x                                                  |
 +---------------------+--------------------------------------------------------+
 | Python              | >= 3.10                                                |
 +---------------------+--------------------------------------------------------+
-| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), Atom, xDiT, plus |
+| Inference Framework | SGLang (>= 0.5.12), vLLM (>= 0.21.0), plus             |
 |                     | ``custom`` for your own benchmark script               |
 +---------------------+--------------------------------------------------------+
 | Kernel Languages    | HIP, Triton, FlyDSL                                    |
@@ -76,13 +76,13 @@ The following table lists the validated Hyperloom version and component combinat
 +===================+===========================+========================+====================================+===============+=============+=============================+
 | 1.0.0             | `TraceLens 1.0.0`_        | Hardware-agnostic      | No dependency                      | OS-independent| >= 3.6      | |tracelens-github|          |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0   | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
+|                   | `GEAK 4.0.0`_             | MI300X, MI325X, MI355X | 6.4.x, 7.0.x, 7.1.x, 7.2.x, 10.0.0 | 22.04, 24.04  | 3.8, 3.12   | |geak-github|               |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `IntelliKit 0.1.1`_       | MI300X, MI325X, MI355X | 7.2.x, 10.0                        | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
+|                   | `IntelliKit 0.1.1`_       | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |intellikit-github|         |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0                        | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
+|                   | `AgentKernelArena 0.2.0`_ | MI300X, MI325X, MI355X | 7.2.x, 10.0.0                      | 22.04, 24.04  | >= 3.10     | |agent-kernel-arena-github| |
 +                   +---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
-|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0          | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
+|                   | `Magpie 0.2.0`_           | MI300X, MI325X, MI355X | 7.0.x, 7.1.x, 7.2.x, 10.0.0        | 22.04, 24.04  | >= 3.10     | |magpie-github|             |
 +-------------------+---------------------------+------------------------+------------------------------------+---------------+-------------+-----------------------------+
 
 .. _TraceLens 1.0.0: https://rocm.docs.amd.com/projects/tracelens/en/docs-1.0.0/
@@ -102,10 +102,9 @@ The following table lists the validated Hyperloom version and component combinat
 
 .. note::
 
-   MI308X and MI325X share the gfx942/CDNA3 runner family with MI300X. Hyperloom
-   keeps the resolved GPU types distinct (``mi308x``, ``mi325x``), but Magpie
-   benchmark rendering reuses the MI300X runner scripts and image family unless a
-   dedicated image is supplied.
+   MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom keeps the
+   resolved GPU types distinct, but Magpie benchmark rendering reuses the MI300X
+   runner scripts and image family unless a dedicated image is supplied.
 
 Inference frameworks
 --------------------
@@ -125,12 +124,6 @@ The following inference frameworks are supported:
    * - vLLM
      - 7.2.3
      - Do not mix frameworks within one session
-   * - Atom
-     - 7.2.0
-     - Single-node only (multi-node rejected by the IR-8 guard)
-   * - xDiT (diffusion)
-     - 7.2.0
-     - Scriptable diffusion pipeline (no serving server). Internal throughput is tracked in img/s, but the primary session-facing metric is end-to-end latency ``e2el_mean_ms`` (ms).
    * - ``custom``
      - Host-defined
      - Escape hatch for your own benchmark script; Hyperloom does not manage the server lifecycle. Requires ``HYPERLOOM_BENCHMARK_BACKEND=bypass`` plus ``--framework-path`` (or ``FRAMEWORK_REPO_PATH``) and ``--benchmark-scripts-dir`` (or ``HYPERLOOM_BYPASS_SCRIPTS_DIR``); the CLI exits with status 2 when any of the three is missing.
@@ -150,11 +143,11 @@ uses a private registry mirror, set the registry prefix accordingly.
    * - Image
      - GPU
    * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821``
-     - MI300X / MI308X / MI325X
+     - MI300X / MI325X
    * - ``lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821``
      - MI355X
    * - ``vllm/vllm-openai-rocm:v0.27.1``
-     - MI300X / MI308X / MI325X / MI355X
+     - MI300X / MI325X / MI355X
 
 The vLLM image entrypoint is ``vllm serve``, so override it (for example
 ``--entrypoint tail``) when starting a long-running Hyperloom container.

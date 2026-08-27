@@ -14,7 +14,7 @@ This page covers Hyperloom's background, licensing, policies, and external resou
 
 ## Policies
 
-These policies govern contributions and community behavior:
+The following policies govern contributions and community behavior:
 
 - [Security policy](https://github.com/AMD-AGI/Hyperloom/blob/main/SECURITY.md)
 - [Code of conduct](https://github.com/AMD-AGI/Hyperloom/blob/main/CODE_OF_CONDUCT.md)

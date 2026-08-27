@@ -4,7 +4,7 @@ myst:
         "description": "Run Hyperloom inside a Docker container or on bare-metal on an AMD GPU machine. Covers installing Hyperloom, configuring credentials, and running a demo."
         "keywords": "Hyperloom, Docker, container, bare metal, install, AMD GPU, MI300X, MI325X, MI355X, SGLang, vLLM, Claude, Dev Containers, Install, ROCm"
 ---
-# Hyperloom installation instructions
+# Install Hyperloom on Docker or bare metal
 
 These instructions allow you to set up and run Hyperloom inside a Docker container
 or on bare-metal on an AMD GPU machine. The recommended path is to prepare a
@@ -12,7 +12,7 @@ dedicated workspace, open that directory in Claude Code and
 install the wheel into the current directory with `pip install --target .`. The
 source-clone path is kept at the end for developers and manual debugging.
 
-## Pip install (Recommended)
+## Pip install (recommended)
 
 This is the recommended path to install and get started with Hyperloom. The
 current directory is both the install target and the agent workspace. Prepare a
@@ -49,7 +49,7 @@ It is normal for the current directory to contain many Python package directorie
 after install. Do not use an existing project directory unless it is acceptable
 for Hyperloom to create or update `.env` there.
 
-### Setup Hyperloom
+### Set up Hyperloom
 
 With the agent still opened in the same workspace, run:
 
@@ -109,7 +109,7 @@ Requirements:
 - **Base Python on this GPU host** — the interpreter `install_baremetal.sh`
   resolves, not a child venv:
   - Python 3.10+ for SGLang and general operation.
-  - **Exactly Python 3.12** when setup installs vLLM. vLLM ROCm wheels are
+  - Exactly Python 3.12 when setup installs vLLM. vLLM ROCm wheels are
     built for 3.12 only. vLLM defaults to an isolated framework venv, but that
     venv is created from the base interpreter and inherits its version; isolated
     mode does not relax the requirement.
@@ -123,13 +123,13 @@ PYTHONPATH="$REPO_ROOT" python3 -m hyperloom.inference_optimizer.setup
 
 The backend runs `install_baremetal.sh` in five phases:
 
-1. **Base preflight**: checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
+1. **Base preflight**: Checks ROCm, GPU arch, ROCm torch, torch/triton alignment,
    and serving framework imports.
-2. **Framework install**: optionally installs the SGLang or vLLM framework layer.
-3. **ROCm hotfix**: applies the profiler hotfix when the ROCm stack is eligible,
+2. **Framework install**: Optionally installs the SGLang or vLLM framework layer.
+3. **ROCm hotfix**: Applies the profiler hotfix when the ROCm stack is eligible,
    covering both `/opt/rocm/lib` and PyTorch's bundled `torch/lib/`.
-4. **Credentials**: resolves LLM gateway credentials into `.env`.
-5. **Runtime env**: persists bare-metal runtime vars (framework, ROCm/venv roots,
+4. **Credentials**: Resolves LLM gateway credentials into `.env`.
+5. **Runtime env**: Persists bare-metal runtime vars (framework, ROCm/venv roots,
    etc.) into `.env`.
 
 ### Scenario B: Bare metal + Docker
@@ -149,7 +149,7 @@ Requirements:
   wheel and agent. Serving-framework Python versions come from the container
   image, not the host.
 
-In this scenario, `/hyperloom-setup` writes `.env` only and does **not** start a
+In this scenario, `/hyperloom-setup` writes `.env` only and does *not* start a
 container. The selected demo skill owns the container lifecycle.
 
 If Slurm is available, setup also checks the current user's allocation so Docker
@@ -288,7 +288,7 @@ must never be printed.
 
 ## Source checkout and manual installation
 
-These instructions are for advanced users and developer. Use this path only
+These instructions are for advanced users and developers. Use this path only
 when developing Hyperloom, testing local source changes, or debugging setup
 internals.
 
@@ -351,7 +351,7 @@ command, failing with exit 127.
 
 If the gateway also serves an OpenAI-compatible route, set `OPENAI_BASE_URL` and
 `OPENAI_API_KEY` against it to enable the Codex-side features. On the AMD
-network the interactive flow described in [Setup Hyperloom](#setup-hyperloom)
+network the interactive flow described in [Set up Hyperloom](#set-up-hyperloom)
 offers the AMD gateway as a ready-made choice, so you do not need to write any
 of this by hand. See
 [Authentication and credentials](../reference/authentication.md) for the full
