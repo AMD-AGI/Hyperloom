@@ -55,20 +55,36 @@ ROOT="${NFS_ROOT%/}/runs/${CI_VERSION}/${LEG_ID}"
 mkdir -p "$ROOT"
 BOOTSTRAP="${NFS_ROOT%/}/bootstrap/${CI_VERSION}/bootstrap-pre-release.sh"
 NAME="hyperloom-${LEG_ID}"
-RD=$((128 + GPU_INDEX))   # renderD node paired with cardN
 
-echo "[docker-run] leg=$LEG_ID gpu=$GPU_INDEX card$GPU_INDEX/renderD$RD image=$IMAGE cpus=$LEG_CPUS mem=$LEG_MEM"
+# GPU index -> renderD node. VERIFIED on a real privileged MI355X x8 pod (2026-08-27):
+# the 8 physical GPUs map to renderD128,136,144,...,184 -- i.e. stride 8, NOT +1. The
+# rocm-smi GPU order matches this render-node order (GPU i == 0002/0003:00:0X.0 ==
+# renderD(128+8*i)). See project memory. `cardN` numbering is NOT guaranteed to align
+# with the GPU order, so we isolate via /dev/kfd + the single renderD node only.
+RD=$((128 + GPU_INDEX * 8))
+
+# Device group ownership: the pod's /etc/group has NO `video`/`render` NAMES, so
+# `--group-add video` FAILS ("no matching entries in group file"). Resolve the numeric
+# GIDs of the device nodes and pass those instead (verified working).
+KFD_GID="$(stat -c %g /dev/kfd 2>/dev/null || echo 0)"
+DRI_GID="$(stat -c %g /dev/dri/renderD${RD} 2>/dev/null || stat -c %g /dev/dri 2>/dev/null || echo 0)"
+
+echo "[docker-run] leg=$LEG_ID gpu=$GPU_INDEX renderD$RD (kfd_gid=$KFD_GID dri_gid=$DRI_GID) image=$IMAGE cpus=$LEG_CPUS mem=$LEG_MEM"
 
 docker rm -f "$NAME" >/dev/null 2>&1 || true
 
-# GPU isolation: expose exactly one card, and set ROCR_VISIBLE_DEVICES=0 so the
-# container sees a single device at index 0. CPU/mem hard-capped to the 1/4 share.
+# GPU isolation: expose /dev/kfd (shared) + exactly ONE renderD node, so the container
+# sees a single device. HIP_VISIBLE_DEVICES=0 pins the app to that one card. CPU/mem
+# hard-capped to the 1/4 share. seccomp=unconfined matches how the ROCm images expect
+# to run (verified: rocm-smi enumerates the single bound card correctly).
 exec docker run --rm --name "$NAME" \
   --device "/dev/kfd" \
-  --device "/dev/dri/card${GPU_INDEX}" \
   --device "/dev/dri/renderD${RD}" \
-  --group-add video \
+  --group-add "$KFD_GID" \
+  --group-add "$DRI_GID" \
+  --security-opt seccomp=unconfined \
   --cpus "$LEG_CPUS" --memory "$LEG_MEM" --shm-size "$LEG_SHM" \
+  -e HIP_VISIBLE_DEVICES=0 \
   -e ROCR_VISIBLE_DEVICES=0 \
   -e CI_VERSION="$CI_VERSION" \
   -e NFS_ROOT="$NFS_ROOT" \

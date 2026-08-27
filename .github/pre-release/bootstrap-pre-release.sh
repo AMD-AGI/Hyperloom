@@ -96,11 +96,40 @@ run_leg() {
   log "leg $leg agent turns complete; poll will judge $session/reports/final.json"
 }
 
+# Install docker + start a pod-local dockerd. VERIFIED on a real privileged MI355X pod
+# (2026-08-27): the Authoring base image ships NO docker/dockerd/docker.sock, but the
+# pod has full capabilities (CapEff=0x1ffffffffff), so a self-hosted dockerd works.
+# Two non-obvious requirements, both confirmed by probing:
+#   * --storage-driver=vfs  -- overlayfs-on-overlayfs fails inside the container rootfs.
+#   * no systemd in the pod -- start dockerd detached via setsid, then poll the socket.
+ensure_dockerd() {
+  if docker info >/dev/null 2>&1; then log "dockerd already up"; return 0; fi
+  if ! command -v dockerd >/dev/null 2>&1; then
+    log "installing docker.io (no docker in the Authoring base image)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq  >/tmp/apt-docker.log 2>&1 || { log "ERROR: apt-get update failed"; tail -20 /tmp/apt-docker.log; return 1; }
+    apt-get install -y -qq docker.io >>/tmp/apt-docker.log 2>&1 \
+      || { log "ERROR: docker.io install failed"; tail -30 /tmp/apt-docker.log; return 1; }
+    log "docker installed: $(docker --version 2>&1)"
+  fi
+  log "starting pod-local dockerd (vfs, detached via setsid)"
+  setsid bash -c 'dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs >/var/log/dockerd.log 2>&1' \
+    </dev/null >/dev/null 2>&1 &
+  local i
+  for i in $(seq 1 60); do
+    docker info >/dev/null 2>&1 && { log "dockerd up after ${i}s"; return 0; }
+    sleep 1
+  done
+  log "ERROR: dockerd did not become ready"; tail -40 /var/log/dockerd.log 2>/dev/null || true
+  return 1
+}
+
 # ---- docker host: fan out to nested containers -----------------------------
 run_docker_host() {
   : "${DOCKER_LEGS:?}"; : "${DOCKER_GPU_MAP:?}"; : "${MODEL_3H:?}"; : "${MODEL_12H:?}"
   local runner="${SELF_DIR}/docker-run-hyperloom.sh"
   [ -x "$runner" ] || chmod +x "$runner" 2>/dev/null || true
+  ensure_dockerd || { log "ERROR: cannot provide docker on the host pod"; return 1; }
   log "docker host: legs='${DOCKER_LEGS}'"
   local pids=()
   for leg in $DOCKER_LEGS; do
