@@ -2485,17 +2485,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         max_minutes=max_minutes_for_prompt,
         transport=_orch_transport,
     )
-    # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
-    # Reads the parser dest ``framework_discover_timeout_sec`` first, then the
-    # longer ``framework_agent_`` spelling for callers that set it directly.
-    try:
-        coordinator.framework_agent_discover_timeout_sec = float(
-            getattr(args, "framework_discover_timeout_sec", 0.0)
-            or getattr(args, "framework_agent_discover_timeout_sec", 0.0)
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        coordinator.framework_agent_discover_timeout_sec = 0.0
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None

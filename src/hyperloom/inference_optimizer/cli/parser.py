@@ -743,17 +743,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "stdout for stream-based parsers.",
     )
     opt.add_argument(
-        "--framework-discover-timeout-sec",
-        type=float,
-        default=0.0,
-        help="Override the per-call timeout for "
-        "``fa phase-discover``. 0 (the default) uses "
-        "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
-        "(180s). The Coordinator retries discover up to "
-        "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
-        "failures before marking FRAMEWORK done.",
-    )
-    opt.add_argument(
         "--no-framework-agent",
         action="store_true",
         default=False,
