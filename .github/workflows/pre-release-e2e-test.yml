@@ -1,0 +1,267 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: Pre-release E2E test
+
+# Full-path release gate: build the CI wheel, push it to NFS, then run 8 demo legs
+# (baremetal/docker x vLLM/SGLang x 3h/12h) as SaFE Authoring workloads driven through
+# the Claude CLI + setup/demo skills -- the same path a user takes. Independent of the
+# per-PR smoke test (ci-e2e.yml). See hyperloom-pre-release-e2e-ci-design.md.
+#
+# Triggers:
+#   * push to main that changes pyproject.toml's `version` field -> FULL run (all 8 legs)
+#   * push to main that changes this CI's scripts/prompts/workflow (version unchanged)
+#     -> SCRIPTS-ONLY run (the 4 fast 3h legs, to validate the logic change)
+#   * manual workflow_dispatch (reuse a wheel, run a leg subset; default all 8)
+#
+# ── Environment values to fill in (repo Secrets/Variables) ──────────────────
+# Secrets (sensitive): SAFE_API_KEY (ADMIN token: privileged 8-GPU pod is admin-only),
+#   ANTHROPIC_API_KEY.
+# Variables (non-secret): SAFE_API_BASE, SAFE_WORKSPACE_ID, AUTHORING_IMAGE,
+#   PRE_RELEASE_NFS_ROOT, MODEL_3H_PATH, MODEL_12H_PATH, CLAUDE_MODEL,
+#   CLAUDE_CLI_VERSION, (optional) ANTHROPIC_BASE_URL, SAFE_INSECURE.
+# Nothing below hard-codes an environment value; all are `${{ secrets.* }}` /
+# `${{ vars.* }}` references. TODO(owner): populate these before first real run.
+
+on:
+  push:
+    branches: [main]
+    # A push must touch one of these to even start the workflow; `resolve` then
+    # classifies it into a FULL run (version bump) or a SCRIPTS-ONLY run (CI logic
+    # changed but version unchanged).
+    paths:
+      - "pyproject.toml"                              # version bump -> full release gate
+      - ".github/workflows/pre-release-e2e-test.yml"  # the workflow itself
+      - ".github/scripts/pre-release-e2e-*.sh"        # dispatch / poll
+      - ".github/pre-release/**"                      # bootstrap, docker-run, prompts
+  workflow_dispatch:
+    inputs:
+      reuse_ci_version:
+        description: "Reuse an existing wheel dir (skip build); e.g. 1.0.0b3.dev202608261530+ci"
+        required: false
+      tasks:
+        description: "Comma-separated subset of leg IDs (default: all 8)"
+        required: false
+
+# No cross-version concurrency (design §13, point D): serialize pre-release runs so the
+# peak GPU footprint stays at 8. A newer run QUEUES behind the in-flight one.
+concurrency:
+  group: pre-release-e2e
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  # 1. resolve: gate on a real version bump (push) or manual input; compute CI_VERSION.
+  resolve:
+    runs-on: Hyperloom-e2e-ci
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      run_scope: ${{ steps.decide.outputs.run_scope }}
+      ci_version: ${{ steps.decide.outputs.ci_version }}
+      base_version: ${{ steps.decide.outputs.base_version }}
+      reuse: ${{ steps.decide.outputs.reuse }}
+      tasks: ${{ steps.decide.outputs.tasks }}
+    steps:
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2   # need HEAD~1 to diff the version field on push
+
+      - name: Decide + compute CI_VERSION
+        id: decide
+        env:
+          EVENT: ${{ github.event_name }}
+          REUSE_IN: ${{ inputs.reuse_ci_version }}
+          TASKS_IN: ${{ inputs.tasks }}
+        run: |
+          set -euo pipefail
+          # The 4 fast 3h legs used when only CI logic (scripts/prompts/workflow)
+          # changed but the release version did not -- enough to exercise the changed
+          # dispatch/bootstrap/poll path without burning a full 14h GPU round.
+          SCRIPTS_ONLY_TASKS="baremetal-vllm-3h,baremetal-sglang-3h,docker-vllm-3h,docker-sglang-3h"
+          run=false; run_scope="none"; reuse=""; tasks="${TASKS_IN:-}"
+          # Extract the [project] version line. The field is a simple quoted string in
+          # this repo's pyproject.toml, so a scoped grep is deterministic and avoids
+          # embedding a Python heredoc in the YAML block scalar.
+          read_version() { # reads TOML on stdin, prints project.version
+            awk '
+              /^\[project\]/{inp=1; next}
+              /^\[/{inp=0}
+              inp && /^[[:space:]]*version[[:space:]]*=/{
+                gsub(/.*=[[:space:]]*"|".*/,""); print; exit
+              }'
+          }
+          base_version="$(read_version < pyproject.toml)"
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            # Manual runs are full-scope; tasks default to all 8 (empty = all in dispatch).
+            run=true; run_scope="full"; reuse="${REUSE_IN:-}"
+          else
+            # push to main. Classify: version bump -> full; else CI logic changed -> scripts-only.
+            prev="$(git show HEAD~1:pyproject.toml 2>/dev/null | read_version || true)"
+            if [ "$base_version" != "$prev" ] && [ -n "$base_version" ]; then
+              run=true; run_scope="full"
+              echo "version bump: '${prev}' -> '${base_version}' -> FULL run (all 8 legs)"
+            else
+              # Version unchanged. on.push.paths already guaranteed this push touched one
+              # of the watched paths, and it wasn't the version -> it changed the CI's own
+              # scripts/prompts/workflow. Run the fast scripts-only scope. (The diff is
+              # best-effort logging; across a multi-commit push HEAD~1 may not show every
+              # changed file, so we do NOT gate on it -- the path filter already did.)
+              run=true; run_scope="scripts-only"
+              changed="$(git diff --name-only HEAD~1 HEAD 2>/dev/null | grep -E \
+                '^\.github/(workflows/pre-release-e2e-test\.yml|scripts/pre-release-e2e-.*\.sh|pre-release/)' \
+                | paste -sd',' - || true)"
+              echo "version unchanged; CI logic changed (${changed:-see path filter}) -> SCRIPTS-ONLY run (4 fast 3h legs)"
+            fi
+          fi
+
+          # Default the task set from the scope when the caller didn't pin one.
+          if [ -z "$tasks" ] && [ "$run_scope" = "scripts-only" ]; then
+            tasks="$SCRIPTS_ONLY_TASKS"
+          fi
+
+          if [ -n "$reuse" ]; then
+            ci_version="$reuse"
+          else
+            ci_version="${base_version}.dev$(date -u +%Y%m%d%H%M)+ci"
+          fi
+          {
+            echo "run=$run"
+            echo "run_scope=$run_scope"
+            echo "reuse=$reuse"
+            echo "tasks=$tasks"
+            echo "base_version=$base_version"
+            echo "ci_version=$ci_version"
+          } >> "$GITHUB_OUTPUT"
+          echo "decision: run=$run scope=$run_scope ci_version=$ci_version reuse='${reuse}' tasks='${tasks}'"
+
+  # 2. build: build the wheel, publish to NFS, stage bootstrap + prompts, write manifest.
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.run == 'true' && needs.resolve.outputs.reuse == ''
+    runs-on: Hyperloom-e2e-ci
+    env:
+      CI_VERSION: ${{ needs.resolve.outputs.ci_version }}
+      BASE_VERSION: ${{ needs.resolve.outputs.base_version }}
+      NFS_ROOT: ${{ vars.PRE_RELEASE_NFS_ROOT }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build wheel with the CI version
+        id: build
+        run: |
+          set -euo pipefail
+          pip install --upgrade pip
+          pip install "setuptools>=77" wheel build
+          # Override the version for this build only (never committed).
+          SETUPTOOLS_SCM_PRETEND_VERSION="$CI_VERSION" \
+            python -m build --wheel --no-isolation --outdir dist \
+            -C--global-option=egg_info -C--global-option=--tag-build= 2>&1 | tee build.log || \
+            python -m build --wheel --no-isolation --outdir dist
+          echo "wheel=$(ls dist/*.whl | head -n1)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish wheel + bootstrap + prompts + manifest to NFS
+        env:
+          WHEEL: ${{ steps.build.outputs.wheel }}
+          GIT_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          : "${NFS_ROOT:?PRE_RELEASE_NFS_ROOT var is required}"
+          wheel_dir="${NFS_ROOT%/}/wheels/${CI_VERSION}"
+          runs_dir="${NFS_ROOT%/}/runs/${CI_VERSION}"
+          boot_dir="${NFS_ROOT%/}/bootstrap/${CI_VERSION}"
+          mkdir -p "$wheel_dir" "$runs_dir" "$boot_dir/prompts/pre-release"
+          # Wheel named after CI_VERSION per design §5.
+          cp "$WHEEL" "$wheel_dir/"
+          # Stage the in-pod scripts + fixed prompts (pods read them from NFS).
+          cp .github/pre-release/bootstrap-pre-release.sh .github/pre-release/docker-run-hyperloom.sh "$boot_dir/"
+          cp .github/pre-release/prompts/pre-release/*.txt "$boot_dir/prompts/pre-release/"
+          chmod +x "$boot_dir"/*.sh
+          # manifest.json (design §5).
+          jq -n \
+            --arg wd "$wheel_dir" --arg rd "$runs_dir" --arg sha "$GIT_SHA" \
+            --arg rid "$RUN_ID" --arg bv "$BASE_VERSION" --arg civ "$CI_VERSION" \
+            '{ci_version:$civ, base_version:$bv, wheel_dir:$wd, runs_dir:$rd,
+              git_sha:$sha, github_run_id:$rid,
+              tasks:["baremetal-vllm-3h","baremetal-vllm-12h","baremetal-sglang-3h","baremetal-sglang-12h",
+                     "docker-vllm-3h","docker-vllm-12h","docker-sglang-3h","docker-sglang-12h"]}' \
+            > "$wheel_dir/manifest.json"
+          echo "published to $wheel_dir"; cat "$wheel_dir/manifest.json"
+
+  # 3+4. dispatch + poll: create the 5 SaFE workloads, then judge each leg (point C).
+  run:
+    needs: [resolve, build]
+    # Run whenever resolve said go and build didn't fail (build is skipped on reuse).
+    if: >-
+      always() && needs.resolve.outputs.run == 'true' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
+    runs-on: Hyperloom-e2e-ci
+    timeout-minutes: 900   # ≥14h: covers the 12h leg + bootstrap/setup/agent overhead
+    env:
+      CI_VERSION: ${{ needs.resolve.outputs.ci_version }}
+      TASKS: ${{ needs.resolve.outputs.tasks }}
+      NFS_ROOT: ${{ vars.PRE_RELEASE_NFS_ROOT }}
+      TARGET_GAIN: "100"
+      # SaFE API
+      SAFE_API_BASE: ${{ vars.SAFE_API_BASE }}
+      SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}          # ADMIN token (privileged pod)
+      SAFE_WORKSPACE_ID: ${{ vars.SAFE_WORKSPACE_ID }}
+      SAFE_INSECURE: ${{ vars.SAFE_INSECURE || '1' }}
+      AUTHORING_IMAGE: ${{ vars.AUTHORING_IMAGE }}
+      # models + agent
+      MODEL_3H: ${{ vars.MODEL_3H_PATH }}
+      MODEL_12H: ${{ vars.MODEL_12H_PATH }}
+      CLAUDE_MODEL: ${{ vars.CLAUDE_MODEL }}
+      CLAUDE_CLI_VERSION: ${{ vars.CLAUDE_CLI_VERSION }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} # GitHub Secret path (design §9 D)
+      ANTHROPIC_BASE_URL: ${{ vars.ANTHROPIC_BASE_URL }}
+      # per-leg GitHub commit status
+      GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_STATUS_REPO: ${{ github.repository }}
+      GH_STATUS_SHA: ${{ github.sha }}
+      GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      POLL_INTERVAL_S: "120"
+      GLOBAL_TIMEOUT_S: "50400"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Ensure jq + shared dispatch-map path
+        # RUNNER_TEMP is an env var inside run steps (the `runner.*` context is not
+        # available in job-level env:), so publish DISPATCH_MAP to the job env here.
+        run: |
+          command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+          echo "DISPATCH_MAP=${RUNNER_TEMP}/pre_release_dispatch.json" >> "$GITHUB_ENV"
+
+      - name: Dispatch SaFE Authoring workloads
+        run: |
+          chmod +x .github/scripts/pre-release-e2e-dispatch.sh
+          .github/scripts/pre-release-e2e-dispatch.sh
+
+      - name: Poll legs + write release gate
+        run: |
+          chmod +x .github/scripts/pre-release-e2e-poll.sh
+          .github/scripts/pre-release-e2e-poll.sh
+
+      - name: Cancel workloads on job cancel
+        if: cancelled()
+        env:
+          SAFE_API_BASE: ${{ vars.SAFE_API_BASE }}
+          SAFE_API_KEY: ${{ secrets.SAFE_API_KEY }}
+        run: |
+          [ -f "$DISPATCH_MAP" ] || { echo "no dispatch map; nothing to cancel"; exit 0; }
+          for wid in $(jq -r '.[]' "$DISPATCH_MAP" | sort -u); do
+            echo "cancelling workload $wid"
+            curl -sS -k -o /dev/null -w 'DELETE %{http_code}\n' -X DELETE \
+              -H "Authorization: Bearer ${SAFE_API_KEY}" \
+              "${SAFE_API_BASE%/}/api/v1/workloads/${wid}" || true
+          done

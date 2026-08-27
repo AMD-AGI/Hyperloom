@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Nested docker runner for the privileged 8-GPU pre-release host. This is the ONLY
+# docker entry point for docker legs: it force-binds ONE GPU and caps CPU/memory to a
+# 1/4 host share so the 4 docker legs are mutually comparable and comparable to the
+# baremetal legs (design §8, point E). Prompts are forbidden from running docker
+# directly or choosing GPUs via rocm-smi.
+#
+# Usage: docker-run-hyperloom.sh <gpu_index 0-7> <leg_id>
+#
+# Inputs (env, inherited from the host bootstrap):
+#   NFS_ROOT CI_VERSION MODEL_3H MODEL_12H TARGET_GAIN
+#   CLAUDE_MODEL CLAUDE_CLI_VERSION ANTHROPIC_API_KEY_B64 [ANTHROPIC_BASE_URL]
+#   HYPERLOOM_IMAGE   backend container image (overrides per-backend default)
+#   LEG_CPUS LEG_MEM LEG_SHM   per-container quota (default 32 / 128g / 64g)
+set -euo pipefail
+
+GPU_INDEX="${1:?usage: docker-run-hyperloom.sh <gpu_index> <leg_id>}"
+LEG_ID="${2:?usage: docker-run-hyperloom.sh <gpu_index> <leg_id>}"
+
+: "${NFS_ROOT:?}"; : "${CI_VERSION:?}"; : "${ANTHROPIC_API_KEY_B64:?}"
+: "${CLAUDE_MODEL:?}"; : "${CLAUDE_CLI_VERSION:?}"
+TARGET_GAIN="${TARGET_GAIN:-100}"
+
+# 1/4 of a 128-core / 512Gi host, matching the baremetal leg envelope.
+LEG_CPUS="${LEG_CPUS:-32}"
+LEG_MEM="${LEG_MEM:-128g}"
+LEG_SHM="${LEG_SHM:-64g}"
+
+# Resolve per-leg backend / model / hours from the leg id.
+case "$LEG_ID" in
+  *-vllm-*)   BACKEND=vllm ;;
+  *-sglang-*) BACKEND=sglang ;;
+  *) echo "cannot infer backend from leg '$LEG_ID'" >&2; exit 2 ;;
+esac
+case "$LEG_ID" in
+  *-3h)  HOURS=3;  MODEL_PATH="${MODEL_3H:?MODEL_3H required}" ;;
+  *-12h) HOURS=12; MODEL_PATH="${MODEL_12H:?MODEL_12H required}" ;;
+  *) echo "cannot infer duration from leg '$LEG_ID'" >&2; exit 2 ;;
+esac
+
+# Default backend images (overridable via HYPERLOOM_IMAGE); mirrors the demo skill's
+# suggested ROCm images.
+if [ -n "${HYPERLOOM_IMAGE:-}" ]; then
+  IMAGE="$HYPERLOOM_IMAGE"
+elif [ "$BACKEND" = vllm ]; then
+  IMAGE="${HYPERLOOM_IMAGE_VLLM:-vllm/vllm-openai-rocm:v0.27.1}"
+else
+  IMAGE="${HYPERLOOM_IMAGE_SGLANG:-lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-srt}"
+fi
+
+ROOT="${NFS_ROOT%/}/runs/${CI_VERSION}/${LEG_ID}"
+mkdir -p "$ROOT"
+BOOTSTRAP="${NFS_ROOT%/}/bootstrap/${CI_VERSION}/bootstrap-pre-release.sh"
+NAME="hyperloom-${LEG_ID}"
+RD=$((128 + GPU_INDEX))   # renderD node paired with cardN
+
+echo "[docker-run] leg=$LEG_ID gpu=$GPU_INDEX card$GPU_INDEX/renderD$RD image=$IMAGE cpus=$LEG_CPUS mem=$LEG_MEM"
+
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+
+# GPU isolation: expose exactly one card, and set ROCR_VISIBLE_DEVICES=0 so the
+# container sees a single device at index 0. CPU/mem hard-capped to the 1/4 share.
+exec docker run --rm --name "$NAME" \
+  --device "/dev/kfd" \
+  --device "/dev/dri/card${GPU_INDEX}" \
+  --device "/dev/dri/renderD${RD}" \
+  --group-add video \
+  --cpus "$LEG_CPUS" --memory "$LEG_MEM" --shm-size "$LEG_SHM" \
+  -e ROCR_VISIBLE_DEVICES=0 \
+  -e CI_VERSION="$CI_VERSION" \
+  -e NFS_ROOT="$NFS_ROOT" \
+  -e LEG_ID="$LEG_ID" \
+  -e HYPERLOOM_RUN_MODE=docker \
+  -e HYPERLOOM_BACKEND="$BACKEND" \
+  -e HYPERLOOM_MODEL_PATH="$MODEL_PATH" \
+  -e DEMO_HOURS="$HOURS" \
+  -e TARGET_GAIN="$TARGET_GAIN" \
+  -e CLAUDE_MODEL="$CLAUDE_MODEL" \
+  -e CLAUDE_CLI_VERSION="$CLAUDE_CLI_VERSION" \
+  -e ANTHROPIC_API_KEY_B64="$ANTHROPIC_API_KEY_B64" \
+  ${ANTHROPIC_BASE_URL:+-e ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL"} \
+  -v "$ROOT:$ROOT" \
+  -v "$NFS_ROOT:$NFS_ROOT" \
+  --entrypoint bash \
+  "$IMAGE" "$BOOTSTRAP"
