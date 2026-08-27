@@ -76,15 +76,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         state = self.shared_state
         if (state.phase or "").strip().upper() != _phase_state.PHASE_FRAMEWORK_AGENT:
             return
-        # When the baseline could not launch, dispatch a one-shot
-        # enablement_specialist before the perf PR-discovery loop.
-        try:
-            enablement_tid = await self._maybe_enqueue_enablement_specialist()
-        except Exception:  # noqa: BLE001 — never wedge the perf pump
-            log.exception("ENABLEMENT: enqueue failed")
-            enablement_tid = ""
-        if enablement_tid:
-            return
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
         # Skip if a framework task is already queued or running.
@@ -2370,14 +2361,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             batch_id,
             status,
         )
-
-    # Cap on the framework config-exploration grid so a single round cannot
-    # monopolise the phase budget (mirrors _MN_AUTO_EXPLORE_GRID_CAP).
-    _FRAMEWORK_CONFIG_GRID_CAP = 8
-    # Max config-exploration rounds per FRAMEWORK subphase (safety cap; the lane
-    # normally terminates earlier once a round yields no new candidates).
-    # Overridable via INFERENCE_OPTIMIZER_FRAMEWORK_CONFIG_MAX_ROUNDS.
-    _FRAMEWORK_CONFIG_MAX_ROUNDS = 4
 
     async def _candidate_discovery_inflight(self) -> bool:
         """True while a candidate-discovery specialist is queued or running."""
