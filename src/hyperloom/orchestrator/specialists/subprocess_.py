@@ -1616,6 +1616,7 @@ class SpecialistSubprocessDispatcher:
             str: The diff text, or ``""`` when there is nothing to harvest or
                 git could not be run.
         """
+
         def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
             try:
                 return subprocess.run(
