@@ -1,0 +1,134 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 380" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="phaseGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="barFill" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#f87171"/>
+      <stop offset="100%" style="stop-color:#38ef7d"/>
+    </linearGradient>
+    <linearGradient id="goalLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#fbbf24"/>
+      <stop offset="100%" style="stop-color:#f97316"/>
+    </linearGradient>
+    <filter id="sh2" x="-2%" y="-2%" width="104%" height="108%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000" flood-opacity="0.25"/>
+    </filter>
+    <filter id="glowG" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="4" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="380" rx="12" fill="url(#phaseGrad)"/>
+
+  <!-- Title -->
+  <text x="480" y="32" text-anchor="middle" fill="#e2e8f0" font-size="16" font-weight="700">SLA BACKWARD OPTIMIZATION JOURNEY — 6 PHASES, EACH PMC-GUIDED</text>
+  <text x="480" y="48" text-anchor="middle" fill="#64748b" font-size="10">Config C (BLKQ=128) · B=1 H=24 S=65536 D=128 · MI355X · Bwd wall-clock (ms)</text>
+
+  <!-- Chart area: x 80-800, y 68-310 -->
+  <!-- Scale: 56ms = x:80, 30ms = x:800 → width = 720px for 26ms range → 27.7 px/ms -->
+  <!-- Actually let's use: max=58ms at left, min=30ms at right, bars grow from left -->
+  <!-- Better: horizontal bars, y-axis = phases, x-axis = milliseconds -->
+
+  <!-- X-axis (milliseconds) -->
+  <line x1="140" y1="300" x2="870" y2="300" stroke="#334155" stroke-width="1.5"/>
+  <!-- Scale: 140=30ms, 870=60ms → 730px/30ms = 24.33 px/ms -->
+  <!-- Ticks -->
+  <line x1="140" y1="300" x2="140" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="140" y="318" text-anchor="middle" fill="#475569" font-size="9">30</text>
+  <line x1="262" y1="300" x2="262" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="262" y="318" text-anchor="middle" fill="#475569" font-size="9">35</text>
+  <line x1="384" y1="300" x2="384" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="384" y="318" text-anchor="middle" fill="#475569" font-size="9">40</text>
+  <line x1="505" y1="300" x2="505" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="505" y="318" text-anchor="middle" fill="#475569" font-size="9">45</text>
+  <line x1="627" y1="300" x2="627" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="627" y="318" text-anchor="middle" fill="#475569" font-size="9">50</text>
+  <line x1="749" y1="300" x2="749" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="749" y="318" text-anchor="middle" fill="#475569" font-size="9">55</text>
+  <line x1="870" y1="300" x2="870" y2="305" stroke="#475569" stroke-width="1"/>
+  <text x="870" y="318" text-anchor="middle" fill="#475569" font-size="9">60</text>
+  <text x="505" y="338" text-anchor="middle" fill="#64748b" font-size="10">Wall-clock time (ms) — lower is better</text>
+
+  <!-- Triton reference line at 46.71ms → x = 140 + (46.71-30)*24.33 = 140 + 406.4 = 546.4 -->
+  <line x1="547" y1="62" x2="547" y2="300" stroke="#fbbf24" stroke-width="1.5" stroke-dasharray="6,3" opacity="0.7"/>
+  <rect x="513" y="54" width="68" height="18" rx="4" fill="#fbbf24" opacity="0.15"/>
+  <text x="547" y="66" text-anchor="middle" fill="#fbbf24" font-size="9" font-weight="600">Triton 46.71</text>
+
+  <!-- Grid lines -->
+  <line x1="140" y1="68" x2="140" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+  <line x1="262" y1="68" x2="262" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+  <line x1="384" y1="68" x2="384" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+  <line x1="505" y1="68" x2="505" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+  <line x1="627" y1="68" x2="627" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+  <line x1="749" y1="68" x2="749" y2="300" stroke="#1e293b" stroke-width="0.5"/>
+
+  <!-- Phase 0: Combined baseline, 56.00 ms → width = (56-30)*24.33 = 632.6 -->
+  <text x="135" y="93" text-anchor="end" fill="#64748b" font-size="9">Phase 0</text>
+  <rect x="140" y="80" width="633" height="28" rx="5" fill="#ef4444" filter="url(#sh2)" opacity="0.7"/>
+  <text x="148" y="99" fill="#fff" font-size="10" font-weight="600">Combined baseline</text>
+  <text x="765" y="99" fill="#f87171" font-size="10" font-weight="700">56.00 ms</text>
+  <text x="815" y="99" fill="#64748b" font-size="9">0.83x</text>
+
+  <!-- Phase 1: Split pipelines, 54.44 ms → width = (54.44-30)*24.33 = 594.6 -->
+  <text x="135" y="129" text-anchor="end" fill="#64748b" font-size="9">Phase 1</text>
+  <rect x="140" y="116" width="595" height="28" rx="5" fill="#f97316" filter="url(#sh2)" opacity="0.7"/>
+  <text x="148" y="135" fill="#fff" font-size="10" font-weight="600">Split dkdv + dq</text>
+  <text x="727" y="135" fill="#fb923c" font-size="10" font-weight="700">54.44 ms</text>
+  <text x="782" y="135" fill="#64748b" font-size="9">0.86x</text>
+
+  <!-- Phase 2: Constexpr + log2e, 41.16 ms → width = (41.16-30)*24.33 = 271.5 -->
+  <text x="135" y="165" text-anchor="end" fill="#64748b" font-size="9">Phase 2</text>
+  <rect x="140" y="152" width="272" height="28" rx="5" fill="#eab308" filter="url(#sh2)" opacity="0.7"/>
+  <text x="148" y="171" fill="#1a1a2e" font-size="10" font-weight="600">Constexpr masks + log2e</text>
+  <text x="404" y="171" fill="#eab308" font-size="10" font-weight="700">41.16 ms</text>
+  <text x="459" y="171" fill="#38ef7d" font-size="9" font-weight="600">1.14x</text>
+
+  <!-- Phase 3: bf16 delta, 40.27 ms → width = (40.27-30)*24.33 = 249.9 -->
+  <text x="135" y="201" text-anchor="end" fill="#64748b" font-size="9">Phase 3</text>
+  <rect x="140" y="188" width="250" height="28" rx="5" fill="#84cc16" filter="url(#sh2)" opacity="0.7"/>
+  <text x="148" y="207" fill="#1a1a2e" font-size="10" font-weight="600">bf16 delta preprocess</text>
+  <text x="382" y="207" fill="#84cc16" font-size="10" font-weight="700">40.27 ms</text>
+  <text x="437" y="207" fill="#38ef7d" font-size="9" font-weight="600">1.16x</text>
+
+  <!-- Phase 4: dkdv occ=2, 39.77 ms → width = (39.77-30)*24.33 = 237.8 -->
+  <text x="135" y="237" text-anchor="end" fill="#64748b" font-size="9">Phase 4</text>
+  <rect x="140" y="224" width="238" height="28" rx="5" fill="#22c55e" filter="url(#sh2)" opacity="0.8"/>
+  <text x="148" y="243" fill="#fff" font-size="10" font-weight="600">dkdv occupancy=2</text>
+  <text x="370" y="243" fill="#22c55e" font-size="10" font-weight="700">39.77 ms</text>
+  <text x="425" y="243" fill="#38ef7d" font-size="9" font-weight="600">1.17x</text>
+  <text x="473" y="243" fill="#475569" font-size="8">VGPR 252→228</text>
+
+  <!-- Phase 5: dq occ=2, 33.84 ms → width = (33.84-30)*24.33 = 93.4 — HIGHLIGHT -->
+  <text x="135" y="273" text-anchor="end" fill="#e2e8f0" font-size="9" font-weight="700">Phase 5</text>
+  <rect x="138" y="256" width="99" height="32" rx="6" fill="#38ef7d" filter="url(#sh2)" stroke="#38ef7d" stroke-width="1"/>
+  <text x="148" y="277" fill="#0f172a" font-size="10" font-weight="700">dq occ=2</text>
+  <text x="248" y="277" fill="#38ef7d" font-size="12" font-weight="800" filter="url(#glowG)">33.84 ms</text>
+  <text x="325" y="277" fill="#38ef7d" font-size="11" font-weight="700">1.38x</text>
+  <text x="378" y="277" fill="#64748b" font-size="8">VGPR 296→238 · Zero spills</text>
+
+  <!-- Arrow showing -5.93 ms drop -->
+  <line x1="232" y1="256" x2="232" y2="246" stroke="#38ef7d" stroke-width="1.5" opacity="0.6"/>
+  <line x1="225" y1="250" x2="232" y2="244" stroke="#38ef7d" stroke-width="1.5" opacity="0.6"/>
+  <line x1="239" y1="250" x2="232" y2="244" stroke="#38ef7d" stroke-width="1.5" opacity="0.6"/>
+  <text x="245" y="250" fill="#38ef7d" font-size="8" font-weight="600">-5.93 ms</text>
+
+  <!-- Right callout -->
+  <rect x="863" y="88" width="85" height="200" rx="10" fill="#1e293b" stroke="#38ef7d" stroke-width="1" opacity="0.9"/>
+  <text x="905" y="112" text-anchor="middle" fill="#94a3b8" font-size="8" font-weight="600">TOTAL DROP</text>
+  <text x="905" y="140" text-anchor="middle" fill="#f87171" font-size="14" font-weight="700">56.00</text>
+  <text x="905" y="155" text-anchor="middle" fill="#64748b" font-size="10">↓</text>
+  <text x="905" y="175" text-anchor="middle" fill="#38ef7d" font-size="14" font-weight="700">33.84</text>
+  <text x="905" y="200" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">−22.16 ms</text>
+  <text x="905" y="215" text-anchor="middle" fill="#e2e8f0" font-size="9">(−39.6%)</text>
+  <line x1="878" y1="228" x2="932" y2="228" stroke="#334155" stroke-width="0.5"/>
+  <text x="905" y="248" text-anchor="middle" fill="#38ef7d" font-size="9" font-weight="600">6 phases</text>
+  <text x="905" y="264" text-anchor="middle" fill="#38ef7d" font-size="9" font-weight="600">PMC-guided</text>
+  <text x="905" y="280" text-anchor="middle" fill="#38ef7d" font-size="9" font-weight="600">zero spills</text>
+
+  <!-- Bottom annotation -->
+  <text x="480" y="365" text-anchor="middle" fill="#64748b" font-size="9">Each phase: predict PMC impact → build → SNR gate → bench → profile → analyze → decide ONE change</text>
+</svg>

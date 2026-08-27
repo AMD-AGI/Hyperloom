@@ -1,0 +1,262 @@
+
+=== p600 ===
+Field Name
+Bits
+Format or Description
+ROW_MASK
+[63:60]
+Row Mask Applies to the VGPR destination write only, does not impact the thread
+mask when fetching source VGPR data.
+31==0: lanes[63:48] are disabled (wave 64 only)
+30==0: lanes[47:32] are disabled (wave 64 only)
+29==0: lanes[31:16] are disabled
+28==0: lanes[15:0] are disabled
+Table 94. DPP_CTRL Enumeration
+DPP_Cntl
+Enumeration
+Hex
+Value
+Function
+Description
+DPP_QUAD_PER
+M*
+000-
+0FF
+pix[n].srca = pix[(n&0x3c)+ dpp_cntl[n%4*2+1 : n%4*2]].srca Full permute of four threads.
+DPP_UNUSED
+100
+Undefined
+Reserved.
+DPP_ROW_SL*
+101-10F if ((n & 0xf) < (16-cntl[3:0])) pix[n].srca = pix[n +
+cntl[3:0]].srca else use bound_cntl
+Row shift left by 1-15 threads.
+DPP_ROW_SR*
+111-11F if ((n&0xf) >= cntl[3:0]) pix[n].srca = pix[n - cntl[3:0]].srca else
+use bound_cntl
+Row shift right by 1-15 threads.
+DPP_ROW_RR*
+121-12F if ((n&0xf) >= cnt[3:0]) pix[n].srca = pix[n - cntl[3:0]].srca else
+pix[n].srca = pix[n + 16 - cntl[3:0]].srca
+Row rotate right by 1-15 threads.
+DPP_WF_SL1*
+130
+if (n<63) pix[n].srca = pix[n+1].srca else use bound_cntl
+Wavefront left shift by 1 thread.
+DPP_WF_RL1*
+134
+if (n<63) pix[n].srca = pix[n+1].srca else pix[n].srca =
+pix[0].srca
+Wavefront left rotate by 1
+thread.
+DPP_WF_SR1*
+138
+if (n>0) pix[n].srca = pix[n-1].srca else use bound_cntl
+Wavefront right shift by 1
+thread.
+DPP_WF_RR1*
+13C
+if (n>0) pix[n].srca = pix[n-1].srca else pix[n].srca =
+pix[63].srca
+Wavefront right rotate by 1
+thread.
+DPP_ROW_MIRR
+OR*
+140
+pix[n].srca = pix[15-(n&f)].srca
+Mirror threads within row.
+DPP_ROW_HALF
+_MIRROR*
+141
+pix[n].srca = pix[7-(n&7)].srca
+Mirror threads within row (8
+threads).
+DPP_ROW_BCAST
+15*
+142
+if (n>15) pix[n].srca = pix[n & 0x30 - 1].srca
+Broadcast 15th thread of each
+row to next row.
+DPP_ROW_BCAST
+31*
+143
+if (n>31) pix[n].srca = pix[n & 0x20 - 1].srca
+Broadcast thread 31 to rows 2
+and 3.
+DPP_ROW*
+150 -
+15F
+pix[n].srca = pix[(n & 0xfffffff0)+count].srca;
+Broadcast thread 0-15 within a
+row to the whole row.
+Note that for 64-bit input data the only legal DPP type is "DPP_ROW*".
+13.4. LDS format
+13.4.1. DS
+CDNA4 Instruction Set Architecture
+13.4. LDS format
+592 of 600
+
+=== p601 ===
+Format
+LDS
+Description
+Local and Global Data Sharing instructions
+Table 95. DS Fields
+Field Name
+Bits
+Format or Description
+OFFSET0
+[7:0]
+First address offset
+OFFSET1
+[15:8]
+Second address offset. For some opcodes this is concatenated with OFFSET0.
+OP
+[24:17]
+See Opcode table below.
+ACC
+[25]
+VDST is Accumulation VGPR
+ENCODING
+[31:26]
+Must be: 110110
+ADDR
+[39:32]
+VGPR which supplies the address.
+DATA0
+[47:40]
+First data VGPR.
+DATA1
+[55:48]
+Second data VGPR.
+VDST
+[63:56]
+Destination VGPR when results returned to VGPRs.
+Table 96. DS Opcodes
+Opcode #
+Name
+Opcode #
+Name
+0
+DS_ADD_U32
+68
+DS_DEC_U64
+1
+DS_SUB_U32
+69
+DS_MIN_I64
+2
+DS_RSUB_U32
+70
+DS_MAX_I64
+3
+DS_INC_U32
+71
+DS_MIN_U64
+4
+DS_DEC_U32
+72
+DS_MAX_U64
+5
+DS_MIN_I32
+73
+DS_AND_B64
+6
+DS_MAX_I32
+74
+DS_OR_B64
+7
+DS_MIN_U32
+75
+DS_XOR_B64
+8
+DS_MAX_U32
+76
+DS_MSKOR_B64
+9
+DS_AND_B32
+77
+DS_WRITE_B64
+10
+DS_OR_B32
+78
+DS_WRITE2_B64
+11
+DS_XOR_B32
+79
+DS_WRITE2ST64_B64
+12
+DS_MSKOR_B32
+80
+DS_CMPST_B64
+13
+DS_WRITE_B32
+81
+DS_CMPST_F64
+14
+DS_WRITE2_B32
+82
+DS_MIN_F64
+15
+DS_WRITE2ST64_B32
+83
+DS_MAX_F64
+16
+DS_CMPST_B32
+84
+DS_WRITE_B8_D16_HI
+17
+DS_CMPST_F32
+85
+DS_WRITE_B16_D16_HI
+18
+DS_MIN_F32
+86
+DS_READ_U8_D16
+19
+DS_MAX_F32
+87
+DS_READ_U8_D16_HI
+20
+DS_NOP
+88
+DS_READ_I8_D16
+21
+DS_ADD_F32
+89
+DS_READ_I8_D16_HI
+23
+DS_PK_ADD_F16
+90
+DS_READ_U16_D16
+24
+DS_PK_ADD_BF16
+91
+DS_READ_U16_D16_HI
+29
+DS_WRITE_ADDTID_B32
+92
+DS_ADD_F64
+30
+DS_WRITE_B8
+96
+DS_ADD_RTN_U64
+31
+DS_WRITE_B16
+97
+DS_SUB_RTN_U64
+32
+DS_ADD_RTN_U32
+98
+DS_RSUB_RTN_U64
+33
+DS_SUB_RTN_U32
+99
+DS_INC_RTN_U64
+34
+DS_RSUB_RTN_U32
+100
+DS_DEC_RTN_U64
+CDNA4 Instruction Set Architecture
+13.4. LDS format
+593 of 600

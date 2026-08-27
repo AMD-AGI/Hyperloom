@@ -1,0 +1,245 @@
+# GitHub Actions self-hosted runners for KernelForge, on the Primus-SaFE global cluster.
+#
+# WHY self-hosted at all: the AMD-BRAIN-Internal organisation enforces a GitHub IP
+# allow list. GitHub-hosted runners get ephemeral egress IPs that are not on it, so
+# every job on `ubuntu-latest` dies in `actions/checkout` with
+#   remote: The repository owner has an IP allow list enabled, and <ip> is not
+#   permitted to access this repository.
+#   fatal: unable to access '.../KernelForge/': The requested URL returned error: 403
+# The global cluster egresses from an allow-listed address, so runners must live here.
+#
+# WHY the e2e runner is ALSO here, not on Crusoe: the Crusoe host is not on the allow
+# list (verified: HTTP 403 from its egress IP), so a runner there could not even read
+# the repository. It does not need to be there — the e2e job only POSTs to the Crusoe
+# orchestration API and polls it; the GPU work still runs on Crusoe. The global
+# cluster reaches that endpoint directly (verified: crusoe.primus-safe.amd.com
+# resolves and /robust-api answers 200), so dispatching from here is equivalent.
+#
+# Modeled on the hyperloom-ci runner StatefulSet already running on this cluster.
+#
+# Two pools, because the workloads have opposite shapes:
+#   KernelForge-ci      installs packages and runs ruff/pytest/sphinx/CodeQL -> CPU+disk
+#   KernelForge-e2e-ci  submits one API call and polls for ~45 min          -> nearly idle
+# Keeping them apart stops a 45-minute e2e run from starving the fast checks.
+#
+# Deploy:
+#   1. Get a registration token (valid 1 h, reusable for every runner in that window):
+#        gh api --method POST \
+#          repos/AMD-BRAIN-Internal/KernelForge/actions/runners/registration-token
+#   2. kubectl create ns kernelforge-ci
+#      kubectl -n kernelforge-ci create secret generic kernelforge-runner \
+#        --from-literal=reg-token=<TOKEN>
+#   3. Create the source-staging push key (e2e pool only). Generate it ON the cluster
+#      so the private half never leaves it, then install the public half on the host
+#      that owns the GPU side's shared mount:
+#        ssh-keygen -t ed25519 -N '' -f /tmp/k
+#        kubectl -n kernelforge-ci create secret generic kernelforge-crusoe-ssh \
+#          --from-file=id_ed25519=/tmp/k
+#        shred -u /tmp/k     # public half -> <user>@<mount-host>:~/.ssh/authorized_keys
+#      That host also needs a staging dir owned by the same account, and the repo
+#      needs CI_E2E_STAGE_HOST / CI_E2E_STAGE_ROOT set to match:
+#        sudo mkdir -p <stage-root> && sudo chown <user>: <stage-root>
+#      The key and those two repo secrets are one switch: leave ALL of them unset and
+#      e2e still runs, with the workload fetching from GitHub (fine only where the GPU
+#      node may read the repo). Set the repo secrets without the key and every run
+#      fails loudly instead of falling back to a fetch it cannot make.
+#   4. kubectl apply -f deploy/ci/global-runners.yaml
+#
+# The token is only read on a pod's FIRST start: config.sh writes credentials into the
+# PVC, so restarts and reboots reuse them and never need a fresh token.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kernelforge-ci
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kernelforge-ci-runner
+  namespace: kernelforge-ci
+  labels:
+    app.kubernetes.io/name: kernelforge-ci-runner-sts
+spec:
+  replicas: 8
+  serviceName: kernelforge-ci-runner-sts
+  podManagementPolicy: Parallel
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kernelforge-ci-runner-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kernelforge-ci-runner-sts
+    spec:
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:2.336.0
+          securityContext:
+            runAsUser: 1001
+          env:
+            - name: RUNNER_URL
+              value: https://github.com/AMD-BRAIN-Internal/KernelForge
+            - name: RUNNER_LABELS
+              value: KernelForge-ci
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kernelforge-runner
+                  key: reg-token
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -e
+              RD=/runnerdata
+              if [ ! -f "$RD/config.sh" ]; then
+                echo "[runner] seeding install to PVC"
+                cp -a /home/runner/. "$RD"/
+              fi
+              cd "$RD"
+              if [ ! -f "$RD/.runner" ]; then
+                echo "[runner] registering as $POD_NAME"
+                ./config.sh --url "$RUNNER_URL" --token "$RUNNER_TOKEN" \
+                  --name "$POD_NAME" --labels "$RUNNER_LABELS" \
+                  --work _work --unattended --replace
+              else
+                echo "[runner] already registered ($POD_NAME); reusing PVC creds"
+              fi
+              exec ./run.sh
+          resources:
+            # `requests` is what actually reserves cluster capacity, so keep it
+            # small: most jobs here (ruff, bandit, reuse, the e2e resolve steps)
+            # idle well below it. `limits` stays roomy because it costs nothing
+            # until a job uses it, and CodeQL's python database build needs
+            # several GB — capping at 2Gi would OOMKill it or blow the 45 min
+            # timeout, and it is the only heavy job in this pool.
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+          volumeMounts:
+            - name: data
+              mountPath: /runnerdata
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: rbd
+        resources:
+          requests:
+            # Slightly bigger than the e2e pool: pip installs, the CodeQL bundle
+            # and its database all land here. Deliberately modest — the shared
+            # Ceph rbd pool sits above 80% used, and `rbd` allows expansion, so
+            # grow a volume if a job ever runs out rather than reserving upfront.
+            storage: 12Gi
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kernelforge-e2e-runner
+  namespace: kernelforge-ci
+  labels:
+    app.kubernetes.io/name: kernelforge-e2e-runner-sts
+spec:
+  replicas: 2
+  serviceName: kernelforge-e2e-runner-sts
+  podManagementPolicy: Parallel
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kernelforge-e2e-runner-sts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kernelforge-e2e-runner-sts
+    spec:
+      securityContext:
+        fsGroup: 1001
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:2.336.0
+          securityContext:
+            runAsUser: 1001
+          env:
+            - name: RUNNER_URL
+              value: https://github.com/AMD-BRAIN-Internal/KernelForge
+            - name: RUNNER_LABELS
+              value: KernelForge-e2e-ci
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: kernelforge-runner
+                  key: reg-token
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -e
+              RD=/runnerdata
+              if [ ! -f "$RD/config.sh" ]; then
+                echo "[runner] seeding install to PVC"
+                cp -a /home/runner/. "$RD"/
+              fi
+              cd "$RD"
+              if [ ! -f "$RD/.runner" ]; then
+                echo "[runner] registering as $POD_NAME"
+                ./config.sh --url "$RUNNER_URL" --token "$RUNNER_TOKEN" \
+                  --name "$POD_NAME" --labels "$RUNNER_LABELS" \
+                  --work _work --unattended --replace
+              else
+                echo "[runner] already registered ($POD_NAME); reusing PVC creds"
+              fi
+              exec ./run.sh
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /runnerdata
+            # The e2e job stages PR source onto the GPU side's shared mount over
+            # SSH, because the GPU node cannot clone this repo (its egress address
+            # is not on the org IP allow list). Mounted read-only; the job copies it
+            # to RUNNER_TEMP and chmods 600, since ssh rejects a group-readable key.
+            - name: crusoe-ssh
+              mountPath: /runner-secrets/crusoe-ssh
+              readOnly: true
+      volumes:
+        - name: crusoe-ssh
+          secret:
+            secretName: kernelforge-crusoe-ssh
+            defaultMode: 0440
+            # optional so a cluster without the key still gets working runners. A
+            # required secret that is missing leaves every pod stuck in
+            # ContainerCreating, which takes out the whole e2e pool rather than the
+            # one job that needs the key.
+            optional: true
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        storageClassName: rbd
+        resources:
+          requests:
+            storage: 8Gi

@@ -1,0 +1,35 @@
+{
+  "name": "triton_permuted_store_blocking_layout_pitfall",
+  "level": 0,
+  "backend": "triton",
+  "description": "Fusing a permute into an upstream Triton kernel's store phase often LOSES vs a separate post-permute pass, because Triton's BlockedEncoding distributes threads along the outer tile axis first. Even `tl.trans(tile)` only swaps the LOGICAL tile axes — it doesn't change the PHYSICAL thread mapping. Stores to a layout where the inner (contiguous) dim differs from the tile's inner axis will be uncoalesced.",
+  "preconditions": [
+    "Considering fusing a permute/reshape into a Triton kernel's output store",
+    "Target output layout has a DIFFERENT inner (stride-1) dim than the tile's natural inner axis",
+    "Source tile is produced with standard blocked layout (not explicit BlockedEncoding override)"
+  ],
+  "steps": [
+    "Profile the separate `kernel + post-permute` baseline BEFORE designing the fused version.",
+    "If the post-permute uses an LDS-tile Triton kernel that hits ~85%+ HBM peak, the fused version is unlikely to beat it.",
+    "If you still want to fuse, explicitly set the tile's BlockedEncoding to match the target output's inner axis. For gfx950 LDS 64-byte banks, aim for sizePerThread=[1,8] or [1,16] on the inner-matching axis.",
+    "Validate with CUDA event timing AND by checking the lane store pattern in AMDGCN dump (should see `buffer_store_dwordx4` with adjacent lanes at adjacent addresses)."
+  ],
+  "expected_impact": "Avoids 20-30% regression from naive fusion. In the HIP wgrad case: fused dual_jagged_permuted was 1301 us vs dual_jagged + fast_permute post-pass at 1092 us — 0.84× slower despite 30% less theoretical HBM traffic.",
+  "successes": 0,
+  "failures": 1,
+  "success_contexts": [],
+  "failure_contexts": [
+    "2026-04-24: implemented quant_mxfp8_dual_jagged_permuted to fuse the fp8 permute into the quant kernel for HIP wgrad. Bit-exact correctness but 20% slower than post-permute pipeline because thread layout distributed along outer axis (l) while permuted output wanted inner = m_local. tl.trans(xq_c) didn't help. Reverted (kept as docs-only reference)."
+  ],
+  "sub_skills": ["triton_fp8_permute_lds_tile"],
+  "decision_rules": [
+    "Rule of thumb: if the post-permute kernel hits >= 80% of HBM peak, don't try to fuse — the layout penalty will beat you.",
+    "If fusing is still desired, use explicit BlockedEncoding overrides and AMDGCN-dump the stores.",
+    "A fused kernel with MORE total ops (quant + transpose) but the same HBM traffic IS still net-slower if any of its stores become uncoalesced."
+  ],
+  "created_at": "2026-04-24T00:00:00",
+  "updated_at": "2026-04-24T00:00:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_hip_primus_turbo"
+  ]
+}

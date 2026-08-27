@@ -1,0 +1,30 @@
+{
+  "name": "mla_multi_pass_q_amortize_kv",
+  "level": 0,
+  "backend": "ck",
+  "description": "Process multiple Q head batches (Q_PASSES) per KV tile load to amortize KV memory traffic",
+  "preconditions": [
+    "MLA decode kernel",
+    "nhead >> nhead_kv (GQA)",
+    "KV load is bottleneck"
+  ],
+  "steps": [
+    "Set Q_PASSES = nhead / MFMA_HEADS (e.g., 128/16 = 8, but 2 is practical limit per block)",
+    "Load KV tile once into LDS (BLOCK_N \u00d7 QK_HEAD_DIM)",
+    "Loop Q_PASSES times: load Q batch from global, compute QK MFMA, accumulate PV",
+    "Each pass processes MFMA_HEADS heads against the shared KV tile",
+    "Trade-off: more passes = better KV reuse but more VGPR for accumulators"
+  ],
+  "expected_impact": "2-4x reduction in KV HBM traffic for GQA ratios \u2265 16",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [],
+  "created_at": "2026-04-21T19:59:32.322902",
+  "updated_at": "2026-04-21T19:59:32.322903",
+  "experiment_ids": [
+    "mla_ck_native_baseline"
+  ]
+}

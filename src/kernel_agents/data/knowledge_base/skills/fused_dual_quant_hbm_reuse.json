@@ -1,0 +1,32 @@
+{
+  "name": "fused_dual_quant_hbm_reuse",
+  "level": 0,
+  "backend": "triton",
+  "description": "Fuse rowwise + colwise quantisation of the same tensor into one kernel that reads input once. Caveat: L2 cache often hides the second read's HBM cost, so gains are modest on hot paths.",
+  "preconditions": [
+    "Need two different quantisations of the same tensor (e.g. rowwise for fwd, colwise for wgrad in MX-FP8)",
+    "Both quantisations can share the same tile shape / scale group size"
+  ],
+  "steps": [
+    "Single kernel tile reads (BM, BL) of x into registers",
+    "Compute both amax paths in-tile: rowwise (along last axis per GROUP) + colwise (along M axis per GROUP)",
+    "Produce two fp8 outputs at same (M, L) positions (different scale-applied values)",
+    "Write four outputs: fp8_row, scale_row [M, L/32], fp8_col, scale_col [L, total_sc] (jagged)",
+    "Grid = (total_scale_groups, cdiv(L, BLOCK_L)) using flat-grid-block-to-expert-lookup"
+  ],
+  "expected_impact": "Measured ~0.1 ms / 1% step gain on cold-L2 single-step runs. Near-zero gain under gradient accumulation where L2 is already warm between back-to-back quant calls. Ship anyway: simpler call graph, no regression, correct-by-construction.",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": ["flat_grid_block_to_expert_lookup"],
+  "decision_rules": [
+    "Pursue only if separate quant kernels measurably contend (cold paths, inference-only, large tensor sizes).",
+    "MI355X has 4 MB L2 per chiplet + 64 MB MALL — tensors up to ~50 MB stay resident between back-to-back kernel calls."
+  ],
+  "created_at": "2026-04-23T19:30:00",
+  "updated_at": "2026-04-23T19:30:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_primus_turbo"
+  ]
+}

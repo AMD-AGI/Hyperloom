@@ -1,0 +1,685 @@
+
+=== p55 ===
+7.1.3.4. V_MFMA_F64_16X16X4_F64
+This demonstrates how double-precision values are handled using the example of V_MFMA_F64_16X16X4_F64.
+This instruction follows the same input layout patterns as the previous examples and operates most similarly to
+V_MFMA_F32_32X32X2_F32. However, each input is spread across multiple registers in order to accommodate
+the full 64-bit value.
+The output of this instruction, and the other double-precision MFMA instructions, does not follow the 4 × N
+block layout of other MFMA instructions. Instead, the output rows are packed contiguously across the lanes of
+each wavefront, and then packed into pairs (to account for the 64 bits needed to store the output) of registers,
+as shown below.
+The input and output formats for V_MFMA_F64_16X16X4_F64 are
+Lane 0
+Lane 1
+…
+Lane 15
+Lane 16
+…
+Lane 63
+Reg. 0
+A[0,0,0][31:0]
+A[0,1,0][31:0]
+…
+A[0,15,0][31:0]
+A[0,0,1][31:0]
+…
+A[0,15,3][31:0]
+Reg. 1
+A[0,0,0][63:32]
+A[0,1,0][63:32]
+…
+A[0,15,0][63:0]
+A[0,0,1][63:32]
+…
+A[0,15,3][63:32]
+Lane 0
+Lane 1
+…
+Lane 15
+Lane 16
+…
+Lane 63
+Reg. 0
+B[0,0,0][31:0]
+B[0,0,1][31:0]
+…
+B[0,0,15][31:0]
+B[0,1,0][31:0]
+…
+B[0,3,15][31:0]
+Reg. 1
+B[0,0,0][63:32]
+B[0,0,1][63:32]
+…
+B[0,0,15][63:32]
+B[0,1,0][63:32]
+…
+B[0,3,15][63:32]
+Lane 0
+Lane 1
+…
+Lane 15
+Lane 16
+…
+Lane 63
+Reg. 0
+D[0,0,0][31:0]
+D[0,0,1][31:0]
+…
+D[0,0,15][31:0]
+D[0,1,0][31:0]
+…
+D[0,3,15][31:0]
+Reg. 1
+D[0,0,0][63:32]
+D[0,0,1][63:32]
+…
+D[0,0,15][63:32]
+D[0,1,0][63:32]
+…
+D[0,3,15][63:32]
+Reg. 2
+D[0,4,0][31:0]
+D[0,4,1][31:0]
+…
+D[0,4,15][31:0]
+D[0,5,0][31:0]
+…
+D[0,7,15][31:0]
+…
+…
+…
+…
+…
+…
+…
+…
+Reg. 7
+D[0,12,0][63:32]
+D[0,12,1][63:32]
+…
+D[0,12,15][63:32]
+D[0,13,0][63:32]
+…
+D[0,15,15][63:32]
+7.1.4. General input and output layout
+In general, an MFMA instruction is parameterized by its input and output datatypes, the sizes M, N, and K of
+each matrix block and the number of blocks it operates on B.
+Semantically, for each 0 <= b < B, 0 <= i < M, and 0 <= j < N, it computes
+D[b,i,j] = C[b,i,j] + sum_{0 <= k < K} A[b,i,k] * B[b,k,j]
+where each A[b,:,:] is M × K, each B[b,:,:] is K × N, and each D[b,:,:] and corresponding C[b,:,:] is M × N.
+The values of the inputs and outputs are placed into the arguments to the instruction according to a fixed
+layout. For simplicity, this layout is defined in terms of the lanes of a wavefront and of the sequence of items for
+each lane: these items are arranged into the 32-bit registers that are the true arguments to an MFMA
+instruction in little-endian form.
+More specifically,
+• For 64-bit quantities, each item corresponds to a pair of registers, with the low bits of the quantity in the
+first of those registers and high bits in the second one
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+47 of 600
+
+=== p56 ===
+• For 32-bit quantities, each item corresponds to a distinct register
+• For 16-bit quantities, an item is half of a register, with the odd-numbered items taking up bits 31-16 and the
+even ones in bits 0-15
+• For 8-bit quantities, four items are packed into a register, analogously to the 16-bit case
+• For 4-bit quantities, eight items are packed into a register analogously to the 16- and 8-bit cases. That is,
+item 0 lives in bits 3-0 of the first register, item 1 is in bits 7-4 of the same register, and so on, until item 8 is
+placed in bits 3-0 of the following register.”
+• 6-bit quantities, like fp6 and bf6 values, are also densely packed into the registers that contain them.
+Because 6-bit quantities cannot be evenly packed into one 32-bit register, all instructions that take 6-bit
+inputs from lanes require them to be placed into six contiguous registers, and thus will require each lane to
+provide 32 values across those registers. If that group of 6 registers is treated as one 192-bit register, we can
+then describe item 0 as residing in bits 5-0 of that register, item 1 as being stored in bits 11-6, item 4 in bits
+35-30 (note the crossing of the 32-bit register boundary) and so on.”
+7.1.4.1. Input layout
+To define the input layout for the matrix A, first define the auxiliary constant
+K_L = K / (64 / (M * B))
+which is the number of consecutive values of K that each lane holds in its registers.
+For example, for the instruction V_MFMA_F32_32X32X1_2B_F32:
+K_L = 1 / (64 / (32 * 2)) = 1 / 1 = 1
+and for V_MFMA_F32_32X32X2_F32:
+K_L = 2 / (64 / (32 * 1)) = 2 / 2 = 1
+These both show that the one input register holds one value in the K dimension, but for
+V_MFMA_F32_4X4X4_16B_F16:
+K_L = 4 / (64 / (4 * 16)) = 4 / 1 = 4
+representing the fact that, for each lane, the two input registers hold four values in the K dimension. These
+input values are packed little-endian. For example, the third value in each row (which has k = 2 zero-indexed),
+is in bits 15:0 of the second input register for both A and B across all lanes. That 16-bit region is "item 2" in the
+layout computed below for V_MFMA_F32_4X4X4_16B_F16.
+Note that, in all MFMA instructions, the products M * B and N * B are less than 64, that is, the values of a single
+column of A or row of B, considered over all blocks, fit within a single input item.
+With this layout defined, a given input value A[b,i,k] is placed in the item
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+48 of 600
+
+=== p57 ===
+k % K_L
+of lane
+i + M * (b + B * (k / K_L))
+The layout for B is the analogous function that places B[b,k,j] in item
+k % K_L
+of lane
+j + N * (b + B * (k / K_L))
+7.1.4.2. Output layout
+The output values D[b,i,j] of an MFMA instruction, as well as the corresponding values C[b,i,j] of the matrix
+to add to the result, are stored in a fixed layout that is a function of the MFMA instruction being used.
+To define this layout, first define the following constants:
+• H, the group height, which indicates how many consecutive rows of output are placed in each row group and
+which are therefore stored in consecutive items on a single lane. For f64 instructions, H = 1, but for all
+other MFMA instructions, H = 4.
+• B_I = ceil(64 / (N * M / H)), the number of blocks stored in each output item (an item within the storage
+for D or C) across all lanes
+• M_I = (64 / B_I) / N, the number of rows of D stored in each output item across all lanes
+• G = M / (H * M_I), the number of row groups needed to store B_I blocks of output.
+For example, using the instruction V_MFMA_F32_32X32X1_2B_F32 gives
+H = 4
+B_I = ceil(64 / (32 * 32 / H)) = ceil(64 / 256) = 1
+M_I = (64 / 1) / 32 = 2
+G = 32 / (4 * 2) = 4
+while the instruction V_MFMA_F32_4X4X4_16B_F16 yields the values
+H = 4
+B_I = ceil(64 / (H * 4 / 4)) = ceil(64 / 4) = 16
+M_I = (64 / 16) / 4 = 4 / 4 = 1
+G = 4 / (H * 1) = 4 / 4 = 1
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+49 of 600
+
+=== p58 ===
+With these constants defined, the value D[b,i,j] of matrix D is located in item
+(i % H) + H * (i/(H * M_I) + G * (b / B_I))
+on lane
+j + N * ((i / H) % M_I + M_I * (b % B_I))
+7.1.5. 8-bit and Smaller Matrix Operations and Layouts
+There are two MFMA instructions which can independently select FP4, FP6 or FP6 for the A and B matrices:
+A & B Matrix
+C & D Matrices
+Notes
+V_MFMA_F32_16x16x128_F8F6F4
+16x128
+F8: 8 VGPRs
+F6: 6 VGPRs
+F4: 4 VGPRs
+16x16 F32
+4 VGPRs
+If either matrix = F8 → 32 cycles
+Else → 16 cycles
+V_MFMA_F32_32x32x64_F8F6F4
+32x64
+F8: 8 VGPRs
+F6: 6 VGPRs
+F4: 4 VGPRs
+32x32 F32
+16 VGPRs
+If either matrix = F8 → 64 cycles
+Else → 32 cycles
+Rules for the F8F6F4 MFMA instructions:
+Control
+Behavior
+Matrix Format
+CBSZ[2:0] defines the matrix A format, BLGP[2:0] defines the matrix B format. Matrix op
+supports mixed types (i.e., any combination of the formats defined).
+BLGP[2:0] /
+CBSZ[2:0]
+3’b000
+E4M3 (FP8)
+3’b001
+E5M2 (BF8)
+3’b010
+E2M3 (FP6)
+3’b011
+E3M2 (BF6)
+3’b100
+E2M1 (FP4)
+Denorm Control
+Ignores Denorm Control from MODE and keep Input/Output Denorms.
+Clamp
+Supported and uses the FP16_OVFL bit.
+If set, F32 Result on overflow is clamped to +/- MAX, otherwise the overflow result is
+normalized to +/-INF.
+If set, I32 Result is clamped to +/-MAX on overflow/underflow, otherwise the carry out bits are
+dropped.
+Round Mode
+ignores Round Mode from MODE and forces it to RNE.
+Imod/Omod
+Not Supported
+Exceptions
+Not Supported
+Execution Mask
+ignores exec mask from MODE and forces it to 1 for all threads
+Operand
+Alignment/Sources
+Src0/1/2/VDST if VGPR need to be even aligned.
+Src0/1 can be only VGPR/ACC_VGPR.
+SRC2 can be VGPR/ACC_VGPR/Constant
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+50 of 600
+
+=== p59 ===
+Control
+Behavior
+Scale
+Format is E8M0.
+ABID[0] = 1’b1 : Must be set for V_MFMA_SCALE_F32_16X16X128_F8F6F4 and
+V_MFMA_SCALE_F32_32X32X64_F8F6F4 instructions.
+ABID[0] = 1’b0 : forces all scales into the ALU as 1.0f (exponent = 0x7f Biased – MFMA Runs
+without scale source).
+Hardware adjusts this scale value in its calculation: d_exp = (a0_exp+b0_exp) + (a1_exp+
+b1_exp) + … + c_exp + scale_a + scale_b.
+7.1.5.1. Dense Matrix Layouts: 8-bit and Smaller
+Matrix A[M][k] and B[k][N] Layouts are shown below.
+For 32x32x64 FP4:
+ K_L = 64 / (64 / 32) = 32
+ A[I, k] goes in “item” k % 32 of lane I + 32 * (k / 32)
+FP4:
+16x16x128
+A[16][128]
+B[128][16]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [0-15]
+row2 thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [0-15]
+v0
+k=0-31
+k=32-63
+k = 64 - 95
+K = 96 - 127
+v1
+v2
+v3
+32x32x64
+A[32][64]
+B[64][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v0
+k=0-31
+k=0-31
+k =32-63
+K = 32-63
+v1
+v2
+v3
+FP6:
+16x16x128
+A[16][128]
+B[128][16]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [0-15]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [0-15]
+v0
+k=0-15
+k = 32-47
+k=64-79
+k = 96-111
+v1
+v2
+v3
+k = 16-31
+k = 48 - 63
+k = 80-95
+k = 112-127
+v4
+v5
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+51 of 600
+
+=== p60 ===
+32x32x64
+A[32][64]
+B[64][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v0
+k=0-15
+k = 0-15
+k = 32-47
+k = 32-47
+v1
+v2
+v3
+k = 16-31
+k = 16-31
+k = 48 - 63
+k = 48 - 63
+v4
+v5
+FP8:
+16x16x128
+A[16][128]
+B[128][16]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [0-15]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [0-15]
+v0
+k=0-15
+k=16-31
+k = 32-47
+k = 48 - 63
+v1
+v2
+v3
+v4
+k=64-79
+k = 80-95
+k = 96-111
+k = 112-127
+v5
+v6
+v7
+32x32x64
+A[32][64]
+B[64][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v0
+k = 0 – 15
+k = 0-15
+k = 16-31
+k = 16-31
+v1
+v2
+v3
+v4
+k = 32-47
+k = 32-47
+k = 48-63
+k = 48-63
+v5
+v6
+v7
+A[m][k]/B[k][n] Layout BF16
+16x16x32
+A[16][32]
+B[32][16]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [0-15]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [0-15]
+v0
+k=0-1
+k=8-9
+k=16-17
+k=24-25
+v1
+k=2-3
+k=10-11
+k=18-19
+k=26-27
+v2
+k=4-5
+k=12-13
+k=20-21
+k=28-29
+v3
+k=6-7
+k=14-15
+k=22-23
+k=30-31
+32x32x16
+A[32][16]
+B[16][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v0
+k=0-1
+k=0-1
+k=8-9
+k=8-9
+v1
+k=2-3
+k=2-3
+k=10-11
+k=10-11
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+52 of 600
+
+=== p61 ===
+32x32x16
+A[32][16]
+B[16][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v2
+k=4-5
+k=4-5
+k=12-13
+k=12-13
+v3
+k=6-7
+k=6-7
+k=14-15
+k=14-15
+A[m][k]/B[k][n] Layout IU8
+16x16x64
+A[16][64]
+B[64][16]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [0-15]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [0-15]
+v0
+k=0-3
+k=16-19
+k=32-35
+k=48-51
+v1
+k=4-7
+k=20-23
+k=36-39
+k=52-55
+v2
+k=8-11
+k=24-27
+k=40-43
+k=56-59
+v3
+k=12-15
+k=28-31
+k=44-47
+k=60-63
+32x32x32
+A[32][32]
+B[32][32]
+row0
+thr 0-15
+M/N = [0-15]
+row1
+thr 16-31
+M/N = [16-31]
+row2
+thr 32-47
+M/N = [0-15]
+row3
+thr48-63
+M/N = [16-31]
+v0
+k=0-3
+k=0-3
+k=16-19
+k=16-19
+v1
+k=4-7
+k=4-7
+k=20-23
+k=20-23
+v2
+k=8-11
+k=8-11
+k=24-27
+k=24-27
+v3
+k=12-15
+k=12-15
+k=28-31
+k=28-31
+7.1.6. Broadcasting values
+While the operation of multiplying a 32 × 1 matrix of floats A by a 1 × 64 matrix B is not available natively, one
+can emulate this multiplication using the broadcast controls Control Broadcast SiZe (CBSZ), A Block ID (ABID),
+and B Lane-Group Permutation (BLGP).
+These controls impact the retrieval of values from lanes: after the lane l_a in which a particular element of A
+would reside is computed, that value is permuted as defined by the CBSZ and ABID fields in order to determine
+the lane that is accessed during the computation. Similarly, l_b, the lane to be used when retrieving any
+particular value of B, is permuted in the manner specified by the BLGP field.
+7.1.6.1. CBSZ and ABID
+Together, the CBSZ and ABID fields control the broadcasting of the blocks of matrix A.
+When the 3-bit CBSZ field is non-zero, one block of lanes broadcasts the values it holds for matrix A to the other
+blocks of lanes, superseding the values those other lanes hold for the A matrix. Setting CBSZ such that (1 <<
+CBSZ) exceeds the number of blocks the MFMA instruction processes is undefined.
+The broadcast block size is
+S = 64 / (1 << CBSZ)
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+53 of 600
+
+=== p62 ===
+For example, if CBSZ is 1, then one block of 32 lanes provides the inputs to both groups of 32 lanes in the
+wavefront, while CBSZ being 3 means that a the values from a block of 8 lanes are replicated.
+The largest legal value of CBSZ is 4.
+The 4-bit ABID field controls which block of S lanes is used as the broadcast source. The possible blocks are
+numbered in order, with lanes S-1:0 being selected by ABID=0, 2S-1:S corresponding to ABID=1, and so on.
+For example, if CBSZ=2, then ABID=1 means the values from lanes 16 to 31 are broadcast, to the three other
+blocks of lanes, while ABID=3 means that lanes 48 to 63 serve as the source of their inputs.
+It is not legal to set ABID such that ABID >= (1 << CBSZ), as such values do not refer to a potential source block.
+Put differently, the CBSZ and ABID bits cause lane l_a to read thir inputs from the lane given by the
+permutation
+p_a(l_a) = (l_a % S) + (S * ABID)
+As a full example, if CBSZ=1 and ABID=1 when using the instruction V_MFMA_F32_32X32X1_2B_F32, both 1 ×
+32 blocks of B are multiplied by the values in the second 32 × 1 block of A, which is stored by the first 32 lanes.
+That is, the operation becomes:
+D[b,i,j] = C[b,i,j] + A[1,i,0] * B[b,0,j]
+which is a 32 × 1 by 1 × 64 matrix multiplication if the two blocks of B are treated as one matrix with 64 rows.
+7.1.6.2. Alternate meaning of CBSZ field for F8F6F4 instructions
+V_MFMA_F32_*_F8F6F4 use CBSZ to indicate the data type, and behave as if BLGP==0 in terms of data
+broadcasting.
+7.1.6.3. BLGP
+The 3-bit BLGP field selects how the lane from which values in matrix B are read is permuted. Once it is
+determined that some value B[b,k,j] is in item r on lane l_b, using the defined input layout, the lane to be
+accessed l_b is permuted depending on the BLGP field as shown in Table Permutations corresponding to BLGP
+values.
+Table 29. Permutations corresponding to BLGP values
+Value
+Description
+Expression
+0
+No broadcast
+l_b
+1
+Broadcast first 32 lanes
+l_b % 32
+2
+Broadcast second 32 lanes
+l_b % 32 + 32
+3
+Rotate 16 lanes left
+(l_b + 16) % 64
+4
+Broadcast first 16 lanes
+l_b % 16
+5
+Broadcast second 16 lanes
+l_b %16 + 16
+6
+Broadcast third 16 lanes
+l_b % 16 + 32
+CDNA4 Instruction Set Architecture
+7.1. Matrix fused-multiply-add (MFMA)
+54 of 600

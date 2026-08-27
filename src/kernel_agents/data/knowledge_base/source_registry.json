@@ -1,0 +1,230 @@
+[
+  {
+    "name": "fused_moe_asm_mi300_mi350_design_doc",
+    "source_type": "internal_design_doc",
+    "url": "fused_moe_kernel_in_asm_for_amdgpu.md",
+    "backend": "aiter",
+    "ingested_at": "2026-04-23T00:00:00",
+    "key_findings": [
+      "Fused MoE FP8 kernel runs 1 TG of 256 threads (4 waves) producing a 32x256 output tile (SUB_X=32 tokens, sub_GU=256 inter_dim); only the 32x256 config is shipped",
+      "GEMM0 (Z = X.G^T) and GEMM1 (GM1 = X.U^T) are fused in one TG and share X: X is loaded once into LDS in GEMM0 and reused from LDS in GEMM1, halving X HBM traffic",
+      "Inner K (depth 8) is split into two halves (K=0..3, K=4..7) with independent load+MFMA streams for HBM-to-MFMA overlap",
+      "Block-scaled FP8 (128x128 with optional U1 upscale) dequant is applied in-register via DPP cross-lane broadcast of one scale per block; no LDS round-trip for scales",
+      "Between GEMM0+1 and GEMM2, dynamic FP8 re-quant uses a 4-wave LDS MAX reduction: 16 threads per wave write 2 MAX dwords each (2048-dword scratch), barrier, every thread reads all 16 entries, reduces with v_max3_f32, computes scale = 240.0 / max",
+      "Activation is fused in fp32 registers: act(Z) * GM1 happens between the two dequants and the MAX reduction, with no LDS round-trip",
+      "Register aliasing: _v_G window hosts G in GEMM0 and U in GEMM1; after GEMM1 dequant the A-operand window is reused for _v_Max and _v_GMAX scratch, keeping the kernel under the VGPR budget",
+      "PF_Bs = 2 weight prefetch buffers give standard double-buffered weight loads; X is single-buffered because it is LDS-resident across both GEMMs",
+      "Abs-max is initialized to 1e-6 (not 0) to avoid NaN on zero blocks when computing scale = DENO / max",
+      "GEMM2 (down projection) is named in the summary but the doc does not describe its register or tile plan in detail"
+    ],
+    "output_files": [
+      "knowledge_base/aiter/moe_asm_kernel_patterns.md",
+      "knowledge_base/skills/moe_gemm0_gemm1_fusion.json",
+      "knowledge_base/skills/moe_blockscale_dpp_dequant.json",
+      "knowledge_base/skills/moe_k_split_dual_stream.json",
+      "knowledge_base/skills/moe_register_aliasing.json",
+      "knowledge_base/skills/moe_lds_x_reuse.json",
+      "knowledge_base/skills/skill_index.json"
+    ]
+  },
+  {
+    "name": "llvm_amdgpu_asm_gfx950",
+    "source_type": "official_reference",
+    "url": "https://llvm.org/docs/AMDGPU/AMDGPUAsmGFX950.html",
+    "backend": "shared",
+    "ingested_at": "2026-04-23T00:00:00",
+    "key_findings": [
+      "v_mfma_scale_f32_{16x16x128,32x32x64}_f8f6f4 is the first MFMA family that takes per-block scale operands inline (scale_src0, scale_src1) plus op_sel/op_sel_hi/neg_lo/neg_hi modifiers; this is native MXFP support and replaces the gfx942 dequantize-then-MFMA pattern",
+      "f8f6f4 is a union-typed MFMA: one opcode, with fp8/fp6/fp4 format selected per operand via cbsz (A matrix) and blgp (B matrix); mixed-precision (e.g. fp8xfp4) is possible in one instruction",
+      "ds_read_b64_tr_b{4,8,16} and ds_read_b96_tr_b6 land LDS data directly in MFMA B-operand lane order; eliminates hand-swizzled LDS layouts and ds_bpermute-based transposes for every new GEMM",
+      "global_load_lds_dwordx3/dwordx4 do HBM->LDS direct transfers up to 128b/lane with zero VGPR intermediate; primary lever when VGPR count is the occupancy bottleneck",
+      "bf16/fp16 MFMA K-depth doubled vs gfx942: now 16x16x32 and 32x32x16 (was 16x16x16 / 32x32x8); i8 similarly doubled to 16x16x64 / 32x32x32",
+      "SMFMAC (2:4 structured sparse) coverage expanded to fp8/bf8/i8 at 16x16x{64,128} and 32x32x{32,64} — 2x K-depth of the dense equivalent",
+      "Packed fp32 VOP3P is new: v_pk_add_f32 / v_pk_mul_f32 / v_pk_fma_f32 (gfx942 had packed fp16 only)",
+      "New 64-bit float atomics: flat/global_atomic_max_f64 / min_f64 (absent on gfx942)",
+      "gfx950 has no WMMA — MFMA only; zero v_wmma_* entries on the reference page",
+      "The page is operand-syntax only: no latency, no hazard/wait-state timing, no VGPR/AGPR file sizes, no cbsz/blgp packing legality — need AMD's gfx950 ISA PDF for those"
+    ],
+    "output_files": [
+      "knowledge_base/shared/gpu_arch_gfx950.md"
+    ]
+  },
+  {
+    "name": "fmoe_bf16_blockscale_fp8_roofline",
+    "source_type": "internal_perf_doc",
+    "url": "inference-testing/docs/uplift_plan/roofline/fmoe_bf16_blockscale_fp8.md",
+    "backend": "aiter",
+    "ingested_at": "2026-04-23T00:00:00",
+    "key_findings": [
+      "Fused MoE is ALWAYS memory-bound on MI325X: arithmetic intensity 0.4-2.0 FLOPs/byte, weights are 99% of bytes_accessed (1.41 GB of 1.43 GB at DeepSeek-R1 TP8 batch=480)",
+      "Efficiency DROPS with batch due to L2 thrashing: 4.05 TB/s at batch=480 (67% peak) -> 0.71 TB/s at batch=8613 (12% peak); time scales super-linearly (18x batch = 7x time)",
+      "MI325X L2 is ~192 MB shared across CUs; weights at 1.41 GB are 7x larger, so weight reuse across TOKENS (not within an expert) is the only remaining lever",
+      "Block-scale geometry: kernel name 'ps_32x256' is the OUTPUT TILE (32 tokens x 256 inter_dim), not the scale block; actual FP8 scale block is 128x128 (confirmed from w2_scale shape [256,56,2] with 7168/128=56, 256/128=2)",
+      "DeepSeek-R1 TP8 params: hidden=7168, gate_up_dim=512, down_dim=256, n_experts=256, top_k=8",
+      "activated_experts = min(batch * top_k, n_experts); batch=32+ hits the 256-expert cap and all weights transfer",
+      "Decode (batch=1) loads only 8/256 = 3% of weights, which is why per-token decode MoE cost is low",
+      "Implied peak HBM BW on MI325X = ~6.0 TB/s (from 4.05 TB/s at 67% peak)",
+      "Efficiency escalation thresholds in the doc: >80% good, 60-80% acceptable, <60% escalate to Amir's team",
+      "Uplift candidates that move the needle: weight compression past fp8 (fp6/fp4 via gfx950 f8f6f4 MFMA), persistent kernels with expert co-residency, router-affinity batching. Compute-side micro-tuning (MFMA scheduling, LDS padding) has zero roofline headroom."
+    ],
+    "output_files": [
+      "knowledge_base/aiter/moe_roofline_analysis.md",
+      "knowledge_base/skills/moe_memory_bound_weight_dominant.json",
+      "knowledge_base/skills/moe_cache_thrashing_past_batch_480.json"
+    ]
+  },
+  {
+    "name": "uplift_plan_methodology",
+    "source_type": "internal_team_process",
+    "url": "inference-testing/docs/uplift_plan/",
+    "backend": "shared",
+    "ingested_at": "2026-04-23T00:00:00",
+    "key_findings": [
+      "Use Max-Achievable FLOPs (~50% of vendor peak) for roofline denominator: MI300X/MI325X bf16=650 / fp8=1300 TFLOPs; MI355X bf16=1260 / fp8=2500 TFLOPs; HBM 5.3 / 6.0 / 8.0 TB/s respectively",
+      "MI355X vs MI325X doubles both BW and compute (bf16 TFLOPs) so same-shape kernels hit the same bound on both -- memory-bound stays memory-bound, compute-bound stays compute-bound",
+      "Decode GEMMs are ALWAYS memory-bound: Llama-70B QKV at batch=32 on MI325X has memory_time = 67us vs compute_time = 0.02us (3000x gap)",
+      "Prefill is 5-10% of E2E, decode is 90-95% -- serving workloads must prioritize decode; prefill GEMMs are compute-bound, decode GEMMs are memory-bound (genuinely different problems)",
+      "Amdahl prioritization: 10x win on 1% kernel = 0.9% E2E; 10% win on 42% kernel = 4.1% E2E -- rank by P (fraction of total time), never by local win potential",
+      "Fusion pattern catalog: elementwise-chain / compute+norm (GEMM epilogue) / attention QKV-reduce / cross-device-reduce+norm -- viability gated on sequential-dependency + backend primitive existence",
+      "CK kernel name decoding: MT{M}x{N}x{K} = thread tile, WG{a}_{b}_{c} = workgroup, LDSB0/1 = single/double-buffered LDS (double faster), MIWT = MFMA waves per tile",
+      "Red flags in traces: high variance (avg>>median), cudaMemcpy in hot path (sync transfer), duplicate-timestamp kernels (redundant compute), many sub-5us kernels with high count (launch-overhead-dominated, fuse them)",
+      "Template tracks per-optimization cumulative OTPS uplift in Excel; also tracks MI355X-vs-B200 side-by-side gap with target/owner/ETA per row",
+      "uplift-plan CLI consumes *.pt.trace.json traces, emits prefill_kernels.csv / decode_kernels.csv / uplift_plan.md; integrates into MLflow experiment tracking"
+    ],
+    "output_files": [
+      "knowledge_base/shared/gemm_roofline.md",
+      "knowledge_base/shared/uplift_plan_methodology.md",
+      "knowledge_base/skills/amdahl_prioritize_by_p.json",
+      "knowledge_base/skills/roofline_use_maf_not_peak.json"
+    ]
+  },
+  {
+    "name": "ck_performance_playbook",
+    "source_type": "internal_analysis_playbook",
+    "url": "rocm-kernel-analysis/aiter-kernel-analysis/CK_PLAYBOOK.md",
+    "backend": "ck",
+    "ingested_at": "2026-05-14T00:00:00",
+    "key_findings": [
+      "16-section Composable Kernel + CK_tile playbook; pinned to composable_kernel @ fdf4bb7fcc (parent aiter-amd @ 3cbdcb371)",
+      "Section 16 is a dedicated MI300/MI355 (gfx942/gfx950) perf-engineering toolkit with per-arch tuning specifics",
+      "Vendored as a full copy (not a symlink) so the knowledge base is self-contained; re-copy from rocm-kernel-analysis when the playbook is revised"
+    ],
+    "output_files": [
+      "knowledge_base/ck/ck_playbook.md"
+    ]
+  },
+  {
+    "name": "aiter_asm_perf_playbooks",
+    "source_type": "internal_analysis_playbook",
+    "url": "rocm-kernel-analysis/aiter-kernel-analysis/",
+    "backend": "aiter",
+    "ingested_at": "2026-05-14T00:00:00",
+    "key_findings": [
+      "ASM_PERF_PLAYBOOK_V2: 29-section bit-level reference for aiter hand-written .co ASM kernels; 102 catalogued techniques; pinned to aiter-amd @ 3cbdcb371; errata-corrected (supersedes v1)",
+      "ASM_KERNEL_KNOWLEDGE: structural map of aiter ASM kernel families (ar, flatmm, fmoe, pa, smf, multix)",
+      "Raw disassembly dumps for those kernel families vendored under knowledge_base/aiter/asm-disassembly/ (kernel.isa + note.txt per family)",
+      "Vendored as full copies (not symlinks) for a self-contained knowledge base"
+    ],
+    "output_files": [
+      "knowledge_base/aiter/asm_perf_playbook_v2.md",
+      "knowledge_base/aiter/asm_kernel_knowledge.md",
+      "knowledge_base/aiter/asm-disassembly/"
+    ]
+  },
+  {
+    "name": "hipkittens_performance_playbook",
+    "source_type": "internal_analysis_playbook",
+    "url": "rocm-kernel-analysis/hipkittens-kernel-analysis/HIPKITTENS_PLAYBOOK.md",
+    "backend": "hip",
+    "ingested_at": "2026-05-14T00:00:00",
+    "key_findings": [
+      "11-section playbook for HazyResearch HipKittens (HIP port of ThunderKittens); pinned to HipKittens @ 5294d1c5",
+      "Section 9 covers MI300 (gfx942) / MI355 (gfx950) CDNA4 specifics; section 10.3 is a direct HipKittens-vs-Composable-Kernel comparison",
+      "Includes the assembly subtree and sched_barrier numerics notes",
+      "Vendored as a full copy (not a symlink) for a self-contained knowledge base"
+    ],
+    "output_files": [
+      "knowledge_base/hip/hipkittens_playbook.md"
+    ]
+  },
+  {
+    "name": "cdna4_isa_spec_extracts",
+    "source_type": "official_reference",
+    "url": "amd-instinct-cdna4-instruction-set-architecture.pdf",
+    "backend": "shared",
+    "ingested_at": "2026-05-14T00:00:00",
+    "key_findings": [
+      "30 chapter-level text extracts of the AMD Instinct CDNA4 (gfx950) ISA spec, covering MFMA layout, sparse MFMA, block-scaled/FP8 formats, LDS/FLAT/MUBUF memory ops, VOP3P packed math, DPP, and wait-state hazards",
+      "Vendored into local_knowledge/languages/asm/API_docs/cdna4-isa/ so ISA lookups need no external repo; the full 608-page PDF stays out-of-repo",
+      "cdna4_isa_reference.md is the index/pointer file the fellow KB index surfaces"
+    ],
+    "output_files": [
+      "knowledge_base/shared/cdna4_isa_reference.md",
+      "local_knowledge/languages/asm/API_docs/cdna4-isa/"
+    ]
+  },
+  {
+    "name": "intellikit_asm_skills",
+    "source_type": "official_reference",
+    "url": "https://github.com/ROCm/intellikit-asm-skills",
+    "backend": "aiter",
+    "ingested_at": "2026-05-14T00:00:00",
+    "key_findings": [
+      "AMD RAD's agent-driven AMDGCN assembly skill pack for gfx950/MI355X: 67 per-instruction docs, 6 guides, METHODOLOGY.md — all empirically measured on real MI355X silicon, much of it absent from public ISA docs",
+      "Instruction docs carry YAML frontmatter (instruction/category/tags) for agent indexing; grep 'tags:' to navigate",
+      "Methodology: disassemble an optimized .co, round-trip validate bit-identical, make one targeted change at a time, profile rather than guess",
+      "nop_hazard_summary.md, kernel_descriptor.md, and s_waitcnt.md are the highest-value silent-corruption / launch-failure references",
+      "buffer_load_lds documented at ~17% speedup over buffer_load + ds_write",
+      "Vendored as a full copy under local_knowledge/languages/asm/skills/optimize/asm_levers/intellikit/ (tools/scripts/vgpr_liveness.py included; the atlassian MCP server was not vendored — infra, not knowledge)"
+    ],
+    "output_files": [
+      "knowledge_base/aiter/intellikit_asm_skills.md",
+      "local_knowledge/languages/asm/skills/optimize/asm_levers/intellikit/"
+    ]
+  },
+  {
+    "name": "flydsl_repo_ingest_v1",
+    "source_type": "official_reference",
+    "url": "https://github.com/ROCm/FlyDSL",
+    "commit": "2812676",
+    "backend": "flydsl",
+    "ingested_at": "2026-05-18T00:00:00",
+    "key_findings": [
+      "FlyDSL = Flexible Layout Python DSL: Python frontend (@flyc.kernel / @flyc.jit) + MLIR Fly+FlyROCDL dialects + JIT runtime, targeting AMD ROCm/HIP GPUs (gfx942/gfx950/gfx1250/gfx120x). Inspired by CuTe (CUTLASS) layout algebra",
+      "Two-decorator surface: @flyc.kernel for device kernels, @flyc.jit for host launchers. Calling a @kernel returns a KernelLauncher; .launch(grid=, block=, smem=, stream=) emits the GPU launch op",
+      "Compilation pipeline (MlirCompiler._pipeline_fragments() in compiler/backends/rocm.py): fly-rewrite-func-signature -> fly-canonicalize -> fly-layout-lowering -> fly-int-swizzle-simplify -> fly-convert-atom-call-to-ssa-form -> fly-promote-regmem-to-vectorssa -> convert-fly-to-rocdl -> gpu.module(convert-scf-to-cf, cse, convert-gpu-to-rocdl, fly-rocdl-cluster-attr) -> rocdl-attach-target -> LLVM lowering chain -> gpu-module-to-binary{format=fatbin}",
+      "Fly dialect core types: !fly.int_tuple, !fly.layout (Shape+Stride pair), !fly.coord_tensor, !fly.memref, !fly.copy_atom, !fly.mma_atom, !fly.tiled_copy, !fly.tiled_mma, !fly.smem_ptr, !fly.swizzle, !fly.composed_layout. Address spaces: Generic(0)/Global(1)/Shared(3)/Register(5)/BufferDesc(8)",
+      "FlyROCDL target atoms: cdna3.mfma + cdna4.mfma_scale (MXFP4/FP6/FP8 with per-block scale operand) + gfx1250.wmma (wave32). Copy atoms: cdna3.buffer_copy, cdna3.buffer_copy_lds (DMA), cdna4.lds_read_trans (DS_READ_B64_TR_B16/8/4, DS_READ_B96_TR_B6 — eliminates explicit LDS transpose for MFMA operand prep)",
+      "JIT cache: in-memory _mem_cache always active; disk at ~/.flydsl/cache/<func>_<fingerprint>/ gated by FLYDSL_RUNTIME_ENABLE_CACHE. Cache key tuple = (target, compile_hints, per_arg_cache_sig). Fingerprint = SHA256 of flydsl Python sources + native .so files + version. Closure capture is NOT tracked — helper-outside-traced-function changes do NOT invalidate cache",
+      "Layout algebra (CuTe-equivalent): make_shape/stride/layout, crd2idx/idx2crd, composition/coalesce/complement/right_inverse, products (logical/zipped/tiled/flat/raked/blocked), divides (logical/zipped/tiled/flat), tile (make_tile + zipped_divide+slice for partitioning)",
+      "Tiled operation idiom: CopyAtom + thr_layout + val_layout -> TiledCopy; MmaAtom + atom_layout -> TiledMma. Then tc.get_slice(tid).partition_S/D(tensor) and tm.thr_slice(tid).make_fragment_A/B/C(tensor) for per-thread views. Execute with fx.copy(atom, src, dst) and fx.gemm(atom, D, A, B, C)",
+      "Production preshuffle GEMM (kernels/preshuffle_gemm.py, 1970 lines): MFMA 16x16 with B preshuffle layout (N/16, K/64, 4, 16, kpack_bytes), K64 micro-step (2x K32 MFMA), ping-pong LDS (lds_stage=2) with two SmemAllocator regions, XOR16 bank-conflict swizzle, hot_loop_scheduler() with sched_mfma/vmem/dsrd/dswr hints, optional CShuffle epilogue and async copy (raw_ptr_buffer_load_lds bypasses VGPR). Empirical _TILE_PRELOAD_TABLE caches tuned (dsrd_preload, dvmem_preload) per (tile_m, tile_n, tile_k)",
+      "30+ production kernels: GEMM family (preshuffle a8, blockscale fp8, hgemm splitk, rdna/gfx1250 variants), MoE family (2-stage gate/up+reduce; mixed-precision; blockscale; gfx1250 WMMA+TDM+MX-scale), attention family (paged-attn decode fp8, flash-attn, MLA — all WIP perf), norms (layernorm/rmsnorm/softmax with online softmax + LDS reduce), fused RoPE+KV, custom all-reduce",
+      "Repo ships its own .claude/skills/ pack (16 skills): flydsl-kernel-authoring, flydsl-tile-programming, gemm-optimization, lds-optimization, debug-flydsl-kernel, capture-kernel-trace, kernel-trace-analysis, bisect-perf-regression, add-target-atom-op, port-to-layout-api, flydsl-internal-types-cleanup, prefetch-data-load, build-flydsl, build-rocm-image, format-code, check-python-style",
+      "WAVES_PER_EU must be re-tuned per kernel (dense flash-attn wpe=3 optimal; sparse SLA wpe=2 optimal — wpe=3 is 1.389x SLOWER). Anti-composition: wpe=3 + ds_bpermute regresses both dense and sparse. Setting via Config(waves_per_eu=N) routes through rocdl-attach-target (known: opts= channel does NOT propagate)",
+      "AST rewriter pitfalls: (1) range(int, int, int, init=[...]) is treated as Python range and unrolled — bounds MUST be fx.Index(...) for actual scf.for. (2) range_constexpr unrolls; plain runtime range maps to scf.for with ArithValue iv (cannot index Python lists). (3) Do not wrap GPU runtime values in const_expr. (4) Single SSA exit path; no def-in-branch-use-after-branch. (5) SmemPtr._view_cache must be cleared before epilogue if used in loop body (else SSA dominance error)"
+    ],
+    "output_files": [
+      "knowledge_base/flydsl/README.md",
+      "knowledge_base/flydsl/overview.md",
+      "knowledge_base/flydsl/dsl_api.md",
+      "knowledge_base/flydsl/dialect.md",
+      "knowledge_base/flydsl/compilation_pipeline.md",
+      "knowledge_base/flydsl/kernel_patterns.md",
+      "knowledge_base/flydsl/gemm_optimization.md",
+      "knowledge_base/flydsl/lds_optimization.md",
+      "knowledge_base/flydsl/env_vars.md",
+      "knowledge_base/flydsl/kernels_inventory.md",
+      "knowledge_base/flydsl/skills_index.md",
+      "knowledge_base/flydsl/pitfalls.md"
+    ]
+  },
+  {
+    "name": "canonical_asset_locations",
+    "source_type": "internal_note",
+    "ingested_at": "2026-08-12",
+    "key_findings": [
+            "Both sets are byte-identical across trees. Prefer local_knowledge paths for Read/Grep (richer YAML frontmatter)."
+    ]
+  }
+]

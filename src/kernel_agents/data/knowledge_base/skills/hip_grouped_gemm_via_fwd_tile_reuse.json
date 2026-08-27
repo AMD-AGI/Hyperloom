@@ -1,0 +1,36 @@
+{
+  "name": "hip_grouped_gemm_via_fwd_tile_reuse",
+  "level": 1,
+  "backend": "hip",
+  "description": "Turn a production HIP single-GEMM into a grouped-GEMM (MoE) by wrapping its tile struct with per-expert flat-grid dispatch — no kernel-body rewrite. Inherits all register pinning, AGPR use, LDS double-buffering, and waitcnt tuning of the reference.",
+  "preconditions": [
+    "An existing HIP single-GEMM kernel that exposes its tile work as a templated struct (e.g., GEMM_Tile_MXFP8_NT_256x256x128_...)",
+    "The tile struct encapsulates LDS setup, load helpers, phase functions, and register pins, so the kernel body is mostly a sequence of tile.method calls",
+    "Caller can supply group_offs, block_to_expert, and tile_offs tensors (host-precomputed)"
+  ],
+  "steps": [
+    "Copy the single-GEMM kernel body verbatim into a new grouped kernel",
+    "Replace the (m, n) boundary computation: pid_m/pid_n now come from block_to_expert + tile_offs lookup, not swizzle_pid_m_n",
+    "Replace global m with per-expert m_g = group_offs[g+1] - group_offs[g]",
+    "Shift base pointers: a_base += group_offs[g] * K; b_base += g * N * K (NT) or g * K * N (NN); c_base += group_offs[g] * N",
+    "Keep tile pipeline phases unchanged — they see the same extents",
+    "Host side: compute block_to_expert = repeat_interleave(arange(G), tiles_per_expert)",
+    "Grid = (total_tiles,), block = kernel's existing threads/WG"
+  ],
+  "expected_impact": "Inherit the compute-side wins of the reference kernel (e.g., 27 s_waitcnt / 512 MFMA = 0.053 waitcnt/MFMA vs Triton's ~0.875) for ~500 lines of delta, no tuning effort. On gpt_oss_20B MoE gate_up: fwd 1.131× / dgrad 1.274× Triton with zero kernel-body edits.",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": ["flat_grid_block_to_expert_lookup", "autograd_function_requires_grad_check"],
+  "decision_rules": [
+    "Use when you have a tuned single-GEMM kernel and need its grouped-MoE variant.",
+    "Per-expert data constraints (e.g., M_g % preshuffle_block == 0) must hold — preshuffle operates globally, and non-aligned group starts break scale layout.",
+    "Do NOT refactor the kernel body to call through a helper — the tight register pinning breaks on inlining changes. Copy-paste is correct here."
+  ],
+  "created_at": "2026-04-23T22:50:00",
+  "updated_at": "2026-04-23T22:50:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_hip_primus_turbo"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "name": "amdahl_prioritize_by_p",
+  "level": 0,
+  "backend": "shared",
+  "description": "Rank optimization candidates by their fraction-of-total-time (P), not by single-kernel win potential; a 10x win on a 1% contributor = 0.9% E2E, a 10% win on a 42% contributor = 4.1% E2E",
+  "preconditions": [
+    "Have a profiled trace with per-kernel total time (duration_avg x occurrences)",
+    "Multiple optimization candidates on the table"
+  ],
+  "steps": [
+    "Compute total_time = duration_avg x occurrences for every kernel",
+    "Rank by total_time descending; top-N typically covers 80% of E2E",
+    "For each candidate, compute expected E2E speedup via Amdahl: 1 / ((1 - P) + P/S)",
+    "Discard any candidate below the bar (e.g. <1% E2E) before investing implementation effort",
+    "Only after ranking do you open a tuning ticket for the top contributor"
+  ],
+  "expected_impact": "avoids months of work on kernels that can't move E2E by construction; focuses effort on the 2-3 kernels that actually matter",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [
+    "If Amdahl predicts <1% E2E speedup even with a 2x local win, reject the candidate",
+    "Decode-phase kernels get priority over prefill for serving workloads (decode is 90-95% of E2E)"
+  ],
+  "created_at": "2026-04-23T00:00:00",
+  "updated_at": "2026-04-23T00:00:00",
+  "experiment_ids": []
+}

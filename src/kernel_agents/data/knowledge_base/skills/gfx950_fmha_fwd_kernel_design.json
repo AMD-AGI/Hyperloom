@@ -1,0 +1,40 @@
+{
+  "name": "gfx950_fmha_fwd_kernel_design",
+  "level": 0,
+  "backend": "asm",
+  "description": "Architecture template for hand-tuned gfx950 FMHA forward kernel with online softmax + multi-D-block PV. Distilled from asm_vsa_fwd week4n_full.",
+  "preconditions": [
+    "gfx950 / MI355X / CDNA4",
+    "FlashAttention forward with online softmax",
+    "bf16 Q/K/V, fp32 accumulators, D=128"
+  ],
+  "steps": [
+    "AGPR allocation: a[0:15] = S accumulator (reset per K-iter), a[16:79] = O accumulator (4 D-blocks x 16, accumulates across K-iters). accum_offset = 96, next_free_vgpr = 176.",
+    "LDS layout: Q (8K, persistent across K-loop) + K (8K, per K-tile) + V (8K, per K-tile) + S/P scratch (4K reused for softmax row + P bf16 storage). Total 28 KB. Stays under 40 KB per wave for full occupancy at 4 waves/SIMD.",
+    "Persistent state per lane: v72=log2e constant; v74=m_old (init -inf); v75=l_old (init 0); v126=alpha (transient). Q gather addr v25; S transpose write v36; S row read v38; V gather base v77.",
+    "Per K-tile body: (1) zero a[0:15]; (2) load K, V via 16 buffer_load_dwordx4 ... offen lds with sequential voff=L*16; (3) wait vmcnt; (4) gather Q + K to VGPRs interleaved; (5) wait lgkmcnt; (6) 8 v_mfma QK^T -> a[0:15]; (7) s_nop 15 x 4; (8) read AGPRs to v[8:23]; (9) transpose S to LDS_S; (10) read row L%32 to v[40:71]; (11) softmax: m_local row_max -> m_new -> alpha (v126) -> exp(S-m_new) inplace v[40:71] -> row_sum_P -> l_new fma; (12) convert P to bf16 packed v[80:95]; (13) write P to LDS_S region (half-wave 0 only via exec mask); (14) compute MFMA-A read addr v68 = (L%32)*64 + (L/32)*16; (15) for each of 4 D-blocks: rescale O[d_b] *= alpha (16 v_mul_f32), 2 PV MFMAs (k-slice 0 + k-slice 1) with V gather via 8 ds_read_u16 + 4 v_pack per slice, s_nop 15 x 2 between MFMAs (or Phase 1c overlap pattern: move 2nd MFMA's LDS reads into the s_nop window + s_nop 7); (16) update m_old = m_new; (17) loop.",
+    "Epilog: s_nop 15 x 6 (drain final MFMA pipeline); v_rcp_f32 v78, v75; s_nop 4 (mandatory hazard); for each D-block: read O AGPRs -> v[8:23], mul by v78, transpose to LDS_S, read row per lane, half-wave-0-only HBM store with v28:v29 = O_ptr + L*128 + d_block*128. For d_block > 0, bump v28:v29 by d_block*32*4 = 128 between stores (global_store offset is 13-bit signed, ~±4095 byte max).",
+    "Use Python script to generate the 4 inlined D-block PV blocks + 4 epilog D-block blocks (LLVM AMDGCN asm doesn't support %(expr) operand math)."
+  ],
+  "expected_impact": "Foundation FMHA forward kernel hitting 11.54% MAF / 94% HBM peak (4720 GB/s) on MI355X for customer-like configs. ~440 ms projected wall on customer pattern. Path to ~50 ms (production parity) requires 4-phase optimization roadmap: tr_b16 via V^T LDS, ping-pong K/V, 4-wave WG with shared LDS K/V, final scheduler tuning.",
+  "successes": 1,
+  "failures": 0,
+  "success_contexts": [
+    "asm_vsa_fwd week4n_full.s: shipped + perf-validated on MI355X. T1/T4/T5 correctness PASS for symmetric V; T2/T3 small numerical residue (1-of-8 V-gather reads returns d=1 instead of d=L%32, fixable by V^T LDS layout)."
+  ],
+  "failure_contexts": [],
+  "sub_skills": [
+    "cdna4_mfma_hazard_audit",
+    "gfx950_asm_probe_kernel"
+  ],
+  "decision_rules": [
+    {"if": "starting a new FMHA forward kernel on gfx950", "then": "use this template structure; don't reinvent the AGPR/LDS allocation"},
+    {"if": "kernel hits >5% MAF but stalls below 15%", "then": "expect HBM-bound regime; further compute optimizations need Phase 2 ping-pong or Phase 3 multi-wave WG"},
+    {"if": "D=128 with 4 D-blocks per Q-tile", "then": "use 80 AGPRs (16 S + 64 O); accum_offset 96 / next_free_vgpr 176; acceptable but reduces occupancy to ~2 waves/SIMD"}
+  ],
+  "created_at": "2026-05-14T00:00:00.000000",
+  "updated_at": "2026-05-14T00:00:00.000000",
+  "experiment_ids": [
+    "asm_vsa_fwd_week4n_full"
+  ]
+}

@@ -1,0 +1,138 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 440" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="ckBarM" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#475569"/>
+      <stop offset="100%" style="stop-color:#64748b"/>
+    </linearGradient>
+    <linearGradient id="flyBarM" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+    <linearGradient id="bgGradM" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0f172a"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="accentLine" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+    <filter id="barSh" x="-2%" y="-2%" width="104%" height="108%">
+      <feDropShadow dx="0" dy="1" stdDeviation="2" flood-color="#000" flood-opacity="0.3"/>
+    </filter>
+    <filter id="glowP" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="440" rx="12" fill="url(#bgGradM)"/>
+
+  <!-- Title -->
+  <text x="480" y="34" text-anchor="middle" fill="#e2e8f0" font-size="18" font-weight="700">KIMI-K2 MoE mxfp4 INFERENCE — FlyDSL vs CK</text>
+  <text x="480" y="52" text-anchor="middle" fill="#64748b" font-size="11">TP=4 · E=384 · topk=8 · hidden=7168 · AMD Instinct MI355X</text>
+
+  <!-- Legend -->
+  <rect x="330" y="66" width="14" height="14" rx="3" fill="url(#ckBarM)"/>
+  <text x="350" y="77" fill="#94a3b8" font-size="11">CK Baseline</text>
+  <rect x="480" y="66" width="14" height="14" rx="3" fill="url(#flyBarM)"/>
+  <text x="500" y="77" fill="#94a3b8" font-size="11">FlyDSL (Kernel Agents)</text>
+
+  <!-- Chart area -->
+  <!-- Y-axis labels and grid -->
+  <text x="72" y="105" text-anchor="end" fill="#475569" font-size="9">2200 us</text>
+  <line x1="80" y1="100" x2="740" y2="100" stroke="#1e293b" stroke-width="1"/>
+  <text x="72" y="155" text-anchor="end" fill="#475569" font-size="9">1600 us</text>
+  <line x1="80" y1="150" x2="740" y2="150" stroke="#1e293b" stroke-width="1"/>
+  <text x="72" y="205" text-anchor="end" fill="#475569" font-size="9">1000 us</text>
+  <line x1="80" y1="200" x2="740" y2="200" stroke="#1e293b" stroke-width="1"/>
+  <text x="72" y="255" text-anchor="end" fill="#475569" font-size="9">600 us</text>
+  <line x1="80" y1="250" x2="740" y2="250" stroke="#1e293b" stroke-width="1"/>
+  <text x="72" y="305" text-anchor="end" fill="#475569" font-size="9">200 us</text>
+  <line x1="80" y1="300" x2="740" y2="300" stroke="#1e293b" stroke-width="1"/>
+
+  <!-- Baseline axis -->
+  <line x1="80" y1="320" x2="740" y2="320" stroke="#334155" stroke-width="1.5"/>
+
+  <!-- Scale: 0us = y:320, 2200us = y:100  → scale = 220px / 2200us = 0.1 px/us -->
+  <!-- Bar pair for each token count -->
+
+  <!-- tokens=64: CK=287, FlyDSL=268 -->
+  <rect x="100" y="291" width="32" height="29" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="134" y="293" width="32" height="27" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="133" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">64</text>
+  <text x="133" y="285" text-anchor="middle" fill="#64748b" font-size="8">1.08x</text>
+
+  <!-- tokens=256: CK=392, FlyDSL=369 -->
+  <rect x="190" y="281" width="32" height="39" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="224" y="283" width="32" height="37" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="223" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">256</text>
+  <text x="223" y="275" text-anchor="middle" fill="#64748b" font-size="8">1.06x</text>
+
+  <!-- tokens=512: CK=406, FlyDSL=379 -->
+  <rect x="280" y="279" width="32" height="41" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="314" y="282" width="32" height="38" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="313" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">512</text>
+  <text x="313" y="273" text-anchor="middle" fill="#64748b" font-size="8">1.07x</text>
+
+  <!-- tokens=1024: CK=485, FlyDSL=412 -->
+  <rect x="370" y="271" width="32" height="49" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="404" y="279" width="32" height="41" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="403" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">1024</text>
+  <text x="403" y="265" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="600">1.18x</text>
+
+  <!-- tokens=2048: CK=823, FlyDSL=620  — peak -->
+  <rect x="460" y="238" width="32" height="82" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="494" y="258" width="32" height="62" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="493" y="335" text-anchor="middle" fill="#e2e8f0" font-size="9" font-weight="600">2048</text>
+  <text x="493" y="230" text-anchor="middle" fill="#a78bfa" font-size="11" font-weight="800">1.33x</text>
+  <!-- Peak marker -->
+  <text x="493" y="218" text-anchor="middle" fill="#fbbf24" font-size="8" font-weight="600">PEAK</text>
+  <polygon points="487,221 499,221 493,226" fill="#fbbf24" opacity="0.6"/>
+
+  <!-- tokens=4096: CK=1254, FlyDSL=1028 -->
+  <rect x="550" y="195" width="32" height="125" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="584" y="217" width="32" height="103" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="583" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">4096</text>
+  <text x="583" y="210" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="600">1.22x</text>
+
+  <!-- tokens=8192: CK=2159, FlyDSL=1745 -->
+  <rect x="640" y="104" width="32" height="216" rx="3" fill="url(#ckBarM)" filter="url(#barSh)" opacity="0.8"/>
+  <rect x="674" y="146" width="32" height="174" rx="3" fill="url(#flyBarM)" filter="url(#barSh)"/>
+  <text x="673" y="335" text-anchor="middle" fill="#94a3b8" font-size="9">8192</text>
+  <text x="673" y="140" text-anchor="middle" fill="#a78bfa" font-size="9" font-weight="600">1.24x</text>
+
+  <!-- X-axis label -->
+  <text x="410" y="358" text-anchor="middle" fill="#64748b" font-size="10">Token Count</text>
+
+  <!-- Speedup trend line (connecting the speedup values) -->
+  <polyline points="133,289 223,282 313,280 403,267 493,245 583,220 673,160" fill="none" stroke="#a78bfa" stroke-width="2" stroke-dasharray="4,3" opacity="0.5"/>
+
+  <!-- Right panel: Key insights -->
+  <rect x="760" y="90" width="185" height="250" rx="12" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+
+  <text x="852" y="116" text-anchor="middle" fill="#e2e8f0" font-size="11" font-weight="700">KEY INSIGHTS</text>
+  <line x1="780" y1="124" x2="925" y2="124" stroke="#334155" stroke-width="1"/>
+
+  <text x="780" y="148" fill="#fbbf24" font-size="10" font-weight="600">Peak Speedup</text>
+  <text x="780" y="164" fill="#a78bfa" font-size="22" font-weight="800">1.33x</text>
+  <text x="780" y="180" fill="#64748b" font-size="9">at 2048 tokens</text>
+
+  <line x1="780" y1="192" x2="925" y2="192" stroke="#334155" stroke-width="0.5"/>
+
+  <text x="780" y="212" fill="#38ef7d" font-size="10" font-weight="600">Max Absolute Savings</text>
+  <text x="780" y="230" fill="#38ef7d" font-size="18" font-weight="800">414 us</text>
+  <text x="780" y="246" fill="#64748b" font-size="9">per layer at 8192 tokens</text>
+
+  <line x1="780" y1="258" x2="925" y2="258" stroke="#334155" stroke-width="0.5"/>
+
+  <text x="780" y="278" fill="#94a3b8" font-size="10" font-weight="600">Steady-State Ratio</text>
+  <text x="780" y="296" fill="#94a3b8" font-size="16" font-weight="700">~1.22x</text>
+  <text x="780" y="312" fill="#64748b" font-size="9">tokens ≥ 4096</text>
+  <text x="780" y="326" fill="#475569" font-size="8">MFMA-scheduler gap</text>
+
+  <!-- Bottom note -->
+  <text x="480" y="395" text-anchor="middle" fill="#94a3b8" font-size="10">Absolute savings scale linearly: more tokens = more time saved per layer</text>
+  <text x="480" y="412" text-anchor="middle" fill="#64748b" font-size="9">At 8192 tokens: 414 us/layer saved → directly reduces time-to-first-token for long prompts</text>
+  <text x="480" y="430" text-anchor="middle" fill="#475569" font-size="9">Pure FlyDSL e2e deployed (mixed FlyDSL+CK tested — 0.06 us difference, within noise)</text>
+</svg>

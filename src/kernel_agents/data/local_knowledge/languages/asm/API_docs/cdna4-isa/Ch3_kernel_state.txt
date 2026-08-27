@@ -1,0 +1,631 @@
+
+=== p16 ===
+Chapter 3. Kernel State
+This chapter describes the kernel states visible to the shader program.
+3.1. State Overview
+The table below shows all of the hardware states readable or writable by a shader program.
+Table 2. Readable and Writable Hardware States
+Abbrev.
+Name
+Size
+(bits)
+Description
+PC
+Program Counter
+48
+Points to the memory address of the next shader
+instruction to execute.
+V0-V255
+VGPR
+32
+Vector general-purpose register ("architectural VGPRs").
+AV0-AV255
+AccVGPR
+32
+Matrix Accumulation Vector general-purpose register.
+S0-S103
+SGPR
+32
+Vector general-purpose register.
+LDS
+Local Data Share
+160kB
+Local data share is a scratch RAM with built-in
+arithmetic capabilities that allow data to be shared
+between threads in a workgroup.
+EXEC
+Execute Mask
+64
+A bit mask with one bit per thread, which is applied to
+vector instructions and controls that threads execute and
+that ignore the instruction.
+EXECZ
+EXEC is zero
+1
+A single bit flag indicating that the EXEC mask is all
+zeros.
+VCC
+Vector Condition Code
+64
+A bit mask with one bit per thread; it holds the result of a
+vector compare operation.
+VCCZ
+VCC is zero
+1
+A single bit-flag indicating that the VCC mask is all zeros.
+SCC
+Scalar Condition Code
+1
+Result from a scalar ALU comparison instruction.
+FLAT_SCRATCH
+Flat scratch address
+64
+The 64-bit base address of scratch memory, in
+NumSGPRs-5 and -6. Read Only.
+XNACK_MASK
+Address translation failure.
+64
+Bit mask of threads that have failed their address
+translation.
+STATUS
+Status
+32
+Read-only shader status bits.
+MODE
+Mode
+32
+Writable shader mode bits.
+M0
+Memory Reg
+32
+A temporary register that has various uses, including
+GPR indexing and bounds checking.
+HW_ID
+Hardware ID
+32
+Read-only status register that has various wave ID state.
+XCC_ID
+Compute ID
+32
+Read-only status register that contains the compute
+device ID.
+TRAPSTS
+Trap Status
+32
+Holds information about exceptions and pending traps.
+TBA
+Trap Base Address
+64
+Holds the pointer to the current trap handler program.
+TMA
+Trap Memory Address
+64
+Temporary register for shader operations. For example,
+can hold a pointer to memory used by the trap handler.
+TTMP0-TTMP15
+Trap Temporary SGPRs
+32
+16 SGPRs available only to the Trap Handler for
+temporary storage.
+VMCNT
+Vector memory instruction count 6
+Counts the number of VMEM instructions issued but not
+yet completed.
+EXPCNT
+Export Count
+3
+Unused
+CDNA4 Instruction Set Architecture
+3.1. State Overview
+8 of 600
+
+=== p17 ===
+Abbrev.
+Name
+Size
+(bits)
+Description
+LGKMCNT
+LDS, Constant and Message count 4
+Counts the number of LDS, constant-fetch (scalar
+memory read), and message instructions issued but not
+yet completed.
+3.2. Program Counter (PC)
+The program counter (PC) is a byte address pointing to the next instruction to execute. When a wavefront is
+created, the PC is initialized to the first instruction in the program.
+The PC interacts with three instructions: S_GET_PC, S_SET_PC, S_SWAP_PC. These transfer the PC to, and
+from, an even-aligned SGPR pair.
+Branches jump to (PC_of_the_instruction_after_the_branch + offset). The shader program cannot directly read
+from, or write to, the PC. Branches, GET_PC and SWAP_PC, are PC-relative to the next instruction, not the
+current one. S_TRAP saves the PC of the S_TRAP instruction itself.
+3.3. EXECute Mask
+The Execute mask (64-bit) determines which threads in the vector are executed:
+1 = execute, 0 = do not execute.
+EXEC can be read from, and written to, through scalar instructions; it also can be written as a result of a vector-
+ALU compare. This mask affects vector-ALU, vector-memory, and LDS instructions. It does not affect scalar
+execution or branches.
+A helper bit (EXECZ) can be used as a condition for branches to skip code when EXEC is zero.
+
+This Accelerator does no optimization when EXEC = 0. The shader hardware executes every
+instruction, wasting instruction issue bandwidth. Use CBRANCH or VSKIP to rapidly skip
+over code when it is likely that the EXEC mask is zero.
+3.4. Status registers
+Status register fields can be read, but not written to, by the shader. These bits are initialized at wavefront-
+creation time. The table below lists and briefly describes the status register fields. The status register fields may
+be written when PRIV=1. Some fields are set as a result of shader instructions.
+Table 3. Status Register Fields
+Field
+Bit
+Position
+Description
+SCC
+1
+Scalar condition code. Used as a carry-out bit. For a comparison instruction, this
+bit indicates failure or success. For logical operations, this is 1 if the result was
+non-zero.
+CDNA4 Instruction Set Architecture
+3.2. Program Counter (PC)
+9 of 600
+
+=== p18 ===
+Field
+Bit
+Position
+Description
+SPI_PRIO
+2:1
+Wavefront priority set by the shader processor interpolator (SPI) when the
+wavefront is created. See the S_SETPRIO instruction (page 12-49) for details. 0 is
+lowest, 3 is highest priority.
+WAVE_PRIO
+4:3
+Wavefront priority set by the shader program. See the S_SETPRIO instruction
+(page 12-49) for details.
+PRIV
+5
+Privileged mode. Can only be active when in the trap handler. Gives write access
+to the TTMP, TMA, and TBA registers.
+TRAP_EN
+6
+Indicates that a trap handler is present. When set to zero, traps are not taken.
+EXECZ
+9
+Exec mask is zero.
+VCCZ
+10
+Vector condition code is zero.
+IN_TG
+11
+Wavefront is a member of a work-group of more than one wavefront.
+IN_BARRIER
+12
+Wavefront is waiting at a barrier.
+HALT
+13
+Wavefront is halted or scheduled to halt. HALT can be set by the host through
+wavefront-control messages, or by the shader. This bit is ignored while in the
+trap handler (PRIV = 1); it also is ignored if a host-initiated trap is received
+(request to enter the trap handler).
+TRAP
+14
+Wavefront is flagged to enter the trap handler as soon as possible.
+VALID
+16
+Wavefront is active (has been created and not yet ended).
+ECC_ERR
+17
+An ECC error has occurred.
+PERF_EN
+19
+Performance counters are enabled for this wavefront.
+COND_DBG_USER
+20
+Conditional debug indicator for user mode
+COND_DBG_SYS
+21
+Conditional debug indicator for system mode.
+ALLOW_REPLAY
+22
+Indicates that ATC replay is enabled.
+FATAL_HALT
+23
+Indicates a fatal halt has occurred.
+SCRATCH_EN
+28
+1 = wave has scratch space allocated; 0 = does not.
+IDLE
+31
+Indicates wave is idle - has no outstanding instructions.
+3.5. Mode register
+Mode register fields can be read from, and written to, by the shader through scalar instructions. The table
+below lists and briefly describes the mode register fields.
+Table 4. Mode Register Fields
+Field
+Bit
+Position
+Description
+FP_ROUND
+3:0
+[1:0] Single precision round mode. [3:2] Double/Half precision round mode.
+Round Modes: 0=nearest even, 1= +infinity, 2= -infinity, 3= toward zero.
+FP_DENORM
+7:4
+[1:0] Single precision denormal mode. [3:2] Double/Half precision denormal
+mode. Denorm modes:
+0 = flush input and output denorms.
+1 = allow input denorms, flush output denorms.
+2 = flush input denorms, allow output denorms.
+3 = allow input and output denorms.
+DX10_CLAMP
+8
+Used by the vector ALU to force DX10-style treatment of NaNs: when set, clamp
+NaN to zero; otherwise, pass NaN through.
+IEEE
+9
+Floating point opcodes that support exception flag gathering quiet and propagate
+signaling NaN inputs per IEEE 754-2008. Min_dx10 and max_dx10 become IEEE
+754-2008 compliant due to signaling NaN propagation and quieting.
+CDNA4 Instruction Set Architecture
+3.5. Mode register
+10 of 600
+
+=== p19 ===
+Field
+Bit
+Position
+Description
+DEBUG
+11
+Forces the wavefront to jump to the exception handler after each instruction is
+executed (but not after ENDPGM). Only works if TRAP_EN = 1.
+EXCP_EN
+18:12
+Enable mask for exceptions. Enabled means if the exception occurs and
+TRAP_EN==1, a trap is taken.
+[12] : invalid. 
+[13] : inputDenormal. 
+[14] : float_div0. 
+[15] : overflow. 
+[16] : underflow. 
+[17] : inexact.
+[18] : int_div0.
+[19] : address watch
+[20] : memory violation
+[20] : trap on wave end
+FP16_OVFL
+23
+If set, an overflowed FP16 result is clamped to +/- MAX_FP16, regardless of round
+mode, while still preserving true INF values.
+DISABLE_PERF
+26
+1 = disable performance counting for this wave
+GPR_IDX_EN
+27
+GPR index enable.
+VSKIP
+28
+0 = normal operation. 1 = skip (do not execute) any vector instructions: valu,
+vmem, lds. "Skipping" instructions occurs at high-speed (10 wavefronts per clock
+cycle can skip one instruction). This is much faster than issuing and discarding
+instructions.
+CSP
+31:29
+Conditional branch stack pointer.
+3.6. GPRs and LDS
+This section describes how GPR and LDS space is allocated to a wavefront, as well as how out-of-range and
+misaligned accesses are handled.
+3.6.1. Out-of-Range behavior
+This section defines the behavior when a source or destination GPR or memory address is outside the legal
+range for a wavefront.
+Out-of-range can occur through GPR-indexing or bad programming. It is illegal to index from one register type
+into another (for example: SGPRs into trap registers or inline constants). It is also illegal to index within inline
+constants.
+The following describe the out-of-range behavior for various storage types.
+• SGPRs
+◦Source or destination out-of-range = (sgpr < 0 || (sgpr >= sgpr_size)).
+◦Source out-of-range: returns the value of SGPR0 (not the value 0).
+◦Destination out-of-range: instruction writes no SGPR result.
+• VGPRs
+◦Similar to SGPRs. It is illegal to index from SGPRs into VGPRs, or vice versa.
+◦Out-of-range = (vgpr < 0 || (vgpr >= vgpr_size))
+CDNA4 Instruction Set Architecture
+3.6. GPRs and LDS
+11 of 600
+
+=== p20 ===
+◦If a source VGPR is out of range, VGPR0 is used.
+◦If a destination VGPR is out-of-range, the instruction is ignored (treated as an NOP).
+• LDS
+◦If the LDS-ADDRESS is out-of-range (addr < 0 or >= (MIN(lds_size, m0)):
+▪Writes out-of-range are discarded; it is undefined if SIZE is not a multiple of write-data-size.
+▪Reads return the value zero.
+◦If any source-VGPR is out-of-range, use the VGPR0 value is used.
+◦If the dest-VGPR is out of range, nullify the instruction (issue with exec=0)
+• Memory, LDS: Reads and atomics with returns.
+◦If any source VGPR or SGPR is out-of-range, the data value is undefined.
+◦If any destination VGPR is out-of-range, the operation is nullified by issuing the instruction as if the
+EXEC mask were cleared to 0.
+▪This out-of-range check must check all VGPRs that can be returned (for example: VDST to VDST+3
+for a BUFFER_LOAD_DWORDx4).
+▪Atomic operations with out-of-range destination VGPRs are nullified: issued, but with exec mask of
+zero.
+Instructions with multiple destinations (for example: V_ADDC): if any destination is out-of-range, no results
+are written.
+3.6.2. SGPR Allocation and storage
+A wavefront can be allocated 16 to 102 SGPRs, in units of 16 GPRs (Dwords). These are logically viewed as
+SGPRs 0-101. The VCC is physically stored as part of the wavefront’s SGPRs in the highest numbered two SGPRs
+(SGPR 106 and 107; the source/destination VCC is an alias for those two SGPRs). When a trap handler is present,
+16 additional SGPRs are reserved after VCC to hold the trap addresses, as well as saved-PC and trap-handler
+temps. These all are privileged (cannot be written to unless privilege is set). Note that if a wavefront allocates
+16 SGPRs, 2 SGPRs are typically used as VCC, the remaining 14 are available to the shader. Shader hardware
+does not prevent use of all 16 SGPRs.
+3.6.3. SGPR Alignment
+Even-aligned SGPRs are required in the following cases.
+• When 64-bit data is used. This is required for moves to/from 64-bit registers, including the PC.
+• When scalar memory reads that the address-base comes from an SGPR-pair (either in SGPR).
+Quad-alignment is required for the data-GPR when a scalar memory read returns four or more Dwords. When a
+64-bit quantity is stored in SGPRs, the LSBs are in SGPR[n], and the MSBs are in SGPR[n+1].
+3.6.4. VGPR Allocation and Alignment
+VGPRs are allocated in groups of eight Dwords.
+VGPRs are allocated out of two pools: regular VGPRs and accumulation VGPRs. Accumulation VGPRs are used
+with matrix VALU instructions, and can also be loaded directly from memory. A wave may have up to 512 total
+CDNA4 Instruction Set Architecture
+3.6. GPRs and LDS
+12 of 600
+
+=== p21 ===
+VGPRs, 256 of each type. When a wave has fewer than 512 total VGPRs, the number of each type is flexible - it is
+not required to be equal numbers of both types.
+Instructions which operate on 64-bit data must use aligned (i.e. even) VGPRs. This applies to ALU and memory
+instructions.
+3.6.5. LDS Allocation and Clamping
+LDS is allocated per work-group or per-wavefront when work-groups are not in use. LDS space is allocated to a
+work-group or wavefront in contiguous blocks of 1280 bytes on 1280-byte alignment. LDS allocations do not
+wrap around the LDS storage. All accesses to LDS are restricted to the space allocated to that wavefront/work-
+group.
+Clamping of LDS reads and writes is controlled by two size registers, which contain values for the size of the
+LDS space allocated by SPI to this wavefront or work-group, and a possibly smaller value specified in the LDS
+instruction (size is held in M0). The LDS operations use the smaller of these two sizes to determine how to
+clamp the read/write addresses.
+3.7. M0 Memory Descriptor
+There is one 32-bit M0 register per wavefront, which can be used for:
+• Local Data Share (LDS)
+◦LDS addressing for Memory/Vfetch → LDS: {14’h0, lds_offset[17:0]} // in bytes
+◦{ base[5:0], 16’h0}
+• Indirect GPR addressing for both vector and scalar instructions. M0 is an unsigned index.
+3.8. SCC: Scalar Condition code
+Most scalar ALU instructions set the Scalar Condition Code (SCC) bit, indicating the result of the operation.
+Compare operations: 1 = true
+Arithmetic operations: 1 = carry out
+Bit/logical operations: 1 = result was not zero
+Move: does not alter SCC
+The SCC can be used as the carry-in for extended-precision integer arithmetic, as well as the selector for
+conditional moves and branches.
+3.9. Vector Compares: VCC and VCCZ
+Vector ALU comparisons set the Vector Condition Code (VCC) register (1=pass, 0=fail). Also, vector compares
+have the option of setting EXEC to the VCC value.
+CDNA4 Instruction Set Architecture
+3.7. M0 Memory Descriptor
+13 of 600
+
+=== p22 ===
+There is also a VCC summary bit (vccz) that is set to 1 when the VCC result is zero. This is useful for early-exit
+branch tests. VCC is also set for selected integer ALU operations (carry-out).
+Vector compares have the option of writing the result to VCC (32-bit instruction encoding) or to any SGPR (64-
+bit instruction encoding). VCCZ is updated every time VCC is updated: vector compares and scalar writes to
+VCC.
+The EXEC mask determines which threads execute an instruction. The VCC indicates which executing threads
+passed the conditional test, or which threads generated a carry-out from an integer add or subtract.
+V_CMP_* ⇒ VCC[n] = EXEC[n] & (test passed for thread[n])
+VCC is fully written; there are no partial mask updates.
+
+VCC physically resides in the SGPR register file, so when an instruction sources VCC, that
+counts against the limit on the total number of SGPRs that can be sourced for a given
+instruction. VCC physically resides in the highest two user SGPRs.
+Shader Hazard with VCC The user/compiler must prevent a scalar-ALU write to the SGPR holding VCC,
+immediately followed by a conditional branch using VCCZ. The hardware cannot detect this, and inserts the
+one required wait state (hardware does detect it when the SALU writes to VCC, it only fails to do this when the
+SALU instruction references the SGPRs that happen to hold VCC).
+3.10. Trap and Exception registers
+Each type of exception can be enabled or disabled independently by setting, or clearing, bits in the TRAPSTS
+register’s EXCP_EN field. This section describes the registers which control and report kernel exceptions.
+All Trap temporary SGPRs (TTMP*) are privileged for writes - they can be written only when in the trap handler
+(status.priv = 1). When not privileged, writes to these are ignored and reads return zero. TMA and TBA are
+read-only; they can be accessed through S_GETREG_B32.
+When a trap is taken (either user initiated, exception or host initiated), the shader hardware generates an
+S_TRAP instruction. This loads trap information into a pair of SGPRS:
+{TTMP1, TTMP0} = {3'h0, pc_rewind[3:0], HT[0],trapID[7:0], PC[47:0]}.
+HT is set to one for host initiated traps, and zero for user traps (s_trap) or exceptions. TRAP_ID is zero for
+exceptions, or the user/host trapID for those traps. When the trap handler is entered, the PC of the faulting
+instruction is: (PC - PC_rewind*4).
+STATUS . TRAP_EN - This bit indicates to the shader whether or not a trap handler is present. When one is not
+present, traps are not taken, no matter whether they’re floating point, user-, or host-initiated traps. When the
+trap handler is present, the wavefront uses an extra 16 SGPRs for trap processing. If trap_en == 0, all traps and
+exceptions are ignored, and s_trap is converted by hardware to NOP.
+MODE . EXCP_EN[8:0] - Floating point exception enables. Defines which exceptions and events cause a trap.
+CDNA4 Instruction Set Architecture
+3.10. Trap and Exception registers
+14 of 600
+
+=== p23 ===
+Bit
+Exception
+0
+Invalid
+1
+Input Denormal
+2
+Divide by zero
+3
+Overflow
+4
+Underflow
+5
+Inexact
+6
+Integer divide by zero
+7
+Address Watch - TC (L1) has witnessed a thread access to an 'address
+of interest'
+3.10.1. Trap Status register
+The trap status register records previously seen traps or exceptions. It can be read and written by the kernel.
+Table 5. Exception Field Bits
+Field
+Bits
+Description
+EXCP
+8:0
+Status bits of which exceptions have occurred. These bits are sticky and accumulate
+results until the shader program clears them. These bits are accumulated regardless
+of the setting of EXCP_EN. These can be read or written without shader privilege. Bit
+Exception 0 invalid
+1 Input Denormal
+2 Divide by zero
+3 overflow
+4 underflow
+5 inexact
+6 integer divide by zero
+7 address watch
+8 memory violation
+SAVECTX
+10
+A bit set by the host command indicating that this wave must jump to its trap handler
+and save its context. This bit must be cleared by the trap handler using S_SETREG.
+Note - a shader can set this bit to 1 to cause a save-context trap, and due to hardware
+latency the shader may execute up to 2 additional instructions before taking the trap.
+ILLEGAL_INST
+11
+An illegal instruction has been detected.
+ADDR_WATCH1-3
+14:12
+Indicates that address watch 1, 2, or 3 has been hit. Bit 12 is address watch 1; bit 13 is
+2; bit 14 is 3.
+EXCP_CYCLE
+21:16
+When a float exception occurs, this tells the trap handler on which cycle the exception
+occurred on. 0-3 for normal float operations, 0-7 for double float add, and 0-15 for
+double float muladd or transcendentals. This register records the cycle number of the
+first occurrence of an enabled (unmasked) exception. EXCP_CYCLE[1:0] Phase:
+threads 0-15 are in phase 0, 48-63 in phase 3.
+EXCP_CYCLE[3:2] Multi-slot pass.
+EXCP_CYCLE[5:4] Hybrid pass: used for machines running at lower rates.
+DP_RATE
+31:29
+Determines how the shader interprets the TRAP_STS.cycle. Different Vector Shader
+Processors (VSP) process instructions at different rates.
+3.11. Memory Violations
+A Memory Violation is reported from:
+CDNA4 Instruction Set Architecture
+3.11. Memory Violations
+15 of 600
+
+=== p24 ===
+• LDS alignment error.
+• Memory read/write/atomic alignment error.
+• Flat access where the address is invalid (does not fall in any aperture).
+• Write to a read-only memory address.
+Memory violations are not reported for instruction or scalar-data accesses.
+Memory Buffer to LDS does NOT return a memory violation if the LDS address is out of range, but masks off
+EXEC bits of threads that would go out of range.
+When a memory access is in violation, the appropriate memory (LDS or TC) returns MEM_VIOL to the wave.
+This is stored in the wave’s TRAPSTS.mem_viol bit. This bit is sticky, so once set to 1, it remains at 1 until the
+user clears it.
+There is a corresponding exception enable bit (EXCP_EN.mem_viol). If this bit is set when the memory returns
+with a violation, the wave jumps to the trap handler.
+Memory violations are not precise. The violation is reported when the LDS or TC processes the address; during
+this time, the wave may have processed many more instructions. When a mem_viol is reported, the Program
+Counter saved is that of the next instruction to execute; it has no relationship the faulting instruction.
+3.12. Hardware ID Registers
+The values below indicate where a wave is currently execution. It is not safe to rely on these values as they may
+change over the lifetime of a wave.
+Table 6. Hardware ID (HW_ID)
+Field
+Bits
+Description
+WAVE_ID
+3:0
+Wave buffer slot number
+SIMD_ID
+5:4
+SIMD which the wave is assigned to within the CU
+PIPE_ID
+7:6
+Pipeline from which the wave was dispatched
+CU_ID
+11:8
+Compute Unit the wave is assigned to
+SH_ID
+12
+Shader Array (within an SE) the wave is assigned to. Is set to zero.
+SE_ID
+15:13
+Shader Engine the wave is assigned to
+TG_ID
+19:16
+Thread-group ID
+VM_ID
+23:20
+Virtual Memory ID
+QUEUE_ID
+26:24
+Queue from which this wave was dispatched
+STATE_ID
+29:27
+State ID (UNUSED)
+ME_ID
+31:30
+Micro-engine ID
+Table 7. XCC ID (XCC_ID)
+Field
+Bits
+Description
+XCC_ID
+3:0
+ID of this XCC
+3.13. GPR Initialization
+When a compute shader wave is launched VGPR0 and a number of SGPRs are initialized.
+CDNA4 Instruction Set Architecture
+3.12. Hardware ID Registers
+16 of 600
+
+=== p25 ===
+Compute shaders have VGPR0 initialized with the X, Y and Z index within the workgroup: { 2’b00, Z[9:0], Y[9:0],
+X[9:0] }.
+Table 8. CS SGPR Load
+SGPR Order
+Description
+Enable
+First 0.. 16 of
+User data registers
+COMPUTE_PGM_RSRC2.user_sgpr
+then
+work_group_id0[31:0]
+COMPUTE_PGM_RSRC2.tgid_x_en
+then
+work_group_id1[31:0]
+COMPUTE_PGM_RSRC2.tgid_y_en
+then
+work_group_id2[31:0]
+COMPUTE_PGM_RSRC2.tgid_z_en
+then
+{first_wave, 6’h00, wave_id_in_group[4:0], 2’h0,
+14’h0, work-group_size_in_waves[5:0]}
+COMPUTE_PGM_RSRC2.tg_size_en
+TTMP4,5
+0
+TTMP6
+dispatch packet addr lo
+TTMP7
+dispatch packet addr hi
+TTMP8
+dispatch grid X[31:0]
+TTMP9
+dispatch grid Y[31:0]
+TTMP10
+dispatch grid Z[31:0]
+TTMP11
+{ 26’b0, wave_id_in_workgroup[5:0] }
+Other TTMPs are not initialized.
+CDNA4 Instruction Set Architecture
+3.13. GPR Initialization
+17 of 600

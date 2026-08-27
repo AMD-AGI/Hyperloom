@@ -1,0 +1,28 @@
+{
+  "name": "moe_lds_x_reuse",
+  "level": 0,
+  "backend": "aiter",
+  "description": "Stage X tile once into LDS during GEMM0, then consume it from LDS in GEMM1 to halve X HBM traffic in fused MoE gate+up",
+  "preconditions": [
+    "fused MoE gate (X.G^T) + up (X.U^T) with shared X operand",
+    "LDS budget has room for one X tile (32 tokens x sub_GU inner_dim) plus ~8 KB MAX-reduction scratch",
+    "single TG per expert tile"
+  ],
+  "steps": [
+    "During GEMM0, interleave HBM loads for G, U, and X -- write X into LDS as part of the same K-split cadence",
+    "At GEMM0 end, barrier + wait on X LDS writes so GEMM1 can read safely",
+    "GEMM1 issues HBM loads for U only (G is not needed; it is the gate), and reads X from LDS via ds_read_b128",
+    "Pick LDS stride with 8-byte padding per row to avoid bank conflicts (see asm_kernel_patterns.md)",
+    "Hold X in LDS until GEMM1 dequant is done; then the region can be reclaimed for the MAX-reduction scratch"
+  ],
+  "expected_impact": "halves X HBM traffic; LDS reads are ~10x cheaper than HBM reads at this access pattern",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [],
+  "created_at": "2026-04-23T00:00:00",
+  "updated_at": "2026-04-23T00:00:00",
+  "experiment_ids": []
+}

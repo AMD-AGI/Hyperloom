@@ -1,0 +1,33 @@
+{
+  "name": "moe_gemm0_gemm1_fusion",
+  "level": 0,
+  "backend": "aiter",
+  "description": "Fuse MoE gate (X.G^T) and up (X.U^T) GEMMs into one TG, sharing a single X load to halve X HBM traffic",
+  "preconditions": [
+    "gfx942 or gfx950 MoE fused MLP",
+    "gate and up projections have identical X operand and K depth",
+    "single TG per expert tile (32xsub_GU output)",
+    "FP8 weights with per-128 block scales"
+  ],
+  "steps": [
+    "Load X tile once into LDS during the GEMM0 phase (feed X + G from HBM in parallel)",
+    "Run GEMM0 accumulating into _v_Z, then dequant Z via (sX*sG) DPP broadcast",
+    "Run GEMM1 using X from LDS (not HBM) and U from HBM, accumulating into _v_GM1",
+    "Dequant GM1 via (sX*sU) DPP broadcast; fuse act(Z)*GM1 in fp32 registers before FP8 re-quant",
+    "Do not issue any HBM X loads inside GEMM1 -- that destroys the fusion win"
+  ],
+  "expected_impact": "halves X HBM traffic vs independent gate+up GEMMs; removes an entire kernel launch",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [
+    "moe_lds_x_reuse",
+    "moe_blockscale_dpp_dequant",
+    "moe_k_split_dual_stream"
+  ],
+  "decision_rules": [],
+  "created_at": "2026-04-23T00:00:00",
+  "updated_at": "2026-04-23T00:00:00",
+  "experiment_ids": []
+}

@@ -1,0 +1,34 @@
+{
+  "name": "tilelang_gemm_no_sliced_operands",
+  "level": 0,
+  "backend": "shared",
+  "description": "TileLang T.gemm cannot accept a sliced shared-memory tensor as an operand (LayoutInference throws 'bad optional access'). Pre-copy chunks into small scratch buffers via T.copy first; T.gemm on the full scratch lowers fine. Verified: chunked FP8 GEMM at H=64, BI=64, D=448, NTILE=7, threads=256 lowers and runs with max_err=1.24e-3, cos_sim=1.000000 on gfx950.",
+  "preconditions": [
+    "TileLang >= 0.1.7 with HIP backend on gfx950",
+    "Implementing chunked GEMM (split-K via Python-time unroll over compile-time-constant tile range)",
+    "Operands originate as slices of a larger T.alloc_shared buffer"
+  ],
+  "steps": [
+    "Allocate small per-tile T.alloc_shared scratch buffers ONCE outside the chunk loop (e.g., Q_chunk_shared[H, GS], K_chunk_shared[BI, GS])",
+    "Inside the chunk loop, T.copy(big_buffer[:, t*GS:(t+1)*GS], chunk_scratch) — slicing in T.copy is fine",
+    "Then T.gemm(chunk_scratch_A, chunk_scratch_B, acc, ...) — T.gemm sees full unsliced operands",
+    "Apply per-tile scale post-GEMM via T.Parallel(H, BI) loop (post-multiply pattern, mirroring fp8_paged_mqa_logits_kernel:883-888)",
+    "For FP8 GEMM on gfx950: label kernel signature with 'float8_e4m3fnuz' even though hardware uses OCP fp8_e4m3fn; TileLang's MFMA emitter only routes 'fnuz' to the fp8 MFMA suffix, but the v_mfma_f32_*_fp8_fp8 opcode operates on the same 8-bit bytes regardless of label",
+    "Avoid in-kernel reductions across non-power-of-2 dimensions (e.g., D=448 with threads=256 fails 'num_threads % replicate_extent != 0'). Pre-compute scale fragments in the wrapper or use chunked reduction"
+  ],
+  "expected_impact": "unblocks chunked-FP8 GEMM (A1 from REVIEW_NOTES) — required for native FP8 MFMA path that aiter and CK Tile both use; expected 1.3-1.6x on Pro b>=4 sparse-MLA decode shapes. Validated as compiling and bit-exact-within-FP8 noise on gfx950.",
+  "successes": 1,
+  "failures": 0,
+  "success_contexts": ["dsv4_sparse_mla_decode_hip_workspace/_a1_test_chunked_fp8_qkt.py — pure Q.K^T at MODEL1 dims, max_err=1.24e-3 cos_sim=1.0"],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [
+    "If T.gemm fails with 'InternalError: bad optional access' during LayoutInference, check whether any operand is a slice expression. If yes, refactor to pre-copy via T.copy.",
+    "Slicing inside T.copy is fine; slicing inside T.gemm is not",
+    "On gfx950 with TileLang FP8 GEMM, kernel signature MUST use 'float8_e4m3fnuz' (or the actual e5m2fnuz) — TileLang's MFMA dtype dispatch tables don't recognize 'float8_e4m3' or 'float8_e4m3fn'. Pass tensors via .view(torch.float8_e4m3fnuz) at the call site to satisfy strict dtype-check.",
+    "Avoid T.reduce_* across reduction extent that doesn't divide thread count cleanly — fragment layout inference will reject"
+  ],
+  "created_at": "2026-04-25T18:14:00",
+  "updated_at": "2026-04-25T18:30:00",
+  "experiment_ids": ["dsv4_sparse_mla_decode_hip"]
+}

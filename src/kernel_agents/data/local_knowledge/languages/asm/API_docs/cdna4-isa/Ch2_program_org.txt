@@ -1,0 +1,78 @@
+
+=== p13 ===
+Chapter 2. Program Organization
+CDNA kernels are programs executed by the CDNA processor. Conceptually, the kernel is executed
+independently on every work-item, but in reality the CDNA processor groups 64 work-items into a wavefront,
+which executes the kernel on all 64 work-items in one pass.
+The CDNA processor consists of:
+• A scalar ALU, which operates on one value per wavefront (common to all work items).
+• A vector ALU, which operates on unique values per work-item.
+• Local data storage, which allows work-items within a workgroup to communicate and share data.
+• Scalar memory, which can transfer data between SGPRs and memory through a cache.
+• Vector memory, which can transfer data between VGPRs and memory
+All kernel control flow is handled using scalar ALU instructions. This includes if/else, branches and looping.
+Scalar ALU (SALU) and memory instructions work on an entire wavefront and operate on up to two SGPRs, as
+well as literal constants.
+Vector memory and ALU instructions operate on all work-items in the wavefront at one time. In order to
+support branching and conditional execute, every wavefront has an EXECute mask that determines which
+work-items are active at that moment, and which are dormant. Active work-items execute the vector
+instruction, and dormant ones treat the instruction as a NOP. The EXEC mask can be changed at any time by
+Scalar ALU instructions.
+Vector ALU instructions can take up to three arguments, which can come from VGPRs, SGPRs, or literal
+constants that are part of the instruction stream. They operate on all work-items enabled by the EXEC mask.
+Vector compare and add with- carryout return a bit-per-work-item mask back to the SGPRs to indicate, per
+work-item, which had a "true" result from the compare or generated a carry-out.
+Vector memory instructions transfer data between VGPRs and memory. Each work-item supplies its own
+memory address and supplies or receives unique data. These instructions are also subject to the EXEC mask.
+2.1. Compute Shaders
+Compute kernels (shaders) are generic programs that can run on the CDNA processor, taking data from
+memory, processing it, and writing results back to memory. Compute kernels are created by a dispatch, which
+causes the CDNA processors to run the kernel over all of the work-items in a 1D, 2D, or 3D grid of data. The
+CDNA processor walks through this grid and generates wavefronts, which then run the compute kernel. Each
+work-item is initialized with its unique address (index) within the grid. Based on this index, the work-item
+computes the address of the data it is required to work on and what to do with the results.
+2.2. Data Sharing
+The AMD CDNA stream processors can share data between different work-items. Data sharing can significantly
+boost performance. The figure below shows the memory hierarchy that is available to each work-item.
+CDNA4 Instruction Set Architecture
+2.1. Compute Shaders
+5 of 600
+
+=== p14 ===
+Figure 2. Shared Memory Hierarchy
+2.2.1. Local Data Share (LDS)
+Each compute unit has a 160 kB memory space that enables low-latency communication between work-items
+within a work-group, or the work-items within a wavefront; this is the local data share (LDS). This memory is
+configured with 64 banks, each with 640 entries of 4 bytes. The shared memory contains 32 integer atomic
+units designed to enable fast, unordered atomic operations. This memory can be used as a software cache for
+predictable re-use of data, a data exchange machine for the work-items of a work-group, or as a cooperative
+way to enable efficient access to off-chip memory.
+2.3. Device Memory
+The AMD CDNA devices offer several methods for access to off-chip memory from the processing elements
+(PE) within each compute unit. On the primary read path, the device consists of multiple channels of L2 read-
+write cache that provides data to an L1 cache for each compute unit. Specific cache-less load instructions can
+force data to be retrieved from device memory during an execution of a load clause. Load requests that overlap
+within the clause are cached with respect to each other. The output cache is formed by two levels of cache: the
+first for write-combining cache (collect scatter and store operations and combine them to provide good access
+patterns to memory); the second is a read/write cache with atomic units that lets each processing element
+complete unordered atomic accesses that return the initial value. Each processing element provides the
+destination address on which the atomic operation acts, the data to be used in the atomic operation, and a
+return address for the read/write atomic unit to store the pre-op value in memory. Each store or atomic
+operation can be set up to return an acknowledgment to the requesting PE upon write confirmation of the
+return value (pre-atomic op value at destination) being stored to device memory.
+This acknowledgment has two purposes:
+CDNA4 Instruction Set Architecture
+2.3. Device Memory
+6 of 600
+
+=== p15 ===
+• enabling a PE to recover the pre-op value from an atomic operation by performing a cache-less load from
+its return address after receipt of the write confirmation acknowledgment, and
+• enabling the system to maintain a relaxed consistency model.
+Each scatter write from a given PE to a given memory channel maintains order. The acknowledgment enables
+one processing element to implement a fence to maintain serial consistency by ensuring all writes have been
+posted to memory prior to completing a subsequent write. In this manner, the system can maintain a relaxed
+consistency model between all parallel work-items operating on the system.
+CDNA4 Instruction Set Architecture
+2.3. Device Memory
+7 of 600

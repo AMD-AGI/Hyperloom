@@ -1,0 +1,331 @@
+# Robust kubernetes workload template for KernelForge forge-loop CI smoke tests.
+#
+# NOTE: the container installs node/claude/pip deps at runtime for bootstrap.
+# A dedicated CI image (pre-baked deps) would improve reproducibility — follow-up.
+#
+# Register against primus-robust workload-manager:
+#   PUT /v1/orchestration/templates/kubernetes/kernelforge
+#
+# CI submits via .github/workflows/ci-e2e.yml + ci-e2e-dispatch.sh (kind=kernelforge).
+#   POST /v1/orchestration/workloads
+#   {
+#     "name": "kf-smoke-manual",
+#     "infra_type": "kubernetes",
+#     "kind": "kernelforge",
+#     "namespace": "control-plan-hyperloom-ci",
+#     "workspace": "control-plan-hyperloom-ci",
+#     "image": "harbor.crusoe.primus-safe.amd.com/proxy/vllm/vllm-openai-rocm:v0.24.0",
+#     "replicas": 1,
+#     "gpu_per_replica": 1,
+#     "template": {
+#       "params": {
+#         "KF_LOCAL_SRC": "/shared_nfs/hyperloom/KernelForge",
+#         "MAX_HOURS": "1.0",
+#         "MAX_ITERS": "100",
+#         "GPU_TARGET": "gfx950"
+#       }
+#     }
+#   }
+infraType: kubernetes
+kind: kernelforge
+validation:
+  requireImage: true
+  minReplicas: 1
+  maxReplicas: 1
+  minGpuPerReplica: 1
+status:
+  mode: counts
+  succeededPath: status.succeeded
+  activePath: status.active
+  failedPath: status.failed
+body: |
+  apiVersion: batch/v1
+  kind: Job
+  metadata:
+    name: {{ .Name }}
+    namespace: {{ .Namespace }}
+    labels:
+      {{- toYaml .Labels | nindent 4 }}
+      kernelforge.amd.com/task-source: {{ .Params.KF_TASK_SOURCE | default "manual" | quote }}
+      kernelforge.amd.com/source-pr: {{ .Params.KF_SOURCE_PR | default "" | quote }}
+      kernelforge.amd.com/source-sha: {{ .Params.KERNELFORGE_SOURCE_SHA | default "" | quote }}
+  spec:
+    parallelism: 1
+    completions: 1
+    backoffLimit: 0
+    # Server-side stop. The CI runner cancels the workload on its way out, but a
+    # runner that dies takes that path with it and would leave a GPU busy for the
+    # whole forge-loop budget. Kubernetes enforces this one regardless.
+    activeDeadlineSeconds: {{ .Params.KF_ACTIVE_DEADLINE_SEC | default "5400" }}
+    template:
+      metadata:
+        labels:
+          {{- toYaml .PodLabels | nindent 8 }}
+          kernelforge.amd.com/task-source: {{ .Params.KF_TASK_SOURCE | default "manual" | quote }}
+          kernelforge.amd.com/source-pr: {{ .Params.KF_SOURCE_PR | default "" | quote }}
+          kernelforge.amd.com/source-sha: {{ .Params.KERNELFORGE_SOURCE_SHA | default "" | quote }}
+      spec:
+        restartPolicy: Never
+        nodeSelector:
+          {{- if .NodeSelector }}
+          {{- toYaml .NodeSelector | nindent 8 }}
+          {{- else }}
+          primus-safe.workspace.id: {{ .Namespace }}
+          {{- end }}
+        tolerations:
+          - operator: Exists
+        {{- with .Affinity }}
+        affinity:
+          {{- toYaml . | nindent 8 }}
+        {{- end }}
+        volumes:
+          - name: shared-memory
+            emptyDir:
+              medium: Memory
+              sizeLimit: {{ .Params.KF_SHM_SIZE | default "32Gi" }}
+          - name: shared-nfs
+            hostPath:
+              path: {{ .Params.KF_SHARED_MOUNT | default "/shared_nfs" }}
+              type: Directory
+          - name: home
+            hostPath:
+              path: /home
+              type: Directory
+        containers:
+          - name: kernelforge
+            image: {{ .Image | quote }}
+            terminationMessagePolicy: FallbackToLogsOnError
+            resources:
+              limits:
+                {{ .GPUResource }}: "{{ if .GPUPerReplica }}{{ .GPUPerReplica }}{{ else }}1{{ end }}"
+                {{- if gt .CPUPerReplica 0 }}
+                cpu: "{{ .CPUPerReplica }}"
+                {{- end }}
+                {{- if gt .MemMBPerReplica 0 }}
+                memory: "{{ .MemMBPerReplica }}Mi"
+                {{- end }}
+            volumeMounts:
+              - name: shared-memory
+                mountPath: /dev/shm
+              - name: shared-nfs
+                mountPath: {{ .Params.KF_SHARED_MOUNT | default "/shared_nfs" }}
+              - name: home
+                mountPath: /home
+            envFrom:
+              - secretRef:
+                  name: {{ .Params.KF_CREDENTIALS_SECRET | default "hyperloom-credentials" }}
+            env:
+              - name: ROBUST_WORKLOAD_UID
+                value: {{ .WorkloadUID | quote }}
+              - name: NODE_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: spec.nodeName
+              - name: POD_NAME
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.name
+              - name: SAFE_WORKSPACE
+                value: {{ .Namespace | quote }}
+              {{- with .EnvVars }}
+              {{- toYaml . | nindent 12 }}
+              {{- end }}
+            command: ["/bin/bash", "-lc"]
+            args:
+              - |
+                set -euo pipefail
+
+                # This template always runs the Claude CLI, which takes either a
+                # gateway pair or a subscription OAuth token whose endpoint it
+                # defaults on its own. Each shape must stand up on its own values:
+                # nothing is synthesized from the other, and supplying half a pair
+                # is what made SAFE_API_KEY unfalsifiable.
+                _kf_has_gateway_pair() {
+                  [ -n "${ANTHROPIC_BASE_URL:-}" ] \
+                    && { [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; }
+                }
+                _kf_has_oauth_token() { [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; }
+
+                if ! _kf_has_gateway_pair && ! _kf_has_oauth_token; then
+                  echo "[kf] ERROR: this template runs the Claude CLI; the workspace" \
+                       "secret must set either ANTHROPIC_BASE_URL and" \
+                       "ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY, or" \
+                       "CLAUDE_CODE_OAUTH_TOKEN for subscription billing" >&2
+                  exit 5
+                fi
+                # The CLI resolves ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY ahead of
+                # CLAUDE_CODE_OAUTH_TOKEN, so a co-present key silently wins and the
+                # run bills to API credits. Say so rather than let it pass unseen.
+                if _kf_has_oauth_token \
+                   && { [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; }; then
+                  echo "[kf] WARN: CLAUDE_CODE_OAUTH_TOKEN is set but the CLI prefers" \
+                       "ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY; this run bills to" \
+                       "that key, not to the subscription. Drop both from the" \
+                       "workspace secret to bill the subscription instead" >&2
+                fi
+                if _kf_has_oauth_token && ! _kf_has_gateway_pair \
+                   && [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+                  echo "[kf] WARN: CLAUDE_CODE_OAUTH_TOKEN against a custom" \
+                       "ANTHROPIC_BASE_URL; a subscription token is normally rejected" \
+                       "by a self-hosted gateway, so expect auth failures" >&2
+                fi
+                # Relaxed TLS is for a self-hosted gateway whose chain this image
+                # does not carry. Without one the CLI talks to the public default
+                # endpoint, where turning verification off would expose a
+                # long-lived subscription token; the Secret can still opt back out.
+                if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
+                  export ANTHROPIC_SKIP_TLS_VERIFY="${ANTHROPIC_SKIP_TLS_VERIFY:-true}"
+                  export NODE_TLS_REJECT_UNAUTHORIZED="${NODE_TLS_REJECT_UNAUTHORIZED:-0}"
+                else
+                  export ANTHROPIC_SKIP_TLS_VERIFY="${ANTHROPIC_SKIP_TLS_VERIFY:-false}"
+                  export NODE_TLS_REJECT_UNAUTHORIZED="${NODE_TLS_REJECT_UNAUTHORIZED:-1}"
+                fi
+                # OPENAI_BASE_URL + OPENAI_API_KEY are the separate line that
+                # fusion discovery and the Codex supervisor use. They are optional
+                # here -- forge-loop runs on Claude -- and are left exactly as the
+                # Secret provides them, with no default endpoint.
+                export IS_SANDBOX="${IS_SANDBOX:-1}"
+                export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
+
+                ensure_node() {
+                  command -v npm >/dev/null 2>&1 && return 0
+                  echo "[kf] installing node 22"
+                  curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 || true
+                  apt-get install -y --no-install-recommends nodejs >/dev/null 2>&1 || true
+                  command -v npm >/dev/null 2>&1
+                }
+
+                ensure_claude() {
+                  ensure_node || { echo "[kf] ERROR: npm unavailable after node install" >&2; exit 3; }
+                  npm install -g @anthropic-ai/claude-code >/dev/null 2>&1 \
+                    || { echo "[kf] ERROR: npm install claude failed" >&2; exit 4; }
+                  mkdir -p /root/.claude
+                  # Only the gateway shape has anything to put here. OAuth-only
+                  # authenticates from the process env, and a config.json carrying an
+                  # empty primaryApiKey / customApiUrl is undefined input to the CLI.
+                  if _kf_has_gateway_pair; then
+                    "$KF_PY" -c 'import json,os,pathlib; p=pathlib.Path("/root/.claude/config.json"); p.write_text(json.dumps({"theme":"dark","hasCompletedOnboarding":True,"primaryApiKey":os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_AUTH_TOKEN") or "","customApiUrl":os.environ.get("ANTHROPIC_BASE_URL","")})); p.chmod(0o600)'
+                  else
+                    echo "[kf] OAuth-only credential: leaving /root/.claude/config.json unwritten"
+                  fi
+                  command -v claude >/dev/null 2>&1 || { echo "[kf] ERROR: claude CLI not available" >&2; exit 3; }
+                }
+
+                KF_REPO="{{ .Params.KERNELFORGE_SOURCE_REPO | default "https://github.com/AMD-AGI/KernelForge.git" }}"
+                KF_SHA="{{ .Params.KERNELFORGE_SOURCE_SHA | default "" }}"
+                KF_REF="{{ .Params.KERNELFORGE_SOURCE_REF | default "main" }}"
+                KF_PULL_REF="{{ .Params.KERNELFORGE_SOURCE_PULL_REF | default "" }}"
+                KF_ROOT="{{ .Params.KF_SOURCE_DIR | default "" }}"
+                KF_LOCAL="{{ .Params.KF_LOCAL_SRC | default "/shared_nfs/hyperloom/KernelForge" }}"
+                KF_USE_GIT="{{ .Params.KF_USE_GIT | default "0" }}"
+                # forge-loop is time-driven and refuses to start an iteration once
+                # less than its finalize reserve remains. MAX_ITERS is retained
+                # only for compatibility with existing dispatch payloads.
+                MAX_HOURS="{{ .Params.MAX_HOURS | default "1.0" }}"
+                MAX_ITERS="{{ .Params.MAX_ITERS | default "100" }}"
+                GPU_TARGET="{{ .Params.GPU_TARGET | default "gfx950" }}"
+                KF_SHARED="{{ .Params.KF_SHARED_MOUNT | default "/shared_nfs" }}"
+
+                configure_git_auth() {
+                  # KERNELFORGE_SOURCE_REPO must stay token-free (API-visible param).
+                  KF_REPO="$(printf '%s' "$KF_REPO" | sed -E 's#https://[^@/]+@#https://#')"
+                  local tok="${GITHUB_TOKEN:-}"
+                  if [ -n "$tok" ]; then
+                    git config --global credential.helper store
+                    printf 'https://x-access-token:%s@github.com\n' "$tok" > /root/.git-credentials
+                    chmod 600 /root/.git-credentials
+                  fi
+                }
+
+                echo "[kf] node=${NODE_NAME:-?} pod=${POD_NAME:-?}"
+                configure_git_auth
+
+                if [ -z "$KF_ROOT" ] && [ "$KF_USE_GIT" != "1" ]; then
+                  for candidate in "$KF_LOCAL" "${KF_SHARED}/hyperloom/KernelForge"; do
+                    if [ -f "${candidate}/pyproject.toml" ]; then
+                      KF_ROOT="$candidate"
+                      echo "[kf] using local KernelForge source: $KF_ROOT"
+                      break
+                    fi
+                  done
+                fi
+
+                if [ -z "$KF_ROOT" ] || [ "$KF_USE_GIT" = "1" ]; then
+                  KF_ROOT="${KF_SHARED}/kernelforge-ci/src/${ROBUST_WORKLOAD_UID:-local}"
+                  mkdir -p "$(dirname "$KF_ROOT")"
+                  rm -rf "$KF_ROOT"
+                  if [ -n "$KF_SHA" ]; then
+                    case "$KF_SHA" in
+                      *[!0-9a-fA-F]*)
+                        echo "[kf] ERROR: KERNELFORGE_SOURCE_SHA must be a git commit SHA" >&2
+                        exit 6 ;;
+                    esac
+                    KF_SHA="$(printf '%s' "$KF_SHA" | tr '[:upper:]' '[:lower:]')"
+                    git init -q "$KF_ROOT"
+                    git -C "$KF_ROOT" remote add origin "$KF_REPO"
+                    # Fork PR heads live under refs/pull/<n>/head of the base repo;
+                    # fetch the SHA directly first, then fall back to that ref.
+                    if ! git -C "$KF_ROOT" fetch --depth 1 origin "$KF_SHA"; then
+                      if [ -z "$KF_PULL_REF" ]; then
+                        echo "[kf] ERROR: cannot fetch $KF_SHA and no pull ref available" >&2
+                        exit 6
+                      fi
+                      echo "[kf] SHA fetch failed; retrying via $KF_PULL_REF"
+                      git -C "$KF_ROOT" fetch --depth 1 origin "$KF_PULL_REF"
+                    fi
+                    git -C "$KF_ROOT" checkout --detach --force FETCH_HEAD
+                    actual="$(git -C "$KF_ROOT" rev-parse HEAD)"
+                    [ "$actual" = "$KF_SHA" ] || { echo "[kf] SHA mismatch expected=$KF_SHA actual=$actual" >&2; exit 6; }
+                    echo "[kf] using SHA-pinned KernelForge: $actual"
+                  else
+                    echo "[kf] cloning KernelForge ref=$KF_REF into $KF_ROOT"
+                    git clone --depth 1 --branch "$KF_REF" "$KF_REPO" "$KF_ROOT"
+                  fi
+                fi
+
+                if [ ! -f "$KF_ROOT/pyproject.toml" ]; then
+                  echo "[kf] ERROR: KernelForge source not found at $KF_ROOT" >&2
+                  exit 4
+                fi
+
+                KF_BUILD="/tmp/KernelForge-${ROBUST_WORKLOAD_UID:-local}"
+                rm -rf "$KF_BUILD"
+                cp -a "$KF_ROOT" "$KF_BUILD"
+                # The NFS copy is only a staging area for the git fetch; the build
+                # and the run happen in /tmp. Drop it now, otherwise every CI run
+                # leaves ~30 MB behind on a mount shared with other teams.
+                case "$KF_ROOT" in
+                  "${KF_SHARED}/kernelforge-ci/src/"*) rm -rf "$KF_ROOT" ;;
+                esac
+                cd "$KF_BUILD"
+
+                KF_PY="$(command -v python3)"
+                for candidate in python3 /usr/bin/python3; do
+                  if "$candidate" -c "import torch" >/dev/null 2>&1; then
+                    KF_PY="$candidate"
+                    break
+                  fi
+                done
+                echo "[kf] using python: $KF_PY ($("$KF_PY" --version 2>&1))"
+
+                "$KF_PY" -m pip install --quiet --upgrade pip
+                "$KF_PY" -m pip install --quiet -e ".[claude,dev]"
+                "$KF_PY" -c "import triton" >/dev/null 2>&1 || "$KF_PY" -m pip install --quiet triton || true
+
+                if ! command -v kernel-agents >/dev/null 2>&1; then
+                  KF_BIN="$("$KF_PY" -c 'import os,sys; print(os.path.join(os.path.dirname(sys.executable), "kernel-agents"))')"
+                  if [ -x "$KF_BIN" ]; then
+                    ln -sf "$KF_BIN" /usr/local/bin/kernel-agents
+                  fi
+                fi
+                command -v kernel-agents >/dev/null 2>&1 || { echo "[kf] ERROR: kernel-agents not on PATH" >&2; exit 4; }
+
+                ensure_claude
+
+                # Profiling stays ENABLED: it is one of the paths this smoke exists
+                # to exercise. A single rocprof-compute collection may take up to
+                # profile_timeout_sec (1800s), so the pod's activeDeadlineSeconds is
+                # sized as MAX_HOURS + a bootstrap slack rather than trimmed to the
+                # budget alone (see KF_ACTIVE_DEADLINE_SEC from the dispatch script).
+                export MAX_HOURS MAX_ITERS GPU_TARGET FORGE_MODEL="${FORGE_MODEL:-}"
+                exec bash examples/triton-softmax-forge-loop/run_example.sh "/tmp/kf-forge-${ROBUST_WORKLOAD_UID:-local}"

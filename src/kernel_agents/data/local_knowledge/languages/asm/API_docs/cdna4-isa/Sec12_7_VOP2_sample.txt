@@ -1,0 +1,583 @@
+
+=== p181 ===
+12.7. VOP2 Instructions
+Instructions in this format may use a 32-bit literal constant, DPP or SDWA which occurs immediately after the
+instruction.
+V_CNDMASK_B32
+0
+Copy data from one of two inputs based on the per-lane condition code and store the result into a vector
+register.
+D0.u32 = VCC.u64[laneId] ? S1.u32 : S0.u32
+Notes
+In VOP3 the VCC source may be a scalar GPR specified in S2.
+Floating-point modifiers are valid for this instruction if S0 and S1 are 32-bit floating point values. This
+instruction is suitable for negating or taking the absolute value of a floating-point value.
+V_ADD_F32
+1
+Add two floating point inputs and store the result into a vector register.
+D0.f32 = S0.f32 + S1.f32
+Notes
+0.5ULP precision, denormals are supported.
+V_SUB_F32
+2
+Subtract the second floating point input from the first input and store the result into a vector register.
+D0.f32 = S0.f32 - S1.f32
+Notes
+0.5ULP precision, denormals are supported.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+173 of 600
+
+=== p182 ===
+V_SUBREV_F32
+3
+Subtract the first floating point input from the second input and store the result into a vector register.
+D0.f32 = S1.f32 - S0.f32
+Notes
+0.5ULP precision, denormals are supported.
+V_FMAC_F64
+4
+Multiply two floating point inputs and accumulate the result into the destination register using fused multiply
+add.
+D0.f64 = fma(S0.f64, S1.f64, D0.f64)
+V_MUL_F32
+5
+Multiply two floating point inputs and store the result into a vector register.
+D0.f32 = S0.f32 * S1.f32
+Notes
+0.5ULP precision, denormals are supported.
+V_MUL_I32_I24
+6
+Multiply two signed 24-bit integer inputs and store the result as a signed 32-bit integer into a vector register.
+D0.i32 = 32'I(S0.i24) * 32'I(S1.i24)
+Notes
+This opcode is expected to be as efficient as basic single-precision opcodes since it utilizes the single-precision
+floating point multiplier. See also V_MUL_HI_I32_I24.
+V_MUL_HI_I32_I24
+7
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+174 of 600
+
+=== p183 ===
+Multiply two signed 24-bit integer inputs and store the high 32 bits of the result as a signed 32-bit integer into a
+vector register.
+D0.i32 = 32'I((64'I(S0.i24) * 64'I(S1.i24)) >> 32U)
+Notes
+See also V_MUL_I32_I24.
+V_MUL_U32_U24
+8
+Multiply two unsigned 24-bit integer inputs and store the result as an unsigned 32-bit integer into a vector
+register.
+D0.u32 = 32'U(S0.u24) * 32'U(S1.u24)
+Notes
+This opcode is expected to be as efficient as basic single-precision opcodes since it utilizes the single-precision
+floating point multiplier. See also V_MUL_HI_U32_U24.
+V_MUL_HI_U32_U24
+9
+Multiply two unsigned 24-bit integer inputs and store the high 32 bits of the result as an unsigned 32-bit integer
+into a vector register.
+D0.u32 = 32'U((64'U(S0.u24) * 64'U(S1.u24)) >> 32U)
+Notes
+See also V_MUL_U32_U24.
+V_MIN_F32
+10
+Select the minimum of two single-precision float inputs and store the result into a vector register.
+if (WAVE_MODE.IEEE && isSignalNAN(64'F(S0.f32))) then
+    D0.f32 = 32'F(cvtToQuietNAN(64'F(S0.f32)))
+elsif (WAVE_MODE.IEEE && isSignalNAN(64'F(S1.f32))) then
+    D0.f32 = 32'F(cvtToQuietNAN(64'F(S1.f32)))
+elsif isNAN(64'F(S0.f32)) then
+    D0.f32 = S1.f32
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+175 of 600
+
+=== p184 ===
+elsif isNAN(64'F(S1.f32)) then
+    D0.f32 = S0.f32
+elsif ((64'F(S0.f32) == +0.0) && (64'F(S1.f32) == -0.0)) then
+    D0.f32 = S1.f32
+elsif ((64'F(S0.f32) == -0.0) && (64'F(S1.f32) == +0.0)) then
+    D0.f32 = S0.f32
+else
+    // Note: there's no IEEE case here like there is for V_MAX_F32.
+    D0.f32 = S0.f32 < S1.f32 ? S0.f32 : S1.f32
+endif
+V_MAX_F32
+11
+Select the maximum of two single-precision float inputs and store the result into a vector register.
+if (WAVE_MODE.IEEE && isSignalNAN(64'F(S0.f32))) then
+    D0.f32 = 32'F(cvtToQuietNAN(64'F(S0.f32)))
+elsif (WAVE_MODE.IEEE && isSignalNAN(64'F(S1.f32))) then
+    D0.f32 = 32'F(cvtToQuietNAN(64'F(S1.f32)))
+elsif isNAN(64'F(S0.f32)) then
+    D0.f32 = S1.f32
+elsif isNAN(64'F(S1.f32)) then
+    D0.f32 = S0.f32
+elsif ((64'F(S0.f32) == +0.0) && (64'F(S1.f32) == -0.0)) then
+    D0.f32 = S0.f32
+elsif ((64'F(S0.f32) == -0.0) && (64'F(S1.f32) == +0.0)) then
+    D0.f32 = S1.f32
+elsif WAVE_MODE.IEEE then
+    D0.f32 = S0.f32 >= S1.f32 ? S0.f32 : S1.f32
+else
+    D0.f32 = S0.f32 > S1.f32 ? S0.f32 : S1.f32
+endif
+V_MIN_I32
+12
+Select the minimum of two signed 32-bit integer inputs and store the selected value into a vector register.
+D0.i32 = S0.i32 < S1.i32 ? S0.i32 : S1.i32
+V_MAX_I32
+13
+Select the maximum of two signed 32-bit integer inputs and store the selected value into a vector register.
+D0.i32 = S0.i32 >= S1.i32 ? S0.i32 : S1.i32
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+176 of 600
+
+=== p185 ===
+V_MIN_U32
+14
+Select the minimum of two unsigned 32-bit integer inputs and store the selected value into a vector register.
+D0.u32 = S0.u32 < S1.u32 ? S0.u32 : S1.u32
+V_MAX_U32
+15
+Select the maximum of two unsigned 32-bit integer inputs and store the selected value into a vector register.
+D0.u32 = S0.u32 >= S1.u32 ? S0.u32 : S1.u32
+V_LSHRREV_B32
+16
+Given a shift count in the first vector input, calculate the logical shift right of the second vector input and store
+the result into a vector register.
+D0.u32 = (S1.u32 >> S0[4 : 0].u32)
+V_ASHRREV_I32
+17
+Given a shift count in the first vector input, calculate the arithmetic shift right (preserving sign bit) of the second
+vector input and store the result into a vector register.
+D0.i32 = (S1.i32 >> S0[4 : 0].u32)
+V_LSHLREV_B32
+18
+Given a shift count in the first vector input, calculate the logical shift left of the second vector input and store the
+result into a vector register.
+D0.u32 = (S1.u32 << S0[4 : 0].u32)
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+177 of 600
+
+=== p186 ===
+V_AND_B32
+19
+Calculate bitwise AND on two vector inputs and store the result into a vector register.
+D0.u32 = (S0.u32 & S1.u32)
+Notes
+Input and output modifiers not supported.
+V_OR_B32
+20
+Calculate bitwise OR on two vector inputs and store the result into a vector register.
+D0.u32 = (S0.u32 | S1.u32)
+Notes
+Input and output modifiers not supported.
+V_XOR_B32
+21
+Calculate bitwise XOR on two vector inputs and store the result into a vector register.
+D0.u32 = (S0.u32 ^ S1.u32)
+Notes
+Input and output modifiers not supported.
+V_DOT2C_F32_BF16
+22
+Compute the dot product of two packed 2-D BF16 float inputs in the single-precision float domain and
+accumulate with the single-precision float value in the destination register.
+tmp = D0.f32;
+tmp += bf16_to_f32(S0[15 : 0].bf16) * bf16_to_f32(S1[15 : 0].bf16);
+tmp += bf16_to_f32(S0[31 : 16].bf16) * bf16_to_f32(S1[31 : 16].bf16);
+D0.f32 = tmp
+Notes
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+178 of 600
+
+=== p187 ===
+ABS[1:0] are used as NEG_HI[1:0] during translation.
+NEG and ABS input modifiers do not affect S2.
+V_FMAMK_F32
+23
+Multiply a single-precision float input with a literal constant and add a second single-precision float input using
+fused multiply add, and store the result into a vector register.
+D0.f32 = fma(S0.f32, SIMM32.f32, S1.f32)
+Notes
+This opcode cannot use the VOP3 encoding and cannot use input/output modifiers.
+V_FMAAK_F32
+24
+Multiply two single-precision float inputs and add a literal constant using fused multiply add, and store the
+result into a vector register.
+D0.f32 = fma(S0.f32, S1.f32, SIMM32.f32)
+Notes
+This opcode cannot use the VOP3 encoding and cannot use input/output modifiers.
+V_ADD_CO_U32
+25
+Add two unsigned 32-bit integer inputs, store the result into a vector register and store the carry-out mask into
+a scalar register.
+tmp = 64'U(S0.u32) + 64'U(S1.u32);
+VCC.u64[laneId] = tmp >= 0x100000000ULL ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_ADDC_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair.
+Supports saturation (unsigned 32-bit integer domain).
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+179 of 600
+
+=== p188 ===
+V_SUB_CO_U32
+26
+Subtract the second unsigned 32-bit integer input from the first input, store the result into a vector register and
+store the carry-out mask into a scalar register.
+tmp = S0.u32 - S1.u32;
+VCC.u64[laneId] = S1.u32 > S0.u32 ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_SUBB_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair.
+Supports saturation (unsigned 32-bit integer domain).
+V_SUBREV_CO_U32
+27
+Subtract the first unsigned 32-bit integer input from the second input, store the result into a vector register and
+store the carry-out mask into a scalar register.
+tmp = S1.u32 - S0.u32;
+VCC.u64[laneId] = S0.u32 > S1.u32 ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_SUBB_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair.
+Supports saturation (unsigned 32-bit integer domain).
+V_ADDC_CO_U32
+28
+Add two unsigned 32-bit integer inputs and a bit from a carry-in mask, store the result into a vector register and
+store the carry-out mask into a scalar register.
+tmp = 64'U(S0.u32) + 64'U(S1.u32) + VCC.u64[laneId].u64;
+VCC.u64[laneId] = tmp >= 0x100000000ULL ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_ADDC_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair, and the VCC source comes from the SGPR-pair at
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+180 of 600
+
+=== p189 ===
+S2.u.
+Supports saturation (unsigned 32-bit integer domain).
+V_SUBB_CO_U32
+29
+Subtract the second unsigned 32-bit integer input from the first input, subtract a bit from the carry-in mask,
+store the result into a vector register and store the carry-out mask into a scalar register.
+tmp = S0.u32 - S1.u32 - VCC.u64[laneId].u32;
+VCC.u64[laneId] = 64'U(S1.u32) + VCC.u64[laneId].u64 > 64'U(S0.u32) ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_SUBB_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair, and the VCC source comes from the SGPR-pair at
+S2.u.
+Supports saturation (unsigned 32-bit integer domain).
+V_SUBBREV_CO_U32
+30
+Subtract the first unsigned 32-bit integer input from the second input, subtract a bit from the carry-in mask,
+store the result into a vector register and store the carry-out mask into a scalar register.
+tmp = S1.u32 - S0.u32 - VCC.u64[laneId].u32;
+VCC.u64[laneId] = 64'U(S0.u32) + VCC.u64[laneId].u64 > 64'U(S1.u32) ? 1'1U : 1'0U;
+// VCC is an UNSIGNED overflow/carry-out for V_SUBB_CO_U32.
+D0.u32 = tmp.u32
+Notes
+In VOP3 the VCC destination may be an arbitrary SGPR-pair, and the VCC source comes from the SGPR-pair at
+S2.u.
+Supports saturation (unsigned 32-bit integer domain).
+V_ADD_F16
+31
+Add two floating point inputs and store the result into a vector register.
+D0.f16 = S0.f16 + S1.f16
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+181 of 600
+
+=== p190 ===
+Notes
+0.5ULP precision. Supports denormals, round mode, exception flags and saturation.
+V_SUB_F16
+32
+Subtract the second floating point input from the first input and store the result into a vector register.
+D0.f16 = S0.f16 - S1.f16
+Notes
+0.5ULP precision. Supports denormals, round mode, exception flags and saturation.
+V_SUBREV_F16
+33
+Subtract the first floating point input from the second input and store the result into a vector register.
+D0.f16 = S1.f16 - S0.f16
+Notes
+0.5ULP precision. Supports denormals, round mode, exception flags and saturation.
+V_MUL_F16
+34
+Multiply two floating point inputs and store the result into a vector register.
+D0.f16 = S0.f16 * S1.f16
+Notes
+0.5ULP precision. Supports denormals, round mode, exception flags and saturation.
+V_MAC_F16
+35
+Multiply two floating point inputs and accumulate the result into the destination register. Implements IEEE
+rules and non-standard rule for OPSEL.
+tmp = S0.f16 * S1.f16 + D0.f16;
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+182 of 600
+
+=== p191 ===
+if OPSEL.u4[3] then
+    D0 = { tmp.f16, D0[15 : 0] }
+else
+    D0 = { 16'0, tmp.f16 }
+endif
+Notes
+Supports round mode, exception flags, saturation.
+V_MADMK_F16
+36
+Multiply a floating point input with a literal constant and add a second floating point input, and store the result
+into a vector register. Implements IEEE rules.
+tmp = S0.f16 * SIMM16.f16 + S1.f16;
+D0 = { 16'0, tmp.f16 }
+Notes
+This opcode cannot use the VOP3 encoding and cannot use input/output modifiers. Supports round mode,
+exception flags, saturation.
+V_MADAK_F16
+37
+Multiply two floating point inputs and add a literal constant, and store the result into a vector register.
+Implements IEEE rules.
+tmp = S0.f16 * S1.f16 + SIMM16.f16;
+D0 = { 16'0, tmp.f16 }
+Notes
+This opcode cannot use the VOP3 encoding and cannot use input/output modifiers. Supports round mode,
+exception flags, saturation.
+V_ADD_U16
+38
+Add two unsigned 16-bit integer inputs and store the result into a vector register. No carry-in or carry-out
+support.
+D0.u16 = S0.u16 + S1.u16
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+183 of 600
+
+=== p192 ===
+Notes
+Supports saturation (unsigned 16-bit integer domain).
+V_SUB_U16
+39
+Subtract the second unsigned 16-bit integer input from the first input and store the result into a vector register.
+No carry-in or carry-out support.
+D0.u16 = S0.u16 - S1.u16
+Notes
+Supports saturation (unsigned 16-bit integer domain).
+V_SUBREV_U16
+40
+Subtract the first unsigned 16-bit integer input from the second input and store the result into a vector register.
+No carry-in or carry-out support.
+D0.u16 = S1.u16 - S0.u16
+Notes
+Supports saturation (unsigned 16-bit integer domain).
+V_MUL_LO_U16
+41
+Multiply two unsigned 16-bit integer inputs and store the low bits of the result into a vector register.
+D0.u16 = S0.u16 * S1.u16
+Notes
+Supports saturation (unsigned 16-bit integer domain).
+V_LSHLREV_B16
+42
+Given a shift count in the first vector input, calculate the logical shift left of the second vector input and store the
+result into a vector register.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+184 of 600
+
+=== p193 ===
+D0.u16 = (S1.u16 << S0[3 : 0].u32)
+V_LSHRREV_B16
+43
+Given a shift count in the first vector input, calculate the logical shift right of the second vector input and store
+the result into a vector register.
+D0.u16 = (S1.u16 >> S0[3 : 0].u32)
+V_ASHRREV_I16
+44
+Given a shift count in the first vector input, calculate the arithmetic shift right (preserving sign bit) of the second
+vector input and store the result into a vector register.
+D0.i16 = (S1.i16 >> S0[3 : 0].u32)
+V_MAX_F16
+45
+Select the maximum of two half-precision float inputs and store the result into a vector register.
+if (WAVE_MODE.IEEE && isSignalNAN(64'F(S0.f16))) then
+    D0.f16 = 16'F(cvtToQuietNAN(64'F(S0.f16)))
+elsif (WAVE_MODE.IEEE && isSignalNAN(64'F(S1.f16))) then
+    D0.f16 = 16'F(cvtToQuietNAN(64'F(S1.f16)))
+elsif isNAN(64'F(S0.f16)) then
+    D0.f16 = S1.f16
+elsif isNAN(64'F(S1.f16)) then
+    D0.f16 = S0.f16
+elsif ((64'F(S0.f16) == +0.0) && (64'F(S1.f16) == -0.0)) then
+    D0.f16 = S0.f16
+elsif ((64'F(S0.f16) == -0.0) && (64'F(S1.f16) == +0.0)) then
+    D0.f16 = S1.f16
+elsif WAVE_MODE.IEEE then
+    D0.f16 = S0.f16 >= S1.f16 ? S0.f16 : S1.f16
+else
+    D0.f16 = S0.f16 > S1.f16 ? S0.f16 : S1.f16
+endif
+Notes
+IEEE compliant. Supports denormals, round mode, exception flags, saturation.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+185 of 600
+
+=== p194 ===
+V_MIN_F16
+46
+Select the minimum of two half-precision float inputs and store the result into a vector register.
+if (WAVE_MODE.IEEE && isSignalNAN(64'F(S0.f16))) then
+    D0.f16 = 16'F(cvtToQuietNAN(64'F(S0.f16)))
+elsif (WAVE_MODE.IEEE && isSignalNAN(64'F(S1.f16))) then
+    D0.f16 = 16'F(cvtToQuietNAN(64'F(S1.f16)))
+elsif isNAN(64'F(S0.f16)) then
+    D0.f16 = S1.f16
+elsif isNAN(64'F(S1.f16)) then
+    D0.f16 = S0.f16
+elsif ((64'F(S0.f16) == +0.0) && (64'F(S1.f16) == -0.0)) then
+    D0.f16 = S1.f16
+elsif ((64'F(S0.f16) == -0.0) && (64'F(S1.f16) == +0.0)) then
+    D0.f16 = S0.f16
+else
+    // Note: there's no IEEE case here like there is for V_MAX_F16.
+    D0.f16 = S0.f16 < S1.f16 ? S0.f16 : S1.f16
+endif
+Notes
+IEEE compliant. Supports denormals, round mode, exception flags, saturation.
+V_MAX_U16
+47
+Select the maximum of two unsigned 16-bit integer inputs and store the selected value into a vector register.
+D0.u16 = S0.u16 >= S1.u16 ? S0.u16 : S1.u16
+V_MAX_I16
+48
+Select the maximum of two signed 16-bit integer inputs and store the selected value into a vector register.
+D0.i16 = S0.i16 >= S1.i16 ? S0.i16 : S1.i16
+V_MIN_U16
+49
+Select the minimum of two unsigned 16-bit integer inputs and store the selected value into a vector register.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+186 of 600
+
+=== p195 ===
+D0.u16 = S0.u16 < S1.u16 ? S0.u16 : S1.u16
+V_MIN_I16
+50
+Select the minimum of two signed 16-bit integer inputs and store the selected value into a vector register.
+D0.i16 = S0.i16 < S1.i16 ? S0.i16 : S1.i16
+V_LDEXP_F16
+51
+Multiply the first input, a floating point value, by an integral power of 2 specified in the second input, a signed
+integer value, and store the floating point result into a vector register.
+D0.f16 = S0.f16 * 16'F(2.0F ** 32'I(S1.i16))
+Notes
+Compare with the ldexp() function in C. Note that the S1 has a format of f16 since floating point literal
+constants are interpreted as 16 bit value for this opcode.
+V_ADD_U32
+52
+Add two unsigned 32-bit integer inputs and store the result into a vector register. No carry-in or carry-out
+support.
+D0.u32 = S0.u32 + S1.u32
+Notes
+Supports saturation (unsigned 32-bit integer domain).
+V_SUB_U32
+53
+Subtract the second unsigned 32-bit integer input from the first input and store the result into a vector register.
+No carry-in or carry-out support.
+D0.u32 = S0.u32 - S1.u32
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+187 of 600
+
+=== p196 ===
+Notes
+Supports saturation (unsigned 32-bit integer domain).
+V_SUBREV_U32
+54
+Subtract the first unsigned 32-bit integer input from the second input and store the result into a vector register.
+No carry-in or carry-out support.
+D0.u32 = S1.u32 - S0.u32
+Notes
+Supports saturation (unsigned 32-bit integer domain).
+V_DOT2C_F32_F16
+55
+Compute the dot product of two packed 2-D half-precision float inputs in the single-precision float domain and
+accumulate with the single-precision float value in the destination register.
+tmp = D0.f32;
+tmp += f16_to_f32(S0[15 : 0].f16) * f16_to_f32(S1[15 : 0].f16);
+tmp += f16_to_f32(S0[31 : 16].f16) * f16_to_f32(S1[31 : 16].f16);
+D0.f32 = tmp
+V_DOT2C_I32_I16
+56
+Compute the dot product of two packed 2-D signed 16-bit integer inputs in the signed 32-bit integer domain and
+accumulate with the signed 32-bit integer value in the destination register.
+tmp = D0.i32;
+tmp += i16_to_i32(S0[15 : 0].i16) * i16_to_i32(S1[15 : 0].i16);
+tmp += i16_to_i32(S0[31 : 16].i16) * i16_to_i32(S1[31 : 16].i16);
+D0.i32 = tmp
+V_DOT4C_I32_I8
+57
+Compute the dot product of two packed 4-D signed 8-bit integer inputs in the signed 32-bit integer domain and
+accumulate with the signed 32-bit integer value in the destination register.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+188 of 600
+
+=== p197 ===
+tmp = D0.i32;
+tmp += i8_to_i32(S0[7 : 0].i8) * i8_to_i32(S1[7 : 0].i8);
+tmp += i8_to_i32(S0[15 : 8].i8) * i8_to_i32(S1[15 : 8].i8);
+tmp += i8_to_i32(S0[23 : 16].i8) * i8_to_i32(S1[23 : 16].i8);
+tmp += i8_to_i32(S0[31 : 24].i8) * i8_to_i32(S1[31 : 24].i8);
+D0.i32 = tmp
+V_DOT8C_I32_I4
+58
+Compute the dot product of two packed 8-D signed 4-bit integer inputs in the signed 32-bit integer domain and
+accumulate with the signed 32-bit integer value in the destination register.
+tmp = D0.i32;
+tmp += i4_to_i32(S0[3 : 0].i4) * i4_to_i32(S1[3 : 0].i4);
+tmp += i4_to_i32(S0[7 : 4].i4) * i4_to_i32(S1[7 : 4].i4);
+tmp += i4_to_i32(S0[11 : 8].i4) * i4_to_i32(S1[11 : 8].i4);
+tmp += i4_to_i32(S0[15 : 12].i4) * i4_to_i32(S1[15 : 12].i4);
+tmp += i4_to_i32(S0[19 : 16].i4) * i4_to_i32(S1[19 : 16].i4);
+tmp += i4_to_i32(S0[23 : 20].i4) * i4_to_i32(S1[23 : 20].i4);
+tmp += i4_to_i32(S0[27 : 24].i4) * i4_to_i32(S1[27 : 24].i4);
+tmp += i4_to_i32(S0[31 : 28].i4) * i4_to_i32(S1[31 : 28].i4);
+D0.i32 = tmp
+V_FMAC_F32
+59
+Multiply two floating point inputs and accumulate the result into the destination register using fused multiply
+add.
+D0.f32 = fma(S0.f32, S1.f32, D0.f32)
+V_PK_FMAC_F16
+60
+Multiply two packed half-precision float inputs component-wise and accumulate the result into the destination
+register using fused multiply add.
+D0[15 : 0].f16 = fma(S0[15 : 0].f16, S1[15 : 0].f16, D0[15 : 0].f16);
+D0[31 : 16].f16 = fma(S0[31 : 16].f16, S1[31 : 16].f16, D0[31 : 16].f16)
+V_XNOR_B32
+61
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+189 of 600
+
+=== p198 ===
+Calculate bitwise XNOR on two vector inputs and store the result into a vector register.
+D0.u32 = ~(S0.u32 ^ S1.u32)
+Notes
+Input and output modifiers not supported.
+CDNA4 Instruction Set Architecture
+12.7. VOP2 Instructions
+190 of 600

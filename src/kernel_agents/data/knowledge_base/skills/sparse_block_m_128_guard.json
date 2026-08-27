@@ -1,0 +1,27 @@
+{
+  "name": "sparse_block_m_128_guard",
+  "level": 0,
+  "backend": "shared",
+  "description": "Sparse attention requires BLOCK_M=128; BLOCK_M=64 causes silent data corruption",
+  "preconditions": [
+    "sparse attention kernel",
+    "any backend"
+  ],
+  "steps": [
+    "Verify BLOCK_M >= 128 in kernel configuration",
+    "If BLOCK_M=64, increase to 128 before any other optimization",
+    "Re-run correctness test (SNR gate) after change"
+  ],
+  "expected_impact": "correctness: prevents silent corruption in sparse patterns",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [],
+  "created_at": "2026-04-21T19:59:32.315174",
+  "updated_at": "2026-04-21T19:59:32.315175",
+  "experiment_ids": [
+    "sla_fwd_flydsl_prod"
+  ]
+}

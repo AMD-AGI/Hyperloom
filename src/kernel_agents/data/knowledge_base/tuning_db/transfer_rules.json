@@ -1,0 +1,135 @@
+[
+  {
+    "rule_id": "sparse_wpe2",
+    "description": "For ALL sparse attention on gfx950, wpe=2 beats wpe=3 (SLA fwd: 8.86 vs 13.40 ms)",
+    "scope": "all_sparse",
+    "parameter": "wpe",
+    "recommended_value": 2,
+    "anti_value": 3,
+    "evidence": [
+      "sla_fwd_flydsl_prod",
+      "sla_bwd_ck_prod",
+      "vsa_sparse_fwd_ck"
+    ],
+    "confidence": 0.6000000000000001
+  },
+  {
+    "rule_id": "sparse_block_m_128",
+    "description": "BLOCK_M=128 mandatory for sparse attention \u2014 BLOCK_M=64 causes silent corruption",
+    "scope": "all_sparse",
+    "parameter": "BLOCK_M",
+    "recommended_value": 128,
+    "anti_value": 64,
+    "evidence": [
+      "sla_fwd_flydsl_prod",
+      "vsa_sparse_fwd_ck"
+    ],
+    "confidence": 0.4
+  },
+  {
+    "rule_id": "ck_vgpr_256_cliff",
+    "description": "CK occupancy cliff at VGPR=256: occupancy drops from 2 to 1 (step function)",
+    "scope": "all",
+    "parameter": "VGPR_BUDGET",
+    "recommended_value": "<=256",
+    "anti_value": ">256",
+    "evidence": [
+      "sla_bwd_ck_prod",
+      "sla_bwd_ck_tier25"
+    ],
+    "confidence": 0.4
+  },
+  {
+    "rule_id": "moe_sorted_tokens",
+    "description": "MoE kernels benefit from pre-sorting tokens by expert assignment",
+    "scope": "moe_*",
+    "parameter": "sorted_tokens",
+    "recommended_value": true,
+    "anti_value": false,
+    "evidence": [
+      "kimi_k2_moe_prod"
+    ],
+    "confidence": 0.2
+  },
+  {
+    "rule_id": "mla_q_global_not_lds",
+    "description": "MLA decode: load Q from global per-MFMA (L2 cache reuse) instead of pinning to LDS \u2014 saves 72 VGPRs",
+    "scope": "mla_*",
+    "parameter": "Q_LOAD_STRATEGY",
+    "recommended_value": "global_per_mfma",
+    "anti_value": "lds_pinned",
+    "evidence": [
+      "mla_ck_native_baseline"
+    ],
+    "confidence": 0.2
+  },
+  {
+    "rule_id": "mla_qk_head_dim_576",
+    "description": "MLA QK_HEAD_DIM=576 (512 latent + 64 RoPE) requires QK_K_ITERS=18 for MFMA_K=32",
+    "scope": "mla_*",
+    "parameter": "QK_K_ITERS",
+    "recommended_value": 18,
+    "anti_value": null,
+    "evidence": [
+      "mla_ck_native_baseline"
+    ],
+    "confidence": 0.2
+  },
+  {
+    "rule_id": "mla_two_stage_mandatory",
+    "description": "MLA must use two-stage (split KV + reduce) for variable-length paged KV cache",
+    "scope": "mla_*",
+    "parameter": "ALGORITHM",
+    "recommended_value": "two_stage_split_reduce",
+    "anti_value": "single_pass",
+    "evidence": [
+      "mla_ck_native_baseline",
+      "mla_triton_baseline"
+    ],
+    "confidence": 0.4
+  },
+  {
+    "rule_id": "auto_triton_num_warps_4",
+    "description": "For triton kernels, num_warps=4 is 1.11\u00d7 faster than num_warps=8 across 3 operations",
+    "scope": "all",
+    "parameter": "num_warps",
+    "recommended_value": 4,
+    "anti_value": 8,
+    "evidence": [
+      "mla_decode",
+      "sla_sparse_attention_fwd",
+      "vsa_block_sparse_attention_fwd"
+    ],
+    "confidence": 0.6000000000000001
+  },
+  {
+    "rule_id": "auto__iteration_1",
+    "description": "For  kernels, iteration=1 is 2.61\u00d7 faster than iteration=9 across 4 operations",
+    "scope": "all",
+    "parameter": "iteration",
+    "recommended_value": 1,
+    "anti_value": 9,
+    "evidence": [
+      "fused_moe_triton_kernels",
+      "triton_sparse_attn_decode",
+      "gemm",
+      "mla_decode_fwd_kernel"
+    ],
+    "confidence": 0.8
+  },
+  {
+    "rule_id": "auto__kept_True",
+    "description": "For  kernels, kept=True is 1.35\u00d7 faster than kept=False across 4 operations",
+    "scope": "all",
+    "parameter": "kept",
+    "recommended_value": true,
+    "anti_value": false,
+    "evidence": [
+      "fused_moe_triton_kernels",
+      "triton_sparse_attn_decode",
+      "gemm",
+      "mla_decode_fwd_kernel"
+    ],
+    "confidence": 0.8
+  }
+]

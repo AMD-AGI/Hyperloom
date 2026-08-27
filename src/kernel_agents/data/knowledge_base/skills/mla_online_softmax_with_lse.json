@@ -1,0 +1,30 @@
+{
+  "name": "mla_online_softmax_with_lse",
+  "level": 0,
+  "backend": "shared",
+  "description": "Two-stage online softmax: per-split tracking (Stage 1) + cross-split reduction via LSE (Stage 2)",
+  "preconditions": [
+    "split-KV attention",
+    "variable-length sequences",
+    "numerical stability required"
+  ],
+  "steps": [
+    "Stage 1: maintain per-head (rmax, rsum) across KV tiles within each split",
+    "On each new tile: rescale = exp(old_max - new_max), rsum *= rescale",
+    "Output partial O and LSE = rmax + log(rsum) per split",
+    "Stage 2 (Triton): load all splits, find global max LSE",
+    "Combine: O_final = sum(exp(lse_i - lse_max) * O_i) / sum(exp(lse_i - lse_max))"
+  ],
+  "expected_impact": "Numerically stable attention for arbitrary context lengths with split-KV parallelism",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [],
+  "created_at": "2026-04-21T19:59:32.331683",
+  "updated_at": "2026-04-21T19:59:32.331684",
+  "experiment_ids": [
+    "mla_ck_native_baseline"
+  ]
+}

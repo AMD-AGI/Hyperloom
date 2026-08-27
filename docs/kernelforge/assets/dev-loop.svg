@@ -1,0 +1,155 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 420" font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="blueGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#667eea"/>
+      <stop offset="100%" style="stop-color:#764ba2"/>
+    </linearGradient>
+    <linearGradient id="greenGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#11998e"/>
+      <stop offset="100%" style="stop-color:#38ef7d"/>
+    </linearGradient>
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#eb3349"/>
+      <stop offset="100%" style="stop-color:#f45c43"/>
+    </linearGradient>
+    <linearGradient id="orangeGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f7971e"/>
+      <stop offset="100%" style="stop-color:#ffd200"/>
+    </linearGradient>
+    <linearGradient id="pinkGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#fc5c7d"/>
+      <stop offset="100%" style="stop-color:#6a82fb"/>
+    </linearGradient>
+    <linearGradient id="tealGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4facfe"/>
+      <stop offset="100%" style="stop-color:#00f2fe"/>
+    </linearGradient>
+    <filter id="sh" x="-4%" y="-4%" width="108%" height="116%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#000" flood-opacity="0.2"/>
+    </filter>
+    <marker id="arr" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#64748b"/>
+    </marker>
+    <marker id="arrRed" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#eb3349"/>
+    </marker>
+    <marker id="arrGreen" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#38ef7d"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="960" height="420" rx="12" fill="#0f172a"/>
+
+  <!-- Title -->
+  <text x="480" y="32" text-anchor="middle" fill="#e2e8f0" font-size="16" font-weight="700" letter-spacing="0.5">ENFORCED DEVELOPMENT LOOP</text>
+  <text x="480" y="48" text-anchor="middle" fill="#64748b" font-size="10">Every fellow must follow this exact sequence — skipping a step is blocked</text>
+
+  <!-- Step 1: READ -->
+  <rect x="30" y="72" width="120" height="68" rx="10" fill="url(#blueGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="90" y="80" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 1</text>
+  <text x="90" y="102" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">READ</text>
+  <text x="90" y="118" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="9">Source &amp; Config</text>
+  <text x="90" y="132" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="8">Understand first</text>
+  <line x1="150" y1="106" x2="175" y2="106" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 2: PREDICT -->
+  <rect x="180" y="72" width="120" height="68" rx="10" fill="url(#tealGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="240" y="80" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 2</text>
+  <text x="240" y="102" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">PREDICT</text>
+  <text x="240" y="118" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="9">PMC Impact</text>
+  <text x="240" y="132" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="8">Before building</text>
+  <line x1="300" y1="106" x2="325" y2="106" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 3: BUILD -->
+  <rect x="330" y="72" width="120" height="68" rx="10" fill="url(#orangeGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="390" y="80" text-anchor="middle" fill="rgba(0,0,0,0.4)" font-size="9" font-weight="600">STEP 3</text>
+  <text x="390" y="102" text-anchor="middle" fill="#1a1a2e" font-size="14" font-weight="700">BUILD</text>
+  <text x="390" y="118" text-anchor="middle" fill="rgba(0,0,0,0.6)" font-size="9">Clean Artifacts</text>
+  <text x="390" y="132" text-anchor="middle" fill="rgba(0,0,0,0.4)" font-size="8">Stale .so detection</text>
+  <line x1="450" y1="106" x2="475" y2="106" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 4: TEST (Decision diamond as rounded rect) -->
+  <rect x="480" y="65" width="140" height="82" rx="10" fill="#1e293b" stroke="#eb3349" stroke-width="2.5" filter="url(#sh)"/>
+  <text x="550" y="83" text-anchor="middle" fill="#eb3349" font-size="9" font-weight="600">STEP 4 — GATE</text>
+  <text x="550" y="105" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">TEST</text>
+  <text x="550" y="121" text-anchor="middle" fill="#f87171" font-size="10" font-weight="600">SNR ≥ 30 dB ?</text>
+  <text x="550" y="139" text-anchor="middle" fill="#64748b" font-size="8">Never bench wrong code</text>
+
+  <!-- FAIL path -->
+  <line x1="550" y1="147" x2="550" y2="200" stroke="#eb3349" stroke-width="2" marker-end="url(#arrRed)"/>
+  <rect x="480" y="205" width="140" height="44" rx="8" fill="url(#redGrad)" filter="url(#sh)"/>
+  <text x="550" y="225" text-anchor="middle" fill="#fff" font-size="12" font-weight="700">STOP</text>
+  <text x="550" y="241" text-anchor="middle" fill="rgba(255,255,255,0.8)" font-size="9">Fix numerics first</text>
+  <text x="565" y="185" fill="#eb3349" font-size="10" font-weight="600">FAIL</text>
+
+  <!-- PASS path -->
+  <line x1="620" y1="106" x2="648" y2="106" stroke="#38ef7d" stroke-width="2" marker-end="url(#arrGreen)"/>
+  <text x="634" y="98" fill="#38ef7d" font-size="10" font-weight="600">PASS</text>
+
+  <!-- Step 5: BENCH -->
+  <rect x="653" y="72" width="120" height="68" rx="10" fill="url(#greenGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="713" y="80" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 5</text>
+  <text x="713" y="102" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">BENCH</text>
+  <text x="713" y="118" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="9">30-iter Median</text>
+  <text x="713" y="132" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="8">In-context only</text>
+  <line x1="773" y1="106" x2="798" y2="106" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 6: PROFILE -->
+  <rect x="803" y="72" width="130" height="68" rx="10" fill="url(#pinkGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="868" y="80" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 6</text>
+  <text x="868" y="102" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">PROFILE</text>
+  <text x="868" y="118" text-anchor="middle" fill="rgba(255,255,255,0.7)" font-size="9">PMC Counters</text>
+  <text x="868" y="132" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="8">rocprofv3</text>
+
+  <!-- Down from PROFILE -->
+  <line x1="868" y1="140" x2="868" y2="195" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 7: ANALYZE -->
+  <rect x="803" y="200" width="130" height="60" rx="10" fill="url(#blueGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="868" y="218" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 7</text>
+  <text x="868" y="238" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">ANALYZE</text>
+  <text x="868" y="254" text-anchor="middle" fill="rgba(255,255,255,0.6)" font-size="8">Predict vs Reality</text>
+
+  <!-- Left from ANALYZE -->
+  <line x1="803" y1="230" x2="778" y2="230" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 8: DECIDE -->
+  <rect x="653" y="200" width="120" height="60" rx="10" fill="url(#orangeGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="713" y="218" text-anchor="middle" fill="rgba(0,0,0,0.4)" font-size="9" font-weight="600">STEP 8</text>
+  <text x="713" y="238" text-anchor="middle" fill="#1a1a2e" font-size="14" font-weight="700">DECIDE</text>
+  <text x="713" y="254" text-anchor="middle" fill="rgba(0,0,0,0.5)" font-size="8">ONE variable change</text>
+
+  <!-- Left from DECIDE -->
+  <line x1="653" y1="230" x2="338" y2="230" stroke="#64748b" stroke-width="1.5" marker-end="url(#arr)"/>
+
+  <!-- Step 9: LOG -->
+  <rect x="213" y="200" width="120" height="60" rx="10" fill="url(#tealGrad)" filter="url(#sh)" opacity="0.9"/>
+  <text x="273" y="218" text-anchor="middle" fill="rgba(255,255,255,0.5)" font-size="9" font-weight="600">STEP 9</text>
+  <text x="273" y="238" text-anchor="middle" fill="#fff" font-size="14" font-weight="700">LOG</text>
+  <text x="273" y="254" text-anchor="middle" fill="rgba(255,255,255,0.6)" font-size="8">Config · SNR · ms · PMC</text>
+
+  <!-- Loop back arrow -->
+  <path d="M 213 230 L 50 230 Q 25 230 25 210 L 25 130 Q 25 106 30 106" fill="none" stroke="#667eea" stroke-width="2" stroke-dasharray="6,3" marker-end="url(#arr)" opacity="0.7"/>
+  <text x="25" y="170" fill="#667eea" font-size="9" font-weight="600" opacity="0.7" transform="rotate(-90, 25, 170)">REPEAT</text>
+
+  <!-- Key Rules Box -->
+  <rect x="30" y="295" width="900" height="110" rx="10" fill="#1e293b" stroke="#334155" stroke-width="1"/>
+  <text x="480" y="318" text-anchor="middle" fill="#e2e8f0" font-size="12" font-weight="700">KEY RULES — Violations are blocked by the system prompt</text>
+
+  <text x="70" y="345" fill="#f87171" font-size="11" font-weight="600">SNR Gate</text>
+  <text x="70" y="360" fill="#94a3b8" font-size="10">SNR &lt; 30 dB → STOP. Never benchmark a wrong kernel.</text>
+  <text x="70" y="375" fill="#64748b" font-size="9">Caught: AGPR asm bug (21 dB SNR, silently wrong results)</text>
+
+  <text x="370" y="345" fill="#fbbf24" font-size="11" font-weight="600">One Variable Rule</text>
+  <text x="370" y="360" fill="#94a3b8" font-size="10">Change exactly ONE config per iteration.</text>
+  <text x="370" y="375" fill="#64748b" font-size="9">Enables: causal attribution of perf changes to specific edits</text>
+
+  <text x="670" y="345" fill="#4ade80" font-size="11" font-weight="600">Predict First</text>
+  <text x="670" y="360" fill="#94a3b8" font-size="10">Predict PMC impact BEFORE building.</text>
+  <text x="670" y="375" fill="#64748b" font-size="9">Prevents: random exploration, "try and hope" anti-pattern</text>
+
+  <!-- Dividers -->
+  <line x1="345" y1="332" x2="345" y2="390" stroke="#334155" stroke-width="1"/>
+  <line x1="645" y1="332" x2="645" y2="390" stroke="#334155" stroke-width="1"/>
+</svg>

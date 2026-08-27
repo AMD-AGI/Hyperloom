@@ -1,0 +1,33 @@
+{
+  "name": "autograd_function_requires_grad_check",
+  "level": 0,
+  "backend": "triton",
+  "description": "Gotcha: torch.is_grad_enabled() returns False inside torch.autograd.Function.forward by design — do NOT use it to guard backward-save quant. Check input.requires_grad directly instead.",
+  "preconditions": [
+    "Custom torch.autograd.Function with static forward(ctx, ...)",
+    "Want to skip expensive bwd-save operations under torch.no_grad()"
+  ],
+  "steps": [
+    "WRONG: `if torch.is_grad_enabled(): do_expensive_bwd_save()` — always skips because autograd disables grad inside forward",
+    "RIGHT: `if a.requires_grad or b.requires_grad: do_expensive_bwd_save()` — correctly reflects caller intent",
+    "Under torch.no_grad(), autograd never calls backward() anyway, so setting up ctx state is moot — safe to always set.",
+    "Custom ctx attrs (ctx._my_flag = x) must be set unconditionally so backward() can read them without AttributeError."
+  ],
+  "expected_impact": "Correctness — inference (no_grad) path skips backward-save quant (~1 ms/forward saved). Avoids silent AttributeError when backward runs but forward skipped the ctx setup.",
+  "successes": 0,
+  "failures": 1,
+  "success_contexts": [],
+  "failure_contexts": [
+    "Initial MX-FP8 Function shipped with is_grad_enabled() check; crashed on first backward() call with 'FP8GroupedGemmMXFuncBackward has no attribute _use_mx_wgrad'. Fixed by switching to requires_grad check and setting ctx attrs unconditionally."
+  ],
+  "sub_skills": [],
+  "decision_rules": [
+    "Never use torch.is_grad_enabled() inside autograd.Function.forward — always False there.",
+    "Set all ctx custom attrs unconditionally; guard the expensive operations, not the ctx setup."
+  ],
+  "created_at": "2026-04-23T19:30:00",
+  "updated_at": "2026-04-23T19:30:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_primus_turbo"
+  ]
+}

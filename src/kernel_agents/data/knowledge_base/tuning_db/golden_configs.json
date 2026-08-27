@@ -1,0 +1,206 @@
+{
+  "sla_sparse_attention_fwd|flydsl|gfx950|bf16|batch=1|head_dim=128|heads=16|seq_len=4096": {
+    "config": {
+      "BLOCK_M": 128,
+      "BLOCK_N": 64,
+      "wpe": 2,
+      "num_stages": 1
+    },
+    "wall_ms": 8.859,
+    "snr_db": 142.0,
+    "pmc_diagnosis": "COMPUTE-BOUND",
+    "vgpr": 228,
+    "experiment_id": "sla_fwd_flydsl_prod",
+    "timestamp": "2026-04-21T19:59:32.256622"
+  },
+  "sla_sparse_attention_fwd|triton|gfx950|bf16|batch=1|head_dim=128|heads=16|seq_len=4096": {
+    "config": {
+      "BLOCK_M": 128,
+      "BLOCK_N": 64,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    "wall_ms": 9.612,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "BALANCED",
+    "vgpr": null,
+    "experiment_id": "sla_fwd_triton_baseline",
+    "timestamp": "2026-04-21T19:59:32.262051"
+  },
+  "sla_sparse_attention_bwd|ck|gfx950|bf16|batch=1|head_dim=128|heads=16|seq_len=4096": {
+    "config": {
+      "BLOCK_Q": 128,
+      "BLOCK_KV": 64,
+      "wpe": 2,
+      "split_bwd": true
+    },
+    "wall_ms": 44.97,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "COMPUTE-BOUND",
+    "vgpr": 240,
+    "experiment_id": "sla_bwd_ck_tier25",
+    "timestamp": "2026-04-21T19:59:32.267513"
+  },
+  "moe_mxfp4_decode|flydsl|gfx950|mxfp4|experts=8|hidden=7168|intermediate=2048|tokens=2048": {
+    "config": {
+      "BLOCK_SIZE_M": 32,
+      "sorted_tokens": true
+    },
+    "wall_ms": 0.62,
+    "snr_db": 30.0,
+    "pmc_diagnosis": "MEMORY-BOUND",
+    "vgpr": null,
+    "experiment_id": "kimi_k2_moe_prod",
+    "timestamp": "2026-04-21T19:59:32.270060"
+  },
+  "moe_mxfp4_decode|triton|gfx950|mxfp4|experts=8|hidden=7168|intermediate=2048|tokens=2048": {
+    "config": {},
+    "wall_ms": 0.823,
+    "snr_db": 30.0,
+    "pmc_diagnosis": "MEMORY-BOUND",
+    "vgpr": null,
+    "experiment_id": "kimi_k2_moe_baseline",
+    "timestamp": "2026-04-21T19:59:32.272666"
+  },
+  "vsa_block_sparse_attention_fwd|ck|gfx950|bf16|batch=1|head_dim=128|heads=5|seq_len=75600": {
+    "config": {
+      "BLOCK_M": 128,
+      "BLOCK_N": 64,
+      "wpe": 2
+    },
+    "wall_ms": 4.5,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "COMPUTE-BOUND",
+    "vgpr": 230,
+    "experiment_id": "vsa_sparse_fwd_ck",
+    "timestamp": "2026-04-21T19:59:32.275422"
+  },
+  "vsa_block_sparse_attention_fwd|triton|gfx950|bf16|batch=1|head_dim=128|heads=5|seq_len=75600": {
+    "config": {
+      "BLOCK_M": 128,
+      "BLOCK_N": 64,
+      "num_warps": 4
+    },
+    "wall_ms": 10.0,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "BALANCED",
+    "vgpr": null,
+    "experiment_id": "vsa_sparse_fwd_triton",
+    "timestamp": "2026-04-21T19:59:32.278033"
+  },
+  "sage_attention_sparse|triton|gfx950|bf16|batch=1|head_dim=128|heads=5|seq_len=75600": {
+    "config": {
+      "BLOCK_M": 128,
+      "BLOCK_N": 64,
+      "num_warps": 8,
+      "num_stages": 1
+    },
+    "wall_ms": 10.71,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "COMPUTE-BOUND",
+    "vgpr": null,
+    "experiment_id": "sage_attn_triton_opt",
+    "timestamp": "2026-04-21T19:59:32.280813"
+  },
+  "mla_decode|ck|gfx950|bf16|batch=8|max_seqlen_kv=4096|nhead=128|qk_head_dim=576|v_head_dim=512": {
+    "config": {
+      "BLOCK_N": 32,
+      "Q_PASSES": 2,
+      "MFMA_HEADS": 16,
+      "NUM_WARPS": 4,
+      "LDS_PAD": 8
+    },
+    "wall_ms": 0.0,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "BALANCED",
+    "vgpr": null,
+    "experiment_id": "mla_ck_native_baseline",
+    "timestamp": "2026-04-21T19:59:32.284671"
+  },
+  "mla_decode|triton|gfx950|bf16|batch=8|max_seqlen_kv=4096|nhead=128|qk_head_dim=576|v_head_dim=512": {
+    "config": {
+      "BLOCK_N": 32,
+      "TILE_HEADS": 16,
+      "num_warps": 4,
+      "num_stages": 1
+    },
+    "wall_ms": 0.0,
+    "snr_db": 35.0,
+    "pmc_diagnosis": "MEMORY-BOUND",
+    "vgpr": null,
+    "experiment_id": "mla_triton_baseline",
+    "timestamp": "2026-04-21T19:59:32.287064"
+  },
+  "mla_decode_fwd_kernel||gfx950|bf16|batch=8|kv_lora_rank=512|max_seqlen_kv=4096|max_seqlen_q=1|nhead=128|nhead_kv=1|page_size=16|qk_head_dim=576|qk_rope_head_dim=64|v_head_dim=512": {
+    "config": {
+      "iteration": 9,
+      "kept": true
+    },
+    "wall_ms": 0.1778,
+    "snr_db": 86.64,
+    "pmc_diagnosis": "",
+    "vgpr": null,
+    "experiment_id": "1aa52409",
+    "timestamp": "2026-04-21T21:33:46.675147"
+  },
+  "mla_decode_fwd_kernel||gfx950|bf16|batch=8|max_seqlen_kv=4096|nhead=128": {
+    "config": {
+      "iteration": 5,
+      "kept": true
+    },
+    "wall_ms": 0.1775,
+    "snr_db": 81.83,
+    "pmc_diagnosis": "",
+    "vgpr": null,
+    "experiment_id": "6206a385",
+    "timestamp": "2026-04-21T22:19:45.442163"
+  },
+  "triton_sparse_attn_decode||gfx950|bf16|batch=1|d_qk=576|d_v=512|h_q=64|s_q=1|topk=512": {
+    "config": {
+      "iteration": 1,
+      "kept": true
+    },
+    "wall_ms": 0.0455,
+    "snr_db": 53.62,
+    "pmc_diagnosis": "",
+    "vgpr": null,
+    "experiment_id": "71893d75",
+    "timestamp": "2026-05-14T07:15:29.958489"
+  },
+  "gemm||gfx942|bf16|K=2048|M=2048|N=2048": {
+    "config": {
+      "iteration": 2,
+      "kept": true
+    },
+    "wall_ms": 0.1042,
+    "snr_db": 96.61,
+    "pmc_diagnosis": "MEMORY-BOUND (optimize data movement)",
+    "vgpr": null,
+    "experiment_id": "0680de16",
+    "timestamp": "2026-06-13T11:02:30.418655"
+  },
+  "fused_moe_triton_kernels||gfx942|bf16|E=8|K=2048|M=4096|N=1408|TOPK=2": {
+    "config": {
+      "iteration": 1,
+      "kept": false
+    },
+    "wall_ms": 0.7753,
+    "snr_db": 47.74,
+    "pmc_diagnosis": "MEMORY-BOUND (optimize data movement)",
+    "vgpr": null,
+    "experiment_id": "06868b10",
+    "timestamp": "2026-06-13T16:57:25.842318"
+  },
+  "fused_moe_triton_kernels||gfx942|bf16|": {
+    "config": {
+      "iteration": 8,
+      "kept": true
+    },
+    "wall_ms": 0.2308,
+    "snr_db": 47.74,
+    "pmc_diagnosis": "MEMORY-BOUND (optimize data movement)",
+    "vgpr": null,
+    "experiment_id": "797776e7",
+    "timestamp": "2026-06-14T06:11:28.968805"
+  }
+}

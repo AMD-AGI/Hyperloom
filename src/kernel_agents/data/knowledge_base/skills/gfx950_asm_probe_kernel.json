@@ -1,0 +1,35 @@
+{
+  "name": "gfx950_asm_probe_kernel",
+  "level": 0,
+  "backend": "asm",
+  "description": "Build a standalone probe kernel to characterize a poorly-documented gfx950/CDNA4 instruction's behavior empirically. ~30 min vs hours of doc archaeology.",
+  "preconditions": [
+    "gfx950 / CDNA4",
+    "Need to understand semantics of a specific instruction (e.g., ds_read_b64_tr_b16) where docs are unclear or contradict experience"
+  ],
+  "steps": [
+    "Build minimal .s kernel: load test data to LDS, issue the instruction with various per-lane addressing modes, dump output to HBM via global_store_dwordx4.",
+    "Pick test data that creates UNIQUE identifiable values per source position. Two probe modes: V[i,j] = i (row-uniform) and V[i,j] = j (col-uniform). Each output bf16 then identifies which i or j the lane received.",
+    "Vary the per-lane addressing formula via a kernarg-selected mode (e.g., probe_mode = 0..3 selects different v_addr patterns).",
+    "Run via launcher, dump per-lane output to console. Inspect first 8-10 lanes covering different group boundaries (0, 1, 2, 3, 4, 8, 16, 17, 32, 48).",
+    "Cross-reference outputs to determine: which source positions feed which output lane, what transpose pattern HW does, whether all lanes contribute unique addrs or HW broadcasts subsets.",
+    "Document the discovered semantics in a reference memory + skill before integrating into the production kernel."
+  ],
+  "expected_impact": "Saves hours of doc reading + speculative implementation. Used to characterize ds_read_b64_tr_b16 semantics on gfx950 (= 4x4 transpose within 16-lane groups with 4-way lane duplication; needs V^T LDS layout to match MFMA-B output).",
+  "successes": 1,
+  "failures": 0,
+  "success_contexts": [
+    "asm_vsa_fwd week4s_tr_probe.s: characterized ds_read_b64_tr_b16 with 4 v_addr modes x 2 V data patterns. Discovered the 4-way duplication pattern that forced V^T layout requirement."
+  ],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [
+    {"if": "HW instruction behavior is unclear from docs or seems to produce wrong data", "then": "build a 60-line probe kernel BEFORE integrating into production code"},
+    {"if": "probe shows duplicated outputs across lanes within a group", "then": "HW is doing a smaller transpose tile than 16-lane width; need different LDS layout"}
+  ],
+  "created_at": "2026-05-14T00:00:00.000000",
+  "updated_at": "2026-05-14T00:00:00.000000",
+  "experiment_ids": [
+    "asm_vsa_fwd_week4s_tr_probe"
+  ]
+}

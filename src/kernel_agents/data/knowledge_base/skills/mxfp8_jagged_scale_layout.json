@@ -1,0 +1,34 @@
+{
+  "name": "mxfp8_jagged_scale_layout",
+  "level": 1,
+  "backend": "triton",
+  "description": "Per-expert jagged scale layout for MX-FP8 variable-K grouped GEMM — supports arbitrary per-expert M_g (including 0-token and giant experts) without padding.",
+  "preconditions": [
+    "gfx950 / MI350",
+    "MX-FP8 wgrad kernel reducing along variable-M per expert",
+    "tl.dot_scaled with e4m3 operands + e8m0 scales, GROUP_K=32"
+  ],
+  "steps": [
+    "Compute scale_offs[G+1] = cumsum of ceil(M_g / 32) per expert on GPU",
+    "Total scale columns = scale_offs[-1] (one .item() sync is cheap)",
+    "Quant kernel grid = (total_scale_cols, cdiv(L, BLOCK_L)) — NOT (G, max_sg, L) which wastes dispatches on unbalanced shapes",
+    "Block-to-expert lookup via torch.repeat_interleave(arange(G), sg_per_group) — passed as a small i32 tensor",
+    "In wgrad kernel: replace 'ms_start = m_start // 32' with 'ms_start = tl.load(scale_offs_ptr + group_idx)'",
+    "Tail-iter scale mask uses ceil-division: 'mask_ks = rks < (tail_m + GROUP_K - 1) // GROUP_K' (not //)",
+    "Zero-init fp8 output tensor so partial last scale groups have zero fp8 for rows past M_g"
+  ],
+  "expected_impact": "Correct on any per-expert M_g. +8% step on real unbalanced MoE trace (vs pad-to-32 approach) at gpt_oss_20B shape. Eliminates pad buffer + detect-if-unbalanced branch.",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": ["flat_grid_block_to_expert_lookup"],
+  "decision_rules": [
+    "Use when any M_g % 32 != 0 is possible in the workload. Real MoE traces always have some misaligned experts."
+  ],
+  "created_at": "2026-04-23T19:30:00",
+  "updated_at": "2026-04-23T19:30:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_primus_turbo"
+  ]
+}

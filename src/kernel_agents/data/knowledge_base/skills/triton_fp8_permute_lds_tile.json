@@ -1,0 +1,35 @@
+{
+  "name": "triton_fp8_permute_lds_tile",
+  "level": 1,
+  "backend": "triton",
+  "description": "PyTorch's generic `.permute(...).contiguous()` for 1-byte dtypes (fp8/uint8) runs at ~12% of HBM peak. An LDS-tile Triton transpose kernel hits ~85% peak. For 377 MB fp8 permute on gfx950: 1534 µs → 168 µs = 9.2× speedup. Critical for any HIP kernel that needs to rearrange fp8 operand layouts between Triton quant output and HIP kernel input (e.g., wgrad col-quant → HIP fwd-reuse).",
+  "preconditions": [
+    "Need a byte-level transpose / permute of a fp8 (or uint8) tensor",
+    "Source tensor stored [M, N] row-major, want [G, N, M_g] contig output (or similar transpose)",
+    "Have Triton runtime available"
+  ],
+  "steps": [
+    "Write a Triton kernel with BLOCK_M=64, BLOCK_N=64 tile (16 KB LDS per tile — comfortable)",
+    "Load source tile coalesced: src + rm[:, None] * stride_m + rn[None, :] (thread row varies slower, col faster)",
+    "Store transposed: dst + rn[:, None] * stride_m_out + rm[None, :] via tl.trans(tile)",
+    "Use num_warps=4 for gfx950; Triton's BlockedLayout picks sensible thread mapping when rows × cols both ≥ 64",
+    "View fp8 as uint8 for the kernel (they have same byte layout); view back at end",
+    "Grid: (cdiv(M_g, BLOCK_M), cdiv(N, BLOCK_N), G) for per-group transpose"
+  ],
+  "expected_impact": "377 MB fp8: 1534 us → 168 us (9.2× speedup). Enables HIP wgrad path that was 0.44× Triton to reach 0.99× Triton kernel-only. Reference impl: `Primus-Turbo/primus_turbo/hip/grouped_gemm_mxfp8/_permute_fp8.py::fp8_permute_M_to_GN`.",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [
+    "ALWAYS profile before assuming the kernel is the bottleneck. In the HIP wgrad case, 60% of time was in a torch API call running at 1/10th of HBM peak.",
+    "Use for any fp8/uint8 / int8 permute. bf16 permute via torch is less bad (~30% HBM peak) but still benefits from this pattern.",
+    "Don't try to pre-fuse the permute into an upstream quant kernel without measuring — Triton's blocked layout may fight the permuted store (see skill `triton_permuted_store_blocking_layout_pitfall`)."
+  ],
+  "created_at": "2026-04-24T00:00:00",
+  "updated_at": "2026-04-24T00:00:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_hip_primus_turbo"
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "name": "flat_grid_block_to_expert_lookup",
+  "level": 1,
+  "backend": "triton",
+  "description": "For per-expert kernels on unbalanced MoE workloads, use a flat grid sized to the ACTUAL per-expert work sum with a block_to_expert lookup tensor — NOT a (G, max_per_group, ...) grid which wastes dispatches.",
+  "preconditions": [
+    "Per-expert operation where per-expert work count varies",
+    "Unbalanced MoE real traces (e.g. tokens-per-expert range 0..16000+)",
+    "Triton kernel dispatcher"
+  ],
+  "steps": [
+    "Host-side: compute work_per_expert = (M_g + GROUP - 1) // GROUP (or whatever per-expert unit)",
+    "work_offs = cumsum(work_per_expert) prepended with 0 — [G+1] int64",
+    "total_work = work_offs[-1].item() — one CPU sync, negligible",
+    "block_to_expert = torch.repeat_interleave(arange(G, dtype=int32), work_per_expert.to(int32)) — shape [total_work]",
+    "Launch grid = (total_work, other_tile_dims...) — EXACT size",
+    "In kernel: expert_g = tl.load(block_to_expert_ptr + pid_flat); work_base = tl.load(work_offs_ptr + expert_g); local_idx = pid_flat - work_base",
+    "Eliminates ALL wasted dispatches; unbalanced MoE with giant experts no longer pays for (G × max_sg) blocks"
+  ],
+  "expected_impact": "On gpt_oss_20B unbalanced MoE (M_g range 105..16053): switched 723K wasted dispatches -> 2K exact dispatches. Wgrad quant bwd: 12.77 ms -> 6.85 ms (~1.9x). General pattern applicable to any per-expert grouped op.",
+  "successes": 0,
+  "failures": 0,
+  "success_contexts": [],
+  "failure_contexts": [],
+  "sub_skills": [],
+  "decision_rules": [
+    "Use whenever the per-expert work distribution has variance >2x.",
+    "Even on balanced workloads the flat-grid form is no worse — and the code generalises for free."
+  ],
+  "created_at": "2026-04-23T19:30:00",
+  "updated_at": "2026-04-23T19:30:00",
+  "experiment_ids": [
+    "mxfp8_grouped_gemm_primus_turbo"
+  ]
+}

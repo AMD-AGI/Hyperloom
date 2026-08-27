@@ -1,0 +1,1070 @@
+
+=== p68 ===
+Greater than max FP8 magnitude
+±max_E4M3
+NaN
+±max_E5M2
+±Inf
+The register SH_MEM_CONFIG, bit[8] must be set to 1 to produce the correct results for BF8 and FP8
+operations.
+7.4. Floating-point handling details and formats
+The handling of denormal numbers varies depending on the datatypes the instruction takes and, in some
+cases, the MODE flags.
+• V_MFMA_F32_*_F32 instructions, which take 32-bit inputs, honor the denormal-handling flags in MODE
+• Matrix-C input and result-matrix output ignore MODE.denorm and do not flush denormals
+• All instructions that take floats whose size is less than 32-bits (F16, BF16, BF8, FP8) ignore MODE.denorm
+and do not flush denormals
+• The V_MFMA_F64_*_F64 instructions, which take 64-bit inputs and outputs ignores MODE and rounds to
+nearest even and allows denorms in the input and output
+• The V_MFMA_I32_*_I8 perform integer multiply-add and thus do not respect the MODE bits. The 16-bit
+results of multiplying the I8 input values are sign-extended to 32 bits before multiplication, and the 16-bit
+result of the multiplication is sign extended to 32 bits prior to being added to the 32-bit result
+The matrix core unit does not support arithmetic exceptions, except for DGEMM matrix operation which does
+support exceptions.
+7.5. Sparse Matrices
+The V_SMFMAC family of instructions perform matrix multiply-accumulate operations on a 4:2 structurally-
+sparse matrix A and dense matrices B, C, and D: D = C + A × B.
+The A matrix is represented using 4:2 structured sparsity which means that two out of every 4 elements along
+the matrix K-dimension are zero. These zeros are not stored directly but instead are described in a separate
+VGPR which holds pairs of 2-bit index values. The index values indicate which two values out of each group of
+4 are non-zero and are used to reconstruct full A-matrix. Non-zero samples are tightly packed resulting in 2:1
+compression. Only the A-matrix may be sparse.
+These SMFMAC instructions are all "accumulate" ops, where the C and D matrices are identical, referenced by
+the instruction’s VDST field (D-matrix). The C operand input is repurposed to hold the index data offset.
+Table 33. SMFMA VALU Opcodes:
+Instruction
+Variants
+Blocks
+Cycles
+Description
+V_SMFMAC_F32_{*}_F16
+16x16x32
+1
+16
+Sparse Matrix multiply of F16 data
+32x32x16
+1
+32
+V_SMFMAC_F32_{*}_BF16
+16x16x32
+1
+16
+Sparse Matrix multiply of BF16 data
+32x32x16
+1
+32
+V_SMFMAC_I32_{*}_I8
+16x16x64
+1
+16
+Sparse Matrix multiply of I8 data
+32x32x32
+1
+32
+CDNA4 Instruction Set Architecture
+7.4. Floating-point handling details and formats
+60 of 600
+
+=== p69 ===
+Instruction
+Variants
+Blocks
+Cycles
+Description
+V_SMFMAC_F32_{*}_BF8_BF8
+V_SMFMAC_F32_{*}_BF8_FP8
+V_SMFMAC_F32_{*}_FP8_BF8
+V_SMFMAC_F32_{*}_FP8_FP8
+16x16x64
+1
+16
+Sparse Matrix multiply of BF8 or FP8 data
+32x32x32
+1
+32
+V_SMFMAC_F32_16X16X64_BF16
+V_SMFMAC_F32_16X16X64_F16
+16x16x64
+1
+16
+Sparse Matrix Multiply of FP16/BF16 data
+V_SMFMAC_I32_16X16X128_I8
+16x16x128
+1
+16
+Sparse Matrix Multiply of Int8 data
+V_SMFMAC_F32_16x16x128_BF8_BF8
+V_SMFMAC_F32_16x16x128_BF8_FP8
+V_SMFMAC_F32_16x16x128_FP8_BF8
+V_SMFMAC_F32_16x16x128_FP8_FP8
+16x16x128
+1
+16
+Sparse Matrix Multiply of FP8/BF8 data
+V_SMFMAC_F32_32X32X32_BF16
+V_SMFMAC_F32_32X32X32_F16
+32x32x32
+1
+32
+Sparse Matrix Multiply of FP16/BF16 data
+V_SMFMAC_I32_32X32X64_I8
+32x32x64
+1
+32
+Sparse Matrix Multiply of Int8 data
+V_SMFMAC_F32_32x32x64_BF8_BF8
+V_SMFMAC_F32_32x32x64_BF8_FP8
+V_SMFMAC_F32_32x32x64_FP8_BF8
+V_SMFMAC_F32_32x32x64_FP8_FP8
+32x32x64
+1
+32
+Sparse Matrix Multiply of FP8/BF8 data
+Matrix A is structurally sparse and occupies two VGPRs per lane at srcA offset. Matrix B is dense and occupies
+four VGPRs per lane at srcB offset. Matrix C shares VGPR offset with destination argument and occupies 16
+VGPRs.
+16-bit source data
+If CBSZ[1:0] =0, ABID[1:0] selects one of four 8-bit sets of sparse-indices within a VGPR starting at srcC
+containing 8-bits of index information for a lane. If CBSZ[1:0] !=0; the very first is selected
+(VGPR[srcC][7..0]).
+8-bit source data
+If CBSZ[1:0] =0, ABID[0] selects one of two 16-bit sets of sparse-indices within a VGPR starting at srcC
+containing 16-bits of index information for a lane. If CBSZ[1:0] !=0; the very first is selected
+(VGPR[srcC][15..0]).
+All SMFMAC instructions must follow these restrictions:
+1. The Matrix A is sparse matrix and matrix B is the dense matrix. The ALU loads twice more data from VGPR
+for matrix B comparing with matrix A.
+2. Matrix C is the same as the result Matrix. The ALU uses the VDST VGPR to load matrix C. All instructions
+are encoded as accumulation opcodes.
+3. Src2 has the index encoded (all of the indexes are in one VGPR) and it can only be VGPR. Index Data
+provides information about which 2 out 4 SRCA are non-zero. For this index pair, index 0 < index 1 &
+index0 != index1.
+4. The VGPR address of Src0, src1 and VDST must be even aligned.
+5. CBSZ and ABID controls are ONLY used to pick the index from the VGPR read and don’t affect SRCA matrix
+broadcast etc. as defined for other MFMA opcodes that use CBSZ and ABID controls.
+SMFMAC instructions interpret the ACC_CD differently from other instructions: For SMFMAC the ACC_CD bit
+control only the DEST vgpr (arch vs accum), not the SRC2 location. The SRC2 argument provides the index data
+for sparse data supplied by the SRC0 argument which must reside in the ARCH-vgprs along with the A and B
+matrix data. In other words SRC2 acts as if ACC_CD==0.
+CDNA4 Instruction Set Architecture
+7.5. Sparse Matrices
+61 of 600
+
+=== p70 ===
+Denorm Control
+ignores Denorm Control from MODE and keep Input/Output Denorms.
+Clamp
+Supported. uses the FP16_OVFL bit from MODE.
+If set, F32 Result on overflow is clamped to +/- MAX, otherwise the overflow result is
+normalized to +/-INF.
+If set, I32 Result is clamped to +/-MAX on overflow/underflow, otherwise the carry out bits
+are dropped.
+FP16_Ovfl
+Once the FP16_OVFL is set, F32 overflow result is clamped to +/- MAX, otherwise the
+overflow result is normalized to +/-INF.
+Round Mode
+ignores Round Mode from MODE and forces it to RNE.
+Exceptions
+Not Supported
+Execution Mask
+ignores exec mask from MODE and forces it to 1 for all threads
+Operand Alignment/Sources Src0/1/VDST if VGPR needs to be even aligned.
+Src0/1/VDST can be only VGPR/ACCVGPR
+Src2 can only be VGPR (No even alignment req)
+Scale
+No support for FP16, BF16,I8 MFMA Opcodes
+Sparse Index Select
+16x16x64_BF16, 32x32x32_BF16, 16x16x64_F16, 32x32x32_F16 :
+If CBSZ[1:0] =0, ABID[0] selects one of two, 8 bit sets within a VGPR starting at srcC
+containing 8 bits of index information for a lane. If CBSZ[1:0] !=0; the very first set is selected
+(VGPR[srcC][7..0]).
+16x16x128_IU8/*F8, 32x32x64_IU8/*F8:
+CBSZ[1:0] ,ABID[1:0] fields ignored. One single defined set within a VGPR.
+7.5.1. Details of Sparsity Structure
+Every index for the matrix B selection is a 2-bit number which identifies one of K=4 is selected. Depending on
+the matrix B layout, SRC2 may hold multiple sets of indices.
+7.5.1.1. 16-bit A/B Matrix
+When the A and B matrices consist of 16-bit data (FP16, BF16), the rules below apply.
+Table 34. Matrix B Layout
+16x16x32
+Row0 Row1
+Row2
+Row3
+v0
+k=0,1
+k=8,9
+k=16,17
+k=24,25
+v1
+k=2,3
+k=10,11
+k=18,19
+k=26,27
+v2
+k=4,5
+k=12,13
+k=20,21
+k=28,29
+v3
+k=6,7
+k=14,15
+k=22,23
+k=30,31
+32x32x16
+Row0
+Row1
+Row2
+Row3
+v0
+k=0,1
+k=0,1
+k=8,9
+k=8,9
+v1
+k=2,3
+k=2,3
+k=10,11
+k=10,11
+v2
+k=4,5
+k=4,5
+k=12,13
+k=12,13
+v3
+k=6,7
+k=6,7
+k=14,15
+k=14,15
+Each lane has K=8 values which requires 4 indices per lane (8 bits), so each SRC2 VGPR holds 4 sets of indices.
+Table 35. Index Layout
+Lane ID
+0
+1
+… 3
+4
+… 31
+32
+… 63
+Vn[31:30]
+set3, V1[31:16]
+CDNA4 Instruction Set Architecture
+7.5. Sparse Matrices
+62 of 600
+
+=== p71 ===
+Lane ID
+0
+1
+… 3
+4
+… 31
+32
+… 63
+Vn[29:28]
+set3, V1[15:0]
+Vn[27:26]
+set3, V0[31:16]
+Vn[25:24]
+set3, V0[15:0]
+…
+…
+Vn[9:8]
+set1, V0[15:0]
+Vn[7:6]
+set0, V1[31:16]
+Vn[5:4]
+set0, V1[15:0]
+Vn[3:2]
+set0, V0[31:16]
+Vn[1:0]
+set0, V0[15:0]
+"Vn" is the SRC-C VGPR holding the index values.
+7.5.1.2. 8-bit A/B Matrix
+When the A and B matrices consist of 8-bit data (I8, FP8, BF8), the rules below apply.
+Table 36. Matrix B Layout
+16x16x64
+Row0
+Row1
+Row2
+Row3
+v0
+k=0,1,2,3
+k=16,17,18,19
+k=32,33,34,35
+k=48,49,50,51
+v1
+k=4,5,6,7
+k=20,21,22,23
+k=36,37,38,39
+k=52,53,54,55
+v2
+k=8,9.10,11
+k=24,25,26,27
+k=40,41,42,43
+k=56,57,58,59
+v3
+k=12,13,14,15
+k=28,29,30,31
+k=44,45,46,47
+k=60,61,62,63
+32x32x32
+Row0
+Row1
+Row2
+Row3
+v0
+k=0,1,2,3
+k=0,1,2,3
+k=16,17,18,19
+k=16,17,18,19
+v1
+k=4,5,6,7
+k=4,5,6,7
+k=20,21,23,23
+k=20,21,23,23
+v2
+k=8,9,10,11
+k=8,9,10,11
+k=24,25,26,27
+k=24,25,26,27
+v3
+k=12,13,14,15
+k=12,13,14,15
+k=28,29,30,31
+k=28,29,30,31
+Each lane has K=16 values which requires 8 indices per lane (16 bits), so each SRC2 VGPR holds 2 sets of
+indices.
+Table 37. Index Layout
+Lane ID
+0
+1
+…
+3
+4
+…
+31
+32
+…
+63
+Vn[31:30]
+set1, V1[31:24]
+Vn[29:28]
+set1, V1[23:16]
+Vn[27:26]
+set1, V1[15:8]
+Vn[25:24]
+set1, V1[7:0]
+Vn[23:22]
+set1, V0[31:24]
+Vn[21:20]
+set1, V0[23:16]
+Vn[19:19]
+set1, V0[15:8]
+Vn[17:16]
+set1, V0[7:0]
+Vn[15:14]
+set0, V1[31:24]
+…
+…
+Vn[3:2]
+set0, V0[15:8]
+Vn[1:0]
+set0, V0[7:0]
+CDNA4 Instruction Set Architecture
+7.5. Sparse Matrices
+63 of 600
+
+=== p72 ===
+7.5.1.3. Sparse Matrix Index Layout
+BF16 Layouts for Matrix A : A is a sparse matrix (2 out of every 4k = 0) and packed as A[16][32] (for
+SMFMAC_F32_16x16x64_BF16) or A[32][16] (SMFMAC_F32_32x32x32_BF16).
+F16/BF16 Layout for
+Matrix B
+B[64][16]
+row0
+thr 0-15
+N = [0-15]
+row1
+thr 16-31
+N = [0-15]
+row2
+thr 32-47
+N = [0-15]
+row3
+thr48-63
+N = [0-15]
+v0
+k=0-1
+k=8-9
+k=16-17
+k=24-25
+v1
+k=2-3
+k=10-11
+k=18-19
+k=26-27
+v2
+k=4-5
+k=12-13
+k=20-21
+k=28-29
+v3
+k=6-7
+k=14-15
+k=22-23
+k=30-31
+v4
+k=32-33
+k=40-41
+k=48-49
+k=56-57
+v5
+k=34-35
+k=42-43
+k=50-51
+k=58-59
+v6
+k=36-37
+k=44-45
+k=52-53
+k=60-61
+v7
+k=38-39
+k=46-47
+k=54-55
+k=62-63
+B[32][32]
+row0
+thr 0-15
+N = [0-15]
+row1
+thr 16-31
+N = [16-31]
+row2
+thr 32-47
+N = [0-15]
+row3
+thr48-63
+N = [16-31]
+v0
+k=0-1
+k=0-1
+k=8-9
+k=8-9
+v1
+k=2-3
+k=2-3
+k=10-11
+k=10-11
+v2
+k=4-5
+k=4-5
+k=12-13
+k=12-13
+v3
+k=6-7
+k=6-7
+k=14-15
+k=14-15
+v4
+k=16-17
+k=16-17
+k=24-25
+k=24-25
+v5
+k=18-19
+k=18-19
+k=26-27
+k=26-27
+v6
+k=20-21
+k=20-21
+k=28-29
+k=28-29
+v7
+k=22-23
+k=22-23
+k=30-31
+k=30-31
+F16/BF16 Index Layout :
+Index layouts map SRCA Matrix elements that are not sparse to indicate which 2/4 k values are non-zero.
+Layout below maps directly to SRCA Matrix (opcode reads 4 VGPRS shown as V0-V3 as an example)
+ 
+Row0
+Row1
+Row2
+Row3
+[31:30]
+Set1 V3[31:16]
+Set1 V3[31:16]
+Set1 V3[31:16]
+Set1 V3[31:16]
+[29:28]
+Set1 V3[15:0]
+Set1 V3[15:0]
+Set1 V3[15:0]
+Set1 V3[15:0]
+[27:26]
+Set1 V2[31:16]
+Set1 V2[31:16]
+Set1 V2[31:16]
+Set1 V2[31:16]
+[25:24]
+Set1 V2[15:0]
+Set1 V2[15:0]
+Set1 V2[15:0]
+Set1 V2[15:0]
+[23:22]
+Set1 V1[31:16]
+Set1 V1[31:16]
+Set1 V1[31:16]
+Set1 V1[31:16]
+[21:20]
+Set1 V1[15:0]
+Set1 V1[15:0]
+Set1 V1[15:0]
+Set1 V1[15:0]
+[19:18]
+Set1 V0[31:16]
+Set1 V0[31:16]
+Set1 V0[31:16]
+Set1 V0[31:16]
+[17:16]
+Set1 V0[15:0]
+Set1 V0[15:0]
+Set1 V0[15:0]
+Set1 V0[15:0]
+[15:14]
+Set0 V3[31:16]
+Set0 V3[31:16]
+Set0 V3[31:16]
+Set0 V3[31:16]
+[13:12]
+Set0 V3[15:0]
+Set0 V3[15:0]
+Set0 V3[15:0]
+Set0 V3[15:0]
+[11:10]
+Set0 V2[31:16]
+Set0 V2[31:16]
+Set0 V2[31:16]
+Set0 V2[31:16]
+[9:8]
+Set0 V2[15:0]
+Set0 V2[15:0]
+Set0 V2[15:0]
+Set0 V2[15:0]
+[7:6]
+Set0 V1[31:16]
+Set0 V1[31:16]
+Set0 V1[31:16]
+Set0 V1[31:16]
+CDNA4 Instruction Set Architecture
+7.5. Sparse Matrices
+64 of 600
+
+=== p73 ===
+ 
+Row0
+Row1
+Row2
+Row3
+[5:4]
+Set0 V1[15:0]
+Set0 V1[15:0]
+Set0 V1[15:0]
+Set0 V1[15:0]
+[3:2]
+Set0 V0[31:16]
+Set0 V0[31:16]
+Set0 V0[31:16]
+Set0 V0[31:16]
+[1:0]
+Set0 V0[15:0]
+Set0 V0[15:0]
+Set0 V0[15:0]
+Set0 V0[15:0]
+IU8/F8 Layouts for Matrix A :
+A is a sparse matrix (2 out of every 4k = 0) and packed as A[16][64] (for SMFMAC_*32_16x16x128_*) or A[32][32]
+(SMFMAC_*32_32x32x64_*).
+IU8/F*8 Layout for Matrix B
+B[128][16]
+row0
+row1
+row2
+row3
+v0
+k=0-3
+k=16-19
+k=32-35
+k=48-51
+v1
+k=4-7
+k=20-23
+k=36-39
+k=52-55
+v2
+k=8-11
+k=24-27
+k=40-43
+k=56-59
+v3
+k=12-15
+k=28-31
+k=44-47
+k=60-63
+v4
+k=64-67
+k=80-83
+k=96-99
+k=112-115
+v5
+k=68-71
+k=84-87
+k=100-103
+k=116-119
+v6
+k=72-75
+k=88-91
+k=104-107
+k=120-123
+v7
+k=76-79
+k=92-95
+k=108-111
+k=124-127
+B[64][32]
+row0
+row1
+row2
+row3
+v0
+k=0-3
+k=0-3
+k=16-19
+k=16-19
+v1
+k=4-7
+k=4-7
+k=20-23
+k=20-23
+v2
+k=8-11
+k=8-11
+k=24-27
+k=24-27
+v3
+k=12-15
+k=12-15
+k=28-31
+k=28-31
+v4
+k=32-35
+k=32-35
+k=48-51
+k=48-51
+v5
+k=36-39
+k=36-39
+k=52-55
+k=52-55
+v6
+k=40-43
+k=40-43
+k=56-59
+k=56-59
+v7
+k=44-47
+k=44-47
+k=60-63
+k=60-63
+IU8/F*8 Index Layout :
+Index layouts map SRCA Matrix elements that are not sparse to indicate which 2/4 k values are non-zero.
+Layout below maps directly to SRCA Matrix (opcode reads 4 VGPRS shown as V0-V3 as an example)
+ 
+Row0
+Row1
+Row2
+Row3
+[31:30]
+Set0 V3[31:24]
+Set0 V3[31:24]
+Set0 V3[31:24]
+Set0 V3[31:24]
+[29:28]
+Set0 V3[23:16]
+Set0 V3[23:16]
+Set0 V3[23:16]
+Set0 V3[23:16]
+[27:26]
+Set0 V3[16:8]
+Set0 V3[16:8]
+Set0 V3[16:8]
+Set0 V3[16:8]
+[25:24]
+Set0 V3[7:0]
+Set0 V3[7:0]
+Set0 V3[7:0]
+Set0 V3[7:0]
+[23:22]
+Set0 V2[31:24]
+Set0 V2[31:24]
+Set0 V2[31:24]
+Set0 V2[31:24]
+[21:20]
+Set0 V2[23:16]
+Set0 V2[23:16]
+Set0 V2[23:16]
+Set0 V2[23:16]
+[19:18]
+Set0 V2[16:8]
+Set0 V2[16:8]
+Set0 V2[16:8]
+Set0 V2[16:8]
+[17:16]
+Set0 V2[7:0]
+Set0 V2[7:0]
+Set0 V2[7:0]
+Set0 V2[7:0]
+[15:14]
+Set0 V1[31:24]
+Set0 V1[31:24]
+Set0 V1[31:24]
+Set0 V1[31:24]
+[13:12]
+Set0 V1[23:16]
+Set0 V1[23:16]
+Set0 V1[23:16]
+Set0 V1[23:16]
+[11:10]
+Set0 V1[16:8]
+Set0 V1[16:8]
+Set0 V1[16:8]
+Set0 V1[16:8]
+[9:8]
+Set0 V1[7:0]
+Set0 V1[7:0]
+Set0 V1[7:0]
+Set0 V1[7:0]
+[7:6]
+Set0 V0[31:24]
+Set0 V0[31:24]
+Set0 V0[31:24]
+Set0 V0[31:24]
+CDNA4 Instruction Set Architecture
+7.5. Sparse Matrices
+65 of 600
+
+=== p74 ===
+ 
+Row0
+Row1
+Row2
+Row3
+[5:4]
+Set0 V0[23:16]
+Set0 V0[23:16]
+Set0 V0[23:16]
+Set0 V0[23:16]
+[3:2]
+Set0 V0[16:8]
+Set0 V0[16:8]
+Set0 V0[16:8]
+Set0 V0[16:8]
+[1:0]
+Set0 V0[7:0]
+Set0 V0[7:0]
+Set0 V0[7:0]
+Set0 V0[7:0]
+7.6. Dependency Resolution: Required Independent
+Instructions
+The table below indicates timing conditions which require the user to insert NOPs (or independent VALU
+instructions).
+DLop
+Dot products
+XDLOP
+Matrix math on {I8, F16, BF16}
+DGEMM
+V_MFMA…F64
+PASS
+4 clock cycles
+Table 38. VOP3P-Matrix Opcodes Required NOPs
+First Instruction
+Second Instruction
+Required
+Waits
+Comments
+Non-DLops VALU Write VGPR
+V_MFMA* read VGPR OR
+V_SMFMA* read VGPR
+2
+No internal 4 & 8 cycle forwarding path.
+DL ops Write VGPR
+DLops read VGPR as SrcC,
+and the opcode is exactly
+the same as 1st DLops
+0
+We can only support same opcode of DLops
+back-to-back SrcC forwarding which is used
+for accumulation.
+DLops read VGPR as
+SrcA/B, and the opcode is
+exactly the same as 1st
+DLops
+3
+We don’t support SrcA/B forwarding in DLops
+Any opcode read/write
+VGPR that is not exactly
+the same as 1st DLops
+opcode (RAW + WAW)
+3
+Disable all of the forwarding path from DL
+ops to normal VALU/VM/LDS/FLAT ops
+CDNA4 Instruction Set Architecture
+7.6. Dependency Resolution: Required Independent Instructions
+66 of 600
+
+=== p75 ===
+First Instruction
+Second Instruction
+Required
+Waits
+Comments
+XDL Write VGPR or V_SMFMA*
+Write VGPR
+XDL read VGPR as Source
+C exactly same with 1st
+vDst OR V_SMFMA* read
+VGPR for Matrix C exactly
+same with 1st vDst
+2
+the two V_MFMA must be the same number
+passes and vDst and vSrc start from the same
+offset and same VGPR size. V_MFMA &
+V_SMFMA must be the same number passes
+and both vDst start from the same offset and
+same VGPR size. Note: V_SMFMA reads vdst
+for Matrix C.
+0
+0
+0
+XDL read VGPR as Source
+C overlapped with 1st vDst
+OR V_SMFMA* read VGPR
+for Matrix C overlapped
+with 1st vDst
+4
+overlapped with XDL
+Note: V_SMFMA reads vdst for Matrix C.
+6
+10
+18
+S/DGEMM read VGPR as
+Source C
+3
+Overlapped with S/DGEMM
+6
+10
+18
+V_MFMA read VGPR as
+SrcA or SrcB OR
+V_SMFMA* read VGPR as
+SrcA or SrcB or Index SrcC
+5
+No internal forwarding path, need to wait
+previous V_MFMA/V_SMFMA* commit result
+to VGPR V_SMFMA uses srcC address for
+extra Index C Reads
+8
+12
+20
+1) VM, LDS, FLAT, Export
+Read VGPR overlapped
+with 1st vDst 2) VALU
+read/write VGPR (RAW +
+WAW)
+5
+8
+12
+20
+SGEMM Write VGPR
+SGEMM read VGPR as
+Source C exactly same with
+1st vDst
+2
+the two SGEMM must be the same number
+passes and vDst and vSrc start from the same
+offset and same VGPR size.
+0
+0
+0
+S/DGEMM read VGPR as
+Source C overlapped with
+1st vDst
+2
+Overlapped with S/DGEMM
+4
+8
+16
+XDL read VGPR as Source
+C overlapped with 1st vDst
+or V_SMFMA* read VGPR
+for Matrix C overlapped
+with 1st vDst
+0
+XDL 2x opcodes read SRCC Faster
+S/DGEMM, V_MFMA read
+VGPR as SrcA or SrcB OR
+V_SMFMA* read VGPR as
+SrcA or SrcB or Index SrcC
+4
+No internal forwarding path, need to wait
+previous V_MFMA commit result to VGPR
+Note: V_SMFMA used SrcC for Index reads.
+6
+10
+18
+1) VM, LDS, FLAT, Export
+Read VGPR overlapped
+with 1st vDst 2) VALU
+read/write VGPR (RAW +
+WAW)
+4
+V_MFMA_F32_4X4X4F16
+6
+V_MFMA_F32_16X16X16F16
+10
+V_MFMA_F32_32X32X8F16
+18
+V_MFMA_F32_32X32X4F16
+CDNA4 Instruction Set Architecture
+7.6. Dependency Resolution: Required Independent Instructions
+67 of 600
+
+=== p76 ===
+First Instruction
+Second Instruction
+Required
+Waits
+Comments
+V_MFMA_16x16x4_F64 Write VGPR V_MFMA_16x16x4_F64
+read VGPR as Source C
+exactly same with 1st vDst
+0
+the two V_MFMA must be the same number
+passes and vDst and vSrc start from the same
+offset.
+S/DGEMM read VGPR as
+Source C overlapped with
+1st vDst
+17
+overlapped, different VGPR access sequence
+XDL read VGPR as Source
+C overlapped with 1st vDst
+0
+2 HW Waits
+V_SMFMA* read VGPR for
+Matrix C overlapped with
+1st vDst
+0
+V_SMFMA reads vdst for Matrix C.
+S/DGEMM read VGPR as
+SrcA or SrcB
+19
+No internal forwarding path, need to wait
+previous V_MFMA commit result to VGPR
+XDL read VGPR as SrcA or
+SrcB
+19
+V_SMFMA* read VGPR as
+SrcA or SrcB or Index SrcC
+19
+V_SMFMA uses srcC address for extra Index C
+Reads
+VALU read/write VGPR
+(RAW + WAW)
+19
+VM, LDS, FLAT and Export
+Read VGPR overlapped
+with 1st vDst
+18
+No internal forwarding path, need to wait
+previous V_MFMA commit result to VGPR
+V_MFMA_4x4x4_F64 Write VGPR
+V_MFMA_4x4x4_F64, read
+VGPR as Source C exactly
+same with 1st vDst
+4
+4x4x4 needs to do accumulation, so the write
+VGPR is later than normal XDL 4x4x4, so
+needs extra wait
+S/DGEMM read VGPR as
+Source C overlapped with
+1st vDst
+4
+overlapped, different VGPR access sequence
+XDL read VGPR as Source
+C overlapped with 1st vDst
+0
+2 HW Waits
+V_SMFMA read VGPR for
+Matrix C overlapped with
+1st vDst
+0
+V_SMFMA reads vdst for Matrix C.
+S/DGEMM read VGPR as
+SrcA or SrcB
+6
+No internal forwarding path, need to wait
+previous V_MFMA commit result to VGPR
+XDL read VGPR as SrcA or
+SrcB
+6
+Already have 2 hardware waits, so only needs
+1 software waits.
+V_SMFMA* read VGPR as
+SrcA or SrcB or Index SrcC
+6
+V_SMFMA uses srcC address for extra Index C
+Reads
+VALU read/write VGPR
+(RAW + WAW)
+6
+Already have 2 hardware waits, so only needs
+1 software wait.
+VM, LDS, FLAT and Export
+Read VGPR overlapped
+with 1st vDst
+9
+No internal forwarding path, need to wait
+previous V_MFMA commit result to VGPR
+V_CMPX* write EXEC MASK
+V_MFMA*
+4
+Doesn’t support execution mask forwarding
+with XDL/DGEMM
+CDNA4 Instruction Set Architecture
+7.6. Dependency Resolution: Required Independent Instructions
+68 of 600
+
+=== p77 ===
+First Instruction
+Second Instruction
+Required
+Waits
+Comments
+XDL/SMFMA Read VGPR SrcC
+VALU write VGPR (WAR),
+Co-Execution Anti-
+Dependency for over-
+lapping with 1st SrcC
+1
+XDL and VALU could access arch VGPR, need
+to resolve WAR, XDL read at S11, VALU write
+at S11, so needs 1 wait for this case
+3
+7
+15
+CDNA4 Instruction Set Architecture
+7.6. Dependency Resolution: Required Independent Instructions
+69 of 600

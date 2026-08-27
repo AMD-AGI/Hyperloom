@@ -1,0 +1,41 @@
+{
+  "name": "mfma_16x16x128_f8f6f4_fp4_operand_layout",
+  "level": 1,
+  "backend": "hip",
+  "description": "For v_mfma_scale_f32_16x16x128_f8f6f4 with cbsz=0 blgp=4 (FP8 e4m3 A x FP4 e2m1 B) on gfx950, the per-lane operand layout is fully documented in the AMD CDNA4 ISA (page 51). FP4 B is NATURAL: lane (n_lane=lane%16, k_lane=lane/16) carries B[n_lane, MFMA K=k_lane*32..+32) packed naturally (vec byte i: low nibble = K=2i, high nibble = K=2i+1 within the lane's K-block). FP8 A is PERMUTED: vec bytes 0..15 = K=[k_lane*16, k_lane*16+16), vec bytes 16..31 = K=[k_lane*16+64, k_lane*16+80) (NON-CONTIGUOUS, two 16-K regions separated by 64 K). Scale operand: 1 dword per lane, byte 0 = scale for (M=m_lane, K-block=k_lane); MFMA reads byte 0 with default opsel=0.",
+  "preconditions": [
+    "Writing a raw HIP kernel with __builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4 and blgp=4 (FP4 B)",
+    "Loading A and B from natural row-major GMEM (no preshuffle) into VGPR vectors via per-lane reads"
+  ],
+  "steps": [
+    "Reference: AMD CDNA4 ISA Architecture, sections 7.1.5.1 (Dense Matrix Layouts: 8-bit and Smaller, page 51) and 7.2.1 (MFMA with Block Exponent Scaling, page 56-65). Located at amd-instinct-cdna4-instruction-set-architecture.pdf.",
+    "FP4 B per-lane vector load: lane (n_lane=lane%16, k_lane=lane/16) reads 16 contiguous packed bytes from GMEM at byte offset row*K_packed_stride + k_lane*16. Vec byte i (i in 0..15) holds packed nibbles for K=k_lane*32+2i (low) and K=k_lane*32+2i+1 (high).",
+    "FP8 A per-lane vector load: lane (m_lane, k_lane) needs 32 bytes split as TWO regions. Vec bytes 0..15 from GMEM at row*K_stride + k_lane*16 (16 bytes = K=[k_lane*16, k_lane*16+16)). Vec bytes 16..31 from GMEM at row*K_stride + k_lane*16 + 64 (16 bytes = K=[k_lane*16+64, k_lane*16+80)).",
+    "Scale: each lane provides ONE uint32. Byte 0 = E8M0 scale for that lane's (M-row, K-block). Stage B's preshuffle (each output uint32 = single zero-extended scale byte) is correct for this layout. The 4 separate scale uint32s per warp (PIN_SA+0..3 in Stage B) correspond to 4 different M-frags (16 rows each); they are NOT 4 K-blocks of one frag.",
+    "VERIFICATION: a single-MFMA known-value test that uses sum-invariant patterns (all-ones, only-k=0, diagonal, k%16==n) is NECESSARY but NOT SUFFICIENT. It will pass the natural layout assumption even when the layout is wrong, because the inner product sum is invariant under K-permutation in those patterns. Use a K-position-distinguishing probe like probe_fp4_layout.hip in hip_scaffold/.",
+    "Common bug (the one we hit): assuming FP8 A is naturally laid out (lane k_lane reads contiguous bytes [k_lane*32, +32)). This produces correct outputs for sum-invariant tests but garbage for inputs that vary along K in BOTH A and B (RANDA_RANDBPOS gives -1.79 dB SNR). Stage B's compute_lds_offsets pattern (i=0,1 with lds_col=k_lane+i*4) encodes the correct PERMUTED FP8 layout."
+  ],
+  "expected_impact": "Correctness — saves 1-2 days of wrong-direction debugging. With the correct layout, native FP4 GEMM passes RANDA_RANDBPOS, PROBE_BK, and gpt-oss production at 55+ dB SNR. Without it, every K-distinguishing test fails.",
+  "successes": 2,
+  "failures": 0,
+  "success_contexts": [
+    "2026-05-11: Stage C native FP4 GEMM (gemm_fp8_mxfp4_native.hip) ships at 660 TFLOPS / 0.516 ms gate_up at gpt-oss-120b shape (M=10240, N=5760, K=2880), 55+ dB SNR with both unity and random scales. All 7 probe patterns pass (PROBE_BK, RANDA_RANDBPOS, AKVAR_BKVAR, AK_VAR, BK_VAR, ROWA_RANDB, RANDA_ROWB). Native is currently 50% slower than the dequant + Stage B path (1338 TFLOPS) due to lack of LDS swizzle / double buffering / AGPR pinning, but correctness is solid and tuning is incremental from here.",
+    "2026-05-11 (later same day): Stage C-2 turbo (gemm_fp8_mxfp4_turbo.hip) ships at 1146 TFLOPS / 0.297 ms gate_up + 1195 TFLOPS / 0.142 ms down at gpt-oss-120b shape, 55+ dB SNR with random scales. 82% of Stage B FP8xFP8 perf (1389 TF), 1.74x of native v0 baseline. Two parallel prototyping agents independently arrived at the same M1 design (Stage B tile struct + AGPR-pinned C with 256 AGPRs + pinned VGPR data/scale buffers v[112:223] + phase_mfma_only). Critical learning: the spec recommendation to pad B to 128-byte LDS rows (Option A) for swizzle reuse is BROKEN. buffer_load_lds<16> requires lane-uniform LDS stride = lane*Bytes; non-uniform offsets needed for 128-byte padding silently scramble writes (Agent A measured -27 dB SNR, '8 cols OK / 8 wrong' pattern within each 16-col N-frag). Option B (64-byte LDS rows, uniform lane*16 STS, 4 ds_read_b128 per subtile vs Stage B's 8) works on first try at 999 dB on PROBE_BK. This is the one Stage B convention you cannot deviate from."
+  ],
+  "failure_contexts": [
+    "2026-05-11 (earlier same day): native FP4 attempt with the natural FP8 A layout (lane k_lane reads contiguous bytes [k_lane*32, +32) of A) failed RANDA_RANDBPOS at -1.79 dB. Mistake was trusting the single-MFMA test (which only used sum-invariant patterns); the K-position probe revealed the FP8 A layout is permuted. Corrected by porting Stage B's compute_lds_offsets pattern."
+  ],
+  "sub_skills": [],
+  "decision_rules": [
+    "For a8w4 GEMM with maximum perf AND no workspace constraint: use the dequant + Stage B path (gemm_fp8_mxfp4.hip). 1338 TFLOPS gate_up. Costs 16 MB B_fp8 workspace per call.",
+    "For a8w4 GEMM with NO workspace allowed (e.g., MoE wrapper Stage D where 128 experts x 16 MB = 2.1 GB is infeasible): use the turbo path (gemm_fp8_mxfp4_turbo.hip). 1146 TFLOPS gate_up at 82% of Stage B FP8 perf, 86% of dequant perf. Zero workspace beyond preshuffled scales.",
+    "Always validate FP4 MFMA kernels with K-distinguishing probes (PROBE_BK, RANDA_RANDBPOS), not just sum-invariant patterns. The single-MFMA test in test_fp4_mfma.hip is INSUFFICIENT.",
+    "When deriving an MFMA per-lane layout empirically: load A with the same suspected layout you're testing for B. If A's loading is wrong, your B-position probe will read PERMUTED A values and you'll mis-decode the K-mapping. Use a 2-probe (k%16, k/16) to uniquely identify each K position, then cross-reference against the AMD ISA.",
+    "buffer_load_lds<Bytes=16> requires lane-uniform LDS stride. The destination LDS address argument is the BASE (lane 0's address); the hardware writes lane L at base + L*Bytes. Per-lane non-uniform offsets cannot be expressed via this instruction — they silently scramble writes. If you need a wider LDS row stride than Bytes*64 (e.g., to reuse Stage B's swizzle on FP4 by padding B's 64-byte rows to 128 bytes), buffer_load_lds is NOT the right path. Either: (a) keep LDS row stride = Bytes*lanes_per_row (FP4 turbo M1: 4 lanes per 64-byte row), or (b) use ds_write to pre-stage data into LDS at the swizzled position (slower)."
+  ],
+  "created_at": "2026-05-11T00:00:00",
+  "updated_at": "2026-05-11T00:00:00",
+  "experiment_ids": [
+    "stage_c_a8w4_native_2026_05_11"
+  ]
+}
