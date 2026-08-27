@@ -507,6 +507,36 @@ def resolve_session_framework_root() -> str:
     return generic[0] if generic else ""
 
 
+def resolve_framework_tree(framework: str) -> str:
+    """Return the source tree belonging to ``framework``, or ``""``.
+
+    Every source consulted here is keyed by the framework's own name — its env
+    vars, its Python package, its default path. That is what distinguishes this
+    from :func:`resolve_source_file_allowlist`, whose order reflects only how
+    roots were discovered and so cannot name the tree a session is optimising.
+
+    Args:
+        framework: Framework name, e.g. ``"sglang"``.
+
+    Returns:
+        str: The normalised tree root, or ``""`` when the framework has none.
+    """
+    pkg = str(framework or "").strip().lower()
+    if not pkg:
+        return ""
+    for key in (f"{pkg.upper()}_REPO_PATH", f"{pkg.upper()}_DIR", GENERIC_FRAMEWORK_ROOT_ENV):
+        candidate = os.environ.get(key, "").strip()
+        if candidate and Path(candidate).is_dir():
+            return _normalize_root(candidate)
+    origin = _find_spec_origin(pkg)
+    if origin is not None:
+        return _normalize_root(str(origin))
+    for default in _DEFAULT_SOURCE_ROOTS:
+        if default.rstrip("/").endswith(f"/{pkg}") and Path(default).is_dir():
+            return _normalize_root(default)
+    return ""
+
+
 def resolve_patch_target_roots() -> tuple[str, ...]:
     """Roots for substring matching in patch apply + kernel classifiers.
 
@@ -759,7 +789,7 @@ def resolve_warm_replay_framework_root(
     return _resolve_warm_replay_patch_root(
         patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_framework_patch_roots(),
-        missing_patch_reason="active_framework_root_missing",
+        missing_patch_reason="warm_replay_patch_content_missing",
         missing_allowlist_reason="framework_patch_root_not_in_allowlist",
         explicit_root=resolve_session_framework_root() or None,
     )
@@ -865,6 +895,7 @@ __all__ = [
     "WarmReplayPatchSource",
     "WarmReplayRootResolution",
     "probe_framework_source_roots_for_env",
+    "resolve_framework_tree",
     "resolve_patch_target_roots",
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",
