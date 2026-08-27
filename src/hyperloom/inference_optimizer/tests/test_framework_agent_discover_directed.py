@@ -37,7 +37,7 @@ class _StateStub:
 
 
 class _CoordinatorStub:
-    """Binds the real Coordinator discover + helper methods against a mocked ``phase_discover``."""
+    """Binds the real repo-url builder and the helpers it reads."""
 
     _framework_candidate_key = staticmethod(Coordinator._framework_candidate_key)
     _framework_processed_candidate_keys = Coordinator._framework_processed_candidate_keys

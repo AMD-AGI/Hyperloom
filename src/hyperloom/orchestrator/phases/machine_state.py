@@ -1449,8 +1449,10 @@ def compute_plateau_explore(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_explore → ``(triggered, evidence)``.
 
-    Trigger (AND): recent_keep_gain < threshold AND
-    recent_empty_streak >= empty_streak_threshold.
+    Trigger (AND): recent_keep_gain < threshold, and the arm is out of new
+    things to try. The second half reads the trailing empty specialist-round
+    streak, or — for a run with no research lane, which records no specialist
+    round at all — the count of variants benched this cycle.
 
     Args:
         state (Any): Frozen SharedState view exposing ``explore_search`` and
@@ -1459,8 +1461,9 @@ def compute_plateau_explore(
             non-positive disables the judgment.
         keep_gain_threshold_pct (float): Keep-gain floor below which the gain
             arm trips.
-        empty_streak_threshold (int): Trailing empty specialist-round count that
-            trips the streak arm.
+        empty_streak_threshold (int): Evidence the arm is out of new things to
+            try: trailing empty specialist rounds, or variants benched this
+            cycle when no specialist round exists.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
@@ -1528,10 +1531,6 @@ def compute_plateau_explore(
         else:
             break
 
-    # A run with no research lane never records a specialist round, so the
-    # streak is structurally zero and cannot discriminate. The grid is the
-    # arm's other source of "tried and got nothing": count what it benched
-    # this cycle, and require the same volume of evidence the streak does.
     tested_this_cycle = len(_rows_for_current_cycle(list(tested_ledger.values()), state))
     exhausted = streak >= empty_streak_threshold or (
         not specialist_rounds and tested_this_cycle >= empty_streak_threshold

@@ -1,11 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Constants and lookups the source arm shares with the framework agent.
+"""The orchestrator's import path into the framework agent's shared tables.
 
-The Coordinator no longer shells out to ``fa phase-*``: candidate discovery is
-a specialist, and its verdicts arrive in the deliverable rather than from a
-per-candidate audit call.
+Re-exports :func:`repo_url_for_framework` so the orchestrator has one place to
+reach it, and owns the discovery retry budget the source arm declines on.
 """
 
 from __future__ import annotations
