@@ -469,7 +469,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     next_phase, reason, evidence = out
     assert next_phase == "SWEEP"
     assert reason == "no_kernel_skipped"
-    assert evidence.get("passed_through_reason") == "plateau_explore"
+    assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
 
 
 def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
@@ -517,7 +517,7 @@ def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
     )
     assert out is not None
     reason, evidence = out
-    assert reason == "plateau_explore"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
 
 
