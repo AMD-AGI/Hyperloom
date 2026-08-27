@@ -100,6 +100,12 @@ The following table lists the validated Hyperloom version and component combinat
 
    See the `TraceLens documentation <https://rocm.docs.amd.com/projects/tracelens/en/latest/reference/compatibility.html>`_ for more information.
 
+.. note::
+
+   MI325X shares the gfx942/CDNA3 runner family with MI300X. Hyperloom keeps the
+   resolved GPU types distinct, but Magpie benchmark rendering reuses the MI300X
+   runner scripts and image family unless a dedicated image is supplied.
+
 Inference frameworks
 --------------------
 
