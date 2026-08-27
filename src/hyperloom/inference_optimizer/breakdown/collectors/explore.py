@@ -282,6 +282,54 @@ def _scan_sweep_variants(session_dir: Path) -> list[Path]:
     return out
 
 
+_UNREADABLE_REPORT = "benchmark_report.json unreadable or not a JSON object"
+_SUCCESS_FALSE_FALLBACK = "benchmark_report.json recorded success=false"
+
+
+def _sweep_report_error(report_data: dict[str, Any]) -> str:
+    """Pick a non-empty failure reason from a readable unsuccessful report.
+
+    Prefers the GEAK-dialect singular ``error``, then the Magpie-compatible
+    ``errors`` list (joined), then a fixed fallback so a ``failed`` row never
+    ships ``error=None``.
+
+    Args:
+        report_data (dict[str, Any]): A parsed ``benchmark_report.json`` object.
+
+    Returns:
+        str: A non-empty reason string.
+    """
+    singular = str(report_data.get("error") or "").strip()
+    if singular:
+        return singular
+    errors = report_data.get("errors")
+    if isinstance(errors, list):
+        joined = "; ".join(str(item).strip() for item in errors if str(item).strip())
+        if joined:
+            return joined
+    return _SUCCESS_FALSE_FALLBACK
+
+
+def _abort_reason_error(abort: dict[str, Any] | None) -> str:
+    """Format ``abort_reason.json`` into a single error string.
+
+    Args:
+        abort (dict[str, Any] | None): Parsed abort marker, or None when the
+            file existed but was unreadable.
+
+    Returns:
+        str: ``"<error_class>: <error>"`` when both are present, otherwise
+        whichever field is non-empty, otherwise a fallback.
+    """
+    if not isinstance(abort, dict):
+        return "abort_reason.json unreadable or not a JSON object"
+    error_class = str(abort.get("error_class") or "").strip()
+    detail = str(abort.get("error") or "").strip()
+    if error_class and detail:
+        return f"{error_class}: {detail}"
+    return error_class or detail or "abort_reason.json present without error detail"
+
+
 def _shape_sweep_point(
     variant_dir: Path,
     session_dir: Path,
@@ -292,10 +340,12 @@ def _shape_sweep_point(
     Parses the ``conc`` / ``isl`` / ``osl`` from the variant directory name,
     reads its benchmark report for throughput / latency metrics, and derives a
     status (``ok`` / ``failed`` / ``skipped``). Status is derived, never
-    defaulted to success: missing report → ``skipped``; unreadable report →
-    ``failed``; readable report with ``success is False`` → ``failed``;
-    otherwise ``ok``. ``error`` is present on every row (``None`` when there
-    is no failure reason).
+    defaulted to success: unreadable report → ``failed``; readable report
+    with ``success is False`` → ``failed``; no report but
+    ``abort_reason.json`` present → ``failed``; no report and no abort
+    marker → ``skipped``; otherwise ``ok``. ``error`` is present on every
+    row (``None`` when there is no failure reason) and is non-empty on
+    every ``failed`` row.
 
     Args:
         variant_dir (Path): A ``variant_*`` directory.
@@ -323,20 +373,25 @@ def _shape_sweep_point(
     out_tput = ttft = tpot = e2el = None
     error: str | None = None
     if report is None:
-        status = "skipped"
-    else:
-        report_data = _load_json_safe(report, warnings)
-        if isinstance(report_data, dict):
-            out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
-            status = "failed" if report_data.get("success") is False else "ok"
-            if status == "failed":
-                error = str(report_data.get("error") or "").strip() or None
-        else:
-            # Report exists but is not a JSON object (truncated, empty, or a
-            # non-object top-level value): a measurement that did not land,
-            # not a successful measurement.
+        abort_path = variant_dir / "abort_reason.json"
+        if abort_path.is_file():
+            abort = _load_json_safe(abort_path, warnings, require_dict=True)
             status = "failed"
-            error = "benchmark_report.json unreadable or not a JSON object"
+            error = _abort_reason_error(abort)
+        else:
+            status = "skipped"
+    else:
+        report_data = _load_json_safe(report, warnings, require_dict=True)
+        if report_data is None:
+            status = "failed"
+            error = _UNREADABLE_REPORT
+        else:
+            out_tput, ttft, tpot, e2el = _benchmark_report_metrics(report_data)
+            if report_data.get("success") is False:
+                status = "failed"
+                error = _sweep_report_error(report_data)
+            else:
+                status = "ok"
     return {
         "variant_name": name,
         "conc": conc,

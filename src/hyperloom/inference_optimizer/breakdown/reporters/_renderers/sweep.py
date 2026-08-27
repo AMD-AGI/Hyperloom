@@ -49,7 +49,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
 
     grid_size = sw.get("grid_size") or len(variants)
     successes = [v for v in variants if v.get("status") == "ok"]
-    failures = [v for v in variants if v.get("status") != "ok"]
+    failures = [v for v in variants if v.get("status") == "failed"]
+    skipped = [v for v in variants if v.get("status") == "skipped"]
 
     def _ot(v: dict[str, Any]) -> float:
         """Extract a variant's output throughput as a float sort key.
@@ -69,7 +70,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     best = max(successes, key=_ot, default=None)
 
     facts: list[str] = []
-    facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}.")
+    facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}, skipped={len(skipped)}.")
     if best:
         facts.append(
             f"Best point: conc={best.get('conc')} isl={best.get('isl')} "

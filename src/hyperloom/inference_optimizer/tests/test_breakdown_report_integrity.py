@@ -21,6 +21,8 @@ but never enforced:
   that evidence must reach the reader instead of being dropped silently.
 * A sweep variant whose ``benchmark_report.json`` is missing, truncated, empty,
   or not a JSON object is ``failed`` / ``skipped``, never silently ``ok``.
+  ``abort_reason.json`` without a report is ``failed``. ``ok`` does not require
+  selectable throughput.
 """
 
 from __future__ import annotations
@@ -28,6 +30,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.recorder.recorder import Recorder
@@ -685,51 +689,109 @@ def _ok_benchmark_report() -> dict[str, Any]:
     }
 
 
-def test_sweep_variant_status_matrix_matches_report_readability(tmp_path: Path) -> None:
-    """Missing / unreadable reports are failed or skipped, never silently ok."""
-    ok_dir = _sweep_variant_dir(tmp_path, "variant_0_conc32_isl128_osl128")
-    _write_report_text(ok_dir, json.dumps(_ok_benchmark_report()))
+def _install_sweep_case(session_dir: Path, kind: str) -> str:
+    """Create one sweep variant matching ``kind`` and return its directory name.
 
-    failed_dir = _sweep_variant_dir(tmp_path, "variant_1_conc64_isl128_osl128")
-    _write_report_text(failed_dir, json.dumps({"success": False, "error": "OOM killed"}))
+    Args:
+        session_dir (Path): Session root.
+        kind (str): Case id from the status-matrix parametrize table.
 
-    skipped_dir = _sweep_variant_dir(tmp_path, "variant_2_conc128_isl128_osl128")
+    Returns:
+        str: The variant directory name.
+    """
+    name = "variant_0_conc32_isl128_osl128"
+    variant_dir = _sweep_variant_dir(session_dir, name)
+    if kind == "ok_full":
+        _write_report_text(variant_dir, json.dumps(_ok_benchmark_report()))
+    elif kind == "empty_object":
+        _write_report_text(variant_dir, "{}")
+    elif kind == "success_true_no_metrics":
+        _write_report_text(variant_dir, json.dumps({"success": True}))
+    elif kind == "success_true_zero_tput":
+        # Status stays ``ok``: a landed success=true measurement is not
+        # "unselectable" (``is_valid_measurement``). Throughput 0 is falsy in
+        # ``_benchmark_report_metrics``'s ``or`` chain, so the extracted
+        # metric is None; that is pre-existing collector behaviour.
+        _write_report_text(variant_dir, json.dumps({"success": True, "output_throughput": 0.0}))
+    elif kind == "success_false_error":
+        _write_report_text(variant_dir, json.dumps({"success": False, "error": "OOM killed"}))
+    elif kind == "success_false_errors_list":
+        _write_report_text(
+            variant_dir,
+            json.dumps({"success": False, "errors": ["CUDA OOM", "server died"]}),
+        )
+    elif kind == "success_false_no_reason":
+        _write_report_text(variant_dir, json.dumps({"success": False}))
+    elif kind == "truncated":
+        _write_report_text(variant_dir, '{"success": true, "output_throughput":')
+    elif kind == "empty_file":
+        _write_report_text(variant_dir, "")
+    elif kind == "top_level_list":
+        _write_report_text(variant_dir, json.dumps([{"output_throughput": 1.0}]))
+    elif kind == "missing":
+        pass
+    elif kind == "abort_reason_only":
+        (variant_dir / "abort_reason.json").write_text(
+            json.dumps(
+                {
+                    "variant": name,
+                    "error_class": "no_benchmark_workspace",
+                    "error": "no benchmark_* workspace produced",
+                    "extra_args": "",
+                    "aborted_at_utc": "2026-01-01T00:00:00Z",
+                }
+            ),
+            encoding="utf-8",
+        )
+    else:
+        raise ValueError(kind)
+    return name
 
-    truncated_dir = _sweep_variant_dir(tmp_path, "variant_3_conc256_isl128_osl128")
-    _write_report_text(truncated_dir, '{"success": true, "output_throughput":')
 
-    empty_dir = _sweep_variant_dir(tmp_path, "variant_4_conc8_isl128_osl128")
-    _write_report_text(empty_dir, "")
-
-    list_dir = _sweep_variant_dir(tmp_path, "variant_5_conc16_isl128_osl128")
-    _write_report_text(list_dir, json.dumps([{"output_throughput": 1.0}]))
-
+@pytest.mark.parametrize(
+    ("kind", "expected_status", "error_contains", "expect_warning", "tput"),
+    [
+        ("ok_full", "ok", None, False, 800.0),
+        ("empty_object", "ok", None, False, None),
+        ("success_true_no_metrics", "ok", None, False, None),
+        ("success_true_zero_tput", "ok", None, False, None),
+        ("success_false_error", "failed", ("OOM killed",), False, None),
+        ("success_false_errors_list", "failed", ("CUDA OOM", "server died"), False, None),
+        ("success_false_no_reason", "failed", ("success=false",), False, None),
+        ("truncated", "failed", ("unreadable",), True, None),
+        ("empty_file", "failed", ("unreadable",), True, None),
+        ("top_level_list", "failed", ("unreadable",), True, None),
+        ("missing", "skipped", None, False, None),
+        ("abort_reason_only", "failed", ("no_benchmark_workspace",), False, None),
+    ],
+)
+def test_sweep_variant_status_matrix_matches_report_readability(
+    tmp_path: Path,
+    kind: str,
+    expected_status: str,
+    error_contains: tuple[str, ...] | None,
+    expect_warning: bool,
+    tput: float | None,
+) -> None:
+    """Each on-disk report shape maps to the documented status / error / warning."""
+    name = _install_sweep_case(tmp_path, kind)
     warnings: list[str] = []
-    by_name = {row["variant_name"]: row for row in collectors.collect_sweep(tmp_path, {}, warnings)["all_variants"]}
-
-    ok_row = by_name[ok_dir.name]
-    assert ok_row["status"] == "ok"
-    assert ok_row["error"] is None
-    assert ok_row["output_throughput_tok_s"] == 800.0
-    assert ok_row["ttft_mean_ms"] == 50.0
-
-    failed_row = by_name[failed_dir.name]
-    assert failed_row["status"] == "failed"
-    assert failed_row["error"] == "OOM killed"
-
-    skipped_row = by_name[skipped_dir.name]
-    assert skipped_row["status"] == "skipped"
-    assert skipped_row["error"] is None
-    assert skipped_row["benchmark_report_path"] is None
-
-    unreadable = (truncated_dir.name, empty_dir.name, list_dir.name)
-    for name in unreadable:
-        row = by_name[name]
-        assert row["status"] == "failed", name
-        assert row["error"], name
-        assert row["output_throughput_tok_s"] is None, name
-
-    assert any("failed to parse" in w for w in warnings)
+    rows = collectors.collect_sweep(tmp_path, {}, warnings)["all_variants"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["variant_name"] == name
+    assert row["status"] == expected_status
+    if expected_status == "failed":
+        assert row["error"]
+        for fragment in error_contains or ():
+            assert fragment in row["error"], row["error"]
+    else:
+        assert row["error"] is None
+    assert row["output_throughput_tok_s"] == tput
+    has_parse_warning = any("failed to parse" in w for w in warnings)
+    assert has_parse_warning is expect_warning, warnings
+    if expected_status == "skipped":
+        assert row["benchmark_report_path"] is None
 
 
 def test_sweep_variant_rows_share_a_stable_key_set(tmp_path: Path) -> None:
@@ -751,10 +813,12 @@ def test_sweep_variant_rows_share_a_stable_key_set(tmp_path: Path) -> None:
         assert set(row) == _SWEEP_POINT_KEYS
         assert row["status"] in _SWEEP_STATUSES
         assert "error" in row
+        if row["status"] == "failed":
+            assert row["error"]
 
 
 def test_corrupt_sweep_report_is_not_counted_as_success_by_the_renderer(tmp_path: Path) -> None:
-    """Collector output fed to the renderer: only a readable success counts."""
+    """Collector output fed to the renderer: failed and skipped are counted apart."""
     ok_dir = _sweep_variant_dir(tmp_path, "variant_0_conc32_isl128_osl128")
     _write_report_text(ok_dir, json.dumps(_ok_benchmark_report()))
     bad_dir = _sweep_variant_dir(tmp_path, "variant_1_conc64_isl128_osl128")
@@ -764,12 +828,15 @@ def test_corrupt_sweep_report_is_not_counted_as_success_by_the_renderer(tmp_path
     section = collectors.collect_sweep(tmp_path, {}, [])
     out = sw.render({"sweep": section})
 
-    assert any("success=1" in f for f in out.key_facts), out.key_facts
+    summary = next(f for f in out.key_facts if f.startswith("Sweep grid="))
+    assert "success=1" in summary, out.key_facts
+    assert "failed=1" in summary, out.key_facts
+    assert "skipped=1" in summary, out.key_facts
     assert any("Best point" in f and "tput=800.0" in f for f in out.key_facts), out.key_facts
     assert out.decisions[0].kind == "kept"
     assert "800.00" in out.markdown_block
     assert "50.00" in out.markdown_block
     assert "unreadable" in out.markdown_block
     assert "| conc | isl | osl | status | tput | ttft | e2el | error |" in out.markdown_block
-    ok_count = sum(1 for v in section["all_variants"] if v["status"] == "ok")
-    assert ok_count == 1
+    by_status = {v["status"] for v in section["all_variants"]}
+    assert by_status == {"ok", "failed", "skipped"}

@@ -971,12 +971,13 @@ class SweepPoint(TypedDict, total=False):
         ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
         tpot_mean_ms (float | None): Mean time-per-output-token (ms), or None.
         e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        status (str): Point status. ``ok`` only when a complete report was
+        status (str): Point status. ``ok`` when a readable JSON object was
             read and ``success`` was not false; ``failed`` when the report
-            says failure or was unreadable; ``skipped`` when no report exists.
-        error (str | None): Failure reason when ``status`` is ``failed``, else
-            None. Present on every row so table-shaped consumers see a stable
-            key set.
+            says failure, was unreadable, or ``abort_reason.json`` is
+            present with no report; ``skipped`` when neither file exists.
+        error (str | None): Non-empty failure reason when ``status`` is
+            ``failed``, else None. Present on every row so table-shaped
+            consumers see a stable key set.
         benchmark_report_path (str | None): Path to the benchmark report, or None.
     """
 
