@@ -64,7 +64,7 @@ permissions:
 jobs:
   # 1. resolve: gate on a real version bump (PR vs base) or manual input; compute CI_VERSION.
   resolve:
-    runs-on: Hyperloom-e2e-ci
+    runs-on: hyperloom-pre-e2e-ci
     outputs:
       run: ${{ steps.decide.outputs.run }}
       run_scope: ${{ steps.decide.outputs.run_scope }}
@@ -160,7 +160,7 @@ jobs:
   build:
     needs: resolve
     if: needs.resolve.outputs.run == 'true' && needs.resolve.outputs.reuse == ''
-    runs-on: Hyperloom-e2e-ci
+    runs-on: hyperloom-pre-e2e-ci
     env:
       CI_VERSION: ${{ needs.resolve.outputs.ci_version }}
       BASE_VERSION: ${{ needs.resolve.outputs.base_version }}
@@ -221,7 +221,7 @@ jobs:
     if: >-
       always() && needs.resolve.outputs.run == 'true' &&
       (needs.build.result == 'success' || needs.build.result == 'skipped')
-    runs-on: Hyperloom-e2e-ci
+    runs-on: hyperloom-pre-e2e-ci
     timeout-minutes: 900   # ≥14h: covers the 12h leg + bootstrap/setup/agent overhead
     env:
       CI_VERSION: ${{ needs.resolve.outputs.ci_version }}
