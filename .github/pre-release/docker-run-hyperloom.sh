@@ -56,6 +56,21 @@ mkdir -p "$ROOT"
 BOOTSTRAP="${NFS_ROOT%/}/bootstrap/${CI_VERSION}/bootstrap-pre-release.sh"
 NAME="hyperloom-${LEG_ID}"
 
+# The model dir (e.g. /shared_nfs/models/<name>) lives OUTSIDE $ROOT/$NFS_ROOT, so the
+# demo skill's rule applies: "If ... a pre-downloaded model directory is outside the
+# workspace, add matching -v host_path:host_path mounts" (examples/*/SKILL.md). Without
+# this the container's HYPERLOOM_MODEL_PATH resolves to a path that does not exist and
+# optimize can never boot the server -> the leg hangs waiting for a final.json that
+# never comes. Mount the model's PARENT dir (minimal exposure). Skip the extra -v when
+# the model already lives under a dir we mount ($ROOT or $NFS_ROOT) to avoid a duplicate
+# -v that docker rejects.
+MODEL_DIR="$(dirname -- "$MODEL_PATH")"
+MODEL_MOUNT=()
+case "$MODEL_DIR/" in
+  "${ROOT%/}/"*|"${NFS_ROOT%/}/"*) : ;;  # already covered by an existing mount
+  *) MODEL_MOUNT=(-v "$MODEL_DIR:$MODEL_DIR") ;;
+esac
+
 # GPU index -> renderD node. VERIFIED on a real privileged MI355X x8 pod (2026-08-27):
 # the 8 physical GPUs map to renderD128,136,144,...,184 -- i.e. stride 8, NOT +1. The
 # rocm-smi GPU order matches this render-node order (GPU i == 0002/0003:00:0X.0 ==
@@ -100,5 +115,6 @@ exec docker run --rm --name "$NAME" \
   ${ANTHROPIC_BASE_URL:+-e ANTHROPIC_BASE_URL="$ANTHROPIC_BASE_URL"} \
   -v "$ROOT:$ROOT" \
   -v "$NFS_ROOT:$NFS_ROOT" \
+  "${MODEL_MOUNT[@]}" \
   --entrypoint bash \
   "$IMAGE" "$BOOTSTRAP"
