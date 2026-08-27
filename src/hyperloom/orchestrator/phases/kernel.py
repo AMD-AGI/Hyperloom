@@ -36,8 +36,8 @@ from ..loop.coordinator_helpers import (
     _geak_accepted_kernel_specs,
     _geak_has_accepted_kernel,
     _resolve_roofline_watermark_ratio,
+    _accepted_config_as_variant,
     _resolve_serving_fidelity,
-    _split_env_and_flags,
 )
 from .base import PhaseHandler
 
@@ -1332,13 +1332,15 @@ class KernelPhase(PhaseHandler):
         Turns the bench-style ``{"flags":.., "env":..}`` blob into a reproducible
         (server-args, real-env) pair: any ``KEY=VAL`` token in ``env`` becomes a
         real env var; any ``--flag`` token folds into flags.
+
+        Shares :func:`_accepted_config_as_variant` with the material gate and the
+        2b dispatch, so the env mapping written to ``geak_pending`` and to
+        ``current_best`` is the one the executor will actually run. This is the
+        path that hands ``current_best`` the raw ``accepted_config``: filtering
+        only at the comparison would leave a blocked name on the stored side and
+        make an unchanged config read as a difference.
         """
-        accepted_cfg = result.get("accepted_config") or {}
-        accepted_flags = str(accepted_cfg.get("flags") or "").strip()
-        parsed_envs, extra_flags = _split_env_and_flags(str(accepted_cfg.get("env") or ""))
-        if extra_flags:
-            accepted_flags = (accepted_flags + " " + extra_flags).strip()
-        return accepted_flags, parsed_envs
+        return _accepted_config_as_variant(result.get("accepted_config"))
 
     def _record_geak_candidate(self, result: dict[str, Any]) -> None:
         """Record a GEAK e2e win as an UNVALIDATED candidate (no headline).
