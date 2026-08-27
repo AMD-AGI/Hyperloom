@@ -1370,7 +1370,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.55.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1378,7 +1378,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.35.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

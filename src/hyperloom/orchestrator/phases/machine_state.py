@@ -338,8 +338,8 @@ DEFAULT_PHASE_BUDGET_PCT: dict[str, float] = {
     PHASE_PRELUDE: 0.03,
     # The optimisation phase carries both levers' share. Rotation between them
     # is the arms' plateau judgement, not a wall-clock cap.
-    PHASE_FRAMEWORK_AGENT: 0.55,
-    PHASE_KERNEL_AGENT: 0.35,
+    PHASE_FRAMEWORK_AGENT: 0.40,
+    PHASE_KERNEL_AGENT: 0.50,
     PHASE_SWEEP: 0.05,
     PHASE_CLOSE: 0.02,
 }

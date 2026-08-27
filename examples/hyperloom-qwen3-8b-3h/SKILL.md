@@ -77,7 +77,7 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
-- `--max-minutes-framework-pct 0.59`
+- `--max-minutes-framework-pct 0.44`
 - `--max-minutes-sweep-pct 0.01`
 - `--explore-force-exit-budget-pct 0.01`
 - `--no-framework-agent`
@@ -195,7 +195,7 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.59` and `--max-minutes-sweep-pct 0.01`
+5. Include `--max-minutes-framework-pct 0.44` and `--max-minutes-sweep-pct 0.01`
    in the optimize command. With FRAMEWORK_AGENT and KERNEL_AGENT disabled,
    Hyperloom redistributes their shares so most of the short run budget is
    reserved for OPTIMIZE while still leaving SWEEP/CLOSE time to exit cleanly

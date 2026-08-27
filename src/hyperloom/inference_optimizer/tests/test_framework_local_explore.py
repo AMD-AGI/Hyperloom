@@ -36,10 +36,12 @@ def test_every_phase_gets_a_budget_share_and_the_shares_sum_to_one():
     budget = _phase_state.DEFAULT_PHASE_BUDGET_PCT
     assert set(budget) == set(_phase_state.PHASE_NAMES)
     assert sum(budget.values()) == pytest.approx(1.0)
-    # The merged optimisation phase carries both levers, so it holds the
-    # largest share; rotation between the arms is their plateau judgement, not
-    # a wall-clock cap.
-    assert max(budget, key=lambda p: budget[p]) == _phase_state.PHASE_FRAMEWORK_AGENT
+    # How the two work phases divide their share is a tuning call; that the
+    # session is spent on them rather than on setup and wind-down is not.
+    work = budget[_phase_state.PHASE_FRAMEWORK_AGENT] + budget[_phase_state.PHASE_KERNEL_AGENT]
+    overhead = budget[_phase_state.PHASE_PRELUDE] + budget[_phase_state.PHASE_CLOSE]
+    assert work >= 0.8
+    assert overhead <= 0.1
 
 
 # --------------------------------------------------------------------------- #
