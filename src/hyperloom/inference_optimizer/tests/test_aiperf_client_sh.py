@@ -56,6 +56,7 @@ printf '%s\n' "$@" > "$art/aiperf_args.txt"
   echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
   echo "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=${AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT:-UNSET}"
   echo "AIPERF_DATASET_MMAP_CACHE_DIR=${AIPERF_DATASET_MMAP_CACHE_DIR:-UNSET}"
+  echo "AIPERF_HTTP_TCP_USER_TIMEOUT=${AIPERF_HTTP_TCP_USER_TIMEOUT:-UNSET}"
   echo "AIPERF_UI_REALTIME_METRICS_ENABLED=${AIPERF_UI_REALTIME_METRICS_ENABLED:-UNSET}"
 } > "${AGENTX_TEST_MARKER}"
 exit "${FAKE_RC:-0}"
@@ -158,6 +159,38 @@ def test_scrub_keeps_aiperf_bin_drops_others(tmp_path):
     marker = (tmp_path / "marker.txt").read_text()
     assert "AIPERF_BIN=" in marker and "UNSET" not in marker.split("AIPERF_BIN=")[1].splitlines()[0]
     assert "AIPERF_FOO=UNSET" in marker  # stray AIPERF_* scrubbed
+
+
+def test_tcp_user_timeout_survives_the_scrub(tmp_path):
+    """The scrub must not leave aiperf on its 30s stock TCP_USER_TIMEOUT.
+
+    That bound is how long Linux tolerates an established connection making no
+    progress, and an agentic turn against a long-context model makes none for
+    as long as the server is prefill-bound. Upstream's Kimi-K3 and DSv4 recipes
+    export 900000; because the scrub above drops any inherited copy, this file
+    has to re-state it or the connection dies mid-prefill and the round fails
+    as a warmup error with no matching server-side fault.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=900000" in (tmp_path / "marker.txt").read_text()
+
+
+def test_tcp_user_timeout_is_tunable_through_the_agentx_name(tmp_path):
+    """Operators tune it through AGENTX_, like every other knob in this file."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_HTTP_TCP_USER_TIMEOUT="1200000")
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=1200000" in (tmp_path / "marker.txt").read_text()
+
+
+def test_inherited_tcp_user_timeout_does_not_win(tmp_path):
+    """An inherited AIPERF_ copy is scrubbed; ours is authoritative."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AIPERF_HTTP_TCP_USER_TIMEOUT="30000")
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=900000" in (tmp_path / "marker.txt").read_text()
 
 
 def test_gpu_type_uppercase_resolves_builtin(tmp_path):

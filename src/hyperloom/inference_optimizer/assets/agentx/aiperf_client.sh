@@ -29,6 +29,9 @@
 #     non-submittable -- see the smoke note below),
 #   AGENTX_REALTIME_METRICS (rolling stats block; default true),
 #   AGENTX_DATASET_CONFIG_TIMEOUT (default 1800), AGENTX_LIVE_ASSISTANT,
+#   AGENTX_HTTP_TCP_USER_TIMEOUT (no-TCP-progress bound in ms; default 900000,
+#     matching upstream's long-context recipes -- aiperf's stock 30s aborts
+#     live connections while the server is prefill-bound),
 #   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
 #   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
 #     from $MAX_MODEL_LEN -- see the replay-context note below),
@@ -214,6 +217,15 @@ done < <(env)
 # aiperf validates SERVICE_PROFILE_CONFIGURE_TIMEOUT >= DATASET_CONFIGURATION_TIMEOUT.
 export AIPERF_DATASET_CONFIGURATION_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
 export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+# TCP_USER_TIMEOUT bounds how long Linux tolerates an established connection
+# making no progress -- and an agentic turn against a long-context model makes
+# no TCP progress for as long as the server is prefill-bound. aiperf's stock
+# 30s therefore aborts otherwise-live connections mid-prefill, which surfaces
+# as a warmup failure with no server-side error to match it. Upstream's
+# Kimi-K3 and DSv4 recipes all export 900000 (15 min) for exactly this, and the
+# scrub above would drop an inherited copy, so it has to be re-stated here or
+# the request timeout is left to a bound two orders of magnitude too small.
+export AIPERF_HTTP_TCP_USER_TIMEOUT="${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}"
 # Pre-canned assistant replay (recorded responses drive later turns).
 export AIPERF_DATASET_WEKA_LIVE_ASSISTANT_RESPONSES="${AGENTX_LIVE_ASSISTANT:-0}"
 # Headless realtime metrics are opt-in on current aiperf, and the scrub above

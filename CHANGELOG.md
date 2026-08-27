@@ -37,6 +37,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   floor nor above the cap and restored the full exposure without printing
   anything. The override is still honoured verbatim; it now warns.
 
+- **`AIPERF_HTTP_TCP_USER_TIMEOUT` is re-stated after the `AIPERF_*` scrub.**
+  `TCP_USER_TIMEOUT` bounds how long Linux tolerates an established connection
+  making no progress, and an agentic turn against a long-context model makes
+  none for as long as the server is prefill-bound. aiperf's stock 30s therefore
+  aborts otherwise-live connections mid-prefill, surfacing as a warmup failure
+  with no server-side error to match it. Upstream's Kimi-K3 and DSv4 recipes all
+  export `900000` (15 min); Hyperloom scrubs every inherited `AIPERF_*` except
+  `AIPERF_BIN`, so an operator setting it had no effect and the client ran on
+  the stock bound. Now exported after the scrub, tunable via
+  `AGENTX_HTTP_TCP_USER_TIMEOUT`.
+
 - **A loosened `AGENTX_FAILED_REQUEST_THRESHOLD` is flagged as a non-canonical
   workload.** Raising the abort ratio keeps alive a run that upstream's 0.10
   would have aborted, and the surviving requests are then mapped as an ordinary
