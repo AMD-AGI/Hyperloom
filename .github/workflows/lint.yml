@@ -60,9 +60,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install Ruff
+        # Pinned exactly, not a floating range. Both `check` and `format --check`
+        # below are hard gates, and ruff changes rule behaviour and formatting
+        # between minor releases -- with a range, a ruff release reds main with
+        # no code change. Absorbed from KernelForge's pre-merge.yml, which pinned
+        # this for the same reason.
+        #
+        # The version is the one the tree was last formatted with; bumping it
+        # means running `ruff format .` in the same commit.
         run: |
           pip install --upgrade pip
-          pip install "ruff>=0.8,<1"
+          pip install "ruff==0.16.2"
 
       - name: Ruff check
         id: ruff_check
@@ -71,6 +79,25 @@ jobs:
       - name: Ruff format (check only)
         id: ruff_format
         run: ruff format --check .
+
+  compile:
+    name: byte-compile (syntax check)
+    runs-on: ubuntu-latest
+    # Seconds long, and it catches the failure mode ruff cannot: ruff parses
+    # with its own frontend, so a construct CPython rejects can lint clean.
+    # The vendored `kernelforge` tree arrived via a bulk rename, which is
+    # exactly how syntax casualties get introduced. Ported from KernelForge's
+    # pre-merge.yml, which compiled the two source packages it had back then;
+    # those are one package now, so this compiles it plus hyperloom itself.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile package sources
+        run: python -m compileall -q src/kernelforge src/hyperloom
 
   bandit:
     name: bandit (medium+, production code)

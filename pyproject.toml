@@ -140,6 +140,23 @@ kernelforge = "kernelforge.cli:main"
 # distribution is gone, and operator scripts still reference this name.
 kernel-agents = "kernelforge.cli:main"
 
+[tool.setuptools]
+# setuptools defaults this to true for pyproject-based config, which makes
+# build_py sweep every file living under a package directory -- including
+# subdirectories that are NOT packages. ``packages.find.exclude`` keeps
+# ``*.tests`` out of the *package* list, but the sweep then re-added the very
+# same files as package *data*: the wheel shipped 627 test entries before forge
+# was vendored and 833 after (all of ``kernelforge/tests/`` and
+# ``kernelforge/gemm_tune/tests/``). ``scripts/check_wheel_contents.py`` has
+# been reporting this; it is the ``packaging.yml`` wheel-contents job.
+#
+# Turning the sweep off makes ``[tool.setuptools.package-data]`` below the sole
+# source of shipped non-module files, which is the state the two packaging
+# checks already assume: ``test_packaging_lint.py`` walks tree -> declaration
+# and check_wheel_contents.py walks declaration -> wheel, so nothing can now
+# ship undeclared or be declared and missing.
+include-package-data = false
+
 [tool.setuptools.packages.find]
 where = ["src"]
 # Test trees are not part of the distribution: their fixture data is not
