@@ -88,11 +88,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         if bool(getattr(state, "framework_agent_phase_done", False)):
             return
         # Skip if a framework task is already queued or running.
-        try:
-            queued = await self.tasks.queued()
-            running = await self.tasks.running()
-        except Exception:  # noqa: BLE001 — defensive
-            queued, running = [], []
+        queued = await self.tasks.queued()
+        running = await self.tasks.running()
         for t in (*queued, *running):
             # A candidate landing as ``integrate_patch`` with a candidate id.
             if getattr(t, "kind", "") == "integrate_patch" and (getattr(t, "params", None) or {}).get(
@@ -117,11 +114,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         # proposal-pending case is covered by the ``next_candidate is None``
         # inflight wait below.
         if getattr(state, "framework_agent_authoring_enabled", False):
-            try:
-                _q = await self.tasks.queued()
-                _r = await self.tasks.running()
-            except Exception:  # noqa: BLE001 — defensive
-                _q, _r = [], []
+            _q = await self.tasks.queued()
+            _r = await self.tasks.running()
             if any(
                 getattr(t, "kind", "") in ("specialist", "integrate_patch")
                 and bool((getattr(t, "params", None) or {}).get("framework_agent_authoring"))
@@ -205,11 +199,8 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return True
             return cand_id.startswith("local_explore:") and cand_id not in processed_ids
 
-        try:
-            queued = await self.tasks.queued()
-            running = await self.tasks.running()
-        except Exception:  # noqa: BLE001 — defensive
-            queued, running = [], []
+        queued = await self.tasks.queued()
+        running = await self.tasks.running()
         for t in (*queued, *running):
             if getattr(t, "kind", "") not in ("specialist", "integrate_patch"):
                 continue
@@ -2466,6 +2457,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         *,
         task: "Task",
         done_payload: dict[str, Any],
+        run_error: str = "",
     ) -> None:
         """Harvest a discovery specialist's candidates into a batch.
 
@@ -2475,9 +2467,19 @@ class FrameworkPhase(CoordinatorCollaborator):
         Args:
             task: The completed specialist task.
             done_payload: Its ``specialist_done`` payload.
+            run_error: The task's error, if it did not complete. A round that
+                failed reports nothing about what is out there, so it must not
+                count toward the streak that retires the lane.
         """
         params = getattr(task, "params", None) or {}
         if not bool(params.get("candidate_discovery")):
+            return
+        if run_error:
+            log.warning(
+                "FRAMEWORK: discovery task=%s failed, not counted as an empty round: %s",
+                getattr(task, "task_id", ""),
+                run_error[:200],
+            )
             return
         proposals = done_payload.get("proposal_set") if isinstance(done_payload, dict) else None
         candidates = self._candidates_from_discovery_proposals(proposals or [])

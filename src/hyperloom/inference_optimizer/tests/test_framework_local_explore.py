@@ -415,3 +415,37 @@ def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
     # Budget spent: the lane declines so the rungs below it are reachable.
     stub.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
     assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+
+
+def test_a_failed_discovery_round_is_not_an_empty_one(tmp_path: Path):
+    """A crashed specialist reports nothing about what is out there.
+
+    Counting it toward the empty streak walks the source arm to "exhausted" on
+    the strength of its own failures, and the signal is available at the call
+    site: the dispatcher already reads the task error for the sibling bridge.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+
+    stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="specialist died")
+    assert stub.shared_state.framework_agent_empty_discoveries == 0
+
+    # A round that completed and genuinely found nothing still counts.
+    stub._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
+    assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+
+def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
+    """The pump must not read a failed task query as "nothing in flight".
+
+    Treating it as idle dispatches a second candidate on top of a live one.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+
+    async def _boom():
+        raise RuntimeError("registry unavailable")
+
+    stub.tasks.queued = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(stub._pump_framework_agent_phase())
