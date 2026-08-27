@@ -242,6 +242,23 @@ bootstrap_entry_b64() {
 echo "[dispatch] CI_VERSION=$CI_VERSION tasks='$REQ_TASKS'"
 declare -A DISPATCH   # leg -> workloadId
 
+# Persist the dispatch map INCREMENTALLY, one entry per created workload -- not just
+# once at the end. With concurrency.cancel-in-progress a newer push can cancel THIS run
+# mid-dispatch; the job's `if: cancelled()` cleanup then stops whatever is in
+# DISPATCH_MAP. If the map were written only after the loop, workloads created before
+# the cancel would leak their GPUs. Seed an empty map up front so the file always
+# exists, then append after every successful create.
+: > "$DISPATCH_MAP" 2>/dev/null || true
+printf '{}\n' > "$DISPATCH_MAP"
+record_dispatch() {  # leg workloadId -- add to the in-memory map AND the on-disk map
+  local leg="$1" wid="$2"
+  DISPATCH["$leg"]="$wid"
+  local tmp="${DISPATCH_MAP}.tmp"
+  if jq --arg l "$leg" --arg w "$wid" '. + {($l):$w}' "$DISPATCH_MAP" > "$tmp" 2>/dev/null; then
+    mv "$tmp" "$DISPATCH_MAP"
+  fi
+}
+
 # ---- baremetal legs: one non-privileged 1-GPU workload each ----------------
 leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" \
   '{replica:1, gpu:"1", cpu:$cpu, memory:$mem, ephemeralStorage:"100Gi"}')"
@@ -255,7 +272,7 @@ for leg in $REQ_TASKS; do
       entry="$(bootstrap_entry_b64 "")"
       dl="$(leg_deadline_s "$leg")"
       wid="$(create_workload "$(workload_name "$leg")" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
-      DISPATCH["$leg"]="$wid"
+      record_dispatch "$leg" "$wid"
       summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU, deadline $((dl/3600))h)"
       ;;
     docker-*)
@@ -319,19 +336,15 @@ if [ "$want_docker_host" = 1 ]; then
   # Every docker leg shares the one host workloadId; the poll distinguishes them by
   # reading each leg's own session dir on NFS.
   for leg in $docker_legs; do
-    DISPATCH["$leg"]="$wid"
+    record_dispatch "$leg" "$wid"
     summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_gpu_index "$leg"), deadline $((host_dl/3600))h)"
   done
 fi
 
-# ---- write the dispatch map for the poll step ------------------------------
-map_json="{}"
-for leg in "${!DISPATCH[@]}"; do
-  map_json="$(printf '%s' "$map_json" | jq --arg l "$leg" --arg w "${DISPATCH[$leg]}" '. + {($l):$w}')"
-done
-printf '%s\n' "$map_json" > "$DISPATCH_MAP"
+# ---- dispatch map already written incrementally by record_dispatch ---------
+# (so a mid-dispatch cancel still leaves a complete-so-far map for cleanup to stop).
 echo "dispatch_map=$DISPATCH_MAP" >> "${GITHUB_OUTPUT:-/dev/null}"
 summary ""
-summary "**dispatched $(printf '%s' "$map_json" | jq 'length') legs** → \`$DISPATCH_MAP\`"
+summary "**dispatched $(jq 'length' "$DISPATCH_MAP") legs** → \`$DISPATCH_MAP\`"
 echo "[dispatch] wrote $DISPATCH_MAP"
-printf '%s\n' "$map_json" | jq .
+jq . "$DISPATCH_MAP"

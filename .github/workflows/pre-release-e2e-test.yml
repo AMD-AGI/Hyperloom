@@ -54,11 +54,16 @@ on:
         description: "Comma-separated subset of leg IDs (default: all 8)"
         required: false
 
-# No cross-version concurrency (design §13, point D): serialize pre-release runs so the
-# peak GPU footprint stays at 8. A newer run QUEUES behind the in-flight one.
+# One pre-release run at a time (design §13, point D): the peak GPU footprint stays at
+# 8. cancel-in-progress: a NEWER push supersedes the in-flight run -- GitHub cancels the
+# old run, whose `if: cancelled()` step stops its SaFE workloads (freeing GPUs) before
+# this new run dispatches. This is what makes "push a fix -> the stale run is torn down
+# and the fresh code reruns from scratch" automatic, instead of queueing behind a run
+# built from superseded code. Per-PR concurrency (group keyed by ref) so two different
+# PRs don't cancel each other -- only newer commits on the SAME PR supersede.
 concurrency:
-  group: pre-release-e2e
-  cancel-in-progress: false
+  group: pre-release-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write        # commit-comment fallback when no PR is associated
