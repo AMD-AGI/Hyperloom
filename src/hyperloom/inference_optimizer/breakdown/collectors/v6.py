@@ -376,12 +376,6 @@ def _framework_windows(
             active["exit_row"] = row
             active = None
             continue
-        if from_framework and from_phase == to_phase:
-            if active is None or int(active["cycle"]) != cycle:
-                active = _new_framework_window(cycle)
-                windows.append(active)
-            active["rows"].append(row)
-
     current_phase = str(state.get("phase") or "").strip().upper()
     current_cycle = int(state.get("macro_cycle") or 0)
     if current_phase in _FRAMEWORK_PHASES and not any(

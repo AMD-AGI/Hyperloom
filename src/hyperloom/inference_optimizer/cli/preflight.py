@@ -1164,7 +1164,7 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
             f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        raise SystemExit(2)
 
     if _in_container():
         remedy = (
@@ -1195,7 +1195,7 @@ def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
         "for a local run that is expected to serve from somewhere unprobed.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
 
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
@@ -1746,7 +1746,7 @@ def _check_tracelens_cli() -> dict[str, Any]:
         f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
 
 def _check_tracelens_root_exists() -> dict[str, Any]:
