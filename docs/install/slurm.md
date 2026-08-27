@@ -4,18 +4,27 @@ myst:
         "description": "Submit Hyperloom optimization jobs to a Slurm cluster on AMD Instinct GPUs. Covers credentials, cluster setup, job submission, monitoring, and troubleshooting."
         "keywords": "Hyperloom, Slurm, cluster, AMD Instinct, MI300X, MI355X, sbatch, SGLang, vLLM, job submission, batch scheduler, ROCm"
 ---
-# Slurm installation instructions
+# Install and configure Hyperloom on a Slurm cluster
 
-Slurm mode submits Hyperloom optimization jobs to a **Slurm** cluster, where each
+Slurm mode submits Hyperloom optimization jobs to a Slurm cluster, where each
 job launches a ROCm serving container (sglang or vllm) on one node and runs the
 `inference_optimizer` CLI inside it. It is the batch-scheduler counterpart to the
 Kubernetes layout in the [self-hosting and operations guide](../reference/operations.md),
 and suits teams whose AMD GPU fleet is managed by Slurm rather than Kubernetes.
 
-The submission scripts wrap the full flow: resolve the model row → build the
-sbatch command → start the container → set the gateway host alias → mount the CA
-bundle → install the optimizer → launch the backend. They never start
-optimization on the login node; work only runs inside the scheduled job.
+The submission scripts wrap the full flow:
+
+```mermaid
+flowchart LR
+    A[Resolve model row] --> B[Build sbatch command]
+    B --> C[Start container]
+    C --> D[Set gateway host alias]
+    D --> E[Mount CA bundle]
+    E --> F[Install optimizer]
+    F --> G[Launch backend]
+```
+
+They never start optimization on the login node; work only runs inside the scheduled job.
 
 The ready-to-use scripts ship under
 `src/hyperloom/inference_optimizer/assets/slurm/`:
@@ -37,9 +46,9 @@ The following table lists the prerequisites and their implications for running H
 | Aspect | Assumption | Consequence |
 |---|---|---|
 | Scheduler | Slurm (`sbatch` / `srun` / `sinfo` / `squeue` available) | — |
-| Container runtime | pyxis/enroot **or** docker | Auto-detected; override with `HL_CONTAINER_RUNTIME`. |
+| Container runtime | pyxis/enroot *or* docker | Auto-detected; override with `HL_CONTAINER_RUNTIME`. |
 | GPU | AMD Instinct™ (for example MI355X `gfx950` or MI300X), 8 per node | Image and `--gpu-type` must match the hardware variant. |
-| Slurm GPU gres | GPUs might or might not be registered as gres | If **not** registered you cannot use `--gpus`; see [Clusters without GPU gres](#clusters-without-gpu-gres). |
+| Slurm GPU gres | GPUs might or might not be registered as gres | If *not* registered you cannot use `--gpus`; see [Clusters without GPU gres](#clusters-without-gpu-gres). |
 | Shared filesystem | A cross-node mount (WekaFS, VAST/NFS, ...) | Holds source, artifacts, and the CA bundle. |
 | LLM gateway | Reachable directly or through a jump host | Might need a host alias plus an internal CA. |
 | Container registry | Public or private | A private registry unreachable from compute nodes requires a locally cached image. |
@@ -97,7 +106,7 @@ credential model, including the split Anthropic-/OpenAI-compatible provider setu
 ### Build a combined CA bundle
 
 If the gateway uses an internal CA, the job still needs to reach
-**huggingface.co** and **github.com** over public TLS. A CA bundle containing
+`huggingface.co` and `github.com` over public TLS. A CA bundle containing
 only the internal certificate makes public TLS fail with
 `CERTIFICATE_VERIFY_FAILED`. Merge the system roots with the internal CA into a
 single bundle and point `HL_CA_BUNDLE_HOST` at it:
@@ -123,7 +132,7 @@ ssh <node> 'docker images | grep -iE "sglang|vllm"'
 
 ### Stage the Hyperloom source
 
-Copy a **complete** source checkout (src-layout, `src/hyperloom/...`) to the
+Copy a *complete* source checkout (src-layout, `src/hyperloom/...`) to the
 shared mount and point `submit.sh --source-dir` at it to skip the runtime
 `git clone`. It must be a complete snapshot: an old flat layout or a snapshot
 missing `src/hyperloom/inference_optimizer/cli/` causes `ModuleNotFoundError`
@@ -165,17 +174,17 @@ Useful `submit.sh` options (run `./submit.sh --help` for the full list):
 
 ### Clusters without GPU gres
 
-If compute nodes do **not** register GPUs as Slurm gres (`scontrol show node`
+If compute nodes do *not* register GPUs as Slurm gres (`scontrol show node`
 reports `Gres=(null)`), any `--gpus N>0` request stays `PENDING (Resources)`
 forever. The convention is then "one job takes a whole node; the container grabs
 the GPUs directly":
 
-- pass `-g 0` so the job requests only a placeholder CPU and lands on the node;
+- Pass `-g 0` so the job requests only a placeholder CPU and lands on the node;
 - `submit.sh` emits `--gpus` only when `-g` is non-zero;
 - `run_hyperloom.sbatch` carries no `#SBATCH --gpus` directive.
 
 The container still receives every GPU through `--device=/dev/kfd
---device=/dev/dri`, so TP=8 works. If your GPUs **are** registered as gres
+--device=/dev/dri`, so TP=8 works. If your GPUs *are* registered as gres
 (`Gres=gpu:...:8`), use the standard `--gpus 8` and skip `-g 0`.
 
 ## Step 5: Monitor and read artifacts
@@ -189,16 +198,26 @@ cat <data-root>/<key>/$SID/state.json
 
 The artifact directory `<data-root>/<model_key>/<CLAW_SESSION_ID>/` contains:
 
-- `state.json`: live status (`baseline_tput`, `current_best`, `cumulative_gain_validated`);
-- `manifest.json`: session manifest;
-- `ci_metrics.json`: baseline/optimized throughput plus `gain_pct`;
+- `state.json`: Live status (`baseline_tput`, `current_best`, `cumulative_gain_validated`);
+- `manifest.json`: Session manifest;
+- `ci_metrics.json`: Baseline/optimized throughput plus `gain_pct`;
 - `optimizer_runs/`: `launch_<sid>.json` and logs;
 - `runtime/`: `kernel-agent.env.sh` and other files produced by the installer.
 
-A healthy run logs, in order: container start → install complete → framework root
-discovery (`sglang=ok aiter=ok`) → model gate passed → Ray head (`--num-gpus=8`)
-→ model load → baseline throughput → optimization iterations. GPU memory and
-utilization ramp up only after the model-load step.
+A healthy run logs in this order:
+
+```mermaid
+flowchart LR
+    A[Container start] --> B[Install complete]
+    B --> C["Framework root discovery\n(sglang=ok aiter=ok)"]
+    C --> D[Model gate passed]
+    D --> E["Ray head\n(--num-gpus=8)"]
+    E --> F[Model load]
+    F --> G[Baseline throughput]
+    G --> H[Optimization iterations]
+```
+
+GPU memory and utilization ramp up only after the model-load step.
 
 ---
 
@@ -210,8 +229,8 @@ optimization. Model names must exist in your key's catalog:
 | Use | Environment variable | Allowed values | Notes |
 |---|---|---|---|
 | Orchestration | `CLAUDE_MODEL` / `LLM_MODEL` | Any model in the gateway catalog; `claude-opus-5` preferred, with `claude-opus-4-8` / `claude-opus-4-7` / `claude-opus-4-6` as the AMD allowlist fallbacks | Validated against your gateway's `/models` catalog. |
-| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | for example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
-| Forge (fusion / rewrite / collective) | `FORGE_CLAUDE_MODEL` | for example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
+| GEAK (kernel optimization subprocess) | `GEAK_CLAUDE_MODEL` | For example `claude-opus-5` | Defaults from `CLAUDE_MODEL`; set explicitly only when GEAK should use a different model. |
+| Forge (fusion / rewrite / collective) | `FORGE_CLAUDE_MODEL` | For example `claude-opus-5` / `gpt-5.6-sol` | Defaults from `CLAUDE_MODEL` for the selected Forge backend; set explicitly only when Forge should use a different model. |
 
 - Do *not* append effort/thinking suffixes (for example
   `claude-opus-4-7-thinking-xhigh`); the gateway returns `Invalid model name`
@@ -244,18 +263,26 @@ optimization. Model names must exist in your key's catalog:
 
 The following items address common Slurm job and cluster configuration problems.
 
-- Job stuck `PD (Resources)` while the node is `idle`: the node has no GPU gres, so `--gpus` can never be satisfied. Submit with `-g 0` and confirm there is no `#SBATCH --gpus` (see [Clusters without GPU gres](#clusters-without-gpu-gres)).
-- `docker: ... no such host` when pulling the image: the private registry is unreachable from the node. Use a node-cached local image name, or `docker login` a reachable registry.
-- `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): the CA bundle has only the internal cert. Use a combined CA bundle.
-- `ModuleNotFoundError: No module named '...cli'`: the source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
-- `--gpu-type: invalid choice: 'MI355X'`: the CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
-- `--claude-model=... is not allowed`: the strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-5` for orchestration, or unset the variable to validate against the gateway catalog instead.
-- `Invalid model name` / `401 missing subscription key`: the model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
+- Job stuck `PD (Resources)` while the node is `idle`: The node has no GPU gres, so `--gpus` can never be satisfied. Submit with `-g 0` and confirm there is no `#SBATCH --gpus` (see [Clusters without GPU gres](#clusters-without-gpu-gres)).
+- `docker: ... no such host` when pulling the image: The private registry is unreachable from the node. Use a node-cached local image name, or `docker login` a reachable registry.
+- `CERTIFICATE_VERIFY_FAILED: unable to get local issuer` (huggingface/github): The CA bundle has only the internal cert. Use a combined CA bundle.
+- `ModuleNotFoundError: No module named '...cli'`: The source snapshot is incomplete or an old layout. Stage a complete src-layout checkout (`src/hyperloom/...`).
+- `--gpu-type: invalid choice: 'MI355X'`: The CLI is case-sensitive. Use lowercase (for example `mi355x`; `submit-vultr.sh` already does).
+- `--claude-model=... is not allowed`: The strict AMD allowlist is in force (`INFERENCE_OPTIMIZER_ALLOW_CUSTOM_ORCH_MODEL=0`). Use `claude-opus-5` for orchestration, or unset the variable to validate against the gateway catalog instead.
+- `Invalid model name` / `401 missing subscription key`: The model name is not in the key catalog (often a suffixed variant). Use a name from `curl $OPENAI_BASE_URL/models`.
 - Server fails to start / OOM in shm: `/dev/shm` is too small. Raise `HL_SHM_SIZE` (default `64g`).
-- DNS failure / connection timeout to the gateway: the host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.
+- DNS failure / connection timeout to the gateway: The host alias was not applied. The docker path uses `--add-host`; confirm the node can reach the jump host on `:443`.
 
-Suggested triage order: **GPU gres → image reachability → combined CA → complete
-source → gpu-type casing → orchestration-model allowlist.**
+Suggested triage order:
+
+```mermaid
+flowchart LR
+    A[GPU gres] --> B[Image reachability]
+    B --> C[Combined CA]
+    C --> D[Complete source]
+    D --> E[GPU-type casing]
+    E --> F[Orchestration-model allowlist]
+```
 
 ---
 
