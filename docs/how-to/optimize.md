@@ -105,13 +105,9 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM / Atom |
+| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
-
-For scriptable diffusion workloads (`--framework xdit`), the headline metric is
-`final.e2el_mean_ms` (lower is better) and reports use `img/s` as the throughput
-unit.
 
 For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see
