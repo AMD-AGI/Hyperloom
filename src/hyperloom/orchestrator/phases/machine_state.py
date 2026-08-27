@@ -1475,6 +1475,9 @@ def compute_plateau_explore(
     if not isinstance(explore_search, dict):
         explore_search = {}
     winners_history = _rows_for_current_cycle(explore_search.get("winners_history") or [], state)
+    tested_ledger = explore_search.get("tested")
+    if not isinstance(tested_ledger, dict):
+        tested_ledger = {}
     recent_winners = list(winners_history[-lookback:])
     recent_keep_gain = 0.0
     for w in recent_winners:
@@ -1525,7 +1528,16 @@ def compute_plateau_explore(
         else:
             break
 
-    triggered = recent_keep_gain < keep_gain_threshold_pct and streak >= empty_streak_threshold
+    # A run with no research lane never records a specialist round, so the
+    # streak is structurally zero and cannot discriminate. The grid is the
+    # arm's other source of "tried and got nothing": count what it benched
+    # this cycle, and require the same volume of evidence the streak does.
+    tested_this_cycle = len(_rows_for_current_cycle(list(tested_ledger.values()), state))
+    exhausted = streak >= empty_streak_threshold or (
+        not specialist_rounds and tested_this_cycle >= empty_streak_threshold
+    )
+
+    triggered = recent_keep_gain < keep_gain_threshold_pct and exhausted
     return triggered, {
         "recent_keep_gain_pct": round(recent_keep_gain, 4),
         "keep_gain_threshold_pct": keep_gain_threshold_pct,
@@ -1534,6 +1546,7 @@ def compute_plateau_explore(
         "lookback": int(lookback),
         "winners_seen": len(recent_winners),
         "specialist_rounds_seen": len(specialist_rounds),
+        "tested_this_cycle": tested_this_cycle,
     }
 
 
@@ -2699,6 +2712,17 @@ def source_arm_plateaued(state: Any) -> tuple[bool, dict[str, Any]]:
     return (streak >= threshold or exhausted), evidence
 
 
+def _optimize_did_work_this_cycle(state: Any) -> bool:
+    """Whether either arm has dispatched or benched anything this macro-cycle."""
+    if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
+        return True
+    explore_search = getattr(state, "explore_search", None) or {}
+    tested = explore_search.get("tested") if isinstance(explore_search, dict) else None
+    if isinstance(tested, dict) and _rows_for_current_cycle(list(tested.values()), state):
+        return True
+    return bool(_rows_for_current_cycle(getattr(state, "framework_agent_phase_progress", None) or [], state))
+
+
 def exit_normal_optimize(
     state: Any,
     *,
@@ -2763,10 +2787,11 @@ def exit_normal_optimize(
 
     hint = str(getattr(state, "pending_escalate_hint", "") or "").strip()
     if hint == ESCALATE_HINT_SKIP_TO_KERNEL:
-        # Honoured only once a specialist round has actually run this cycle: a
+        # Honoured only once the phase has actually run something this cycle: a
         # phase that dispatched nothing must not end with zero validated work.
-        if _rows_for_current_cycle(getattr(state, "specialist_rounds", None) or [], state):
-            return "plateau_explore", {**arms, "evidence": "llm_escalation", "hint": hint}
+        # Either arm's work counts, so a grid-only run can still be skipped.
+        if _optimize_did_work_this_cycle(state):
+            return "optimize_no_more_leverage", {**arms, "evidence": "llm_escalation", "hint": hint}
     if hint == ESCALATE_HINT_SKIP_TO_SWEEP:
         return "optimize_no_more_leverage", {**arms, "evidence": "skip_to_sweep", "hint": hint}
 

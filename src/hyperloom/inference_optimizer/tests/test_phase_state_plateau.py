@@ -310,7 +310,7 @@ def test_exit_normal_optimize_exits_on_plateau():
 
 
 def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
-    """``skip_to_kernel`` hint forces ``plateau_explore`` even when the real signals disagree."""
+    """A ``skip_to_kernel`` hint exits even when the arms' own signals disagree."""
     state = SimpleNamespace(
         phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
@@ -322,7 +322,7 @@ def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
         stop_reason="",
     )
     out = exit_normal_optimize(state)
-    assert out is not None and out[0] == "plateau_explore"
+    assert out is not None and out[0] == "optimize_no_more_leverage"
     assert out[1]["evidence"] == "llm_escalation"
 
 
