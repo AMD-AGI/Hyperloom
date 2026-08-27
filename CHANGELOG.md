@@ -99,11 +99,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   of a shared install the run never served with when one happened to be present.
   `_resolve_framework_build` already walks the candidate interpreters and imports
   the framework to find the right one, but `_check_serving_framework` only
-  printed the winner; it is now published as `$HYPERLOOM_FRAMEWORK_PYTHON` and
-  the fingerprint reads its `site-packages`. The installer-written
-  `$VLLM_VENV_ROOT` is deliberately not consulted: it is only ever written, never
-  cleared, so it survives an isolated-to-shared move and would name an
-  environment the run no longer serves with.
+  printed the winner; it is now published as `$HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON`
+  (paired with `$HYPERLOOM_RESOLVED_FRAMEWORK`, since the scan answers for one
+  framework and `sglang` is the default) and the fingerprint reads its
+  `site-packages`. The installer-written `$VLLM_VENV_ROOT` is no longer read by
+  the fingerprint directly: it is only ever written, never cleared, so on its own
+  it cannot say whether the tree it names still holds vLLM. It still leads
+  preflight's candidate list and is probed there, which is what the recorded
+  version now follows. A prefix that yields no `site-packages` — a system Python keeps its
+  packages in `dist-packages` — is treated as a failed derivation and falls back
+  to this process, not as an authoritative "not installed".<br/>
+  **Operator note**: the framework check returns before publishing when
+  `$HYPERLOOM_SKIP_FRAMEWORK_CHECK` is set, when `$BENCHMARK_BASE_URL` points at
+  a remote server, on external multi-node, and for scriptable frameworks (xDiT,
+  custom) that own their entrypoint — serving is not local on those paths, so
+  the fingerprint falls back to this process rather than reading a venv root
+  that describes some other host.
 
 - **Shell and loader hijack names are rejected from the `extra_envs` argument to
   `materialize_config_with_envs` before the config is persisted.** The predicate

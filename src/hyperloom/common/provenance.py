@@ -33,6 +33,7 @@ import hashlib
 import os
 import re
 import subprocess  # nosec B404 - best-effort, guarded provenance probes only.
+import sys
 from importlib import metadata as _im
 from pathlib import Path
 from typing import Any, Mapping
@@ -58,15 +59,29 @@ _STACK_FINGERPRINT_ENVS: dict[str, tuple[str, ...]] = {
 # ``importlib.metadata`` here cannot see it, and the version silently degraded to
 # "unknown" on the default bare-metal vLLM path.
 #
-# Preflight already walks the candidate interpreters and imports the framework to
-# find this one, so it describes the runtime this session resolved. The installer's
-# ``$VLLM_VENV_ROOT`` is deliberately not consulted: it is host state that is only
-# ever written, never cleared, so it survives an isolated -> shared move and would
-# name an environment the run no longer serves with.
-_FRAMEWORK_PYTHON_ENV: str = "HYPERLOOM_FRAMEWORK_PYTHON"
+# Preflight already walks the candidate interpreters and locates the framework
+# under one of them, so it describes the runtime this session resolved. The
+# installer's ``$VLLM_VENV_ROOT`` is no longer read here directly: it is host
+# state that is only ever written, never cleared, so on its own it cannot say
+# whether the tree it names still holds the framework. It stays in play through
+# preflight, which leads with it and probes it -- and that is the right answer
+# either way, because ``_derive_runtime_paths`` also puts that root at the head
+# of ``PATH`` and vLLM starts as a bare ``vllm serve``, so a root that still
+# holds a working vLLM *is* what serves. A root that no longer does fails the
+# probe and the scan moves on, where reading it directly would have recorded a
+# version from an environment the run never touched.
+#
+# Distinct from ``HYPERLOOM_FRAMEWORK_PYTHON``, the per-attempt YAML key a
+# framework-agent attempt uses to force its own launch interpreter: that one is
+# a per-benchmark override, this one is the session-wide resolution.
+#: Published by preflight; read here. Public so the two stay in one place.
+RESOLVED_FRAMEWORK_PYTHON_ENV: str = "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON"
 
-# Components served by that interpreter. Others live in this process.
-_FRAMEWORK_COMPONENTS: frozenset[str] = frozenset({"vllm", "sglang"})
+#: The framework that interpreter was resolved for. The scan answers for one
+#: framework only, so the pair has to travel together: an SGLang session
+#: publishes an interpreter that knows nothing about vLLM, and reading it as the
+#: vLLM answer reports "unknown" for a vLLM this process can see.
+RESOLVED_FRAMEWORK_ENV: str = "HYPERLOOM_RESOLVED_FRAMEWORK"
 
 #: Runtime-arch overrides only. ``PYTORCH_ROCM_ARCH`` is deliberately absent:
 #: it names the archs a wheel is *compiled* for, not the installed device, and
@@ -206,25 +221,49 @@ def detect_stack_fingerprint(env: Mapping[str, str], *, probe: bool = True) -> d
 def _framework_site_packages(env: Mapping[str, str], component: str) -> list[str] | None:
     """``site-packages`` dirs of the interpreter preflight resolved, if any.
 
-    ``None`` when this component is not served by a resolved interpreter, or
-    when preflight published none -- both are the shared-environment case that
-    the running interpreter already answers.
+    ``None`` means "no answer from a separate interpreter" and lets the caller
+    fall back to this process. That covers four cases: nothing was published,
+    the interpreter was resolved for a different framework, it *is* this
+    process, or its prefix is not a venv layout so the derivation below cannot
+    be trusted.
 
-    A resolved interpreter that has no importable tree yields an empty list.
-    That is distinct from ``None``: the interpreter was chosen for this run, so
-    the version has to come from it or not at all.
+    A non-empty list is authoritative: the prefix really is venv-shaped, so an
+    absent distribution there means the served environment lacks it, and
+    answering from this process would report a version the run never served
+    with. The caller must not fall back on that.
+
+    The path is used literally. ``resolve()`` would follow ``bin/python`` down
+    its symlink chain to the base interpreter (``/usr/bin/python3.12``), whose
+    ``parent.parent`` is ``/usr`` -- and a system prefix keeps its packages in
+    ``dist-packages``, so every lookup would degrade to "unknown" including the
+    shared case this process answers on its own. ``sys.executable`` inside a
+    venv is likewise the unresolved venv path.
     """
-    if component not in _FRAMEWORK_COMPONENTS:
+    resolved_for = _env_first(env, RESOLVED_FRAMEWORK_ENV)
+    if not resolved_for or resolved_for.strip().lower() != component:
         return None
-    python_exe = _env_first(env, _FRAMEWORK_PYTHON_ENV)
-    if not python_exe:
+    python_exe = _env_first(env, RESOLVED_FRAMEWORK_PYTHON_ENV)
+    if not python_exe or python_exe == sys.executable:
+        # This process already answers for its own interpreter, without a
+        # derivation that only holds for venv-shaped prefixes.
         return None
-    # ``<venv>/bin/python`` -> ``<venv>/lib/python*/site-packages``.
-    venv_root = Path(python_exe).resolve().parent.parent
+    # ``<venv>/bin/python`` -> ``<venv>/lib/python*/site-packages``. Only a venv
+    # keeps packages there; a system prefix uses ``dist-packages`` and a bare
+    # ``python3`` would glob the working directory, so both are refused rather
+    # than silently yielding an empty authoritative answer.
+    exe_path = Path(python_exe)
+    if not exe_path.is_absolute():
+        return None
+    venv_root = exe_path.parent.parent
     try:
-        return [str(p) for p in sorted(venv_root.glob("lib/python*/site-packages"))]
+        hits = [str(p) for p in sorted(venv_root.glob("lib/python*/site-packages"))]
     except OSError:
-        return []
+        return None
+    # No match means the prefix is not venv-shaped (a system prefix keeps its
+    # packages in ``dist-packages``), so the derivation failed and this process
+    # is the better answer. Only a real hit is authoritative -- then an absent
+    # distribution genuinely means the served environment lacks it.
+    return hits or None
 
 
 def _probe_pkg_version(component: str, venv_path: list[str] | None = None) -> str:
@@ -388,6 +427,8 @@ def build_provenance(
 __all__ = [
     "PROVENANCE_VERSION",
     "PROVENANCE_SOURCE",
+    "RESOLVED_FRAMEWORK_ENV",
+    "RESOLVED_FRAMEWORK_PYTHON_ENV",
     "build_provenance",
     "server_args_hash",
     "detect_gfx_arch",
