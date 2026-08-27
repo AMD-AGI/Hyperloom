@@ -310,11 +310,11 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     return {"applied": applied, "skipped": skipped, "failed": failed}
 
 
-def trusted_explicit_root(
+def allowlisted_explicit_root(
     explicit: str,
     allowlist: tuple[str, ...] | None = None,
 ) -> Path | None:
-    """Resolve a declared framework root, or ``None`` when it is not trusted.
+    """Resolve a declared framework root, or ``None`` when it is not allowlisted.
 
     A root outside the allowlisted source scope is refused whatever its tree
     holds, so callers must ask this before blaming the patches for not
@@ -328,7 +328,7 @@ def trusted_explicit_root(
 
     Returns:
         The resolved directory, or ``None`` when it is unreadable, absent, or
-        outside the trusted source scope.
+        outside the allowlisted source scope.
     """
     try:
         resolved = Path(explicit).resolve()
@@ -424,11 +424,11 @@ def _resolve_framework_root(
     roots = [Path(root) for root in allowlist]
 
     if recorded_root:
-        return trusted_explicit_root(recorded_root, allowlist=allowlist)
+        return allowlisted_explicit_root(recorded_root, allowlist=allowlist)
 
     explicit_path: Path | None = None
     if explicit:
-        explicit_path = trusted_explicit_root(explicit, allowlist=allowlist)
+        explicit_path = allowlisted_explicit_root(explicit, allowlist=allowlist)
         if explicit_path is None:
             return None
 
@@ -2257,15 +2257,15 @@ class IntegratePatchExecutor:
         if patch_paths and framework_root is None:
             _lane_early = _derive_lane(params)
             if explicit_framework_root:
-                # An untrusted root is refused on that ground alone; only a
-                # trusted one that simply lacks the files is the patches' fault.
-                trusted_root = trusted_explicit_root(explicit_framework_root)
-                if trusted_root is not None:
+                # A non-allowlisted root is refused on that ground alone; only
+                # an allowlisted one that simply lacks the files is the patches' fault.
+                allowed_root = allowlisted_explicit_root(explicit_framework_root)
+                if allowed_root is not None:
                     if not _read_patch_texts(patch_paths):
                         _error_class = "patch_unreadable"
                         _error = "no patch file could be read; verify paths and permissions"
                     else:
-                        missing_records = _preflight_missing_targets(trusted_root, patch_paths)
+                        missing_records = _preflight_missing_targets(allowed_root, patch_paths)
                         if missing_records:
                             _error_class = "patch_target_missing"
                             _error = missing_records

@@ -1217,7 +1217,7 @@ def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
     if not params.get("patches"):
         return ""
     from ...framework.paths import resolve_source_file_allowlist
-    from .integrate_patch import _resolve_framework_root, trusted_explicit_root
+    from .integrate_patch import _resolve_framework_root, allowlisted_explicit_root
 
     recorded = {
         str(entry.get("framework_root") or "").strip()
@@ -1225,9 +1225,9 @@ def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
         if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
     }
     if len(recorded) == 1:
-        trusted = trusted_explicit_root(recorded.pop(), allowlist=resolve_source_file_allowlist())
-        if trusted is not None:
-            return str(trusted)
+        allowed = allowlisted_explicit_root(recorded.pop(), allowlist=resolve_source_file_allowlist())
+        if allowed is not None:
+            return str(allowed)
 
     log.info("warm replay: no recorded apply root; resolving from patch targets")
     root = _resolve_framework_root(
