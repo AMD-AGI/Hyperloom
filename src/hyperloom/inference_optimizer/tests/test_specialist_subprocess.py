@@ -1280,6 +1280,51 @@ def test_collect_patches_harvests_git_diff_when_worktree_modified(tmp_path: Path
     assert str(base) in roots[patches[0]]
 
 
+def test_collect_patches_harvests_a_file_the_specialist_created(tmp_path: Path):
+    """git diff cannot see an untracked path; a half-patch is worse than none."""
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / "added.py").write_text("fresh = 3\n", encoding="utf-8")
+
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+
+    patch_text = Path(patches[0]).read_text(encoding="utf-8")
+    assert "mod.py" in patch_text
+    assert "added.py" in patch_text
+
+
+def test_collect_patches_keeps_its_own_output_out_of_the_harvest(tmp_path: Path):
+    """The harvest lands in patches/, which must not become part of the diff."""
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / "patches").mkdir()
+    (wt / "patches" / "stray.patch").write_text("--- a/z\n+++ b/z\n", encoding="utf-8")
+
+    patches, _roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+
+    assert "stray.patch" not in Path(patches[0]).read_text(encoding="utf-8")
+
+
+def test_collect_patches_falls_back_to_disk_scan_when_git_is_unusable(tmp_path: Path, monkeypatch):
+    """A raising harvest would take the done-file and usage down with it."""
+    import subprocess as _sp
+
+    base, wt = _make_git_worktree_pair(tmp_path)
+    (wt / "mod.py").write_text("new = 2\n", encoding="utf-8")
+    (wt / "patches").mkdir()
+    (wt / "patches" / "manual.patch").write_text("--- a/foo.py\n+++ b/foo.py\n", encoding="utf-8")
+
+    def _boom(*_args, **_kwargs):
+        raise _sp.TimeoutExpired(cmd="git", timeout=120.0)
+
+    monkeypatch.setattr(_sp, "run", _boom)
+
+    patches, roots = SpecialistSubprocessDispatcher._collect_patches(wt, tmp_path / "ws", worktree_base=base)
+
+    assert any("manual.patch" in patch for patch in patches)
+    assert roots == {}
+
+
 def test_collect_patches_falls_back_to_disk_scan_when_no_changes(tmp_path: Path):
     base, wt = _make_git_worktree_pair(tmp_path)
     ws = tmp_path / "ws"

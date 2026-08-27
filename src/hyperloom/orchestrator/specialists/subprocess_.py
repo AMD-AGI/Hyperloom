@@ -1600,6 +1600,42 @@ class SpecialistSubprocessDispatcher:
                 pass
 
     @staticmethod
+    def _harvest_worktree_diff(worktree: Path) -> str:
+        """Return the worktree's edits as one ``-p1`` diff, or ``""``.
+
+        A new file is untracked, and ``git diff`` does not see untracked paths.
+        Intent-to-add stages their existence so they render as creations without
+        committing anything, which is what keeps "edited a file and added one"
+        from harvesting a patch that silently omits the addition. ``patches/`` is
+        excluded because the harvest itself lands there.
+
+        Args:
+            worktree: Per-task worktree holding a ``.git`` marker.
+
+        Returns:
+            str: The diff text, or ``""`` when there is nothing to harvest or
+                git could not be run.
+        """
+        def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(
+                    ["git", "-C", str(worktree), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=120.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
+                return None
+
+        _git("add", "-A", "-N", "--", ".", ":(exclude)patches")
+        diff = _git("diff", "HEAD", "--", ".", ":(exclude)patches")
+        if diff is None or diff.returncode != 0:
+            return ""
+        return diff.stdout if diff.stdout.strip() else ""
+
+    @staticmethod
     def _collect_patches(
         worktree: Path | None,
         workspace: Path,
@@ -1610,7 +1646,9 @@ class SpecialistSubprocessDispatcher:
         Editing the worktree is the primary contract: ``git diff HEAD`` renders
         those edits as one canonical ``-p1`` patch and names its apply root, so
         nothing downstream has to infer which tree it belongs to. Scanning
-        ``patches/`` remains for dispatches that never got a worktree.
+        ``patches/`` remains for dispatches that never got a worktree, and for
+        any git failure here -- a harvest that raises would otherwise discard
+        the whole specialist result, done-file included.
 
         Args:
             worktree: Per-task worktree, or None.
@@ -1622,17 +1660,11 @@ class SpecialistSubprocessDispatcher:
             ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
         if worktree is not None and (worktree / ".git").exists():
-            diff = subprocess.run(
-                ["git", "-C", str(worktree), "diff", "HEAD"],
-                capture_output=True,
-                text=True,
-                timeout=120.0,
-                check=False,
-            )
-            if diff.returncode == 0 and diff.stdout.strip():
+            harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree)
+            if harvested_diff:
                 harvested = worktree / "patches" / "_worktree_diff.patch"
                 harvested.parent.mkdir(exist_ok=True)
-                harvested.write_text(diff.stdout, encoding="utf-8")
+                harvested.write_text(harvested_diff, encoding="utf-8")
                 return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
 
         out: list[str] = []
