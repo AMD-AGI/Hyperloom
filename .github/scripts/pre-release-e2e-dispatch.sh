@@ -146,6 +146,11 @@ common_env_json() {
 create_workload() {
   local name="$1" resources="$2" env="$3" privileged="$4" entry_b64="$5" deadline_s="${6:-}"
   local body resp code json wid dl_json="{}"
+  # SaFE derives the k8s object name from displayName, which must be an RFC 1123
+  # subdomain (lowercase alphanumerics, '-', '.'; start/end alphanumeric). CI_VERSION
+  # contains '+' (e.g. 1.0.0.dev...+ci), which is illegal and 422s the create. Fold
+  # any illegal char to '-', lowercase, and collapse/trim leading-trailing dashes.
+  name="$(printf '%s' "$name" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9.]+/-/g; s/-+/-/g; s/^-+//; s/-+$//')"
   # Attach the pod hard-deadline when both a field name and a value are set.
   if [ -n "$DEADLINE_FIELD" ] && [ -n "$deadline_s" ]; then
     dl_json="$(jq -n --arg k "$DEADLINE_FIELD" --argjson v "$deadline_s" '{($k): $v}')"
