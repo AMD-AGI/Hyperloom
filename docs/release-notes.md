@@ -16,14 +16,20 @@ summarizes the headline capabilities.
 
 ## Hyperloom 1.0.0 release
 
-The [1.0.0 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0) is
-the first stable Hyperloom release. It promotes the 1.0.0b2 beta to general
-availability and adds a correctness pass over the optimization loop: the
-fingerprint that decides whether a configuration has already been benchmarked,
-the kernel evidence a hard-killed campaign leaves behind, the ledger a warm
-replay writes, and the filters standing between an agent's proposal and the
-benchmark subprocess. It contains breaking changes — one of which invalidates
-persisted session state. Review the full list below before upgrading.
+The [1.0.0 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
+marks the first stable release of Hyperloom, following the tech preview
+release in July 2026. This release supports full end-to-end inference workload
+optimization on AMD Instinct GPUs (MI300X, MI325X, and MI355X), the vLLM and
+SGLang inference frameworks, the HIP, Triton, and FlyDSL kernel languages,
+and extends support to ROCm 10.0.
+
+Over the last several releases, we have enabled numerous features, including
+Knowledge Base, Search Orchestration and Self-Evolution, Dynamic Agents, Gap
+Analysis, Roofline Support, Automated CI/CD, Release Engineering, and many
+others. Additional details on these feature enhancements are provided in
+the [previous release notes](https://github.com/AMD-AGI/Hyperloom/releases).
+
+This release contains various fixes highlighted below.
 
 ### 1.0.0 highlights
 
@@ -100,15 +106,6 @@ persisted session state. Review the full list below before upgrading.
   anything in production. If your code imports `stop_ray_if_owned` directly,
   remove that import.
 
-## Hyperloom 1.0.0b2 release
-
-The [1.0.0b2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b2)
-builds on 1.0.0b1 with the move to the official upstream vLLM ROCm image, the
-Magpie v0.2.0 benchmark upgrade, a single current remote Recipe KB Store
-contract, and a consolidation pass that removes several surfaces that never had
-a runtime effect. It carries breaking changes; review the list below before
-upgrading.
-
 ### 1.0.0b2 highlights
 
 - **Official upstream vLLM ROCm image**: Every vLLM image reference moves from
@@ -173,13 +170,6 @@ upgrading.
   flags from any script or tool that invokes `kernel_optimization.py` directly;
   argparse will exit with an error if either is still present.
 
-## Hyperloom 1.0.0b1 release
-
-The [1.0.0b1 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0b1)
-is the first beta, building on 1.0.0a3 with the remote Recipe knowledge cutover
-to KB Store, a session-wide accuracy-eval opt-out, Claude subscription OAuth
-support, and enterprise gateway header handling.
-
 ### 1.0.0b1 highlights
 
 - **Remote Recipe KB Store cutover**: Remote Recipe reads and CLOSE writes use
@@ -206,12 +196,6 @@ support, and enterprise gateway header handling.
   `ANTHROPIC_CUSTOM_HEADERS` / `OPENAI_CUSTOM_HEADERS`, so header-authenticated
   gateways work from a fresh shell.
 
-## Hyperloom 1.0.0a3 release
-
-The [1.0.0a3 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a3)
-builds on 1.0.0a2 with stronger Recipe-KB observability, removal of the remote
-Cortex KB path, and a recipe-oriented naming cleanup across orchestration state.
-
 ### 1.0.0a3 highlights
 
 - **Recipe-KB write traceability**: Writes to the cross-session recipe KB are now
@@ -229,13 +213,6 @@ Cortex KB path, and a recipe-oriented naming cleanup across orchestration state.
   emitted state, breakdown data, stop reasons, warm-recipe source tags, sweep grid
   sources, and session runtime directories. If your tooling or scripts reference
   the old KB path names, update them to the `recipe_*` equivalents.
-
-## Hyperloom 1.0.0a2 release
-
-The [1.0.0a2 release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0a2)
-builds on 1.0.0a1 with long-horizon Forge integration, trace-driven GEMM
-capture, an enablement subsystem for non-runnable combos, and install/eval
-integrity fixes.
 
 ### 1.0.0a2 highlights
 
