@@ -15,13 +15,21 @@ Full-file capture (not a fuzzy diff) reconstructs byte-for-byte regardless of
 patch strip levels, generated/untracked files, or whether the framework root is
 a git tree at all.
 
-``files/<import_root>`` is the directory the GEAK handoff puts on PYTHONPATH, so
-``import_root`` must name where modules start within the tree: ``python`` for a
-sglang checkout, ``""`` for a dist-packages install.
+The GEAK handoff consumes a snapshot as a PYTHONPATH entry, not as a tree to
+rebuild: ``run_e2e`` joins the ``snapshot_dir`` of every entry it considers
+reproducible into ``initial_overlay_pythonpath``. Two consequences fix the shape
+of everything below.
 
-``complete`` is False once any declared path could not be accounted for, which
-is what makes the snapshot unusable as an overlay; ``reproducible`` downstream
-is this flag, never the mere existence of the directory.
+``import_root`` must name where modules start within the tree -- ``python`` for a
+sglang checkout, ``""`` for a dist-packages install -- because the directory that
+travels is ``files/<import_root>``, not the snapshot root. Handing over
+``files/`` for a checkout puts ``python/sglang/...`` on the path, where
+``import sglang`` does not resolve and the stock install answers instead.
+
+``complete`` is False once any declared path could not be accounted for, and
+that is what ``reproducible`` reports downstream -- never the mere existence of
+the directory. A snapshot that reports False is dropped from the overlay, so an
+optimistic answer here is what silently benchmarks an unpatched tree.
 """
 
 from __future__ import annotations
@@ -66,6 +74,9 @@ def snapshot_is_complete(snapshot_dir: str | Path) -> bool:
         return False
     if "complete" in manifest:
         return bool(manifest["complete"])
+    # Schema 1 only ever recorded these two ops, so this is always True. That is
+    # the intended reading: it had no way to express an unaccounted path, and its
+    # snapshots have to be taken at face value or not used at all.
     files = manifest.get("files") or []
     return all(f.get("op") in ("upsert", "delete") for f in files if isinstance(f, dict))
 
@@ -89,6 +100,27 @@ def source_layer_reproducible(entry: dict[str, Any]) -> bool:
     if recorded is not None:
         return bool(recorded)
     return snapshot_is_complete(snapshot_dir)
+
+
+def source_layer_overlay_dir(entry: dict[str, Any]) -> str:
+    """Return the directory a consumer puts on PYTHONPATH for ``entry``.
+
+    The snapshot root holds the manifest and a ``files/`` tree, neither of which
+    is importable; the entry's recorded import root selects the level within it
+    that is. Returns ``""`` when the entry carries no snapshot.
+
+    Args:
+        entry: A ``scope=source_patch`` optimization_stack entry.
+
+    Returns:
+        str: The overlay directory, or ``""``.
+    """
+    snapshot_dir = str(entry.get("source_snapshot") or "").strip()
+    if not snapshot_dir:
+        return ""
+    overlay = Path(snapshot_dir) / "files"
+    import_root = _safe_rel(str(entry.get("source_import_root") or ""))
+    return str(overlay / import_root) if import_root else str(overlay)
 
 
 def snapshot_source_layer(

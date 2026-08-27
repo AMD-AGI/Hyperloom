@@ -18,6 +18,7 @@ from hyperloom.orchestrator.roles import (
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop import writeback as wb
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
@@ -1838,3 +1839,92 @@ async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
     )
 
     assert s.current_best["extra_envs"] == {"KEEP_ME": "1", "TUNED": "new"}
+
+
+# ── source-layer handles: executor result → stack entry → env_spec ──────────
+
+
+def _keep_result(tmp_path: Path, *, import_root: str, complete: bool = True) -> dict:
+    """An integrate_patch KEEP result with a materialized snapshot on disk."""
+    snapshot = tmp_path / "snap"
+    (snapshot / "files" / import_root).mkdir(parents=True)
+    return {
+        "source_snapshot": str(snapshot),
+        "source_manifest": str(snapshot / "manifest.json"),
+        "target_files": ["python/sglang/srt/server.py"],
+        "framework_root": "/sgl-workspace/sglang",
+        "base_sha": "abc123",
+        "source_import_root": import_root,
+        "source_snapshot_complete": complete,
+    }
+
+
+def test_source_layer_handles_carry_every_field_the_stack_entry_needs(tmp_path):
+    """A lift path that forwards a subset silently degrades the GEAK overlay."""
+    handles = wb._source_layer_handles(_keep_result(tmp_path, import_root="python"))
+
+    assert handles["source_import_root"] == "python"
+    assert handles["source_snapshot_complete"] is True
+    assert handles["framework_root"] == "/sgl-workspace/sglang"
+    assert handles["base_sha"] == "abc123"
+    assert handles["target_files"] == ["python/sglang/srt/server.py"]
+    assert handles["source_snapshot"].endswith("snap")
+
+
+def test_source_layer_handles_omit_a_completeness_the_result_never_recorded():
+    """Absent must stay absent so legacy entries still read their manifest."""
+    handles = wb._source_layer_handles({"source_snapshot": "/snap"})
+
+    assert "source_snapshot_complete" not in handles
+
+
+def test_env_spec_hands_geak_the_import_root_not_the_snapshot_top(session_dir, tmp_path):
+    """GEAK PYTHONPATHs this value; the snapshot top holds no importable module."""
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 1000.0
+    result = _keep_result(tmp_path, import_root="python")
+
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+    )
+    spec = coord.build_env_spec()
+
+    (snapshot,) = spec["source_snapshots"]
+    assert snapshot["snapshot_dir"] == str(tmp_path / "snap" / "files" / "python")
+    assert snapshot["reproducible"] is True
+
+
+def test_env_spec_overlay_stops_at_files_for_a_dist_packages_install(session_dir, tmp_path):
+    """No import root means modules already start at the tree root."""
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 1000.0
+    result = _keep_result(tmp_path, import_root="")
+
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+    )
+    spec = coord.build_env_spec()
+
+    (snapshot,) = spec["source_snapshots"]
+    assert snapshot["snapshot_dir"] == str(tmp_path / "snap" / "files")
+
+
+def test_env_spec_refuses_an_incomplete_snapshot(session_dir, tmp_path):
+    """GEAK drops a non-reproducible entry, so False must survive the lift."""
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 1000.0
+    result = _keep_result(tmp_path, import_root="python", complete=False)
+
+    coord._lift_to_current_best(
+        "integrate_patch",
+        1200.0,
+        {"name": "patch-1", "scope": "source_patch", **wb._source_layer_handles(result)},
+    )
+    spec = coord.build_env_spec()
+
+    (snapshot,) = spec["source_snapshots"]
+    assert snapshot["reproducible"] is False

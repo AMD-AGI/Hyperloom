@@ -102,6 +102,35 @@ class _PromoteOutcome:
     early_return: bool = False
 
 
+def _source_layer_handles(result: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the source-layer fields a ``source_patch`` lift must carry.
+
+    Every field here has to survive the hop from the executor result into the
+    optimization_stack entry, where ``build_env_spec`` reads it. Assembling them
+    in one place is what keeps a second lift path from forwarding a subset and
+    degrading the overlay it feeds.
+
+    Args:
+        result: An integrate_patch KEEP result.
+
+    Returns:
+        dict[str, Any]: Handles to merge into the lift. ``source_snapshot_complete``
+            is present only when the result recorded it, so entries predating the
+            field still fall back to reading their manifest.
+    """
+    handles: dict[str, Any] = {
+        "source_snapshot": result.get("source_snapshot") or "",
+        "source_manifest": result.get("source_manifest") or "",
+        "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
+        "framework_root": result.get("framework_root") or "",
+        "base_sha": result.get("base_sha") or "",
+        "source_import_root": result.get("source_import_root") or "",
+    }
+    if "source_snapshot_complete" in result:
+        handles["source_snapshot_complete"] = bool(result["source_snapshot_complete"])
+    return handles
+
+
 def _predicted_gain(*sources: dict[str, Any] | None) -> float | None:
     """First non-zero ``predicted_gain_pct`` (``to_float``-parsed) across ordered sources.
 
@@ -4009,11 +4038,7 @@ class WritebackCollaborator:
                 "scope": "source_patch",
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
-                "source_snapshot": result.get("source_snapshot") or "",
-                "source_manifest": result.get("source_manifest") or "",
-                "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
-                "framework_root": result.get("framework_root") or "",
-                "base_sha": result.get("base_sha") or "",
+                **_source_layer_handles(result),
             }
             if source_phase:
                 lift["source_phase"] = source_phase
@@ -4413,7 +4438,7 @@ class WritebackCollaborator:
         baseline ref is materialized from the SAME layers as ``current_best``
         (not just its flags/env), closing the cross-harness baseline gap.
         """
-        from ..source_snapshot import source_layer_reproducible
+        from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
         materialized = self._current_best_launch_config()
         stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
@@ -4436,13 +4461,12 @@ class WritebackCollaborator:
                     }
                 )
                 continue
-            # The consumer puts this directory straight on PYTHONPATH, so it must
-            # be the import root, not the snapshot's own top level.
-            overlay_dir = Path(snap) / "files" / str(entry.get("source_import_root") or "").strip()
             source_snapshots.append(
                 {
                     "id": str(entry.get("variant_name") or entry.get("name") or ""),
-                    "snapshot_dir": str(overlay_dir),
+                    # GEAK PYTHONPATHs this value; it is the import root inside
+                    # the snapshot, not the snapshot's own top level.
+                    "snapshot_dir": source_layer_overlay_dir(entry),
                     "framework_root": str(entry.get("framework_root") or ""),
                     "base_sha": str(entry.get("base_sha") or ""),
                     "reproducible": source_layer_reproducible(entry),
@@ -4648,11 +4672,7 @@ class WritebackCollaborator:
                 # Same durable source-layer handles as the primary KEEP lift so a
                 # source_patch recovered on THIS path is equally reproducible in
                 # the GEAK baseline (no path is left snapshot-less).
-                "source_snapshot": result.get("source_snapshot") or "",
-                "source_manifest": result.get("source_manifest") or "",
-                "target_files": [str(path) for path in (result.get("target_files") or []) if str(path).strip()],
-                "framework_root": result.get("framework_root") or "",
-                "base_sha": result.get("base_sha") or "",
+                **_source_layer_handles(result),
             }
             source_phase = patch_owner_phase(result)
             gap_layer = str(result.get("gap_layer") or "").strip()
