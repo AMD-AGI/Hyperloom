@@ -59,6 +59,7 @@ OPENAI_CUSTOM_HEADERS_ENV = "OPENAI_CUSTOM_HEADERS"
 # reject must never reach ``resolve_codex_provider_config`` (which raises).
 _VALID_HEADER_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 _NEWLINE_RE = re.compile(r"[\r\n]+")
+_SEPARATOR_RE = re.compile(r"[,=]")
 
 __all__ = [
     "ATTRIBUTION_ENV",
@@ -146,19 +147,23 @@ def current_action() -> str:
 
 
 def _sanitize(value: object) -> str:
-    """Strip anything that would corrupt the ``Name: value`` header encoding.
+    """Strip anything that would corrupt an encoding the value passes through.
 
-    Newlines end a header record, and ``$`` would be re-read as a ``${VAR}``
-    reference by ``llm_config.parse_custom_headers`` and expanded against the
-    environment.
+    Three of them: a newline ends a header record; ``$`` would be re-read as a
+    ``${VAR}`` reference by ``llm_config.parse_custom_headers`` and expanded
+    against the environment; and ``,`` and ``=`` are the ``combined`` shape's own
+    delimiters, so a value carrying either would arrive at the gateway split into
+    tags nobody wrote. The separators are replaced rather than dropped, so two
+    values differing only there stay two values.
 
     Args:
         value: Raw field value from a call site.
 
     Returns:
-        The value reduced to characters that survive both encodings.
+        The value reduced to characters that survive every encoding.
     """
-    return _NEWLINE_RE.sub(" ", str(value or "")).replace("$", "").strip()
+    text = _NEWLINE_RE.sub(" ", str(value or "")).replace("$", "")
+    return _SEPARATOR_RE.sub("_", text).strip()
 
 
 def attribution_context(
@@ -179,7 +184,9 @@ def attribution_context(
 
     ``extra`` keeps the vocabulary open: a site with more context (``kernel_id``,
     ``task_id``, ``attempt``) can add it without changing this signature, and a
-    preset decides whether to select it.
+    preset decides whether to select it. No preset does today -- a per-call
+    identifier belongs in a header of its own, since spreading unbounded
+    cardinality across the ``combined`` tag is what stops it rolling up.
 
     Args:
         component: Producer label for the call, e.g. ``geak`` or ``specialist``.
@@ -264,6 +271,35 @@ PRESETS: dict[str, tuple[AttributionHeader, ...]] = {
 }
 
 
+def _validate_presets(presets: Mapping[str, Sequence[AttributionHeader]]) -> None:
+    """Reject a preset that some path downstream could not carry.
+
+    Checked at import so a bad entry fails the process that added it rather than
+    the first run that happens to spawn the wrong child: ``codex_session`` maps
+    each gateway header onto a TOML bare key and raises on a name it cannot
+    write, and an unknown shape would surface much later as a ``KeyError`` from
+    inside rendering. Adding a gateway is the only way to reach any of these.
+
+    Args:
+        presets: The preset table to check.
+
+    Raises:
+        ValueError: If a header names something unwritable, renders through an
+            unknown shape, or selects no fields at all.
+    """
+    for gateway, headers in presets.items():
+        for header in headers:
+            if not _VALID_HEADER_NAME_RE.match(header.name):
+                raise ValueError(f"{gateway} preset: header name {header.name!r} is not a TOML bare key")
+            if header.shape not in _RENDERERS:
+                raise ValueError(f"{gateway} preset: header {header.name!r} has unknown shape {header.shape!r}")
+            if not header.fields:
+                raise ValueError(f"{gateway} preset: header {header.name!r} selects no fields")
+
+
+_validate_presets(PRESETS)
+
+
 def _configured_headers(env: Mapping[str, str]) -> tuple[AttributionHeader, ...]:
     """Return the headers the selected gateway preset emits.
 
@@ -322,7 +358,10 @@ def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
     here would materialize the operator's gateway secret into a new variable.
 
     Re-injecting the same header replaces the previous copy rather than stacking
-    another one, because the env-facing hooks run once per turn.
+    another one, because the env-facing hooks run once per turn. Replacement is
+    by name and does not ask who wrote the previous copy, so a preset naming a
+    header the operator already sets for their own purposes takes it over
+    wholesale. A preset should name headers of its own.
 
     Args:
         raw: Current value of the setting, possibly unset.
@@ -389,8 +428,8 @@ def inject_env(
     still decided from ``env``, since that is what the child will resolve its
     gateway credentials from.
 
-    No-op when no gateway is selected, so an unconfigured deployment spawns
-    children with a byte-identical environment.
+    No-op when no gateway is selected, so an unconfigured deployment hands its
+    children the same header variables it always did.
 
     Args:
         env: Child environment to enrich (mutated in place).

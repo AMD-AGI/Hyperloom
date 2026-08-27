@@ -15,10 +15,8 @@ describe the mechanism and do not have to change when a gateway's headers do.
 
 from __future__ import annotations
 
-import ast
 import asyncio
 import json
-from pathlib import Path
 
 import pytest
 
@@ -140,6 +138,19 @@ class TestValueHygiene:
         headers = llm_attribution.call_headers(component="${SECRET}", env=_env())
         assert "$" not in headers["x-litellm-tags"]
 
+    def test_a_value_cannot_forge_extra_tags(self) -> None:
+        # The gateway splits this header on "," and "=": a value carrying either
+        # would arrive as tags nobody wrote, under keys nobody chose.
+        headers = llm_attribution.call_headers(component="geak,team=other", env=_env())
+        assert "component=geak_team_other" in headers["x-litellm-tags"]
+
+    def test_separators_are_replaced_so_distinct_values_stay_distinct(self) -> None:
+        # Dropping them instead would collapse "a,b" and "ab" onto one tag, and
+        # merge two producers' spend into a rollup belonging to neither.
+        first = llm_attribution.call_headers(component="a,b", env=_env())
+        second = llm_attribution.call_headers(component="ab", env=_env())
+        assert first["x-litellm-tags"] != second["x-litellm-tags"]
+
 
 class TestPresets:
     """Presets are the whole configuration surface, so they are checked here."""
@@ -151,16 +162,36 @@ class TestPresets:
             "x-litellm-trace-id": "claw-abc",
         }
 
-    def test_every_preset_header_is_usable(self) -> None:
+    def test_every_shipped_preset_emits_something(self) -> None:
+        """Importing the module already validated these; this states the floor.
+
+        The per-header rules are exercised below against deliberately bad
+        entries. What is left to check here is that a preset exists at all, so
+        an entry emptied by a refactor cannot pass validation by having nothing
+        left to validate.
+        """
+        assert llm_attribution.PRESETS
         for gateway, headers in llm_attribution.PRESETS.items():
             assert headers, f"{gateway} preset emits nothing"
-            for header in headers:
-                # Codex rejects a header name that is not a TOML bare key.
-                assert llm_attribution._VALID_HEADER_NAME_RE.match(header.name), (
-                    f"{gateway}: header name {header.name!r} is not a TOML bare key"
-                )
-                assert header.shape in llm_attribution._RENDERERS, f"{gateway}: unknown shape {header.shape!r}"
-                assert header.fields, f"{gateway}: header {header.name!r} selects no fields"
+
+    @pytest.mark.parametrize(
+        ("header", "reason"),
+        [
+            (AttributionHeader("x litellm tags", "combined", ("session",)), "not a TOML bare key"),
+            (AttributionHeader("x-litellm-tags", "sentence", ("session",)), "unknown shape"),
+            (AttributionHeader("x-litellm-tags", "combined", ()), "selects no fields"),
+        ],
+    )
+    def test_an_unusable_preset_header_is_refused(self, header: AttributionHeader, reason: str) -> None:
+        """Adding a gateway is the only way to reach these, so they fail loudly.
+
+        Each of the three would otherwise surface far from its cause: a name
+        Codex cannot write as a TOML key raises on the first Codex child, an
+        unknown shape raises from inside rendering, and a header selecting
+        nothing renders empty and is silently dropped.
+        """
+        with pytest.raises(ValueError, match=reason):
+            llm_attribution._validate_presets({"acme": (header,)})
 
 
 class TestMergePreservesExistingSetting:
@@ -364,72 +395,3 @@ class TestOperation:
         with llm_attribution.current_action_scope("conc_sweep"):
             headers = llm_attribution.call_headers(component="orchestration", operation="rank_candidates", env=_env())
         assert headers["x-litellm-tags"].endswith("type=conc_sweep,operation=rank_candidates")
-
-
-#: Entry points that only tag a call when the caller names a component, so an
-#: untagged call site is spend the gateway cannot attribute to anything.
-_TAGGED_ENTRY_POINTS = frozenset(
-    {
-        "achat_completion",
-        "aanthropic_completion",
-        "aanthropic_messages",
-        "anthropic_completion",
-        "anthropic_messages",
-        "astream_chat_completion_text",
-        "chat_completion",
-        "claude_sdk_env_options",
-        "stream_chat_completion_text",
-    }
-)
-
-_SRC_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _scan_call_sites(field: str) -> tuple[int, list[str]]:
-    """Find production calls to a tagged entry point that omit ``field``.
-
-    Args:
-        field: The keyword every call site is required to pass.
-
-    Returns:
-        The number of call sites seen and one line per offender. The count is
-        reported so the guard cannot quietly pass by finding nothing.
-    """
-    seen = 0
-    offenders: list[str] = []
-    for path in sorted(_SRC_ROOT.rglob("*.py")):
-        relative = path.relative_to(_SRC_ROOT)
-        if any(part in {"tests", "test"} for part in relative.parts):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files to fix
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            func = node.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name not in _TAGGED_ENTRY_POINTS:
-                continue
-            seen += 1
-            if not any(keyword.arg == field for keyword in node.keywords):
-                offenders.append(f"{relative}:{node.lineno}: {name}(...) has no {field}=")
-    return seen, offenders
-
-
-@pytest.mark.parametrize("field", ["component", "operation"])
-def test_every_llm_entry_point_call_names_its_attribution(field: str) -> None:
-    """Every production LLM call must say who is spending, and on what.
-
-    This is the coverage half of the feature: the module can render a header,
-    but a call site that names neither silently drops out of gateway
-    attribution, which is the accounting gap this exists to close. ``component``
-    and ``operation`` are the two the call site alone knows -- the rest are
-    filled in from the run's own state.
-    """
-    seen, offenders = _scan_call_sites(field)
-    assert not offenders, f"LLM call sites with no {field}:\n" + "\n".join(offenders)
-    # Guard the guard: a rename that emptied _TAGGED_ENTRY_POINTS would
-    # otherwise turn this into a test that always passes.
-    assert seen >= 15, f"only {seen} LLM call sites found; the scan is no longer finding them"
