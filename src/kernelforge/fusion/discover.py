@@ -369,7 +369,7 @@ def _default_knowledge_root() -> Path:
     configured = os.environ.get("FORGE_LOCAL_KNOWLEDGE", "").strip()
     if configured:
         return Path(configured)
-    return resource_path("local_knowledge")
+    return resource_path("local_knowledge", missing_ok=True)
 
 
 def _tokens(text: str) -> set[str]:

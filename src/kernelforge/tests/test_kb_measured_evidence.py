@@ -31,7 +31,7 @@ from kernelforge.rewrite_by_flydsl.record_store import (
     RewriteRecordError,
 )
 
-from tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
+from kernelforge.tests.test_rewrite_by_flydsl_kb import InMemoryKBStore, _remote_config
 
 PRODUCER_KERNEL_PATH = Path("packages/src/aiter_meta/ops/triton/deterministic_kernel.py")
 CONSUMER_KERNEL_PATH = Path("src/aiter/ops/triton/deterministic_kernel.py")

@@ -40,7 +40,7 @@ from kernelforge.loop.scoring import (
     rescaled_sigma,
     warm_start_improvement_flags,
 )
-from tests.test_loop_runner import (
+from kernelforge.tests.test_loop_runner import (
     _make_loop,
     _measurement_loop,
     _no_change_agent,

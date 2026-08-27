@@ -42,7 +42,7 @@ class PostMortem:
     """Extracts and persists lessons from completed experiments.
 
     Usage:
-        pm = PostMortem(knowledge_dir="knowledge_base")
+        pm = PostMortem(knowledge_dir=writable_knowledge_root())
         lessons = pm.analyze(experiment)
         pm.save_lessons(lessons)
     """
@@ -175,6 +175,9 @@ class PostMortem:
         """Write lessons to the knowledge base as markdown files.
 
         New lessons are appended to the appropriate backend's learned/ directory.
+        ``knowledge_dir`` must be a writable root (see
+        ``kernelforge.resources.writable_knowledge_root``), never the packaged
+        curated tree.
         """
         saved = []
         for lesson in lessons:

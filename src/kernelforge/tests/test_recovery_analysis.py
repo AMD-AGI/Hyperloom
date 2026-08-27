@@ -18,8 +18,8 @@ from kernelforge.orchestrator.analysis import (
     AnalysisBundleError,
     _case_directory,
 )
-from tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
-from tests.test_loop_runner import _make_loop, _no_change_agent, _unused_supervisor
+from kernelforge.tests.test_analysis_agent import _BundleBackend, _context, _service, _workspace
+from kernelforge.tests.test_loop_runner import _make_loop, _no_change_agent, _unused_supervisor
 
 
 def test_resume_recovery_rejects_gap_before_pending_keep(tmp_path, monkeypatch):

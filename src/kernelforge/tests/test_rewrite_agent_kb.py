@@ -26,7 +26,7 @@ from kernelforge.rewrite_by_flydsl.identity import framework_version, resolve_id
 from kernelforge.rewrite_by_flydsl.record_store import KBStoreError, RewriteRecordError
 from kernelforge.rewrite_by_flydsl.spec import RewriteSpec
 
-from tests.test_rewrite_by_flydsl_kb import (
+from kernelforge.tests.test_rewrite_by_flydsl_kb import (
     InMemoryKBStore,
     _remote_config,
     _spec,

@@ -132,10 +132,18 @@ class TuningDatabase:
 
     def __init__(self, db_dir: str | Path):
         self.db_dir = Path(db_dir)
-        self.db_dir.mkdir(parents=True, exist_ok=True)
         self._entries_path = self.db_dir / "tuning_entries.jsonl"
         self._golden_path = self.db_dir / "golden_configs.json"
         self._rules_path = self.db_dir / "transfer_rules.json"
+
+    def _ensure_db_dir(self) -> None:
+        """Materialize the DB directory, but only on the way to an actual write.
+
+        Constructing a ``TuningDatabase`` used to mkdir unconditionally, which
+        created an empty tree under whatever root was handed in even though
+        ``_TUNING_DB_WRITE_ENABLED`` is False and nothing is ever written.
+        """
+        self.db_dir.mkdir(parents=True, exist_ok=True)
 
     # ─── Logging ───
 
@@ -147,6 +155,7 @@ class TuningDatabase:
             return entry
 
         # Append to JSONL (append-only, no read-modify-write)
+        self._ensure_db_dir()
         with open(self._entries_path, "a") as f:
             f.write(json.dumps(entry.to_dict(), default=str) + "\n")
 
@@ -183,6 +192,7 @@ class TuningDatabase:
     def _save_golden(self, golden: dict) -> None:
         if not _TUNING_DB_WRITE_ENABLED:
             return
+        self._ensure_db_dir()
         self._golden_path.write_text(json.dumps(golden, indent=2, default=str))
 
     # ─── Querying ───
@@ -346,6 +356,7 @@ class TuningDatabase:
     def _save_rules(self, rules: list[dict]) -> None:
         if not _TUNING_DB_WRITE_ENABLED:
             return
+        self._ensure_db_dir()
         self._rules_path.write_text(json.dumps(rules, indent=2, default=str))
 
     def _rule_applies(self, rule: dict, operation: str) -> bool:

@@ -57,6 +57,11 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         "This file names the old spellings in order to forbid them.",
     ),
     (
+        "src/kernelforge/tests/test_provider_registry.py",
+        r"kernel_agents",
+        "Coverage for the deprecated entry-point group's dual-read; the test has to name the group it is asserting on.",
+    ),
+    (
         "pyproject.toml",
         r"^kernel-agents = ",
         "Deprecated console-script alias, kept one release so existing scripts and shell history keep working.",

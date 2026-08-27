@@ -301,14 +301,80 @@ def test_external_entry_point_provider_is_discovered(monkeypatch) -> None:
 
         @staticmethod
         def select(*, group):
-            """Filter fake entries by the public provider group."""
-            assert group == registry.PROVIDER_ENTRY_POINT_GROUP
-            return [_EntryPoint()]
+            """Filter fake entries by the public provider group.
+
+            The loader also probes the deprecated ``kernel_agents.*`` group, so
+            an unknown group must come back empty rather than raise.
+            """
+            if group == registry.PROVIDER_ENTRY_POINT_GROUP:
+                return [_EntryPoint()]
+            assert group == registry.LEGACY_PROVIDER_ENTRY_POINT_GROUP
+            return []
 
     monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
     monkeypatch.setattr(registry, "_plugins_loaded", False)
 
     assert get_agent_provider("externalcli") is provider
+
+
+def test_legacy_entry_point_group_still_loads_and_warns(monkeypatch) -> None:
+    """A provider published under the pre-rename group still loads, once, loudly."""
+
+    provider = AgentProvider(
+        name="legacycli",
+        factory=lambda runtime: _FakeBackend(runtime.provider),
+        default_model="legacy-model",
+    )
+
+    class _EntryPoint:
+        name = "legacycli"
+
+        @staticmethod
+        def load():
+            return lambda: provider
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            if group == registry.LEGACY_PROVIDER_ENTRY_POINT_GROUP:
+                return [_EntryPoint()]
+            assert group == registry.PROVIDER_ENTRY_POINT_GROUP
+            return []
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+
+    with pytest.warns(DeprecationWarning, match=registry.LEGACY_PROVIDER_ENTRY_POINT_GROUP):
+        assert get_agent_provider("legacycli") is provider
+
+
+def test_current_entry_point_group_wins_over_the_legacy_one(monkeypatch) -> None:
+    """A name published under both groups resolves to the current group's entry."""
+
+    current = AgentProvider(name="dualcli", factory=lambda runtime: _FakeBackend(runtime.provider), default_model="m")
+    legacy = AgentProvider(name="dualcli", factory=lambda runtime: _FakeBackend(runtime.provider), default_model="m")
+
+    def _entry(target):
+        class _EntryPoint:
+            name = "dualcli"
+
+            @staticmethod
+            def load():
+                return lambda: target
+
+        return _EntryPoint()
+
+    class _EntryPoints:
+        @staticmethod
+        def select(*, group):
+            if group == registry.PROVIDER_ENTRY_POINT_GROUP:
+                return [_entry(current)]
+            return [_entry(legacy)]
+
+    monkeypatch.setattr(registry.metadata, "entry_points", _EntryPoints)
+    monkeypatch.setattr(registry, "_plugins_loaded", False)
+
+    assert get_agent_provider("dualcli") is current
 
 
 def test_config_accepts_external_provider_without_core_choice_list() -> None:

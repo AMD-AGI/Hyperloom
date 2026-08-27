@@ -1,7 +1,5 @@
 """Packaging resource smoke tests."""
 
-from pathlib import Path
-
 from kernelforge.resources import resource_path
 
 
@@ -11,10 +9,8 @@ def test_packaged_resource_paths_are_available():
     assert (resource_path("examples") / "flydsl-softmax-forge-loop").is_dir()
 
 
-_REPO = Path(__file__).resolve().parents[1]
 _VGPR_LIVENESS = (
-    _REPO
-    / "local_knowledge"
+    resource_path("local_knowledge")
     / "languages"
     / "asm"
     / "skills"

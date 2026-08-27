@@ -75,6 +75,7 @@ def test_on_experiment_complete_logs_and_discovers(tmp_path):
 
 def _seed_tuning_entries(db: TuningDatabase) -> None:
     """Seed the entries file directly (log() is a no-op with persistence off)."""
+    db.db_dir.mkdir(parents=True, exist_ok=True)
     entries = []
     for op in ["attention_fwd", "attention_bwd", "sla_fwd"]:
         entries.append(

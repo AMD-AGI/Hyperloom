@@ -17,6 +17,7 @@ from typing import Any
 from kernelforge.config import Config
 from kernelforge.learning.postmortem import PostMortem
 from kernelforge.learning.tuning_db import TuningDatabase
+from kernelforge.resources import writable_knowledge_root
 from kernelforge.tracker.schema import Experiment
 from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
@@ -34,8 +35,14 @@ class AutoEvolver:
 
     @classmethod
     def from_config(cls, config: Config) -> AutoEvolver:
-        """Create an AutoEvolver from standard config."""
-        kb_dir = config.knowledge_dir
+        """Create an AutoEvolver from standard config.
+
+        Both sinks are *writers*, so they target the writable knowledge root
+        rather than ``config.knowledge_dir`` -- that one resolves to the curated
+        tree packaged inside ``kernelforge/data``, which lives in site-packages
+        and is replaced on upgrade.
+        """
+        kb_dir = writable_knowledge_root()
         return cls(
             tuning_db=TuningDatabase(kb_dir / "tuning_db"),
             postmortem=PostMortem(kb_dir),

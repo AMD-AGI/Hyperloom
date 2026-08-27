@@ -1008,7 +1008,7 @@ def _materialize_reference(workspace: Path) -> Path | None:
     ref_dir = workspace / REFERENCE_SUBDIR
     _safe_rmtree(ref_dir)
 
-    examples = resource_path("examples")
+    examples = resource_path("examples", missing_ok=True)
     try:
         if examples and Path(examples).is_dir():
             shutil.copytree(examples, ref_dir, ignore=_REFERENCE_IGNORE)

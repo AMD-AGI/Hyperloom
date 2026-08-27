@@ -23,8 +23,8 @@ from kernelforge.orchestrator.contracts import CaseEvidence, OrchestrationContex
 from kernelforge.loop import runner as runner_module
 from kernelforge.loop.campaign_config import CampaignConfigStore
 from kernelforge.loop.campaign_setup import resolve_campaign
-from tests.test_campaign_setup import _base_args, _git_workspace
-from tests.test_loop_runner import _make_loop, _unused_supervisor
+from kernelforge.tests.test_campaign_setup import _base_args, _git_workspace
+from kernelforge.tests.test_loop_runner import _make_loop, _unused_supervisor
 
 
 def _coverage_loop(baseline: dict[str, float], unscored: set[str] | None = None):
@@ -846,7 +846,7 @@ def test_resume_recovery_does_not_delete_an_operators_new_file(tmp_path, monkeyp
     -- ``git clean`` on an untracked file the operator put there, with no way
     back.
     """
-    from tests.test_campaign_cross_process import (
+    from kernelforge.tests.test_campaign_cross_process import (
         _initialize_workspace,
         _make_loop as _campaign_loop,
         _successful_iteration,

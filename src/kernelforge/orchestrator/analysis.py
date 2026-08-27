@@ -42,6 +42,7 @@ from kernelforge.orchestrator.analysis_session import (
     SESSION_SCHEMA_VERSION,
 )
 from kernelforge.durable_io import atomic_write_text
+from kernelforge.resources import assert_sandbox_grant
 
 
 ANALYSIS_SCHEMA_VERSION = 1
@@ -1534,7 +1535,7 @@ class AnalysisAgentService:
                         reasoning_effort="high",
                         additional_directories=[
                             context.workspace,
-                            str(Path(self.config.local_knowledge_dir).resolve()),
+                            str(assert_sandbox_grant(self.config.local_knowledge_dir, what="local_knowledge_dir")),
                         ],
                         allow_untracked=True,
                         tool_policy=AgentToolPolicy(
