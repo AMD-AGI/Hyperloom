@@ -49,6 +49,20 @@ class TestCategorizeKernelName:
         # ...and the new gemm alternations must not steal MoE kernels.
         assert dg.categorize_kernel_name("fused_moe_gemm_kernel") == "moe"
 
+    def test_snake_case_kernels_from_a_second_model(self):
+        # Regression: the first pass at the fix above was calibrated on one
+        # Qwen3-14B-FP8 trace. A GLM-5.2-MXFP4 trace (MoE, MXFP4, a different
+        # serving framework) showed it was not general -- and that the
+        # pre-existing ``\bgemm\b`` had the same word-boundary flaw.
+        for name in (
+            "_batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant_kernel_HAS_BIAS_0",
+            "aiter::bf16gemm_bf16_tn_256x256",
+            "_gluon_deepgemm_fp8_paged_mqa_logits_preshuffle",
+        ):
+            # 3.7% of that trace's GPU time; ``_quant_kernel`` had filed these as
+            # ``cast``, which is launch-bound, inflating the fusible share.
+            assert dg.categorize_kernel_name(name) == "gemm", name
+
 
 class TestDiagnoseFromShares:
     def test_launch_bound_is_candidate(self):

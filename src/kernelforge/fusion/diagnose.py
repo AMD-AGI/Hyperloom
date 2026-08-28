@@ -70,12 +70,17 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 # ``other``. On Qwen3-14B-FP8 that buried 11.9% of GPU time (act_mul+rms+quant) and
 # pushed launch_bound_share to 0.083, below the 0.10 floor -- the FP8 variant of a
 # model whose BF16 form is a measured +6.2% fusion win (see 276aacf6). The
-# ``quantgemm|gemmkernel`` alternation likewise files ck_tile QuantGemmKernel as
-# GEMM instead of ``other``; it must stay in the first rule so the quant patterns
-# below never claim a GEMM.
+# The same word-boundary flaw ran the other way in the pre-existing ``gemm``
+# rule: ``\bgemm\b`` matched none of ``_batched_gemm_a8w8_...``, ``bf16gemm_...``,
+# ``deepgemm``, or ck_tile's ``QuantGemmKernel``, so a bare ``gemm`` replaces it.
+# That makes ``gemm`` overlap ``moe``, whose kernels are GEMMs the table reports
+# separately, so ``moe`` now precedes it -- and ``gemm`` precedes the quant rules,
+# without which ``_batched_gemm_..._quant_kernel`` (3.7% of GPU time on a
+# GLM-5.2-MXFP4 trace) is filed as ``cast`` and wrongly counted as launch-bound.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
-    ("gemm", r"cijk_|tensile|hgemm|sgemm|\bgemm\b|matmul|_bhs_|f16_gemm|quantgemm|gemmkernel"),
+    # MoE first: its kernels are GEMMs too, and the table reports them separately.
     ("moe", r"fused_moe|moe_align|moe_sum|_routing|expert"),
+    ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),
     ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped"),
     ("conv", r"conv1d|_conv_|\bconv\b"),
     ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
