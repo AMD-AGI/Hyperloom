@@ -17,6 +17,7 @@ from typing import Any
 
 from ..agent_ownership import (
     LEVER_CONFIG,
+    LEVER_KERNEL,
     LEVER_UPSTREAM_PR,
     UNATTRIBUTED,
     patch_author,
@@ -28,13 +29,18 @@ from ._common import (
 )
 
 
-#: Phase bucket -> the lever that phase could only have moved, for rows written
-#: before ``lever_kind`` was stamped. ``explore`` and ``sweep`` only ever moved
-#: configuration; ``framework`` only ever landed upstream PRs.
+#: Phase bucket -> the lever that bucket could only have moved, for rows
+#: written before ``lever_kind`` was stamped. ``explore`` and ``sweep`` only
+#: ever moved configuration, ``framework`` only ever landed upstream PRs, and
+#: the three kernel lanes only ever shipped kernels. ``prelude`` and ``close``
+#: are absent because neither carries gain.
 _LEVER_BY_PHASE_BUCKET = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "framework": LEVER_UPSTREAM_PR,
+    "kernel_agent": LEVER_KERNEL,
+    "gemm_tuning": LEVER_KERNEL,
+    "geak": LEVER_KERNEL,
 }
 
 

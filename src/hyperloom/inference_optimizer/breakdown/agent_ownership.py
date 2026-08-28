@@ -40,8 +40,15 @@ LEVER_CONFIG = "config"  # server args / envs only; nothing on disk is touched
 LEVER_SOURCE_PATCH = "source_patch"  # a diff a specialist authored
 LEVER_UPSTREAM_PR = "upstream_pr"  # a diff fetched from an upstream PR
 LEVER_ENABLEMENT = "enablement"  # graded on runnability + accuracy, not throughput
+LEVER_KERNEL = "kernel"  # a tuned or authored kernel, graded on the e2e bench
 
-LEVER_KINDS = (LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT)
+LEVER_KINDS = (
+    LEVER_CONFIG,
+    LEVER_SOURCE_PATCH,
+    LEVER_UPSTREAM_PR,
+    LEVER_ENABLEMENT,
+    LEVER_KERNEL,
+)
 
 #: Lever kinds whose phase is not in doubt. ``source_patch`` and ``config`` are
 #: absent on purpose: either can be dispatched from more than one phase, so the
@@ -138,6 +145,7 @@ __all__ = [
     "AGENT_BY_PHASE",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
+    "LEVER_KERNEL",
     "LEVER_KINDS",
     "LEVER_SOURCE_PATCH",
     "LEVER_UPSTREAM_PR",

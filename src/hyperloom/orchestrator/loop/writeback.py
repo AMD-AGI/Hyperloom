@@ -4075,6 +4075,11 @@ class WritebackCollaborator:
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
             }
+            # Merged so the derivation sees the mandate's stamp and the
+            # deliverable's markers together; the result wins on a collision.
+            lever_kind = patch_lever_kind({**task_params, **result})
+            if lever_kind:
+                lift["lever_kind"] = lever_kind
             if source_phase:
                 lift["source_phase"] = source_phase
             if origin_domain:
@@ -4591,6 +4596,9 @@ class WritebackCollaborator:
                 # the GEAK baseline (no path is left snapshot-less).
                 **_source_layer_handles(result),
             }
+            replay_lever = patch_lever_kind(result)
+            if replay_lever:
+                bv["lever_kind"] = replay_lever
             source_phase = patch_owner_phase(result)
             gap_layer = str(result.get("gap_layer") or "").strip()
             if source_phase:

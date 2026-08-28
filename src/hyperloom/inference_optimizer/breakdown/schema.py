@@ -1379,10 +1379,13 @@ class Attribution(TypedDict, total=False):
             ``single_source`` / ``reconstructed`` / ``missing``).
         source_breakdown (SourceBreakdown): Gain split by contributing source.
         phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
-        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``
-            (``config`` / ``source_patch`` / ``upstream_pr`` / ``enablement``,
-            plus ``unattributed`` when some gain carried no stamp). Both arms
-            share one phase, so the lever is what says which one earned it.
+        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``:
+            ``config`` (server args / envs), ``source_patch`` (a diff a
+            specialist wrote), ``upstream_pr`` (a diff fetched from a PR),
+            ``enablement`` (graded on runnability, not throughput) and
+            ``kernel`` (a tuned or authored kernel). ``unattributed`` collects
+            gain no stamp claimed. Two levers share the optimisation phase, so
+            the lever -- not the phase that was live -- says which earned it.
         notes (list[str]): Human-readable caveats about the attribution.
     """
 

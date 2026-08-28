@@ -35,9 +35,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **Gain is attributed by lever, not by phase.** Both arms run inside one
   phase, so the phase that was live when a KEEP landed no longer says which
-  lever moved it. `lever_kind` (config / source_patch / upstream_pr /
-  enablement) is the attribution key, and it is read from what a specialist
-  delivered rather than from what its mandate asked for.
+  lever moved it. `lever_kind` is the attribution key, read from what a
+  specialist delivered rather than from what its mandate asked for, and
+  `attribution.lever_breakdown` splits validated gain by it. The values are:
+  - `config` — server args / envs; nothing on disk is touched.
+  - `source_patch` — a diff a specialist wrote for this session.
+  - `upstream_pr` — a diff fetched from an upstream pull request.
+  - `enablement` — graded on runnability and the accuracy floor, not throughput.
+  - `kernel` — a tuned or authored kernel, graded on the end-to-end bench.
+
+  Gain that carried no stamp lands under `unattributed`; a non-zero figure
+  there is a tagging gap, not a category.
 
 ### Fixed
 
