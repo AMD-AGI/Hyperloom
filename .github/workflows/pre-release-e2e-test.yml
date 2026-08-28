@@ -290,6 +290,7 @@ jobs:
       GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
       # PR number is known directly from the event -- no commit->PR reverse lookup.
       PR_NUMBER: ${{ github.event.pull_request.number }}
+      HEAD_REF: ${{ github.head_ref }}
       GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       POLL_INTERVAL_S: "120"
       GLOBAL_TIMEOUT_S: "50400"

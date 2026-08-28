@@ -96,9 +96,9 @@ leg_deadline_s() { case "$1" in *-3h) echo "$DEADLINE_3H_S" ;; *-12h) echo "$DEA
 # NOT embed the full CI_VERSION (e.g. 1.0.0.dev202608270954+ci) in every workload name
 # -- it would blow the limit and, once truncated, collide across legs (the leg suffix
 # gets cut). Instead build "e2e-<leg>-<short version hash>": the human-readable leg
-# stays intact up front, and a 6-hex digest of CI_VERSION disambiguates across runs
-# without length risk. All legs of one run share the same VERSION_TAG.
-VERSION_TAG="$(printf '%s' "$CI_VERSION" | sha1sum | cut -c1-6)"
+# stays intact up front, and a 6-hex digest of CI_VERSION+run id disambiguates across
+# runs (including repeated pushes with the same wheel version). All legs share VERSION_TAG.
+VERSION_TAG="$(printf '%s-%s' "$CI_VERSION" "${GITHUB_RUN_ID:-local}" | sha1sum | cut -c1-6)"
 workload_name() { printf 'e2e-%s-%s' "$1" "$VERSION_TAG"; }  # $1 = leg (or "docker-host")
 
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"

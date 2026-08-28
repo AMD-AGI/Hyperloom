@@ -32,6 +32,8 @@
 #   MAX_CRASHES / MAX_BOOT_FAILS   tolerance (default 0 / 0)
 #   Optional GitHub commit status (per-leg context pre-release-e2e/<leg>):
 #     GH_STATUS_TOKEN / GH_STATUS_REPO / GH_STATUS_SHA / GH_STATUS_DETAILS_URL
+#   Supersede detection (release runner when a newer pre-release run is queued):
+#     GITHUB_RUN_ID / PR_NUMBER / HEAD_REF (branch); uses GH_STATUS_TOKEN + GH_STATUS_REPO
 #   SAFE_CACERT / SAFE_INSECURE    TLS to the API
 set -euo pipefail
 
@@ -51,8 +53,10 @@ MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
 POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"
 LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
 # Sleep in short slices instead of one long one so a cancelled job tears down in seconds
-# rather than at the end of a full POLL_INTERVAL_S.
+# rather than at the end of a full POLL_INTERVAL_S. Each slice also re-checks whether a
+# newer pre-release run has been queued so this poll can exit and release the runner.
 POLL_SLEEP_SLICE_S="${POLL_SLEEP_SLICE_S:-5}"
+PRE_RELEASE_WORKFLOW_FILE="${PRE_RELEASE_WORKFLOW_FILE:-pre-release-e2e-test.yml}"
 
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"
 : "${SAFE_API_KEY:?SAFE_API_KEY is required}"
@@ -74,6 +78,65 @@ runs_dir="${NFS_ROOT%/}/runs/${CI_VERSION}"
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 
 gh_status_on() { [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [ -n "${GH_STATUS_SHA:-}" ]; }
+
+# True when a newer pre-release workflow run is queued/in-flight for this PR branch.
+# GitHub run ids are monotonic; a pending successor blocks on concurrency until we exit.
+supersede_check_on() {
+  [[ "${GITHUB_RUN_ID:-}" =~ ^[0-9]+$ ]] \
+    && [ -n "${GH_STATUS_TOKEN:-}" ] \
+    && [ -n "${GH_STATUS_REPO:-}" ]
+}
+
+_supersede_head_ref() {
+  if [ -n "${HEAD_REF:-}" ]; then
+    printf '%s' "$HEAD_REF"
+    return 0
+  fi
+  if [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]; then
+    curl -sS \
+      -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: 2022-11-28" \
+      "${GH_API}/repos/${GH_STATUS_REPO}/pulls/${PR_NUMBER}" 2>/dev/null \
+      | jq -r '.head.ref // empty' 2>/dev/null || true
+    return 0
+  fi
+  echo ""
+}
+
+superseded_by_newer_run() {
+  supersede_check_on || return 1
+  local head_ref newer
+  head_ref="$(_supersede_head_ref)"
+  [ -n "$head_ref" ] || return 1
+  newer="$(curl -sS \
+    -H "Authorization: Bearer ${GH_STATUS_TOKEN}" \
+    -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: 2022-11-28" \
+    "${GH_API}/repos/${GH_STATUS_REPO}/actions/workflows/${PRE_RELEASE_WORKFLOW_FILE}/runs?branch=${head_ref}&per_page=10" \
+    2>/dev/null \
+    | jq -r --argjson rid "$GITHUB_RUN_ID" '
+        [.workflow_runs[]?
+          | select(.id > $rid)
+          | select(.status == "queued" or .status == "in_progress" or .status == "pending" or .status == "waiting")
+          | .id][0] // empty' 2>/dev/null || true)"
+  [ -n "$newer" ]
+}
+
+mark_superseded_and_exit_poll() { # -> sets superseded=1, marks pending legs SKIP, breaks caller loop
+  local leg pending=0
+  for leg in "${LEGS[@]}"; do
+    [ -n "${VERDICT[$leg]}" ] && continue
+    VERDICT["$leg"]="SKIP|superseded by newer run (dispatch reap will stop)"
+    summary "⏳ **$leg** — superseded (newer run queued; workload left for dispatch reap)"
+    post_status "$leg" pending "superseded; newer run queued"
+    pending=$((pending + 1))
+  done
+  summary ""
+  summary "⏹ superseded: newer pre-release run queued (run_id>${GITHUB_RUN_ID}). Releasing the runner; ${pending} workload(s) left for the successor's dispatch reap."
+  superseded=1
+}
+
 post_status() { # leg state(pending|success|failure|error) description
   gh_status_on || return 0
   local desc="${3:0:139}"
@@ -259,7 +322,12 @@ report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
 start_s="$(date +%s)"
 fail_seen=0   # has any leg reached a FAIL verdict? -> the gate is already decided
+superseded=0  # a newer workflow run is queued -> release runner without stopping pods
 while :; do
+  if superseded_by_newer_run; then
+    mark_superseded_and_exit_poll
+    break
+  fi
   pending=0
   changed=0   # did any leg reach a verdict this tick? -> refresh the sticky comment
   for leg in "${LEGS[@]}"; do
@@ -330,10 +398,33 @@ while :; do
   echo "[poll] ${pending} leg(s) still running; elapsed $((elapsed/60))m; sleeping ${POLL_INTERVAL_S}s"
   slept=0
   while [ "$slept" -lt "$POLL_INTERVAL_S" ]; do
+    if superseded_by_newer_run; then
+      mark_superseded_and_exit_poll
+      break
+    fi
     sleep "$POLL_SLEEP_SLICE_S"
     slept=$(( slept + POLL_SLEEP_SLICE_S ))
   done
+  [ "$superseded" -eq 1 ] && break
 done
+
+if [ "$superseded" -eq 1 ]; then
+  summary ""
+  summary "### Result"
+  summary ""
+  summary "| leg | verdict | detail |"
+  summary "|-----|---------|--------|"
+  for leg in "${LEGS[@]}"; do
+    v="${VERDICT[$leg]:-SKIP|superseded}"
+    vv="${v%%|*}"; vd="${v#*|}"
+    summary "| \`$leg\` | ⏳ $vv | $vd |"
+  done
+  summary ""
+  gate_line="**GATE: SUPERSEDED** — newer run queued; workloads left for dispatch reap."
+  summary "$gate_line"
+  report_upsert "$(printf '%s\n\n%s\n' "$(report_body Complete "$(done_count)" "${#LEGS[@]}")" "$gate_line")"
+  exit 0
+fi
 
 # ---- aggregate gate --------------------------------------------------------
 summary ""

@@ -63,6 +63,12 @@ def poll_script() -> str:
     return (_GITHUB / "scripts" / "pre-release-e2e-poll.sh").read_text(encoding="utf-8")
 
 
+@pytest.fixture(scope="module")
+def dispatch_script() -> str:
+    assert _GITHUB is not None
+    return (_GITHUB / "scripts" / "pre-release-e2e-dispatch.sh").read_text(encoding="utf-8")
+
+
 def test_nothing_that_talks_to_safe_runs_on_a_github_hosted_runner(workflow: dict) -> None:
     """SAFE_API_BASE is an in-network NodePort; a hosted runner can only time out."""
     for name, job in workflow["jobs"].items():
@@ -116,3 +122,21 @@ def test_abnormal_end_cleanup_respects_leave_running(workflow: dict) -> None:
     body = cleanup[0]["run"]
     assert "/stop" in body
     assert "leave_running" in body
+
+
+def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
+    """Reap must distinguish repeated pushes that reuse the same CI_VERSION wheel."""
+    assert (
+        'VERSION_TAG="$(printf \'%s-%s\' "$CI_VERSION" "${GITHUB_RUN_ID:-local}" | sha1sum | cut -c1-6)"'
+        in dispatch_script
+    )
+
+
+def test_poll_exits_when_a_newer_run_is_queued(poll_script: str, workflow: dict) -> None:
+    """A pending successor cannot dispatch until this poll releases the runner."""
+    assert "superseded_by_newer_run" in poll_script
+    assert "mark_superseded_and_exit_poll" in poll_script
+    assert "GATE: SUPERSEDED" in poll_script
+    assert "dispatch reap will stop" in poll_script
+    run_env = yaml.safe_dump(workflow["jobs"]["run"].get("env", {}))
+    assert "HEAD_REF:" in run_env
