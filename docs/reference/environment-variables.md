@@ -96,7 +96,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
-  `--no-framework-agent`, `--no-eval`.
+  `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
