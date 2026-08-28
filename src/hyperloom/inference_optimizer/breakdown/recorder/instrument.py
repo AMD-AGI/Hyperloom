@@ -3662,6 +3662,7 @@ def record_specialist_round(
             domains.append(str(entry.get("domain")))
         domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
+        source_phase = str(entry.get("source_phase") or "EXPLORE").strip().upper()
         record_subject(
             session_dir,
             subject_id=round_subject_id,
@@ -3713,7 +3714,7 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase=phase or str(entry.get("phase") or ""),
+            phase=source_phase,
             status="succeeded" if entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",

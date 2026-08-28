@@ -842,3 +842,968 @@ def test_fresh_model_gate_with_only_soft_skips_succeeds(tmp_path):
     assert event is not None
     assert event["status"] == "succeeded"
     assert event["ext"]["skip_reason"] is None
+
+
+def test_framework_timeline_merges_legacy_framework_and_explore(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "framework_agent_phase_done": True,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "prelude_complete",
+                "ts": "2026-08-27T01:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "EXPLORE",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T01:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "EXPLORE",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "explore_no_more_leverage",
+                "ts": "2026-08-27T01:20:00+00:00",
+                "cycle": 0,
+                "evidence": {
+                    "recent_keep_gain_pct": 5.0,
+                    "keep_gain_threshold_pct": 6.0,
+                    "empty_streak": 2,
+                    "empty_streak_threshold": 2,
+                    "lookback": 6,
+                    "tested_this_cycle": 1,
+                    "config_arm_plateaued": True,
+                    "source_consecutive_no_keep": 1,
+                    "source_threshold": 3,
+                    "source_candidates_exhausted": True,
+                    "source_arm_plateaued": True,
+                    "switch_bottleneck": True,
+                    "evidence": "both_arms_plateaued",
+                },
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "spec-config-1",
+                "task_id": "spec-config-task",
+                "domain": "serving_specialist",
+                "cycle": 0,
+                "completed_at": "2026-08-27T01:04:00+00:00",
+                "proposal_set": [
+                    {
+                        "name": "chunked-prefill",
+                        "fingerprint": "fp-config-1",
+                    }
+                ],
+            }
+        ],
+        "explore_search": {
+            "tested": {
+                "fp-config-1": {
+                    "fingerprint": "fp-config-1",
+                    "name": "chunked-prefill",
+                    "outcome": "KEEP",
+                    "tput": 105.0,
+                    "base_tput": 100.0,
+                    "gain_pct": 5.0,
+                    "round_id": "config-round-1",
+                    "cycle": 0,
+                    "workload_signature": "qwen-tp8-c64",
+                    "framework": "sglang",
+                    "stack_rebench_tput": 104.0,
+                    "stack_rebench_workspace": "runs/config-round-1/rebench",
+                }
+            },
+            "winners_history": [{"gain_pct": 5.0, "cycle": 0}],
+        },
+        "framework_agent_batches": [
+            {
+                "batch_id": "legacy-batch",
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/7",
+                        "route": "direct_framework",
+                        "audit": {"verdict": "worth_a_bench"},
+                    }
+                ],
+            }
+        ],
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": "https://example.test/pr/7",
+                "status": "kept",
+                "kept": True,
+                "pre_tput": 105.0,
+                "post_tput": 108.0,
+                "gain_pct": 2.857,
+                "cycle": 0,
+                "ts": "2026-08-27T01:08:00+00:00",
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-source-1",
+            "name": "framework_agent",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T01:08:00+00:00",
+            "outputs": {
+                "status": "kept",
+                "candidate": {
+                    "pr_url": "https://example.test/pr/7",
+                    "route": "direct_framework",
+                    "changed_files": ["python/server.py"],
+                },
+                "base_tput": 105.0,
+                "output_throughput": 108.0,
+                "delta_pct": 2.857,
+                "accuracy_pass": True,
+                "keep_threshold_pct": 1.0,
+                "patches_applied": ["patches/pr-7.patch"],
+                "target_files": ["python/server.py"],
+                "workspace": "runs/framework/pr-7",
+            },
+            "extensions": {"task_id": "source-task-1"},
+        },
+        {
+            "operation_id": "op-config-1",
+            "name": "explore",
+            "phase": "EXPLORE",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T01:16:00+00:00",
+            "outputs": {
+                "status": "succeeded",
+                "round_id": "config-round-1",
+                "framework": "sglang",
+                "base_tput": 100.0,
+                "per_variant_outcomes": [
+                    {
+                        "variant_name": "chunked-prefill",
+                        "outcome": "KEEP",
+                        "fingerprint": "fp-config-1",
+                        "provenance": "specialist:serving_specialist",
+                        "scope": "domain",
+                        "metrics": {"tput": 105.0, "gain_pct": 5.0},
+                        "variant": {
+                            "extra_server_args": "--enable-chunked-prefill",
+                            "extra_envs": {"SGLANG_CHUNKED_PREFILL": "1"},
+                        },
+                    }
+                ],
+                "explore_search_update": {
+                    "tested": state["explore_search"]["tested"],
+                    "last_round": {
+                        "round_id": "config-round-1",
+                        "base_tput": 100.0,
+                        "base_extra_args": "--base-flag",
+                    },
+                },
+            },
+            "extensions": {"task_id": "config-task-1"},
+        },
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [event["type"] for event in timeline] == ["framework_agent"]
+    event = timeline[0]
+    assert event["start_time"] == "2026-08-27T01:00:00+00:00"
+    assert event["end_time"] == "2026-08-27T01:20:00+00:00"
+    assert "summary" not in event
+    assert event["ext"]["policy"]["stack_rebench_enabled"] is None
+    assert event["ext"]["config_arm"]["rounds"][0]["workload_signature"] == "qwen-tp8-c64"
+    assert event["ext"]["config_arm"]["rounds"][0]["input_stack"]["extra_server_args"] == "--base-flag"
+    variant = event["ext"]["config_arm"]["rounds"][0]["variants"][0]
+    assert variant["stack_rebench"] == {"ran": True, "tput": 104.0, "stable": True}
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+    assert attempt["patch_source"] == "upstream_pr"
+    assert attempt["lever_kind"] == "upstream_pr"
+    assert attempt["route"] == "direct_framework"
+    assert attempt["status"] == "KEEP"
+    assert event["ext"]["exit"] == {
+        "reason": "optimize_no_more_leverage",
+        "trigger": "both_arms_plateaued",
+        "hint": None,
+        "switch_bottleneck": True,
+    }
+
+
+def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 2,
+        "framework_agent_authoring_enabled": True,
+        "framework_agent_phase_done": False,
+        "phase_history": [
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "cycle_reloop",
+                "ts": "2026-08-27T02:00:00+00:00",
+                "cycle": 2,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_phase_budget_exhausted",
+                "ts": "2026-08-27T02:20:00+00:00",
+                "cycle": 2,
+                "evidence": {
+                    "source_consecutive_no_keep": 0,
+                    "source_threshold": 3,
+                    "source_candidates_exhausted": False,
+                    "source_arm_plateaued": False,
+                    "recent_keep_gain_pct": 0.0,
+                    "keep_gain_threshold_pct": 1.0,
+                    "empty_streak": 0,
+                    "empty_streak_threshold": 3,
+                    "lookback": 6,
+                    "tested_this_cycle": 0,
+                    "config_arm_plateaued": False,
+                    "switch_bottleneck": False,
+                },
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "discover-round",
+                "task_id": "discover-task-1234",
+                "domain": "candidate_discovery_specialist",
+                "cycle": 2,
+                "completed_at": "2026-08-27T02:04:00+00:00",
+                "proposal_set": [
+                    {
+                        "pr_url": "https://example.test/pr/9",
+                        "title": "Fuse host copies",
+                        "verdict": "worth_a_bench",
+                        "route": "author_via_specialist",
+                    },
+                    {
+                        "pr_url": "https://example.test/pr/10",
+                        "title": "Unrelated backend",
+                        "verdict": "not_applicable",
+                        "reason": "wrong framework",
+                    },
+                ],
+            },
+            {
+                "round_id": "author-round",
+                "task_id": "author-task-1",
+                "domain": "serving_specialist",
+                "cycle": 2,
+                "completed_at": "2026-08-27T02:08:00+00:00",
+                "proposal_set": [{"patches_written": ["patches/pr-9.patch"]}],
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0-discover",
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/9",
+                        "route": "author_via_specialist",
+                        "audit": {"verdict": "worth_a_bench"},
+                    }
+                ],
+            }
+        ],
+        "framework_agent_specialist_candidate_map": {
+            "author-task-1": "https://example.test/pr/9",
+        },
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": "https://example.test/pr/9",
+                "batch_id": "discovery-0-discover",
+                "status": "kept",
+                "kept": True,
+                "gain_pct": 4.0,
+                "pre_tput": 100.0,
+                "post_tput": 104.0,
+                "specialist_task_id": "author-task-1",
+                "integrate_task_id": "integrate-task-1",
+                "cycle": 2,
+                "ts": "2026-08-27T02:15:00+00:00",
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-integrate-1",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "agent": "framework_agent",
+            "macro_cycle": 2,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T02:15:00+00:00",
+            "outputs": {
+                "status": "kept",
+                "framework_agent_authoring": True,
+                "specialist_task_id": "author-task-1",
+                "base_tput": 100.0,
+                "output_throughput": 104.0,
+                "delta_pct": 4.0,
+                "accuracy_pass": True,
+                "keep_threshold_pct": 1.0,
+                "patches_applied": ["patches/pr-9.patch"],
+                "target_files": ["python/worker.py"],
+                "source_snapshot": "optimization_stack/src/author-task-1",
+                "source_manifest": "optimization_stack/src/author-task-1/manifest.json",
+                "workspace": "runs/integrate-task-1",
+                "switch_off_parity": {"ran": True, "ok": True},
+                "stack_rebench": {"stable": True},
+                "framework_levers": [{"switch": "SGLANG_FAST_COPY", "default_on": True}],
+            },
+            "extensions": {"task_id": "integrate-task-1"},
+        }
+    ]
+    critic_dir = tmp_path / "critic-workdir" / "000000"
+    _write_json(
+        critic_dir / "judge_bundle.json",
+        {
+            "merged_context": {"macro_cycle": 2},
+            "proposals": [
+                {
+                    "msg_id": "proposal-1",
+                    "action_name": "integrate_patch",
+                    "payload": {
+                        "params": {
+                            "framework_agent_candidate_id": "https://example.test/pr/9",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    _write_json(
+        critic_dir / "review.json",
+        {
+            "review_verdicts": [
+                {
+                    "target_proposal_msg_id": "proposal-1",
+                    "verdict": "needs_review",
+                    "source": "critic",
+                    "reasoning": "needs parity evidence",
+                    "confidence": "high",
+                    "required_evidence": ["switch-off parity"],
+                    "risks": [{"severity": "major", "risk": "default behavior may change"}],
+                }
+            ]
+        },
+    )
+    _write_json(
+        critic_dir / "emit.json",
+        {
+            "intent_envelope": {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": "proposal-1",
+                            "verdict": "approve",
+                            "advice_text": "retain the switch-off check",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    event = timeline[0]
+    discovery = event["ext"]["source_arm"]["candidate_discovery_runs"][0]
+    assert discovery["task_id"] == "discover-task-1234"
+    assert [candidate["verdict"] for candidate in discovery["candidates"]] == [
+        "worth_a_bench",
+        "not_applicable",
+    ]
+    authoring = event["ext"]["source_arm"]["authoring_runs"][0]
+    assert authoring["candidate_id"] == "https://example.test/pr/9"
+    assert authoring["patch_refs"] == ["patches/pr-9.patch"]
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+    assert attempt["patch_source"] == "specialist_authored"
+    assert attempt["lever_kind"] == "source_patch"
+    assert attempt["route"] == "author_via_specialist"
+    assert attempt["status"] == "KEEP"
+    assert attempt["gates"] == {
+        "accuracy_passed": True,
+        "keep_threshold_pct": 1.0,
+        "switch_off_parity_passed": True,
+        "stack_rebench_passed": True,
+    }
+    review = event["ext"]["critic_reviews"][0]
+    assert review["arm"] == "source"
+    assert review["target_action"] == "integrate_patch"
+    assert review["verdict"] == "needs_review"
+    assert review["effective_verdict"] == "approve"
+    assert "token" not in json.dumps(event).lower()
+
+
+def test_framework_timeline_keeps_config_serving_specialist_out_of_source_arm(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "config-round",
+                "task_id": "config-task",
+                "domain": "serving_specialist",
+                "source_phase": "FRAMEWORK_AGENT",
+                "cycle": 0,
+                "proposal_set": [
+                    {
+                        "name": "larger-page-size",
+                        "extra_server_args": "--page-size 32",
+                    }
+                ],
+            }
+        ],
+    }
+    critic_dir = tmp_path / "critic-workdir" / "000000"
+    _write_json(
+        critic_dir / "request.json",
+        {
+            "context": {"phase": "FRAMEWORK_AGENT"},
+            "raw_prompt": "=== Shared session state ===\nmacro_cycle=0\n",
+        },
+    )
+    _write_json(
+        critic_dir / "judge_bundle.json",
+        {
+            "phase": "FRAMEWORK_AGENT",
+            "proposals": [
+                {
+                    "msg_id": "config-proposal",
+                    "action_name": "specialist",
+                    "payload": {
+                        "params": {
+                            "domain": "serving_specialist",
+                            "source_phase": "FRAMEWORK_AGENT",
+                        }
+                    },
+                }
+            ],
+        },
+    )
+    _write_json(
+        critic_dir / "review.json",
+        {
+            "review_verdicts": [
+                {
+                    "target_proposal_msg_id": "config-proposal",
+                    "verdict": "approve",
+                }
+            ]
+        },
+    )
+    _write_json(
+        critic_dir / "emit.json",
+        {
+            "intent_envelope": {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": "config-proposal",
+                            "verdict": "approve",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+
+    assert [row["task_id"] for row in event["ext"]["config_arm"]["specialist_runs"]] == ["config-task"]
+    assert event["ext"]["source_arm"]["authoring_runs"] == []
+    assert event["ext"]["critic_reviews"][0]["arm"] == "config"
+
+
+def test_framework_timeline_ignores_kernel_specialist_without_framework_evidence(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 4,
+        "specialist_rounds": [
+            {
+                "round_id": "kernel-specialist",
+                "task_id": "kernel-specialist",
+                "domain": "kernel_specialist",
+                "cycle": 4,
+                "completed_at": "2026-08-27T04:00:00+00:00",
+                "proposal_set": [{"name": "kernel-rewrite"}],
+            }
+        ],
+    }
+
+    operations = [
+        {
+            "operation_id": "op-kernel-specialist",
+            "kind": "specialist",
+            "name": "specialist round kernel-specialist",
+            "phase": "EXPLORE",
+            "source": "specialist_recorder_hook",
+            "macro_cycle": 4,
+            "status": "succeeded",
+            "outputs": state["specialist_rounds"][0],
+        }
+    ]
+
+    assert collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations) == []
+
+
+def test_framework_timeline_recovers_direct_upstream_patch_source(tmp_path):
+    candidate_id = "https://example.test/pr/11"
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0",
+                "candidates": [
+                    {
+                        "pr_url": candidate_id,
+                        "route": "direct_framework",
+                    }
+                ],
+            }
+        ],
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": candidate_id,
+                "integrate_task_id": "integrate-direct-1",
+                "status": "kept",
+                "kept": True,
+                "cycle": 0,
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "op-integrate-direct",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "outputs": {
+                "status": "kept",
+                "framework_agent_authoring": True,
+                "specialist_task_id": "integrate-direct-1",
+            },
+            "extensions": {"task_id": "integrate-direct-1"},
+        }
+    ]
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)[0]
+    attempt = event["ext"]["source_arm"]["attempts"][0]
+
+    assert attempt["candidate_id"] == candidate_id
+    assert attempt["patch_source"] == "upstream_pr"
+    assert attempt["lever_kind"] == "upstream_pr"
+    assert attempt["route"] == "direct_framework"
+
+
+def test_framework_timeline_keeps_macro_cycles_isolated(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "prelude_complete",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_no_more_leverage",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "cycle_reloop",
+                "ts": "2026-08-27T04:00:00+00:00",
+                "cycle": 1,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "optimize_no_more_leverage",
+                "ts": "2026-08-27T04:10:00+00:00",
+                "cycle": 1,
+            },
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "cycle-0",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "outputs": {"status": "succeeded", "round_id": "round-0"},
+        },
+        {
+            "operation_id": "cycle-1",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "status": "succeeded",
+            "outputs": {"status": "succeeded", "round_id": "round-1"},
+        },
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [event["ext"]["macro_cycle"] for event in timeline] == [0, 1]
+    assert [event["ext"]["config_arm"]["rounds"][0]["round_id"] for event in timeline] == [
+        "round-0",
+        "round-1",
+    ]
+
+
+def test_framework_timeline_excludes_kernel_phase_explore_rebench(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "framework-round",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "agent": "explore",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T03:05:00+00:00",
+            "outputs": {"status": "succeeded", "round_id": "framework-round"},
+        },
+        {
+            "operation_id": "kernel-rebench",
+            "name": "explore",
+            "phase": "KERNEL_AGENT",
+            "agent": "explore",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T03:06:00+00:00",
+            "outputs": {"status": "succeeded", "round_id": "kernel-rebench"},
+        },
+    ]
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)[0]
+
+    assert [row["round_id"] for row in event["ext"]["config_arm"]["rounds"]] == ["framework-round"]
+
+
+def test_framework_timeline_projects_discovery_history_outcomes_in_order(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 1,
+                    "limit": 3,
+                    "error": "TimeoutError('upstream unavailable')",
+                },
+                "ts": "2026-08-27T03:01:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "discover_empty_payload",
+                "evidence": {
+                    "event": "framework_agent_phase_done",
+                    "failure_count": 0,
+                    "retry_limit": 3,
+                },
+                "ts": "2026-08-27T03:03:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T03:04:00+00:00",
+                "cycle": 0,
+            },
+        ],
+        "framework_agent_batches": [
+            {
+                "batch_id": "discovery-0",
+                "ts": "2026-08-27T03:02:00+00:00",
+                "cycle": 0,
+                "candidates": [
+                    {
+                        "pr_url": "https://example.test/pr/12",
+                        "route": "direct_framework",
+                    }
+                ],
+            }
+        ],
+    }
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+    runs = event["ext"]["source_arm"]["candidate_discovery_runs"]
+
+    assert [run["status"] for run in runs] == ["failed", "succeeded", "empty"]
+    assert runs[0]["reason"] == "TimeoutError('upstream unavailable')"
+    assert runs[1]["batch_id"] == "discovery-0"
+    assert runs[1]["candidates"][0]["candidate_id"] == "https://example.test/pr/12"
+    assert runs[2]["reason"] == "discover_empty_payload"
+    assert event["status"] == "succeeded"
+    assert event["ext"]["failure"] == {
+        "failed_task_id": None,
+        "error_class": None,
+        "error": None,
+    }
+
+
+def test_framework_timeline_marks_exhausted_discovery_retries_failed(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 1,
+                    "limit": 3,
+                    "error": "TimeoutError('first')",
+                },
+                "ts": "2026-08-27T03:01:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "framework_agent_discover_failed",
+                "evidence": {
+                    "event": "framework_agent_discover_failed",
+                    "attempt": 3,
+                    "limit": 3,
+                    "error": "TimeoutError('last')",
+                },
+                "ts": "2026-08-27T03:02:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "reason": "discover_retries_exhausted",
+                "evidence": {
+                    "event": "framework_agent_phase_done",
+                    "failure_count": 3,
+                    "retry_limit": 3,
+                },
+                "ts": "2026-08-27T03:03:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "reason": "framework_agent_phase_done",
+                "ts": "2026-08-27T03:04:00+00:00",
+                "cycle": 0,
+            },
+        ],
+    }
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+    runs = event["ext"]["source_arm"]["candidate_discovery_runs"]
+
+    assert [run["status"] for run in runs] == ["failed", "failed"]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"] == {
+        "failed_task_id": None,
+        "error_class": None,
+        "error": "TimeoutError('last')",
+    }
+
+
+def test_framework_timeline_assigns_critic_reviews_from_request_cycle(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T04:00:00+00:00",
+                "cycle": 1,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T04:10:00+00:00",
+                "cycle": 1,
+            },
+        ],
+    }
+    for cycle in (0, 1):
+        proposal_id = f"proposal-cycle-{cycle}"
+        critic_dir = tmp_path / "critic-workdir" / f"{cycle:06d}"
+        _write_json(
+            critic_dir / "request.json",
+            {
+                "context": {"phase": "FRAMEWORK_AGENT"},
+                "raw_prompt": (
+                    f"=== Shared session state ===\nmacro_cycle={cycle}\n"
+                    if cycle == 0
+                    else "=== Shared session state ===\n"
+                ),
+            },
+        )
+        _write_json(
+            critic_dir / "judge_bundle.json",
+            {
+                "phase": "FRAMEWORK_AGENT",
+                "proposals": [
+                    {
+                        "msg_id": proposal_id,
+                        "action_name": "integrate_patch",
+                        "payload": {
+                            "framework_agent_candidate_id": f"candidate-{cycle}",
+                        },
+                    }
+                ],
+            },
+        )
+        _write_json(
+            critic_dir / "review.json",
+            {
+                "review_verdicts": [
+                    {
+                        "target_proposal_msg_id": proposal_id,
+                        "verdict": "approve",
+                    }
+                ]
+            },
+        )
+        _write_json(
+            critic_dir / "emit.json",
+            {
+                "intent_envelope": {
+                    "intents": [
+                        {
+                            "intent_type": "review_verdict",
+                            "payload": {
+                                "target_proposal_msg_id": proposal_id,
+                                "verdict": "approve",
+                            },
+                        }
+                    ]
+                }
+            },
+        )
+
+    _write_json(
+        tmp_path / "reports" / "trace" / "proposal_task_map.jsonl",
+        {
+            "proposal_msg_id": "proposal-cycle-1",
+            "task_id": "integrate-cycle-1",
+        },
+    )
+    operations = [
+        {
+            "operation_id": "op-cycle-1",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "extensions": {"task_id": "integrate-cycle-1"},
+            "outputs": {"status": "reverted"},
+        }
+    ]
+
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert [[review["proposal_msg_id"] for review in event["ext"]["critic_reviews"]] for event in timeline] == [
+        ["proposal-cycle-0"],
+        ["proposal-cycle-1"],
+    ]
