@@ -78,11 +78,6 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
 # / ``b/`` prefix is conventional, not required: a diff produced without it
 # writes the bare path, and matching only the prefixed form left an absolute
 # header like ``--- /etc/passwd`` invisible to :func:`patch_escapes_tree`.
-_PATCH_PATH_RE: re.Pattern[str] = re.compile(
-    r"^(?:---|\+\+\+) (?:(?:a|b)/)?(?P<path>.+)$",
-    re.M,
-)
-
 #: The one absolute header a legitimate diff carries: the missing side of an
 #: add or delete. Never treated as an escape.
 _DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
@@ -151,12 +146,20 @@ _GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
 )
 
 
-def _safe_patch_path(raw: str) -> str:
+def _normalize_patch_path(raw: str) -> str:
+    """Strip the header decoration ``git apply -p1`` drops, without judging it."""
     value = str(raw or "").strip().split("\t", 1)[0]
     if value in {"", _DEV_NULL}:
         return value
     if value.startswith(("a/", "b/")):
         value = value[2:]
+    return value
+
+
+def _safe_patch_path(raw: str) -> str:
+    value = _normalize_patch_path(raw)
+    if value in {"", _DEV_NULL}:
+        return value
     parsed = PurePosixPath(value)
     if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
         raise ValueError(f"unsafe patch target path: {raw!r}")
@@ -620,18 +623,23 @@ def patch_escapes_tree(patch_text: str) -> str | None:
     Args:
         patch_text: The unified-diff text to scan.
 
+    Reads the same ``---``/``+++`` header pairs the apply path resolves its
+    targets from. Scanning lines independently cannot tell a header from a
+    deleted source line that happens to start with ``--``, and the two must
+    agree on which paths a patch touches or one gates on what the other never
+    applies.
+
     Returns:
         The first absolute or ``..``-containing path, or ``None`` when none
         escape the tree.
     """
-    for hit in _PATCH_PATH_RE.finditer(patch_text or ""):
-        cand = hit.group("path").strip()
-        # Trailing timestamp columns are legal in a unified-diff header.
-        cand = cand.split("\t", 1)[0].strip()
-        if cand in _DEV_NULL_PATHS:
-            continue
-        if cand.startswith("/") or ".." in Path(cand).parts:
-            return cand
+    for old, new in patch_file_targets(patch_text):
+        for raw in (old, new):
+            cand = _normalize_patch_path(raw)
+            if not cand or cand in _DEV_NULL_PATHS:
+                continue
+            if cand.startswith("/") or ".." in PurePosixPath(cand).parts:
+                return cand
     return None
 
 
