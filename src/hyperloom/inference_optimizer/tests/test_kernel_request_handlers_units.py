@@ -194,15 +194,8 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh.subprocess, "run", _fake_run)
         assert krh._forge_gemm_tune_available() is True
-        assert seen == [
-            [
-                sys.executable,
-                "-m",
-                "kernel_agents.cli",
-                "forge-gemm-tune",
-                "--help",
-            ]
-        ]
+        assert seen == [krh._forge_gemm_tune_probe_cmd()]
+        assert seen[0][0] == sys.executable
 
     def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
         # An older kernel_agents imports fine but has no forge-gemm-tune group;
@@ -237,7 +230,7 @@ class TestForgeGemmHelperCoverage:
         "exc",
         [
             OSError("no interpreter"),
-            subprocess.TimeoutExpired(cmd="probe", timeout=120),
+            subprocess.SubprocessError("bad subprocess"),
         ],
     )
     def test_forge_gemm_tune_available_swallows_probe_failures(self, monkeypatch, exc):
@@ -246,6 +239,20 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh.subprocess, "run", _boom)
         assert krh._forge_gemm_tune_available() is False
+
+    def test_forge_gemm_tune_available_logs_probe_timeout(self, monkeypatch, caplog):
+        def _boom(_cmd, **_kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd="probe",
+                timeout=krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+            )
+
+        monkeypatch.setattr(krh.subprocess, "run", _boom)
+        with caplog.at_level("WARNING"):
+            assert krh._forge_gemm_tune_available() is False
+
+        assert "preflight timed out" in caplog.text
+        assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
     def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
@@ -1333,7 +1340,10 @@ class TestForgeGemmHelperCoverage:
             _capture_durable_envs,
         )
 
+        subprocess_cmd = []
+
         async def _fake_subprocess(_cmd, *, timeout_sec):
+            subprocess_cmd.extend(_cmd)
             sentinel = (
                 "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
                 + json.dumps(
@@ -1355,6 +1365,7 @@ class TestForgeGemmHelperCoverage:
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["model_path"] == str(snapshot)
+        assert subprocess_cmd[0] == sys.executable
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 

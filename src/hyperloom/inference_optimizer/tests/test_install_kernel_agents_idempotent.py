@@ -175,9 +175,17 @@ def test_static_readiness_probe_covers_the_fusion_package() -> None:
     """
     probe = _extract_fn("_kernel_agents_ready")
     assert "kernel_agents.fusion" in probe, "the readiness probe must require fusion"
-    assert '"forge-gemm-tune" in main.commands' in probe, "the readiness probe must require the GEMM command"
+    assert '"forge-gemm-tune" in getattr(main, "commands", {})' in probe, (
+        "the readiness probe must require the GEMM command without assuming main is a click Group"
+    )
 
     body = _extract_fn("ensure_kernel_agents")
     skip_probe, _, verify = body.partition("pip install")
     assert "_kernel_agents_ready" in skip_probe, "the skip gate must use the shared readiness probe"
     assert "_kernel_agents_ready" in verify, "the post-install check must use the shared readiness probe"
+
+
+def test_static_standalone_forge_gemm_tune_install_is_removed() -> None:
+    text = IO_INSTALL.read_text(encoding="utf-8")
+    assert "ensure_forge_gemm_tune" not in text
+    assert "FORGE_GEMM_TUNE_ROOT" not in text

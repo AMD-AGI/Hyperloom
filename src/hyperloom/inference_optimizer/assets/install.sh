@@ -777,73 +777,12 @@ PY
   fi
 }
 
-# --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
-_forge_gemm_tune_candidates() {
-  # Explicit gemm-tune override first.
-  [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root (single canonical var: FORGE_PATH).
-  [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-}
-
-_resolve_forge_gemm_tune_root() {
-  local cand
-  while IFS= read -r cand; do
-    [ -n "$cand" ] || continue
-    if [ -f "${cand%/}/pyproject.toml" ] && { [ -f "${cand%/}/forge_gemm_tune/cli.py" ] || [ -f "${cand%/}/cli.py" ]; }; then
-      realpath "$cand" 2>/dev/null || printf '%s\n' "$cand"
-      return 0
-    fi
-  done < <(_forge_gemm_tune_candidates)
-  return 1
-}
-
-ensure_forge_gemm_tune() {
-  local root resolved
-  if root="$(_resolve_forge_gemm_tune_root)"; then
-    log "ensuring forge-gemm-tune from ${root}"
-    if [ "$CHECK_ONLY" -eq 1 ]; then
-      "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1 \
-        && log "forge-gemm-tune import OK" \
-        || warn "forge-gemm-tune not importable (check-only; would install from ${root})"
-      return 0
-    fi
-    if [ "$DRY_RUN" -eq 1 ]; then
-      log "would run: ${PYTHON} -m pip install -e ${root}"
-      return 0
-    fi
-    resolved="$("$PYTHON" -c 'import forge_gemm_tune, os; print(os.path.realpath(os.path.dirname(forge_gemm_tune.__file__)))' 2>/dev/null || true)"
-    case "$resolved" in
-      "$root" | "$root"/*)
-        log "forge-gemm-tune already installed from ${root}; skipping editable reinstall"
-        ;;
-      *)
-        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$root"
-        "$PYTHON" -c "import forge_gemm_tune; import forge_gemm_tune.cli" >/dev/null
-        log "forge-gemm-tune installed OK from ${root}"
-        ;;
-    esac
-  else
-    if "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1; then
-      log "forge-gemm-tune import OK"
-    else
-      log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
-    fi
-  fi
-}
-
-# --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
+# --- 1b. kernel_agents (KernelForge forge-loop + GEMM tuning CLI) ---
 # forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike forge_gemm_tune — which has a standalone sub-pyproject and gets
-# pip-installed by the carrier from its sub-package dir — `kernel_agents` is only
-# packaged by the KernelForge *root* pyproject and was never installed here. So
-# forge-loop relied entirely on $FORGE_PATH being present and prepended to the
-# child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
-# unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
-# `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
-# attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
-# import succeed regardless of FORGE_PATH, and it is now the ONLY way to get the
-# fusion pipeline: `kernel-agents forge-fuse` lives in the root package since
-# forge_fusion was absorbed into it.
+# The same root package now owns `kernel-agents forge-gemm-tune`; installing the
+# standalone `src/forge_gemm_tune` sub-package only makes its Python modules
+# importable and cannot provide that command. Keep one canonical install path so
+# the readiness check and every runtime invocation observe the same distribution.
 _kernel_forge_root() {
   # KernelForge repo root that actually contains kernel_agents. Keyed on
   # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
@@ -867,14 +806,14 @@ _kernel_agents_ready() {
 import sys
 import kernel_agents, kernel_agents.fusion, openai_codex  # noqa: F401
 from kernel_agents.cli import main
-sys.exit(0 if "forge-gemm-tune" in main.commands else 1)
+sys.exit(0 if "forge-gemm-tune" in getattr(main, "commands", {}) else 1)
 '
   "$PYTHON" -c "$probe"
 }
 
 ensure_kernel_agents() {
-  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
-  # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
+  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER. install.sh
+  # frequently runs at setup time under the
   # default geak backend, so a backend gate here would skip the install; a later
   # forge session whose child has no FORGE_PATH would then still hit
   # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
@@ -909,9 +848,7 @@ ensure_kernel_agents() {
   # Deliberately NON-editable (no -e): ${root} is a shared, often read-only
   # KernelForge checkout used by concurrent sessions. A non-editable install
   # builds in a temp dir and never writes egg-info/build artifacts back into the
-  # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own forge_gemm_tune install (see _incontainer.sh: "Non-editable installs
-  # build in a temp dir and never write to the read-only shared checkout").
+  # checkout, so parallel runs can't race on it.
   # Installing the root also provides forge_gemm_tune and the fusion pipeline.
   # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
   # that directory and its sub-pyproject were removed when fusion was absorbed.
@@ -927,7 +864,7 @@ ensure_kernel_agents() {
     || die "kernel_agents / forge-gemm-tune / codex SDK check failed after install from ${root}"
 }
 
-# --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
+# --- 1c. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
 # forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
 # and only falls back to the thin rocprofv3 "PMC" path when the tool is absent.
 # KernelForge's resolve_rocpc() looks for the tool at
@@ -1682,7 +1619,6 @@ chain_kernel_agent() {
 }
 
 ensure_inference_optimizer
-ensure_forge_gemm_tune
 ensure_kernel_agents
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /
