@@ -487,3 +487,26 @@ def test_a_round_that_ran_clears_the_failure_streak(tmp_path: Path):
     stub._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
     assert stub.shared_state.framework_agent_discover_failures == 0
     assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+
+def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path):
+    """The patch applied and measured; only the commit failed.
+
+    The executor reports that as ``apply_failed`` so the lane winds down, but
+    the rearm reads only the status, so it sent a specialist to rewrite a diff
+    that had already passed the bench and the accuracy gate.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    stub.shared_state.apply_fail_retry_pending = []
+
+    stub._maybe_rearm_authored_lane(
+        {
+            "status": "apply_failed",
+            "error_class": "keep_commit_failed",
+            "lane": "perf_framework",
+            "candidate": {"candidate_id": "c1"},
+            "specialist_task_id": "t1",
+        }
+    )
+
+    assert stub.shared_state.apply_fail_retry_pending == []

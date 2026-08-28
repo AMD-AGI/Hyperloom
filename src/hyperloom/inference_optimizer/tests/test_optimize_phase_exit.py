@@ -118,48 +118,25 @@ def test_every_reason_it_emits_is_in_the_exit_vocabulary():
     assert emitted <= ps.PHASE_EXIT_REASONS
 
 
-def _config_arm_state(*, winners, rounds, tested):
-    return SimpleNamespace(
-        explore_search={"winners_history": winners, "tested": tested},
-        specialist_rounds=rounds,
+def test_the_config_arm_needs_specialist_evidence_to_report_dry():
+    """The streak counts rounds; a variant count is a different quantity.
+
+    A run with no research lane records no specialist round, so the arm reports
+    no exhaustion however flat the grid goes and the phase leaves on its
+    budget. Standing a benched-variant count in for the round streak made five
+    variants read as five empty rounds and cut the phase short.
+    """
+    state = SimpleNamespace(
+        explore_search={
+            "winners_history": [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)],
+            "tested": {f"fp{i}": {"cycle": 0} for i in range(50)},
+        },
+        specialist_rounds=[],
         macro_cycle=0,
     )
-
-
-_LOW_GAIN = [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)]
-_FIVE_BENCHED = {f"fp{i}": {"cycle": 0} for i in range(5)}
-
-
-@pytest.mark.parametrize(
-    ("name", "winners", "rounds", "tested", "expected"),
-    [
-        # A run with no research lane records no specialist round ever, so the
-        # streak is structurally zero. Without the grid fallback this arm could
-        # never report dry and the phase could only leave on its budget.
-        ("grid only, enough benched, gain below floor", _LOW_GAIN, [], _FIVE_BENCHED, True),
-        ("grid only, too little benched to judge", _LOW_GAIN, [], {"fp0": {"cycle": 0}}, False),
-        ("nothing has run yet", [], [], {}, False),
-        ("grid still paying", [{"gain_pct": 9.0, "cycle": 0}], [], _FIVE_BENCHED, False),
-        (
-            "specialists still producing",
-            _LOW_GAIN,
-            [{"proposals_total": 3, "proposals_kept": 1, "cycle": 0}],
-            _FIVE_BENCHED,
-            False,
-        ),
-        (
-            "specialists dry",
-            _LOW_GAIN,
-            [{"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(5)],
-            _FIVE_BENCHED,
-            True,
-        ),
-    ],
-)
-def test_the_config_arm_can_go_dry_without_a_research_lane(name, winners, rounds, tested, expected):
-    """The arm judges on whichever evidence it has, and needs some to judge at all."""
-    triggered, _ = ps.compute_plateau_explore(_config_arm_state(winners=winners, rounds=rounds, tested=tested))
-    assert triggered is expected, name
+    triggered, evidence = ps.compute_plateau_explore(state)
+    assert triggered is False
+    assert evidence["empty_streak"] == 0
 
 
 def test_skip_to_kernel_leaves_on_an_optimize_reason():

@@ -481,6 +481,10 @@ class FrameworkPhase(CoordinatorCollaborator):
         if status != "apply_failed":
             # Non-apply-failed perf-lane results go through the writeback path.
             return
+        if str(res.get("error_class") or "") == "keep_commit_failed":
+            # The patch applied and measured; only the commit failed. Rewriting
+            # it would send a specialist after a defect that is not in the diff.
+            return
 
         if lane not in ("perf_framework", "perf_explore"):
             return
@@ -2108,7 +2112,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
         matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
-        if any(str(row.get("provenance") or "") != "authored_empty" for row in matching):
+        # A KEEP is the last word on a candidate; anything else is an outcome a
+        # later attempt may better. Guarding on "has any row" stranded the KEEP
+        # of a candidate that had failed to enqueue once and was re-dispatched.
+        if any(str(row.get("status") or "") == "kept" for row in matching):
             return
         if matching:
             progress[:] = [

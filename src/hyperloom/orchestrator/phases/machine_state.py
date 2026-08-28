@@ -1415,9 +1415,8 @@ def compute_plateau_explore(
             non-positive disables the judgment.
         keep_gain_threshold_pct (float): Keep-gain floor below which the gain
             arm trips.
-        empty_streak_threshold (int): Evidence the arm is out of new things to
-            try: trailing empty specialist rounds, or variants benched this
-            cycle when no specialist round exists.
+        empty_streak_threshold (int): Trailing empty specialist-round count
+            that trips the streak arm.
 
     Returns:
         tuple[bool, dict[str, Any]]: ``(triggered, evidence)`` — whether the
@@ -1486,11 +1485,7 @@ def compute_plateau_explore(
             break
 
     tested_this_cycle = len(_rows_for_current_cycle(list(tested_ledger.values()), state))
-    exhausted = streak >= empty_streak_threshold or (
-        not specialist_rounds and tested_this_cycle >= empty_streak_threshold
-    )
-
-    triggered = recent_keep_gain < keep_gain_threshold_pct and exhausted
+    triggered = recent_keep_gain < keep_gain_threshold_pct and streak >= empty_streak_threshold
     return triggered, {
         "recent_keep_gain_pct": round(recent_keep_gain, 4),
         "keep_gain_threshold_pct": keep_gain_threshold_pct,

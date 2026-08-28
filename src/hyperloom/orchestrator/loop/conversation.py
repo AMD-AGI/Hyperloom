@@ -903,7 +903,7 @@ class ConversationCollaborator:
                     f"threshold={source_ev.get('source_threshold', 0)} "
                     f"candidates_exhausted={source_ev.get('source_candidates_exhausted', False)}"
                 )
-            if lines and not (config_dry and source_dry):
+            if config_dry != source_dry:
                 lines.append("  Only one arm is dry: the other lever is still live, and the phase stays open.")
         elif phase == _phase_state.PHASE_KERNEL_AGENT:
             triggered, evidence = _phase_state.compute_plateau_kernel(
