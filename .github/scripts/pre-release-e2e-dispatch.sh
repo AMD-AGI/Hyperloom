@@ -124,6 +124,7 @@ fi
 summary() { echo "$*" | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"; }
 
 # ---- reclaim stale pre-release workloads BEFORE dispatching -----------------
+# Stale = any non-terminal e2e-* in this workspace whose VERSION_TAG differs from ours.
 # The concurrency.cancel-in-progress GitHub knob only cancels the JOB; it does NOT
 # reliably stop the SaFE PyTorchJob pods a superseded/failed run already created (the
 # `if: cancelled()` cleanup gets a short grace window, and a job that FAILS -- not
