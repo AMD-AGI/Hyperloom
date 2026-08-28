@@ -1121,9 +1121,7 @@ def test_verify_cpp_itfs_rebuilt_mtime_slack_and_module_glob(akp, tmp_path):
     assert slack["fresh_lib_so"] == [str(scoped)]
     assert str(other) not in slack["fresh_lib_so"]
 
-    fallback = akp.verify_cpp_itfs_rebuilt(
-        _cpp_itfs_backup(build_dir, invalidated_unix=mtime, module_names=[])
-    )
+    fallback = akp.verify_cpp_itfs_rebuilt(_cpp_itfs_backup(build_dir, invalidated_unix=mtime, module_names=[]))
     assert fallback["verified"] is True
     assert set(fallback["fresh_lib_so"]) == {str(scoped), str(other)}
 
