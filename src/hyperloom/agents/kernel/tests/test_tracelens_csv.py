@@ -4310,9 +4310,9 @@ def test_operation_key_drops_launch_decoration_for_both_source_kinds():
         assert key(graph) == "_mxfp8_linear_kernel"
         assert key(module) == key(graph)
     # Distinct kernels behind the same launch API stay distinct.
-    assert normalize_operation_key(
-        "hipGraphLaunch->_first_kernel (Synthetic Op)"
-    ) != normalize_operation_key("hipGraphLaunch->_second_kernel (Synthetic Op)")
+    assert normalize_operation_key("hipGraphLaunch->_first_kernel (Synthetic Op)") != normalize_operation_key(
+        "hipGraphLaunch->_second_kernel (Synthetic Op)"
+    )
     # Demangling stays native-only and still runs after the shared cleanup.
     assert native_operation_key("void _ZN4vllm11some_kernelEv (Synthetic Op)") == "vllm::some_kernel"
 

@@ -111,11 +111,7 @@ class TestFlyDSLClassification(unittest.TestCase):
     def test_unmatched_symbol_among_several_triton_defs_is_not_claimed(self) -> None:
         """Several Triton defs and no name match leaves the kernel unproven."""
         path = self._write(
-            "import triton\n"
-            "@triton.jit\n"
-            "def _first_kernel(x): pass\n"
-            "@triton.jit\n"
-            "def _second_kernel(x): pass\n"
+            "import triton\n@triton.jit\ndef _first_kernel(x): pass\n@triton.jit\ndef _second_kernel(x): pass\n"
         )
         self.assertFalse(_defines_traced_triton_kernel("_absent_kernel", path))
         self.assertEqual(source_type_for("_absent_kernel", path), "python")

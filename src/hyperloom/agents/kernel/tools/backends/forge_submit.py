@@ -743,11 +743,7 @@ def _local_scratch_dir(output_dir: Path) -> Path:
     if not _is_on_network_fs(output_dir):
         return output_dir / "worktree"
     root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
-    local_root = (
-        Path(root_env).expanduser()
-        if root_env
-        else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
-    )
+    local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
     local_root.mkdir(parents=True, exist_ok=True)
     _sweep_orphaned_scratch(local_root, output_dir)
     return local_root / output_dir.name / "worktree"
@@ -856,11 +852,7 @@ def _prepare_worktree_nogit(
     skipped_dirs = runtime_dirs | {".git"}
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
-        return [
-            n
-            for n in names
-            if n in skipped_dirs or n.endswith((".egg-info", *runtime_suffixes))
-        ]
+        return [n for n in names if n in skipped_dirs or n.endswith((".egg-info", *runtime_suffixes))]
 
     try:
         if copy_subtrees is None:
@@ -1376,9 +1368,7 @@ _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
 # copy into an ImportError on a node that never needed the producer. These are
 # the artefacts no repository should ever hash, not a mirror of the manifest; a
 # producer-specific addition arrives through the import below.
-_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
-    {"__pycache__", "build", "dist", "flydsl_cache", "jit"}
-)
+_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "build", "dist", "flydsl_cache", "jit"})
 _FALLBACK_RUNTIME_FILE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".so")
 
 

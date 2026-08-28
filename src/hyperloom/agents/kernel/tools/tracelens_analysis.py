@@ -2715,7 +2715,7 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
         patterns.extend(
             [
                 r"def\s+" + re.escape(sym) + r"\b",  # Python / @triton.jit
-                r"\b" + re.escape(sym) + r"\s*=",    # module-level assignment
+                r"\b" + re.escape(sym) + r"\s*=",  # module-level assignment
                 r"__global__[^\n;{]*" + re.escape(sym) + r"\b",  # CUDA/HIP
             ]
         )

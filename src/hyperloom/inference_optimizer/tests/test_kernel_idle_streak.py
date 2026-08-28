@@ -186,9 +186,7 @@ async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
     st = c.shared_state
     _arm_kernel_phase(st)
     _stall_the_ledger(st)
-    st.kernel_inline_step_seen_unix = (
-        datetime.now(timezone.utc).timestamp() - ps.KERNEL_INLINE_STEP_STALE_SECONDS - 1.0
-    )
+    st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_INLINE_STEP_STALE_SECONDS - 1.0
 
     await c._advance_phase_if_needed()
     for _ in range(ps.KERNEL_IDLE_MAX_TICKS):

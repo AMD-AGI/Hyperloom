@@ -486,8 +486,7 @@ def test_grep_prefers_defining_module_over_reexporting_init(monkeypatch, tmp_pat
     pkg = tmp_path / "pkg" / "kernels" / "linear"
     (pkg / "mxfp8").mkdir(parents=True)
     (pkg / "__init__.py").write_text(
-        "from .mxfp8.rocm_native import _mxfp8_linear_kernel\n\n"
-        '__all__ = ["_mxfp8_linear_kernel"]\n',
+        'from .mxfp8.rocm_native import _mxfp8_linear_kernel\n\n__all__ = ["_mxfp8_linear_kernel"]\n',
         encoding="utf-8",
     )
     definition = pkg / "mxfp8" / "rocm_native.py"
