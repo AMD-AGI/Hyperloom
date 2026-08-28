@@ -51,6 +51,25 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
     return cp.stdout.strip() or None, ""
 
 
+def _pr_number_of(candidate: dict[str, Any]) -> int:
+    """Read a candidate's PR number, or 0 when it does not carry a usable one.
+
+    The row reaches us from the framework agent's KB and from LLM-authored
+    proposals, so the field arrives as an int, a decimal string, ``"#1234"``,
+    or prose.
+
+    Args:
+        candidate: The PR metadata row.
+
+    Returns:
+        The positive PR number, or 0.
+    """
+    raw = str(candidate.get("pr_number") or "").strip().lstrip("#")
+    if not raw.isdigit():
+        return 0
+    return int(raw)
+
+
 def _candidate_slug(candidate: dict[str, Any]) -> str:
     """Filesystem-safe candidate id (variant names + paths). Prefer
     ``repo/pr_number``.
@@ -63,8 +82,8 @@ def _candidate_slug(candidate: dict[str, Any]) -> str:
         / ref.
     """
     repo = str(candidate.get("repo") or "").replace("/", "-")
-    pr = candidate.get("pr_number")
-    if repo and pr not in (None, "", 0):
+    pr = _pr_number_of(candidate)
+    if repo and pr:
         return f"{repo}-pr-{pr}"
     ref = str(candidate.get("ref") or "").replace(":", "-")
     if repo and ref:
@@ -187,7 +206,7 @@ def _candidate_is_same_repo(
     return _normalize_repo_id(origin_raw) == cand_repo
 
 
-def _materialize_pr_diff_via_worktree(
+def _materialize_pr_diff_from_head(
     framework_root: Path,
     candidate: dict[str, Any],
     dest: Path,
@@ -196,10 +215,9 @@ def _materialize_pr_diff_via_worktree(
 ) -> tuple[bool, str]:
     """checkout-head (diff source) mode.
 
-    Fetches the PR head into ``framework_root``, checks it out into an
-    isolated worktree (the live KEPT stack is undisturbed), computes the
-    PR's net diff against its merge-base, and writes it to ``dest``.
-    Worktree always removed in ``finally``. Returns ``(ok, err)``.
+    Fetches the PR head into ``framework_root`` and writes the PR's net diff
+    against its merge-base to ``dest``. Both ends of the range are shas, so
+    the live KEPT working tree is read but never moved. Returns ``(ok, err)``.
 
     Head ref order: ``candidate.head_sha`` → ``candidate.ref`` →
     ``refs/pull/<pr_number>/head``.
@@ -219,14 +237,14 @@ def _materialize_pr_diff_via_worktree(
 
     head_sha = str(candidate.get("head_sha") or "").strip()
     ref = str(candidate.get("ref") or "").strip()
-    pr_number = candidate.get("pr_number")
+    pr_number = _pr_number_of(candidate)
 
     # Decide the fetch refspec.
     fetch_ref = ""
     if ref:
         fetch_ref = ref
-    elif pr_number not in (None, "", 0):
-        fetch_ref = f"refs/pull/{int(pr_number)}/head"
+    elif pr_number:
+        fetch_ref = f"refs/pull/{pr_number}/head"
 
     # Fetch the head ref.
     if fetch_ref:
@@ -248,53 +266,28 @@ def _materialize_pr_diff_via_worktree(
     if not head_sha:
         return False, ("checkout-head: no head_sha / ref / pr_number on candidate; cannot resolve PR head")
 
-    # Isolated worktree at the fetched head (clean any stale prior-run dir).
-    wt_dir = dest.parent / f"wt-{_candidate_slug(candidate)}"
-    _run_git(["-C", root, "worktree", "remove", "--force", str(wt_dir)], timeout=60.0)
-    ok, _out, err = _run_git(
-        ["-C", root, "worktree", "add", "--detach", str(wt_dir), head_sha],
-        timeout=timeout_sec,
-    )
-    if not ok:
-        return False, f"git worktree add failed: {err}"
+    # Diff against the merge-base so applying introduces only the PR's own
+    # commits, not the full divergence from the live HEAD.
+    ok_hb, base_out, _e = _run_git(["-C", root, "rev-parse", "HEAD"], timeout=30.0)
+    live_head = base_out.strip() if ok_hb else ""
+    merge_base = ""
+    if live_head:
+        ok_mb, mb_out, _mb_e = _run_git(["-C", root, "merge-base", live_head, head_sha], timeout=60.0)
+        if ok_mb and mb_out.strip():
+            merge_base = mb_out.strip()
+    diff_range = f"{merge_base}..{head_sha}" if merge_base else head_sha
+    ok_d, diff_out, err_d = _run_git(["-C", root, "diff", "--binary", diff_range], timeout=timeout_sec)
+    if not ok_d:
+        return False, f"git diff {diff_range!r} failed: {err_d}"
+    if not diff_out.strip():
+        return False, (
+            f"checkout-head produced an empty diff for range {diff_range!r} (PR head already merged into live tree?)"
+        )
     try:
-        # Diff against the merge-base so applying introduces only the PR's
-        # own commits, not the full divergence from the live HEAD.
-        ok_hb, base_out, _e = _run_git(
-            ["-C", root, "rev-parse", "HEAD"],
-            timeout=30.0,
-        )
-        live_head = base_out.strip() if ok_hb else ""
-        merge_base = ""
-        if live_head:
-            ok_mb, mb_out, _mb_e = _run_git(
-                ["-C", root, "merge-base", live_head, head_sha],
-                timeout=60.0,
-            )
-            if ok_mb and mb_out.strip():
-                merge_base = mb_out.strip()
-        diff_range = f"{merge_base}..{head_sha}" if merge_base else head_sha
-        ok_d, diff_out, err_d = _run_git(
-            ["-C", root, "diff", "--binary", diff_range],
-            timeout=timeout_sec,
-        )
-        if not ok_d:
-            return False, f"git diff {diff_range!r} failed: {err_d}"
-        if not diff_out.strip():
-            return False, (
-                f"checkout-head produced an empty diff for range "
-                f"{diff_range!r} (PR head already merged into live tree?)"
-            )
-        try:
-            dest.write_text(diff_out, encoding="utf-8")
-        except OSError as exc:
-            return False, f"could not write diff to {dest}: {exc!r}"
-        return True, ""
-    finally:
-        _run_git(
-            ["-C", root, "worktree", "remove", "--force", str(wt_dir)],
-            timeout=60.0,
-        )
+        dest.write_text(diff_out, encoding="utf-8")
+    except OSError as exc:
+        return False, f"could not write diff to {dest}: {exc!r}"
+    return True, ""
 
 
 @dataclass
@@ -372,7 +365,7 @@ def materialize_candidate_patches(
     has_checkout_ref = bool(
         str(candidate.get("head_sha") or "").strip()
         or str(candidate.get("ref") or "").strip()
-        or candidate.get("pr_number") not in (None, "", 0)
+        or bool(_pr_number_of(candidate))
     )
     explicit_checkout = apply_mode in {"checkout_head", "checkout-head", "checkout"} or prefer_checkout
     use_checkout_head = explicit_checkout or (not diff_url and has_checkout_ref)
@@ -396,7 +389,7 @@ def materialize_candidate_patches(
     dest = output_root / f"{slug}.patch"
     if use_checkout_head:
         mode = "checkout_head"
-        ok, err = _materialize_pr_diff_via_worktree(
+        ok, err = _materialize_pr_diff_from_head(
             framework_root,
             candidate,
             dest,

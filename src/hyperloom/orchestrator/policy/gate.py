@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
     resolve_session_framework_root,
@@ -300,6 +300,28 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
         "advise",
     }
 )
+
+
+def patch_verdict_subject(params: Mapping[str, Any] | None) -> str:
+    """Return the id an ``integrate_patch``'s Critic verdict is filed under.
+
+    An authored patch is reviewed as the specialist that wrote it, so the
+    specialist task id is the subject. An upstream-PR candidate is pre-screened
+    before any specialist exists -- approval there means "spend a bench on this
+    PR" -- so the candidate id is.
+
+    Args:
+        params: The action's params.
+
+    Returns:
+        The subject id, or ``""`` when the params name neither.
+    """
+    values = params if isinstance(params, Mapping) else {}
+    sid = str(values.get("specialist_task_id") or "").strip()
+    if sid:
+        return sid
+    return str(values.get("framework_agent_candidate_id") or "").strip()
+
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
@@ -1558,16 +1580,16 @@ class PolicyGate:
         self,
         payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict).
+        """Enforce a permissive Critic verdict on the patch's review subject.
 
         Args:
             payload (dict[str, Any]): the integrate_patch intent payload
-                carrying ``params`` with ``specialist_task_id``.
+                carrying ``params``.
 
         Raises:
-            PolicyDenied: when ``params`` is malformed, ``specialist_task_id``
-                is missing, no Critic verdict is on record, or the verdict is
-                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
+            PolicyDenied: when ``params`` is malformed, name no review
+                subject, no Critic verdict is on record for it, or the verdict
+                is not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1585,15 +1607,17 @@ class PolicyGate:
         # cancelled, so a successful from-source build never reaches KEEP.
         if params.get("enablement_launch_only"):
             return
-        sid = str(params.get("specialist_task_id") or "").strip()
+        sid = patch_verdict_subject(params)
         if not sid:
             raise PolicyDenied(
-                "integrate_patch.params.specialist_task_id is required",
+                "integrate_patch.params names no Critic review subject",
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "set params.specialist_task_id to the task_id of "
                     "the completed specialist whose worktree carries "
-                    "the patches you want to apply."
+                    "the patches you want to apply, or "
+                    "params.framework_agent_candidate_id to the "
+                    "pre-screened upstream-PR candidate."
                 ),
             )
         ss = getattr(self, "shared_state", None)
@@ -1606,7 +1630,7 @@ class PolicyGate:
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
-                f"integrate_patch: no Critic verdict on record for specialist_task_id={sid!r}",
+                f"integrate_patch: no Critic verdict on record for subject={sid!r}",
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "Wait for the Critic to emit a "
@@ -1618,8 +1642,8 @@ class PolicyGate:
             )
         if verdict.lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
             raise PolicyDenied(
-                f"integrate_patch: Critic verdict for specialist "
-                f"task {sid!r} is {verdict!r}; integrate_patch only "
+                f"integrate_patch: Critic verdict for subject "
+                f"{sid!r} is {verdict!r}; integrate_patch only "
                 f"runs on "
                 f"{sorted(INTEGRATE_PATCH_PERMISSIVE_VERDICTS)!r}",
                 rule="integrate_patch_requires_critic_verdict",

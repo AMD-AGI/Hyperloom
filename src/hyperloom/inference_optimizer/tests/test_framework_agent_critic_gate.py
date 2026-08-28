@@ -180,6 +180,9 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
     await coord._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
     assert len(raw) == 1
+    # The dispatched task carries no specialist task id, so the verdict has to
+    # be filed under the candidate for the executor and PolicyGate to find it.
+    assert coord.shared_state.get_specialist_patch_verdict(_CANDIDATE["candidate_id"]) == "approve"
 
 
 @pytest.mark.asyncio

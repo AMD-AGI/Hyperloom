@@ -214,17 +214,15 @@ class _FakeClient:
         self.chat = type("_C", (), {"completions": _FakeCompletions(content, raise_exc)})()
 
 
-def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, worktree_add_ok: bool = True):
+def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = True, seen: list | None = None):
     def _fake(args, timeout=None):  # noqa: ANN001
         sub = args[2] if len(args) > 2 else ""
+        if seen is not None:
+            seen.append(sub)
         if sub == "fetch":
             return (fetch_ok, "", "" if fetch_ok else "remote hung up")
         if sub == "rev-parse":
             return (True, "abc123headsha", "")
-        if sub == "worktree":
-            if "add" in args:
-                return (worktree_add_ok, "", "" if worktree_add_ok else "worktree add failed")
-            return (True, "", "")  # remove (best-effort)
         if sub == "merge-base":
             return (True, "basesha", "")
         if sub == "diff":
@@ -237,14 +235,14 @@ def _scripted_run_git(diff_text: str = "diff --git a b\n+x\n", fetch_ok: bool = 
 def test_materialize_pr_diff_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     dest = tmp_path / "out" / "cand.patch"
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
+    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {"pr_number": 1015}, dest, timeout_sec=30.0)
     assert ok is True and err == ""
     assert dest.read_text().startswith("diff --git")
 
 
 def test_materialize_pr_diff_fetch_fails(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(fetch_ok=False))
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"ref": "refs/pull/1/head"}, tmp_path / "c.patch", timeout_sec=30.0
     )
     assert ok is False and "git fetch" in err
@@ -252,7 +250,7 @@ def test_materialize_pr_diff_fetch_fails(monkeypatch, tmp_path) -> None:
 
 def test_materialize_pr_diff_empty_diff(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(diff_text="   \n"))
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
     assert ok is False and "empty diff" in err
@@ -260,16 +258,38 @@ def test_materialize_pr_diff_empty_diff(monkeypatch, tmp_path) -> None:
 
 def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
+    ok, err = fpr_mod._materialize_pr_diff_from_head(tmp_path / "root", {}, tmp_path / "c.patch", timeout_sec=30.0)
     assert ok is False and "cannot resolve PR head" in err
 
 
-def test_materialize_pr_diff_worktree_add_fails(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(worktree_add_ok=False))
-    ok, err = fpr_mod._materialize_pr_diff_via_worktree(
+def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
+    """Both ends of the diff range are shas, so no tree has to be materialized.
+
+    The mode checked the head out into a worktree and then diffed the bare
+    repo anyway, paying a full checkout of a multi-gigabyte framework tree for
+    a path that never read it.
+    """
+    seen: list[str] = []
+    monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(seen=seen))
+    ok, _err = fpr_mod._materialize_pr_diff_from_head(
         tmp_path / "root", {"head_sha": "deadbeef"}, tmp_path / "c.patch", timeout_sec=30.0
     )
-    assert ok is False and "worktree add failed" in err
+    assert ok is True
+    assert "worktree" not in seen
+
+
+def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path) -> None:
+    """The row reaches us from the KB and from LLM-authored proposals alike.
+
+    A non-numeric number used to reach ``int()`` and raise out of the
+    executor; it now reads as "no PR number", which is what the caller's
+    fallback chain is there for.
+    """
+    monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
+    ok, err = fpr_mod._materialize_pr_diff_from_head(
+        tmp_path / "root", {"pr_number": "not-a-number"}, tmp_path / "c.patch", timeout_sec=30.0
+    )
+    assert ok is False and "cannot resolve PR head" in err
 
 
 # --------------------------------------------------------------------------

@@ -43,6 +43,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
 from ..policy.gate import (
+    patch_verdict_subject,
     PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
@@ -540,7 +541,10 @@ class IntentRouter:
             pa_params = {}
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
-            sid_candidate = str(pa_params.get("specialist_task_id") or "").strip()
+            # A pre-screen carries its candidate id at the top level and has no
+            # params; the executor and PolicyGate look the verdict up under the
+            # same subject the dispatched task's params will name.
+            sid_candidate = patch_verdict_subject({**pa_params, **(pending.payload or {})})
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pa_params.get("task_id") or "").strip()

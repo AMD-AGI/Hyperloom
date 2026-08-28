@@ -18,7 +18,7 @@ from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors._patch_source_pr import (
     _fetch_diff_to_path,
-    _materialize_pr_diff_via_worktree,
+    _materialize_pr_diff_from_head,
     materialize_candidate_patches,
 )
 
@@ -95,12 +95,12 @@ def test_fetch_diff_to_path_fails_on_unreachable_url(tmp_path: Path):
     assert not dest.exists()
 
 
-def test_materialize_pr_diff_via_worktree_extracts_net_diff(tmp_path: Path):
+def test_materialize_pr_diff_from_head_extracts_net_diff(tmp_path: Path):
     repo = tmp_path / "framework"
     head_sha = _init_repo_with_pr_branch(repo, pr_ref="pr-head")
     dest = tmp_path / "out" / "pr.patch"
     cand = {"repo": "x/y", "pr_number": 7, "ref": "pr-head", "head_sha": head_sha}
-    ok, err = _materialize_pr_diff_via_worktree(repo, cand, dest, timeout_sec=60.0)
+    ok, err = _materialize_pr_diff_from_head(repo, cand, dest, timeout_sec=60.0)
     assert ok, err
     text = dest.read_text()
     assert "src.py" in text
@@ -113,7 +113,7 @@ def test_materialize_pr_diff_empty_when_no_ref(tmp_path: Path):
     repo = tmp_path / "framework"
     _init_repo_with_pr_branch(repo)
     dest = tmp_path / "pr.patch"
-    ok, err = _materialize_pr_diff_via_worktree(repo, {"repo": "x/y"}, dest, timeout_sec=30.0)
+    ok, err = _materialize_pr_diff_from_head(repo, {"repo": "x/y"}, dest, timeout_sec=30.0)
     assert not ok
     assert "cannot resolve PR head" in err or "head" in err.lower()
 

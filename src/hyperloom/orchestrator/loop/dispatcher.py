@@ -32,6 +32,7 @@ from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
+    patch_verdict_subject,
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
@@ -452,7 +453,9 @@ class DispatcherCollaborator:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
 
         Covers the resume gap where ``coordinator.db`` retained a cancelled task
-        but ``SharedState.specialist_patch_verdicts`` was restored later. Only
+        but ``SharedState.specialist_patch_verdicts`` was restored later. The
+        row is re-keyed by its review subject, so a pre-screened upstream-PR
+        candidate reconciles the same way an authored patch does. Only
         ``integrate_patch_requires_critic_verdict`` denials are retried; forged
         params that still fail :meth:`PolicyGate.validate_dispatched_task` are
         left terminal.
@@ -484,7 +487,7 @@ class DispatcherCollaborator:
             if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
                 continue
             params = dict(task.params or {})
-            sid = str(params.get("specialist_task_id") or "").strip()
+            sid = patch_verdict_subject(params)
             if not sid:
                 continue
             verdict = str(get_verdict(sid) or "").strip().lower()

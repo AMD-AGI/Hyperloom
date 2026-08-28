@@ -1547,11 +1547,12 @@ def _stamp_framework_kb_provenance(
 
 def _enforce_critic_gate(
     shared_state: Any,
-    specialist_task_id: str,
+    subject: str,
 ) -> "dict[str, Any] | None":
     """Enforce a permissive Critic verdict before any side effect; returns a
     ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState
-    is available or the verdict is permissive."""
+    is available or the verdict is permissive. ``subject`` is the specialist
+    task id for an authored patch, the candidate id for a PR pre-screen."""
     if shared_state is None:
         return None
     try:
@@ -1559,7 +1560,7 @@ def _enforce_critic_gate(
     except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
         _PERMISSIVE = frozenset({"approve", "advise"})
     try:
-        recorded = shared_state.get_specialist_patch_verdict(specialist_task_id)
+        recorded = shared_state.get_specialist_patch_verdict(subject)
     except AttributeError:
         recorded = ""
     if (recorded or "").lower() not in _PERMISSIVE:
@@ -1567,14 +1568,13 @@ def _enforce_critic_gate(
         # No side effect has occurred yet; reject cleanly (nothing to revert).
         return {
             "status": "rejected_by_critic",
-            "specialist_task_id": specialist_task_id,
+            "specialist_task_id": subject,
             "patches_applied": [],
             "patches_reverted": [],
             "config_changes_applied": {},
             "reason": (
                 f"integrate_patch requires a permissive Critic verdict "
-                f"(approve/advise) for specialist task "
-                f"{specialist_task_id!r}; {_detail}. Refusing to run."
+                f"(approve/advise) for {subject!r}; {_detail}. Refusing to run."
             ),
         }
     return None
@@ -1844,6 +1844,17 @@ class IntegratePatchExecutor:
             # Same rebind the specialist lane does: a task queued before a KEEP
             # landed must still measure against the real stack top.
             inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
+
+        # Same pre-side-effect gate the specialist lane runs, on the subject a
+        # pre-screen is reviewed under. This lane fetches a diff from a remote
+        # and applies it to the live framework tree, and a queued or
+        # resume-dispatched task is not re-validated by PolicyGate.
+        critic_reject = _enforce_critic_gate(
+            shared_state,
+            str(params.get("framework_agent_candidate_id") or "").strip(),
+        )
+        if critic_reject is not None:
+            return critic_reject
 
         task_id = ctx.task.task_id
         scratch = runs_dir(self.session_dir, "integrate_patch", task_id)
