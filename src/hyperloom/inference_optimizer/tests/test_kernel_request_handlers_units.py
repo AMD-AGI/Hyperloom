@@ -1328,6 +1328,7 @@ class TestForgeGemmHelperCoverage:
             "resolve_local_model_dir",
             lambda _model_path: snapshot,
         )
+        monkeypatch.setattr(krh, "_resolve_aiter_root_for_forge", lambda: "/opt/aiter")
         durable = {}
 
         def _capture_durable_envs(extra_envs, *, model_path, session_dir):
@@ -1365,7 +1366,8 @@ class TestForgeGemmHelperCoverage:
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["model_path"] == str(snapshot)
-        assert subprocess_cmd[0] == sys.executable
+        assert subprocess_cmd[:2] == ["env", "AITER_ROOT_DIR=/opt/aiter"]
+        assert subprocess_cmd[2] == sys.executable
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 
