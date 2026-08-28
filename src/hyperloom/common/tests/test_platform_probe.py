@@ -12,13 +12,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hyperloom.common import platform_probe as platform_probe_mod
 from hyperloom.common.platform_probe import (
+    CpuPlatform,
     amdgpu_device_count,
     boost_state,
     cpu_model,
     cpufreq_governor,
     nodes_per_socket,
     numa_node_count,
+    platform_fingerprint,
     probe_cpu_platform,
     read_kernel_file,
     smt_state,
@@ -174,3 +177,48 @@ def test_driver_control_entries_are_not_devices(tmp_path):
 def test_a_host_without_the_amdgpu_driver_reports_nothing(tmp_path):
     """None, not zero: the driver dir is absent, which is not a count of zero."""
     assert amdgpu_device_count(root=tmp_path) is None
+
+
+def test_platform_fingerprint_unavailable_when_probe_returns_none(monkeypatch):
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", lambda: None)
+    got = platform_fingerprint(gpu_type="mi300x", multi_node=False)
+    assert got == {"status": "unavailable", "reason": "no host CPU sysfs on this machine"}
+
+
+def test_platform_fingerprint_outer_failure_is_status_error(monkeypatch):
+    def _boom():
+        raise RuntimeError("probe exploded")
+
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _boom)
+    got = platform_fingerprint()
+    assert got["status"] == "error"
+    assert "probe exploded" in got["reason"]
+
+
+def test_platform_fingerprint_gpu_and_stack_blocks_degrade(monkeypatch):
+    plat = CpuPlatform(
+        cpu="AMD EPYC",
+        smt="on",
+        sockets=2,
+        numa_nodes=8,
+        nps="NPS4",
+        governor="performance",
+        boost="on",
+        kernel="5.15.0",
+    )
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", lambda: plat)
+
+    def _gpu_boom():
+        raise OSError("gpu sysfs unreadable")
+
+    def _stack_boom(_env):
+        raise RuntimeError("stack probe failed")
+
+    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", _gpu_boom)
+    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", _stack_boom)
+    got = platform_fingerprint(gpu_type="mi300x", multi_node=True)
+    assert got["status"] == "ok"
+    assert got["cpu"] == "AMD EPYC"
+    assert got["multi_node_session"] is True
+    assert got["gpu"] == {"status": "error"}
+    assert got["stack"] == {"status": "error"}
