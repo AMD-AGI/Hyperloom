@@ -66,8 +66,10 @@ from .llm_failure import (
     retry_delay,
 )
 from .locate import (
+    _read_source,
     _unclaimable_note,
     covered_by_vllm_compile_pass,
+    out_of_scope_terms,
     rank_recipes,
     vllm_compile_pass_state,
 )
@@ -733,6 +735,21 @@ runs back-to-back on the decode path.
 
 Constraints for each proposed fusion:
 - Must be a real contiguous chain in this source (name the exact functions/methods).
+- SCOPE — the single hardest constraint, and the one that wastes a whole run when
+  it is broken. The fusion is delivered by REPLACING one call site in the source
+  file printed below, so the entire chain must live inside THAT file, and every
+  tensor your kernel takes as input must already be a local name at that call
+  site. Do not fuse across a boundary: not into a method defined in another
+  module (an imported `XMLP`, an imported norm class), and not into work the
+  framework performs below the call (in vLLM the KV-cache write happens inside
+  the attention backend, so `key_cache` / `value_cache` / `slot_mapping` are NOT
+  reachable from a model `forward` and a fusion folding them in cannot be wired).
+  Before proposing, name the exact call site you would replace and check that
+  every input is in scope there. A chain that fails this test is worth zero
+  end-to-end even when its microbenchmark is 30x.
+- One patch, one file. If two different modules each hold a fusible chain,
+  propose them as two SEPARATE entries, each self-contained in its own file --
+  never one entry spanning both.
 - ROCm-native: it will be authored as a Triton kernel; do NOT propose reusing a
   framework CUDA-only fused op.
 - Existing AITER/CK/HIP/Triton operators listed above are allowed and preferred when
@@ -958,6 +975,9 @@ def parse_discovered_recipes(
     level the proposal stays authoring work with ``compile_pass_note`` recording why.
     """
     runtime = resolve_target_runtime(framework, framework_root=framework_root)
+    # The same file the prompt embedded, re-read so the scope gate below judges a
+    # proposal against exactly the source the model was shown.
+    source_text = _read_source(source_file)
     out: list[Recipe] = []
     for i, item in enumerate(_extract_json_array(text)):
         name = str(item.get("name") or f"discovered_{i + 1}").strip()
@@ -1016,6 +1036,21 @@ def parse_discovered_recipes(
                     ",".join(matched_categories),
                 )
                 continue
+        # SCOPE gate: a fusion is wired by replacing ONE call site in the file the
+        # model was shown, so a proposal claiming ops that file never performs is
+        # unwireable no matter how good the kernel is. Dropping it here costs one
+        # JSON object; keeping it costs a full authoring campaign that ends in an
+        # orphan module (see ``locate.out_of_scope_terms``).
+        outside = out_of_scope_terms(source_text, [*declared, *traits])
+        if outside:
+            log.info(
+                "discovery: dropping %s (%s not performed in %s -- the fusion crosses "
+                "a module boundary and has no wireable call site there)",
+                name,
+                ",".join(outside),
+                Path(source_file).name or source_file,
+            )
+            continue
         # Compile-pass gate: never author a chain vLLM fuses at compile time.
         # Matched keyword-only, because the gate's own vocabulary differs from the
         # op-category vocabulary derived above. Reads ``identity_text`` for the

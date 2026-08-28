@@ -24,7 +24,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 
 from .calibration import DEFAULT_MIN_PREDICTED_GAIN, predict_cuda_graph_on_gain
 from .models import Diagnosis, FusionPattern, Recipe
@@ -395,6 +395,60 @@ def _read_source(source_file: str) -> str:
         return Path(source_file).read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+# A fusion is delivered by REPLACING one call site in the framework source the
+# author was shown. Every input the fused kernel needs therefore has to be in
+# scope at that call site, and every op it computes has to be one the shown file
+# actually performs -- otherwise the kernel cannot be wired at all, or wiring it
+# would double-execute work the framework still does elsewhere.
+#
+# The map is deliberately partial. A term earns an entry only when it has an
+# unambiguous source-level spelling; ``add``, ``mul``, ``copy`` and ``reduce``
+# are absent because the shapes they take in real source are too varied to
+# distinguish "absent" from "spelled differently", and a scope gate that fires
+# on a spelling is worse than none. Unlisted terms are not judged.
+_SCOPE_MARKERS: tuple[tuple[str, str], ...] = (
+    # The failure this table was written for: a decode fusion that folds in the
+    # KV-cache write. In vLLM v1 that write happens inside the attention
+    # backend, several frames below the model file -- ``key_cache`` /
+    # ``slot_mapping`` are simply not names the model's forward can reach.
+    ("kvcache", r"kv_cache|key_cache|value_cache|slot_mapping|reshape_and_cache|kvcache"),
+    ("rope", r"rotary|\brope\b"),
+    ("rmsnorm", r"rms_?norm"),
+    ("layernorm", r"layer_?norm"),
+    ("activation", r"silu|gelu|\brelu\b|sigmoid|act_fn|activation"),
+    ("conv", r"\bconv"),
+    ("sample", r"sample|argmax|multinomial"),
+    ("mla", r"\bmla\b|kv_lora|q_lora"),
+    ("moe", r"\bmoe\b|expert"),
+)
+
+
+def out_of_scope_terms(source_text: str, terms: Sequence[str]) -> list[str]:
+    """Declared terms the shown source file never performs.
+
+    A non-empty result means the proposal crosses a module boundary: it claims
+    to compute something that is not in the file whose call site the author will
+    replace. Such a fusion is unwireable by construction -- the author writes
+    the kernel, cannot find a call site that has the inputs, and delivers the
+    module with no wiring edit. That is exactly the shape
+    :func:`kernelforge.fusion.validate.fused_symbol_invocation_evidence` catches
+    at the far end of the pipeline, after a full authoring campaign has been
+    spent on it; this catches it before the campaign starts.
+
+    Fails OPEN in every uncertain case: an unreadable source is not judged, and
+    neither is a term with no entry in :data:`_SCOPE_MARKERS`.
+    """
+    if not source_text:
+        return []
+    lowered = source_text.lower()
+    markers = dict(_SCOPE_MARKERS)
+    return [
+        term
+        for term in dict.fromkeys(str(t).strip().lower() for t in terms if str(t).strip())
+        if term in markers and not re.search(markers[term], lowered)
+    ]
 
 
 def _source_confirms(pattern: FusionPattern, source_text: str) -> bool:
