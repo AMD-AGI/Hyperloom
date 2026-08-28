@@ -35,6 +35,32 @@ In docker mode:
   framework must come from the image. Do **not** use `--skip-base-check`.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
+### Stale container after credential retry
+
+A wrong LLM API key or auth failure often means fixing `.env` and starting a
+**replacement** long-running container. The first container may still be running
+and holding GPU memory.
+
+Before `docker run` for the replacement, on the **docker host** (not inside a
+container):
+
+```bash
+docker ps --format '{{.Names}}' | grep -E '^hyperloom' || true
+```
+
+When any names are printed, ask the user in plain language whether to stop
+those unused containers — for example: *"An earlier Hyperloom Docker container
+(`hyperloom-local`) is still running. Stop it before we start the new one?"*
+Wait for an explicit yes or no.
+
+- **Yes:** stop each listed name with `docker stop <name>`. When reusing
+  `${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}`, stopping the old instance is
+  required before `docker run --name ...` can succeed.
+- **No:** continue, but warn that GPU contention from the leftover container
+  can depress benchmarks and produce a misleading 0% validated gain.
+
+Never stop a container without the user's explicit approval.
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
