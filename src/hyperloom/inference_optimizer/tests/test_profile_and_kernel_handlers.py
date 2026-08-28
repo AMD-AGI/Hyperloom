@@ -755,6 +755,7 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
                 "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
+                "--profiler-config.capture_torch_profiler True "
                 "--profiler-config.detailed_trace_annotation True"
             ),
         },
