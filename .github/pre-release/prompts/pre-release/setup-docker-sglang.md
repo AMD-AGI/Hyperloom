@@ -37,24 +37,39 @@ Follow the `hyperloom-setup` skill in **docker** mode with these fixed decisions
 
 ## Image selection
 
-`HYPERLOOM_IMAGE` is not preset — pick it from the demo skill's **"Suggested Docker
-images"** list (do **not** ask the user, and do **not** hard-code a tag from memory).
-This is a `sglang` leg, and the skill lists a different sglang image per GPU
-architecture, so detect the architecture on this host first:
+`HYPERLOOM_IMAGE` is not preset. You **MUST** use the **exact, verbatim** `docker.io/...`
+tag string that is written on the demo skill's matching `sglang` row in its **"Suggested
+Docker images"** section — nothing else. This is a hard release-gate constraint, not a
+suggestion:
 
-```bash
-gfx="$(/opt/rocm/bin/rocminfo 2>/dev/null | grep -oiE 'gfx9[0-9a-f]+' | head -1)"
-```
+- **Do NOT freelance the tag.** Do not bump the version, do not pick a "newer" or
+  "latest" build, do not substitute a different tag from your memory, from Docker Hub, or
+  from anywhere other than the skill file. The pinned tag is the one the release is gated
+  on; a different tag is a **failure**, even if it also pulls successfully.
+- The skill lists a **different `sglang` image per GPU architecture**, so first detect the
+  architecture on this host, then read the **exact** tag for the matching row **from the
+  skill file itself** rather than typing it out (the demo skill's path is in
+  `HYPERLOOM_SKILL_PATH` in `.env`; otherwise it is the `SKILL.md` of the demo skill you
+  are running):
 
-- `gfx950` → **MI355X** → use the skill's `sglang MI355X` image.
-- `gfx942` → **MI300X** → use the skill's `sglang MI300X` image.
+  ```bash
+  gfx="$(/opt/rocm/bin/rocminfo 2>/dev/null | grep -oiE 'gfx9[0-9a-f]+' | head -1)"
+  case "$gfx" in
+    gfx950) row='MI355X' ;;   # MI355X
+    gfx942) row='MI300X' ;;   # MI300X
+    *) echo "ERROR: could not detect GPU arch (gfx='$gfx')"; exit 1 ;;
+  esac
+  HYPERLOOM_IMAGE="$(grep -E "^- \`sglang\` $row" "$HYPERLOOM_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
+  echo "arch=$gfx row=$row using image: $HYPERLOOM_IMAGE"
+  ```
 
-Read the exact, fully-qualified `docker.io/...` tag for that row **from the skill file**
-(the demo skill's SKILL.md "Suggested Docker images" section) and export it as
-`HYPERLOOM_IMAGE` for the `docker run` below. This is architecture **detection only** —
-it selects the image tag, not which card the leg runs on (the card is pinned by the
-isolation flags below). If `rocminfo` cannot be found or reports no `gfx`, stop and
-report the failure rather than guessing a tag.
+  This is architecture **detection only** — it selects the image tag, not which card the
+  leg runs on (the card is pinned by the isolation flags below).
+- If the arch cannot be detected, the extracted tag is empty, or the resulting image
+  cannot be pulled, **stop and report the failure** — do **not** substitute any other tag
+  to work around it.
+
+Export the extracted value as `HYPERLOOM_IMAGE` for the `docker run` below.
 
 ## Hard constraints (automated release gate)
 

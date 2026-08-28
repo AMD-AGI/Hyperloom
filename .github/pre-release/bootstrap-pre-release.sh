@@ -149,7 +149,20 @@ run_leg() {
       # CI hard constraints it must apply to its `docker run` (see setup-docker-*.md).
       if [ "$run_mode" = docker ]; then
         # HYPERLOOM_IMAGE intentionally NOT set: the agent selects it from the skill's
-        # image list (by backend + detected GPU arch). See setup-docker-*.md.
+        # image list (by backend + detected GPU arch). See setup-docker-*.md. To pin the
+        # tag to the SKILL's exact string (no freelancing), the setup prompt greps it out
+        # of the demo skill's SKILL.md -- so hand the agent that file's absolute path.
+        # `pip install --target "$root"` materializes the example demo skills (declared as
+        # [tool.setuptools.data-files] in pyproject.toml) at
+        #   $root/.claude/skills/<demo-skill-name>/SKILL.md
+        # (empirically verified). The demo skill is chosen by leg duration:
+        #   *-3h  -> hyperloom-qwen3-8b-3h ; *-12h -> hyperloom-qwen3-14b-fp8-12h.
+        local demo_skill=""
+        case "$leg" in
+          *-3h)  demo_skill="hyperloom-qwen3-8b-3h" ;;
+          *-12h) demo_skill="hyperloom-qwen3-14b-fp8-12h" ;;
+        esac
+        echo "HYPERLOOM_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
         echo "HYPERLOOM_SHM_SIZE=${LEG_SHM:-64g}"
         echo "E2E_GPU_INDEX=${GPU_INDEX}"
@@ -299,8 +312,43 @@ ensure_dockerd() {
       || { log "ERROR: docker.io install failed"; tail -30 /tmp/apt-docker.log; return 1; }
     log "docker installed: $(docker --version 2>&1)"
   fi
-  log "starting pod-local dockerd (vfs, detached via setsid)"
-  setsid bash -c 'dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs >/var/log/dockerd.log 2>&1' \
+  # --- pick a data-root that does NOT count against the pod's ephemeral limit ---
+  # The vfs storage driver has NO layer dedup: every image layer + every container is a
+  # full copy. Left at the default /var/lib/docker (inside the container ROOTFS), 4 legs
+  # pulling+running big ROCm images blow past the pod's ephemeralStorage quota and the pod
+  # is EVICTED ("ephemeral local storage usage exceeds the total limit of containers
+  # 1792Gi" -- observed live 2026-08-28). This is a PRIVILEGED host pod, so it sees the
+  # NODE's own disks directly: /shared-data is the node-local NVMe (~28T xfs on
+  # /dev/mapper/nvme_vg-nvme_lv), a real host filesystem -- NOT the container rootfs
+  # overlay -- so bytes written there are NOT counted toward the pod's ephemeralStorage
+  # quota. Point the vfs data-root there so image/container copies land on the big host
+  # disk instead of the small pod-ephemeral quota.
+  #
+  # /shared-data is host-persistent (survives this pod), so vfs copies from OLD runs would
+  # accumulate and eventually fill the node NVMe. Reap stale e2e-docker data-roots (any
+  # run other than this CI_VERSION) before starting dockerd. dockerd is not up yet, so a
+  # plain rm of the old data-root dirs is safe.
+  local docker_data_root="/var/lib/docker"
+  local dr_base="/shared-data/e2e-docker"
+  local dr_candidate="${dr_base}/${CI_VERSION:-current}"
+  if [ -d /shared-data ] && mkdir -p "$dr_candidate" 2>/dev/null && touch "$dr_candidate/.wtest" 2>/dev/null; then
+    rm -f "$dr_candidate/.wtest" 2>/dev/null || true
+    # reap other runs' leftovers (best-effort; never abort the run on cleanup failure)
+    if [ -d "$dr_base" ]; then
+      for d in "$dr_base"/*; do
+        [ -d "$d" ] || continue
+        [ "$d" = "$dr_candidate" ] && continue
+        log "reaping stale docker data-root from an older run: $d"
+        rm -rf "$d" 2>/dev/null || true
+      done
+    fi
+    docker_data_root="$dr_candidate"
+    log "dockerd data-root on node-local NVMe: $docker_data_root (vfs copies stay off the pod ephemeral quota)"
+  else
+    log "WARN: /shared-data not writable; dockerd falls back to $docker_data_root (may hit the pod ephemeral limit under vfs)"
+  fi
+  log "starting pod-local dockerd (vfs, data-root=$docker_data_root, detached via setsid)"
+  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs --data-root='$docker_data_root' >/var/log/dockerd.log 2>&1" \
     </dev/null >/dev/null 2>&1 &
   local i
   for i in $(seq 1 60); do

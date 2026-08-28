@@ -37,12 +37,30 @@ Follow the `hyperloom-setup` skill in **docker** mode with these fixed decisions
 
 ## Image selection
 
-`HYPERLOOM_IMAGE` is not preset — pick it from the demo skill's **"Suggested Docker
-images"** list (do **not** ask the user, and do **not** hard-code a tag from memory).
-This is a `vllm` leg, so use the single fully-qualified `docker.io/...` tag on the
-skill's `vllm` row (it is architecture-independent — no GPU detection needed). Read the
-exact tag **from the skill file** (the demo skill's SKILL.md "Suggested Docker images"
-section) and export it as `HYPERLOOM_IMAGE` for the `docker run` below.
+`HYPERLOOM_IMAGE` is not preset. You **MUST** use the **exact, verbatim** `docker.io/...`
+tag string that is written on the demo skill's `vllm` row in its **"Suggested Docker
+images"** section — nothing else. This is a hard release-gate constraint, not a
+suggestion:
+
+- **Do NOT freelance the tag.** Do not bump the version, do not pick a "newer" or
+  "latest" build, do not substitute a different tag from your memory, from Docker Hub, or
+  from anywhere other than the skill file. The pinned tag is the one the release is gated
+  on; a different tag is a **failure**, even if it also pulls successfully.
+- Read the tag by extracting it **from the skill file itself** rather than typing it out,
+  e.g. (the demo skill's path is in `HYPERLOOM_SKILL_PATH` in `.env`; otherwise it is the
+  `SKILL.md` of the demo skill you are running):
+
+  ```bash
+  HYPERLOOM_IMAGE="$(grep -E '^- `vllm`' "$HYPERLOOM_SKILL_PATH" | grep -oE 'docker\.io/[^`]+' | head -1)"
+  echo "using image: $HYPERLOOM_IMAGE"
+  ```
+
+  This is a `vllm` leg, so use the single arch-independent `vllm` row — no GPU detection
+  is needed.
+- If that command yields an empty string, or the resulting image cannot be pulled, **stop
+  and report the failure** — do **not** substitute any other tag to work around it.
+
+Export the extracted value as `HYPERLOOM_IMAGE` for the `docker run` below.
 
 ## Hard constraints (automated release gate)
 
