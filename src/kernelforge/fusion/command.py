@@ -69,6 +69,7 @@ from .validate import (
     DEFAULT_TARGET_SPEEDUP,
     KERNEL_KEEP_CHECKPOINT,
     HarnessKernelRunner,
+    fused_symbol_invocation_evidence,
     serving_smoke,
     serving_smoke_verdict,
     validate_recipe,
@@ -1280,6 +1281,26 @@ def apply_serving_gate(
             "no fusion patch could be exported for %s; a killed run cannot be salvaged",
             recipe.pattern_id,
         )
+    # Cheapest gate first, and the only one that catches a fusion nothing calls:
+    # the smoke would boot, decode and PASS, because stock code is what ran.
+    wired, wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
+    if not wired:
+        result.kept = False
+        vr.kept = False
+        vr.kernel_speedup = None
+        vr.note = (
+            f"KERNEL OK but NOT WIRED IN: {wiring}. The microbench measured the fused "
+            f"entry point directly, so its speedup says nothing about the served model, "
+            f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
+            f"is half the deliverable -- replace the ORIGINAL call site in the framework's "
+            f"forward path with a call to the fused entry point, under the same env gate, "
+            f"and leave the unfused code as the fallback branch."
+        )
+        result.termination_reason = "not_wired"
+        _clear_kernel_keep_checkpoint(out)
+        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
+        return
+    log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring)
     verdict = serving_smoke_verdict(
         model_path,
         flags,

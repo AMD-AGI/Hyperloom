@@ -1436,6 +1436,74 @@ def _tail(text: str, n: int = 400) -> str:
     return " ".join((text or "").split())[-n:]
 
 
+def fused_symbol_invocation_evidence(source_file: str) -> tuple[bool, str]:
+    """Whether the framework edit CALLS the fused module, or only imports it.
+
+    A fusion is delivered as two edits: a new fused-kernel module, and a wiring
+    edit that makes the framework's forward path use it. Everything downstream
+    measures only the first. The harness imports the fused entry point and times
+    it against its own eager reference, so a 37x microbench is fully explained by
+    a module that nothing calls; and the serving smoke boots the framework and
+    sends real decodes, which succeed exactly as they did before because the
+    unwired kernel never runs. Both report success for zero end-to-end gain --
+    the failure this module already names elsewhere as "a PASS reported for a
+    kernel that was never loaded, which is worse than a failure".
+
+    This is the missing wiring check, and it is deliberately static: an import
+    bound by a name that appears nowhere else in the file (the ``# noqa: F401``
+    shape an agent produces when it authors the kernel but forgets the call site)
+    cannot execute, whatever the runtime does. Everything else fails OPEN --
+    an unreadable or unparseable source, and equally a source that imports no
+    fused module at all, which is what an INLINE fusion (the fused call written
+    straight into the framework file) legitimately looks like. The gate exists
+    to catch one provable defect, not to demote a KEEP it could not inspect.
+
+    Returns:
+        ``(True, reason)`` when the fused module is referenced somewhere other
+        than its own import statement, or when the check could not run.
+    """
+    from .emit import _is_fused_module_name
+
+    try:
+        tree = ast.parse(Path(source_file).read_text(encoding="utf-8", errors="replace"))
+    except (OSError, SyntaxError, ValueError) as exc:
+        return True, f"unchecked ({type(exc).__name__}: {exc})"
+
+    # Names the wiring edit binds from a fused-kernel module, at any nesting
+    # depth: a lazy import inside ``forward`` is a legitimate wiring style.
+    bound: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            leaf = (node.module or "").rsplit(".", 1)[-1]
+            if leaf and _is_fused_module_name(f"{leaf}.py"):
+                bound.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if _is_fused_module_name(f"{alias.name.rsplit('.', 1)[-1]}.py"):
+                    bound.add(alias.asname or alias.name.split(".")[0])
+    if not bound:
+        # A fusion authored INLINE in the framework file imports nothing, and is
+        # wired by construction. Only a bound-but-unused import is provable, so
+        # this branch fails open like the unreadable-source one above.
+        return True, f"unchecked ({Path(source_file).name} imports no fused-kernel module)"
+
+    # An ``import`` statement contributes ast.alias, never ast.Name, so any Name
+    # load of a bound identifier is by construction a use outside the import.
+    used = sorted(
+        {
+            node.id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in bound
+        }
+    )
+    if used:
+        return True, f"{Path(source_file).name} references {', '.join(used)}"
+    return False, (
+        f"{Path(source_file).name} imports {', '.join(sorted(bound))} from a fused-kernel "
+        f"module and never references it -- the fused kernel is dead code in the served model"
+    )
+
+
 def validate_recipe(
     recipe: Recipe,
     runner: KernelValidationRunner,
