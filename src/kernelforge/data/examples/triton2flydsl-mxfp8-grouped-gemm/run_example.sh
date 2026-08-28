@@ -26,9 +26,9 @@ GPU_TARGET="${GPU_TARGET:-gfx950}"
 MAX_PORT_ATTEMPTS="${MAX_PORT_ATTEMPTS:-3}"
 MAX_HOURS="${MAX_HOURS:-1.0}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "       python3 -m pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "       python3 -m pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 
@@ -58,7 +58,7 @@ if [ -n "${FORGE_MODEL:-}" ]; then
 fi
 
 echo "==> Launching FlyDSL rewrite (gpu=mi355x/$GPU_TARGET, port_attempts=$MAX_PORT_ATTEMPTS, max_hours=$MAX_HOURS)"
-kernel-agents forge-rewrite-by-flydsl \
+kernelforge forge-rewrite-by-flydsl \
   --source-kernel "$WORKSPACE/mxfp8_grouped_gemm.py" \
   --driver "$WORKSPACE/driver.py" \
   --logical-op-name mxfp8_grouped_gemm \

@@ -25,7 +25,7 @@
 #   FORGE_MODEL  model name served by your gateway      (default: forge default)
 #
 # Prerequisites:
-#   * KernelForge installed so `kernel-agents` is on PATH (pip install -e .)
+#   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * 4 GPUs on one node, fully connected (XGMI/P2P)
 #   * An AITER checkout with its JIT modules already built
 #   * Claude gateway configured: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN
@@ -54,9 +54,9 @@ detect_arch() {
 GPU_TARGET="${GPU_TARGET:-$(detect_arch)}"
 GPU_TARGET="${GPU_TARGET:-gfx942}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "         pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "         pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 if [ ! -d "$AITER_SRC/.git" ]; then
@@ -148,7 +148,7 @@ python3 "$DRIVER" \
   --warmup 20 --iters 50 --bench-mode >/dev/null
 
 echo "==> Launching forge-loop"
-exec kernel-agents forge-loop \
+exec kernelforge forge-loop \
   "${MODEL_ARGS[@]}" \
   --workspace "$WORKSPACE" \
   --kernel "$WORKSPACE/csrc/include/custom_all_reduce.cuh" \

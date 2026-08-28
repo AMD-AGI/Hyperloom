@@ -2,7 +2,7 @@
 #
 # Task-format metadata (mirrors the AgentKernelArena triton2flydsl task layout).
 # The actual end-to-end run is launched by run_example.sh via
-# `kernel-agents forge-rewrite-by-flydsl`, which drives the port + optimize.
+# `kernelforge forge-rewrite-by-flydsl`, which drives the port + optimize.
 #
 # Unlike a plain forge-loop task, this driver uses the forge stdout contract
 # (--bench-mode / --ref-bench-mode / --profile-run) rather than

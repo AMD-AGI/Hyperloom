@@ -54,11 +54,14 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
 # Occurrences that are deliberate. Each entry is (path glob, line regex, why).
 _ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/data/*",
+        "src/kernelforge/data/*.md",
         r"kernel-agents",
         "Knowledge-base prose describing historical campaigns -- ${KA_WORKSPACE}/"
         "kernel-agents-workspace/... paths that were real when those runs happened. "
-        "Rewriting them would falsify the record.",
+        "Rewriting them would falsify the record. Scoped to *.md on purpose: the "
+        "exemption is for narrative, and a data/* glob also swallowed the runnable "
+        "examples/*/run_example.sh, which kept invoking the deprecated kernel-agents "
+        "console alias and telling readers to pip install a repo that is now archived.",
     ),
     (
         "*",

@@ -38,7 +38,7 @@
 #                          already-git WORKSPACE_DIR (default: 0, refuse)
 #
 # Prerequisites:
-#   * KernelForge installed so `kernel-agents` is on PATH (pip install -e .)
+#   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * 8 GPUs, mori installed (`python -c "import mori"`)
 #   * A `mori` git checkout on disk for the correctness gate -- see
 #     MORI_REPO_ROOT above (driver.py's module docstring has details)
@@ -59,9 +59,9 @@ GPU_TARGET="${GPU_TARGET:-$(detect_arch)}"
 GPU_TARGET="${GPU_TARGET:-gfx942}"
 MAX_HOURS="${MAX_HOURS:-1.0}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "         pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "         pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 
@@ -137,7 +137,7 @@ if [ -n "${FORGE_MODEL:-}" ]; then
 fi
 
 echo "==> Launching forge-loop (gpu=$GPU_TARGET, max_hours=$MAX_HOURS)"
-kernel-agents forge-loop \
+kernelforge forge-loop \
   --kernel "$WORKSPACE/mori_ep_config.py" \
   --driver "$WORKSPACE/driver.py" \
   --workspace "$WORKSPACE" \

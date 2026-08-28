@@ -61,7 +61,7 @@ kernel per elementwise step.
 ## Run a task
 
 ```bash
-# Prerequisites: KernelForge installed (kernel-agents on PATH), a GPU + the
+# Prerequisites: Hyperloom installed (kernelforge on PATH), a GPU + the
 # backend the task uses, and a configured Claude gateway:
 export ANTHROPIC_BASE_URL=...        # your gateway
 export ANTHROPIC_AUTH_TOKEN=...      # bearer token
@@ -98,7 +98,7 @@ On an MI355X host with GPU device access, the SGLang ROCm image has torch, Trito
 and FlyDSL already installed:
 
 ```bash
-export REPO_ROOT="$(pwd -P)"          # a KernelForge checkout
+export REPO_ROOT="$(pwd -P)"          # a Hyperloom checkout
 export CASE=triton_mixtral_dynamic_quant
 
 docker run --rm -it \
@@ -322,7 +322,7 @@ specific flags differ. It must:
 - Copy the task files into a scratch workspace and `git init` + commit it
   (forge-loop's keep/revert relies on git; leave build artifacts and
   `forge_experiments/` untracked so a revert never fails on a dirtied tree).
-- Launch `kernel-agents forge-loop` with this task's settings — the ones that
+- Launch `kernelforge forge-loop` with this task's settings — the ones that
   vary per task are:
 
 ```sh

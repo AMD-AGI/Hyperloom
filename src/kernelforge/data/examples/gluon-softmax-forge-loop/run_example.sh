@@ -2,7 +2,7 @@
 # Drive this forge-loop task (Gluon softmax) end to end.
 #
 # forge-loop git-inits its workspace and edits the kernel IN PLACE, so this
-# script copies the task out of the KernelForge repo into a scratch workspace
+# script copies the task out of the packaged example tree into a scratch workspace
 # first (keeping the repo tree clean) — the isolate-then-run pattern any
 # forge-loop caller should follow.
 #
@@ -16,7 +16,7 @@
 #   FORGE_MODEL  model name served by your gateway     (default: forge default)
 #
 # Prerequisites:
-#   * KernelForge installed so `kernel-agents` is on PATH (pip install -e .)
+#   * Hyperloom installed so `kernelforge` is on PATH (pip install -e .)
 #   * A gfx950 (CDNA4) GPU with torch + Triton; Gluon must import:
 #     python -c "from triton.experimental import gluon"
 #   * Claude auth configured: ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, or
@@ -50,9 +50,9 @@ MAX_HOURS="${MAX_HOURS:-2.0}"
 # fan-out instead.
 LANES="${LANES:-1}"
 
-if ! command -v kernel-agents >/dev/null 2>&1; then
-  echo "error: 'kernel-agents' not found on PATH. Install KernelForge first:" >&2
-  echo "         pip install -e /path/to/KernelForge" >&2
+if ! command -v kernelforge >/dev/null 2>&1; then
+  echo "error: 'kernelforge' not found on PATH. Install Hyperloom first:" >&2
+  echo "         pip install -e /path/to/Hyperloom" >&2
   exit 1
 fi
 
@@ -122,7 +122,7 @@ if [ -n "${FORGE_MODEL:-}" ]; then
 fi
 
 echo "==> Launching forge-loop (gpu=mi355x/$GPU_TARGET, max_hours=$MAX_HOURS)"
-kernel-agents forge-loop \
+kernelforge forge-loop \
   --kernel "$WORKSPACE/softmax_kernel.py" \
   --driver "$WORKSPACE/driver.py" \
   --workspace "$WORKSPACE" \
