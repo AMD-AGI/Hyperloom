@@ -2261,7 +2261,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Phases whose long, serially-drained GPU grids must not starve the
     # per-phase cyclic budget exit. PRELUDE/SWEEP/CLOSE/RECOVER drain normally.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT"})
+    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall

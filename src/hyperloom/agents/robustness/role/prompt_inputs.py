@@ -123,7 +123,7 @@ class PhaseBudgetRow:
     """One parsed row from the ``=== Phase budget telemetry ===`` block.
 
     Attributes:
-        phase (str): Phase name in upper-case (e.g. ``"EXPLORE"``).
+        phase (str): Phase name in upper-case (e.g. ``"FRAMEWORK_AGENT"``).
         elapsed_sec (int): Seconds elapsed in this phase.
         cap_sec (int): Budget cap in seconds; ``-1`` when unlimited.
         used_pct (float): Fraction of budget consumed (0–100). Meaningful

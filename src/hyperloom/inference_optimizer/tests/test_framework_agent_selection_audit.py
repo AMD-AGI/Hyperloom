@@ -273,7 +273,7 @@ def test_materialize_pr_diff_worktree_add_fails(monkeypatch, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------
-# framework_agent_client.phase_audit optional-field plumbing
+# Dispatch pause on a spent phase budget
 # --------------------------------------------------------------------------
 def test_dispatch_pause_phase_not_gated(coord: Coordinator) -> None:
     coord.shared_state.phase = "PRELUDE"
@@ -284,7 +284,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
     # The pause is length-agnostic: it fires whenever the phase budget is spent,
     # regardless of is_long_run (the dispatcher no longer reads it), so short and
     # long runs both pause new dispatch — consistent with the phase-advance gates.
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
@@ -294,7 +294,7 @@ def test_dispatch_pause_budget_spent(coord: Coordinator, monkeypatch) -> None:
 
 
 def test_dispatch_pause_budget_remaining(coord: Coordinator, monkeypatch) -> None:
-    coord.shared_state.phase = "KERNEL"
+    coord.shared_state.phase = "KERNEL_AGENT"
     monkeypatch.setattr(
         coord_mod._phase_state,
         "phase_budget_remaining_seconds",
