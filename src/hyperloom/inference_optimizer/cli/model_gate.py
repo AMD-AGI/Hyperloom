@@ -1812,6 +1812,7 @@ _MODEL_GATE_ORDER = (
     "model_config_compat",
     "context_window",
 )
+_MODEL_GATE_EVENT_ATTR = "_sbd_v6_model_gate_event"
 
 
 def _model_gate_workload(args: argparse.Namespace) -> dict[str, Any]:
@@ -1849,11 +1850,14 @@ def _new_model_gate_event(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[str, Any]:
-    from ..session.sbd_v6 import read_timeline_event
+    from ..session.sbd_v6 import read_timeline_event_for_update
 
-    event = read_timeline_event(session_dir, "model_gate")
+    event = getattr(args, _MODEL_GATE_EVENT_ATTR, None)
+    if not isinstance(event, dict):
+        event = read_timeline_event_for_update(session_dir, "model_gate")
     if event is None or str(event.get("type") or "") != "model_gate":
-        return _new_model_gate_event(args)
+        event = _new_model_gate_event(args)
+    setattr(args, _MODEL_GATE_EVENT_ATTR, event)
     event.setdefault("kind", "model_gate")
     event.setdefault("status", "succeeded")
     event.setdefault("start_time", now_iso(timespec="seconds"))
@@ -1962,7 +1966,9 @@ def _record_model_gate_check(
 def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
     """Create the model-gate event before the first check executes."""
     try:
-        _write_model_gate_event(session_dir, _new_model_gate_event(args))
+        event = _new_model_gate_event(args)
+        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
+        _write_model_gate_event(session_dir, event)
     except Exception:  # noqa: BLE001 — V6 observability must never change launch behavior
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
 
@@ -2009,6 +2015,7 @@ def _record_resumed_model_gate(
             }
             for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1)
         ]
+        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
     except Exception:  # noqa: BLE001 — V6 observability must never change resume behavior
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -14,6 +16,7 @@ from hyperloom.inference_optimizer.breakdown.schema import SCHEMA_VERSION_V5
 from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
     read_timeline_event,
+    read_timeline_events,
     write_timeline_event,
 )
 
@@ -215,6 +218,154 @@ def test_install_event_stays_pending_until_session_creation(tmp_path):
         "check_shm_disk",
     ]
     assert persisted["ext"]["runtime_snapshot"]["provider_mode"] == "openai"
+
+
+def test_preflight_hard_failure_creates_session_and_final_sbd(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    workspace = tmp_path / "sessions"
+    model = tmp_path / "Qwen-Test"
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    def fail_preflight(args):
+        event = preflight._begin_install_event(args)
+
+        def reject_credentials():
+            raise SystemExit(2)
+
+        preflight._run_install_step(
+            event,
+            step_id="validate_credentials",
+            category="check",
+            action=reject_credentials,
+        )
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--model", str(model)])
+
+    with pytest.raises(SystemExit) as exc:
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    assert exc.value.code == 2
+    session_dir = Path(os.environ[ENV_CURRENT_SESSION_DIR])
+    assert session_dir.is_relative_to(workspace)
+    install = read_timeline_event(session_dir, "install")
+    assert install is not None
+    assert install["status"] == "failed"
+    assert install["ext"]["hard_fail_step_id"] == "validate_credentials"
+    assert (session_dir / "manifest.json").is_file()
+    breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
+    assert [(event["type"], event["status"]) for event in breakdown["timeline"]] == [("install", "failed")]
+
+
+def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.cli import model_gate
+
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T01:00:00+00:00",
+            "end_time": "2026-08-27T01:01:00+00:00",
+            "ext": {"run_kind": "fresh", "steps": []},
+        },
+    )
+    timestamps = iter(
+        (
+            "2026-08-27T01:02:00+00:00",
+            "2026-08-27T01:03:00+00:00",
+            "2026-08-27T02:02:00+00:00",
+            "2026-08-27T02:03:00+00:00",
+            "2026-08-27T02:04:00+00:00",
+        )
+    )
+    monkeypatch.setattr(model_gate, "now_iso", lambda **_kwargs: next(timestamps))
+    fresh_args = _gate_args(tmp_path / "model")
+    model_gate._start_model_gate(fresh_args, tmp_path)
+    model_gate._finish_model_gate(fresh_args, tmp_path)
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T02:00:00+00:00",
+            "end_time": "2026-08-27T02:01:00+00:00",
+            "ext": {"run_kind": "resume", "steps": []},
+        },
+    )
+    resume_args = _gate_args(tmp_path / "model", resume_from=str(tmp_path))
+    model_gate._record_resumed_model_gate(resume_args, tmp_path)
+
+    expected = [
+        ("install", "succeeded", "fresh"),
+        ("model_gate", "succeeded", "fresh"),
+        ("install", "succeeded", "resume"),
+        ("model_gate", "skipped", "resume"),
+    ]
+    assert [
+        (event["type"], event["status"], event["ext"]["run_kind"]) for event in read_timeline_events(tmp_path)
+    ] == expected
+    assert [
+        (event["type"], event["status"], event["ext"]["run_kind"])
+        for event in collect_v6_timeline(tmp_path, [], state={}, recorded_operations=[])
+    ] == expected
+    latest_gate = read_timeline_event(tmp_path, "model_gate")
+    assert latest_gate is not None
+    assert latest_gate["ext"]["run_kind"] == "resume"
+
+
+def test_timeline_history_bootstraps_legacy_fixed_events(tmp_path):
+    _write_json(
+        tmp_path / "reports" / "sbd_v6" / "install.json",
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T01:00:00+00:00",
+            "end_time": "2026-08-27T01:01:00+00:00",
+            "ext": {"run_kind": "fresh", "steps": []},
+        },
+    )
+    _write_json(
+        tmp_path / "reports" / "sbd_v6" / "model_gate.json",
+        {
+            "type": "model_gate",
+            "kind": "model_gate",
+            "status": "succeeded",
+            "start_time": "2026-08-27T01:02:00+00:00",
+            "end_time": "2026-08-27T01:03:00+00:00",
+            "ext": {"run_kind": "fresh", "checks": []},
+        },
+    )
+
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T02:00:00+00:00",
+            "end_time": "2026-08-27T02:01:00+00:00",
+            "ext": {"run_kind": "resume", "steps": []},
+        },
+    )
+
+    assert [(event["type"], event["ext"]["run_kind"]) for event in read_timeline_events(tmp_path)] == [
+        ("install", "fresh"),
+        ("model_gate", "fresh"),
+        ("install", "resume"),
+    ]
 
 
 def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
@@ -1175,6 +1326,53 @@ def test_framework_timeline_keeps_macro_cycles_isolated(tmp_path):
         "round-0",
         "round-1",
     ]
+
+
+def test_framework_timeline_excludes_kernel_phase_explore_rebench(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "ts": "2026-08-27T03:00:00+00:00",
+                "cycle": 0,
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "ts": "2026-08-27T03:10:00+00:00",
+                "cycle": 0,
+            },
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "framework-round",
+            "name": "explore",
+            "phase": "FRAMEWORK_AGENT",
+            "agent": "explore",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T03:05:00+00:00",
+            "outputs": {"status": "succeeded", "round_id": "framework-round"},
+        },
+        {
+            "operation_id": "kernel-rebench",
+            "name": "explore",
+            "phase": "KERNEL_AGENT",
+            "agent": "explore",
+            "macro_cycle": 0,
+            "status": "succeeded",
+            "ended_at": "2026-08-27T03:06:00+00:00",
+            "outputs": {"status": "succeeded", "round_id": "kernel-rebench"},
+        },
+    ]
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)[0]
+
+    assert [row["round_id"] for row in event["ext"]["config_arm"]["rounds"]] == ["framework-round"]
 
 
 def test_framework_timeline_projects_discovery_history_outcomes_in_order(tmp_path):

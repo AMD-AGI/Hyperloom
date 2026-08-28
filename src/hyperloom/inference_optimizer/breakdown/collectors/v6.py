@@ -9,8 +9,7 @@ from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
 
-from ...session.sbd_v6 import SCHEMA_VERSION_V6
-from ...session.session_paths import sbd_v6_install_path, sbd_v6_model_gate_path
+from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 
 
 _SUCCESS_STOP_REASONS = frozenset(
@@ -305,8 +304,15 @@ def _is_framework_operation(operation: dict[str, Any]) -> bool:
     phase = str(operation.get("phase") or "").strip().upper()
     agent = str(operation.get("agent") or "").strip().lower()
     outputs = _mapping(operation.get("outputs"))
-    if name in {"explore", "framework_agent"}:
+    source_phase = str(outputs.get("source_phase") or "").strip().upper()
+    if name == "framework_agent":
         return True
+    if name == "explore":
+        if phase:
+            return phase in _FRAMEWORK_PHASES or source_phase in _FRAMEWORK_PHASES
+        if source_phase:
+            return source_phase in _FRAMEWORK_PHASES
+        return agent in {"framework_agent", "explore"}
     if name in {"integrate", "integrate_patch"}:
         if outputs.get("enablement") or outputs.get("enablement_landing"):
             return False
@@ -315,7 +321,7 @@ def _is_framework_operation(operation: dict[str, Any]) -> bool:
             or phase in _FRAMEWORK_PHASES
             or outputs.get("framework_agent_authoring")
             or outputs.get("framework_agent_candidate_id")
-            or str(outputs.get("source_phase") or "").strip().upper() in _FRAMEWORK_PHASES
+            or source_phase in _FRAMEWORK_PHASES
         )
     return name.startswith("specialist") and (phase in _FRAMEWORK_PHASES or agent in {"framework_agent", "explore"})
 
@@ -414,14 +420,14 @@ def _framework_windows(
 
 def _row_in_window(row: dict[str, Any], window: dict[str, Any], window_count: int) -> bool:
     cycle = _row_cycle(row)
-    if cycle is not None:
-        return cycle == int(window["cycle"])
+    if cycle is not None and cycle != int(window["cycle"]):
+        return False
     row_ts = _timestamp_number(_row_timestamp(row))
     start_ts = _timestamp_number(window.get("start_time"))
     end_ts = _timestamp_number(window.get("end_time"))
     if row_ts is not None and (start_ts is not None or end_ts is not None):
         return (start_ts is None or row_ts >= start_ts) and (end_ts is None or row_ts <= end_ts)
-    return window_count == 1
+    return cycle is not None or window_count == 1
 
 
 def _window_operations(
@@ -1960,22 +1966,7 @@ def collect_v6_timeline(
     recorded_operations: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Load durable events and project framework work without mutating V5 state."""
-    timeline: list[dict[str, Any]] = []
-    for event_type, path in (
-        ("install", sbd_v6_install_path(session_dir)),
-        ("model_gate", sbd_v6_model_gate_path(session_dir)),
-    ):
-        if not path.is_file():
-            continue
-        try:
-            event = read_json(path, require_dict=True, strict=True)
-        except Exception as exc:
-            warnings.append(f"timeline.{event_type}: failed to parse {path}: {exc!r}")
-            continue
-        if str(event.get("type") or "") != event_type:
-            warnings.append(f"timeline.{event_type}: ignored event with type={event.get('type')!r}")
-            continue
-        timeline.append(event)
+    timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
     windows = _framework_windows(state, operations)
@@ -1990,7 +1981,15 @@ def collect_v6_timeline(
                 len(windows),
             )
         )
-    return timeline
+    indexed = list(enumerate(timeline))
+    indexed.sort(
+        key=lambda row: (
+            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) is None,
+            _timestamp_number(_first(row[1].get("start_time"), row[1].get("end_time"))) or 0.0,
+            row[0],
+        )
+    )
+    return [event for _, event in indexed]
 
 
 def _outcome_status(stop_reason: str) -> str:

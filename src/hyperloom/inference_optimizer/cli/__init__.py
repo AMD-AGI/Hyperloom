@@ -111,6 +111,7 @@ from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
+    workspace_root,
 )
 
 
@@ -1641,6 +1642,53 @@ def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
     return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
 
 
+def _preflight_failure_session_dir(args: argparse.Namespace) -> Path:
+    """Return a safe session directory for a pre-session install failure."""
+    resume_from = str(getattr(args, "resume_from", "") or "").strip()
+    if resume_from:
+        candidate = Path(resume_from).expanduser().resolve()
+        try:
+            candidate.relative_to(workspace_root().resolve())
+        except (OSError, ValueError):
+            pass
+        else:
+            if candidate.is_dir():
+                return candidate
+
+    model_name = resolve_model_display_name(args)
+    if not model_name:
+        model_name = Path(os.environ.get("MODEL_PATH", "")).name
+    return make_session_dir(model_name=model_name or "preflight-failure")
+
+
+def _persist_preflight_failure_artifacts(args: argparse.Namespace) -> Path | None:
+    """Best-effort materialize the failed install event and final SBD."""
+    try:
+        session_dir = _preflight_failure_session_dir(args)
+    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+        log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
+        return None
+
+    if not (session_dir / "manifest.json").is_file():
+        try:
+            manifest_args = argparse.Namespace(**vars(args))
+            if not getattr(manifest_args, "model", None):
+                manifest_args.model = os.environ.get("MODEL_PATH", "")
+            write_manifest(session_dir, args=manifest_args)
+        except Exception:  # noqa: BLE001 — the install event can still stand alone
+            log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
+
+    _persist_install_event(args, session_dir)
+    try:
+        from ..breakdown import write_breakdown_json
+
+        write_breakdown_json(session_dir)
+    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+        log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
+    print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
+    return session_dir
+
+
 async def _run_optimize(args: argparse.Namespace) -> int:
     """Run the ``optimize`` subcommand end to end.
 
@@ -1774,7 +1822,14 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # Capture provider intent before _preflight() fills missing endpoints
     # (preflight may populate OPENAI_BASE_URL from ANTHROPIC_BASE_URL).
     codex_follows_claude = _codex_model_should_follow_claude()
-    resolved_urls = _preflight(args)
+    try:
+        resolved_urls = _preflight(args)
+    except BaseException:
+        try:
+            _persist_preflight_failure_artifacts(args)
+        except BaseException:  # noqa: BLE001 — preserve the original failure exactly
+            log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
+        raise
 
     _resolve_models_for_run(
         args,
