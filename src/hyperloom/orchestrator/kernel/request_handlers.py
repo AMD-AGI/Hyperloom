@@ -1909,15 +1909,59 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
     return "; ".join(parts)
 
 
+_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC = 30
+
+
+def _forge_gemm_tune_probe_cmd() -> list[str]:
+    """Return the exact interpreter and CLI prefix used by GEMM tuning."""
+    return [sys.executable, "-m", "kernel_agents.cli", "forge-gemm-tune", "--help"]
+
+
 def _forge_gemm_tune_available() -> bool:
-    """Check if forge-gemm-tune CLI is importable or on PATH."""
-    if shutil.which("forge-gemm-tune"):
-        return True
+    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
+
+    `forge_gemm_tune` no longer ships a console script of its own -- its
+    commands live under `kernel-agents forge-gemm-tune`, and the tool invokes
+    them as ``sys.executable -m kernel_agents.cli forge-gemm-tune run``. Two
+    weaker checks were tried first and both let the task through to a hard
+    failure:
+
+    * ``shutil.which("kernel-agents")`` -- a console script on PATH can belong
+      to a different virtualenv than ``sys.executable``, in which case ``-m
+      kernel_agents.cli`` still raises ``ModuleNotFoundError``.
+    * ``find_spec("forge_gemm_tune")`` -- the standalone sub-package explicitly
+      excludes ``kernel_agents``. It also says nothing about whether an already
+      installed, older ``kernel_agents`` registers the subcommand at all.
+
+    So ask the subcommand itself, in a subprocess, so a heavy CLI import cannot
+    land in the orchestrator's own process. ``--help`` exits 0 only if
+    ``kernel_agents.cli`` imported and ``forge-gemm-tune`` is registered on it.
+    """
     try:
-        spec = importlib.util.find_spec("forge_gemm_tune")
-        return spec is not None
-    except (ModuleNotFoundError, ValueError):
+        proc = subprocess.run(
+            _forge_gemm_tune_probe_cmd(),
+            capture_output=True,
+            text=True,
+            timeout=_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "forge-gemm-tune preflight timed out after %ss in %s",
+            _FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+            sys.executable,
+        )
         return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.info("forge-gemm-tune preflight could not start in %s: %s", sys.executable, exc)
+        return False
+    if proc.returncode == 0:
+        return True
+    log.info(
+        "forge-gemm-tune preflight failed (rc=%s): %s",
+        proc.returncode,
+        ((proc.stderr or proc.stdout or "").strip()[-400:] or "(no output)"),
+    )
+    return False
 
 
 def _resolve_aiter_root_for_forge() -> str:
@@ -3722,15 +3766,21 @@ async def _run_forge_gemm_tuning(
 
     state = SharedState.load_or_init(session_dir)
 
-    if not _forge_gemm_tune_available():
-        forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")
+    # Importing kernel_agents.cli is deliberately isolated in a subprocess, but
+    # that subprocess may still take until the bounded timeout to fail. Keep the
+    # synchronous probe off the orchestrator reactor.
+    if not await asyncio.to_thread(_forge_gemm_tune_available):
         return {
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "forge-gemm-tune CLI not found. Install via "
-                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
-                f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
+                "forge-gemm-tune is not runnable in this interpreter: "
+                f"'{sys.executable} -m kernel_agents.cli forge-gemm-tune --help' "
+                "failed. It lives in the KernelForge root package, so installing "
+                "src/forge_gemm_tune alone is not enough -- install the "
+                "KernelForge root ('pip install <FORGE_PATH>[claude,codex]') or "
+                "set FORGE_PATH and re-run install.sh."
+                f" (interpreter: {sys.executable!r})"
             ),
             "backend": "forge",
         }
@@ -3953,7 +4003,7 @@ async def _run_forge_gemm_tuning(
     input_json = workspace / "forge_gemm_tuning_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [
-        "python3",
+        sys.executable,
         str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
         "--input-json",
         str(input_json),
