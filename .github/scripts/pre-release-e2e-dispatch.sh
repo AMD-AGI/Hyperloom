@@ -57,10 +57,10 @@ set -euo pipefail
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 # Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128,
-# mem 2048Gi, ephemeral 1792Gi. The privileged DinD host runs nested docker with the
-# vfs storage driver (no layer dedup), so 8 ROCm images x full copies blow past a small
-# ephemeral limit -- our first run was EVICTED at ephemeralStorage 200Gi. 1792Gi matches
-# the reference host and leaves headroom for vfs image blowup + model/wheel scratch.
+# mem 2048Gi, ephemeral 1792Gi. Every writable path the DinD host has -- the container
+# rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
+# toward this one ephemeralStorage quota, so the host bootstrap requires a
+# layer-deduplicating docker storage driver (overlay2) to stay inside it.
 HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"

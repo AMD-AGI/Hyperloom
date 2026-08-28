@@ -70,6 +70,18 @@ install_claude_cli() {
   log "claude CLI installed: $(claude --version 2>/dev/null || true)"
 }
 
+# Seconds a leg has been idle: time since the newest write anywhere under the leg root,
+# floored at the wait loop's start so the preceding `claude --print` turns (which can
+# leave the tree untouched for longer than the stall grace) are never charged to the leg.
+# Args: leg_root loop_start_epoch now_epoch
+leg_idle_s() {
+  local leg_root="$1" loop_start="$2" now="$3" last since
+  last="$(find "$leg_root" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -n1)"
+  since="${last%.*}"
+  [ -n "$since" ] && [ "$since" -ge "$loop_start" ] 2>/dev/null || since="$loop_start"
+  echo $(( now - since ))
+}
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -205,10 +217,14 @@ run_leg() {
   # IS_SANDBOX=1: the SaFE pod runs as root, and claude refuses to skip permissions under
   # root unless IS_SANDBOX=1 (SWSPLAT-42390) -- Hyperloom's own kernel-agent sets the same.
   export IS_SANDBOX=1
-  log "claude --print (setup)"
-  claude --print --dangerously-skip-permissions < "$setup_prompt"
+  # Mirror both turns onto NFS. SaFE deletes the PyTorchJob as soon as a leg fails, taking
+  # the pod's stdout with it, so without this the agent's own account of the failure is
+  # unrecoverable and a post-mortem is left reconstructing events from file mtimes.
+  local agent_log="${session}/agent-${leg}.log"
+  log "claude --print (setup); agent transcript -> $agent_log"
+  claude --print --dangerously-skip-permissions < "$setup_prompt" 2>&1 | tee -a "$agent_log"
   log "claude --print (demo ${hours}h)"
-  claude --print --dangerously-skip-permissions < "$demo_prompt"
+  claude --print --dangerously-skip-permissions < "$demo_prompt" 2>&1 | tee -a "$agent_log"
   log "leg $leg demo turn returned; waiting for the background optimize to finish"
 
   # ---- wait for the backgrounded `optimize` to reach a terminal state --------
@@ -224,16 +240,19 @@ run_leg() {
   # dir by globbing the newest one under $session that contains a state.json, and
   # re-point the poll's pin (.session_dir) at it.
   local wait_interval="${LEG_WAIT_INTERVAL_S:-45}"
-  # Liveness, NOT a wall-clock startup budget. The prior fixed "optimize must produce a
-  # state.json within N seconds" judged LIVE legs dead: baremetal SGLang builds from
-  # source (gfx950, py3.12), starts a Ray head, then loads the server -- >15m before the
-  # first state.json, and `optimize` isn't even a process yet during the build, so a pid
-  # check can't tell "not launched yet" from "died". Instead we ask "how long since ANY
-  # file under $session was last written?": USER_DATA_PATH=$session, so the build/runtime
-  # logs, Ray output, and session artifacts all land under this tree and keep its mtime
-  # fresh while anything is making progress. A leg is dead only if the tree has been
-  # completely IDLE for stall_grace AND no state.json exists yet -- this waits out slow
-  # builds (as long as they keep writing) but reaps a truly hung/exited launch quickly.
+  # Liveness, NOT a wall-clock startup budget: a leg is dead only once NOTHING under the
+  # leg root has been written for stall_grace and no state.json exists yet. This waits out
+  # arbitrarily slow builds (baremetal SGLang compiles from source and starts a Ray head,
+  # >15m before the first state.json) while still reaping a hung launch within ~10m.
+  # Two properties matter, both learned from legs that were killed while demonstrably
+  # alive (2026-08-28):
+  #   * scope is $root, not $session -- the agent's launcher and its setup/install logs
+  #     land next to the workspace, and install.sh writes $root/.cache. Watching only
+  #     $session missed all of it and reaped a leg 26s after it last wrote a file.
+  #   * idleness is measured from the LATER of (last write, loop start) -- the two
+  #     `claude --print` turns can leave the tree untouched for longer than stall_grace,
+  #     and that pre-loop gap must not be charged to the leg, or the very first
+  #     iteration condemns it.
   local stall_grace="${LEG_STALL_GRACE_S:-600}"       # 10m of NO file writes -> dead
   local final_grace="${LEG_FINAL_GRACE_S:-120}"       # state stop_reason -> final.json
   local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin (hard cap)
@@ -254,15 +273,10 @@ run_leg() {
         # Re-pin so the poll (leg_session_dir -> head -n1 .session_dir) finds the report.
         echo "$real_sdir" > "${session}/.session_dir"
       else
-        # No state.json yet -> judge liveness by how long since ANY file under $session
-        # was written. newest mtime across the tree; if the tree is empty, fall back to
-        # $session's own mtime so a brand-new leg isn't reaped on its first iteration.
-        local last_write idle
-        last_write="$(find "$session" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -n1)"
-        [ -n "$last_write" ] || last_write="$(stat -c %Y "$session" 2>/dev/null || echo "$now")"
-        idle=$(( now - ${last_write%.*} ))
+        local idle
+        idle="$(leg_idle_s "$root" "$start_ts" "$now")"
         if [ "$idle" -ge "$stall_grace" ]; then
-          log "ERROR: leg $leg -- no state.json and no file written under $session for ${idle}s (>= ${stall_grace}s stall; build/optimize hung or exited)"
+          log "ERROR: leg $leg -- no state.json and no file written under $root for ${idle}s (>= ${stall_grace}s stall; build/optimize hung or exited)"
           return 1
         fi
       fi
@@ -296,12 +310,51 @@ run_leg() {
   done
 }
 
-# Install docker + start a pod-local dockerd. VERIFIED on a real privileged MI355X pod
-# (2026-08-27): the Authoring base image ships NO docker/dockerd/docker.sock, but the
-# pod has full capabilities (CapEff=0x1ffffffffff), so a self-hosted dockerd works.
-# Two non-obvious requirements, both confirmed by probing:
-#   * --storage-driver=vfs  -- overlayfs-on-overlayfs fails inside the container rootfs.
-#   * no systemd in the pod -- start dockerd detached via setsid, then poll the socket.
+# Layer-deduplicating storage drivers, tried in order. vfs is deliberately NOT a
+# fallback: it copies every image layer and every container in full, which grew the
+# host pod past its ephemeralStorage limit and got it EVICTED within minutes
+# ("ephemeral local storage usage exceeds the total limit of containers 1792Gi",
+# observed live 2026-08-28). Running on vfs is a guaranteed eviction, so a leg that
+# cannot get a deduplicating driver must fail loudly instead.
+DOCKER_DRIVERS="${DOCKER_DRIVERS:-overlay2 fuse-overlayfs}"
+
+# Start a detached dockerd on one driver; 0 when the socket answers. Cleans up the
+# failed daemon so the next driver starts from a clean socket.
+start_dockerd_with_driver() {
+  local driver="$1" data_root="$2" dlog="/var/log/dockerd-${1}.log" i
+  mkdir -p "$data_root" || return 1
+  log "starting pod-local dockerd (driver=$driver, data-root=$data_root)"
+  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver='$driver' --data-root='$data_root' >'$dlog' 2>&1" \
+    </dev/null >/dev/null 2>&1 &
+  for i in $(seq 1 60); do
+    docker info >/dev/null 2>&1 && { log "dockerd up after ${i}s (driver=$driver)"; return 0; }
+    sleep 1
+  done
+  log "WARN: dockerd did not become ready with driver=$driver"
+  tail -20 "$dlog" 2>/dev/null || true
+  pkill -f 'dockerd --host=unix:///var/run/docker.sock' 2>/dev/null || true
+  sleep 3
+  rm -f /var/run/docker.sock 2>/dev/null || true
+  return 1
+}
+
+# fuse-overlayfs is the userspace fallback when the kernel refuses overlay2 on the
+# data-root filesystem. Needs the binary plus /dev/fuse.
+ensure_fuse_overlayfs() {
+  command -v fuse-overlayfs >/dev/null 2>&1 || {
+    log "installing fuse-overlayfs"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >>/tmp/apt-docker.log 2>&1 || true
+    apt-get install -y -qq fuse-overlayfs >>/tmp/apt-docker.log 2>&1 \
+      || { log "WARN: fuse-overlayfs install failed"; return 1; }
+  }
+  [ -c /dev/fuse ] || { log "WARN: /dev/fuse missing; fuse-overlayfs unusable"; return 1; }
+}
+
+# Install docker + start a pod-local dockerd. VERIFIED on a real privileged MI355X pod:
+# the Authoring base image ships NO docker/dockerd/docker.sock, but the pod has full
+# capabilities (CapEff=0x1ffffffffff), so a self-hosted dockerd works. There is no
+# systemd in the pod, hence setsid + socket polling rather than a service start.
 ensure_dockerd() {
   if docker info >/dev/null 2>&1; then log "dockerd already up"; return 0; fi
   if ! command -v dockerd >/dev/null 2>&1; then
@@ -312,50 +365,34 @@ ensure_dockerd() {
       || { log "ERROR: docker.io install failed"; tail -30 /tmp/apt-docker.log; return 1; }
     log "docker installed: $(docker --version 2>&1)"
   fi
-  # --- pick a data-root that does NOT count against the pod's ephemeral limit ---
-  # The vfs storage driver has NO layer dedup: every image layer + every container is a
-  # full copy. Left at the default /var/lib/docker (inside the container ROOTFS), 4 legs
-  # pulling+running big ROCm images blow past the pod's ephemeralStorage quota and the pod
-  # is EVICTED ("ephemeral local storage usage exceeds the total limit of containers
-  # 1792Gi" -- observed live 2026-08-28). This is a PRIVILEGED host pod, so it sees the
-  # NODE's own disks directly: /shared-data is the node-local NVMe (~28T xfs on
-  # /dev/mapper/nvme_vg-nvme_lv), a real host filesystem -- NOT the container rootfs
-  # overlay -- so bytes written there are NOT counted toward the pod's ephemeralStorage
-  # quota. Point the vfs data-root there so image/container copies land on the big host
-  # disk instead of the small pod-ephemeral quota.
-  #
-  # /shared-data is host-persistent (survives this pod), so vfs copies from OLD runs would
-  # accumulate and eventually fill the node NVMe. Reap stale e2e-docker data-roots (any
-  # run other than this CI_VERSION) before starting dockerd. dockerd is not up yet, so a
-  # plain rm of the old data-root dirs is safe.
+  # --- data-root must sit on a filesystem that can back a deduplicating driver ---
+  # The container rootfs (/) is itself an overlay, and overlayfs cannot use an overlay
+  # upperdir -- that is why this used to run on vfs. /shared-data is a plain xfs mount
+  # (/dev/mapper/nvme_vg-nvme_lv) and DOES accept an overlay upperdir (probe-verified:
+  # `mount -t overlay` with upperdir/workdir under /shared-data succeeds, so xfs ftype=1
+  # holds). It is an emptyDir, so it still counts toward the pod's ephemeralStorage quota
+  # and dies with the pod -- the quota headroom comes from the driver's layer dedup, not
+  # from the location.
   local docker_data_root="/var/lib/docker"
-  local dr_base="/shared-data/e2e-docker"
-  local dr_candidate="${dr_base}/${CI_VERSION:-current}"
-  if [ -d /shared-data ] && mkdir -p "$dr_candidate" 2>/dev/null && touch "$dr_candidate/.wtest" 2>/dev/null; then
+  local dr_candidate="/shared-data/e2e-docker/${CI_VERSION:-current}"
+  if mkdir -p "$dr_candidate" 2>/dev/null && touch "$dr_candidate/.wtest" 2>/dev/null; then
     rm -f "$dr_candidate/.wtest" 2>/dev/null || true
-    # reap other runs' leftovers (best-effort; never abort the run on cleanup failure)
-    if [ -d "$dr_base" ]; then
-      for d in "$dr_base"/*; do
-        [ -d "$d" ] || continue
-        [ "$d" = "$dr_candidate" ] && continue
-        log "reaping stale docker data-root from an older run: $d"
-        rm -rf "$d" 2>/dev/null || true
-      done
-    fi
     docker_data_root="$dr_candidate"
-    log "dockerd data-root on node-local NVMe: $docker_data_root (vfs copies stay off the pod ephemeral quota)"
   else
-    log "WARN: /shared-data not writable; dockerd falls back to $docker_data_root (may hit the pod ephemeral limit under vfs)"
+    log "WARN: /shared-data not writable; dockerd falls back to $docker_data_root (overlay-on-overlay, overlay2 will likely be refused)"
   fi
-  log "starting pod-local dockerd (vfs, data-root=$docker_data_root, detached via setsid)"
-  setsid bash -c "dockerd --host=unix:///var/run/docker.sock --storage-driver=vfs --data-root='$docker_data_root' >/var/log/dockerd.log 2>&1" \
-    </dev/null >/dev/null 2>&1 &
-  local i
-  for i in $(seq 1 60); do
-    docker info >/dev/null 2>&1 && { log "dockerd up after ${i}s"; return 0; }
-    sleep 1
+  # Each driver gets its own subdir: dockerd refuses a data-root that already holds a
+  # different driver's tree.
+  local driver
+  for driver in $DOCKER_DRIVERS; do
+    if [ "$driver" = fuse-overlayfs ]; then ensure_fuse_overlayfs || continue; fi
+    if start_dockerd_with_driver "$driver" "${docker_data_root}/${driver}"; then
+      log "docker storage driver in use: $(docker info -f '{{.Driver}}' 2>/dev/null)"
+      return 0
+    fi
   done
-  log "ERROR: dockerd did not become ready"; tail -40 /var/log/dockerd.log 2>/dev/null || true
+  log "ERROR: no layer-deduplicating docker storage driver available (tried: $DOCKER_DRIVERS)."
+  log "ERROR: refusing to fall back to vfs -- it has no layer dedup and evicts the pod on ephemeralStorage."
   return 1
 }
 
