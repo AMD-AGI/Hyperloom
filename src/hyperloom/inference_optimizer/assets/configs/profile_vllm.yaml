@@ -28,8 +28,8 @@
 # the patch creates at vllm/profiler/graph_capture.py -- which is also how
 # the patcher tells a patched 0.26+ install from a stock one, since there
 # the config fields alone are present either way. If patching succeeds,
-# materialize_config_with_envs auto-appends detailed_trace_annotation to
-# EXTRA_VLLM_ARGS; if it fails (version unsupported, fs read-only,
+# materialize_config_with_envs auto-appends capture_torch_profiler and
+# detailed_trace_annotation to EXTRA_VLLM_ARGS; if it fails (version unsupported, fs read-only,
 # already-patched fork, etc.) we fall back to today's safe behaviour: only
 # delay_iterations / max_iterations + ignore_frontend get injected.
 # Set HYPERLOOM_ENABLE_PATCH=0 to disable runtime patching entirely.
