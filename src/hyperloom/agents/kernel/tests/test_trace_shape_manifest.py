@@ -36,7 +36,7 @@ def _launch(name, *, op_name="", ts=0.0, dur=100.0, shapes=None, dtypes=None, ba
         "shapes": shapes or [],
         "dtypes": dtypes or [],
         "kernel_file": kfile,
-        "kernel_backend": backend,
+        "kernel backend": backend,
         "correlation": None,
     }
 

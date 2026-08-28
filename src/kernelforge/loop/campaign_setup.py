@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 from dataclasses import dataclass
@@ -16,8 +15,9 @@ from kernelforge.loop.campaign_config import (
     CampaignConfig,
     CampaignConfigStore,
     create_campaign_config,
-    normalize_fellow_name,
-    resolve_fellow_override,
+    env_backend_override,
+    normalize_kernel_backend_name,
+    resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
 
@@ -50,7 +50,7 @@ def resolve_campaign(
     target_functions: str = "",
     operator_name: str = "",
     producer: str = "",
-    fellow: str = "",
+    kernel_backend: str = "",
     git_branch: str = "",
     gpu_target: str = "",
     gpu_type: str | None = None,
@@ -92,16 +92,17 @@ def resolve_campaign(
             save_deferred=False,
         )
 
-    resolved_fellow = (fellow or "").strip()
-    if not resolved_fellow:
-        resolved_fellow = os.environ.get("FORGE_FELLOW", "").strip()
-    if resolved_fellow:
-        normalized = normalize_fellow_name(resolved_fellow)
-        resolved_fellow = resolve_fellow_override(resolved_fellow)
-        if resolved_fellow != normalized:
-            backend = normalized.removesuffix("-fellow")
+    resolved_kernel_backend = (kernel_backend or "").strip()
+    if not resolved_kernel_backend:
+        resolved_kernel_backend = env_backend_override()
+    if resolved_kernel_backend:
+        # ``normalize_kernel_backend_name`` already returns the bare backend key, so
+        # this is the name the operator asked for, spelled canonically.
+        normalized = normalize_kernel_backend_name(resolved_kernel_backend)
+        resolved_kernel_backend = resolve_kernel_backend_override(resolved_kernel_backend)
+        if resolved_kernel_backend != normalized:
             print(
-                f"Warning: Unknown fellow backend '{backend}'; falling back to '{resolved_fellow}'.",
+                f"Warning: Unknown kernel backend '{normalized}'; falling back to '{resolved_kernel_backend}'.",
                 file=sys.stderr,
             )
 
@@ -138,7 +139,7 @@ def resolve_campaign(
         gpu_target=gpu_target,
         gpu_type=(existing_campaign.gpu_type if existing_campaign is not None else gpu_type),
         git_branch=git_branch,
-        fellow=resolved_fellow,
+        kernel_backend=resolved_kernel_backend,
         task_type=task_type,
         framework=framework,
         operator_name=operator_name,

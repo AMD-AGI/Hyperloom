@@ -72,7 +72,7 @@ def _base_args(workspace, kernel, driver):
         prepare_task=False,
         kernel=str(kernel),
         driver=str(driver),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         snr_threshold=2.0,
     )
 
@@ -164,6 +164,6 @@ class TestResolveCampaign:
                 prepare_task=False,
                 kernel=str(other_kernel),
                 driver=str(driver),
-                fellow="triton-fellow",
+                kernel_backend="triton",
                 snr_threshold=2.0,
             )

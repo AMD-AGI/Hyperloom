@@ -77,7 +77,7 @@ def test_create_experiment():
         exp = tracker.create(
             task_id="test_gemm",
             backend="triton",
-            fellow="triton-fellow",
+            kernel_backend="triton",
             description="Test GEMM experiment",
             target_wall_ms=1.0,
             baseline_wall_ms=2.0,

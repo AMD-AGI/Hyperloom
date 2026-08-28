@@ -741,7 +741,7 @@ def test_reader_extracts_shapes_and_triton_kernel_file(tmp_path):
                 "Input Dims": [[1024, 256], []],
                 "Input type": ["c10::BFloat16", "Scalar"],
                 "kernel_file": "/repo/aiter/triton/silu.py",
-                "kernel_backend": "triton",
+                "kernel backend": "triton",
             },
         },
         {"cat": "cuda_runtime", "name": "launch", "args": {"correlation": 5, "External id": 100}},

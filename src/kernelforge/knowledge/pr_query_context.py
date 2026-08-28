@@ -43,8 +43,8 @@ PR_REPOS_WISHLIST: tuple[str, ...] = (
     "ROCm/ROCm",
 )
 
-# Fellow backends with an exact repository mapping.
-FELLOW_REPO_MAP: dict[str, str] = {
+# Kernel backends with an exact repository mapping.
+KERNEL_BACKEND_REPO_MAP: dict[str, str] = {
     "aiter": "ROCm/aiter",
     "flydsl": "ROCm/FlyDSL",
     "triton": "triton-lang/triton",
@@ -119,10 +119,10 @@ class WhitelistDrift:
         return not (self.missing or self.unexpected or self.inactive)
 
 
-def normalize_fellow(fellow: str) -> str:
-    """Reduce a fellow label to its backend key ('flydsl-fellow' -> 'flydsl')."""
-    name = (fellow or "").strip().lower()
-    return name[: -len("-fellow")] if name.endswith("-fellow") else name
+def normalize_kernel_backend(kernel_backend: str) -> str:
+    """Reduce a backend label to its key, tolerating the legacy '-fellow' suffix."""
+    name = (kernel_backend or "").strip().lower()
+    return name.removesuffix("-fellow")  # rename: keep-literal
 
 
 def parse_git_remote(url: str) -> str:
@@ -143,13 +143,13 @@ def parse_git_remote(url: str) -> str:
 
 def resolve_repo(
     *,
-    fellow: str = "",
+    kernel_backend: str = "",
     git_remote: str = "",
     tracked: tuple[str, ...] | None = None,
 ) -> tuple[str, str]:
-    """Resolve ``owner/repo`` from the fellow, remote, and fork map."""
+    """Resolve ``owner/repo`` from the kernel backend, remote, and fork map."""
     candidates: list[str] = []
-    mapped = FELLOW_REPO_MAP.get(normalize_fellow(fellow))
+    mapped = KERNEL_BACKEND_REPO_MAP.get(normalize_kernel_backend(kernel_backend))
     if mapped:
         candidates.append(mapped)
     from_remote = parse_git_remote(git_remote)
@@ -255,7 +255,7 @@ def check_whitelist(repos_payload: list[dict]) -> WhitelistDrift:
 
 def build_context(
     *,
-    fellow: str = "",
+    kernel_backend: str = "",
     git_remote: str = "",
     tracked: tuple[str, ...] | None = None,
     source_files: tuple[str, ...] | list[str] = (),
@@ -266,7 +266,7 @@ def build_context(
     bottleneck: str = "",
 ) -> PRQueryContext:
     """Build the repository, path, and keyword query context."""
-    repo, reason = resolve_repo(fellow=fellow, git_remote=git_remote, tracked=tracked)
+    repo, reason = resolve_repo(kernel_backend=kernel_backend, git_remote=git_remote, tracked=tracked)
     # Preserve paths so an untracked fork can be resolved by source ownership.
     paths = []
     for raw in source_files:

@@ -82,7 +82,7 @@ def test_forge_loop_exposes_the_superset_of_resume_and_orchestration_options():
         "--gpu-type",
         "--task-type",
         "--model",
-        "--fellow",
+        "--kernel-backend",
         "--supervisor-backend",
         "--profile-timeout-sec",
         "--snr-threshold",
@@ -107,7 +107,7 @@ def _install_cli_fakes(monkeypatch, tmp_path):
         "kb_writes": [],
     }
     monkeypatch.setenv("GPU_TARGET", "gfx942")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     def fake_from_env(**overrides):
         captured.setdefault("config_overrides", []).append(dict(overrides))
@@ -733,7 +733,7 @@ def _driver_integrity_resume(tmp_path, monkeypatch):
         capture_output=True,
     )
     monkeypatch.setenv("GPU_TARGET", "gfx942")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     campaign = create_campaign_config(
         workspace_dir=str(workspace),
         kernel=str(kernel),
@@ -923,33 +923,33 @@ def test_forge_loop_rejects_return_after_read_when_experience_kb_is_disabled(
     assert "cannot be used with --no-experience-kb" in result.output
 
 
-def test_forge_loop_falls_back_from_unsupported_fellow(tmp_path, monkeypatch):
+def test_forge_loop_falls_back_from_unsupported_kernel_backend(tmp_path, monkeypatch):
     _install_cli_fakes(monkeypatch, tmp_path)
 
     result, workspace = _invoke_forge_loop(
         tmp_path,
-        ["--fellow", "tilelang"],
+        ["--kernel-backend", "tilelang"],
     )
 
     assert result.exit_code == 0, result.output
-    assert "Unknown fellow backend 'tilelang'" in result.output
-    assert "falling back to 'flydsl-fellow'" in result.output
-    assert CampaignConfigStore(str(workspace)).load().fellow == "flydsl-fellow"
+    assert "Unknown kernel backend 'tilelang'" in result.output
+    assert "falling back to 'flydsl'" in result.output
+    assert CampaignConfigStore(str(workspace)).load().kernel_backend == "flydsl"
 
 
-def test_forge_loop_falls_back_from_unknown_environment_fellow(
+def test_forge_loop_falls_back_from_unknown_environment_kernel_backend(
     tmp_path,
     monkeypatch,
 ):
     _install_cli_fakes(monkeypatch, tmp_path)
-    monkeypatch.setenv("FORGE_FELLOW", "tilelang")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "tilelang")
 
     result, workspace = _invoke_forge_loop(tmp_path, [])
 
     assert result.exit_code == 0, result.output
-    assert "Unknown fellow backend 'tilelang'" in result.output
-    assert "falling back to 'flydsl-fellow'" in result.output
-    assert CampaignConfigStore(str(workspace)).load().fellow == "flydsl-fellow"
+    assert "Unknown kernel backend 'tilelang'" in result.output
+    assert "falling back to 'flydsl'" in result.output
+    assert CampaignConfigStore(str(workspace)).load().kernel_backend == "flydsl"
 
 
 def test_forge_loop_persists_deadline_read_status(tmp_path, monkeypatch):

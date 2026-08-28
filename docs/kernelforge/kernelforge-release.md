@@ -33,7 +33,7 @@ This work is done by a small number of domain experts, creating a critical bottl
 
 ## The Solution
 
-KernelForge deploys 8 backend fellow agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
+KernelForge deploys 8 kernel backend agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
 
 ### Architecture
 
@@ -41,7 +41,7 @@ KernelForge deploys 8 backend fellow agents, each with domain-specific knowledge
                    Campaign — kernelforge forge-loop
               One kernel, one driver, one change per iteration
                               |
-        Backend fellows (8) — domain knowledge for the kernel at hand
+        Kernel backends (8) — domain knowledge for the kernel at hand
         +----------+----------+----------+----------+----------+----------+----------+
         |          |          |          |          |          |          |          |
          CK         FlyDSL     Triton     AITER      HIP        hipBLASLt  IntelliKit
@@ -64,7 +64,7 @@ KernelForge deploys 8 backend fellow agents, each with domain-specific knowledge
 
 ### How It Works
 
-1. **Campaign inputs** specify the kernel anchor, the driver that owns correctness and timing, the backend fellow whose knowledge is injected, and a wall-clock budget
+1. **Campaign inputs** specify the kernel anchor, the driver that owns correctness and timing, the kernel backend whose knowledge is injected, and a wall-clock budget
 2. **Planning** turns the current hardware evidence into one executable change per iteration
 3. Each **iteration** runs a disciplined loop:
    - Build (with stale-artifact detection)
@@ -144,7 +144,7 @@ Every validation gate exists because of a real incident:
 
 ### Multi-Backend Flexibility
 
-Unlike single-framework tools, KernelForge works across CK (C++ templates), FlyDSL (MLIR DSL), Triton (JIT Python), and AITER (pre-built operators). Each campaign runs with the fellow knowledge for the backend it is optimizing, and the driver contract is backend-agnostic -- when one backend plateaus, the same correctness oracle and benchmark carry straight over to a campaign on another, including a FlyDSL rewrite of the plateaued kernel.
+Unlike single-framework tools, KernelForge works across CK (C++ templates), FlyDSL (MLIR DSL), Triton (JIT Python), and AITER (pre-built operators). Each campaign runs with the kernel backend knowledge for the backend it is optimizing, and the driver contract is backend-agnostic -- when one backend plateaus, the same correctness oracle and benchmark carry straight over to a campaign on another, including a FlyDSL rewrite of the plateaued kernel.
 
 ---
 

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -15,7 +16,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.fellows.constants import FELLOW_BACKENDS
+from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 from kernelforge.knowledge.experience_sink import (
     infer_source_owner_framework,
     resolve_operation,
@@ -46,7 +47,9 @@ SCHEMA_VERSION = 7
 READABLE_SCHEMA_VERSIONS = (6, 7)
 _GPU_TARGET_RE = re.compile(r"\bgfx[0-9a-f]+\b", re.IGNORECASE)
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
-_FALLBACK_FELLOW = "flydsl-fellow"
+log = logging.getLogger(__name__)
+
+_FALLBACK_KERNEL_BACKEND = "flydsl"
 
 
 @dataclass(frozen=True)
@@ -63,7 +66,7 @@ class CampaignConfig:
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB
     gpu_target: str = ""
     gpu_type: str = "mi355x"
-    fellow: str = ""
+    kernel_backend: str = ""
     task_type: str = ""
     target_functions: list[str] = field(default_factory=list)
     git_branch: str = ""
@@ -100,6 +103,18 @@ class CampaignConfig:
                 f"unsupported campaign config schema {version}; expected one "
                 "of " + ", ".join(str(known) for known in READABLE_SCHEMA_VERSIONS)
             )
+        # A campaign paused before the rename has ``"fellow"`` on disk, and the
+        # unknown-field check below is strict on purpose, so translate the key
+        # before it gets there rather than teaching every reader two spellings.
+        # Migrating the dict (instead of reading both keys at the use site) also
+        # keeps ``to_dict()`` round-tripping to exactly one spelling.
+        legacy_key = "fellow"  # rename: keep-literal
+        if legacy_key in payload:
+            payload = dict(payload)
+            legacy_value = payload.pop(legacy_key)
+            if not payload.get("kernel_backend"):
+                payload["kernel_backend"] = legacy_value
+
         unknown_fields = set(payload) - {item.name for item in fields(cls)}
         if unknown_fields:
             raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
@@ -114,7 +129,7 @@ class CampaignConfig:
             snr_threshold=float(payload.get("snr_threshold", DEFAULT_SNR_THRESHOLD_DB)),
             gpu_target=str(payload.get("gpu_target") or ""),
             gpu_type=str(payload["gpu_type"] if "gpu_type" in payload else "mi355x").strip().lower(),
-            fellow=str(payload.get("fellow") or ""),
+            kernel_backend=str(payload.get("kernel_backend") or ""),
             task_type=str(payload.get("task_type") or ""),
             target_functions=[str(name) for name in (payload.get("target_functions") or [])],
             git_branch=str(payload.get("git_branch") or ""),
@@ -358,26 +373,62 @@ def detect_gpu_target() -> str:
     return targets[0].lower()
 
 
-def normalize_fellow_name(fellow: str) -> str:
-    """Normalize a backend or fellow label to the canonical fellow name."""
-    requested = fellow.strip()
-    return requested if requested.endswith("-fellow") else f"{requested}-fellow"
+def normalize_kernel_backend_name(kernel_backend: str) -> str:
+    """Reduce a backend label to its bare canonical name.
+
+    The canonical form used to be ``"<backend>-fellow"`` and this function
+    appended that suffix; it is now the bare backend key and this function
+    strips it. Keeping the strip (rather than rejecting the old spelling) is
+    what makes the rename free for data written before it: a ``"triton-fellow"``
+    in a stored KB row or a resumed campaign's config still resolves to
+    ``"triton"`` instead of falling through to the fallback backend.
+    """
+    requested = kernel_backend.strip()
+    return requested.removesuffix("-fellow")  # rename: keep-literal
 
 
-def resolve_fellow_override(fellow: str) -> str:
-    """Resolve an override against the registered kernel-building fellows."""
-    name = normalize_fellow_name(fellow)
-    backend = name.removesuffix("-fellow")
-    if backend not in FELLOW_BACKENDS:
-        return _FALLBACK_FELLOW
+# The environment override, current name first. ``FORGE_FELLOW`` stays readable
+# because it is set in deployed install scripts, operator shells and running
+# sessions that predate the rename; dropping it would silently ignore an
+# override an operator had every reason to believe was in effect.
+_ENV_OVERRIDE = "FORGE_KERNEL_BACKEND"
+_ENV_OVERRIDE_LEGACY = "FORGE_FELLOW"  # rename: keep-literal
+
+
+def env_backend_override() -> str:
+    """The backend named by the environment, or ``""``.
+
+    Reads :data:`_ENV_OVERRIDE` and falls back to the pre-rename
+    :data:`_ENV_OVERRIDE_LEGACY`, warning once so the operator learns the new
+    spelling instead of discovering it when the legacy name is finally removed.
+    """
+    value = os.environ.get(_ENV_OVERRIDE, "").strip()
+    if value:
+        return value
+    legacy = os.environ.get(_ENV_OVERRIDE_LEGACY, "").strip()
+    if legacy:
+        log.warning(
+            "%s is deprecated and will be removed; set %s=%s instead",
+            _ENV_OVERRIDE_LEGACY,
+            _ENV_OVERRIDE,
+            legacy,
+        )
+    return legacy
+
+
+def resolve_kernel_backend_override(kernel_backend: str) -> str:
+    """Resolve an override against the registered kernel-building backends."""
+    name = normalize_kernel_backend_name(kernel_backend)
+    if name not in KERNEL_BACKENDS:
+        return _FALLBACK_KERNEL_BACKEND
     return name
 
 
-def infer_fellow(source_paths: list[Path]) -> str:
+def infer_kernel_backend(source_paths: list[Path]) -> str:
     """Infer the backend expertise prompt from configuration or source files."""
-    override = os.environ.get("FORGE_FELLOW", "").strip()
+    override = env_backend_override()
     if override:
-        return resolve_fellow_override(override)
+        return resolve_kernel_backend_override(override)
 
     for path in source_paths:
         try:
@@ -387,11 +438,11 @@ def infer_fellow(source_paths: list[Path]) -> str:
         path_text = str(path).lower()
         suffix = path.suffix.lower()
         if "hipblaslt" in text or "hipblaslt" in path_text:
-            return "hipblaslt-fellow"
+            return "hipblaslt"
         if "/aiter/" in path_text or "import aiter" in text:
-            return "aiter-fellow"
+            return "aiter"
         if "flydsl" in text or "cutlass.cute" in text or "from cutlass import cute" in text:
-            return "flydsl-fellow"
+            return "flydsl"
         # Before Triton, and matching an import or a decorator rather than the
         # word: Gluon IS Triton's low-level dialect, so a Gluon file imports
         # triton and routinely keeps a `@triton.jit` sibling kernel as its
@@ -400,14 +451,14 @@ def infer_fellow(source_paths: list[Path]) -> str:
         # of Triton markers distinguishes the two. Checked after flydsl because
         # that arm keys on its own toolchain, which this one never carries.
         if "triton.experimental.gluon" in text or "@gluon.jit" in text or "gluon.language" in text:
-            return "gluon-fellow"
+            return "gluon"
         if "@triton.jit" in text or "triton.language" in text:
-            return "triton-fellow"
+            return "triton"
         if "composable_kernel" in text or "ck::" in text:
-            return "ck-fellow"
+            return "ck"
         if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
-            return "hip-fellow"
-    raise ValueError("could not infer kernel fellow; set FORGE_FELLOW to a known backend")
+            return "hip"
+    raise ValueError(f"could not infer kernel kernel_backend; set {_ENV_OVERRIDE} to a known backend")
 
 
 def _derive_target_functions(
@@ -460,7 +511,7 @@ def create_campaign_config(
     gpu_target: str | None = None,
     gpu_type: str | None = None,
     git_branch: str | None = None,
-    fellow: str | None = None,
+    kernel_backend: str | None = None,
     task_type: str | None = None,
     framework: str | None = None,
     operator_name: str | None = None,
@@ -471,9 +522,9 @@ def create_campaign_config(
 ) -> CampaignConfig:
     """Resolve and normalize all immutable inputs for a fresh/legacy campaign.
 
-    Caller-supplied ``gpu_target``/``gpu_type``/``git_branch``/``fellow``/
+    Caller-supplied ``gpu_target``/``gpu_type``/``git_branch``/``kernel_backend``/
     ``task_type`` and ``framework`` take precedence; each falls back to local inference. An
-    unsupported explicit fellow falls back to the FlyDSL fellow.
+    unsupported explicit kernel backend falls back to the FlyDSL kernel_backend.
     """
     workspace = Path(workspace_dir).resolve()
     kernel_path = _relative_file(workspace, kernel, "kernel")
@@ -509,11 +560,11 @@ def create_campaign_config(
         base_commit=resolved_base_commit,
     )
     resolved_branch = (git_branch or "").strip() or branch
-    fellow_override = (fellow or "").strip()
-    resolved_fellow = (
-        resolve_fellow_override(fellow_override)
-        if fellow_override
-        else infer_fellow([workspace / path for path in normalized_sources])
+    kernel_backend_override = (kernel_backend or "").strip()
+    resolved_kernel_backend = (
+        resolve_kernel_backend_override(kernel_backend_override)
+        if kernel_backend_override
+        else infer_kernel_backend([workspace / path for path in normalized_sources])
     )
     resolved_targets = (
         list(target_functions)
@@ -576,7 +627,7 @@ def create_campaign_config(
         snr_threshold=resolved_snr_threshold,
         gpu_target=(gpu_target or "").strip() or detect_gpu_target(),
         gpu_type=str("mi355x" if gpu_type is None else gpu_type).strip().lower(),
-        fellow=resolved_fellow,
+        kernel_backend=resolved_kernel_backend,
         task_type=resolved_task_type,
         target_functions=resolved_targets,
         git_branch=resolved_branch,

@@ -80,7 +80,7 @@ def _capture_forge_loop_argv(
         captured["command"] = command
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     forge_submit._run_loop_via_cli(
@@ -92,7 +92,7 @@ def _capture_forge_loop_argv(
         branch="forge/test/provider",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -135,7 +135,7 @@ def _capture_rewrite_argv(
         captured["env"] = kwargs.get("env") or {}
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     forge_submit._run_rewrite_via_cli(
@@ -284,7 +284,7 @@ def test_anthropic_only_leaves_provider_selection_untouched(tmp_path, monkeypatc
 
 
 def test_both_sides_configured_leaves_provider_selection_untouched(tmp_path, monkeypatch):
-    """With an Anthropic credential present, the claude fellow still works."""
+    """With an Anthropic credential present, the claude kernel backend still works."""
     _use_openai_only(monkeypatch)
     _use_anthropic_only(monkeypatch)
 
@@ -303,7 +303,7 @@ def test_openai_only_child_env_does_not_pin_the_claude_cli(monkeypatch):
     forge_submit._reset_knowledge_config_cache()
 
     env: dict[str, str] = {}
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
 
     assert "FORGE_CLAUDE_BIN" not in env
     assert "ANTHROPIC_API_KEY" not in env
@@ -320,7 +320,7 @@ def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
     forge_submit._reset_knowledge_config_cache()
 
     env: dict[str, str] = {}
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
 
     assert env["FORGE_CLAUDE_BIN"] == "/usr/local/bin/claude"
 

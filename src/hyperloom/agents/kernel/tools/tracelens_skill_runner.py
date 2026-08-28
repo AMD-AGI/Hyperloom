@@ -433,7 +433,7 @@ def _should_use_codex_runner() -> bool:
     An OpenAI-only deployment has no Claude credentials to drive the Claude
     Agent SDK, so the Codex runner is the only one that can execute. The shape
     test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge fellow.
+    disagree with backend selection or the forge kernel_backend.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 

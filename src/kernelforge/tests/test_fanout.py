@@ -739,7 +739,7 @@ def _lane_factory(config: Config, workspace: Path, implementer) -> object:
         workspace_dir=str(workspace),
         driver=str(workspace / DRIVER_NAME),
         source_files=[str(workspace / "src" / "kernel.py")],
-        session_kwargs={"program_md": "", "fellow_name": "ck-fellow"},
+        session_kwargs={"program_md": "", "kernel_backend_name": "ck"},
     )
 
 

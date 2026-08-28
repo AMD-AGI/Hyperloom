@@ -248,7 +248,7 @@ def build_forge_knowledge(
 
     ``language`` accepts a sequence, rendered in the order given, for a backend
     served by more than one language folder (triton/gluon are one toolchain and
-    carry each other; see ``fellows.constants.resolve_language_dirs``).
+    carry each other; see ``kernel_backends.constants.resolve_language_dirs``).
     Duplicates collapse so the same folder is never rendered twice.
 
     Each level is loaded per the INDEX.md convention (whole INDEX.md if present,

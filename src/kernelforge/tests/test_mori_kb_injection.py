@@ -12,16 +12,16 @@ from __future__ import annotations
 
 
 from kernelforge.config import Config
-from kernelforge.fellows.base import build_single_fellow_prompt
+from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 from kernelforge.knowledge.local_index import build_forge_knowledge
 from kernelforge.resources import resource_path
 
 
 def _mori_prompt(config: Config) -> str:
-    """A prompt from a fellow whose backend actually has a framework/mori/ folder to inject."""
-    return build_single_fellow_prompt(
+    """A prompt from a kernel backend whose backend actually has a framework/mori/ folder to inject."""
+    return build_single_kernel_backend_prompt(
         config,
-        "aiter-fellow",
+        "aiter",
         task_type="repository",
         source_paths=["/work/mori_ep_dispatch_combine/driver.py"],
     )

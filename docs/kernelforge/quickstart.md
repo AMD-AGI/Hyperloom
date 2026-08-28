@@ -130,13 +130,13 @@ kernelforge forge-loop \
     --program-md-file /tmp/forge_softmax/program.md \
     --experiments-dir /tmp/forge_softmax/forge_experiments \
     --result-json /tmp/forge_softmax/forge_experiments/forge_result.json \
-    --fellow triton-fellow \
+    --kernel-backend triton \
     --gpu-target gfx950 \
     --snr-threshold 30 \
     --max-hours 1
 ```
 
-`--fellow` picks which backend fellow's domain knowledge is injected into the agent's prompt: `ck`, `flydsl`, `triton`, `aiter`, `hip`, `hipblaslt`, or `intellikit` (with or without the `-fellow` suffix). Omit it and the backend is inferred from the kernel sources.
+`--kernel-backend` picks which kernel backend's domain knowledge is injected into the agent's prompt: `ck`, `flydsl`, `triton`, `aiter`, `hip`, `hipblaslt`, or `intellikit` (the legacy `-fellow` suffix is still accepted). Omit it and the backend is inferred from the kernel sources.
 
 **In a container.** On a GPU host, a ROCm image with torch and your backend already installed needs nothing else from the environment except the credential line and a `claude` CLI on PATH:
 
@@ -248,7 +248,7 @@ kernelforge forge-loop \
     --workspace /work/aiter-amd \
     --kernel csrc/hk_sla/vsa_sparse_attention_bwd.cpp \
     --driver op_tests/test_sla_bwd.py \
-    --fellow ck-fellow \
+    --kernel-backend ck \
     --gpu-target gfx950 \
     --snr-threshold 30 \
     --max-hours 8

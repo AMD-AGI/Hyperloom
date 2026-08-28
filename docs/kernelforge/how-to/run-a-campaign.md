@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "How to run a KernelForge optimization campaign: prepare a git workspace, launch kernelforge forge-loop on a kernel and its driver, and review the measured result."
-    "keywords": "KernelForge, run campaign, kernelforge forge-loop, workspace, driver, fellow, gfx950, forge_experiments"
+    "keywords": "KernelForge, run campaign, kernelforge forge-loop, workspace, driver, kernel backend, gfx950, forge_experiments"
 ---
 
 # Run a campaign
@@ -51,7 +51,7 @@ kernelforge forge-loop \
     --program-md-file "$W/program.md" \
     --experiments-dir "$W/forge_experiments" \
     --result-json "$W/forge_experiments/forge_result.json" \
-    --fellow triton-fellow \
+    --kernel-backend triton \
     --gpu-target gfx950 \
     --snr-threshold 30.0 \
     --max-hours 8 \
@@ -64,9 +64,9 @@ The flags that decide what a campaign is:
 - `--kernel` — the anchor the driver exercises and the agent edits.
 - `--driver` — the measurement driver. The loop treats it as a black box,
   talks to it over stdout, and blocks edits to it.
-- `--fellow` — which backend's domain knowledge is injected into the agent's
+- `--kernel-backend` — which backend's domain knowledge is injected into the agent's
   prompt: one of `ck`, `flydsl`, `triton`, `aiter`, `hip`, `hipblaslt`, or
-  `intellikit`, written as `<backend>-fellow`.
+  `intellikit`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
   time-driven; it does not stop at a fixed iteration count. It stops when what

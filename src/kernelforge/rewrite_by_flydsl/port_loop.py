@@ -143,7 +143,7 @@ async def run_port_loop(
     driver_path: str,
     config: Config,
     *,
-    fellow: str = "flydsl-fellow",
+    kernel_backend: str = "flydsl",
     max_attempts: int = 3,
     permission_mode: str | None = None,
     validate_stage_timeout_sec: int = 1800,
@@ -166,7 +166,7 @@ async def run_port_loop(
     agent_fn = make_agent_fn(
         config=config,
         program_md=program_md,
-        fellow_name=fellow,
+        kernel_backend_name=kernel_backend,
         pre_task_context=pre_task_context,
         insession_gate=True,
         # PORT is correctness-only: the in-session gate must NOT impose a perf

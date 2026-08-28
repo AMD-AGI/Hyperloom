@@ -114,9 +114,9 @@ def resolve_operation(kernel_source: str, kernel_path: str, target_functions: li
     return Path(kernel_path).stem
 
 
-def detect_backend_language(fellow: str) -> str:
-    """Derive the implementation language exclusively from the selected fellow."""
-    lang = str(fellow or "").split("-", 1)[0].strip().lower()
+def detect_backend_language(kernel_backend: str) -> str:
+    """Derive the implementation language exclusively from the selected kernel_backend."""
+    lang = str(kernel_backend or "").split("-", 1)[0].strip().lower()
     return lang or _UNKNOWN
 
 
@@ -595,7 +595,7 @@ def write_run_experience(
     workspace: str,
     kernel_path: str,
     kernel_source: str,
-    fellow: str,
+    kernel_backend: str,
     gpu_target: str,
     experiment_id: str,
     baseline_wall_ms: float | None,
@@ -639,7 +639,7 @@ def write_run_experience(
             workspace=workspace,
             kernel_path=kernel_path,
             kernel_source=kernel_source,
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             gpu_target=gpu_target,
             experiment_id=experiment_id,
             baseline_wall_ms=baseline_wall_ms,
@@ -675,7 +675,7 @@ def _write_run_experience_impl(
     workspace,
     kernel_path,
     kernel_source,
-    fellow,
+    kernel_backend,
     gpu_target,
     experiment_id,
     baseline_wall_ms,
@@ -733,7 +733,7 @@ def _write_run_experience_impl(
     identity, concrete_op, framework = resolve_loop_identity(
         kernel_path=kernel_path,
         kernel_source=kernel_source,
-        fellow=fellow,
+        kernel_backend=kernel_backend,
         gpu_type=gpu_type,
         target_functions=target_functions,
         source_files=source_files,

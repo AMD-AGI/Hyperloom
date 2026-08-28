@@ -511,7 +511,7 @@ class IterationConfig:
 
     # Experiment identity persisted by ExperimentTracker.
     backend: str = ""
-    fellow: str = ""
+    kernel_backend: str = ""
 
     # Task shape awareness (repository / image_kernel vs single-file snippet).
     # Empty task_type + empty source_files selects the single-file behavior;
@@ -5696,7 +5696,7 @@ class IterationLoop(AnalysisRuntimeMixin):
             parent_experiment_id=parent_experiment_id,
             task_id=Path(self.ic.kernel_file).stem,
             backend=self.ic.backend,
-            fellow=self.ic.fellow,
+            kernel_backend=self.ic.kernel_backend,
             description=f"Autonomous optimization of {self.ic.kernel_file}",
             target_wall_ms=self.ic.target_wall_ms,
             baseline_wall_ms=self.ic.baseline_wall_ms,

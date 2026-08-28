@@ -166,7 +166,7 @@ SIGMA_REMEASURE_MAX_ROUNDS = 2
 # single global dB figure can stand in for.
 DEFAULT_SNR_THRESHOLD_DB = 30.0
 
-# The one description of the gate every fellow prompt renders, so an agent's
+# The one description of the gate every kernel backend prompt renders, so an agent's
 # self-check and forge's acceptance decision cannot drift apart.
 CANONICAL_GATE_PROMPT = f"""\
 SNR >= {DEFAULT_SNR_THRESHOLD_DB:g} dB is a fast pre-filter, NOT the gate. A KEEP is decided by the

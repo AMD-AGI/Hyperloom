@@ -50,7 +50,7 @@ def resolve_loop_identity(
     *,
     kernel_path: str,
     kernel_source: str,
-    fellow: str,
+    kernel_backend: str,
     gpu_type: str,
     target_functions: list[str] | None = None,
     source_files: list[str] | None = None,
@@ -80,7 +80,7 @@ def resolve_loop_identity(
 
     concrete_op = resolve_operation(kernel_source, kernel_path, target_functions=target_functions)
     operator = normalize_operator_name(operator_name or concrete_op)
-    backend = detect_backend_language(fellow)
+    backend = detect_backend_language(kernel_backend)
     resolved_framework = infer_source_owner_framework(
         kernel_path=kernel_path,
         kernel_source=kernel_source,
@@ -95,7 +95,7 @@ def resolve_loop_identity(
         gpu=segment(gpu_type, fallback=UNKNOWN_SEGMENT),
         framework=segment(resolved_framework, fallback=UNKNOWN_SEGMENT),
         framework_version=framework_version(resolved_framework),
-        # A run whose fellow names no language still has to populate the
+        # A run whose kernel backend names no language still has to populate the
         # dimension: an empty one would not render as an address at all.
         backend=segment(backend, fallback=UNKNOWN_SEGMENT),
     )

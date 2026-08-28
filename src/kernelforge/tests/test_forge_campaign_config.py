@@ -17,8 +17,8 @@ from kernelforge.loop.campaign_config import (
     create_campaign_config,
     derive_campaign_implementation_contract,
     detect_gpu_target,
-    infer_fellow,
-    resolve_fellow_override,
+    infer_kernel_backend,
+    resolve_kernel_backend_override,
     validate_pending_campaign_head,
 )
 from kernelforge.llm.git import GitError
@@ -65,7 +65,7 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     program = tmp_path / "program.md"
     program.write_text("# Optimize fused kernel\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     config = create_campaign_config(
         workspace_dir=str(workspace),
@@ -88,7 +88,7 @@ def test_create_save_load_normalizes_and_persists_campaign(tmp_path, monkeypatch
     assert loaded.base_commit
     assert loaded.gpu_target == "gfx950"
     assert loaded.gpu_type == "mi300x"
-    assert loaded.fellow == "triton-fellow"
+    assert loaded.kernel_backend == "triton"
     assert loaded.task_type == "repository"
     assert "fused_kernel" in loaded.target_functions
     assert loaded.operator_name == "fused"
@@ -124,7 +124,7 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
         source_files=[str(kernel)],
         program_md_file=str(program),
         target_functions=["dynamic_quant"],
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert config.operator_name == "dynamic_quant"
@@ -142,7 +142,7 @@ def test_the_operator_is_settled_before_the_loop_can_rename_it(tmp_path, monkeyp
         identity, _op, _fw = resolve_loop_identity(
             kernel_path=str(kernel),
             kernel_source=source,
-            fellow="triton-fellow",
+            kernel_backend="triton",
             gpu_type="mi355x",
             target_functions=list(config.target_functions),
             framework=config.framework,
@@ -385,8 +385,8 @@ def test_store_rejects_non_authoritative_schema_two(tmp_path, monkeypatch):
         store.load()
 
 
-def test_infer_fellow_requires_unambiguous_backend(tmp_path, monkeypatch):
-    monkeypatch.delenv("FORGE_FELLOW", raising=False)
+def test_infer_kernel_backend_requires_unambiguous_backend(tmp_path, monkeypatch):
+    monkeypatch.delenv("FORGE_KERNEL_BACKEND", raising=False)
     triton_kernel = tmp_path / "triton_kernel.py"
     triton_kernel.write_text("import triton\n@triton.jit\ndef kernel():\n    pass\n")
     hip_kernel = tmp_path / "kernel.hip"
@@ -394,38 +394,38 @@ def test_infer_fellow_requires_unambiguous_backend(tmp_path, monkeypatch):
     unknown_kernel = tmp_path / "kernel.py"
     unknown_kernel.write_text("def kernel():\n    pass\n")
 
-    assert infer_fellow([triton_kernel]) == "triton-fellow"
-    assert infer_fellow([hip_kernel]) == "hip-fellow"
+    assert infer_kernel_backend([triton_kernel]) == "triton"
+    assert infer_kernel_backend([hip_kernel]) == "hip"
     with pytest.raises(ValueError, match="infer"):
-        infer_fellow([unknown_kernel])
+        infer_kernel_backend([unknown_kernel])
 
 
-def test_infer_fellow_falls_back_from_unknown_environment_override(monkeypatch):
-    monkeypatch.setenv("FORGE_FELLOW", "tilelang")
+def test_infer_kernel_backend_falls_back_from_unknown_environment_override(monkeypatch):
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "tilelang")
 
-    assert infer_fellow([]) == "flydsl-fellow"
+    assert infer_kernel_backend([]) == "flydsl"
 
 
 @pytest.mark.parametrize(
     ("requested", "expected"),
     [
-        ("hip", "hip-fellow"),
-        ("hip-fellow", "hip-fellow"),
-        ("triton", "triton-fellow"),
-        ("intellikit-fellow", "intellikit-fellow"),
-        ("tilelang", "flydsl-fellow"),
-        ("tilelang-fellow", "flydsl-fellow"),
+        ("hip", "hip"),
+        ("hip", "hip"),
+        ("triton", "triton"),
+        ("intellikit", "intellikit"),
+        ("tilelang", "flydsl"),
+        ("tilelang", "flydsl"),
     ],
 )
-def test_resolve_fellow_override(requested, expected):
-    assert resolve_fellow_override(requested) == expected
+def test_resolve_kernel_backend_override(requested, expected):
+    assert resolve_kernel_backend_override(requested) == expected
 
 
-@pytest.mark.parametrize("fellow", ["tilelang", "tilelang-fellow"])
-def test_create_campaign_falls_back_from_unsupported_fellow(
+@pytest.mark.parametrize("kernel_backend", ["tilelang", "tilelang"])
+def test_create_campaign_falls_back_from_unsupported_kernel_backend(
     tmp_path,
     monkeypatch,
-    fellow,
+    kernel_backend,
 ):
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
@@ -436,10 +436,10 @@ def test_create_campaign_falls_back_from_unsupported_fellow(
         driver=str(driver),
         source_files=[],
         program_md_file=None,
-        fellow=fellow,
+        kernel_backend=kernel_backend,
     )
 
-    assert config.fellow == "flydsl-fellow"
+    assert config.kernel_backend == "flydsl"
 
 
 def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
@@ -454,7 +454,7 @@ def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
     external.parent.mkdir()
     external.write_text("pass\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     config = create_campaign_config(
         workspace_dir=str(workspace),
@@ -474,7 +474,7 @@ def test_external_driver_is_accepted_and_stored_absolute(tmp_path, monkeypatch):
 def test_missing_external_driver_still_fails(tmp_path, monkeypatch):
     workspace, kernel, _, _ = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     with pytest.raises(ValueError, match="driver is not a file"):
         create_campaign_config(
@@ -492,7 +492,7 @@ def test_external_source_file_is_still_rejected(tmp_path, monkeypatch):
     outside = tmp_path / "outside.py"
     outside.write_text("VALUE = 2\n")
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     with pytest.raises(ValueError, match="source file must be inside workspace"):
         create_campaign_config(
@@ -508,7 +508,7 @@ def _campaign_payload(tmp_path, monkeypatch, name="payload"):
     """A freshly created, valid campaign config as its persisted dict."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path, name)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     config = create_campaign_config(
         workspace_dir=str(workspace),
         kernel=str(kernel),
@@ -553,6 +553,23 @@ def test_from_dict_rejects_incoherent_campaign_snapshot(
 def test_from_dict_requires_a_json_object():
     with pytest.raises(ValueError, match="must be a JSON object"):
         CampaignConfig.from_dict([{"schema_version": 6}])
+
+
+def test_from_dict_reads_a_campaign_paused_under_the_old_vocabulary(tmp_path, monkeypatch):
+    """A config written before the rename still resumes on its own backend.
+
+    ``from_dict`` rejects unknown fields on purpose, so without the migration a
+    campaign paused under the old key would not fall back quietly --
+    it would refuse to load at all, stranding the run. The migration also has
+    to leave exactly one spelling behind, or ``to_dict()`` would write both.
+    """
+    payload = _campaign_payload(tmp_path, monkeypatch)
+    payload["fellow"] = payload.pop("kernel_backend")  # rename: keep-literal
+
+    restored = CampaignConfig.from_dict(payload)
+
+    assert restored.kernel_backend == "triton"
+    assert "fellow" not in restored.to_dict()  # rename: keep-literal
 
 
 def test_from_dict_round_trips_measurement_semantics(tmp_path, monkeypatch):
@@ -790,7 +807,7 @@ def test_workspace_relative_inputs_resolve_like_absolute_ones(tmp_path, monkeypa
     """Callers may pass paths relative to the workspace, or a directory by mistake."""
     workspace, kernel, helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
 
     relative = create_campaign_config(
         workspace_dir=str(workspace),
@@ -822,14 +839,14 @@ def test_workspace_relative_inputs_resolve_like_absolute_ones(tmp_path, monkeypa
 @pytest.mark.parametrize(
     ("filename", "source", "expected"),
     [
-        ("gemm.py", "import hipblaslt\n@triton.jit\ndef k(): pass\n", "hipblaslt-fellow"),
-        ("attn.py", "import aiter\n@triton.jit\ndef k(): pass\n", "aiter-fellow"),
-        ("dsl.py", "from cutlass import cute\n@triton.jit\n", "flydsl-fellow"),
-        ("ck_op.cpp", "#include <composable_kernel/foo.hpp>\n", "ck-fellow"),
-        ("plain.cu", "__global__ void k() {}\n", "hip-fellow"),
+        ("gemm.py", "import hipblaslt\n@triton.jit\ndef k(): pass\n", "hipblaslt"),
+        ("attn.py", "import aiter\n@triton.jit\ndef k(): pass\n", "aiter"),
+        ("dsl.py", "from cutlass import cute\n@triton.jit\n", "flydsl"),
+        ("ck_op.cpp", "#include <composable_kernel/foo.hpp>\n", "ck"),
+        ("plain.cu", "__global__ void k() {}\n", "hip"),
     ],
 )
-def test_infer_fellow_prefers_the_more_specific_backend(
+def test_infer_kernel_backend_prefers_the_more_specific_backend(
     tmp_path,
     monkeypatch,
     filename,
@@ -837,22 +854,22 @@ def test_infer_fellow_prefers_the_more_specific_backend(
     expected,
 ):
     """Backend detection is ordered; a generic marker must not win over a library."""
-    monkeypatch.delenv("FORGE_FELLOW", raising=False)
+    monkeypatch.delenv("FORGE_KERNEL_BACKEND", raising=False)
     path = tmp_path / filename
     path.write_text(source)
 
-    assert infer_fellow([path]) == expected
+    assert infer_kernel_backend([path]) == expected
 
 
-def test_infer_fellow_falls_back_to_the_path_when_content_is_unreadable(
+def test_infer_kernel_backend_falls_back_to_the_path_when_content_is_unreadable(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.delenv("FORGE_FELLOW", raising=False)
+    monkeypatch.delenv("FORGE_KERNEL_BACKEND", raising=False)
     unreadable = tmp_path / "aiter" / "ops"
     unreadable.mkdir(parents=True)
 
-    assert infer_fellow([unreadable]) == "aiter-fellow"
+    assert infer_kernel_backend([unreadable]) == "aiter"
 
 
 def test_implementation_contract_is_rederived_from_the_pristine_lineage(
@@ -862,7 +879,7 @@ def test_implementation_contract_is_rederived_from_the_pristine_lineage(
     """A resume re-derives the contract; the loop's own edits must not move it."""
     workspace, kernel, _helper, driver = _git_workspace(tmp_path)
     monkeypatch.setenv("GPU_TARGET", "gfx950")
-    monkeypatch.setenv("FORGE_FELLOW", "triton-fellow")
+    monkeypatch.setenv("FORGE_KERNEL_BACKEND", "triton")
     config = create_campaign_config(
         workspace_dir=str(workspace),
         kernel=str(kernel),

@@ -747,7 +747,7 @@ PY
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
       # PyYAML: hard import-time dep of the CLI startup path. llm extra
       # (claude-agent-sdk/openai/httpx/openai-codex): Coordinator backends and,
-      # for openai-codex, the agent runtime the forge fellow uses on an
+      # for openai-codex, the agent runtime the forge kernel_backend uses on an
       # OpenAI-only deployment. click/anthropic: the built-in kernel-opt agent
       # (`kernelforge`), which ships in this wheel and used to be installed
       # separately from a KernelForge checkout.

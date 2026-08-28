@@ -240,7 +240,7 @@ def test_hostile_pr_text_is_neutralized_end_to_end(tmp_path, system_prompt_for):
     result = collect_references(
         workspace_dir=str(tmp_path),
         client=_HostileClient(),
-        fellow="aiter",
+        kernel_backend="aiter",
         operator_name="rmsnorm",
     )
     assert result.injected
@@ -263,7 +263,7 @@ def test_block_is_bounded_even_for_hostile_input(tmp_path):
     result = collect_references(
         workspace_dir=str(tmp_path),
         client=_HostileClient(),
-        fellow="aiter",
+        kernel_backend="aiter",
         operator_name="rmsnorm",
     )
 

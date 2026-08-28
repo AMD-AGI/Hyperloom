@@ -35,8 +35,8 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 
 log = logging.getLogger("forge_fusion")
 
-# The fellow that carries the decode-fusion authoring discipline.
-FUSION_FELLOW = "fusion-fellow"
+# The kernel backend that carries the decode-fusion authoring discipline.
+FUSION_KERNEL_BACKEND = "fusion"
 
 # Knowledge-base producer for records this pipeline authors. A producer owns its
 # own candidate index, so fusion records never rank against a kernel campaign's.
@@ -273,8 +273,8 @@ def build_forge_loop_command(
         str(snr_threshold),
         "--max-hours",
         str(max(1.0, max_hours)),
-        "--fellow",
-        FUSION_FELLOW,
+        "--kernel-backend",
+        FUSION_KERNEL_BACKEND,
         # The loop refuses a workspace on an unnamed, main or master branch.
         "--git-branch",
         SHADOW_BRANCH,
@@ -441,7 +441,7 @@ def build_campaign_program_md(
     """The task document handed to the loop's implementer for one recipe.
 
     Only the per-recipe facts live here. The durable authoring discipline is the
-    fusion fellow's system prompt, so it is not repeated.
+    fusion kernel backend's system prompt, so it is not repeated.
 
     The fused-module path is stated as a hard requirement because it is the one
     instruction the loop cannot recover from being ignored: a kernel written

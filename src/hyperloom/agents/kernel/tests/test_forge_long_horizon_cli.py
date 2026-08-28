@@ -641,7 +641,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     deadline = time.time() + 120.0
@@ -654,7 +654,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         branch="forge/session/kernel",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file=str(program),
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -710,7 +710,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
         "--gpu-type": "mi355x",
-        "--fellow": "triton-fellow",
+        "--kernel-backend": "triton",
         "--experiments-dir": str(experiments),
         "--experiment-id": "hyperloom",
         "--experience-id": "attempt-1",
@@ -801,7 +801,7 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         def communicate(self, timeout=None):
             return "", "Error: No such option '--future-option'.\n"
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(
         forge_submit.subprocess,
         "Popen",
@@ -817,7 +817,7 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         branch="b",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -866,7 +866,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         commands.append(command)
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     cases = [
@@ -880,7 +880,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [direct],
             "expected_framework": "",
             "expected_kind": "triton",
-            "expected_fellow": "triton-fellow",
+            "expected_kernel_backend": "triton",
             "expected_symbols": ["direct_kernel"],
         },
         {
@@ -895,7 +895,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [wrapper, aiter_impl],
             "expected_framework": "aiter",
             "expected_kind": "",
-            "expected_fellow": "triton-fellow",
+            "expected_kernel_backend": "triton",
             "expected_symbols": ["attention_kernel"],
         },
         {
@@ -909,7 +909,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [ck_source],
             "expected_framework": "aiter",
             "expected_kind": "aiter_ck",
-            "expected_fellow": "ck-fellow",
+            "expected_kernel_backend": "ck",
             "expected_symbols": ["gemm_kernel"],
         },
         {
@@ -922,7 +922,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [fly_source],
             "expected_framework": "",
             "expected_kind": "flydsl",
-            "expected_fellow": "flydsl-fellow",
+            "expected_kernel_backend": "flydsl",
             "expected_symbols": ["moe_kernel"],
         },
     ]
@@ -942,8 +942,8 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             candidate,
             str(case["kernel"]),
         )
-        fellow = forge_submit._resolve_fellow(case["source_type"], kind)
-        assert fellow is not None
+        kernel_backend = forge_submit._resolve_kernel_backend(case["source_type"], kind)
+        assert kernel_backend is not None
         experiments = tmp_path / f"attempt-{index}" / "forge_experiments"
         experiments.mkdir(parents=True)
         forge_submit._run_loop_via_cli(
@@ -955,7 +955,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
             gpu_type="mi355x",
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             program_md_file="",
             invocation_spec_file="",
             experiments_dir=experiments,
@@ -971,7 +971,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         command = commands[-1]
         assert command[command.index("--operator-name") + 1] == (forge_submit._logical_operator(candidate))
         assert command[command.index("--source-files") + 1] == ",".join(source_values)
-        assert command[command.index("--fellow") + 1] == case["expected_fellow"]
+        assert command[command.index("--kernel-backend") + 1] == case["expected_kernel_backend"]
         assert kind == case["expected_kind"]
         assert framework == case["expected_framework"]
         assert symbols == case["expected_symbols"]
@@ -1023,7 +1023,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         checkpoint_json.write_text(json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh}))
         return "partial stdout", "partial stderr"
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
 
@@ -1036,7 +1036,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         branch="forge/session/kernel",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -1104,14 +1104,14 @@ def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkey
     assert stdout == "partial stdout\nfinal stdout"
     assert stderr == "partial stderr\nfinal stderr"
     # SIGTERM, SIGKILL once the grace period expires, then a final sweep of the
-    # group after the parent is reaped (a re-parented fellow child would
+    # group after the parent is reaped (a re-parented kernel backend child would
     # otherwise survive its parent).
     assert signals == [
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
         (process.pid, signal.SIGKILL),
     ]
-    # The escalation also sweeps captured descendants, so a fellow's own
+    # The escalation also sweeps captured descendants, so a kernel backend's own
     # grandchildren cannot outlive the group.
     assert killed == [(descendants, signal.SIGKILL)]
 
@@ -1927,7 +1927,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
     def forbidden_popen(*_args, **_kwargs):
         raise AssertionError("a campaign must not start on unclearable artifacts")
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", forbidden_popen)
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -1940,7 +1940,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             branch="forge/session/kernel",
             gpu_target="gfx950",
             gpu_type="mi355x",
-            fellow="triton-fellow",
+            kernel_backend="triton",
             program_md_file="",
             invocation_spec_file="",
             experiments_dir=experiments,
@@ -3141,7 +3141,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     deadline = time.time() + 7200.0
@@ -3211,7 +3211,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     # Options that only exist on the generic loop must never be smuggled across.
     for forbidden in (
         "--kernel",
-        "--fellow",
+        "--kernel-backend",
         "--experiment-id",
         "--experience-id",
         "--operator-name",
@@ -3253,7 +3253,7 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         terminated["pid"] = proc.pid
         return "partial stdout", "killed"
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: HangingProcess())
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
 
@@ -3306,7 +3306,7 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
             result_json.write_text(json.dumps({"success": True, "from": "sidecar"}))
             return '__FORGE_RESULT__{"success": true, "from": "sentinel"}', ""
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: FakeProcess())
 
     outcome = forge_submit._run_rewrite_via_cli(

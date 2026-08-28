@@ -43,7 +43,7 @@
 
   <!-- Title -->
   <text x="480" y="32" text-anchor="middle" fill="#e2e8f0" font-size="16" font-weight="700" letter-spacing="0.5">ENFORCED DEVELOPMENT LOOP</text>
-  <text x="480" y="48" text-anchor="middle" fill="#64748b" font-size="10">Every fellow must follow this exact sequence — skipping a step is blocked</text>
+  <text x="480" y="48" text-anchor="middle" fill="#64748b" font-size="10">Every backend must follow this exact sequence — skipping a step is blocked</text>
 
   <!-- Step 1: READ -->
   <rect x="30" y="72" width="120" height="68" rx="10" fill="url(#blueGrad)" filter="url(#sh)" opacity="0.9"/>

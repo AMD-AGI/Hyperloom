@@ -195,7 +195,7 @@ def is_anthropic_only(env: Mapping[str, str] | None = None) -> bool:
     """True when the Anthropic side is the only configured provider.
 
     The canonical credential-shape test, so that backend selection, the TraceLens
-    runner and the forge fellow cannot disagree about which shape they are in.
+    runner and the forge kernel backend cannot disagree about which shape they are in.
     Retired provider variables (``DEEPSEEK_*``) are deliberately not consulted:
     :func:`deepseek_compat_env` migrates those onto the standard pair first.
     """

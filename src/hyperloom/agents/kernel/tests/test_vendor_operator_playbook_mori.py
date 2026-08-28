@@ -419,7 +419,7 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
     call = captured[0]
     assert call["kernel_anchor"] == str(workspace / "mori_ep_config.py")
     assert call["driver"] == str(workspace / "driver.py")
-    assert call["fellow"] == "aiter-fellow"
+    assert call["kernel backend"] == "aiter"
     assert call["target_functions"] == ["get_ep_launch_config", "dispatch", "combine"]
     assert call["extra_env"]["KERNELFORGE_INCLUDE_MORI_KB"] == "1"
     assert call["program_md_file"] == str(workspace / "program.md")

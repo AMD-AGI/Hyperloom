@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from kernelforge.llm.git import git
-from kernelforge.fellows.constants import resolve_language_dirs
+from kernelforge.kernel_backends.constants import resolve_language_dirs
 from kernelforge.orchestrator.contracts import EvidenceRef
 from kernelforge.orchestrator.supervisor import latest_supervisor_ruling_path
 from kernelforge.durable_io import atomic_write_text
@@ -233,7 +233,8 @@ class AnalysisEvidenceMixin:
             try:
                 from kernelforge.knowledge import build_forge_knowledge
 
-                backend = (self.ic.fellow or "").removesuffix("-fellow") or self.ic.backend or ""
+                stored = (self.ic.kernel_backend or "").removesuffix("-fellow")  # rename: keep-literal
+                backend = stored or self.ic.backend or ""
                 root = Path(local_knowledge_root)
                 language = resolve_language_dirs(backend, root)
                 include_aiter = backend == "aiter" or any(

@@ -441,7 +441,7 @@ def collect_references(
     *,
     workspace_dir: str,
     client: PRMonitorClient | None = None,
-    fellow: str = "",
+    kernel_backend: str = "",
     git_remote: str = "",
     source_files: Iterable[str] = (),
     operator_name: str = "",
@@ -499,7 +499,7 @@ def collect_references(
 
     workspace = Path(workspace_dir).resolve()
     context = build_context(
-        fellow=fellow,
+        kernel_backend=kernel_backend,
         git_remote=git_remote,
         tracked=tracked,
         source_files=tuple(source_files),

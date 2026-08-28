@@ -80,7 +80,7 @@ def _pr_kb_child_env() -> dict[str, str]:
 def make_agent_fn(
     config: Config,
     program_md: str,
-    fellow_name: str = "ck-fellow",
+    kernel_backend_name: str = "ck",
     pre_task_context: str = "",
     pr_kb_repo: str = "",
     usage: "UsageAccumulator | None" = None,
@@ -188,25 +188,30 @@ def make_agent_fn(
     def _bullets(items: list[str]) -> str:
         return "\n".join(f"  - {i}" for i in items)
 
-    # Load the fellow's prompt as extra domain context; without it the agent
+    # Load the kernel backend's prompt as extra domain context; without it the agent
     # gets only the generic instructions below and misses backend discipline
-    # (e.g. ck-fellow's tile/pipeline tuning + stale-.cuda.o cleaning).
-    fellow_context = ""
+    # (e.g. ck's tile/pipeline tuning + stale-.cuda.o cleaning).
+    kernel_backend_context = ""
     try:
-        from kernelforge.fellows.base import build_single_fellow_prompt
+        from kernelforge.kernel_backends.base import build_single_kernel_backend_prompt
 
-        fellow_context = build_single_fellow_prompt(config, fellow_name, task_type=task_type, source_paths=source_files)
+        kernel_backend_context = build_single_kernel_backend_prompt(
+            config, kernel_backend_name, task_type=task_type, source_paths=source_files
+        )
     except Exception as e:  # noqa: BLE001
-        print(f"  Warning: fellow prompt load failed for {fellow_name} ({e}); using generic prompt", file=sys.stderr)
+        print(
+            f"  Warning: kernel_backend prompt load failed for {kernel_backend_name} ({e}); using generic prompt",
+            file=sys.stderr,
+        )
 
-    # Fellow prompts name build/test/bench/pmc/registers as if they were tools.
+    # Kernel-backend prompts name build/test/bench/pmc/registers as if they were tools.
     # This agent has Bash instead, so frame those names as shell steps it runs
     # and verifies itself, rather than forbidding them.
-    fellow_section = ""
-    if fellow_context:
+    kernel_backend_section = ""
+    if kernel_backend_context:
         # Drop the profile/pmc mentions from this framing when profiling is
         # disabled, so the implementer prompt carries no profiling guidance. (The
-        # loaded fellow_context is backend domain knowledge and is left as-is.)
+        # loaded kernel_backend_context is backend domain knowledge and is left as-is.)
         _self_verbs = (
             "build, run, and profile the kernel YOURSELF via the Bash tool (compile, run the driver, run a profiler)"
             if profiling_enabled
@@ -215,15 +220,15 @@ def make_agent_fn(
         _self_tools = (
             "`build`/`test`/`bench`/`pmc`/`registers`" if profiling_enabled else "`build`/`test`/`bench`/`registers`"
         )
-        fellow_section = (
-            f"{chr(10)}## Backend Expertise ({fellow_name}){chr(10)}"
+        kernel_backend_section = (
+            f"{chr(10)}## Backend Expertise ({kernel_backend_name}){chr(10)}"
             "Backend guidance for choosing and implementing your edit. In this "
             f"loop you {_self_verbs} to verify every change before finishing. "
             f"Where the guidance below names {_self_tools} tools, run those steps "
             "as shell commands via Bash. After you finish, the loop also runs an "
             "SNR pre-filter + benchmark pass on your final kernel, and accepts it "
             "only if the task's own correctness suite passes too."
-            f"{chr(10)}{chr(10)}{fellow_context}"
+            f"{chr(10)}{chr(10)}{kernel_backend_context}"
         )
 
     # `rtk` (token filter) is advertised to the agent ONLY when it's actually on
@@ -329,7 +334,7 @@ explain your rationale in one sentence.
 ## Program (what to optimize and how)
 {program_md}
 {f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""}
-{fellow_section}
+{kernel_backend_section}
 
 ## Instructions
 1. Use Read to fetch the current kernel file (path supplied per invocation).
@@ -392,7 +397,7 @@ repeat until the kernel is CORRECT and FASTER than the current best.
 ## Program (what to optimize and how)
 {program_md}
 {f"{chr(10)}## Prior Knowledge{chr(10)}{pre_task_context}" if pre_task_context else ""}
-{fellow_section}
+{kernel_backend_section}
 
 ## The measurement driver ({driver_base}) — you run it, you never edit it
 `{driver_base}` in the current directory is the SAME script the outer loop uses to

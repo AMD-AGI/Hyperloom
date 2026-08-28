@@ -447,7 +447,7 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
     # Both agent runtimes ship by default: Hyperloom routes every LLM interaction
     # through one of them, and a deployment may be Anthropic-only, OpenAI-only, or
     # both. Omitting openai_codex leaves the TraceLens skill runner and the forge
-    # fellow unable to start on an OpenAI-only gateway.
+    # kernel backend unable to start on an OpenAI-only gateway.
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
         ("openai_codex", "openai-codex>=0.144"),

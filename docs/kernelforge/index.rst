@@ -35,7 +35,7 @@ The source lives under ``src/kernelforge`` in the Hyperloom repository.
     * :doc:`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`
     * :doc:`Fuse a launch-bound decode path </kernelforge/how-to/kernel-fusion>`
     * :doc:`Debug task preparation </kernelforge/how-to/debug-task-preparation>`
-    * :doc:`Add a fellow, tool, or knowledge </kernelforge/how-to/extending>`
+    * :doc:`Add a kernel backend, tool, or knowledge </kernelforge/how-to/extending>`
 
   .. grid-item-card:: Reference
 

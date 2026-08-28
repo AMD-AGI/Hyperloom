@@ -87,7 +87,7 @@ class Experiment:
     experiment_id: str
     task_id: str = ""
     backend: str = ""  # ck, flydsl, triton, aiter
-    fellow: str = ""  # which backend fellow prompt drove this
+    kernel_backend: str = ""  # which kernel backend prompt drove this
     description: str = ""
     target_wall_ms: float | None = None
     baseline_wall_ms: float | None = None

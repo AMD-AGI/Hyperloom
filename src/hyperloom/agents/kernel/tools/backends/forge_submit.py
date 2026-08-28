@@ -162,21 +162,21 @@ _PLATFORM_TO_GFX = {
     "mi355x": "gfx950",
 }
 
-# Triton/python source maps to the triton fellow.
-_SOURCE_TYPE_TO_FELLOW = {
-    "triton": "triton-fellow",
-    "python": "triton-fellow",
+# Triton/python source maps to the triton kernel_backend.
+_SOURCE_TYPE_TO_KERNEL_BACKEND = {
+    "triton": "triton",
+    "python": "triton",
 }
 
-# Compiled-kernel fellows. Opt out with FORGE_DISABLE_COMPILED_FELLOWS=1.
-_COMPILED_SOURCE_TYPE_TO_FELLOW = {
-    "hip_cpp": "hip-fellow",
-    "hip": "hip-fellow",
-    "cuda_cpp": "hip-fellow",
-    "ck": "ck-fellow",
-    "aiter": "aiter-fellow",
-    "hipblaslt": "hipblaslt-fellow",
-    "flydsl": "flydsl-fellow",
+# Compiled-kernel kernel_backends. Opt out with FORGE_DISABLE_COMPILED_KERNEL_BACKENDS=1.
+_COMPILED_SOURCE_TYPE_TO_KERNEL_BACKEND = {
+    "hip_cpp": "hip",
+    "hip": "hip",
+    "cuda_cpp": "hip",
+    "ck": "ck",
+    "aiter": "aiter",
+    "hipblaslt": "hipblaslt",
+    "flydsl": "flydsl",
 }
 
 
@@ -449,32 +449,32 @@ def _resolve_kernel_kind(source_type: str, kernel_kind: str) -> str:
     return ""
 
 
-def _fellow_for_source_type(source_type: str) -> str | None:
-    """Map source_type to a Forge fellow. None if unsupported.
+def _kernel_backend_for_source_type(source_type: str) -> str | None:
+    """Map source_type to a Forge kernel_backend. None if unsupported.
 
-    Triton/python map to triton-fellow. Compiled source types
-    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native fellow by default;
-    opt out with FORGE_DISABLE_COMPILED_FELLOWS=1 for triton-only.
+    Triton/python map to triton. Compiled source types
+    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native kernel backend by default;
+    opt out with FORGE_DISABLE_COMPILED_KERNEL_BACKENDS=1 for triton-only.
     """
     st = (source_type or "").strip().lower()
-    fellow = _SOURCE_TYPE_TO_FELLOW.get(st)
-    if fellow is not None:
-        return fellow
-    if os.environ.get("FORGE_DISABLE_COMPILED_FELLOWS", "").strip().lower() in ("1", "true", "yes"):
+    kernel_backend = _SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
+    if kernel_backend is not None:
+        return kernel_backend
+    if os.environ.get("FORGE_DISABLE_COMPILED_KERNEL_BACKENDS", "").strip().lower() in ("1", "true", "yes"):
         return None
-    return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
+    return _COMPILED_SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
 
 
-def _resolve_fellow(source_type: str, kernel_kind: str) -> str | None:
-    """Resolve the fellow deterministically from language and curated kernel kind."""
+def _resolve_kernel_backend(source_type: str, kernel_kind: str) -> str | None:
+    """Resolve the kernel backend deterministically from language and curated kernel kind."""
     kind = str(kernel_kind or "").strip().lower().replace("-", "_")
     if "flydsl" in kind:
-        return _fellow_for_source_type("flydsl")
+        return _kernel_backend_for_source_type("flydsl")
     if kind == "ck" or kind.endswith("_ck") or kind.startswith("ck_"):
-        return _fellow_for_source_type("ck")
+        return _kernel_backend_for_source_type("ck")
     if "triton" in kind:
-        return _fellow_for_source_type("triton")
-    return _fellow_for_source_type(source_type)
+        return _kernel_backend_for_source_type("triton")
+    return _kernel_backend_for_source_type(source_type)
 
 
 def _git_toplevel(path: str) -> str:
@@ -1681,32 +1681,32 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
 def _openai_only_provider() -> bool:
     """Return true when the OpenAI side is the only configured provider.
 
-    The forge fellow reaches an OpenAI-protocol gateway only through
+    The forge kernel backend reaches an OpenAI-protocol gateway only through
     KernelForge's codex provider, so this predicate is what selects it over the
     claude provider that ``Config.agent_backend='auto'`` would otherwise resolve
     to. The shape test lives in :mod:`hyperloom.common.llm_config` so that the
-    fellow, backend selection and the TraceLens runner cannot disagree.
+    kernel backend, backend selection and the TraceLens runner cannot disagree.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
     return llm_config.is_openai_only()
 
 
-def _apply_fellow_env(env: dict) -> None:
-    """Apply fellow (claude CLI / codex SDK) stability defaults to ``env``.
+def _apply_kernel_backend_env(env: dict) -> None:
+    """Apply kernel backend (claude CLI / codex SDK) stability defaults to ``env``.
 
     Mutates the given child-process env dict ONLY -- never the parent
     ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
     proxy) cannot leak outside this forge attempt. The forge-loop subprocess
-    inherits this env; inside it the fellow drives either the claude CLI
+    inherits this env; inside it the kernel backend drives either the claude CLI
     streaming transport or the codex SDK, per the configured provider side.
     ``setdefault`` keeps operator overrides authoritative.
     """
-    claude_fellow = not _openai_only_provider()
+    claude_kernel_backend = not _openai_only_provider()
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
-    if claude_fellow:
+    if claude_kernel_backend:
         # claude CLI discovery: the child may inherit a stripped PATH, so resolve
         # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
         # to the child PATH.
@@ -1727,7 +1727,7 @@ def _apply_fellow_env(env: dict) -> None:
         base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
         if base_url.endswith("/llm-gateway"):
             env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
-    # Fellow-hung mitigation: bound the claude CLI's own request timeout and cut
+    # KernelBackend-hung mitigation: bound the claude CLI's own request timeout and cut
     # non-essential traffic / autoupdate that can block in headless containers.
     from _llm_stability_env import apply_llm_stability_env
 
@@ -1747,7 +1747,7 @@ def _apply_fellow_env(env: dict) -> None:
     # side, where the codex provider authenticates from OPENAI_API_KEY, and under
     # a subscription token, which any API key would silently override.
     if (
-        claude_fellow
+        claude_kernel_backend
         and not env.get("ANTHROPIC_API_KEY", "").strip()
         and not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     ):
@@ -2728,7 +2728,7 @@ def _run_loop_via_cli(
     branch: str,
     gpu_target: str,
     gpu_type: str,
-    fellow: str,
+    kernel_backend: str,
     program_md_file: str,
     invocation_spec_file: str,
     experiments_dir: Path,
@@ -2745,7 +2745,7 @@ def _run_loop_via_cli(
 
     Shells out to ``kernelforge forge-loop`` (like the GEAK backend shells
     out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung fellow can no longer freeze the orchestrator: the timeout
+    process. A hung kernel backend can no longer freeze the orchestrator: the timeout
     terminates the whole process group, then returns any persisted best
     checkpoint for recovery.
 
@@ -2768,8 +2768,8 @@ def _run_loop_via_cli(
     env = dict(os.environ)
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    # Fellow stability defaults scoped to this child env only.
-    _apply_fellow_env(env)
+    # KernelBackend stability defaults scoped to this child env only.
+    _apply_kernel_backend_env(env)
     # Identity for the commits the loop makes, so no repo .git/config is touched.
     env.setdefault("GIT_AUTHOR_NAME", "forge-bot")
     env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
@@ -2802,8 +2802,8 @@ def _run_loop_via_cli(
         branch,
         "--gpu-target",
         gpu_target,
-        "--fellow",
-        fellow,
+        "--kernel-backend",
+        kernel_backend,
         "--experiments-dir",
         str(experiments_dir),
         "--experiment-id",
@@ -3038,7 +3038,7 @@ def _run_rewrite_via_cli(
     env = dict(os.environ)
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    _apply_fellow_env(env)
+    _apply_kernel_backend_env(env)
     # Same provider pin the generic loop applies through argv, which this command
     # has no options for: it takes no --agent-backend, so its Config reads these.
     # Without them an OpenAI-only deployment resolves "auto" to the claude
@@ -3860,7 +3860,7 @@ def _run_vendor_playbook_loop_via_cli(
     branch: str,
     gpu_target: str,
     gpu_type: str,
-    fellow: str,
+    kernel_backend: str,
     program_md_file: str,
     target_functions: list[str],
     experiments_dir: Path,
@@ -3889,7 +3889,7 @@ def _run_vendor_playbook_loop_via_cli(
     env = dict(os.environ)
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    _apply_fellow_env(env)
+    _apply_kernel_backend_env(env)
     for key, value in (extra_env or {}).items():
         env[str(key)] = str(value)
 
@@ -3912,8 +3912,8 @@ def _run_vendor_playbook_loop_via_cli(
         branch,
         "--gpu-target",
         gpu_target,
-        "--fellow",
-        fellow,
+        "--kernel-backend",
+        kernel_backend,
         "--experiments-dir",
         str(experiments_dir),
         "--experiment-id",
@@ -4141,7 +4141,7 @@ def _run_claimed_vendor_playbook(
         branch=branch,
         gpu_target=gpu_target,
         gpu_type=gpu_type,
-        fellow=str(playbook.get("fellow") or "aiter-fellow"),
+        kernel_backend=str(playbook.get("kernel backend") or "aiter"),
         program_md_file=str(program_md),
         target_functions=[str(f) for f in (playbook.get("target_functions") or [])],
         experiments_dir=experiments_dir,
@@ -4367,7 +4367,7 @@ def submit(
 
     Hyperloom prepares an isolated git worktree / in-place edit, then runs the
     Forge IterationLoop in a hard-killable CLI subprocess (`kernelforge
-    forge-loop`) so a hung fellow can never freeze the orchestrator. Returns a
+    forge-loop`) so a hung kernel backend can never freeze the orchestrator. Returns a
     normalized result dict and writes optimized_versions/ +
     optimization_report.md under output_dir.
     """
@@ -4378,7 +4378,7 @@ def submit(
 
     # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP
     # dispatch/combine) has no rewritable device source to worktree/rewrite --
-    # skip the entire git-worktree / fellow-resolution / rewrite-route pipeline
+    # skip the entire git-worktree / kernel_backend-resolution / rewrite-route pipeline
     # below and copy the validated KernelForge task bundle instead. See
     # _vendor_operator_playbooks.py and KernelForge PR #88.
     if candidate.get("patch_strategy") == "vendor_playbook":
@@ -4402,8 +4402,8 @@ def submit(
         (".cu", ".cuh", ".hip")
     ):
         source_type = "hip_cpp"
-    # Curated kernel_kind refines the fellow choice: an aiter CK .cu is best
-    # tuned by the ck-fellow, not generic HIP; aiter_asm is a prebuilt assembly
+    # Curated kernel_kind refines the kernel backend choice: an aiter CK .cu is best
+    # tuned by the ck, not generic HIP; aiter_asm is a prebuilt assembly
     # core the agent cannot rewrite -> skip cleanly.
     kernel_kind = _resolve_kernel_kind(
         source_type,
@@ -4418,16 +4418,16 @@ def submit(
             time.time() - started,
             skipped=True,
         )
-    fellow = _resolve_fellow(source_type, kernel_kind)
+    kernel_backend = _resolve_kernel_backend(source_type, kernel_kind)
     log.info(
-        "forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
+        "forge dispatch: source_file=%s source_type=%s kernel_kind=%s kernel_backend=%s op=%s",
         source_file,
         source_type,
         kernel_kind or "-",
-        fellow,
+        kernel_backend,
         (candidate or {}).get("operation", ""),
     )
-    if fellow is None:
+    if kernel_backend is None:
         return _normalized(
             2,
             "",
@@ -4587,8 +4587,8 @@ def submit(
         experiments_dir.mkdir(parents=True, exist_ok=True)
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # Run the loop in an isolated, hard-killable subprocess so a hung fellow
-        # can never freeze the orchestrator. Fellow stability env defaults are
+        # Run the loop in an isolated, hard-killable subprocess so a hung kernel backend
+        # can never freeze the orchestrator. KernelBackend stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
         # forge-loop rejects --max-hours below its own MIN_MAX_HOURS (1.0) with a
         # click BadParameter (exit 2) that reads like a forge crash and leaves no
@@ -4638,7 +4638,7 @@ def submit(
             branch=branch,
             gpu_target=gpu_target,
             gpu_type=gpu_type,
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             program_md_file=str(prompt_file),
             invocation_spec_file=invocation_spec_file,
             experiments_dir=experiments_dir,
@@ -4762,7 +4762,7 @@ def submit(
             f"search_start={search_start_ms} best={best_ms} "
             f"mean_case_speedup={mean_case_speedup} improved={improved} "
             f"improved_during_search={improved_during_search} "
-            f"fellow={fellow} gpu={gpu_target} "
+            f"kernel_backend={kernel_backend} gpu={gpu_target} "
             f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )

@@ -2,7 +2,7 @@
 myst:
   html_meta:
     "description": "KernelForge architecture: an autonomous iteration loop that drives one backend-specialized agent per kernel and decides every change on its own measurements."
-    "keywords": "KernelForge, architecture, forge-loop, fellows, Composable Kernel, Triton, HIP, hipBLASLt, FlyDSL, AITER, fusion, knowledge base"
+    "keywords": "KernelForge, architecture, forge-loop, kernel backends, Composable Kernel, Triton, HIP, hipBLASLt, FlyDSL, AITER, fusion, knowledge base"
 ---
 
 # Architecture
@@ -10,7 +10,7 @@ myst:
 KernelForge is organized around one **iteration loop** per kernel. A campaign
 (`kernelforge forge-loop`) owns a git workspace, the kernel it optimizes and
 the driver that measures it, and drives a single writable agent — an
-**implementer** carrying one backend fellow's expertise — through repeated
+**implementer** carrying one kernel backend's expertise — through repeated
 plan → edit → validate → benchmark cycles. The agent works through the Bash tool
 inside that workspace; the loop, not the agent, owns the measurements that
 decide whether a change survives.
@@ -19,7 +19,7 @@ decide whether a change survives.
 
 | Component | Role |
 |:----------|:-----|
-| **Campaign** | The immutable inputs — kernel, driver, fellow, gates, branch — snapshotted so an interrupted run resumes on identical terms |
+| **Campaign** | The immutable inputs — kernel, driver, kernel backend, gates, branch — snapshotted so an interrupted run resumes on identical terms |
 | **Baseline** | Benchmarks the pristine kernel before any edit, so iteration 1 is never kept unconditionally |
 | **Analysis** | Read-only hardware profiling of the current best, producing the evidence bundle the planning stage reads |
 | **Planning** | Read-only compute, memory and algorithm specialists analyze their assigned evidence; their useful work is fused into one executable plan per iteration |
@@ -31,23 +31,23 @@ decide whether a change survives.
 | **Supervisor** | When the search stalls, reviews the trajectory and writes a ruling that redirects the next plan instead of ending the run |
 | **Knowledge base** | Hardware, methodology and per-language knowledge injected into the implementer's prompt; lessons from the run are written back |
 
-## Backend fellows
+## Kernel backends
 
-Nine fellows carry backend expertise. A campaign selects one with
-`--fellow <backend>-fellow`, and that fellow contributes the domain prompt for
+Nine kernel backends carry backend expertise. A campaign selects one with
+`--kernel-backend <backend>`, and that backend contributes the domain prompt for
 the kernel the loop is editing.
 
-| Fellow | Backend expertise |
+| KernelBackend | Backend expertise |
 |:-------|:------------------|
-| `ck-fellow` | Composable Kernel C++ templates: tile shapes, pipelines, instance factories |
-| `flydsl-fellow` | MLIR-based DSL for MFMA-heavy compute: layouts, warp shapes |
-| `triton-fellow` | Triton JIT kernels: block sizes, warps, stages, autotuning |
-| `gluon-fellow` | Gluon, Triton's low-level dialect: explicit layouts, hand-authored software pipeline, register budget, MFMA intrinsics |
-| `aiter-fellow` | Pre-built AITER operators: dispatch, JIT integration, baselines |
-| `hip-fellow` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR management, register pinning |
-| `hipblaslt-fellow` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
-| `intellikit-fellow` | Hand-written gfx950 AMDGCN assembly: MFMA scheduling, LDS layout, hazard management |
-| `fusion-fellow` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
+| `ck` | Composable Kernel C++ templates: tile shapes, pipelines, instance factories |
+| `flydsl` | MLIR-based DSL for MFMA-heavy compute: layouts, warp shapes |
+| `triton` | Triton JIT kernels: block sizes, warps, stages, autotuning |
+| `gluon` | Gluon, Triton's low-level dialect: explicit layouts, hand-authored software pipeline, register budget, MFMA intrinsics |
+| `aiter` | Pre-built AITER operators: dispatch, JIT integration, baselines |
+| `hip` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR management, register pinning |
+| `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
+| `intellikit` | Hand-written gfx950 AMDGCN assembly: MFMA scheduling, LDS layout, hazard management |
+| `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
 
 ## The measurement surface
 

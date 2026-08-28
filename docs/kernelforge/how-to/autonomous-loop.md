@@ -27,7 +27,7 @@ entry the Hyperloom forge backend shells out to). The campaign's immutable
 inputs are snapshotted into `<workspace>/forge_experiments/campaign_config.json`,
 so `--resume` continues an interrupted run from the same workspace.
 
-The campaign derives its backend from the selected fellow. Its immutable
+The campaign derives its backend from the selected kernel_backend. Its immutable
 implementation signature contains the complete canonical editable-source path
 set and stable symbols derived from those sources. Resume and knowledge-base
 reuse therefore use the same source contract without a separate implementation

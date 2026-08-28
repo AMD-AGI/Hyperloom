@@ -25,7 +25,7 @@ of domain experts, creating a critical bottleneck.
 ## The approach
 
 KernelForge optimizes one kernel at a time with an autonomous iteration loop.
-The loop drives an agent carrying one **backend fellow's** expertise —
+The loop drives an agent carrying one **kernel backend's** expertise —
 Composable Kernel, Triton, HIP, hipBLASLt, FlyDSL, AITER, or hand-written gfx950
 assembly — through an enforced development cycle: build, an SNR correctness
 gate, benchmark, hardware-counter (PMC) analysis, then a keep or revert

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Program text for the PORT phase — instructs the flydsl-fellow to translate the
+"""Program text for the PORT phase — instructs the flydsl to translate the
 source kernel into FlyDSL, correctness first. Injected as the agent system prompt
 (stable across attempts, so the SDK prompt cache reuses it).
 

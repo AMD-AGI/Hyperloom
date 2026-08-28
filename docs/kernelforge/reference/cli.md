@@ -41,7 +41,7 @@ to stdout wrapped in `__FORGE_RESULT__` sentinels.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--max-hours <h>` | `1.0` | Runtime budget in hours; the loop is time-driven. Minimum `1.0`. A round is started only when what remains can finish it, so the run ends before the budget does. |
 | `--snr-threshold <dB>` | `30.0` | Fresh-campaign correctness gate, stored immutably; ignored on `--resume`. |
-| `--fellow <name>` | inferred | Fresh campaign: backend fellow override. Unsupported fellows fall back to `flydsl-fellow`. |
+| `--kernel-backend <name>` | inferred | Fresh campaign: kernel backend override. Unsupported kernel backends fall back to `flydsl`. |
 | `--gpu-target <arch>` | none | ROCm compilation architecture, e.g. `gfx950` (also exported to the environment). |
 | `--gpu-type <sku>` | `mi355x` | Hardware SKU used in knowledge-base identities. |
 | `--experiments-dir <dir>` | `<W>/forge_experiments` | Diagnostics and checkpoint root (profiles, optimization potential, tracker checkpoint). |

@@ -24,7 +24,7 @@ builtins.__import__ = blocked_import
 from kernelforge.orchestrator import agent as agent_module
 import kernelforge.knowledge.experience_sink
 from kernelforge.config import Config
-import kernelforge.fellows.base
+import kernelforge.kernel_backends.base
 
 runtime = Config(
     agent_backend="codex",

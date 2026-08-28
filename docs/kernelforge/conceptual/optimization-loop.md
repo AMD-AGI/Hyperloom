@@ -7,7 +7,7 @@ myst:
 
 # Optimization loop
 
-Every fellow follows the same enforced development loop. Skipping a step is
+Every kernel backend follows the same enforced development loop. Skipping a step is
 blocked by the system, so no change is ever accepted without measured evidence.
 
 ## The enforced loop

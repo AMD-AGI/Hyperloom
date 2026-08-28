@@ -39,7 +39,7 @@
       "driver": "driver.py",
       "program_md": "program.md",
       "kb_path": "local_knowledge/framework/mori",
-      "fellow": "aiter-fellow",
+      "kernel_backend": "aiter",
       "target_functions": ["get_ep_launch_config", "dispatch", "combine"],
       "tunable_params": [
         "dispatch_block_num",

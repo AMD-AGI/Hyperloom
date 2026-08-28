@@ -171,7 +171,7 @@ def test_a_failed_lookup_degrades_instead_of_raising(monkeypatch, tmp_path):
     assert (
         _collect_pr_references(
             workspace_dir=str(tmp_path),
-            fellow="aiter",
+            kernel_backend="aiter",
             git_remote="",
             source_files=(),
             operator_name="moe",
@@ -194,7 +194,7 @@ def test_a_service_failure_is_absorbed_like_a_local_one(monkeypatch, tmp_path):
     assert (
         _collect_pr_references(
             workspace_dir=str(tmp_path),
-            fellow="aiter",
+            kernel_backend="aiter",
             git_remote="",
             source_files=(),
             operator_name="moe",
@@ -217,7 +217,7 @@ def test_an_unexpected_failure_is_not_swallowed(monkeypatch, tmp_path):
     with pytest.raises(KeyboardInterrupt):
         _collect_pr_references(
             workspace_dir=str(tmp_path),
-            fellow="aiter",
+            kernel_backend="aiter",
             git_remote="",
             source_files=(),
             operator_name="moe",

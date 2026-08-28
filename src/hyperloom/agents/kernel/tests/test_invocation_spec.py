@@ -356,7 +356,7 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
                 "",
             )
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", FakePopen)
 
     result = forge_submit._run_loop_via_cli(
@@ -368,7 +368,7 @@ def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
         branch="forge/session/scaled_gemm",
         gpu_target="gfx942",
         gpu_type="mi300x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file=str(spec_path),
         experiments_dir=tmp_path / "experiments",
@@ -428,7 +428,7 @@ def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
                 timeout=timeout,
             )
 
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
 
     def terminate_with_checkpoint(_proc):
@@ -457,7 +457,7 @@ def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
         branch="forge/session/scaled_gemm",
         gpu_target="gfx942",
         gpu_type="mi300x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments_dir,

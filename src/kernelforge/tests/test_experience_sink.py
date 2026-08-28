@@ -70,7 +70,7 @@ def _write(config, workspace, **overrides):
         "workspace": str(workspace),
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
-        "fellow": "triton-fellow",
+        "kernel_backend": "triton",
         "gpu_target": "gfx942",
         "experiment_id": "exp1",
         "baseline_wall_ms": 10.0,
@@ -90,7 +90,7 @@ def _records(config, workspace) -> KernelRecipeKB:
     identity, _op, _fw = resolve_loop_identity(
         kernel_path=str(workspace / "kernel.py"),
         kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_type="mi300x",
         framework="standalone",
     )
@@ -348,7 +348,7 @@ def test_a_different_gpu_is_a_different_address(config, workspace):
     identity, _op, _fw = resolve_loop_identity(
         kernel_path=str(workspace / "kernel.py"),
         kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_type="mi355x",
         framework="standalone",
     )
@@ -374,7 +374,7 @@ def test_a_different_producer_is_a_different_address(config, workspace):
     identity, _op, _fw = resolve_loop_identity(
         kernel_path=str(workspace / "kernel.py"),
         kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_type="mi300x",
         framework="standalone",
         producer="fusion",
@@ -393,7 +393,7 @@ def test_an_unset_producer_still_files_under_the_loops_own(config, workspace):
     identity, _op, _fw = resolve_loop_identity(
         kernel_path=str(workspace / "kernel.py"),
         kernel_source=KERNEL_SOURCE,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_type="mi300x",
         framework="standalone",
     )

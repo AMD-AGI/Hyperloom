@@ -1650,7 +1650,7 @@ async def prepare_task(
     program_md: str,
     target_functions: list[str],
     source_files: list[str],
-    fellow: str = "",
+    kernel_backend: str = "",
     snr_threshold: float = DEFAULT_SNR_THRESHOLD_DB,
     preflight: PreflightResult | None = None,
     deadline_sec: float = PREPARE_MAX_WALL_SEC,

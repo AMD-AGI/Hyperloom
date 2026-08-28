@@ -406,8 +406,8 @@ def _rewritable_source(language: str, kind: str, accepted: "Container[str]") -> 
     A traced Triton kernel reports its *language* as ``python`` and records that
     it is Triton in ``kernel_kind``, so the curated kind is the authoritative
     signal -- the precedence ``_invocation_spec._effective_kernel_kind`` already
-    applies, and the one ``_SOURCE_TYPE_TO_FELLOW`` follows when it routes
-    ``python`` to the Triton fellow. Reading the language alone declined every
+    applies, and the one ``_SOURCE_TYPE_TO_KERNEL_BACKEND`` follows when it routes
+    ``python`` to the Triton kernel_backend. Reading the language alone declined every
     Triton kernel the tracer resolved.
 
     Args:

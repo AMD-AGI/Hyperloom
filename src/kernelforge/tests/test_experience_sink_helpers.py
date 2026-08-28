@@ -57,11 +57,11 @@ def test_resolve_operation_survives_derive_exception(monkeypatch):
 # --------------------------------------------------------------------------- #
 # detect_backend_language
 # --------------------------------------------------------------------------- #
-def test_detect_backend_language_fellow_wins():
-    assert sink.detect_backend_language("flydsl-fellow") == "flydsl"
+def test_detect_backend_language_kernel_backend_wins():
+    assert sink.detect_backend_language("flydsl") == "flydsl"
 
 
-def test_detect_backend_language_requires_fellow():
+def test_detect_backend_language_requires_kernel_backend():
     assert sink.detect_backend_language("") == "unknown"
 
 

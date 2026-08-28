@@ -7,7 +7,7 @@ import os
 import pytest
 
 from kernelforge.knowledge.pr_query_context import (
-    FELLOW_REPO_MAP,
+    KERNEL_BACKEND_REPO_MAP,
     PR_REPOS_EXPECTED,
     PR_REPOS_WISHLIST,
     REASON_REPO_UNRESOLVED,
@@ -16,7 +16,7 @@ from kernelforge.knowledge.pr_query_context import (
     check_whitelist,
     extract_keywords,
     normalize_file_path,
-    normalize_fellow,
+    normalize_kernel_backend,
     parse_git_remote,
     resolve_repo,
 )
@@ -24,11 +24,11 @@ from kernelforge.knowledge.pr_query_context import (
 TRACKED = PR_REPOS_EXPECTED
 
 
-def test_normalize_fellow_strips_the_suffix():
-    assert normalize_fellow("flydsl-fellow") == "flydsl"
-    assert normalize_fellow("flydsl") == "flydsl"
-    assert normalize_fellow("  AITER-Fellow ") == "aiter"
-    assert normalize_fellow("") == ""
+def test_normalize_kernel_backend_strips_the_suffix():
+    assert normalize_kernel_backend("flydsl") == "flydsl"
+    assert normalize_kernel_backend("flydsl-fellow") == "flydsl"  # rename: keep-literal
+    assert normalize_kernel_backend("  AITER-Fellow ") == "aiter"  # rename: keep-literal
+    assert normalize_kernel_backend("") == ""
 
 
 @pytest.mark.parametrize(
@@ -49,25 +49,25 @@ def test_parse_git_remote(url, expected):
     assert parse_git_remote(url) == expected
 
 
-@pytest.mark.parametrize("fellow,repo", sorted(FELLOW_REPO_MAP.items()))
-def test_mapped_fellows_resolve_to_a_tracked_repo(fellow, repo):
-    assert resolve_repo(fellow=fellow, tracked=TRACKED) == (repo, "")
+@pytest.mark.parametrize("kernel_backend,repo", sorted(KERNEL_BACKEND_REPO_MAP.items()))
+def test_mapped_kernel_backends_resolve_to_a_tracked_repo(kernel_backend, repo):
+    assert resolve_repo(kernel_backend=kernel_backend, tracked=TRACKED) == (repo, "")
     assert repo in TRACKED
 
 
-@pytest.mark.parametrize("fellow", ["ck", "hipblaslt", "intellikit"])
-def test_unmapped_fellows_fall_to_repo_unresolved(fellow):
+@pytest.mark.parametrize("kernel_backend", ["ck", "hipblaslt", "intellikit"])
+def test_unmapped_kernel_backends_fall_to_repo_unresolved(kernel_backend):
     """Reject approximate repository matches."""
-    assert resolve_repo(fellow=fellow, tracked=TRACKED) == ("", REASON_REPO_UNRESOLVED)
+    assert resolve_repo(kernel_backend=kernel_backend, tracked=TRACKED) == ("", REASON_REPO_UNRESOLVED)
 
 
 def test_git_remote_is_the_second_link_in_the_chain():
-    repo, reason = resolve_repo(fellow="ck", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
+    repo, reason = resolve_repo(kernel_backend="ck", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
     assert (repo, reason) == ("ROCm/ATOM", "")
 
 
-def test_fellow_mapping_wins_over_the_git_remote():
-    repo, reason = resolve_repo(fellow="aiter", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
+def test_kernel_backend_mapping_wins_over_the_git_remote():
+    repo, reason = resolve_repo(kernel_backend="aiter", git_remote="git@github.com:ROCm/ATOM.git", tracked=TRACKED)
     assert (repo, reason) == ("ROCm/aiter", "")
 
 
@@ -89,7 +89,7 @@ def test_nothing_to_resolve_from_is_unresolved():
 
 def test_unknown_tracked_set_skips_the_whitelist_gate():
     """Skip tracked-repository validation when the set is unavailable."""
-    assert resolve_repo(fellow="aiter", tracked=None) == ("ROCm/aiter", "")
+    assert resolve_repo(kernel_backend="aiter", tracked=None) == ("ROCm/aiter", "")
 
 
 def test_absolute_path_becomes_repo_relative():
@@ -236,7 +236,7 @@ def test_wishlist_repo_appearing_later_is_not_flagged_as_unexpected():
 
 def test_build_context_assembles_repo_paths_and_keywords():
     context = build_context(
-        fellow="flydsl",
+        kernel_backend="flydsl",
         tracked=TRACKED,
         source_files=["kernels/moe/mxfp_moe/gemm2.py"],
         operator_name="mxfp_moe_gemm",
@@ -250,7 +250,7 @@ def test_build_context_assembles_repo_paths_and_keywords():
 
 def test_build_context_caps_file_paths():
     context = build_context(
-        fellow="aiter",
+        kernel_backend="aiter",
         tracked=TRACKED,
         source_files=[f"a/f{i}.py" for i in range(10)],
     )
@@ -260,7 +260,7 @@ def test_build_context_caps_file_paths():
 
 def test_build_context_drops_unusable_paths_but_keeps_the_repo():
     context = build_context(
-        fellow="aiter",
+        kernel_backend="aiter",
         tracked=TRACKED,
         source_files=["../escape.py"],
         operator_name="rmsnorm",
@@ -272,7 +272,7 @@ def test_build_context_drops_unusable_paths_but_keeps_the_repo():
 
 
 def test_build_context_without_any_query_source_is_not_usable():
-    context = build_context(fellow="aiter", tracked=TRACKED)
+    context = build_context(kernel_backend="aiter", tracked=TRACKED)
 
     assert context.repo == "ROCm/aiter"
     assert not context.usable

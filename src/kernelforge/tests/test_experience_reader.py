@@ -65,7 +65,7 @@ def _seed(config, workspace, **overrides):
         "workspace": str(workspace),
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
-        "fellow": "triton-fellow",
+        "kernel_backend": "triton",
         "gpu_target": "gfx942",
         "experiment_id": "exp1",
         "baseline_wall_ms": 10.0,
@@ -86,7 +86,7 @@ def _read_args(config, workspace, **overrides):
         "config": config,
         "kernel_path": str(workspace / "kernel.py"),
         "kernel_source": KERNEL_SOURCE,
-        "fellow": "triton-fellow",
+        "kernel_backend": "triton",
         "framework": "standalone",
         "workspace": str(workspace),
     }

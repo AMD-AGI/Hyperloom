@@ -286,7 +286,7 @@ def _pr_refs_event_fields(reason: str, stats: dict) -> dict:
 def _collect_pr_references(
     *,
     workspace_dir: str,
-    fellow: str,
+    kernel_backend: str,
     git_remote: str,
     source_files: Iterable[str],
     operator_name: str,
@@ -306,7 +306,7 @@ def _collect_pr_references(
     try:
         return collect_references(
             workspace_dir=workspace_dir,
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             git_remote=git_remote,
             source_files=source_files,
             operator_name=operator_name,
@@ -759,9 +759,9 @@ def _make_lane_agent_factory(
     help="Hardware SKU for KB identities, e.g. mi355x",
 )
 @click.option(
-    "--fellow",
+    "--kernel-backend",
     default=None,
-    help=("Fresh campaign: backend fellow override. Unsupported fellows fall back to flydsl-fellow."),
+    help=("Fresh campaign: kernel backend override. Unsupported kernel backends fall back to flydsl."),
 )
 @click.option("--program-md-file", default=None, help="Fresh campaign: optional task context copied into the campaign")
 @click.option(
@@ -1015,7 +1015,7 @@ def forge_loop(
     git_branch,
     gpu_target,
     gpu_type,
-    fellow,
+    kernel_backend,
     program_md_file,
     invocation_spec_file,
     experiments_dir,
@@ -1058,7 +1058,7 @@ def forge_loop(
     specialist_probe_scratch_root,
     commit_new_paths,
 ):
-    """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized fellow).
+    """Run ONE Forge IterationLoop as a standalone subprocess (CLI-ized kernel backend).
 
     This is the subprocess entry the Hyperloom forge backend shells out to, so
     the LLM-driven loop runs in an isolated, hard-killable process (like GEAK)
@@ -1158,7 +1158,7 @@ def forge_loop(
             target_functions=target_functions or "",
             operator_name=operator_name or "",
             producer=producer or "",
-            fellow=fellow or "",
+            kernel_backend=kernel_backend or "",
             git_branch=git_branch or "",
             gpu_target=gpu_target or "",
             gpu_type=gpu_type,
@@ -1197,7 +1197,7 @@ def forge_loop(
     snr_threshold = campaign.snr_threshold
     gpu_target = campaign.gpu_target
     gpu_type = campaign.gpu_type
-    fellow = campaign.fellow
+    kernel_backend = campaign.kernel_backend
     task_type = campaign.task_type
     git_branch = campaign.git_branch
     framework = campaign.framework
@@ -1306,8 +1306,8 @@ def forge_loop(
         git_branch=git_branch,
         workspace_dir=workspace_dir,
         experiment_id=experiment_id or "",
-        backend=(fellow or "").split("-", 1)[0],
-        fellow=fellow or "",
+        backend=(kernel_backend or "").split("-", 1)[0],
+        kernel_backend=kernel_backend or "",
         task_type=task_type,
         source_files=source_files_list,
         target_functions=target_functions_list,
@@ -1431,7 +1431,7 @@ def forge_loop(
                 program_md=program_md,
                 target_functions=target_functions_list,
                 source_files=source_files_list,
-                fellow=fellow,
+                kernel_backend=kernel_backend,
                 snr_threshold=snr_threshold,
                 preflight=pf,
                 invocation_spec_file=invocation_spec_file or "",
@@ -1560,7 +1560,7 @@ def forge_loop(
                 kernel=kernel,
                 driver=driver,
                 workspace_dir=workspace_dir,
-                fellow=fellow,
+                kernel_backend=kernel_backend,
                 target_functions=target_functions_list,
                 framework=framework,
                 snr_threshold=snr_threshold,
@@ -1762,7 +1762,7 @@ def forge_loop(
         else:
             pr_result = _collect_pr_references(
                 workspace_dir=workspace_dir,
-                fellow=fellow or "",
+                kernel_backend=kernel_backend or "",
                 git_remote=_git_remote_url(workspace),
                 source_files=campaign.source_files,
                 operator_name=operator_name or "",
@@ -1798,7 +1798,7 @@ def forge_loop(
         program_md=program_md,
         pre_task_context=pr_task_context,
         pr_kb_repo=pr_kb_repo,
-        fellow_name=fellow,
+        kernel_backend_name=kernel_backend,
         insession_gate=gate_on,
         driver_script=driver,
         snr_threshold=snr_threshold,
@@ -1844,7 +1844,7 @@ def forge_loop(
             "program_md": program_md,
             "pre_task_context": pr_task_context,
             "pr_kb_repo": pr_kb_repo,
-            "fellow_name": fellow,
+            "kernel_backend_name": kernel_backend,
             "snr_threshold": snr_threshold,
             "max_blocks": max_blocks,
             "session_timeout_sec": session_timeout_sec,
@@ -2064,7 +2064,7 @@ def forge_loop(
                 loop_runner=loop_runner,
                 workspace_dir=workspace_dir,
                 kernel=kernel,
-                fellow=fellow,
+                kernel_backend=kernel_backend,
                 gpu_target=config.gpu_target,
                 base_sha=base_sha,
                 pristine_baseline_ms=kb_pristine_baseline_ms,

@@ -124,7 +124,7 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
         workspace=str(workspace),
         kernel_path=str(kernel),
         kernel_source=source,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx950",
         experiment_id="local-run",
         baseline_wall_ms=10.0,
@@ -152,7 +152,7 @@ def test_sink_reader_end_to_end_local_warm_start(tmp_path):
         workspace=str(workspace),
         kernel_path=str(kernel),
         kernel_source=source,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         framework="vllm",
     )
 

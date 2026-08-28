@@ -262,7 +262,7 @@ def test_kb_warmstart_reference_only_when_patch_empty(monkeypatch, tmp_path):
     )
 
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), fellow="triton-fellow"
+        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
     )
     assert warm["candidate"] is True
     assert warm["applied"] is False
@@ -295,7 +295,7 @@ def test_write_experience_to_kb_does_not_synthesize_speedup(monkeypatch, tmp_pat
         loop_runner=_LR(),
         workspace_dir=str(tmp_path),
         kernel=str(kernel),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
     )
@@ -314,7 +314,7 @@ def test_kb_warmstart_swallows_reader_error(monkeypatch, tmp_path):
 
     monkeypatch.setattr("kernelforge.knowledge.experience_reader.read_top_solutions", boom)
     warm = integ.kb_warmstart(
-        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), fellow="triton-fellow"
+        config=object(), kernel=str(repo / "kernel.py"), driver="d.py", workspace_dir=str(repo), kernel_backend="triton"
     )
     assert warm == {
         "candidate": False,

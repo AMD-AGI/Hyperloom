@@ -145,7 +145,7 @@ def _publish_producer_solution(
         workspace=str(workspace),
         kernel_path=str(kernel),
         kernel_source=optimized_source,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx950",
         experiment_id=experiment_id,
         baseline_wall_ms=10.0,
@@ -198,7 +198,7 @@ def _warm_start(
         kernel=str(consumer_kernel),
         driver="unused-driver.py",
         workspace_dir=str(consumer_workspace),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         source_files=source_files,
     )
 

@@ -8,7 +8,7 @@ myst:
 # Fuse a launch-bound decode path
 
 `kernelforge forge-fuse` attacks a different bottleneck from the rest of
-KernelForge. The other fellows make one kernel faster. Fusion assumes the
+KernelForge. The other kernel backends make one kernel faster. Fusion assumes the
 kernels are already fast and goes after what is left: a long tail of tiny
 operations -- residual adds, RMSNorm, RoPE, activations, cache writes -- each
 paying a full launch on every decode step. Collapsing a chain of them into one
@@ -58,7 +58,7 @@ chain would be attempted and where in the framework source it lives.
    flipping its default on and running a serving A/B is cheaper than authoring
    anything, so that shortcut runs before the loop.
 4. **Author and validate** each ranked recipe as one `forge-loop` campaign, using
-   the fusion fellow. The loop iterates, gates correctness at SNR >= 30 dB,
+   the fusion kernel_backend. The loop iterates, gates correctness at SNR >= 30 dB,
    benchmarks three times, and commits or reverts.
 5. **Serving smoke** on whatever the loop kept: boot the real framework with
    CUDA graphs **on** and run decode.
@@ -97,7 +97,7 @@ author may write. A kernel written anywhere else would be scored and then lost.
 
 The durable discipline -- CUDA-graph safety, fp32 accumulation inside the
 kernel, one launch replacing the chain, importing the real eager op as the
-parity oracle -- lives in the fusion fellow's prompt and in
+parity oracle -- lives in the fusion kernel backend's prompt and in
 `local_knowledge/languages/fusion/`. Only the per-recipe facts are passed per
 campaign.
 

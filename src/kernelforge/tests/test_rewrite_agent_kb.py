@@ -835,7 +835,7 @@ def test_a_failed_run_experience_write_redacts_and_bounds_the_store_error(
         workspace=str(workspace),
         kernel_path=str(kernel),
         kernel_source=kernel.read_text(encoding="utf-8"),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx950",
         experiment_id="exp-1",
         baseline_wall_ms=10.0,

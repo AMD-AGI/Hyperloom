@@ -220,7 +220,7 @@ def test_kb_warmstart_uses_canonical_path_mapping_end_to_end(
         kernel=str(consumer),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         framework="aiter",
     )
 
@@ -311,7 +311,7 @@ def test_kb_warmstart_cold_starts_without_candidate(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm == {
@@ -332,7 +332,7 @@ def test_kb_warmstart_supports_legacy_monkeypatched_reader_signature(
         config,
         kernel_path,
         kernel_source,
-        fellow,
+        kernel_backend,
         target_functions=None,
         framework="",
         top_k=3,
@@ -352,7 +352,7 @@ def test_kb_warmstart_supports_legacy_monkeypatched_reader_signature(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm == {
@@ -384,7 +384,7 @@ def test_kb_warmstart_propagates_reader_no_hit_status(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm == {
@@ -423,7 +423,7 @@ def test_fresh_kb_lookup_clears_stale_references(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     if lookup_mode == "error":
@@ -474,7 +474,7 @@ def test_kb_warmstart_applies_ranked_solution_when_safe(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -504,7 +504,7 @@ def test_kb_warmstart_tries_next_candidate_when_first_ranked_fails(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is True
@@ -536,7 +536,7 @@ def test_kb_warmstart_persists_all_available_references_without_truncation(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     root = repo / "forge_experiments" / "kb_references"
@@ -679,7 +679,7 @@ def test_kb_warmstart_resume_skips_read_and_restores_reference_pointer(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         resume=True,
     )
 
@@ -702,7 +702,7 @@ def test_kb_warmstart_applies_benches_and_commits(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -754,7 +754,7 @@ def test_kb_warmstart_preserves_candidate_measurements_and_repeat(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         bench_repeat=4,
     )
 
@@ -819,7 +819,7 @@ def test_kb_warmstart_uses_three_measurement_medians(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is True
@@ -899,7 +899,7 @@ def test_kb_warmstart_matches_mean_only_keep_policy(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is expected_applied
@@ -923,7 +923,7 @@ def test_kb_warmstart_is_reference_only_without_pristine_baseline(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is False
@@ -954,7 +954,7 @@ def test_kb_warmstart_preserves_preexisting_staged_changes(
         kernel=str(kernel),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is False
@@ -979,7 +979,7 @@ def test_kb_warmstart_rollback_preserves_existing_untracked_and_removes_new(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         source_files=[str(helper)],
     )
 
@@ -1004,7 +1004,7 @@ def test_kb_warmstart_commits_allowed_new_source_file(monkeypatch, tmp_path):
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         source_files=[str(helper)],
     )
 
@@ -1029,7 +1029,7 @@ def test_kb_warmstart_mismatched_candidate_falls_back_when_patch_does_not_apply(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -1057,7 +1057,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_bench(monkeypatch, tm
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -1081,7 +1081,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_fails_correctness(monkeypat
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -1123,7 +1123,7 @@ def test_rejected_warmstart_removes_only_new_untracked_probe_artifacts(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is False
@@ -1148,7 +1148,7 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["candidate"] is True
@@ -1161,20 +1161,20 @@ def test_kb_warmstart_rolls_back_when_applied_kernel_is_slower(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize(
-    "fellow",
+    "kernel_backend",
     [
-        "triton-fellow",
-        "hip-fellow",
-        "ck-fellow",
-        "flydsl-fellow",
-        "aiter-fellow",
-        "hipblaslt-fellow",
+        "triton",
+        "hip",
+        "ck",
+        "flydsl",
+        "aiter",
+        "hipblaslt",
     ],
 )
 def test_kb_warmstart_applies_for_every_backend_when_driver_validates(
     monkeypatch,
     tmp_path,
-    fellow,
+    kernel_backend,
 ):
     repo = _init_repo(tmp_path)
     _patch_read_solution(monkeypatch, APPLICABLE_PATCH)
@@ -1191,7 +1191,7 @@ def test_kb_warmstart_applies_for_every_backend_when_driver_validates(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow=fellow,
+        kernel_backend=kernel_backend,
     )
 
     assert warm["candidate"] is True
@@ -1225,7 +1225,7 @@ def test_kb_warmstart_attempts_candidate_on_implementation_mismatch(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is True
@@ -1247,7 +1247,7 @@ def test_kb_warmstart_reference_only_when_pristine_baseline_unavailable(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is False
@@ -1272,7 +1272,7 @@ def test_kb_warmstart_applies_patch_to_undeclared_non_protected_source(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         source_files=[],
     )
 
@@ -1305,7 +1305,7 @@ def test_kb_warmstart_rejects_patch_to_protected_config(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         source_files=[],
     )
 
@@ -1346,7 +1346,7 @@ def test_kb_warmstart_rejects_and_restores_on_commit_failure(
         kernel=str(repo / "kernel.py"),
         driver="driver.py",
         workspace_dir=str(repo),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
     assert warm["applied"] is False
@@ -1408,7 +1408,7 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
         loop_runner=_FakeLoopRunner(),
         workspace_dir=str(tmp_path),
         kernel=str(kernel),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
         pristine_baseline_ms=12.0,
@@ -1419,7 +1419,7 @@ def test_write_experience_to_kb_extracts_run_context(monkeypatch, tmp_path):
     assert captured["workspace"] == str(tmp_path)
     assert captured["kernel_path"] == str(kernel)
     assert captured["kernel_source"] == kernel.read_text()
-    assert captured["fellow"] == "triton-fellow"
+    assert captured["kernel_backend"] == "triton"
     assert captured["gpu_target"] == "gfx942"
     assert captured["experiment_id"] == "exp123"
     assert captured["baseline_wall_ms"] == 12.0
@@ -1460,7 +1460,7 @@ def test_write_experience_to_kb_names_the_failure_that_stopped_the_publish(
         loop_runner=_FakeLoopRunner(),
         workspace_dir=str(tmp_path),
         kernel=str(kernel),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
     )
@@ -1524,7 +1524,7 @@ def test_write_uses_pristine_campaign_signature_after_helper_is_added(
         loop_runner=Runner(),
         workspace_dir=str(tmp_path),
         kernel=str(kernel),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx942",
         base_sha="base",
         target_functions=["different_caller_target"],
@@ -1672,7 +1672,7 @@ def test_a_store_failure_reaches_the_publish_status_already_redacted(
         loop_runner=_FakeLoopRunner(),
         workspace_dir=str(tmp_path),
         kernel=str(kernel),
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx950",
         base_sha="base",
         pristine_baseline_ms=12.0,

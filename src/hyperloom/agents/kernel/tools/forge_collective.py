@@ -68,8 +68,8 @@ MIN_CAMPAIGN_TIMEOUT_SEC = 60
 EXPERIMENT_ID = "hyperloom_collective"
 #: aiter implements every collective this lane can reach -- all-reduce,
 #: reduce-scatter and all-gather all live in its custom_all_reduce sources -- so
-#: its fellow (and the matching knowledge base) is the correct specialist.
-COLLECTIVE_FELLOW = "aiter"
+#: its kernel backend (and the matching knowledge base) is the correct specialist.
+COLLECTIVE_KERNEL_BACKEND = "aiter"
 FORGE_SHUTDOWN_GRACE_SEC = 30
 
 
@@ -187,7 +187,7 @@ def _build_cmd(
         raise ValueError("snr_threshold must be finite")
     _add_opt(cmd, snr_threshold, "--snr-threshold")
     _add_opt(cmd, args.get("gpu_target"), "--gpu-target")
-    _add_opt(cmd, COLLECTIVE_FELLOW, "--fellow")
+    _add_opt(cmd, COLLECTIVE_KERNEL_BACKEND, "--kernel-backend")
     _add_opt(cmd, args.get("max_hours"), "--max-hours")
     if isinstance(deadline_unix, bool) or not isinstance(deadline_unix, int) or deadline_unix <= 0:
         raise ValueError("deadline_unix must be a positive integer")

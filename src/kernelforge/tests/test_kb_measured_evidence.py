@@ -182,7 +182,7 @@ def _publish_candidate(
         workspace=str(workspace),
         kernel_path=str(kernel),
         kernel_source=optimized_source,
-        fellow="triton-fellow",
+        kernel_backend="triton",
         gpu_target="gfx950",
         experiment_id=f"producer-{name}",
         baseline_wall_ms=10.0,
@@ -257,7 +257,7 @@ def _warm_start(workspace: Path, kernel: Path) -> dict:
         kernel=str(kernel),
         driver="unused-driver.py",
         workspace_dir=str(workspace),
-        fellow="triton-fellow",
+        kernel_backend="triton",
     )
 
 

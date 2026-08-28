@@ -4,7 +4,7 @@
 """The contract the fusion harness must satisfy.
 
 Two prompts state this contract -- the per-recipe authoring prompt, which knows
-the exact path and env flags, and the fusion fellow's system prompt, which does
+the exact path and env flags, and the fusion kernel backend's system prompt, which does
 not. They render from here so the harness an author writes and the harness the
 loop parses cannot describe different files.
 """

@@ -288,7 +288,7 @@ class TestShadowRepo:
             source_files=list(shadow.created_paths),
             program_md_file=str(program),
             git_branch=SHADOW_BRANCH,
-            fellow="fusion-fellow",
+            kernel_backend="fusion",
             task_type="repository",
             producer="fusion",
             operator_name="residual_add_rmsnorm",
@@ -597,7 +597,7 @@ class TestCampaignCommand:
             fused_module="/sgl/models/lfm2_fused_residual_add_rmsnorm.py",
         )
         assert "forge-loop" in cmd
-        assert cmd[cmd.index("--fellow") + 1] == "fusion-fellow"
+        assert cmd[cmd.index("--kernel-backend") + 1] == "fusion"
         assert cmd[cmd.index("--task-type") + 1] == "repository"
         # The loop refuses an unnamed / main / master branch, and a shadow
         # repository is freshly initialized onto exactly one of those.
