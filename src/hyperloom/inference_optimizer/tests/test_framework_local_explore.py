@@ -510,3 +510,48 @@ def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path)
     )
 
     assert stub.shared_state.apply_fail_retry_pending == []
+
+
+@pytest.mark.asyncio
+async def test_an_apply_retry_is_scoped_to_the_cycle_that_queued_it(tmp_path: Path):
+    """The gap id and the attempt number both repeat across macro-cycles.
+
+    Without the cycle scope, a second cycle's first retry for the same gap
+    returns the settled task from the first cycle, and the re-author it asked
+    for never runs.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+
+    await stub._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    stub.shared_state.macro_cycle = 2
+    await stub._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+
+    keys = [c["idempotency_key"] for c in stub.tasks.created]
+    assert len(set(keys)) == 2
+    assert keys[1].endswith("-c2")
+
+
+@pytest.mark.asyncio
+async def test_the_retry_drain_carries_the_batch_the_failure_belonged_to(tmp_path: Path):
+    """The candidate row does not always carry the batch the round ran under.
+
+    The rearm resolves it from the executor result and records it, but the
+    drain dropped it, so the re-dispatched specialist keyed its idempotency
+    and its progress rows on an empty batch -- colliding with every other
+    batch-less retry for the same candidate.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+    stub.shared_state.apply_fail_retry_pending = [
+        {
+            "cand_id": "c1",
+            "batch_id": "batch-7",
+            "lane": "perf_framework",
+            "attempt": 2,
+            "candidate": {"candidate_id": "c1", "framework": "sglang"},
+        }
+    ]
+
+    await stub._drain_apply_fail_retry_pending()
+
+    keys = [c["idempotency_key"] for c in stub.tasks.created]
+    assert any("batch-7" in k for k in keys), keys

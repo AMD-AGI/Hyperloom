@@ -544,7 +544,6 @@ class FrameworkPhase(CoordinatorCollaborator):
             "lane": lane,
             "attempt": attempt,
             "retry_feedback": res.get("retry_feedback") or [],
-            "prior_patches": res.get("prior_patches") or [],
             "candidate": candidate,
             "specialist_task_id": str(res.get("specialist_task_id") or ""),
         }
@@ -565,6 +564,7 @@ class FrameworkPhase(CoordinatorCollaborator):
         *,
         lane: str,
         candidate: "dict[str, Any] | None" = None,
+        batch_id: str = "",
         specialist_task_id: str = "",
         attempt: int = 1,
         retry_feedback: "list[dict[str, Any]] | None" = None,
@@ -582,6 +582,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         Args:
             lane: ``"perf_framework"`` or ``"perf_explore"``.
             candidate: The candidate dict (for perf_framework lane).
+            batch_id: The failing round's batch, used when the candidate row
+                does not carry one; it keys the retry's idempotency and its
+                progress rows.
             specialist_task_id: The original specialist task that produced the
                 failing patch (for worktree reuse + provenance).
             attempt: Retry attempt number (1-based; appended to idempotency key).
@@ -597,7 +600,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             log.warning("_enqueue_author_specialist: unsupported lane=%s — skipping", lane)
             return ""
 
-        candidate = candidate or {}
+        candidate = dict(candidate or {})
+        if batch_id and not candidate.get("batch_id"):
+            candidate["batch_id"] = batch_id
         retry_feedback = retry_feedback or []
         state = self.shared_state
 
@@ -713,14 +718,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             "source": "coordinator_internal",
             "notes": notes,
             "apply_retry_attempt": attempt,
-            "prior_patches": retry_feedback[0].get("patch") if retry_feedback else "",
             **self._framework_gpu_params(),
         }
         try:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001
             pass
-        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}"
+        # The gap id and the attempt both repeat across cycles, so without the
+        # cycle scope a later cycle's retry returns the settled earlier task.
+        idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._cycle_idem_suffix()}"
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         try:
             spec_task, _ = await self.tasks.create_or_return_existing(
@@ -773,12 +779,14 @@ class FrameworkPhase(CoordinatorCollaborator):
             attempt = int(ctx.get("attempt") or 1)
             candidate = ctx.get("candidate") or {}
             specialist_task_id = str(ctx.get("specialist_task_id") or "")
+            batch_id = str(ctx.get("batch_id") or "")
             retry_feedback = list(ctx.get("retry_feedback") or [])
             vetting_drops = list(ctx.get("vetting_drops") or [])
             try:
                 await self._enqueue_author_specialist(
                     lane=lane,
                     candidate=candidate,
+                    batch_id=batch_id,
                     specialist_task_id=specialist_task_id,
                     attempt=attempt,
                     retry_feedback=retry_feedback,
