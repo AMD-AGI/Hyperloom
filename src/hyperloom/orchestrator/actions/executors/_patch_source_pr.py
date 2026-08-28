@@ -52,11 +52,10 @@ def _git_head_sha(framework_root: Path) -> tuple[str | None, str]:
 
 
 def _pr_number_of(candidate: dict[str, Any]) -> int:
-    """Read a candidate's PR number, or 0 when it does not carry a usable one.
+    """Read a candidate's PR number, or 0 when it carries no usable one.
 
-    The row reaches us from the framework agent's KB and from LLM-authored
-    proposals, so the field arrives as an int, a decimal string, ``"#1234"``,
-    or prose.
+    The row reaches us from the KB and from LLM-authored proposals alike, so
+    the field arrives as an int, a decimal string, ``"#1234"``, or prose.
 
     Args:
         candidate: The PR metadata row.

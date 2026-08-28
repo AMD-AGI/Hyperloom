@@ -539,7 +539,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     """Build the DECISION FRAMEWORK section lines.
 
     Covers the per-tick selection order, FAILURE RECOVERY, and the
-    EXPLORE-scoped IDEA GENERATION block.
+    Config-arm IDEA GENERATION block.
 
     Args:
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
@@ -687,7 +687,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
 
 
 def _idea_generation_lines() -> list[str]:
-    """Build the EXPLORE-scoped IDEA GENERATION block.
+    """Build the config-arm IDEA GENERATION block.
 
     Returns:
         list[str]: Markdown lines describing how to compose the next
@@ -1116,7 +1116,7 @@ def default_enabled_actions(
         no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
             intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
         no_explore (bool): When ``True``, drop the ``explore`` grid-runner
-            action (EXPLORE phase is skipped).
+            action (the optimisation phase is skipped).
 
     Returns:
         tuple[str, ...]: The filtered enabled-action set, preserving

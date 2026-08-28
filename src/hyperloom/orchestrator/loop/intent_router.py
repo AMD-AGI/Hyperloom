@@ -541,9 +541,7 @@ class IntentRouter:
             pa_params = {}
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
-            # A pre-screen carries its candidate id at the top level and has no
-            # params; the executor and PolicyGate look the verdict up under the
-            # same subject the dispatched task's params will name.
+            # A pre-screen carries its candidate id at the top level, not in params.
             sid_candidate = patch_verdict_subject({**pa_params, **(pending.payload or {})})
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.

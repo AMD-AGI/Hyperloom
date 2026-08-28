@@ -4,9 +4,9 @@
 """Phase state machine.
 
 Pure functions over a frozen SharedState; Coordinator is the only writer.
-Chain PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE
-(monotonic within a macro-cycle; SWEEP reloops back to EXPLORE / FRAMEWORK_AGENT
-across macro-cycles until convergence, budget, or the cycle cap forces CLOSE).
+Chain PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE (monotonic
+within a macro-cycle; SWEEP reloops back to FRAMEWORK_AGENT across macro-cycles
+until convergence, budget, or the cycle cap forces CLOSE).
 Any phase → CLOSE on terminal/abort; ``recover`` is phase-orthogonal.
 """
 
@@ -206,12 +206,12 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
         "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
         "sweep_budget_exhausted",
-        "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
+        "no_kernel_skipped",  # FRAMEWORK_AGENT → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
         "optimize_no_more_leverage",  # OPTIMIZE → KERNEL_AGENT (non-terminal): both arms plateaued, or skip_to_sweep
         "kernel_no_more_leverage",  # KERNEL_AGENT → SWEEP (non-terminal) via skip_to_sweep
         # Cyclic phase machine back-edge reasons (transitions that reopen a macro-cycle).
-        "cycle_reloop",  # SWEEP → FRAMEWORK/EXPLORE; opens a new macro-cycle while budget + leverage remain
+        "cycle_reloop",  # SWEEP → FRAMEWORK_AGENT; opens a new macro-cycle while budget + leverage remain
         "global_converged",  # SWEEP → CLOSE; cyclic leverage exhausted across macro-cycles (also a terminal stop_reason)
         # Terminal exits (any phase → CLOSE)
         "robustness_escalated",
@@ -392,12 +392,12 @@ import os as _os_env  # noqa: E402
 
 # FRAMEWORK per-candidate plateau: after this many consecutive resolved
 # candidates without a KEEP (including non-benchmarked terminal outcomes), the
-# phase exits to EXPLORE. A KEEP — or a macro-cycle boundary — resets it.
+# source arm is dry. A KEEP — or a macro-cycle boundary — resets it.
 DEFAULT_FRAMEWORK_PLATEAU_NO_KEEP_STREAK: int = 5
 
 
-# R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT (else EXPLORE) for
-# a new macro-cycle while budget remains and the run hasn't globally converged.
+# R1 macro-cycle reloop: SWEEP loops back to FRAMEWORK_AGENT for a new
+# macro-cycle while budget remains and the run hasn't globally converged.
 
 # Safety ceiling on macro-cycles (defense against a pathological tight loop).
 DEFAULT_MAX_MACRO_CYCLES: int = 1000
@@ -677,7 +677,8 @@ ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
 # ``skip_to_sweep`` is the non-terminal "exhausted the current lever" signal:
-# from EXPLORE it advances to KERNEL, from KERNEL it winds down to SWEEP → CLOSE.
+# from FRAMEWORK_AGENT it advances to KERNEL, from KERNEL it winds down to
+# SWEEP → CLOSE.
 ESCALATE_HINT_VOCAB: frozenset[str] = frozenset(
     {
         ESCALATE_HINT_SKIP_TO_KERNEL,
@@ -1105,8 +1106,8 @@ def phase_cumulative_seconds(
 def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
     """Return total Explore wall-clock seconds across all macro cycles.
 
-    Completed Explore segments are accumulated at every transition out of
-    EXPLORE. If the current phase is still EXPLORE, append the live segment at
+    Completed segments are accumulated at every transition out of the
+    optimisation phase. If it is still current, append the live segment at
     read time so runtime telemetry remains current between transitions. Returns
     ``None`` when a legacy resumed state has no trustworthy historical total.
     """
@@ -1431,9 +1432,6 @@ def compute_plateau_explore(
     if not isinstance(explore_search, dict):
         explore_search = {}
     winners_history = _rows_for_current_cycle(explore_search.get("winners_history") or [], state)
-    tested_ledger = explore_search.get("tested")
-    if not isinstance(tested_ledger, dict):
-        tested_ledger = {}
     recent_winners = list(winners_history[-lookback:])
     recent_keep_gain = 0.0
     for w in recent_winners:
@@ -1484,7 +1482,6 @@ def compute_plateau_explore(
         else:
             break
 
-    tested_this_cycle = len(_rows_for_current_cycle(list(tested_ledger.values()), state))
     triggered = recent_keep_gain < keep_gain_threshold_pct and streak >= empty_streak_threshold
     return triggered, {
         "recent_keep_gain_pct": round(recent_keep_gain, 4),
@@ -1494,7 +1491,6 @@ def compute_plateau_explore(
         "lookback": int(lookback),
         "winners_seen": len(recent_winners),
         "specialist_rounds_seen": len(specialist_rounds),
-        "tested_this_cycle": tested_this_cycle,
     }
 
 
@@ -2882,13 +2878,11 @@ def compute_next_phase(
             # stop_reason instead of opening another macro-cycle.
             if exit_reason == "conc_sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
-            # R1: loop back to EXPLORE (a new macro-cycle) while budget remains
-            # and the run hasn't globally converged (R7); wind down to CLOSE
-            # only when reloop is blocked (budget, convergence, or max_cycles).
+            # R1: open a new macro-cycle while budget remains and the run
+            # hasn't globally converged (R7); wind down to CLOSE only when
+            # reloop is blocked (budget, convergence, or max_cycles).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and optimize_enabled:
-                # Reloop to the highest-leverage layer available: FRAMEWORK when
-                # enabled, else EXPLORE.
                 reloop_target = PHASE_FRAMEWORK_AGENT
                 return (
                     reloop_target,
@@ -3114,7 +3108,8 @@ def bank_phase_segment(state, *, until_unix: float) -> float:
         banked = 0.0
     totals[phase] = banked + segment
     state.phase_elapsed_totals = totals
-    # EXPLORE keeps its own accumulator: it carries a tri-state "unknown" for
+    # The optimisation phase keeps its own accumulator: it carries a
+    # tri-state "unknown" for
     # legacy resumes that status telemetry reports as absent, whereas
     # ``phase_elapsed_totals`` must never report "unknown" — a budget guard
     # would read that as "no cap". The two answer different questions.

@@ -493,23 +493,23 @@ def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path)
     """The patch applied and measured; only the commit failed.
 
     The executor reports that as ``apply_failed`` so the lane winds down, but
-    the rearm reads only the status, so it sent a specialist to rewrite a diff
+    the rearm read only the status, so it sent a specialist to rewrite a diff
     that had already passed the bench and the accuracy gate.
     """
     stub = _Stub(tmp_path, authoring=True, local_explore=False)
-    stub.shared_state.apply_fail_retry_pending = []
+    res = {
+        "status": "apply_failed",
+        "lane": "perf_framework",
+        "candidate": {"candidate_id": "c1"},
+        "specialist_task_id": "t1",
+    }
 
-    stub._maybe_rearm_authored_lane(
-        {
-            "status": "apply_failed",
-            "error_class": "keep_commit_failed",
-            "lane": "perf_framework",
-            "candidate": {"candidate_id": "c1"},
-            "specialist_task_id": "t1",
-        }
-    )
-
+    stub._maybe_rearm_authored_lane({**res, "error_class": "keep_commit_failed"})
     assert stub.shared_state.apply_fail_retry_pending == []
+
+    # A genuine apply failure on the same result still queues a retry.
+    stub._maybe_rearm_authored_lane({**res, "error_class": "patch_did_not_apply"})
+    assert len(stub.shared_state.apply_fail_retry_pending) == 1
 
 
 @pytest.mark.asyncio
@@ -535,10 +535,9 @@ async def test_an_apply_retry_is_scoped_to_the_cycle_that_queued_it(tmp_path: Pa
 async def test_the_retry_drain_carries_the_batch_the_failure_belonged_to(tmp_path: Path):
     """The candidate row does not always carry the batch the round ran under.
 
-    The rearm resolves it from the executor result and records it, but the
-    drain dropped it, so the re-dispatched specialist keyed its idempotency
-    and its progress rows on an empty batch -- colliding with every other
-    batch-less retry for the same candidate.
+    The rearm resolves it from the executor result and records it; the drain
+    dropped it, so the re-dispatched specialist keyed its idempotency on an
+    empty batch and collided with every other batch-less retry.
     """
     stub = _Stub(tmp_path, authoring=True, local_explore=True)
     stub.shared_state.apply_fail_retry_pending = [

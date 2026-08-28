@@ -145,7 +145,7 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 # Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
 
-# Orchestrator-side patch integration step (EXPLORE phase, gated by a Critic verdict).
+# Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Merged explore action.
@@ -302,13 +302,12 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
 )
 
 
-def patch_verdict_subject(params: Mapping[str, Any] | None) -> str:
+def patch_verdict_subject(params: Mapping[str, Any]) -> str:
     """Return the id an ``integrate_patch``'s Critic verdict is filed under.
 
-    An authored patch is reviewed as the specialist that wrote it, so the
-    specialist task id is the subject. An upstream-PR candidate is pre-screened
-    before any specialist exists -- approval there means "spend a bench on this
-    PR" -- so the candidate id is.
+    An authored patch is reviewed as the specialist that wrote it. An
+    upstream-PR candidate is pre-screened before any specialist exists, so the
+    candidate id is what the verdict names.
 
     Args:
         params: The action's params.
@@ -316,11 +315,8 @@ def patch_verdict_subject(params: Mapping[str, Any] | None) -> str:
     Returns:
         The subject id, or ``""`` when the params name neither.
     """
-    values = params if isinstance(params, Mapping) else {}
-    sid = str(values.get("specialist_task_id") or "").strip()
-    if sid:
-        return sid
-    return str(values.get("framework_agent_candidate_id") or "").strip()
+    sid = str(params.get("specialist_task_id") or "").strip()
+    return sid or str(params.get("framework_agent_candidate_id") or "").strip()
 
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
@@ -2546,6 +2542,7 @@ __all__ = [
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
     "BASELINE_ACTION_NAME",
+    "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
@@ -2554,6 +2551,7 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "patch_verdict_subject",
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",

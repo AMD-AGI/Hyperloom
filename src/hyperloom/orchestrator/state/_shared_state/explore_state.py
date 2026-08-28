@@ -67,7 +67,7 @@ class _ExploreStateMixin:
 
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
-        anchor. Called once per EXPLORE round so a long-idle domain's counters
+        anchor. Called once per optimisation round so a long-idle domain's counters
         climb until the Coordinator escalation forces a dispatch."""
         from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
 
@@ -341,7 +341,7 @@ class _ExploreStateMixin:
             self.consecutive_config_only_rounds = 0
 
     def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value.
+        """Increment the per-round specialist dispatch counter; returns post-increment value.
 
         Args:
             n (int): Amount to add to the dispatch counter (default 1).
@@ -429,18 +429,18 @@ class _ExploreStateMixin:
 
     def record_specialist_patch_verdict(
         self,
-        specialist_task_id: str,
+        subject: str,
         verdict: str,
     ) -> None:
-        """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
+        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
 
         Args:
-            specialist_task_id (str): The specialist task id; blank is a
-                no-op.
+            subject (str): The specialist task id for an authored patch, the
+                candidate id for a PR pre-screen; blank is a no-op.
             verdict (str): The Critic verdict; blank clears the recorded
                 verdict to force re-review.
         """
-        sid = str(specialist_task_id or "").strip()
+        sid = str(subject or "").strip()
         if not sid:
             return
         v = str(verdict or "").strip().lower()
@@ -451,18 +451,19 @@ class _ExploreStateMixin:
 
     def get_specialist_patch_verdict(
         self,
-        specialist_task_id: str,
+        subject: str,
     ) -> str:
         """Return the patch verdict, or empty when no Critic decision exists.
 
         Args:
-            specialist_task_id (str): The specialist task id.
+            subject (str): The review subject, as
+                :meth:`record_specialist_patch_verdict` keys it.
 
         Returns:
             str: The recorded verdict, or ``""`` when none exists or the id
                 is blank.
         """
-        sid = str(specialist_task_id or "").strip()
+        sid = str(subject or "").strip()
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""

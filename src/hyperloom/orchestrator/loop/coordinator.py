@@ -144,7 +144,7 @@ def _resolvable_artifacts_from_done(
 ) -> list[dict[str, Any]]:
     """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
 
-    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact via
+    A FRAMEWORK_AGENT specialist may deliver a non-diff tuned artifact via
     ``artifacts_written`` instead of a source patch; it flows through the
     ``integrate_patch`` artifact-install channel. This is the shared routable
     signal used by both the autosubmit and empty-outcome bridges: an artifact is
@@ -283,7 +283,7 @@ def _framework_config_levers_from_done(
     return {}
 
 
-# Hard-trigger thresholds: EXPLORE rounds a domain may go without a specialist
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist
 # dispatch / a KEEP before the Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12

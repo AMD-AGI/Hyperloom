@@ -598,7 +598,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Internal-only baseline cold+hot double-run switch; default-on keeps EXPLORE
+    # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
@@ -749,7 +749,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     closing_report_task_id: str = ""
     # True at END of CLOSE 7-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
-    # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
+    # Auto-roofline gate (optimisation-phase entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
@@ -821,7 +821,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_failure_streak: int = 0
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
-    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → EXPLORE); ``--no-framework-agent`` opts out.
+    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT); ``--no-framework-agent`` opts out.
     framework_agent_phase_enabled: bool = True
     # FRAMEWORK progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
     framework_agent_phase_progress: list[dict[str, Any]] = field(
@@ -949,7 +949,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
-    # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
+    # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)

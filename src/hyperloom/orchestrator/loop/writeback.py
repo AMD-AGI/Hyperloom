@@ -2548,7 +2548,7 @@ class WritebackCollaborator:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: register_seen_pr_ids failed")
-        # Seed high-priority hints as gaps[] so EXPLORE tries them early.
+        # Seed high-priority hints as gaps[] so the config arm tries them early.
         try:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
@@ -3202,7 +3202,7 @@ class WritebackCollaborator:
             # Research scout (parallel, read-only, CPU-only).
             await self._maybe_enqueue_prelude_research_scout()
             # Static-recon (parallel, read-only, CPU-only): seed bridge
-            # candidates as gaps[] before EXPLORE starts.
+            # candidates as gaps[] before the optimisation phase starts.
             await self._maybe_enqueue_prelude_static_recon()
         outcome.changed = changed
         outcome.audit_decision = audit_decision
@@ -4075,8 +4075,8 @@ class WritebackCollaborator:
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
             }
-            # Merged so the derivation sees the mandate's stamp and the
-            # deliverable's markers together; the result wins on a collision.
+            # The mandate's stamp and the deliverable's markers together;
+            # the result wins on a collision.
             lever_kind = patch_lever_kind({**task_params, **result})
             if lever_kind:
                 lift["lever_kind"] = lever_kind

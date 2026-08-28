@@ -1255,7 +1255,7 @@ class DispatcherCollaborator:
                             "FRAMEWORK: candidate discovery ingest failed for task=%s",
                             task.task_id,
                         )
-                # Bump the per-EXPLORE specialist dispatch counter.
+                # Bump the per-round specialist dispatch counter.
                 try:
                     self.shared_state.bump_specialist_dispatched()
                 except Exception:  # noqa: BLE001

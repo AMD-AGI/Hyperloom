@@ -40,11 +40,9 @@ class MachinePhase(PhaseHandler):
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
+        # Only an unset phase means fresh; an unknown one would otherwise
+        # re-run PRELUDE over the earlier build's baseline and KEPT stack.
         if current and current not in _phase_state.PHASE_NAMES:
-            # A phase this build does not have means the session was recorded
-            # by one whose machine differed. Falling through would read as a
-            # fresh start and re-run PRELUDE on top of a session that already
-            # has a KEPT stack, a baseline and hours of measurement.
             raise RuntimeError(
                 f"session was recorded at phase {current!r}, which this build's phase machine "
                 f"does not have (known: {', '.join(_phase_state.PHASE_NAMES)}). "
@@ -308,7 +306,7 @@ class MachinePhase(PhaseHandler):
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
-        # A cyclic EXPLORE plateau winds the cycle down with ``switch_bottleneck``:
+        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``:
         # record the plateaued bottleneck so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
             try:

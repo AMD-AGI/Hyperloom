@@ -461,7 +461,8 @@ class FrameworkPhase(CoordinatorCollaborator):
           status → increment per-candidate apply-fail retry counter; below cap
           clear the in-flight guard so :meth:`_enqueue_author_specialist` can
           be called from the dispatcher; at/above cap stamp a terminal
-          progress row.
+          progress row. A ``keep_commit_failed`` apply failure is excluded:
+          the diff applied and measured, so there is nothing to re-author.
 
         All other statuses for perf lanes are not handled here (they go through
         the existing writeback / progress-stamp paths).
@@ -482,8 +483,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             # Non-apply-failed perf-lane results go through the writeback path.
             return
         if str(res.get("error_class") or "") == "keep_commit_failed":
-            # The patch applied and measured; only the commit failed. Rewriting
-            # it would send a specialist after a defect that is not in the diff.
+            # The patch applied and measured; the defect is not in the diff.
             return
 
         if lane not in ("perf_framework", "perf_explore"):
@@ -576,8 +576,9 @@ class FrameworkPhase(CoordinatorCollaborator):
         Handles the ``perf_framework`` and ``perf_explore`` lanes only
         (enablement uses :meth:`_maybe_enqueue_enablement_specialist`).
         Injects structured apply-failure feedback into the specialist mandate
-        and uses a ``:retry:{n}`` idempotency suffix to get a fresh task that
-        reuses the existing worktree via the idempotency-based worktree lookup.
+        and uses a cycle-scoped ``:retry:{n}`` idempotency suffix to get a
+        fresh task that reuses the existing worktree via the
+        idempotency-based worktree lookup.
 
         Args:
             lane: ``"perf_framework"`` or ``"perf_explore"``.
@@ -592,6 +593,8 @@ class FrameworkPhase(CoordinatorCollaborator):
                 dicts from the failed apply, injected into the specialist mandate.
             critic_feedback: Optional prior Critic advisory (for reauthor retries
                 that also had a Critic ``needs_review`` verdict).
+            vetting_drops: Patch targets the safety gate dropped last round,
+                named in the mandate so the retry does not re-author them.
 
         Returns:
             The dispatched specialist ``task_id`` (empty on failure / skip).
@@ -724,8 +727,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001
             pass
-        # The gap id and the attempt both repeat across cycles, so without the
-        # cycle scope a later cycle's retry returns the settled earlier task.
+        # Gap id and attempt both repeat across cycles.
         idem = f"perf_explore_authoring:{gap_cid}:retry:{attempt}{self._cycle_idem_suffix()}"
         lanes, ttl = self._framework_authoring_lanes_ttl(params, base_ttl_sec=3600)
         try:
@@ -2120,9 +2122,8 @@ class FrameworkPhase(CoordinatorCollaborator):
             progress = []
             self.shared_state.framework_agent_phase_progress = progress
         matching = [row for row in progress if isinstance(row, dict) and self._framework_candidate_key(row) == cand_id]
-        # A KEEP is the last word on a candidate; anything else is an outcome a
-        # later attempt may better. Guarding on "has any row" stranded the KEEP
-        # of a candidate that had failed to enqueue once and was re-dispatched.
+        # A KEEP is the last word on a candidate; any other row is an outcome
+        # a later attempt may better, and is replaced below.
         if any(str(row.get("status") or "") == "kept" for row in matching):
             return
         if matching:

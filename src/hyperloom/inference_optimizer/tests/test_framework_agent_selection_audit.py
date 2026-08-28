@@ -265,9 +265,8 @@ def test_materialize_pr_diff_no_head_resolvable(monkeypatch, tmp_path) -> None:
 def test_materialize_pr_diff_checks_out_nothing(monkeypatch, tmp_path) -> None:
     """Both ends of the diff range are shas, so no tree has to be materialized.
 
-    The mode checked the head out into a worktree and then diffed the bare
-    repo anyway, paying a full checkout of a multi-gigabyte framework tree for
-    a path that never read it.
+    The mode checked the head out into a worktree and diffed the bare repo
+    anyway, paying a full checkout of a multi-gigabyte tree nothing read.
     """
     seen: list[str] = []
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git(seen=seen))
@@ -282,8 +281,7 @@ def test_materialize_pr_diff_ignores_an_unusable_pr_number(monkeypatch, tmp_path
     """The row reaches us from the KB and from LLM-authored proposals alike.
 
     A non-numeric number used to reach ``int()`` and raise out of the
-    executor; it now reads as "no PR number", which is what the caller's
-    fallback chain is there for.
+    executor; it now reads as "no PR number".
     """
     monkeypatch.setattr(fpr_mod, "_run_git", _scripted_run_git())
     ok, err = fpr_mod._materialize_pr_diff_from_head(

@@ -1126,7 +1126,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Auto-dispatch a read-only research scout at PRELUDE (and "
-        "every --research-scout-interval EXPLORE rounds) that "
+        "every --research-scout-interval optimisation rounds) that "
         "collects proven priors — reference launch scripts, model "
         "config.json architecture features, and cross-framework / "
         "NVIDIA research — into ``research_hints.md`` and seeds "
@@ -1138,7 +1138,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="research_scout_interval",
         type=int,
         default=3,
-        help="Re-dispatch the research scout every N EXPLORE rounds with "
+        help="Re-dispatch the research scout every N optimisation rounds with "
         "the current bottleneck context (append-only). Default 3. "
         "Ignored when ``--no-research-scout`` is set.",
     )
@@ -1294,7 +1294,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_keep_gain",
         type=float,
         default=None,
-        help="EXPLORE plateau: max cumulative KEEP-gain (%%) across the "
+        help="Config-arm plateau: max cumulative KEEP-gain (%%) across the "
         "lookback window below which the AND condition fires. "
         "Default 0.5.",
     )
@@ -1303,7 +1303,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_empty_streak",
         type=int,
         default=None,
-        help="EXPLORE plateau: required count of *consecutive* specialist "
+        help="Config-arm plateau: required count of *consecutive* specialist "
         "rounds with empty proposal_set before the AND condition "
         "fires. Default 5.",
     )
@@ -1312,7 +1312,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_lookback",
         type=int,
         default=None,
-        help="EXPLORE plateau: number of trailing rounds the gain sum is computed over. Default 5.",
+        help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
     opt.add_argument(
         "--plateau-kernel-revert-streak",

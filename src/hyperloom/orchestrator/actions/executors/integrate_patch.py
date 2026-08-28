@@ -41,6 +41,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_UPSTRE
 from hyperloom.common.env import is_truthy
 from hyperloom.common.gain_math import gain_pct
 from ..stop_attribution import stopped_by_the_run_class
+from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS
 from ._accuracy_gate import (
     DEFAULT_ENABLEMENT_ACCURACY_FLOOR,
     accuracy_keep_block,
@@ -1549,21 +1550,16 @@ def _enforce_critic_gate(
     shared_state: Any,
     subject: str,
 ) -> "dict[str, Any] | None":
-    """Enforce a permissive Critic verdict before any side effect; returns a
-    ``rejected_by_critic`` dict on failure, else ``None`` when no SharedState
-    is available or the verdict is permissive. ``subject`` is the specialist
-    task id for an authored patch, the candidate id for a PR pre-screen."""
+    """Enforce a permissive Critic verdict on ``subject`` before any side
+    effect; returns a ``rejected_by_critic`` dict on failure, else ``None``
+    when no SharedState is available or the verdict is permissive."""
     if shared_state is None:
         return None
-    try:
-        from ...policy.gate import INTEGRATE_PATCH_PERMISSIVE_VERDICTS as _PERMISSIVE
-    except Exception:  # noqa: BLE001 - avoid a hard import-cycle dependency
-        _PERMISSIVE = frozenset({"approve", "advise"})
     try:
         recorded = shared_state.get_specialist_patch_verdict(subject)
     except AttributeError:
         recorded = ""
-    if (recorded or "").lower() not in _PERMISSIVE:
+    if (recorded or "").lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
         _detail = f"verdict {recorded!r}" if recorded else "no Critic verdict on record"
         # No side effect has occurred yet; reject cleanly (nothing to revert).
         return {
@@ -1827,8 +1823,8 @@ class IntegratePatchExecutor:
             shared_state: SharedState, or ``None``.
 
         Returns:
-            A terminal result when the candidate could not be materialised,
-            else ``None``.
+            A terminal result when the candidate has no permissive Critic
+            verdict or could not be materialised, else ``None``.
         """
         candidate = params.get("candidate") or {}
         if not isinstance(candidate, dict) or not candidate:
@@ -1845,10 +1841,8 @@ class IntegratePatchExecutor:
             # landed must still measure against the real stack top.
             inject_stack_base_params(params, shared_state, anchor=True, overwrite=True)
 
-        # Same pre-side-effect gate the specialist lane runs, on the subject a
-        # pre-screen is reviewed under. This lane fetches a diff from a remote
-        # and applies it to the live framework tree, and a queued or
-        # resume-dispatched task is not re-validated by PolicyGate.
+        # A queued or resume-dispatched task is not re-validated by PolicyGate,
+        # and this lane fetches a remote diff into the live framework tree.
         critic_reject = _enforce_critic_gate(
             shared_state,
             str(params.get("framework_agent_candidate_id") or "").strip(),

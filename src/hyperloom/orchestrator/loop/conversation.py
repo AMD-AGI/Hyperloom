@@ -971,7 +971,7 @@ class ConversationCollaborator:
         return dominant_direction(snaps[-1])
 
     def _bottleneck_redirect_advisory_block(self) -> str:
-        """Render the R3 cyclic bottleneck-redirect advisory (EXPLORE only).
+        """Render the R3 cyclic bottleneck-redirect advisory (optimisation phase only).
 
         Applies when a prior cycle's plateau flagged
         ``pending_bottleneck_switch``. Names the bottleneck we plateaued on, the

@@ -74,10 +74,6 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-# Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``). The ``a/``
-# / ``b/`` prefix is conventional, not required: a diff produced without it
-# writes the bare path, and matching only the prefixed form left an absolute
-# header like ``--- /etc/passwd`` invisible to :func:`patch_escapes_tree`.
 #: The one absolute header a legitimate diff carries: the missing side of an
 #: add or delete. Never treated as an escape.
 _DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
@@ -620,14 +616,12 @@ def is_unified_diff(text: str) -> bool:
 def patch_escapes_tree(patch_text: str) -> str | None:
     """Return the first offending path that escapes the tree, else ``None``.
 
+    Reads the same ``---``/``+++`` header pairs the apply path resolves its
+    targets from, so the gate and the applier cannot disagree on which paths a
+    patch touches.
+
     Args:
         patch_text: The unified-diff text to scan.
-
-    Reads the same ``---``/``+++`` header pairs the apply path resolves its
-    targets from. Scanning lines independently cannot tell a header from a
-    deleted source line that happens to start with ``--``, and the two must
-    agree on which paths a patch touches or one gates on what the other never
-    applies.
 
     Returns:
         The first absolute or ``..``-containing path, or ``None`` when none

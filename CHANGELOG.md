@@ -16,12 +16,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   - `--no-explore` is an alias for `--no-framework-agent`; the two arms cannot
     be disabled separately.
   - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
-    the framework budget option. The merged phase's default share is `0.55`.
+    the framework budget option. The merged phase's default share is `0.40`,
+    against `0.50` for KERNEL_AGENT.
   - Exit reasons `explore_*` and `framework_agent_*` are replaced by
-    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted`,
-    `optimize_budget_cap` and `optimize_force_exit_low_budget`.
-  - Sessions recorded before this change keep their phase labels; the
-    attribution and recorder read paths still understand them.
+    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted` and
+    `optimize_budget_cap`.
+  - **A session recorded at `EXPLORE` cannot be resumed by this build.** Its
+    phase names a machine that no longer exists, and starting over would
+    re-run PRELUDE on top of its baseline and KEPT stack, so the Coordinator
+    refuses at startup. Archived sessions still *read* — the attribution and
+    recorder paths understand the old labels — they just cannot be continued.
 
 - **BREAKING: the `framework_agent` action is retired.** Upstream PRs land
   through `integrate_patch` with `patch_source='upstream_pr'`, the same action
@@ -49,6 +53,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **The upstream-PR arm was gated shut at dispatch.** A PR candidate is
+  pre-screened by the Critic before any specialist exists, so its task carries
+  a candidate id and no `specialist_task_id` — and every enforcement point read
+  only the latter. The verdict was never recorded, PolicyGate denied the
+  dispatched row as if its params had been forged, and the dispatch reconcile
+  could not re-queue it. A patch's review subject is now resolved in one place
+  (the specialist task id for an authored patch, the candidate id for a
+  pre-screen) and `specialist_patch_verdicts` is keyed by it. The executor's
+  upstream-PR lane also gained the pre-side-effect verdict check the specialist
+  lane already ran.
 - **The framework accuracy gate never passed.** `_bench_candidate` read a
   `result_dir` field that does not exist on `VariantResult`, so the eval parse
   searched the process CWD, found nothing, and blocked every KEEP with
