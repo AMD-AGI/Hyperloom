@@ -1664,3 +1664,28 @@ def test_gap_tolerates_a_missing_evidence_file(tmp_path):
     gap, keywords = compose_gap(framework="custom", rewrite_evidence_path=tmp_path / "absent.json")
     assert gap == "improve custom throughput"
     assert keywords == ["custom"]
+
+
+def test_site_stats_record_caps_shape_sigs_and_callers_while_tallies_grow(probe_module):
+    """Capped sets must stop growing while count/wall/nbytes and first/last keep moving."""
+    stats = probe_module._SiteStats()
+    width = probe_module._MAX_CONTAINER_WIDTH
+    callers_cap = probe_module._MAX_CALLERS_PER_SITE
+    for i in range(width + 3):
+        stats.record(elapsed=0.1, nbytes=10, shape_sig=f"s{i}", caller=f"c{i}", at_s=float(i))
+
+    assert stats.count == width + 3
+    assert stats.wall_s == pytest.approx(0.1 * (width + 3))
+    assert stats.nbytes == 10 * (width + 3)
+    assert len(stats.shape_sigs) == width
+    assert len(stats.callers) == callers_cap
+    assert stats.first_s == 0.0
+    assert stats.last_s == float(width + 2)
+
+    stats.record(elapsed=0.5, nbytes=7, shape_sig="overflow-shape", caller="overflow-caller", at_s=99.0)
+    assert stats.count == width + 4
+    assert stats.wall_s == pytest.approx(0.1 * (width + 3) + 0.5)
+    assert stats.nbytes == 10 * (width + 3) + 7
+    assert "overflow-shape" not in stats.shape_sigs
+    assert "overflow-caller" not in stats.callers
+    assert stats.last_s == 99.0
