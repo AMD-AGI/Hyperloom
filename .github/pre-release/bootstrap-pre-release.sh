@@ -208,13 +208,28 @@ run_leg() {
         esac
         echo "HYPERLOOM_SKILL_PATH=${root}/.claude/skills/${demo_skill}/SKILL.md"
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
-        echo "HYPERLOOM_SHM_SIZE=${LEG_SHM:-64g}"
+        local leg_mem leg_shm
+        case "$leg" in
+          *-3h)
+            leg_mem="${DOCKER_LEG_MEM_3H:-256g}"
+            leg_shm="${DOCKER_LEG_SHM_3H:-64g}"
+            ;;
+          *-12h)
+            leg_mem="${DOCKER_LEG_MEM_12H:-512g}"
+            leg_shm="${DOCKER_LEG_SHM_12H:-64g}"
+            ;;
+          *)
+            leg_mem="${LEG_MEM:-256g}"
+            leg_shm="${LEG_SHM:-64g}"
+            ;;
+        esac
+        echo "HYPERLOOM_SHM_SIZE=${leg_shm}"
         echo "E2E_GPU_INDEX=${GPU_INDEX}"
         echo "E2E_RENDERD=${dk_rd}"
         echo "E2E_KFD_GID=${dk_kfd_gid}"
         echo "E2E_DRI_GID=${dk_dri_gid}"
         echo "E2E_LEG_CPUS=${LEG_CPUS:-32}"
-        echo "E2E_LEG_MEM=${LEG_MEM:-128g}"
+        echo "E2E_LEG_MEM=${leg_mem}"
         echo "E2E_NFS_MOUNT=${dk_nfs_mount}"
       fi
     } > "$envf"

@@ -40,10 +40,14 @@
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
 #   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
-#                     (default 128 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod)
+#                     (default 196 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod
+#                     uses 128 CPU; +68 for dockerd + 4 parallel agent/setup processes on
+#                     top of 4x32 CPU-capped nested containers)
 #   LEG_CPU  / LEG_MEM / LEG_EPHEMERAL   baremetal leg resource request
 #                     (default 32 / 512Gi / 512Gi -- sglang 14B-FP8 + roofline/aiter JIT
 #                     exceeded 128Gi/100Gi on 2026-08-28)
+#   DOCKER_LEG_MEM_3H / DOCKER_LEG_MEM_12H / DOCKER_LEG_SHM_3H / DOCKER_LEG_SHM_12H
+#                     nested docker container caps (default 256g / 512g / 64g / 64g)
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
 #                     (default 16200 = 3h+1h+30m / 48600 = 12h+1h+30m). The docker host
 #                     pod uses the MAX over its legs. SaFE kills the pod at the
@@ -57,15 +61,20 @@ set -euo pipefail
 
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
-# Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128,
+# Sized to a proven Running 8-GPU Authoring pod (ref: sglang-kimik3-2): CPU 128 baseline,
+# bumped to 196 for four parallel nested legs (4x32 container CPU caps + host/agent headroom).
 # mem 2048Gi, ephemeral 1792Gi. Every writable path the DinD host has -- the container
 # rootfs AND the /shared-data emptyDir the nested dockerd stores images in -- counts
 # toward this one ephemeralStorage quota, so the host bootstrap requires a
 # layer-deduplicating docker storage driver (overlay2) to stay inside it.
-HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
+HOST_CPU="${HOST_CPU:-196}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
 LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
 LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
+DOCKER_LEG_MEM_3H="${DOCKER_LEG_MEM_3H:-256g}"
+DOCKER_LEG_MEM_12H="${DOCKER_LEG_MEM_12H:-512g}"
+DOCKER_LEG_SHM_3H="${DOCKER_LEG_SHM_3H:-64g}"
+DOCKER_LEG_SHM_12H="${DOCKER_LEG_SHM_12H:-64g}"
 # SaFE workload scheduling priority (Spec.Priority, an int): High=2, Med=1, Low=0
 # (Primus-SaFE common/constant.go). The scheduler orders the queue by this value, and
 # the webhook clamps it into [0,2]. These release-gate legs hold 8 GPUs for up to 14h
@@ -362,6 +371,8 @@ if [ "$want_docker_host" = 1 ]; then
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
     --arg legs "$docker_legs" --argjson gpumap "$gpu_map" \
+    --arg dm3 "$DOCKER_LEG_MEM_3H" --arg dm12 "$DOCKER_LEG_MEM_12H" \
+    --arg ds3 "$DOCKER_LEG_SHM_3H" --arg ds12 "$DOCKER_LEG_SHM_12H" \
     '{
       CI_VERSION:$civ, NFS_ROOT:$nfs,
       MODEL_3H:$m3, MODEL_12H:$m12,
@@ -369,7 +380,9 @@ if [ "$want_docker_host" = 1 ]; then
       ANTHROPIC_API_KEY_B64:$keyb64,
       HYPERLOOM_RUN_MODE:"docker",
       E2E_DOCKER_HOST:"1",
-      DOCKER_LEGS:$legs, DOCKER_GPU_MAP:($gpumap|tostring)
+      DOCKER_LEGS:$legs, DOCKER_GPU_MAP:($gpumap|tostring),
+      DOCKER_LEG_MEM_3H:$dm3, DOCKER_LEG_MEM_12H:$dm12,
+      DOCKER_LEG_SHM_3H:$ds3, DOCKER_LEG_SHM_12H:$ds12
     }
     + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL:$baseurl} end)
     + (if $cheaders == "" then {} else {ANTHROPIC_CUSTOM_HEADERS:$cheaders} end)')"
