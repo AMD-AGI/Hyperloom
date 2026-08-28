@@ -154,8 +154,31 @@ class WorkspaceGuard:
             path = Path(self.spec.cwd) / path
         return path.resolve()
 
+    def _target_exempt(self) -> set[Path]:
+        """Declared targets that the default name globs must not reclaim.
+
+        ``target_files`` is the caller's own per-turn allowlist, so a path on it
+        is by definition permitted to change -- yet ``PROTECTED_GLOBS`` still
+        match it by name. That is right for an implementer turn, whose targets
+        are framework sources and whose harness is off-limits; it is wrong for
+        the turn whose sole deliverable *is* the harness, where the caller lists
+        one ``.forge_fusion/kernel_harness_*.py`` target and the guard then
+        rejects the very file the agent was told to write.
+
+        Explicit protection still wins: ``protected_paths`` and the driver are
+        never exempted, so a caller cannot launder a protected path by also
+        naming it a target. Rollback is unaffected -- every path dropped here is
+        covered by ``_restore_target_snapshots``.
+        """
+        explicit = {self._resolve_path(path) for path in self.spec.protected_paths if path}
+        if self.driver_path is not None:
+            explicit.add(Path(self.driver_path).resolve())
+        return self.target_paths - explicit
+
     def _is_protected(self, relative: str) -> bool:
         """Return whether a repository path belongs to the measurement surface."""
+        if (self.root / relative).resolve() in self._target_exempt():
+            return False
         exact_paths = list(self.spec.protected_paths)
         if self.driver_path is not None:
             exact_paths.append(str(self.driver_path))
@@ -173,12 +196,15 @@ class WorkspaceGuard:
         if self.driver_path is not None:
             exact_paths.append(str(self.driver_path))
         try:
-            return set(
-                protected_path_inventory(
-                    self.root,
-                    exact_paths=exact_paths,
-                    extra_globs=self.spec.protected_globs,
+            return (
+                set(
+                    protected_path_inventory(
+                        self.root,
+                        exact_paths=exact_paths,
+                        extra_globs=self.spec.protected_globs,
+                    )
                 )
+                - self._target_exempt()
             )
         except OSError as error:
             raise WorkspaceSafetyError(

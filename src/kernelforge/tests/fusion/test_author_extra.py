@@ -1266,3 +1266,62 @@ def test_module_directory_inventory_reports_io_failures_as_transient(tmp_path, m
         )
 
     assert raised.value.transient is True
+
+
+def test_declared_harness_target_survives_the_default_name_globs(tmp_path):
+    """A target the caller allowlisted must not be reclaimed by ``*harness*.py``.
+
+    The harness-author turn's whole deliverable is one
+    ``.forge_fusion/kernel_harness_<digest>.py``, declared as its sole
+    ``target_files`` entry (``command.py::_author_baseline_harness``). The
+    default measurement globs match it by name, and the shadow repo keeps the
+    staging directory Git-ignored, so before the exemption the guard rejected the
+    file the agent had just been told to write -- ``forge-fuse --author`` died
+    with ``protected ignored files changed`` on every real run.
+    """
+    import subprocess
+
+    from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+    from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
+
+    repo = tmp_path / "framework"
+    repo.mkdir()
+    (repo / "kernel.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (repo / ".gitignore").write_text(".forge_fusion/\n", encoding="utf-8")
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
+
+    staging = repo / ".forge_fusion" / "kernel_harness_e0120d9d95c2.py"
+
+    def run(targets):
+        spec = AgentRunSpec(
+            system_prompt="",
+            user_prompt="",
+            cwd=str(repo),
+            writable=True,
+            target_files=[str(path) for path in targets],
+            allow_dirty_targets=True,
+            allow_untracked=True,
+            allow_dirty_baseline=True,
+            protected_globs=[],
+            tool_policy=AgentToolPolicy(read=True, search=True, write=True, shell=True),
+        )
+        guard = WorkspaceGuard(spec, dirty_baseline_default=True)
+        guard.prepare()
+        staging.parent.mkdir(exist_ok=True)
+        staging.write_text("BENCH = True\n", encoding="utf-8")
+        return guard
+
+    assert run([staging]).verify() == []
+
+    staging.unlink()
+    # Undeclared, and the name protection is back on: the implementer turn, whose
+    # targets are framework sources, still may not touch the harness.
+    with pytest.raises(WorkspaceSafetyError, match="protected"):
+        run([repo / "kernel.py"]).verify()
