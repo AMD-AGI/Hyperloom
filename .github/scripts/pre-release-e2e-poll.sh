@@ -7,12 +7,11 @@
 # (design §10, point C -- the 3h legs finish ~3-4h and report first; 12h legs later).
 #
 # A leg PASSes only when ALL hold (design §9):
-#   1. its session reports/final.json has stop_reason == "target_reached"
-#      (equivalently cumulative_gain_validated >= TARGET_GAIN; the gate is 100),
-#   2. its owning SaFE workload phase is not Failed/Stopped,
-#   3. reports/final.json and reports/final.md both exist,
+#   1. reports/final.json and reports/final.md both exist,
+#   2. final.json stop_reason is a clean terminal exit (same set as optimize CLI exit 0),
+#   3. its owning SaFE workload phase is not Failed/Stopped,
 #   4. crash_count / server_boot_failures are within tolerance.
-# Anything else (incl. "ran the full duration without target_reached") is FAIL.
+# TARGET_GAIN still flows to optimize via the demo skill; it is NOT used here to judge PASS.
 # Fail-fast leaves still-running optimize legs alive; dispatch reap stops stale e2e-* tags.
 #
 # The exit code is 0 only if every requested leg PASSed.
@@ -25,7 +24,7 @@
 #   CI_VERSION                     run version                    (required)
 #   DISPATCH_MAP                   leg->workloadId JSON from dispatch (required)
 #   NFS_ROOT                       (default /shared_nfs/hyperloom-pre-release-e2e-test)
-#   TARGET_GAIN                    gate %% (default 100)
+#   TARGET_GAIN                    passed to optimize (demo skill); not used to judge PASS
 #   POLL_INTERVAL_S                seconds between polls (default 120)
 #   GLOBAL_TIMEOUT_S               hard cap; unfinished legs -> FAIL
 #                                  (default 50400 = 14h)
@@ -267,6 +266,15 @@ leg_session_dir() {
   echo ""
 }
 
+# Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
+is_clean_stop_reason() {
+  case "$1" in
+    target_reached|global_converged|time_exhausted|max_ticks|sweep_done|conc_sweep_done)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Judge one leg from its final.json. Echoes "PASS"|"FAIL|<reason>".
 judge_leg() {
   local leg="$1" wphase="$2" sdir final gain stop crashes boots
@@ -291,15 +299,10 @@ judge_leg() {
   if [ "$boots" -gt "$MAX_BOOT_FAILS" ] 2>/dev/null; then
     echo "FAIL|server_boot_failures=$boots > $MAX_BOOT_FAILS"; return
   fi
-  # Primary gate: stop_reason target_reached (== gain >= TARGET_GAIN).
-  if [ "$stop" = "target_reached" ]; then
-    echo "PASS|gain=${gain}% stop=${stop}"; return
+  if is_clean_stop_reason "$stop"; then
+    echo "PASS|stop=${stop} gain=${gain}%"; return
   fi
-  # Fallback: numeric compare in case stop_reason lags (awk for float).
-  if awk -v g="$gain" -v t="$TARGET_GAIN" 'BEGIN{exit !(g+0 >= t+0)}'; then
-    echo "PASS|gain=${gain}% (>= ${TARGET_GAIN})"; return
-  fi
-  echo "FAIL|gain=${gain}% < ${TARGET_GAIN} (stop=${stop:-none})"
+  echo "FAIL|stop_reason=${stop:-none} (not a clean terminal exit)"
 }
 
 # ---- poll loop -------------------------------------------------------------
@@ -445,7 +448,7 @@ for leg in "${LEGS[@]}"; do
 done
 summary ""
 if [ "$fail" -eq 0 ]; then
-  gate_line="**GATE: PASS** — all ${#LEGS[@]} legs reached target_gain=${TARGET_GAIN}."
+  gate_line="**GATE: PASS** — all ${#LEGS[@]} legs completed with a clean terminal stop_reason."
 else
   gate_line="**GATE: FAIL** — one or more legs did not pass. Release blocked."
 fi

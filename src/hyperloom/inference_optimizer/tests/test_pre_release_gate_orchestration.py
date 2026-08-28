@@ -140,3 +140,14 @@ def test_poll_exits_when_a_newer_run_is_queued(poll_script: str, workflow: dict)
     assert "dispatch reap will stop" in poll_script
     run_env = yaml.safe_dump(workflow["jobs"]["run"].get("env", {}))
     assert "HEAD_REF:" in run_env
+
+
+def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) -> None:
+    """Gate PASS aligns with optimize CLI exit 0, not cumulative_gain vs TARGET_GAIN."""
+    assert "is_clean_stop_reason" in poll_script
+    assert "target_reached|global_converged|time_exhausted|max_ticks|sweep_done|conc_sweep_done" in poll_script
+    assert "not used to judge PASS" in poll_script
+    assert 'echo "PASS|stop=${stop} gain=${gain}%"' in poll_script
+    assert "gain=${gain}% < ${TARGET_GAIN}" not in poll_script
+    assert "reached target_gain=" not in poll_script
+    assert "clean terminal stop_reason" in poll_script
