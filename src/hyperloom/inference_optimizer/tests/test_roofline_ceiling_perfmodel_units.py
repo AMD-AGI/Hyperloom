@@ -437,3 +437,67 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     """A zero is 'unknown', not 'infinitely slow'; it must not win the min."""
     peak, _kind = rc.select_peak_and_bound(mem, cmp)
     assert peak == max(mem, cmp)
+
+def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
+
+    active = 1_000_000_000
+    weight = 9_000_000_000
+    expected = (100.0 * 1e12 * 2) / (2.0 * active / 2.0)
+    got = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=2,
+        precision_tag="bf16",
+        active_weight_bytes=active,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert got == pytest.approx(expected)
+
+    fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=2,
+        precision_tag="bf16",
+        active_weight_bytes=0,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert fallback == pytest.approx((100.0 * 1e12 * 2) / (2.0 * weight / 2.0))
+    assert fallback > 0.0
+
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="unknown-gpu",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=active,
+            weight_bytes=weight,
+            weight_dtype_bytes=2.0,
+        )
+        == 0.0
+    )
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=0,
+            weight_bytes=0,
+            weight_dtype_bytes=2.0,
+        )
+        == 0.0
+    )
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=active,
+            weight_bytes=weight,
+            weight_dtype_bytes=0.0,
+        )
+        == 0.0
+    )
