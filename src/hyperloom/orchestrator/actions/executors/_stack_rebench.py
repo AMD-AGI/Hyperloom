@@ -36,6 +36,7 @@ class StackRebenchResult:
 
     tput: float | None
     workspace: str | None
+    server_log_path: str | None = None
     warnings: list[str] = field(default_factory=list)
     stable_floor: float = 0.0
     # Set to the ledger class from :mod:`..stop_attribution` when the run itself
@@ -115,11 +116,13 @@ async def measure_stack_rebench(
     rb = results[0] if results else None
     tput: float | None = None
     workspace: str | None = None
+    server_log_path: str | None = None
     warnings: list[str] = []
     error_class = ""
     if rb is not None and rb.status == "succeeded":
         tput = rb.output_throughput
         workspace = rb.workspace
+        server_log_path = rb.server_log_path
         warnings = list(rb.nonfatal_warnings)
     elif rb is not None and stopped_by_the_run_class(getattr(rb, "error_class", "")) is not None:
         error_class = rb.error_class
@@ -132,6 +135,7 @@ async def measure_stack_rebench(
     return StackRebenchResult(
         tput=tput,
         workspace=workspace,
+        server_log_path=server_log_path,
         warnings=warnings,
         stable_floor=stable_floor,
         error_class=error_class,

@@ -4,6 +4,8 @@
 """Coordinator main loop and runtime protocol manager."""
 
 from __future__ import annotations
+import hashlib
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -50,8 +52,9 @@ from .coordinator_helpers import (
     _geak_revalidation_decision,
     _geak_spec_name,
     _geak_sweep_measured_tput,
+    _LAUNCH_ARGV_MARKERS,
+    _launch_argv_from_log,
     _normalize_geak_overlay_dir,
-    _scrape_resolved_launch_flags,
 )
 from ..policy.gate import (
     PolicyDenied,
@@ -2798,6 +2801,7 @@ class WritebackCollaborator:
             if (bv.get("remove_args") or bv.get("unset_envs")) and not current_best.get("args_mode"):
                 current_best["args_mode"] = "replace"
         self.shared_state.current_best = current_best
+        self._stamp_current_best_measurement(bv)
         return True
 
     def _should_run_prelude_bootstrap(self, tput: Any) -> bool:
@@ -3101,6 +3105,7 @@ class WritebackCollaborator:
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
             }
+            self._stamp_current_best_measurement(result)
             changed = True
         if anchor_accepted:
             audit_decision = "promoted"
@@ -4394,6 +4399,79 @@ class WritebackCollaborator:
             "verdicts_seen": len(verdicts),
         }
 
+    @staticmethod
+    def _handoff_launch_identity(env_spec: Mapping[str, Any]) -> str:
+        """Return a stable identity for the complete GEAK baseline launch."""
+        config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        payload = {
+            "base_launch_recipe": str(env_spec.get("base_launch_recipe") or ""),
+            "base_launch_recipe_digest": str(env_spec.get("base_launch_recipe_digest") or ""),
+            "extra_server_args": str(config.get("extra_server_args") or ""),
+            "extra_envs": dict(config.get("extra_envs") or {}),
+            "server_launch_flags": str(config.get("server_launch_flags") or ""),
+            "source_snapshots": list(env_spec.get("source_snapshots") or []),
+            "overlay_pythonpath": str(env_spec.get("overlay_pythonpath") or ""),
+            "overlay_digest": str(env_spec.get("overlay_digest") or ""),
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+    @staticmethod
+    def _launch_recipe_digest(path: str) -> str:
+        """Hash the recipe content so an in-place recipe edit invalidates tput."""
+        try:
+            return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+        except OSError:
+            return ""
+
+    def _measurement_launch_flags(self, measurement: Mapping[str, Any]) -> str:
+        """Read resolved launch flags only from the promoted measurement's evidence."""
+        existing = str(measurement.get("resolved_server_launch_flags") or "").strip()
+        if existing:
+            return existing
+        framework = str(os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+        marker = _LAUNCH_ARGV_MARKERS.get(framework)
+        if not marker:
+            return ""
+        paths = [str(measurement.get("server_log_path") or "").strip()]
+        for key in ("benchmark_workspace", "workspace"):
+            workspace = str(measurement.get(key) or "").strip()
+            if workspace:
+                root = Path(workspace)
+                paths.extend((str(root / "server.log"), str(root.parent / "server.log")))
+        for path in dict.fromkeys(path for path in paths if path):
+            flags = _launch_argv_from_log(path, marker)
+            if flags:
+                return flags
+        return ""
+
+    def _stamp_current_best_measurement(self, evidence: Mapping[str, Any] | None = None) -> None:
+        """Attach the exact promoted config identity to ``current_best``."""
+        cb = self.shared_state.current_best
+        if not isinstance(cb, dict):
+            return
+        evidence = evidence if isinstance(evidence, Mapping) else {}
+        measurement = {
+            "schema_version": 1,
+            "tput": float(cb.get("tput") or 0.0),
+            "benchmark_workspace": str(
+                evidence.get("stack_rebench_workspace")
+                or evidence.get("workspace")
+                or evidence.get("single_workspace")
+                or cb.get("workspace")
+                or ""
+            ),
+            "server_log_path": str(
+                evidence.get("stack_rebench_server_log_path")
+                or evidence.get("server_log_path")
+                or ""
+            ),
+        }
+        measurement["resolved_server_launch_flags"] = self._measurement_launch_flags(measurement)
+        cb["measurement"] = measurement
+        self.shared_state.current_best_measurement = measurement
+        measurement["launch_identity"] = str(self.build_env_spec()["launch_identity"])
+
     def _current_best_launch_config(self) -> dict[str, Any]:
         """The launch config ``current_best`` was measured on.
 
@@ -4432,7 +4510,7 @@ class WritebackCollaborator:
             (see :mod:`source_snapshot`) that reconstructs the patched framework
             tree independent of the mutable live checkout.
           * ``overlay_pythonpath`` — the authored-kernel overlay prefix.
-          * ``launch_recipe`` — the baseline Magpie recipe to launch from.
+          * ``base_launch_recipe`` — the baseline Magpie recipe to launch from.
 
         This is the single source of truth the GEAK handoff forwards so the
         baseline ref is materialized from the SAME layers as ``current_best``
@@ -4440,8 +4518,12 @@ class WritebackCollaborator:
         """
         from ..source_snapshot import source_layer_overlay_dir, source_layer_reproducible
 
+        cb = self.shared_state.current_best if isinstance(self.shared_state.current_best, Mapping) else {}
         materialized = self._current_best_launch_config()
-        stack = [e for e in (getattr(self.shared_state, "optimization_stack", []) or []) if isinstance(e, dict)]
+        # current_best's embedded stack was promoted with its tput. Reading the
+        # mutable global stack here could attach an unrelated source patch after
+        # a resume or partial state write.
+        stack = [e for e in (cb.get("optimization_stack") or []) if isinstance(e, dict)]
         source_snapshots: list[dict[str, Any]] = []
         for entry in stack:
             if entry.get("scope") != "source_patch":
@@ -4472,25 +4554,17 @@ class WritebackCollaborator:
                     "reproducible": source_layer_reproducible(entry),
                 }
             )
-        # FULL resolved engine config (not just the current_best delta): the
-        # complete server-launch flag set the orchestrator actually ran, scraped
-        # from the authoritative launched argv. This is what closes the CONFIG
-        # layer of the cross-harness baseline gap — mem-fraction, radix cache,
-        # chunked-prefill and every other engine knob the recipe/delta never
-        # carried. ``extra_server_args``/``extra_envs`` remain the current_best
-        # DELTA (a consumer merges the delta on top, delta winning on conflict).
-        server_launch_flags = ""
-        try:
-            cb_now = getattr(self.shared_state, "current_best", None)
-            _target_tput = float((cb_now or {}).get("tput") or 0.0) if isinstance(cb_now, Mapping) else 0.0
-            server_launch_flags = _scrape_resolved_launch_flags(
-                getattr(self, "session_dir", ""),
-                str(os.environ.get("FRAMEWORK", "") or "sglang"),
-                target_tput=_target_tput,
-            )
-        except Exception:  # noqa: BLE001 — additive; never block env_spec
-            server_launch_flags = ""
-        return {
+        # ``extra_server_args``/``extra_envs`` remain the current_best delta.
+        # Full engine flags must come from the same promoted measurement, not a
+        # search over historical benchmarks with a similar throughput.
+        state_measurement = getattr(self.shared_state, "current_best_measurement", None)
+        measurement = (
+            state_measurement
+            if isinstance(state_measurement, Mapping) and state_measurement
+            else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
+        )
+        server_launch_flags = self._measurement_launch_flags(measurement)
+        env_spec = {
             "schema_version": 1,
             "config": {
                 "extra_server_args": materialized.get("extra_server_args") or "",
@@ -4501,8 +4575,16 @@ class WritebackCollaborator:
             },
             "source_snapshots": source_snapshots,
             "overlay_pythonpath": materialized.get("final_overlay") or "",
+            "overlay_digest": _geak_overlay_digest(str(materialized.get("final_overlay") or "")),
+            "base_launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
+            "base_launch_recipe_digest": self._launch_recipe_digest(
+                str(getattr(self.shared_state, "baseline_config_path", "") or "")
+            ),
+            # Backward-compatible alias for existing GEAK v2 consumers.
             "launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
         }
+        env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
+        return env_spec
 
     async def _resume_consistency_pass(self) -> dict[str, Any]:
         """One-shot resume audit + recovery for stack/current_best consistency.

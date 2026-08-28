@@ -572,6 +572,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _empty_workspace(slot)
+        (slot / "server.log").write_text("launch evidence\n", encoding="utf-8")
         _write_leak(leak_dir / "inferencex_result.json", tput=1234.0)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -591,6 +592,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     r = results[0]
     assert r.status == "succeeded"
     assert r.output_throughput == pytest.approx(1234.0)
+    assert r.server_log_path == str(output_root / "variant_00_vA" / "server.log")
     assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
 
 

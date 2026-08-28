@@ -1658,7 +1658,7 @@ async def run_grid(
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_existing_log_path(server_log),
+                server_log_path=_measurement_server_log_path(server_log, workspace),
                 note=variant.note,
             )
         )
@@ -2716,6 +2716,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
+                server_log_path=_existing_log_path(server_log) or _existing_log_path(workspace / "server.log"),
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
@@ -2786,6 +2787,24 @@ def _existing_log_path(path: Path) -> str | None:
         str | None: The stringified path, or ``None`` when absent.
     """
     return str(path) if path.exists() else None
+
+
+def _measurement_server_log_path(server_log: Path, workspace: Path) -> str | None:
+    """Return the server log that produced a successful measurement.
+
+    A warm decision/rebench may reuse the server started in the variant's
+    ``warmup_round``; its final measurement workspace therefore has no own
+    ``server.log``. Restrict the fallback to that same variant's warmup
+    workspace rather than scanning historical session logs.
+    """
+    direct = _existing_log_path(server_log) or _existing_log_path(workspace / "server.log")
+    if direct:
+        return direct
+    warmup_dir = workspace.parent / "warmup_round"
+    candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
+    if not candidates:
+        return None
+    return str(max(candidates, key=lambda path: path.stat().st_mtime))
 
 
 def _safe(name: str) -> str:

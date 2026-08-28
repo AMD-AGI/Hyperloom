@@ -1672,6 +1672,7 @@ class ExploreExecutor:
 
                         stack_rebench_tput: float | None = None
                         stack_rebench_workspace: str | None = None
+                        stack_rebench_server_log_path: str | None = None
                         stack_rebench_warnings: list[str] = []
 
                         if enable_stack_rebench and running_base_tput > 0:
@@ -1742,6 +1743,7 @@ class ExploreExecutor:
                                 break
                             stack_rebench_tput = rebench.tput
                             stack_rebench_workspace = rebench.workspace
+                            stack_rebench_server_log_path = rebench.server_log_path
                             stack_rebench_warnings = rebench.warnings
                             stable_floor = rebench.stable_floor
                             # Rebench missed the stability floor: evict as REVERT.
@@ -1759,12 +1761,14 @@ class ExploreExecutor:
                                 round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
                                 round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_server_log_path"] = stack_rebench_server_log_path
                                 round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                                 keep_unstable.append(
                                     {
                                         **keep_entry,
                                         "stack_rebench_tput": stack_rebench_tput,
                                         "stack_rebench_workspace": stack_rebench_workspace,
+                                        "stack_rebench_server_log_path": stack_rebench_server_log_path,
                                         "stack_rebench_warnings": stack_rebench_warnings,
                                     }
                                 )
@@ -1803,11 +1807,13 @@ class ExploreExecutor:
                                 keep_entry["tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_tput"] = stack_rebench_tput
                                 keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
+                                keep_entry["stack_rebench_server_log_path"] = stack_rebench_server_log_path
                                 keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
                                 round_tested[fp]["tput"] = stack_rebench_tput
                                 round_tested[fp]["gain_pct"] = gain
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
                                 round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
+                                round_tested[fp]["stack_rebench_server_log_path"] = stack_rebench_server_log_path
                                 round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
                         else:
                             # Round 2 disabled — KEEP on the cold round-1
