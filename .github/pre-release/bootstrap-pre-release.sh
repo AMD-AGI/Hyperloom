@@ -95,17 +95,17 @@ run_leg() {
   # inject them as E2E_* .env values the setup prompt tells the agent to copy verbatim.
   # renderD = 128 + GPU_INDEX*8 (stride 8, VERIFIED on a real privileged MI355X x8 pod).
   # The pod /etc/group has no `video`/`render` NAMES, so numeric GIDs are required.
-  local dk_image="" dk_rd="" dk_kfd_gid="" dk_dri_gid="" dk_nfs_mount=""
+  local dk_rd="" dk_kfd_gid="" dk_dri_gid="" dk_nfs_mount=""
   if [ "$run_mode" = docker ]; then
     : "${GPU_INDEX:?docker leg needs GPU_INDEX}"
     dk_rd=$(( 128 + GPU_INDEX * 8 ))
     dk_kfd_gid="$(stat -c %g /dev/kfd 2>/dev/null || echo 0)"
     dk_dri_gid="$(stat -c %g "/dev/dri/renderD${dk_rd}" 2>/dev/null || stat -c %g /dev/dri 2>/dev/null || echo 0)"
-    if [ "$backend" = vllm ]; then
-      dk_image="${HYPERLOOM_IMAGE_VLLM:-vllm/vllm-openai-rocm:v0.27.1}"
-    else
-      dk_image="${HYPERLOOM_IMAGE_SGLANG:-lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-srt}"
-    fi
+    # NOTE: we deliberately do NOT inject HYPERLOOM_IMAGE. The demo skill owns the image
+    # list (examples/*/SKILL.md "Suggested Docker images") -- duplicating those tags here
+    # is what caused the wrong sglang tag. Instead the setup-docker-*.md prompt tells the
+    # agent to pick from the skill's list by backend, and for sglang to detect the GPU
+    # arch (gfx950 -> mi35x, gfx942 -> mi30x) via rocminfo and choose the matching tag.
     # The model path (e.g. /shared_nfs/models/<name>) is a SYMLINK into a DIFFERENT
     # /shared_nfs subtree (/shared_nfs/huggingface_models/...). Mounting only NFS_ROOT
     # (the CI subdir) or the model's parent leaves the symlink TARGET unmounted -> broken
@@ -148,7 +148,8 @@ run_leg() {
       # docker leg: hand the container lifecycle to the agent (demo skill) and carry the
       # CI hard constraints it must apply to its `docker run` (see setup-docker-*.md).
       if [ "$run_mode" = docker ]; then
-        echo "HYPERLOOM_IMAGE=${dk_image}"
+        # HYPERLOOM_IMAGE intentionally NOT set: the agent selects it from the skill's
+        # image list (by backend + detected GPU arch). See setup-docker-*.md.
         echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
         echo "HYPERLOOM_SHM_SIZE=${LEG_SHM:-64g}"
         echo "E2E_GPU_INDEX=${GPU_INDEX}"

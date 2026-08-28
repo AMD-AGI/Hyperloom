@@ -14,11 +14,12 @@ setup step for a **docker + SGLang** leg, then stop. Do not run the demo yet.
 A `.env` file exists in the current workspace (`REPO_ROOT`) with these values already
 set: `ANTHROPIC_API_KEY`, `CLAUDE_MODEL`, `USER_DATA_PATH`,
 `HYPERLOOM_RUN_MODE=docker`, `FRAMEWORK=sglang`, `MODEL_PATH`, `TARGET_GAIN`,
-`DEMO_HOURS`, and the container/isolation values the demo skill reads:
-`HYPERLOOM_IMAGE`, `HYPERLOOM_CONTAINER_NAME`, `HYPERLOOM_SHM_SIZE`, plus the CI
+`DEMO_HOURS`, `HYPERLOOM_CONTAINER_NAME`, `HYPERLOOM_SHM_SIZE`, plus the CI
 isolation values `E2E_RENDERD`, `E2E_KFD_GID`, `E2E_DRI_GID`, `E2E_LEG_CPUS`,
 `E2E_LEG_MEM`, `E2E_NFS_MOUNT`. The wheel is already installed via
 `pip install --target .` so a `hyperloom/` package directory is present.
+
+`HYPERLOOM_IMAGE` is **not** in `.env` — you choose it (see "Image selection" below).
 
 ## Fixed decisions
 
@@ -34,6 +35,27 @@ Follow the `hyperloom-setup` skill in **docker** mode with these fixed decisions
 - **LLM provider / model / `USER_DATA_PATH`:** use the values already in `.env`; do
   not change them.
 
+## Image selection
+
+`HYPERLOOM_IMAGE` is not preset — pick it from the demo skill's **"Suggested Docker
+images"** list (do **not** ask the user, and do **not** hard-code a tag from memory).
+This is a `sglang` leg, and the skill lists a different sglang image per GPU
+architecture, so detect the architecture on this host first:
+
+```bash
+gfx="$(/opt/rocm/bin/rocminfo 2>/dev/null | grep -oiE 'gfx9[0-9a-f]+' | head -1)"
+```
+
+- `gfx950` → **MI355X** → use the skill's `sglang MI355X` image.
+- `gfx942` → **MI300X** → use the skill's `sglang MI300X` image.
+
+Read the exact, fully-qualified `docker.io/...` tag for that row **from the skill file**
+(the demo skill's SKILL.md "Suggested Docker images" section) and export it as
+`HYPERLOOM_IMAGE` for the `docker run` below. This is architecture **detection only** —
+it selects the image tag, not which card the leg runs on (the card is pinned by the
+isolation flags below). If `rocminfo` cannot be found or reports no `gfx`, stop and
+report the failure rather than guessing a tag.
+
 ## Hard constraints (automated release gate)
 
 Your `docker run` **MUST** use exactly the flags below. These **replace** the demo
@@ -45,7 +67,7 @@ unchanged. Read the values from `.env`:
 
 - **Container name:** `--name "$HYPERLOOM_CONTAINER_NAME"` (already unique per leg;
   another leg may share this host's dockerd, so do not rename it to a fixed value).
-- **Image:** `"$HYPERLOOM_IMAGE"`.
+- **Image:** the `HYPERLOOM_IMAGE` you selected above (skill list + detected arch).
 - **Single-GPU isolation (REPLACES `--device /dev/dri`):**
   `--device /dev/kfd --device /dev/dri/renderD${E2E_RENDERD}`
 - **Numeric group-add (REPLACES `--group-add video`):**
@@ -60,9 +82,11 @@ unchanged. Read the values from `.env`:
 
 Also:
 
-- Do **not** add any other `--device`, do **not** use `--group-add video`, and do **not**
-  choose GPUs via `rocm-smi`. The single bound `renderD` node + `HIP/ROCR_VISIBLE_DEVICES=0`
-  are what pin this leg to its one card.
+- Do **not** add any other `--device`, and do **not** use `--group-add video`. You may run
+  `rocminfo`/`rocm-smi` to **detect the GPU architecture** for image selection, but do
+  **not** use them to **choose which GPU** the leg runs on: the single bound `renderD` node
+  + `HIP/ROCR_VISIBLE_DEVICES=0` are what pin this leg to its one card. Do not add
+  `HIP_VISIBLE_DEVICES`/`ROCR_VISIBLE_DEVICES` values other than `0`.
 - Do **not** print, echo, or copy secret values (API keys) into output or logs. The key
   lives only in the pod-local `.env` (it reaches the container via `-v $REPO_ROOT:$REPO_ROOT`);
   do **not** write it anywhere else, and never onto NFS outside that `.env`.
