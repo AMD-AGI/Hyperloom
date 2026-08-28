@@ -862,12 +862,15 @@ _kernel_forge_root() {
 # the runtime actually needs: the CLI module, the fusion pipeline, the codex SDK,
 # and that `forge-gemm-tune` is a registered subcommand of the CLI group (the
 # registration runs at import, so `main.commands` is populated by then).
-_KERNEL_AGENTS_READY_PY='
+_kernel_agents_ready() {
+  local probe='
 import sys
 import kernel_agents, kernel_agents.fusion, openai_codex  # noqa: F401
 from kernel_agents.cli import main
 sys.exit(0 if "forge-gemm-tune" in main.commands else 1)
 '
+  "$PYTHON" -c "$probe"
+}
 
 ensure_kernel_agents() {
   # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
@@ -890,7 +893,7 @@ ensure_kernel_agents() {
   # runs as `python -m kernel_agents.cli forge-gemm-tune run`, so a pre-existing
   # install from before that command was registered passes every import here and
   # then dies at the tuning step with "No such command 'forge-gemm-tune'".
-  if "$PYTHON" -c "$_KERNEL_AGENTS_READY_PY" >/dev/null 2>&1; then
+  if _kernel_agents_ready >/dev/null 2>&1; then
     log "kernel_agents already importable with forge-gemm-tune; skipping install (codex SDK present)"
     return 0
   fi
@@ -919,7 +922,7 @@ ensure_kernel_agents() {
   # KernelForge's provider fallback then turns that into a silent claude run that
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "$_KERNEL_AGENTS_READY_PY" \
+  _kernel_agents_ready \
     && log "kernel_agents installed OK from ${root} (claude + codex extras, forge-gemm-tune registered)" \
     || die "kernel_agents / forge-gemm-tune / codex SDK check failed after install from ${root}"
 }

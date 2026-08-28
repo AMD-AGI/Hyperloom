@@ -181,9 +181,7 @@ class TestForgeGemmHelperCoverage:
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
-    def test_forge_gemm_tune_available_probes_the_command_it_will_run(
-        self, monkeypatch
-    ):
+    def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
         # The probe must be the same invocation the tool makes, in the same
         # interpreter: a `kernel-agents` script on PATH from another venv, or a
         # bare `forge_gemm_tune` import, both used to pass here and then fail
@@ -206,17 +204,13 @@ class TestForgeGemmHelperCoverage:
             ]
         ]
 
-    def test_forge_gemm_tune_available_false_when_subcommand_missing(
-        self, monkeypatch
-    ):
+    def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
         # An older kernel_agents imports fine but has no forge-gemm-tune group;
         # click exits 2 on an unknown command.
         monkeypatch.setattr(
             krh.subprocess,
             "run",
-            lambda cmd, **_k: subprocess.CompletedProcess(
-                cmd, 2, "", "Error: No such command 'forge-gemm-tune'."
-            ),
+            lambda cmd, **_k: subprocess.CompletedProcess(cmd, 2, "", "Error: No such command 'forge-gemm-tune'."),
         )
         assert krh._forge_gemm_tune_available() is False
 
@@ -246,9 +240,7 @@ class TestForgeGemmHelperCoverage:
             subprocess.TimeoutExpired(cmd="probe", timeout=120),
         ],
     )
-    def test_forge_gemm_tune_available_swallows_probe_failures(
-        self, monkeypatch, exc
-    ):
+    def test_forge_gemm_tune_available_swallows_probe_failures(self, monkeypatch, exc):
         def _boom(_cmd, **_kwargs):
             raise exc
 
