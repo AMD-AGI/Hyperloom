@@ -16,7 +16,7 @@ sources:
 > extracts live in [`cdna4-isa/`](cdna4-isa/) (`.txt`, load with the Read tool on demand). For *measured*
 > per-instruction cycle/hazard truth (often not in the spec) use the IntelliKit reference at
 > [`../skills/optimize/asm_levers/intellikit/instructions/`](../skills/optimize/asm_levers/intellikit/instructions/);
-> for the authoring model see [`../skills/optimize/asm_levers/overview.md`](../skills/optimize/asm_levers/overview.md).
+> for the authoring model see [`../skills/optimize/asm_levers/asm_decision.md`](../skills/optimize/asm_levers/asm_decision.md).
 
 Pointer file. Chapter-level **text extracts** of the AMD Instinct CDNA4 ISA
 spec are vendored into this knowledge base — `Read`/`Grep` them directly when

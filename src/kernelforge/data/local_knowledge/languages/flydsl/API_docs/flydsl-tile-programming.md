@@ -1,43 +1,91 @@
 ---
 name: flydsl-tile-programming
 description: >
-  Guided step-by-step wizard for producing a new FlyDSL GPU kernel from a requirement:
-  classify the kernel type, pick a skeleton, fill in compute, add control flow / sync / LDS,
-  then test on GPU. Use when the user wants to WRITE a new kernel, port a Triton kernel to
-  FlyDSL, or learn tile programming by following a procedure. For API/layout-algebra lookups,
-  per-op reference tables, and troubleshooting, use the flydsl-kernel-authoring skill instead.
+  Procedure for producing a new FlyDSL kernel: classify the pattern, take the matching skeleton,
+  fill in compute, add control flow / sync / LDS, then verify on GPU. Use when writing a new
+  kernel, porting a Triton kernel to FlyDSL, or learning tile programming by following steps.
+  For API lookups, per-op tables, and the exhaustive troubleshooting list, use
+  flydsl-kernel-authoring instead; for diagnosing a kernel that already runs and is wrong,
+  use debug-flydsl-kernel.
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
-# FlyDSL Tile Programming
+# Writing a FlyDSL kernel
 
-Guide users through writing GPU kernels using FlyDSL's tile programming model (CuTe-style layout algebra). This skill is a step-by-step wizard that takes a kernel requirement and produces a correct, tested FlyDSL kernel.
+## Route here when
+You are **producing** a kernel — from a requirement, or by porting one from Triton — and want a
+procedure to follow in order.
 
-**Trigger**: User wants to write a new FlyDSL kernel, port a Triton kernel to FlyDSL, or learn tile programming patterns.
+**Go elsewhere when:**
 
-**Prerequisites**: FlyDSL installed (editable mode via `pip install -e .`). GPU access required for testing.
+| You want | Go to |
+|---|---|
+| To look up an op, a layout-algebra rule, or an env var | `flydsl-kernel-authoring` (the reference) |
+| To fix a kernel that runs and is wrong | `../skills/bottleneck/debug-flydsl-kernel.md` |
+| To use a kernel FlyDSL already ships | `../skills/optimize/flydsl_levers/flydsl_kernel_library.md` |
+| To make a working kernel faster | `../skills/optimize/flydsl_levers/flydsl_authoring_method.md` |
 
-**Scope (read this first)**: This skill is the *procedure* — follow the steps in order to produce a kernel. It is the companion to the **flydsl-kernel-authoring** skill, which is the *reference* (the full layout-algebra API surface, per-op tables, environment variables, and an exhaustive troubleshooting list). When you need to look something up rather than follow a step, go to flydsl-kernel-authoring. This wizard links there instead of duplicating those tables.
+**Prerequisites:** FlyDSL installed editable (`pip install -e .`), and a GPU — every step below ends
+in a real launch, because tile-programming bugs do not show up statically.
+
+## The mental model, first
+Everything in FlyDSL is layout algebra. Read this before the skeletons; the skeletons are just this
+diagram instantiated.
+
+```
+Layout            make_layout(shape, stride)   →  a map: logical coord → physical index
+
+Divide            zipped_divide(Tensor, Tile)  →  (tile_interior, tile_id)
+                  slice(divided, (None, bid))  →  this block's tile
+
+Atom              CopyAtom  = ONE hardware copy instruction (32b / 64b / 128b)
+                  MmaAtom   = ONE MFMA instruction
+
+Tiled operation   TiledCopy = CopyAtom × thread_layout   →  threads cooperate on a copy
+                  TiledMma  = MmaAtom  × atom_layout     →  threads cooperate on an MMA
+
+Per-thread view   ThrCopy.partition_S/D(tensor)   →  this thread's source / destination
+                  ThrMma.partition_A/B/C(tensor)  →  this thread's operands
+
+Fragment          make_fragment_like(partition)   →  a register tile
+                  retile(fragment)                →  reshape so a copy can consume it
+
+Execute           fx.copy(atom, src, dst)         →  data movement
+                  fx.gemm(atom, D, A, B, C)       →  D = A @ B + C
+```
+
+**Layout is the glue.** Divide, partition, copy, and gemm are all defined in terms of layouts. Getting
+the layouts right is most of the work; the compute is usually three lines.
+
+## gfx950 constants you will need
+| Fact | Value | Where it bites |
+|---|---|---|
+| LDS per workgroup | **160 KiB** | `SmemAllocator` sizing, tile-size ceilings |
+| LDS banks | **64** | any padding or swizzle you inherited from a 32-bank design is wrong here |
+| Wavefront | 64 lanes | thread-layout arithmetic is mod 64, not mod 32 |
+| CU count | 256 | grid sizing — query it, do not hardcode |
+| fp8 encoding | **OCP** | FNUZ is CDNA3; a checkpoint in the wrong dialect is a silent ~2× error |
+
+Full numbers: `local_knowledge/hardware/mi350_lds.md`, `mi350_matrix_core.md`, `mi350_overview.md`.
 
 ---
 
-## Step 1: Classify the Kernel Type
+## Step 1 — Classify the pattern
+Every FlyDSL kernel falls into one of five shapes. Pick one; it decides which primitives you need.
 
-Ask the user what kind of kernel they need. Map to one of these patterns:
+| Pattern | Examples | Key primitives | Skeleton |
+|---|---|---|---|
+| **Elementwise** | vecadd, scale, relu | `logical_divide` + `copy_atom_call` | [A](#pattern-a--elementwise) |
+| **Reduction** | sum, max, softmax, layernorm | `buffer_load` + cross-lane shuffle + LDS | build on A, add §5–§6 |
+| **Tiled copy** | transpose, permute, gather | `zipped_divide` + `TiledCopy` | [B](#pattern-b--tiled-2-d-copy) |
+| **GEMM** | matmul, batched GEMM | `TiledMma` + `TiledCopy` + LDS | [C](#pattern-c--tiled-mma-gemm) |
+| **Fused** | attention, GEMM + epilogue | GEMM skeleton + elementwise epilogue | C, then Step 2 |
 
-| Pattern | Examples | Key Primitives |
-|---------|----------|---------------|
-| **Elementwise** | vecadd, scale, relu, abs | `logical_divide` + `copy_atom_call` |
-| **Reduction** | sum, max, softmax, layernorm | `buffer_load` + warp shuffle + LDS |
-| **Tiled Copy** | transpose, permute, gather | `zipped_divide` + `TiledCopy` |
-| **GEMM** | matmul, batched gemm | `TiledMma` + `TiledCopy` + LDS |
-| **Fused** | fused attention, GEMM+epilogue | Combine GEMM + elementwise |
+If you cannot decide between two, start with the simpler one and get it correct on GPU before adding
+the second half. A wrong fused kernel is extremely hard to bisect.
 
----
-
-## Step 2: Generate Kernel Skeleton
-
-Based on the pattern, generate the appropriate skeleton. Every FlyDSL kernel has two parts:
+## Step 2 — Take the skeleton
+Every FlyDSL kernel is two functions: a `@flyc.kernel` device body and a `@flyc.jit` launcher.
 
 ```python
 import torch
@@ -48,7 +96,7 @@ import flydsl.expr as fx
 def my_kernel(A: fx.Tensor, B: fx.Tensor, ...):
     tid = fx.thread_idx.x
     bid = fx.block_idx.x
-    # ... kernel body ...
+    ...
 
 @flyc.jit
 def my_launch(A: fx.Tensor, B: fx.Tensor, ...,
@@ -56,439 +104,317 @@ def my_launch(A: fx.Tensor, B: fx.Tensor, ...,
     my_kernel(A, B, ...).launch(
         grid=(grid_x, grid_y, grid_z),
         block=(block_x, 1, 1),
-        stream=stream
+        stream=stream,
     )
 ```
 
-### Pattern A: Elementwise Kernel
-
-The simplest pattern. Each thread processes `VEC_WIDTH` elements independently.
-
-**Data flow**: Global -> Register -> Compute -> Register -> Global
+### Pattern A — elementwise
+Each thread owns `VEC_WIDTH` elements. Data flow: global → register → compute → register → global.
 
 ```python
-import torch
-import flydsl.compiler as flyc
-import flydsl.expr as fx
 from flydsl.expr.typing import Vector as Vec
 
-BLOCK_DIM = 256
-VEC_WIDTH = 4
+BLOCK_DIM, VEC_WIDTH = 256, 4
 
 @flyc.kernel
-def elementwise_kernel(
-    A: fx.Tensor,
-    Out: fx.Tensor,
-    BLOCK_DIM: fx.Constexpr[int],
-    VEC_WIDTH: fx.Constexpr[int],
-):
-    bid = fx.block_idx.x
-    tid = fx.thread_idx.x
+def elementwise_kernel(A: fx.Tensor, Out: fx.Tensor,
+                       BLOCK_DIM: fx.Constexpr[int], VEC_WIDTH: fx.Constexpr[int]):
+    bid, tid = fx.block_idx.x, fx.thread_idx.x
 
-    # === Step 1: Divide global tensor into block-sized tiles ===
+    # 1. cut the global tensor into block-sized tiles
     tile_size = BLOCK_DIM * VEC_WIDTH
-    tA = fx.logical_divide(A, fx.make_layout(tile_size, 1))
+    tA   = fx.logical_divide(A,   fx.make_layout(tile_size, 1))
     tOut = fx.logical_divide(Out, fx.make_layout(tile_size, 1))
 
-    # === Step 2: Select this block's tile ===
-    tA = fx.slice(tA, (None, bid))
+    # 2. take this block's tile
+    tA   = fx.slice(tA,   (None, bid))
     tOut = fx.slice(tOut, (None, bid))
 
-    # === Step 3: Divide tile for per-thread vectorized access ===
-    tA = fx.logical_divide(tA, fx.make_layout(VEC_WIDTH, 1))
+    # 3. cut again for per-thread vectorized access
+    tA   = fx.logical_divide(tA,   fx.make_layout(VEC_WIDTH, 1))
     tOut = fx.logical_divide(tOut, fx.make_layout(VEC_WIDTH, 1))
 
-    # === Step 4: Allocate register and set up copy atom ===
-    copy_bits = VEC_WIDTH * 32
-    copy_atom = fx.make_copy_atom(fx.UniversalCopy(copy_bits), fx.Float32)
-    rA = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
+    # 4. registers + the copy instruction to use
+    copy_atom = fx.make_copy_atom(fx.UniversalCopy(VEC_WIDTH * 32), fx.Float32)
+    rA   = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
     rOut = fx.make_rmem_tensor(VEC_WIDTH, fx.Float32)
 
-    # === Step 5: Load -> Compute -> Store ===
+    # 5. load → compute → store
     fx.copy_atom_call(copy_atom, fx.slice(tA, (None, tid)), rA)
-
     vA = Vec(fx.memref_load_vec(rA))
-    # --- YOUR COMPUTE HERE ---
-    vOut = vA * vA  # example: square
-    # --- END COMPUTE ---
+    vOut = vA * vA                      # <<< YOUR COMPUTE
     fx.memref_store_vec(vOut, rOut)
-
     fx.copy_atom_call(copy_atom, rOut, fx.slice(tOut, (None, tid)))
 
 @flyc.jit
-def elementwise_launch(
-    A: fx.Tensor, Out: fx.Tensor, N: fx.Int32,
-    stream: fx.Stream = fx.Stream(None),
-):
+def elementwise_launch(A: fx.Tensor, Out: fx.Tensor, N: fx.Int32,
+                       stream: fx.Stream = fx.Stream(None)):
     tile_size = BLOCK_DIM * VEC_WIDTH
-    grid_x = (N + tile_size - 1) // tile_size
     elementwise_kernel(A, Out, BLOCK_DIM, VEC_WIDTH).launch(
-        grid=(grid_x, 1, 1), block=(BLOCK_DIM, 1, 1), stream=stream
-    )
-
-# === Test ===
-N = 1024
-A = torch.randn(N, dtype=torch.float32, device="cuda")
-Out = torch.empty(N, dtype=torch.float32, device="cuda")
-elementwise_launch(A, Out, N, stream=torch.cuda.Stream())
-torch.cuda.synchronize()
-assert torch.allclose(Out, A * A, atol=1e-5)
+        grid=((N + tile_size - 1) // tile_size, 1, 1),
+        block=(BLOCK_DIM, 1, 1), stream=stream)
 ```
 
-### Pattern B: Tiled 2D Copy (Transpose, Gather)
+Note the **two-level divide** in steps 1 and 3 — first to blocks, then to per-thread vectors. That
+nesting is the whole idiom; the rest is bookkeeping.
 
-Uses `zipped_divide` + `TiledCopy` for 2D data movement with explicit thread-value mapping.
-
-**Data flow**: Global[M,N] -> Fragment -> Global[M,N] (with layout change)
+### Pattern B — tiled 2-D copy
+Uses `zipped_divide` plus `TiledCopy` for an explicit thread-value mapping. Data flow: global[M,N] →
+fragment → global[M,N] with a layout change.
 
 ```python
 @flyc.kernel
 def tiled_copy_kernel(A: fx.Tensor, B: fx.Tensor):
-    tid = fx.thread_idx.x
-    bid = fx.block_idx.x
+    tid, bid = fx.thread_idx.x, fx.block_idx.x
 
     block_m, block_n = 8, 24
-    tile = fx.make_tile([
-        fx.make_layout(block_m, 1),
-        fx.make_layout(block_n, 1)
-    ])
+    tile = fx.make_tile([fx.make_layout(block_m, 1), fx.make_layout(block_n, 1)])
 
-    # Wrap as buffer tensors (AMD buffer descriptors)
-    A = fx.rocdl.make_buffer_tensor(A)
+    A = fx.rocdl.make_buffer_tensor(A)        # AMD buffer descriptors
     B = fx.rocdl.make_buffer_tensor(B)
 
-    # Divide into tiles, select block's tile
-    bA = fx.zipped_divide(A, tile)
-    bB = fx.zipped_divide(B, tile)
-    bA = fx.slice(bA, (None, bid))
-    bB = fx.slice(bB, (None, bid))
+    bA = fx.slice(fx.zipped_divide(A, tile), (None, bid))
+    bB = fx.slice(fx.zipped_divide(B, tile), (None, bid))
 
-    # Thread-value layout: how threads cooperate on the tile
-    thr_layout = fx.make_layout((4, 1), (1, 1))   # 4 threads along M
-    val_layout = fx.make_layout((1, 8), (1, 1))    # each loads 8 along N
-    copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-    layout_tv = fx.raked_product(thr_layout, val_layout)
-    tile_mn = fx.make_tile(4, 8)
+    # thread-value layout: how threads split the tile
+    thr_layout = fx.make_layout((4, 1), (1, 1))     # 4 threads along M
+    val_layout = fx.make_layout((1, 8), (1, 1))     # 8 values each along N
+    copy_atom  = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
+    layout_tv  = fx.raked_product(thr_layout, val_layout)
 
-    # Build tiled copy and get thread's partition
-    tiled_copy = fx.make_tiled_copy(copy_atom, layout_tv, tile_mn)
-    thr_copy = tiled_copy.get_slice(tid)
-    src = thr_copy.partition_S(bA)
-    dst = thr_copy.partition_D(bB)
-    frag = fx.make_fragment_like(src)
+    tiled_copy = fx.make_tiled_copy(copy_atom, layout_tv, fx.make_tile(4, 8))
+    thr_copy   = tiled_copy.get_slice(tid)
+    src, dst   = thr_copy.partition_S(bA), thr_copy.partition_D(bB)
+    frag       = fx.make_fragment_like(src)
 
-    # Copy: global A -> frag -> global B
     fx.copy(copy_atom, src, frag)
     fx.copy(copy_atom, frag, dst)
 ```
 
-### Pattern C: Tiled MMA (GEMM)
+The `thr_layout × val_layout` product is where a transpose actually happens — you change *which*
+thread reads *which* element, not the addresses.
 
-Uses `TiledMma` + `TiledCopy` for matrix multiply with AMD MFMA instructions.
-
-**Data flow**: Global -> (TiledCopy) -> Fragment A,B -> (MFMA) -> Fragment C -> Global
+### Pattern C — tiled MMA (GEMM)
+Data flow: global → TiledCopy → fragments A,B → MFMA → fragment C → global.
 
 ```python
 block_m, block_n, block_k = 64, 64, 8
 
 @flyc.kernel
 def gemm_kernel(A: fx.Tensor, B: fx.Tensor, C: fx.Tensor):
-    tid = fx.thread_idx.x
-    bid = fx.block_idx.x
+    tid, bid = fx.thread_idx.x, fx.block_idx.x
 
-    # Define tiles
-    tileA = fx.make_tile(block_m, block_k)
-    tileB = fx.make_tile(block_n, block_k)
-    tileC = fx.make_tile(block_m, block_n)
+    tileA, tileB, tileC = (fx.make_tile(block_m, block_k),
+                           fx.make_tile(block_n, block_k),
+                           fx.make_tile(block_m, block_n))
 
-    # Wrap as buffer tensors
-    A = fx.rocdl.make_buffer_tensor(A)
-    B = fx.rocdl.make_buffer_tensor(B)
-    C = fx.rocdl.make_buffer_tensor(C)
+    A, B, C = (fx.rocdl.make_buffer_tensor(A),
+               fx.rocdl.make_buffer_tensor(B),
+               fx.rocdl.make_buffer_tensor(C))
 
-    # Divide and select block's tile
     bA = fx.slice(fx.zipped_divide(A, tileA), (None, bid))
     bB = fx.slice(fx.zipped_divide(B, tileB), (None, bid))
     bC = fx.slice(fx.zipped_divide(C, tileC), (None, bid))
 
-    # === MMA setup ===
-    # MFMA(M, N, K, AccType) -- hardware instruction shape
-    mma_atom = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))
+    # MMA: pick the instruction, then tile it across threads
+    mma_atom  = fx.make_mma_atom(fx.rocdl.MFMA(16, 16, 4, fx.Float32))   # see the note below
+    tiled_mma = fx.make_tiled_mma(mma_atom,
+                                  fx.make_layout((2, 2, 1), (1, 2, 0)))  # (M_rep, N_rep, K_rep)
+    thr_mma   = tiled_mma.thr_slice(tid)
 
-    # Tile the MMA atom across threads: 2x2 = 4 MMA atoms per warp
-    tiled_mma = fx.make_tiled_mma(
-        mma_atom,
-        fx.make_layout((2, 2, 1), (1, 2, 0))  # (M_rep, N_rep, K_rep)
-    )
-    thr_mma = tiled_mma.thr_slice(tid)
-
-    # === Copy setup (matched to MMA layout) ===
+    # copies must be built FROM the mma so the layouts agree
     copy_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-    tiled_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma)
-    tiled_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma)
-    tiled_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma)
+    thr_copy_A = fx.make_tiled_copy_A(copy_atom, tiled_mma).get_slice(tid)
+    thr_copy_B = fx.make_tiled_copy_B(copy_atom, tiled_mma).get_slice(tid)
+    thr_copy_C = fx.make_tiled_copy_C(copy_atom, tiled_mma).get_slice(tid)
 
-    thr_copy_A = tiled_copy_A.get_slice(tid)
-    thr_copy_B = tiled_copy_B.get_slice(tid)
-    thr_copy_C = tiled_copy_C.get_slice(tid)
+    frag_A = thr_mma.make_fragment_A(thr_mma.partition_A(bA))
+    frag_B = thr_mma.make_fragment_B(thr_mma.partition_B(bB))
+    frag_C = thr_mma.make_fragment_C(thr_mma.partition_C(bC))
 
-    # === Partition data ===
-    # Copy partitions (for data movement)
-    copy_src_A = thr_copy_A.partition_S(bA)
-    copy_src_B = thr_copy_B.partition_S(bB)
-    copy_dst_C = thr_copy_C.partition_S(bC)
-
-    # MMA partitions (for compute)
-    part_A = thr_mma.partition_A(bA)
-    part_B = thr_mma.partition_B(bB)
-    part_C = thr_mma.partition_C(bC)
-
-    # === Allocate fragments (registers) ===
-    frag_A = thr_mma.make_fragment_A(part_A)
-    frag_B = thr_mma.make_fragment_B(part_B)
-    frag_C = thr_mma.make_fragment_C(part_C)
-
-    # Retile fragments for copy compatibility
-    copy_frag_A = thr_copy_A.retile(frag_A)
-    copy_frag_B = thr_copy_B.retile(frag_B)
-    copy_frag_C = thr_copy_C.retile(frag_C)
-
-    # === Execute: Load A,B -> GEMM -> Store C ===
-    fx.copy(copy_atom, copy_src_A, copy_frag_A, pred=None)
-    fx.copy(copy_atom, copy_src_B, copy_frag_B, pred=None)
+    fx.copy(copy_atom, thr_copy_A.partition_S(bA), thr_copy_A.retile(frag_A), pred=None)
+    fx.copy(copy_atom, thr_copy_B.partition_S(bB), thr_copy_B.retile(frag_B), pred=None)
     fx.gemm(mma_atom, frag_C, frag_A, frag_B, frag_C)
-    fx.copy(copy_atom, copy_frag_C, copy_dst_C, pred=None)
+    fx.copy(copy_atom, thr_copy_C.retile(frag_C), thr_copy_C.partition_S(bC), pred=None)
 ```
 
-### Pattern D: Buffer Load/Store (Low-level)
+Two things to get right, and they are the usual failures:
 
-Direct AMD buffer intrinsics for maximum control. Bypasses the layout algebra.
+- **Build the copies from the MMA** (`make_tiled_copy_A(copy_atom, tiled_mma)`), never independently.
+  An independently-built copy will compile and produce a wrong operand layout.
+- **`retile` before every copy that touches a fragment.** The MMA's fragment layout and the copy's
+  expected layout are not the same shape.
+
+> **On the MMA shape.** `MFMA(16, 16, 4, Float32)` is an fp32 instruction and is fine for a first
+> correct kernel, but it is nowhere near peak on gfx950. The native shapes there are
+> `16x16x32` / `32x32x16` for f16/bf16 and `16x16x128` / `32x32x64` for the f8f6f4 family. Prefer
+> **16×16 over 32×32**: it draws less power (so clocks stay higher) *and* holds only 4 C registers per
+> lane versus 16, which is what actually frees the register budget. Shape table:
+> `local_knowledge/hardware/mi350_matrix_core.md`; the `make_tiled_mma` atom-layout rules are in
+> **flydsl-kernel-authoring** §6.
+
+### Pattern D — raw buffer ops
+Direct AMD buffer intrinsics, bypassing the layout algebra. Use when you need address control the
+algebra will not give you.
 
 ```python
 from flydsl.expr import buffer_ops
 
 @flyc.kernel
 def buffer_kernel(A: fx.Tensor, B: fx.Tensor, N: fx.Constexpr[int]):
-    tid = fx.thread_idx.x
-    bid = fx.block_idx.x
-    gid = bid * 256 + tid
-
+    gid = fx.block_idx.x * 256 + fx.thread_idx.x
     rsrc_a = buffer_ops.create_buffer_resource(A)
     rsrc_b = buffer_ops.create_buffer_resource(B)
 
-    # offset is in ELEMENTS (not bytes!) -- buffer_load converts internally
+    # offset is in ELEMENTS of dtype, not bytes
     data = buffer_ops.buffer_load(rsrc_a, gid * 4, vec_width=4, dtype=fx.T.f32())
-    # ... compute on data ...
     buffer_ops.buffer_store(data, rsrc_b, gid * 4)
 ```
 
----
+The element-vs-byte offset is the classic bug here: a 4× address error usually lands *inside* the
+buffer, so it fails as garbage rather than as a fault.
 
-## Step 3: Fill in the Compute Logic
-
-Common compute recipes (all work on vectors):
+## Step 3 — Fill in the compute
+All of these operate on vectors:
 
 ```python
 from flydsl.expr.typing import Vector as Vec
 
-# Scale: C = A * scalar
-scale = Vec.filled(VEC_WIDTH, 2.0, fx.Float32)
-vC = Vec(vA) * scale
+vC = Vec(vA) * Vec.filled(VEC_WIDTH, 2.0, fx.Float32)   # scale
+vC = Vec(vA) + Vec(vB)                                  # add
+vC = Vec(vA) * Vec(vB) + Vec(vC)                        # fma
+vC = Vec(vA).maximumf(Vec.filled(VEC_WIDTH, 0.0, fx.Float32))   # relu
 
-# Add: C = A + B
-vC = Vec(vA) + Vec(vB)
+v, zero = Vec(vA), Vec.filled(VEC_WIDTH, 0.0, fx.Float32)       # abs
+vC = (v < zero).select(-v, v)
 
-# FMA: D = A * B + C
-vC = Vec(vA) * Vec(vB) + Vec(vC)
-
-# ReLU: C = max(A, 0)
-zero = Vec.filled(VEC_WIDTH, 0.0, fx.Float32)
-vC = Vec(vA).maximumf(zero)
-
-# Abs: C = |A|
-v = Vec(vA)
-neg = -v
-is_neg = v < zero
-vC = is_neg.select(neg, v)
-
-# Type conversion
-vC = Vec(vI32).to(fx.Float32)  # int -> float
-vC = Vec(vF32).to(fx.Float16)  # f32 -> f16
+vC = Vec(vI32).to(fx.Float32)                           # int → float
+vC = Vec(vF32).to(fx.Float16)                           # f32 → f16
 ```
 
----
+Note `abs` is built from `select`, not from an `arith.absf` — that op does not exist. The same
+`select`-based idiom covers most missing "obvious" ops.
 
-## Step 4: Add Control Flow
-
+## Step 4 — Control flow
 ```python
-from flydsl.expr import range_constexpr
+from flydsl.expr import range_constexpr, const_expr
 
-# Compile-time unrolled loop (constant bounds)
-for i in range_constexpr(K):
+for i in range_constexpr(K):        # compile-time unrolled; i is a Python int
     ...
 
-# Runtime loop (dynamic bounds)
-for i in range(runtime_N):
+for i in range(runtime_N):          # runtime loop; i is an ArithValue
     ...
 
-# Loop with carried state (software pipelining)
+# loop-carried state (software pipelining)
 start, stop, step = fx.Index(0), fx.Index(N - 1), fx.Index(1)
 for iv, state in range(start, stop, step, init=[acc_init, ...]):
     acc = state[0]
-    # ... compute ...
     results = yield [new_acc, ...]
 final_acc = results[0]
 
-# Static if (compile-time, no MLIR)
-from flydsl.expr import const_expr
-if const_expr(USE_FAST_PATH):
+if const_expr(USE_FAST_PATH):       # compile-time; emits no MLIR
     ...
 
-# Dynamic if (runtime, rewritten by the frontend)
-if bid == 0:
+if bid == 0:                        # runtime; rewritten to scf.IfOp
     ...
 ```
 
----
+The distinction that costs the most time: a `range()` induction variable **cannot index a Python
+list**, because it is an SSA value rather than an int. If you are indexing a Python-side structure,
+you need `range_constexpr`.
 
-## Step 5: Add Synchronization (if needed)
-
+## Step 5 — Synchronization
 ```python
-# Workgroup barrier (__syncthreads)
-fx.gpu.barrier()
+fx.gpu.barrier()             # workgroup barrier (__syncthreads equivalent)
 
-# Fine-grained waitcnt (CDNA3)
-fx.rocdl.s_waitcnt(0)
-
-# Fine-grained waitcnt (CDNA4 / gfx950)
+# gfx950 (CDNA4): split wait counters — prefer these
 fx.rocdl.s_wait_loadcnt(0)
 fx.rocdl.s_wait_storecnt(0)
 fx.rocdl.s_wait_dscnt(0)
 
-# Scheduling hints
-fx.rocdl.sched_mfma(N)     # schedule N MFMA before next barrier
-fx.rocdl.sched_vmem(N)     # schedule N VMEM reads
-fx.rocdl.sched_dsrd(N)     # schedule N DS reads
-fx.rocdl.sched_dswr(N)     # schedule N DS writes
+fx.rocdl.s_waitcnt(0)        # CDNA3-era combined counter; coarser on gfx950
+
+# scheduling hints
+fx.rocdl.sched_mfma(N)       # N MFMA before the next barrier
+fx.rocdl.sched_vmem(N)       # N VMEM reads
+fx.rocdl.sched_dsrd(N)       # N DS reads
+fx.rocdl.sched_dswr(N)       # N DS writes
 ```
 
----
+Use the **split counters on gfx950**. `s_waitcnt(0)` waits on everything, which serializes loads
+against LDS traffic you did not need to wait for — the single most common reason a hand-written
+pipeline shows no overlap.
 
-## Step 6: Add Shared Memory (if needed)
+Barriers must be reached by every thread in the workgroup. A barrier inside a runtime `if` deadlocks;
+hoist it out.
 
+## Step 6 — Shared memory
 ```python
 from flydsl.utils.smem_allocator import SmemAllocator
 from flydsl.compiler.kernel_function import CompilationContext
 from flydsl._mlir import ir
 
-allocator = SmemAllocator(None, arch="gfx942", global_sym_name="smem0")
-lds_buf = allocator.allocate_array(fx.T.f16, num_elements)
+allocator = SmemAllocator(None, arch="gfx950", global_sym_name="smem0")
+lds_buf   = allocator.allocate_array(fx.T.f16, num_elements)
 
 @flyc.kernel
 def kernel_with_lds(A: fx.Tensor, ...):
-    lds_base = allocator.get_base()
-    lds_ptr = lds_buf(lds_base)
+    lds_ptr = lds_buf(allocator.get_base())
 
-    # Write to LDS
     lds_ptr.store(value, [idx])
     fx.gpu.barrier()
-
-    # Read from LDS
     val = lds_ptr.load([idx])
 
-    # Finalize (inside GPU module body, before launch)
+    # finalize inside the GPU module body, before launch
     comp_ctx = CompilationContext.get_current()
     with ir.InsertionPoint(comp_ctx.gpu_module_body):
         allocator.finalize()
 ```
 
-LDS capacity: gfx942 (MI300X) = 64KB, gfx950 (MI350) = 160KB.
+**gfx950 LDS is 160 KiB per workgroup across 64 banks.** Both numbers matter:
+- 160 KiB means tile sizes that overflowed on CDNA3 now fit — but it also means LDS is rarely the
+  binding occupancy limit on gfx950; registers usually are.
+- 64 banks means **any padding or XOR swizzle you carried over from a 32-bank design is wrong**.
+  Re-derive it. A `+1` pad that removed conflicts at 32 banks does not at 64.
 
----
+Before adding LDS at all: it only pays when there is **cross-thread reuse**. Staging data that each
+thread reads once adds a round trip and a barrier for nothing. See
+`../skills/optimize/flydsl_levers/flydsl_authoring_method.md`.
 
-## Step 7: Test the Kernel
-
-Run the kernel locally or on a remote GPU:
-
+## Step 7 — Run it
 ```bash
-# Run locally
-PYTHONPATH=./ python my_kernel.py
-
-# Run with IR dump for debugging
-FLYDSL_DUMP_IR=1 PYTHONPATH=./ python my_kernel.py
+PYTHONPATH=./ python my_kernel.py                      # run
+FLYDSL_DUMP_IR=1 PYTHONPATH=./ python my_kernel.py     # dump IR when it misbehaves
 ```
 
----
+## Step 8 — Verify
+Correctness is not optional at this stage, because tile-programming bugs are layout bugs and layout
+bugs do not announce themselves.
 
-## Step 8: Debug Common Errors
-
-If the kernel fails to compile or produces wrong results, consult the full error -> cause -> fix
-table in the **flydsl-kernel-authoring** skill (§10 Troubleshooting), which covers the common
-wizard pitfalls: Python `int` where a DSL value is expected, `NameError` inside extracted
-`__then_*` branches, missing `arith.absf`, scalar/vector mismatches, LDS overflow,
-`buffer_load` element-vs-byte offsets, `range(..., init=...)` being unrolled, and stale caches.
-For deeper kernel-debugging methodology (all-1s test, single-partition isolation, MFMA operand
-layout checks), use the **debug-flydsl-kernel** skill.
-
----
-
-## Tile Programming Mental Model
-
-```
-                  Layout Algebra
-                  =============
-   make_layout(shape, stride)  ->  Layout = mapping: coord -> index
-
-                  Divide (Partition)
-                  =================
-   zipped_divide(Tensor, Tile)  ->  (tile_interior, tile_id)
-   slice(divided, (None, bid))  ->  this block's tile
-
-                  Atom (Hardware Instruction)
-                  ==========================
-   CopyAtom  = one hardware copy instruction (32b/64b/128b)
-   MmaAtom   = one MFMA instruction (16x16x4, 16x16x16, etc.)
-
-                  Tiled Operation (Thread Cooperation)
-                  ====================================
-   TiledCopy = CopyAtom x thread_layout  -> many threads cooperate on copy
-   TiledMma  = MmaAtom  x atom_layout   -> many threads cooperate on MMA
-
-                  Per-Thread View
-                  ===============
-   ThrCopy.partition_S/D(tensor)  ->  this thread's source/dest data
-   ThrMma.partition_A/B/C(tensor) ->  this thread's operand data
-
-                  Fragment (Register Storage)
-                  ==========================
-   make_fragment_like(partition)  ->  register tile
-   retile(fragment)              ->  reshape for copy compatibility
-
-                  Execute
-                  =======
-   fx.copy(atom, src, dst)           ->  data movement
-   fx.gemm(atom, D, A, B, C)        ->  matrix multiply: D = A @ B + C
+```python
+torch.cuda.synchronize()                  # required before reading results
+assert torch.allclose(Out, reference, atol=1e-5)
 ```
 
-Key insight: **Layout is the glue**. Every operation (divide, partition, copy, gemm) is defined in terms of layouts that describe the mapping from logical coordinates to physical locations. Getting the layouts right is 90% of FlyDSL programming.
+| Check | Why |
+|---|---|
+| `torch.cuda.synchronize()` before every result read | otherwise you are asserting on unwritten memory |
+| Compare against a torch reference of the same math | not against a previous run of your own kernel |
+| Test at a shape that is **not** a multiple of the tile | masking and predication bugs only appear there |
+| For GEMM: check with non-symmetric A and B | a symmetric input hides operand-order bugs |
 
----
+If it is wrong, the classification table in
+`../skills/bottleneck/debug-flydsl-kernel.md` maps the symptom to the cause. If it does not compile,
+the error → cause → fix table is in **flydsl-kernel-authoring** §10.
 
-## MFMA Instruction Reference (AMD CDNA3/4)
-
-For the table of available MFMA instruction shapes (`MFMA(16,16,4,Float32)`,
-`MFMA(16,16,16,Float32)`, FP8/BF16/CDNA4-scaled variants) and how `make_tiled_mma`'s
-`(M_rep, N_rep, K_rep)` atom_layout works, see the **flydsl-kernel-authoring** skill (§6 MFMA
-Integration). Use it when choosing the MMA atom for the Pattern C (GEMM) skeleton above.
-
----
-
-## Checklist for New Kernels
-
-- [ ] Identified kernel pattern (elementwise / reduction / copy / GEMM)
-- [ ] Chose appropriate copy atom type (Universal vs Buffer, bit width)
-- [ ] Set tile sizes matching MFMA instruction shape (if GEMM)
-- [ ] Verified VEC_WIDTH * sizeof(elem) <= copy atom bits
-- [ ] Used `Constexpr[int]` for compile-time constants, `Int32` for runtime
-- [ ] Added `torch.cuda.synchronize()` before checking results
-- [ ] Verified correctness with `torch.allclose()`
+## Checklist
+- [ ] Pattern identified before writing any code
+- [ ] Copy atom width matches the data: `VEC_WIDTH * sizeof(elem) ≤ atom bits`
+- [ ] For GEMM: tiles sized to the MFMA instruction shape, and copies built **from** the `tiled_mma`
+- [ ] `retile()` applied to every fragment before a copy touches it
+- [ ] `Constexpr[int]` for compile-time constants, `Int32` for runtime values
+- [ ] `range_constexpr()` wherever the induction variable indexes a Python structure
+- [ ] gfx950 split wait counters, not a blanket `s_waitcnt(0)`
+- [ ] LDS added only where there is real cross-thread reuse; swizzle re-derived for 64 banks
+- [ ] `torch.cuda.synchronize()` before checking results
+- [ ] Tested at a non-tile-multiple shape

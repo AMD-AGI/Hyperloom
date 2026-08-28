@@ -69,8 +69,8 @@ aiter/                         (ROCm/aiter@b467ce342 = v0.1.16-283)
 | Family | Location | Purpose |
 |---|---|---|
 | **PA** (paged attention) | `hsa/gfx{942,950,1250}/pa/` + `pa_*.co` | decode + prefill attention, paged KV |
-| **MLA** | `hsa/gfx{942,950,1250}/mla/`, `mla_v4/` (v4/sparse on gfx950+gfx1250) | DeepSeek MLA / DSV4 — see [attn_mla.md](../skills/optimize/aiter_levers/attn_mla.md) |
-| **FMOE** | `hsa/gfx{942,950,1250}/fmoe_*.co` | fused MoE (GEMM-A + act + GEMM-B) — see [fmoe.md](../skills/optimize/aiter_levers/fmoe.md) |
+| **MLA** | `hsa/gfx{942,950,1250}/mla/`, `mla_v4/` (v4/sparse on gfx950+gfx1250) | DeepSeek MLA / DSV4 — see [aiter_attention_entries.md](../skills/optimize/aiter_levers/aiter_attention_entries.md) |
+| **FMOE** | `hsa/gfx{942,950,1250}/fmoe_*.co` | fused MoE (GEMM-A + act + GEMM-B) — see [aiter_moe_pipeline.md](../skills/optimize/aiter_levers/aiter_moe_pipeline.md) |
 | **GEMM** | `hsa/gfx942/{bf16,f4,i8,fp8gemm_blockscale}/`, `flatmm_uk_*.co`, `gemm_a8w8_*.co` | tuned per-shape GEMMs |
 | **TopK-softmax** | `hsa/gfx942/topksoftmax/` | pre-FMOE expert selection |
 | **AllReduce** | `all_reduce.co`, `allreduce_{layernorm,rmsnorm}_*.co` | XGMI ring + fused post-attn norm |
@@ -81,7 +81,7 @@ its own `hsa/gfx1250/` tree (FMHA / MLA / MLA-v4 / f4gemm).
 ## The dispatcher model (how a call resolves)
 1. `aiter.ops.<family>` Python wrapper is called (e.g. `tuned_gemm.gemm_a16w16`).
 2. It builds a lookup key and consults the per-shape **config DB** (`aiter/configs/*.csv`, schema in
-   [configs_db.md](configs_db.md)); the winning row names a `libtype` + `solidx`.
+   [config_files_and_merge.md](config_files_and_merge.md)); the winning row names a `libtype` + `solidx`.
 3. `solMap` routes `libtype` → executor: `hipblaslt` / `asm` / `skinny` (HIP) / `triton` / `flydsl` /
    `opus` (split-K) / `torch`. No match → arch-dependent default (`hipblaslt`/`asm` for bpreshuffle,
    `skinny` for small-M, else `torch`). Details in [dispatch_and_rebind.md](dispatch_and_rebind.md).
@@ -109,9 +109,9 @@ is what preserves the hand-tuned kernel through `torch.compile`.
    kernel only when no libtype covers the shape/fusion → [authoring_delegation.md](authoring_delegation.md).
 
 ## Per-subsystem deep dives
-[configs_db.md](configs_db.md) (CSV schema) · [tuning_db.md](tuning_db.md) (capture→tune→deploy) ·
-[fmoe.md](../skills/optimize/aiter_levers/fmoe.md) (fused MoE) · [attn_mla.md](../skills/optimize/aiter_levers/attn_mla.md) (MLA decode) ·
-[flydsl_path.md](../skills/optimize/aiter_levers/flydsl_path.md) (aiter→FlyDSL dispatch) · [dispatch_and_rebind.md](dispatch_and_rebind.md) ·
+[config_files_and_merge.md](config_files_and_merge.md) (CSV schema) · [tuning_db.md](tuning_db.md) (capture→tune→deploy) ·
+[aiter_moe_pipeline.md](../skills/optimize/aiter_levers/aiter_moe_pipeline.md) (fused MoE) · [aiter_attention_entries.md](../skills/optimize/aiter_levers/aiter_attention_entries.md) (MLA decode) ·
+[aiter_flydsl_libtype.md](../skills/optimize/aiter_levers/aiter_flydsl_libtype.md) (aiter→FlyDSL dispatch) · [dispatch_and_rebind.md](dispatch_and_rebind.md) ·
 [jit_and_build.md](jit_and_build.md) · [operator_catalog.md](operator_catalog.md) ·
 [authoring_delegation.md](authoring_delegation.md).
 

@@ -4,7 +4,7 @@
 Runs ROCm Compute Profiler (`rocprof-compute`) on a driver command and prints its
 Top-Stats + System Speed-of-Light (and, with --roofline, the empirical roofline)
 tables, plus where the raw counters landed. You then classify the bottleneck by
-reading `reading_a_kernel_bottleneck.md` + `roofline_on_mi.md` in this folder.
+reading `measure_triage.md` + `measure_roofline.md` in this folder.
 
 Design notes (why it looks like this):
   * SELF-CONTAINED: stdlib only. It does NOT import any project package, so it
@@ -253,7 +253,7 @@ def main() -> int:
 
     print(report)
     print(f"\nRaw counters + workload kept under: {workload}")
-    print("How to interpret: read reading_a_kernel_bottleneck.md and roofline_on_mi.md "
+    print("How to interpret: read measure_triage.md and measure_roofline.md "
           "(same folder) — the '% of Peak' column is distance-to-ceiling; with --roofline, "
           "the Roofline section gives arithmetic intensity + distance-to-roof.")
     if not a.kernel:

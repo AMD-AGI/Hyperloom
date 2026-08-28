@@ -130,14 +130,14 @@ better across ROCm releases.
    you learn nothing from the number.
 3. **Read the ISA, not just the clock.** Bank conflicts, spills, branch counts and MFMA clustering are
    all visible in the AMDGCN dump and invisible in wall time until they are large. The workflow is
-   shared with Triton: `../../../../triton/skills/optimize/triton_levers/isa_verify.md`.
+   shared with Triton: `../../../../triton/skills/optimize/triton_levers/triton_isa_check.md`.
 4. **Watch register pressure at every rung.** It is the constraint that binds, it is why v6 regressed,
    and it is the thing a change three rungs earlier silently spends.
 5. **A regression that exposes a constraint is information.** Before reverting, establish *what* got
    worse. See v6.
 6. **Sweep the constants you introduced, don't argue about them.** Pipeline depth, unroll factor and
    tile dims are `constexpr` in your own source — exactly what `FORGE_SWEEP_*` is for. See
-   `common_methodology/optimization/cheap_sweeps.md`.
+   `common_methodology/optimization/lever_cheap_sweeps.md`.
 
 ## Cross-links
 - Declare/launch/autotune and the layout-typed value model:

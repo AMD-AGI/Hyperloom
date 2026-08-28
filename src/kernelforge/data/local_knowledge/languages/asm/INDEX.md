@@ -2,7 +2,7 @@
 title: AMDGCN ASM / ISA knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/asm
-updated: 2026-07-14
+updated: 2026-08-28
 ---
 
 # AMDGCN ASM / ISA — knowledge map
@@ -34,13 +34,19 @@ numbers live in `hardware/`; this folder references them rather than duplicating
 3. **raw `.s`** — a peak micro-kernel where you out-schedule LLVM (AITER's fastest paths).
 
 ## Reading order (three layers)
-1. **`skills/optimize/asm_levers/overview.md`** — the authoring model + CDNA execution model (wave64,
-   256 VGPR / 256 AGPR, async memory + `s_waitcnt`, when to drop to each sub-level). **Read this first.**
+1. **`skills/optimize/asm_levers/asm_decision.md`** — the decision itself (should you be here at all,
+   and at which sub-level) + the gfx950 execution model as it looks from the ISA (wave64,
+   256 VGPR / 256 AGPR, async memory + `s_waitcnt`, instruction classes and counters). **Read this first.**
 2. **`API_docs/`** — the "standard doc": the ABI/launch contract (`abi_and_kernel_descriptor.md`) and the
    ISA spec itself (`cdna4_isa_reference.md` → raw `cdna4-isa/*.txt` extracts).
-3. **`operators/<op>/`** — the operator you're building (overview → asm SOTA card → tuning/numerics/fusion),
-   plus **`skills/`** *when you hit a problem*: `profile/`, `bottleneck/`, and the vendored **IntelliKit**
-   reference (MI355X-measured per-instruction/hazard ground truth).
+3. **`skills/`** *when you hit a problem*: `profile/`, `bottleneck/`, and the vendored **IntelliKit**
+   reference (MI355X-measured per-instruction/hazard ground truth). `ik/guides/kernel-architecture.md`
+   carries the GEMM/attention/GEMV/grouped-GEMM kernel families.
+
+> **Per-operator cards are not in this folder — and largely not in this repo.** General operator theory
+> (math contract, shape regimes, Amdahl weight, parity bands) is not maintained here at all; read the
+> source; `framework/aiter/overall/operator_catalog.md` gives the aiter entry point and signature.
+> This folder is the ISA-level *how*.
 
 ## Portable golden rules (the ISA-level non-negotiables)
 - **wave64 only**; with one wave/SIMD the 512 regs/lane split **256 VGPR + 256 AGPR**. Occupancy =
@@ -50,22 +56,21 @@ numbers live in `hardware/`; this folder references them rather than duplicating
   `SchedGroupMask`** and defeats the software pipeliner. Use intrinsics + `sched_group_barrier` to *guide* the compiler.
 - **CDNA memory is asynchronous**: `s_waitcnt <counter>(N)` means "wait until **≤N outstanding**", NOT
   "wait N instructions". Counters: `vmcnt` (VMEM), `lgkmcnt` (LDS/SMEM); CDNA4 adds `q_waitcnt` (async load queue).
-- **`mfma_16x16` > `mfma_32x32`** — 32×32 clocks lower (power), so 16×16×16 yields higher achievable FLOPs.
+- **`mfma_16x16` > `mfma_32x32`** — two reasons: 4 vs 16 C-registers/lane, **and** 32×32 draws more power so the part clocks lower. Both favour 16×16.
 - **inline asm hygiene**: early-clobber `"=&v"` + `"memory"` clobber + `volatile`, and **one block** for ordered sequences.
 - **NOP/wait-state hazards cause silent corruption** — consult `intellikit/instructions/nop_hazard_summary.md`; never guess.
 - **Never guess ISA behavior** — Read/Grep the spec extract or the IntelliKit instruction doc. IntelliKit
   workflow: **disassemble a working `.co` → round-trip validate bit-identical → one targeted change → profile.**
 
 ## Start here — problem → files → order
-Substitute `<op>` with the operator (catalog below). Paths are relative to this folder;
-`ik/` abbreviates `skills/optimize/asm_levers/intellikit/`.
+Paths are relative to this folder; `ik/` abbreviates `skills/optimize/asm_levers/intellikit/`.
 
 | Task / symptom | Read in this order |
 |---|---|
-| "Understand the asm level / should I even drop to asm?" | `skills/optimize/asm_levers/overview.md` |
-| "Write an MFMA GEMM/attention loop (recommended path)" | `skills/optimize/asm_levers/mfma_intrinsics.md` → `operators/<op>/asm.md` → `ik/guides/kernel-architecture.md` |
-| "Hand-schedule a raw `.s` micro-loop / memory overlap" | `skills/optimize/asm_levers/raw_asm.md` → `ik/instructions/s_waitcnt.md` → `ik/guides/memory-coherence-formats.md` |
-| "Reduce VGPR/AGPR pressure / raise occupancy" | `skills/optimize/asm_levers/register_alloc.md` → `ik/guides/register-allocation.md` (+ `ik/tools/scripts/vgpr_liveness.py`) |
+| "Should I even drop to asm? which sub-level?" | `skills/optimize/asm_levers/asm_decision.md` |
+| "Write an MFMA GEMM/attention loop (recommended path)" | `skills/optimize/asm_levers/asm_mfma_builtins.md` → `ik/guides/kernel-architecture.md` |
+| "Hand-schedule a raw `.s` micro-loop / memory overlap" | `skills/optimize/asm_levers/asm_inline_and_raw.md` → `ik/instructions/s_waitcnt.md` → `ik/guides/memory-coherence-formats.md` |
+| "Reduce VGPR/AGPR pressure / raise occupancy" | `skills/optimize/asm_levers/asm_register_budget.md` → `ik/guides/register-allocation.md` (+ `ik/tools/scripts/vgpr_liveness.py`) |
 | "Exact instruction semantics / encoding / wait-states" | `API_docs/cdna4_isa_reference.md` → `API_docs/cdna4-isa/<chapter>.txt` |
 | "Measured cycle count / hazard for instruction X" | `ik/instructions/<X>.md` |
 | "NOP hazards / silent data corruption" | `ik/instructions/nop_hazard_summary.md` → `skills/bottleneck/debug-asm-kernel.md` |
@@ -73,10 +78,10 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 | "Wrong output / broken kernel" | `skills/bottleneck/debug-asm-kernel.md` → `ik/guides/debugging-playbook.md` |
 | "Kernel is slow — what do I change next?" | `skills/profile/profiling-asm.md` → `ik/guides/kernel-optimization-workflow.md` |
 | "LDS bank conflicts / double-buffer / swizzle" | `ik/guides/lds-patterns.md` → `ik/instructions/ds_read_b128.md` / `ds_write_b128.md` |
-| "Block-scaled MXFP8 / FP4 MFMA on CDNA4" | `skills/optimize/asm_levers/mfma_intrinsics.md` → `API_docs/cdna4-isa/Ch7_block_scaled_p63-68.txt` → `ik/instructions/v_mfma_f32_16x16x128_f8f6f4_scales.md` |
-| "Author / tune operator X in asm" | `operators/<op>/overview.md` → `operators/<op>/asm.md` → `operators/<op>/tuning.md` |
-| "Anti-patterns / what breaks at the ISA level" | `skills/optimize/asm_levers/pitfalls.md` |
-| "Numerics / parity gate for operator X" | `operators/<op>/numerics.md` |
+| "Block-scaled MXFP8 / FP4 MFMA on CDNA4" | `skills/optimize/asm_levers/asm_mfma_builtins.md` → `API_docs/cdna4-isa/Ch7_block_scaled_p63-68.txt` → `ik/instructions/v_mfma_f32_16x16x128_f8f6f4_scales.md` |
+| "Author / tune operator X in asm" | the kernel source (`framework/aiter/overall/operator_catalog.md` for the aiter entry point) → back here: `asm_levers/asm_mfma_builtins.md` → `ik/guides/kernel-architecture.md` → `asm_levers/asm_register_budget.md` |
+| "Wrong numbers / no pipelining / TFLOPs regress as tile grows" | `skills/optimize/asm_levers/asm_traps.md` (indexed by symptom) |
+| "Numerics / parity gate for operator X" | not covered in this repo — read the source (`framework/aiter/overall/operator_catalog.md` gives the entry point) |
 
 ## Folder structure & file roles
 ```
@@ -90,21 +95,16 @@ languages/asm/
 │       │                                 #   Ch4 wait-state hazards, Ch5/6 SALU/VALU, Ch8/11 SMEM/LDS,
 │       └─                                #   Ch9/10 global·FLAT·MUBUF, Sec12/13 VOP3P/DPP/SDWA encodings
 ├── skills/                               ← authoring levers + problem-triggered diagnosis
-│   ├── optimize/asm_levers/
-│   │   ├── overview.md                   # authoring model: 3 sub-levels, CDNA exec model, when to drop down (READ FIRST)
-│   │   ├── mfma_intrinsics.md            # __builtin_amdgcn_mfma_* incl. block-scaled CDNA4 variant (the default path)
-│   │   ├── raw_asm.md                    # raw .s / inline asm volatile: s_waitcnt overlap, s_setprio, SMFMAC sparse
-│   │   ├── register_alloc.md             # VGPR/AGPR budgeting, MFMA fragment layout, occupancy breakpoints, spurious spills
-│   │   ├── pitfalls.md                   # ISA-level anti-patterns (asm MFMA vs pipeliner, clobber bugs, waitcnt off-by-ones)
+│   ├── optimize/asm_levers/              ← 5 levers, all gfx950; each: route-in → constants → change → verify → traps
+│   │   ├── asm_decision.md               # SHOULD you drop to asm, and to which of the 3 sub-levels (READ FIRST)
+│   │   ├── asm_mfma_builtins.md          # __builtin_amdgcn_mfma_* + the block-scaled MXFP family (the default sub-level)
+│   │   ├── asm_inline_and_raw.md         # sub-levels 2-3: s_waitcnt overlap, sched barriers, inline-asm hygiene, SMFMAC
+│   │   ├── asm_register_budget.md        # 256 VGPR + 256 AGPR, C-register arithmetic, fragment layout, spills
+│   │   ├── asm_traps.md                  # the 10 ISA-level traps, indexed BY SYMPTOM
 │   │   └── intellikit/                   # VENDORED AMD RAD IntelliKit — MI355X-measured ground truth (see below)
 │   ├── profile/profiling-asm.md          # read the ISA hot loop + rocprofv3 PMC → VALU/MFMA/VMEM/LDS-bound verdict
 │   └── bottleneck/debug-asm-kernel.md    # NOP hazards, waitcnt FIFO, AGPR-alias launch fails, disassemble→round-trip workflow
-└── operators/<op>/                       ← per-operator knowledge (7 operators; catalog below)
-    ├── overview.md   # what/why, math contract, shape regimes, Amdahl weight, backend landscape
-    ├── asm.md        # asm SOTA card: the hand-tuned kernel, ISA techniques, measured perf, when it beats the library
-    ├── tuning.md     # per-operator knob/schedule space + the tune recipe
-    ├── numerics.md   # dtype/accumulate contract, parity bands, accuracy gating
-    └── fusion.md     # fusion neighbors & opportunities for this operator
+(no operators/ — see "Where operator knowledge lives" below)
 ```
 
 ### The vendored IntelliKit reference (`skills/optimize/asm_levers/intellikit/`)
@@ -119,15 +119,38 @@ counts, and cycle counts that are **not in the public ISA docs**. It is a self-c
   bugs), `s_waitcnt.md`, `buffer_load_lds.md`, and the `v_mfma_*` family.
 - `tools/scripts/vgpr_liveness.py` — VGPR liveness analyzer (dead-register windows + remap suggestions; `--json`).
 
-## Operator catalog (→ `operators/<op>/`)
-- **GEMM / linear**: `dense_gemm` (peak hand-MFMA path) · `batched_gemm` · `splitk_streamk_gemm` · `scaled_quant_gemm` (fp8/fp4) · `skinny_gemv_decode` (M=1..8, BW-bound, split-K)
-- **Attention**: `attention_prefill_fmha`
-- **Quantization**: `quant_dequant_fp8`
+## Where operator knowledge lives
+There is **no `operators/` folder here**. The per-operator asm cards were removed: `overview`/`fusion`/
+`numerics`/`tuning` are operator-level facts that do not change with the authoring language, and keeping
+a per-language copy meant the same card existed 3–5 times across `triton/`, `ck/`, `hip/`, `asm/` and
+`flydsl/`.
+
+Operator-level knowledge is **not maintained in this repo at all** — not per language, and no longer per
+framework either. It rots faster than it can be kept true: which backend wins, what the knobs are, which
+env var gates which path all turn over every release, and a stale card is worse than none — it sends you
+to an entry point that no longer exists, confidently. Where to get those facts instead:
+- **"Which API do I call for operator X?"** — `framework/aiter/overall/operator_catalog.md` (entry point
+  + signature, pinned to a commit).
+- **"Which backend will it dispatch to, and what can I tune?"** —
+  `framework/aiter/overall/dispatch_and_rebind.md` + `tuning_db.md`.
+- **"What are its shape constraints / numerics?"** — the `assert`s in the kernel source and `op_tests/`.
+  Nothing else is authoritative.
+- **`framework/mori/operators/`** — the one surviving operator folder: EP dispatch/combine, which is a
+  cross-GPU protocol, not a per-release config.
+
+
+For "write operator X in asm", get *what* you are building from the kernel source, then use this folder
+for *how*. The asm-specific kernel structure the per-operator `asm.md` cards carried is in
+**`ik/guides/kernel-architecture.md`** (GEMM, attention, GEMV, grouped-GEMM, uber-kernel families) —
+that guide is measured on MI355X and is the better source anyway.
+
+**Coverage note:** no operator this folder used to cover has an operator card in `local_knowledge` any
+more. The asm-side substance survives in `ik/guides/kernel-architecture.md` (GEMM / attention / GEMV /
+grouped-GEMM / uber-kernel families, incl. split-K scheduling) and the `ik/instructions/` set.
 
 ## Pinned reference sources
 **Primary ISA references**
-- **AMD CDNA3 ISA Reference (MI300)** — Ch.7 Matrix Arithmetic, waitcnt, encodings: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-mi300-cdna3-instruction-set-architecture.pdf
-- **AMD CDNA4 ISA Reference (MI350)** — Ch.7, block-scaled MFMA, gfx950: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
+- **AMD CDNA4 ISA Reference (MI350)** — the reference for this folder; Ch.7, block-scaled MFMA, gfx950: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf
 - **IntelliKit ASM Skills** (vendored, `asm_levers/intellikit/`) — AMD RAD, **measured on MI355X**: 67 instruction docs + 6 guides + `vgpr_liveness.py`.
 - **amd_matrix_instruction_calculator** — MFMA lane/element layout (authoritative over any table): https://github.com/ROCm/amd_matrix_instruction_calculator
 - Matrix Core programming CDNA3/CDNA4 (ROCm Blog) — intrinsics + register/lane layout: https://rocm.blogs.amd.com/software-tools-optimization/matrix-cores-cdna/README.html
@@ -137,12 +160,12 @@ counts, and cycle counts that are **not in the public ISA docs**. It is a self-c
 **Where hand-asm is consumed** (this folder is the delegated authoring layer)
 - **aiter** — `aiter/hsa/{gfx}/…` HSACO, `*_asm` ops, `hsa/codegen.py`; tune/dispatch via `framework/aiter/`.
 - **CK** — `WarpGemm` wraps MFMA intrinsics; see `languages/ck/`.
-- **HIP** — inline `asm volatile`, `__builtin_amdgcn_*`; `languages/hip/skills/optimize/hip_levers/intrinsics.md`
+- **HIP** — inline `asm volatile`, `__builtin_amdgcn_*`; `languages/hip/skills/optimize/hip_levers/hip_builtins.md`
   covers the **builtins** (recommended default). This `asm/` folder goes one level lower — raw `.s`, register
   allocation, and per-instruction cycle/hazard truth. The two are complementary; neither duplicates the other.
 
 ## Cross-links out of this folder
-Backend-neutral hardware constants (CDNA3 MI300 / CDNA4 MI350 / shared) live in `local_knowledge/hardware/`.
+Backend-neutral hardware constants (gfx950 only) live in `local_knowledge/hardware/`.
 Backend-agnostic optimization methodology (roofline, bottleneck classification, benchmarking) lives in
 `local_knowledge/common_methodology/`. Higher-level backends that consume hand-asm and dispatch it into the
 live path: `framework/aiter/`, `languages/ck/`, `languages/hip/`.

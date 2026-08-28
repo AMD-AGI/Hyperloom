@@ -69,7 +69,7 @@ paged_attention_ragged(out, workspace_buffer, query, key_cache, value_cache,
 
 ### Multi-Latent Attention (MLA)
 ```python
-# High-level API (auto split-KV via get_meta_param, backend selection) — see operators/mla_attention/aiter.md
+# High-level API (auto split-KV via get_meta_param, backend selection)
 from aiter.mla import mla_decode_fwd, mla_prefill_fwd, mla_prefill_ps_fwd, mla_decode_fwd_v4_nm
 
 mla_decode_fwd(q, kv_buffer, o, qo_indptr, kv_indptr, kv_page_indices, kv_last_page_lens,
@@ -186,7 +186,7 @@ moe_align_block_size(topk_ids, num_experts, block_size,
 moe_sum(input, output)
 ```
 
-### Expert-Parallel Dispatch/Combine (cross-GPU seam — see `operators/moe_dispatch_combine/`)
+### Expert-Parallel Dispatch/Combine (cross-GPU seam — see `framework/mori/`)
 Not an `aiter.ops.*` compute kernel — this is the **communicator seam** to MoRI-EP (or, intranode-only,
 FlyDSL) for the cross-GPU all-to-all. Distinct module from the single-GPU ops above.
 ```python

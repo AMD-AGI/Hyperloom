@@ -57,8 +57,8 @@ Consequences for a Gluon kernel that must run on both:
 - Your correctness check must run on the arch you will ship on. A parity pass on gfx950 says nothing
   about gfx942.
 
-See `../../../../hardware/` numerics cards and `../../../triton/operators/scaled_quant_gemm/numerics.md`
-for the dialect details; they are language-independent.
+See `../../../../hardware/mi350_dtypes.md` for the FNUZ-vs-OCP dialect details (language-independent),
+and the aiter source's `torch.finfo(quant_dtype).max` usage for how the dialect is actually selected.
 
 ## Scaling model
 This card is per-tensor / per-channel fp8 scaling, where the scale is applied in the epilogue or folded
@@ -73,6 +73,7 @@ different register cost. Both are `constexpr`-able and therefore cheap sweeps.
 
 ## Cross-links
 `../dense_gemm/gluon.md` — the base design this specializes.
-`../../../triton/operators/scaled_quant_gemm/` — math contract, parity bands, backend landscape.
-`../../../../framework/aiter/operators/dense_gemm/` — the library fp8 GEMM path and its tuned tables;
+Math contract, parity bands and backend landscape are not documented in this repo — read the kernel
+source. For the library fp8 GEMM path and its tuned tables, see
+`../../../../framework/aiter/overall/dispatch_and_rebind.md` + `../../../../framework/aiter/overall/tuning_db.md`;
 hipBLASLt fp8 is a strong bar and should be measured before authoring.

@@ -77,7 +77,7 @@ T __reduce_add_sync(unsigned long long mask, T v);   // + _min_/_max_ variants
 - Half-float `__shfl` is unsupported — shuffle as int/float and repack.
 - These carry **no memory barrier** — add fences for side-effect ordering.
 - Low-level equivalents: `__builtin_amdgcn_ds_bpermute/ds_permute/ds_swizzle/mov_dpp/permlane16/readlane`
-  (see [../skills/optimize/hip_levers/intrinsics.md](../skills/optimize/hip_levers/intrinsics.md)).
+  (see [../skills/optimize/hip_levers/hip_builtins.md](../skills/optimize/hip_levers/hip_builtins.md)).
 
 ## Atomics
 ```cpp

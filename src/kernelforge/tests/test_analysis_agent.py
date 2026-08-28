@@ -312,10 +312,10 @@ def _service(tmp_path, backend, *, profiling_enabled=True):
     )
     (profiling / "rocpc_profile.py").write_text("#!/usr/bin/env python3\nprint('reference')\n")
     for name in (
-        "rocprof_compute_workflow.md",
-        "reading_a_kernel_bottleneck.md",
-        "roofline_on_mi.md",
-        "benchmarking_methodology.md",
+        "measure_rocpc_workflow.md",
+        "measure_triage.md",
+        "measure_roofline.md",
+        "measure_protocol.md",
     ):
         (profiling / name).write_text(f"# {name}\n")
     return AnalysisAgentService(
@@ -568,7 +568,7 @@ async def test_analysis_reports_missing_optional_profiling_methodology(
     workspace, kernel, driver = _workspace(tmp_path)
     backend = _BundleBackend()
     service = _service(tmp_path, backend)
-    missing = tmp_path / "knowledge" / "common_methodology" / "profiling" / "roofline_on_mi.md"
+    missing = tmp_path / "knowledge" / "common_methodology" / "profiling" / "measure_roofline.md"
     missing.unlink()
 
     await service.ensure_bundle(
@@ -580,7 +580,7 @@ async def test_analysis_reports_missing_optional_profiling_methodology(
 
     assert backend.calls == 1
     payload = json.loads(backend.specs[0].user_prompt)
-    assert payload["profiling_methodology_missing"] == ["roofline_on_mi.md"]
+    assert payload["profiling_methodology_missing"] == ["measure_roofline.md"]
     assert all(Path(path).is_file() for path in payload["profiling_methodology"])
 
 

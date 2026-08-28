@@ -16,7 +16,7 @@ Diagnostic workflow for the lowest level (raw `.s`, inline `asm volatile`, HSACO
 MI350/MI355X gfx950. The per-instruction ground truth lives in
 [../optimize/asm_levers/intellikit/](../optimize/asm_levers/intellikit/) (start with
 `intellikit/instructions/nop_hazard_summary.md`, `intellikit/guides/debugging-playbook.md`); the
-authoring model is in [../optimize/asm_levers/overview.md](../optimize/asm_levers/overview.md).
+authoring model is in [../optimize/asm_levers/asm_decision.md](../optimize/asm_levers/asm_decision.md).
 
 ## Step 0: the IntelliKit workflow (never guess)
 Disassemble a working `.co` → **round-trip validate bit-identical** → make **one targeted change** →
@@ -56,7 +56,7 @@ kernel either fails to launch or produces AGPR garbage.
 ## 5. Inline asm rules & scheduling
 - **Do NOT hand-write MFMA in inline asm** — it's not recognized by `SchedGroupMask`, defeating the SW
   pipeliner. Use `__builtin_amdgcn_mfma_*` + `sched_group_barrier` to *guide* the compiler
-  (see hip `hip_levers/intrinsics.md`).
+  (see hip `hip_levers/hip_builtins.md`).
 - Inline `asm volatile` for ordered sequences needs **early-clobber `"=&v"`**, a `"memory"` clobber, and
   **one asm block** (splitting lets the compiler reorder). Missing these → dropped/reordered instructions.
 

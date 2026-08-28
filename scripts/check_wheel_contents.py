@@ -97,7 +97,13 @@ def _check_data_files_are_present(cfg: dict, names: list[str]) -> list[str]:
 #: KernelForge's deleted ``test_wheel_content.py``, which built its own wheel.
 _NON_EMPTY_TREES = {
     "kernelforge/data/knowledge_base/": 100,
-    "kernelforge/data/local_knowledge/": 700,
+    # Was 700, when local_knowledge still carried per-operator cards duplicated
+    # across every language folder. That duplication was removed deliberately
+    # (the same card existed 3-5 times over, and operator-level facts go stale
+    # faster than they can be maintained), taking the tree from 720 .md files to
+    # 213. The floor is a "did the tree get wiped" guard, not a size assertion --
+    # 200 keeps that guard meaningful against the current 251 files.
+    "kernelforge/data/local_knowledge/": 200,
     "kernelforge/data/examples/": 40,
     "kernelforge/data/serving_patches/": 3,
 }

@@ -168,7 +168,7 @@ tiles_per_warp=None, ...)`, fed through `gl.DotOperandLayout`. `instr_shape` is 
 variant and `tiles_per_warp` controls contiguous per-warp tile computation.
 
 Which MFMA shape wins on which arch and dtype is a Triton-substrate question and is **not duplicated
-here** — read `../triton/skills/optimize/triton_levers/deep_codegen.md` (the `tl.dot` → MFMA mapping
+here** — read `../triton/skills/optimize/triton_levers/triton_lowering.md` (the `tl.dot` → MFMA mapping
 and layout selection) and the `hardware/` matrix-core cards. The Gluon-specific part is only that you
 name the layout instead of receiving it — and that changing `instr_shape` on a *scaled* MFMA also
 changes the scale packing order, which is a silent-wrong-answer trap covered in
@@ -188,7 +188,7 @@ when the structured layouts cannot express the mapping you need. Reference:
 - Unexpected `convert_layout` in the IR is the signal that two adjacent ops disagree. Find the *first*
   one in program order — later ones are usually consequences.
 - `AMDGCN_ENABLE_DUMP=1` and the ISA workflow are shared with Triton:
-  `../triton/skills/optimize/triton_levers/isa_verify.md`. Gluon lowers through the same backend, so
+  `../triton/skills/optimize/triton_levers/triton_isa_check.md`. Gluon lowers through the same backend, so
   everything that card says about reading the dump applies unchanged.
 
 ## Sources

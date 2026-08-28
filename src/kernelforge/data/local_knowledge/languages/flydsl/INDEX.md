@@ -2,7 +2,7 @@
 title: FlyDSL knowledge map — index, file roles & problem-routing
 kind: index
 scope: languages/flydsl
-updated: 2026-07-14
+updated: 2026-08-28
 ---
 
 # FlyDSL — knowledge map
@@ -22,13 +22,12 @@ code with `@flyc.kernel` + a `@flyc.jit` host launcher using a **CuTe-style layo
 AMDGCN**. It sits between the compiler-DSL tier (Triton) and hand-asm: more layout control than Triton,
 far less brittle than raw `.s`. Its kernels ship **inside aiter** (`aiter/ops/flydsl/`) as a backend
 (split-K HGEMM, small-M decode HGEMM, fp8 GEMM, MoE, norm/softmax); the live dispatch/rebind seam is
-documented in `framework/aiter/` (the `flydsl_path` lever). Backend-neutral hardware numbers live in
+documented in `framework/aiter/` (the `aiter_flydsl_libtype` lever). Backend-neutral hardware numbers live in
 `hardware/`; this folder references them rather than duplicating.
 
 **Two ways you engage FlyDSL — pick your path first, it changes which files you read:**
 - **Path A — *use* the aiter-shipped FlyDSL kernel library.** Tune `flydsl_hgemm`-style knobs, pick a
-  kernel family, handle preshuffle/dispatch. Entry: `skills/optimize/flydsl_levers/{kernel_families,knobs}.md`
-  → `operators/<op>/flydsl.md`.
+  kernel family, handle preshuffle/dispatch. Entry: `skills/optimize/flydsl_levers/{kernel_families,knobs}.md`.
 - **Path B — *author* a new `@flyc.kernel` from scratch.** Entry: `API_docs/` (language) +
   `API_docs/conventions.md` (style) → `skills/optimize/flydsl_levers/{authoring_optimization,authoring_gemm_levers}.md`.
 
@@ -36,10 +35,16 @@ documented in `framework/aiter/` (the `flydsl_path` lever). Backend-neutral hard
 1. **`API_docs/`** — the language itself: `kernel_authoring_guide.md` (`@flyc.kernel`/`@flyc.jit`, launch,
    LDS, tiled copy/MMA) → `layout_system_guide.md` (layout algebra) → `architecture_guide.md` (compile
    stack). Read alongside **`API_docs/conventions.md`** (the authoring style guide) before writing any kernel.
-2. **`skills/optimize/flydsl_levers/`** — the levers: `kernel_families.md` + `knobs.md` (Path A, using the
-   library) or `authoring_optimization.md` + `authoring_gemm_levers.md` (Path B, structure-first authoring).
-3. **`operators/<op>/`** — the operator you're shipping (overview → `flydsl.md` card → tuning/numerics/
-   fusion), plus **`skills/`** *when you hit a problem*: `profile/` (trace, benchmark), `bottleneck/` (debug).
+2. **`skills/optimize/flydsl_levers/`** — the levers: `flydsl_kernel_library.md` + `flydsl_knob_space.md` (Path A, using the
+   library) or `flydsl_authoring_method.md` + `flydsl_gemm_authoring.md` (Path B, structure-first authoring).
+3. **`skills/`** *when you hit a problem*: `profile/` (trace, benchmark), `bottleneck/` (debug),
+   `optimize/{gemm,lds,prefetch}-*.md` for the targeted levers.
+
+> **Per-operator cards are not in this folder — and largely not in this repo.** General operator theory
+> (math contract, shape regimes, Amdahl weight, parity bands) is not maintained here; read the source.
+> The FlyDSL *dispatch* decision does live in `framework/aiter/`
+> (`skills/optimize/aiter_levers/aiter_flydsl_libtype.md`) — read that for whether FlyDSL is the right backend,
+> then come back here for the authoring levers.
 
 ## Portable golden rules (FlyDSL-specific)
 - **Layout-first.** Prefer the layout API (`fx.rocdl.make_buffer_tensor()` + logical layouts +
@@ -60,20 +65,20 @@ Substitute `<op>` with the operator (catalog below). Paths are relative to this 
 
 | Task / symptom | Read in this order |
 |---|---|
-| "What is FlyDSL / where does it fit?" | `API_docs/architecture_guide.md` → `skills/optimize/flydsl_levers/kernel_families.md` |
+| "What is FlyDSL / where does it fit?" | `API_docs/architecture_guide.md` → `skills/optimize/flydsl_levers/flydsl_kernel_library.md` |
 | "Write my first FlyDSL kernel" | `API_docs/kernel_authoring_guide.md` → `API_docs/conventions.md` → `API_docs/examples/` (01→04) |
 | "Understand the layout algebra (Shape/Stride/tiled copy/MMA)" | `API_docs/layout_system_guide.md` → `API_docs/cute_layout_algebra_guide.md` → `API_docs/flydsl-tile-programming.md` |
-| "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/kernel_families.md` → `.../knobs.md` → `operators/<op>/flydsl.md` |
-| "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/authoring_optimization.md` → (GEMM) `.../authoring_gemm_levers.md` |
-| "Optimize a GEMM specifically" | `skills/optimize/gemm-optimization.md` → `skills/optimize/flydsl_levers/authoring_gemm_levers.md` |
+| "Use the aiter FlyDSL GEMM library — which knobs?" | `skills/optimize/flydsl_levers/flydsl_kernel_library.md` → `.../flydsl_knob_space.md` |
+| "Author & optimize a new kernel (structure-first)" | `skills/optimize/flydsl_levers/flydsl_authoring_method.md` → (GEMM) `.../flydsl_gemm_authoring.md` |
+| "Optimize a GEMM specifically" | `skills/optimize/gemm-optimization.md` → `skills/optimize/flydsl_levers/flydsl_gemm_authoring.md` |
 | "LDS bank conflicts / double-buffer / swizzle" | `skills/optimize/lds-optimization.md` → `API_docs/conventions.md` (SharedAllocator) |
 | "Overlap loads / prefetch / pipeline" | `skills/optimize/prefetch-data-load.md` |
 | "Wrong output / NaN / won't compile / fix didn't take" | `skills/bottleneck/debug-flydsl-kernel.md` (clear cache first) → `API_docs/conventions.md` |
 | "Profile / capture a kernel trace / find the hotspot" | `skills/profile/capture-kernel-trace.md` → `skills/profile/kernel-trace-analysis/SKILL.md` |
 | "Benchmark / write tests / test tiering" | `skills/profile/testing_benchmarking_guide.md` → `skills/profile/tests_tiering_README.md` |
 | "A perf regression appeared — find the culprit commit" | `skills/optimize/bisect-perf-regression.md` |
-| "Which pre-built kernels exist + their dtype/config?" | `API_docs/prebuilt_kernels_guide.md` → `skills/optimize/flydsl_levers/kernel_families.md` |
-| "Tune / numerics / fusion for operator X" | `operators/<op>/tuning.md` · `operators/<op>/numerics.md` · `operators/<op>/fusion.md` |
+| "Which pre-built kernels exist + their dtype/config?" | `API_docs/prebuilt_kernels_guide.md` → `skills/optimize/flydsl_levers/flydsl_kernel_library.md` |
+| "Tune / numerics / fusion for operator X" | not covered in this repo — read the source (`framework/aiter/overall/operator_catalog.md` gives the entry point) |
 
 ## Folder structure & file roles
 ```
@@ -87,15 +92,15 @@ languages/flydsl/
 │   ├── prebuilt_kernels_guide.md         # pre-built kernel library (norm/softmax/GEMM/MoE/attention) + dtype/config
 │   ├── cute_layout_algebra_guide.md      # CuTe layout algebra background (advanced reference)
 │   ├── flydsl-kernel-authoring.md        # authoring reference + new-kernel step recipe
-│   ├── flydsl-tile-programming.md        # tile-programming patterns
+│   ├── flydsl-tile-programming.md        # the PROCEDURE: classify pattern → skeleton → compute → sync/LDS → verify
 │   └── examples/                         # runnable skeletons: 01 vectorAdd · 02 tiledCopy · 03 tiledMma · 04 preshuffle_gemm
 ├── skills/                               ← techniques by phase
 │   ├── optimize/
 │   │   ├── flydsl_levers/
-│   │   │   ├── kernel_families.md        # Path A: the shipped aiter FlyDSL families (HGEMM, small-M, fp8, MoE, norm)
-│   │   │   ├── knobs.md                  # Path A: flydsl_hgemm knob set + constraints (verified against aiter source)
-│   │   │   ├── authoring_optimization.md # Path B: structure-first optimization workflow for an authored kernel
-│   │   │   └── authoring_gemm_levers.md  # Path B: GEMM authoring levers (tiling/LDS/MFMA-loop/epilogue)
+│   │   │   ├── flydsl_kernel_library.md  # Path A: the shipped aiter families (HGEMM, small-M, fp8-A8, MoE, GDR, silu_fq)
+│   │   │   ├── flydsl_knob_space.md      # Path A: the knob set + which 3 knobs are arch-pinned, not tunable
+│   │   │   ├── flydsl_authoring_method.md# Path B: structure-before-parameters workflow, with the stop conditions
+│   │   │   └── flydsl_gemm_authoring.md  # Path B: GEMM levers (tiling / LDS / MFMA loop / epilogue)
 │   │   ├── gemm-optimization.md          # GEMM optimization walkthrough
 │   │   ├── lds-optimization.md           # LDS sizing / bank-conflict / buffering
 │   │   ├── prefetch-data-load.md         # prefetch & load-overlap / pipelining
@@ -105,13 +110,8 @@ languages/flydsl/
 │   │   ├── kernel-trace-analysis/SKILL.md# analyze the trace (+ scripts/ hotspot_analyzer.py, pmc_l2_analyzer.py)
 │   │   ├── testing_benchmarking_guide.md # test infra, benchmark harness, perf measurement
 │   │   └── tests_tiering_README.md       # test tiering (unit / lit / GPU kernel tiers)
-│   └── bottleneck/debug-flydsl-kernel.md # NaN/wrong/crash: cache invalidation, tracing pitfalls, layout/MFMA/LDS debug
-└── operators/<op>/                       ← per-operator knowledge (14 operators; catalog below)
-    ├── overview.md   # what the operator is, shapes/regimes
-    ├── flydsl.md     # implementation card: entry points, knob table + defaults, numerics/parity, pitfalls, verify
-    ├── tuning.md     # tuning levers for this operator
-    ├── numerics.md   # accuracy expectations & parity notes
-    └── fusion.md     # fusion neighbors / opportunities
+│   └── bottleneck/debug-flydsl-kernel.md # symptom-indexed: NaN / zeros / mostly-wrong / slightly-off / no-compile / hang
+(no operators/ — see "Where operator knowledge lives" below)
 ```
 
 ## `API_docs/conventions.md` — what it is
@@ -123,18 +123,40 @@ placement (reuse `kernels/kernels_common.py` etc.); and the **`expr/` target-neu
 `python/flydsl/expr/` top-level modules must not import ROCDL/HIP bindings — backend code goes in
 `expr/rocdl/`). Read it **before authoring** (Path B) and consult it when a kernel won't trace/compile.
 
-## Operator catalog (→ `operators/<op>/`)
-- **GEMM / linear**: `dense_gemm` · `splitk_streamk_gemm` · `scaled_quant_gemm` (fp8/fp4) · `gemm_epilogue_fused` · `skinny_gemv_decode` (M=1..16 decode)
-- **MoE**: `fused_moe_grouped_gemm` · `grouped_gemm_moe`
-- **Norm / activation**: `rmsnorm` · `layernorm` · `softmax` · `act_and_mul_silu_gelu`
-- **Reduction**: `reduction`
-- **Attention (linear)**: `linear_attention_gated_delta`
-- **Layout / utility**: `layout_shuffle` (preshuffle / MFMA-native layout)
+## Where operator knowledge lives
+There is **no `operators/` folder here**. The per-operator FlyDSL cards were removed: `overview`/
+`fusion`/`numerics`/`tuning` are operator-level facts that do not change with the authoring language, and
+keeping a per-language copy meant the same card existed 3–5 times across `triton/`, `ck/`, `hip/`, `asm/`
+and `flydsl/`.
+
+Operator-level knowledge is **not maintained in this repo at all** — not per language, and no longer per
+framework either. It rots faster than it can be kept true: which backend wins, what the knobs are, which
+env var gates which path all turn over every release, and a stale card is worse than none — it sends you
+to an entry point that no longer exists, confidently. Where to get those facts instead:
+- **"Which API do I call for operator X?"** — `framework/aiter/overall/operator_catalog.md` (entry point
+  + signature, pinned to a commit).
+- **"Which backend will it dispatch to, and what can I tune?"** —
+  `framework/aiter/overall/dispatch_and_rebind.md` + `tuning_db.md`.
+- **"What are its shape constraints / numerics?"** — the `assert`s in the kernel source and `op_tests/`.
+  Nothing else is authoritative.
+- **`framework/mori/operators/`** — the one surviving operator folder: EP dispatch/combine, which is a
+  cross-GPU protocol, not a per-release config.
+
+
+For Path A (using the shipped library), `skills/optimize/flydsl_levers/flydsl_kernel_library.md` +
+`flydsl_knob_space.md` and `API_docs/prebuilt_kernels_guide.md` carry the entry points and knob tables the
+per-operator `flydsl.md` cards duplicated. For Path B (authoring), the
+`flydsl_authoring_method.md` / `flydsl_gemm_authoring.md` pair is the structure-first path.
+
+**Coverage note:** none of the operators this folder used to cover (`gemm_epilogue_fused`,
+`layout_shuffle`, `linear_attention_gated_delta`, `reduction`, `splitk_streamk_gemm`, the GEMM and MoE
+families) has an operator card in `local_knowledge` any more. `flydsl_kernel_library.md` and
+`API_docs/prebuilt_kernels_guide.md` still enumerate the FlyDSL kernels that implement them.
 
 ## Cross-links out of this folder
-Backend-neutral hardware constants (CDNA3 MI300 / CDNA4 MI350 / shared) live in `local_knowledge/hardware/`.
+Backend-neutral hardware constants (gfx950 only) live in `local_knowledge/hardware/`.
 Backend-agnostic optimization methodology (roofline, bottleneck classification, benchmarking) lives in
 `local_knowledge/common_methodology/`. The library control plane that dispatches FlyDSL kernels into the
 live sglang/vLLM path — and the decision of when to reach for the FlyDSL backend — is in
-`framework/aiter/` (`skills/optimize/aiter_levers/flydsl_path.md`). Lower-level MFMA/ISA detail is in
+`framework/aiter/` (`skills/optimize/aiter_levers/aiter_flydsl_libtype.md`). Lower-level MFMA/ISA detail is in
 `languages/asm/`.

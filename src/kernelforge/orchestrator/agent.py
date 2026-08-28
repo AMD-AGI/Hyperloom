@@ -301,8 +301,8 @@ instead of guessing rocprof-compute's CLI:
 It prints rocprof-compute's Top-Stats + System Speed-of-Light tables (+ the Roofline section with
 --roofline) and keeps the raw workload. Find your kernel's index in the printed Top-Stats table and
 re-run with --kernel <index> to isolate its Speed-of-Light. Then classify the bottleneck (compute /
-bandwidth / latency-occupancy) yourself using reading_a_kernel_bottleneck.md and roofline_on_mi.md in
-{profiling_dir} ; the script's mechanics are in {profiling_dir}/rocprof_compute_workflow.md . Use the
+bandwidth / latency-occupancy) yourself using measure_triage.md and measure_roofline.md in
+{profiling_dir} ; the script's mechanics are in {profiling_dir}/measure_rocpc_workflow.md . Use the
 script rather than raw `rocprof-compute` (it finds a usable interpreter, runs profile+analyze, and
 prints the tables). If this environment lacks rocprof-compute's deps the script prints an
 "unavailable — skipping" notice and exits without data; just proceed without profiling (don't retry it).

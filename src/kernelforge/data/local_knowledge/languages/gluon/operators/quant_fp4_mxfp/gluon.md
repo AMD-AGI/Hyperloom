@@ -82,6 +82,7 @@ tuned they will both look neutral.
 ## Cross-links
 [`../../API_docs/amd_targets.md`](../../API_docs/amd_targets.md) § 4 — the scaled-MFMA API surface and
 the data-format details. `../dense_gemm/gluon.md` — the base design.
-`../../../triton/operators/quant_fp4_mxfp/` — math contract, quantization semantics, parity gating
-(language-independent). `../../../../framework/aiter/operators/quant_fp4_mxfp/` — the library path and
-where an MXFP4 GEMM sits in a real model.
+Math contract, quantization semantics and parity gating are not documented in this repo — read the
+kernel source and `op_tests/`. For the library path, see
+`../../../../framework/aiter/overall/operator_catalog.md` (the MXFP4/MXFP8 entry points) and
+`../../../../framework/aiter/overall/dispatch_and_rebind.md`.

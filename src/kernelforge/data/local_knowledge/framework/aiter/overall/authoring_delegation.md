@@ -24,7 +24,7 @@ card is the router; it deliberately does **not** duplicate MFMA/LDS/knob docs.
 | HIP/C++ ops (incl. HipKittens) | HIP C++ | `csrc/*` | `local_knowledge/languages/hip/` (intrinsics, lds_async, patterns, hipkittens) |
 | Triton ops (`aiter.ops.triton.*`) | Triton | `aiter/ops/triton/*` | `local_knowledge/languages/triton/` (knobs, patterns, isa_verify) |
 | FlyDSL ops (`aiter.ops.flydsl.*`) | FlyDSL | `aiter/ops/flydsl/*` | `local_knowledge/languages/flydsl/` |
-| opus split-K GEMM/MoE (`opus_gemm`, `moe_stage2_a8w4`) | HIP/C++ split-K kernels | `aiter/ops/opus/*`, `csrc/opus_gemm/*` | aiter-internal; tune via `gemm_a16w16_tune.py --libtype opus` (see [tuning_db.md](tuning_db.md) and `operators/dense_gemm/backends/opus.md`) |
+| opus split-K GEMM/MoE (`opus_gemm`, `moe_stage2_a8w4`) | HIP/C++ split-K kernels | `aiter/ops/opus/*`, `csrc/opus_gemm/*` | aiter-internal; tune via `gemm_a16w16_tune.py --libtype opus` (see [tuning_db.md](tuning_db.md)) |
 | hipBLASLt-dispatched GEMM | (closed library) | n/a | not authored — tune via the DB ([tuning_db.md](tuning_db.md)) |
 
 ## Decide: tune the DB, or author a kernel?

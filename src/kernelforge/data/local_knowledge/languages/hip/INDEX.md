@@ -2,7 +2,7 @@
 title: HIP / C++ knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/hip
-updated: 2026-07-14
+updated: 2026-08-28
 ---
 
 # HIP / C++ — knowledge map
@@ -27,7 +27,7 @@ authoring levers (MFMA/LDS/scheduling), the profile/debug playbooks, and per-ope
   encode the tied-accumulator + software-pipeline + double-buffer patterns correctly and avoid the
   known AGPR-spill trap (LLVM #131954). Raw HIP is the escape hatch, not the default.
 - **Backend-neutral hardware constants are NOT here.** CU/VGPR/LDS/peak numbers are single-sourced in
-  `local_knowledge/hardware/` (`cdna3_mi300/`, `cdna4_mi350/`, `shared/`); HIP cards reference them.
+  `local_knowledge/hardware/` (one card per subsystem, gfx950 only); HIP cards reference them.
 
 ## The two facts behind almost every HIP bug (internalize first)
 1. **Wavefront = 64 lanes, not 32.** `warpSize == 64`; every `__shfl`/`__ballot`/manual reduction, mask
@@ -44,11 +44,11 @@ doesn't change the ISA as expected is usually noise.
 ## Start here — problem → files → order
 | Task / symptom | Read in this order |
 |---|---|
-| "Orient me on authoring HIP kernels" | `skills/optimize/hip_levers/overview.md` → `API_docs/kernel_language.md` |
-| "Write / tune an MFMA (matrix-core) GEMM" | `skills/optimize/hip_levers/overview.md` → `intrinsics.md` → `lds_async.md` → `patterns.md` |
-| "LDS bank conflicts / double-buffer / direct-to-LDS / async copy" | `skills/optimize/hip_levers/lds_async.md` → `intrinsics.md` (§2 buffer, §4 sched) |
-| "Wave reductions / grid-stride / streams / graphs / tiled-GEMM skeleton" | `skills/optimize/hip_levers/patterns.md` |
-| "CUDA→HIP port went wrong / slow / static-assert on mask" | `skills/optimize/hip_levers/pitfalls.md` → `skills/bottleneck/debug-hip-kernel.md` |
+| "Orient me on authoring HIP kernels" | `skills/optimize/hip_levers/hip_authoring_model.md` → `API_docs/kernel_language.md` |
+| "Write / tune an MFMA (matrix-core) GEMM" | `skills/optimize/hip_levers/hip_authoring_model.md` → `hip_builtins.md` → `hip_lds_staging.md` → `hip_templates.md` |
+| "LDS bank conflicts / double-buffer / direct-to-LDS / async copy" | `skills/optimize/hip_levers/hip_lds_staging.md` → `hip_builtins.md` (§2 buffer, §4 sched) |
+| "Wave reductions / grid-stride / streams / graphs / tiled-GEMM skeleton" | `skills/optimize/hip_levers/hip_templates.md` |
+| "CUDA→HIP port went wrong / slow / static-assert on mask" | `skills/optimize/hip_levers/hip_traps.md` → `skills/bottleneck/debug-hip-kernel.md` |
 | "Kernel is wrong / crashes / hangs / underperforms" | `skills/bottleneck/debug-hip-kernel.md` (symptom table → §) |
 | "What should I optimize next? (read the profiler)" | `skills/profile/profiling-hip.md` → the lever it points to |
 | "Tile-abstraction alternative to raw asm / SOTA perf reference" | `skills/optimize/hip_levers/hipkittens.md` |
@@ -56,8 +56,8 @@ doesn't change the ISA as expected is usually noise.
 | "Host API: memory, streams, events, HIP graphs, error handling" | `API_docs/runtime_api.md` |
 | "Compile flags / CMake / PyTorch extension / arch guards / JIT cache" | `API_docs/compilation_and_build.md` |
 | "Low-precision dtype headers (fp8/fp6/fp4/bf16) + MFMA vector types" | `API_docs/dtypes.md` |
-| "fp8 gives wrong results (~2× off) on gfx942" | `API_docs/dtypes.md` → `skills/optimize/hip_levers/pitfalls.md` → `skills/bottleneck/debug-hip-kernel.md` (§6) |
-| "Author / optimize operator X in HIP" | `operators/<X>/overview.md` → `operators/<X>/hip.md` → `fusion.md` / `numerics.md` / `tuning.md` |
+| "fp8 gives wrong results (~2× off) on gfx942" | `API_docs/dtypes.md` → `skills/optimize/hip_levers/hip_traps.md` → `skills/bottleneck/debug-hip-kernel.md` (§6) |
+| "Author / optimize operator X in HIP" | the kernel source (`framework/aiter/overall/operator_catalog.md` for the aiter entry point) → back here: `hip_levers/hip_authoring_model.md` → `hip_builtins.md` → `hip_lds_staging.md` → `hip_templates.md` |
 | "Hardware constants (CU / VGPR / LDS / peak / roofline)" | `local_knowledge/hardware/` (single source of truth) |
 
 ## Folder structure & file roles
@@ -73,38 +73,52 @@ languages/hip/
 │   ├── profile/profiling-hip.md          # read rocprofv3 PMC → classify memory/compute/spill → point to a lever
 │   ├── bottleneck/debug-hip-kernel.md    # wrong/crash/slow: symptom→cause table, wave64, LDS, AGPR, fp8, ISA check, hang recovery
 │   └── optimize/hip_levers/              ← the "how to optimize" levers (indexed below)
-│       ├── overview.md                   # programming model, MI300X constants, toolchain, HIP-vs-Triton/FlyDSL capability map
-│       ├── intrinsics.md                 # __builtin_amdgcn_mfma_*, buffer descriptors, cross-lane, sched_group_barrier
-│       ├── lds_async.md                  # LDS banks/padding/swizzle, direct-to-LDS, barriers/wait-counters, double-buffer
-│       ├── patterns.md                   # wave reductions, grid-stride, cooperative groups, streams/graphs, tiled-GEMM + MFMA µkernel
-│       ├── pitfalls.md                   # CUDA→HIP traps, occupancy prediction, ISA-verification checklist, when NOT to write HIP
+│       ├── hip_authoring_model.md       # SHOULD you write HIP + gfx950 constants, toolchain, capability map (READ FIRST)
+│       ├── hip_builtins.md              # __builtin_amdgcn_mfma_*, buffer descriptors, cross-lane, sched_group_barrier
+│       ├── hip_lds_staging.md           # LDS 64-bank conflicts, swizzle, direct-to-LDS, barriers/waitcnt, double-buffer
+│       ├── hip_templates.md             # wave64 reductions, grid-stride, cooperative groups, streams/graphs, tiled GEMM
+│       ├── hip_traps.md                 # CUDA->HIP traps indexed BY SYMPTOM + occupancy prediction + the ISA checklist
 │       └── hipkittens.md                 # HipKittens tile primitives / wave scheduling / register pinning (SOTA perf reference)
-└── operators/<op>/                       ← per-operator HIP cards (13 operators; catalog below)
-    ├── overview.md   # what/why, math contract, shape regimes, Amdahl weight, cross-backend landscape, how-to-bench
-    ├── hip.md        # the HIP SOTA card: editable kernel source pointers, knobs, the HIP-specific implementation
-    ├── fusion.md     # fusion neighbors (residual-add, norm+quant, GEMM epilogue, attention-entry mega-fusions)
-    ├── numerics.md   # dtype/accumulate contract, parity bands, accuracy gating
-    └── tuning.md     # tile/occupancy/scheduling knob space + the tune recipe
+(no operators/ — see "Where operator knowledge lives" below)
 ```
-All 13 operators carry the full 5-file set (`overview`/`hip`/`fusion`/`numerics`/`tuning`).
 
-## Operator catalog (→ `operators/<op>/`)
-- **GEMM / linear**: `batched_gemm` (per-head/per-expert; fill all CUs across the batch) · `splitk_streamk_gemm` (K/tile decomposition — only helps when CU-underutilized) · `scaled_quant_gemm` (fp8/fp6/fp4 block-scaled MFMA; FP6 at FP4 rate) · `grouped_gemm_moe` (variable-M per-expert GEMMs in one fused launch)
-- **Attention**: `attention_decode_paged` (paged-KV flash-decoding, splitKV, bandwidth-bound) · `mla_attention` (DeepSeek MLA, weight-absorbed MQA on the latent)
-- **Norm**: `rmsnorm` (bandwidth-bound row reduce; fusion anchor) · `fused_add_rmsnorm` (the dominant serving form — residual-add fused) · `layernorm` (two-statistic μ/σ²; encoder/ViT)
-- **Reduction / activation**: `softmax` (max-subtracted row reduce; usually fused into attention) · `reduction` (wave64 shuffle → LDS → split/atomic; the primitive inside norm/softmax)
-- **Position**: `rope` (rotary embedding; must be fused, not naive)
-- **Quantization**: `quant_dequant_fp8` (FNUZ vs OCP correctness gate; the win is fusing it away)
+## Where operator knowledge lives
+There is **no `operators/` folder here**. The per-operator HIP cards were removed: `overview`/`fusion`/
+`numerics`/`tuning` are operator-level facts that do not change with the authoring language, and keeping
+a per-language copy meant the same card existed 3–5 times across `triton/`, `ck/`, `hip/`, `asm/` and
+`flydsl/`.
+
+Operator-level knowledge is **not maintained in this repo at all** — not per language, and no longer per
+framework either. It rots faster than it can be kept true: which backend wins, what the knobs are, which
+env var gates which path all turn over every release, and a stale card is worse than none — it sends you
+to an entry point that no longer exists, confidently. Where to get those facts instead:
+- **"Which API do I call for operator X?"** — `framework/aiter/overall/operator_catalog.md` (entry point
+  + signature, pinned to a commit).
+- **"Which backend will it dispatch to, and what can I tune?"** —
+  `framework/aiter/overall/dispatch_and_rebind.md` + `tuning_db.md`.
+- **"What are its shape constraints / numerics?"** — the `assert`s in the kernel source and `op_tests/`.
+  Nothing else is authoritative.
+- **`framework/mori/operators/`** — the one surviving operator folder: EP dispatch/combine, which is a
+  cross-GPU protocol, not a per-release config.
+
+
+For "write operator X in HIP", get *what* you are building from the kernel source, then use this folder
+for *how*: `hip_levers/hip_templates.md` carries the reusable kernel shapes (wave reductions,
+grid-stride loops, the tiled-GEMM + MFMA µkernel) that the per-operator `hip.md` cards duplicated.
+
+**Coverage note:** no operator this folder used to cover has an operator card in `local_knowledge` any
+more. The HIP-side substance survives in `hip_levers/hip_templates.md` (wave64 reductions, grid-stride,
+tiled-GEMM + MFMA µkernel) and `hip_lds_staging.md`.
 
 ## Reading-depth guide (how much to load)
-- **Just orienting / a single API fact**: `hip_levers/overview.md` or the relevant `API_docs/*` file —
+- **Just orienting / a single API fact**: `hip_levers/hip_authoring_model.md` or the relevant `API_docs/*` file —
   don't load the whole levers folder.
 - **Authoring a matrix-core kernel**: the levers chain `overview → intrinsics → lds_async → patterns`
-  is the core loop; add `pitfalls.md` before you trust a result.
+  is the core loop; add `hip_traps.md` before you trust a result.
 - **Diagnosing a specific failure**: go straight to `skills/bottleneck/debug-hip-kernel.md` and follow
   its symptom→section table; use `skills/profile/profiling-hip.md` when the question is "what next?".
-- **Per-operator work**: `operators/<op>/overview.md` first (cross-backend context + whether HIP is even
-  the right backend), then `hip.md` for the HIP implementation, then `fusion`/`numerics`/`tuning`.
+- **Per-operator work**: start from the kernel source and `framework/aiter/overall/dispatch_and_rebind.md`
+  (is HIP even the backend this call resolves to?), then come back here for the .
 - **Hardware numbers**: always defer to `local_knowledge/hardware/` — this folder never duplicates them.
 
 ## Pinned reference sources
@@ -137,5 +151,5 @@ Single place for the `repo@commit` / canonical-URL pins the `hip/` cards cite (c
 ## Cross-links out of this folder
 Hardware constants: `local_knowledge/hardware/` (single source of truth). Higher-level / alternative
 authoring paths and their operator cards live under `languages/{triton,gluon,flydsl,ck,asm}/` and
-`framework/aiter/`; a HIP operator's `overview.md` links the cross-backend SOTA cards. Benchmark
+`framework/aiter/`; see `framework/aiter/` for the cross-backend context. Benchmark
 discipline (warmup, median-of-≥3, in-context A/B) lives in `local_knowledge/common_methodology/`.

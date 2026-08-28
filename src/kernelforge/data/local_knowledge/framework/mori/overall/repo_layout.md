@@ -34,16 +34,14 @@ heap** (`mori.shmem`) as the foundation, then several higher-level libraries bui
 mori and aiter are **peer libraries with a one-way dependency for EP**: aiter owns the single-GPU MoE
 path (local permute/sort, fused grouped-GEMM) and, for distributed expert parallelism, **delegates the
 actual cross-GPU all-to-all to mori** via `MoriAll2AllManager`
-(`aiter/dist/device_communicators/all2all.py` — see
-[`../aiter/operators/moe_dispatch_combine/aiter.md`](../../aiter/operators/moe_dispatch_combine/aiter.md)
-for the exact integration). mori has no dependency on aiter and does not know it is being called by it —
+(`aiter/dist/device_communicators/all2all.py` — read that file for the exact integration; this repo
+keeps no aiter-side card for it). mori has no dependency on aiter and does not know it is being called by it —
 `EpDispatchCombineOp` is a standalone op usable directly (as this task's own `driver.py` does, without
 ever importing aiter).
 
 **Important asymmetry**: aiter's `MoriAll2AllManager` calls mori with a small set of **fixed kwargs
-chosen once** (see
-[`../aiter/operators/moe_dispatch_combine/aiter.md`](../../aiter/operators/moe_dispatch_combine/aiter.md)
-§"The EP seam" for the exact values) — not tuned per-shape via mori's own tuning-DB mechanism
+chosen once** (`MoriAll2AllManager.get_handle` in `aiter/dist/device_communicators/all2all.py` has the
+exact values) — not tuned per-shape via mori's own tuning-DB mechanism
 (`overall/launch_config_tuning.md`). That means today, a shape where mori's real optimum differs from
 aiter's fixed default (which this KB folder's `operators/ep_dispatch_combine/tuning.md` shows is common)
 gets **no benefit** from mori's tuning-DB unless something upstream of aiter (or aiter itself) is changed

@@ -38,7 +38,7 @@ rocprofv3 --kernel-trace --stats -f csv -- <run>
 | HBM BW near roofline | memory-bound at peak | reduce bytes (dtype, fusion) |
 
 ## 3. Tune order (highest-leverage first)
-Per [../optimize/ck_levers/knobs.md](../optimize/ck_levers/knobs.md): **block tile → KPerBlock → pipeline
+Per [../optimize/ck_levers/ck_tuning_knobs.md](../optimize/ck_levers/ck_tuning_knobs.md): **block tile → KPerBlock → pipeline
 version/scheduler → MFMA tile → wave map → load vector width**. Tune block tile + pipeline first;
 everything else is second-order. Aim `ceil(M/MPerBlock)·ceil(N/NPerBlock) ≈ k·304`.
 

@@ -16,7 +16,7 @@ sources:
 The device headers/classes for the reduced-precision formats CDNA3/CDNA4 matrix cores consume. **Which
 encoding is legal on which arch is a correctness gate** (FNUZ on gfx942 vs OCP on gfx950) — mixing them
 is a silent ~2× error, not a crash (see
-[../skills/optimize/hip_levers/pitfalls.md](../skills/optimize/hip_levers/pitfalls.md)).
+[../skills/optimize/hip_levers/hip_traps.md](../skills/optimize/hip_levers/hip_traps.md)).
 
 ## FP8 (E4M3 / E5M2)
 ```cpp
@@ -58,7 +58,7 @@ wrong/unlowerable — normalize to fnuz first.
 // OCP C++ structs: __hipext_ocp_fp8_e4m3, __hipext_ocp_fp8x2_e4m3, __hipext_ocp_fp6x32_e2m3
 ```
 MXFP block-scaled MFMA uses a 32-element E8M0 scale per block — the `v_mfma_scale_*_f8f6f4` path (see
-[../skills/optimize/hip_levers/intrinsics.md](../skills/optimize/hip_levers/intrinsics.md)).
+[../skills/optimize/hip_levers/hip_builtins.md](../skills/optimize/hip_levers/hip_builtins.md)).
 
 ## MFMA operand vector types
 The matrix-core intrinsics take per-lane vectors declared with `vector_size`:

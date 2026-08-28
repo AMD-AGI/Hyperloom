@@ -13,9 +13,9 @@ allowed-tools: Read Bash Grep Glob
 # Debug CK kernel
 
 Diagnostic workflow for Composable Kernel (classic `DeviceGemm*` + `ck_tile`) on MI300X gfx942 /
-MI350 gfx950. Reference: [../optimize/ck_levers/pitfalls.md](../optimize/ck_levers/pitfalls.md),
-[../optimize/ck_levers/knobs.md](../optimize/ck_levers/knobs.md),
-[../optimize/ck_levers/gemm_template.md](../optimize/ck_levers/gemm_template.md).
+MI350 gfx950. Reference: [../optimize/ck_levers/ck_traps.md](../optimize/ck_levers/ck_traps.md),
+[../optimize/ck_levers/ck_tuning_knobs.md](../optimize/ck_levers/ck_tuning_knobs.md),
+[../optimize/ck_levers/ck_gemm_stack.md](../optimize/ck_levers/ck_gemm_stack.md).
 
 ## Step 1: classify the symptom
 | Symptom | Likely cause | Go to |
@@ -42,7 +42,7 @@ rather than bypassing the check.
 - **`ckProfiler` missing** in deployment images → no on-box sweep; build it on a dev node.
 - **Build-specific pin drift**: tile/pipeline IDs and the tuned instance DB drift across CK/ROCm
   versions. Re-sweep after any bump; never ship a hand-copied instance table as portable.
-Details: [../optimize/ck_levers/codegen_instances.md](../optimize/ck_levers/codegen_instances.md).
+Details: [../optimize/ck_levers/ck_instance_codegen.md](../optimize/ck_levers/ck_instance_codegen.md).
 
 ## 4. ck_tile vs classic — pick the right front-end
 - **Dense square bf16 GEMM**: classic `DeviceGemmXdlUniversal` v3/Intrawave is often ~1.7× faster than
@@ -70,7 +70,7 @@ silent numeric garbage. OCP fp8 / MXFP block-scaled is the gfx950 story.
 Build with `--save-temps` and confirm in the K-loop: `buffer_load_dwordx4` (≥128-bit loads),
 `s_waitcnt lgkmcnt(1)` before `v_mfma`, dense `v_mfma_*`, no `v_accvgpr_*` / `scratch_` spam. Parity:
 fp32 accumulate; greedy temp=0 vs a reference (≥10 prompts for attention). The MFMA/ISA facts are in
-`languages/hip/skills/optimize/hip_levers/intrinsics.md`.
+`languages/hip/skills/optimize/hip_levers/hip_builtins.md`.
 
 ## 8. When to author CK vs use a library
 If aiter/hipBLASLt already dispatch a strong CK instance for your shape, tune via the aiter DB first

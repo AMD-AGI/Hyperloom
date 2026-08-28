@@ -32,7 +32,8 @@ solMap = {"torch": torch_gemm, "hipblaslt": hipb_gemm, "skinny": skinny_gemm,
   shape is **not broken**, just un-optimized. A `flydsl` row is dropped if FlyDSL isn't installed (falls
   through to the next granularity/default).
 - `opus` is a split-K GEMM/MoE-stage2 backend (`gfx942`/`gfx950`/`gfx1250`); its launcher needs a
-  per-stream fp32 workspace warmed **before** HIP-graph capture — see `operators/dense_gemm/backends/opus.md`.
+  per-stream fp32 workspace warmed **before** HIP-graph capture (see `aiter/ops/opus/*`,
+  `csrc/opus_gemm/*` — this is aiter-internal, no separate card).
 - Live call sites: `aiter.tuned_gemm:gemm_a16w16`, `tgemm.mm` — sglang/vLLM `LinearMethod` route here.
 
 ## SGLang seam

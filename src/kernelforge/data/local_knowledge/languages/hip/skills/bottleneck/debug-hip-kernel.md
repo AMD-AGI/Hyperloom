@@ -14,9 +14,9 @@ allowed-tools: Read Edit Bash Grep Glob
 # Debug HIP Kernel
 
 Diagnostic workflow for hand-written HIP/C++ CDNA kernels (MI300X gfx942, MI350/MI355X gfx950).
-Reference material: [../optimize/hip_levers/pitfalls.md](../optimize/hip_levers/pitfalls.md),
-[../optimize/hip_levers/lds_async.md](../optimize/hip_levers/lds_async.md),
-[../optimize/hip_levers/intrinsics.md](../optimize/hip_levers/intrinsics.md).
+Reference material: [../optimize/hip_levers/hip_traps.md](../optimize/hip_levers/hip_traps.md),
+[../optimize/hip_levers/hip_lds_staging.md](../optimize/hip_levers/hip_lds_staging.md),
+[../optimize/hip_levers/hip_builtins.md](../optimize/hip_levers/hip_builtins.md).
 
 ## Step 0: the two facts behind almost every HIP bug
 1. **Wavefront = 64**, not 32. Every `__shfl`/`__ballot`/manual reduction, grid/occupancy calc, and the
@@ -40,14 +40,14 @@ Reference material: [../optimize/hip_levers/pitfalls.md](../optimize/hip_levers/
 - `__shfl*` width defaults to `warpSize` (64). A manual reduction must run `off = 32,16,8,4,2,1`.
 - Block size must be a multiple of 64 (64/128/256). A 32-thread block is half a wave.
 - Half-float `__shfl` is unsupported — shuffle as int/float and repack.
-- Correct block reduction skeleton: see [../optimize/hip_levers/patterns.md](../optimize/hip_levers/patterns.md) §1.
+- Correct block reduction skeleton: see [../optimize/hip_levers/hip_templates.md](../optimize/hip_levers/hip_templates.md) §1.
 
 ## 3. LDS bank conflicts
 - 32 banks × 4 B; a wave64 access is serviced in **two phases**. Same-bank/different-row = conflict.
 - **Diagnose**: rocprofv3 LDS-conflict counters, or ISA showing `ds_read_b32` (scalar) and stalls on
   `s_waitcnt lgkmcnt(0)`.
 - **Fix**: pad inner dim `+1`, or XOR-swizzle the column index (required for direct-to-LDS). Vectorize
-  to `ds_read_b128`/`ds_write_b128`. Detail: [../optimize/hip_levers/lds_async.md](../optimize/hip_levers/lds_async.md) §2.
+  to `ds_read_b128`/`ds_write_b128`. Detail: [../optimize/hip_levers/hip_lds_staging.md](../optimize/hip_levers/hip_lds_staging.md) §2.
 
 ## 4. MFMA / AGPR issues
 - On CDNA3 MFMA accumulators live in **AGPRs**. If the compiler inserts `v_accvgpr_read/write` inside
@@ -98,4 +98,4 @@ rocm-smi                 # 100% usage, no progress → hang (barrier deadlock / 
 sudo amdgpu-reset        # or reboot
 ```
 Common causes: divergent `__syncthreads()` (not all lanes reach the barrier), wrong loop bounds, OOB
-global access (use buffer descriptors for HW bounds checking — [../optimize/hip_levers/intrinsics.md](../optimize/hip_levers/intrinsics.md) §2).
+global access (use buffer descriptors for HW bounds checking — [../optimize/hip_levers/hip_builtins.md](../optimize/hip_levers/hip_builtins.md) §2).

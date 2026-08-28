@@ -2,7 +2,7 @@
 title: Triton-on-AMD knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/triton
-updated: 2026-08-23
+updated: 2026-08-28
 ---
 
 # Triton on AMD — knowledge map
@@ -31,13 +31,19 @@ win is **fusion** (epilogue/attention the library can't express), **skinny split
 exploration, or the `torch.compile`/Inductor `max-autotune` path.
 
 ## Reading order (three layers)
-1. **`skills/optimize/triton_levers/overview.md`** — the authoring overview: NVIDIA→AMD cheat sheet, the
+1. **`skills/optimize/triton_levers/triton_amd_delta.md`** — the authoring overview: NVIDIA→AMD cheat sheet, the
    compilation pipeline, the five AMD mistakes that kill perf. **Read this first.**
 2. **`API_docs/`** — the Python surface: how a kernel is declared/launched/autotuned
    (`programming_model.md`) and the kernel-body op reference (`language_api.md`).
-3. **`operators/<op>/`** — the specific operator you're building (overview → Triton SOTA card → tuning /
-   numerics / fusion), then **`skills/`** *when you hit a problem*: `profile/` (measure & target),
-   `bottleneck/` (diagnose), and the deeper `optimize/triton_levers/` cards (knobs, patterns, ISA).
+3. **`skills/`** *when you hit a problem*: `profile/` (measure & target), `bottleneck/` (diagnose), and
+   the deeper `optimize/triton_levers/` cards (knobs, patterns, codegen, ISA).
+
+> **Per-operator cards are not in this folder.** This folder is **language-level only** — how to author,
+> tune and debug Triton on AMD, independent of which operator you are writing. Operator-level knowledge
+> (math contract, shape regimes, Amdahl weight, parity bands) is **not maintained in this repo** — read
+> the source. `framework/aiter/overall/operator_catalog.md` gives the aiter entry point and signature;
+> `framework/aiter/overall/dispatch_and_rebind.md` tells you which backend a call actually resolves to.
+> Then come back here for the Triton authoring levers.
 
 ## Portable golden rules (the CUDA habits that break on AMD)
 - **wavefront = 64 lanes** (not 32). `num_warps=N` → N·64 threads; all occupancy/reduction math is mod 64.
@@ -48,7 +54,7 @@ exploration, or the `torch.compile`/Inductor `max-autotune` path.
   or a `tl.load` addressed from another `tl.load`, silently forfeits pipelining **and**
   `knobs.amd.use_async_copy` (default-on on gfx950). Rewriting a data-dependent gather as
   "shape-static `tl.range` + mask" once ran **~2× faster while visiting 2–4× more blocks**
-  (`local_knowledge/common_methodology/optimization/loop_form_and_pipelining.md`).
+  (`local_knowledge/common_methodology/optimization/lever_loop_form.md`).
 - **LDS = 64 KB/CU (CDNA3) / 160 KB (CDNA4)**, **512 VGPR/EU** (16-granule) — big tiles silently drop to
   1 wg/CU or fail to compile.
 - **FP8 is FNUZ on CDNA3, OCP on CDNA4** — OCP `float8_e4m3fn` into `tl.dot` on gfx942 fails to lower; use `*_fnuz`.
@@ -57,25 +63,24 @@ exploration, or the `torch.compile`/Inductor `max-autotune` path.
 - **A config is not trusted until you've read the AMDGCN** — autotune timing catches *what*, the ISA catches *why* (scalar loads, spills, FNUZ mismatch).
 
 ## Start here — problem → files → order
-Substitute `<op>` with the operator (catalog below). Paths are relative to this folder.
+Paths are relative to this folder unless prefixed with `local_knowledge/`.
 
 | Task / symptom | Read in this order |
 |---|---|
-| "Onboard / understand Triton on AMD" | `skills/optimize/triton_levers/overview.md` → `API_docs/programming_model.md` → `API_docs/language_api.md` |
-| "Write a kernel body / which `tl.*` op?" | `API_docs/language_api.md` → `API_docs/programming_model.md` → `skills/optimize/triton_levers/patterns.md` |
-| "Port a CUDA / NVIDIA-Triton kernel to MI300X" | `skills/optimize/triton_levers/overview.md` (cheat sheet) → `.../pitfalls.md` → `.../knobs.md` |
-| "Author / tune operator X" | `operators/<op>/overview.md` → `operators/<op>/triton.md` → `operators/<op>/tuning.md` → `skills/optimize/triton_levers/knobs.md` |
-| "Which knobs / how to autotune?" | `skills/optimize/triton_levers/knobs.md` → `API_docs/programming_model.md` (`@triton.autotune`) |
-| "Give me a starting template (GEMM/attention/reduction)" | `skills/optimize/triton_levers/patterns.md` → `operators/<op>/triton.md` |
-| "Kernel is slow — what do I tune next?" | `skills/profile/profiling-triton.md` → `skills/optimize/triton_levers/knobs.md` |
-| "Sparse / top-k / paged-gather kernel — `while` over selected blocks, `num_stages` sweeps flat" | `local_knowledge/common_methodology/optimization/loop_form_and_pipelining.md` → `skills/optimize/triton_levers/deep_codegen.md` (§3 stream pipeliner, §4 async copy) → `operators/sparse_attention_nsa/tuning.md` |
-| "Wrong output / won't compile / lowering error" | `skills/bottleneck/debug-triton-kernel.md` → `skills/optimize/triton_levers/pitfalls.md` |
-| "Verify the compiled kernel / read the ISA" | `skills/optimize/triton_levers/isa_verify.md` → `.../deep_codegen.md` |
-| "Understand `tl.dot`→MFMA / the compile pipeline" | `skills/optimize/triton_levers/deep_codegen.md` → `.../isa_verify.md` |
-| "Block-scaled MXFP8 / MXFP4 GEMM on CDNA4 (gfx950)" | `API_docs/tl_dot_scaled_gfx950.md` → `operators/scaled_quant_gemm/` + `operators/quant_fp4_mxfp/` |
-| "Should I even use Triton for this?" | `skills/optimize/triton_levers/overview.md` ("where it fits" table) |
-| "Numerics / parity gate for operator X" | `operators/<op>/numerics.md` |
-| "Fuse operator X with a neighbor" | `operators/<op>/fusion.md` |
+| "Onboard / understand Triton on AMD" | `skills/optimize/triton_levers/triton_amd_delta.md` → `API_docs/programming_model.md` → `API_docs/language_api.md` |
+| "Write a kernel body / which `tl.*` op?" | `API_docs/language_api.md` → `API_docs/programming_model.md` → `skills/optimize/triton_levers/triton_templates.md` |
+| "Port a CUDA / NVIDIA-Triton kernel to Instinct" | `skills/optimize/triton_levers/triton_amd_delta.md` (cheat sheet) → `.../triton_traps.md` → `.../triton_knob_space.md` |
+| "Author / tune operator X" | the kernel source (`framework/aiter/overall/operator_catalog.md` for the aiter entry point) → back here: `skills/optimize/triton_levers/triton_knob_space.md` → `.../triton_templates.md` |
+| "Which knobs / how to autotune?" | `skills/optimize/triton_levers/triton_knob_space.md` → `API_docs/programming_model.md` (`@triton.autotune`) |
+| "Give me a starting template (GEMM/attention/reduction)" | `skills/optimize/triton_levers/triton_templates.md` |
+| "Kernel is slow — what do I tune next?" | `skills/profile/profiling-triton.md` → `skills/optimize/triton_levers/triton_knob_space.md` |
+| "Sparse / top-k / paged-gather kernel — `while` over selected blocks, `num_stages` sweeps flat" | `local_knowledge/common_methodology/optimization/lever_loop_form.md` → `skills/optimize/triton_levers/triton_lowering.md` (§3 stream pipeliner, §4 async copy) |
+| "Wrong output / won't compile / lowering error" | `skills/bottleneck/debug-triton-kernel.md` → `skills/optimize/triton_levers/triton_traps.md` |
+| "Verify the compiled kernel / read the ISA" | `skills/optimize/triton_levers/triton_isa_check.md` → `.../triton_lowering.md` |
+| "Understand `tl.dot`→MFMA / the compile pipeline" | `skills/optimize/triton_levers/triton_lowering.md` → `.../triton_isa_check.md` |
+| "Block-scaled MXFP8 / MXFP4 GEMM on CDNA4 (gfx950)" | `API_docs/tl_dot_scaled_gfx950.md` → `local_knowledge/hardware/mi350_dtypes.md` |
+| "Should I even use Triton for this?" | `skills/optimize/triton_levers/triton_amd_delta.md` ("where it fits" table) |
+| "Numerics / parity gate, or fusion neighbours, for operator X" | not covered in this repo — read the source (`framework/aiter/overall/operator_catalog.md` gives the entry point) |
 | **"Autotune converged but MFMA utilization is still low"** | **`../gluon/INDEX.md` → `../gluon/skills/optimize/gluon_levers/overview.md`** — that is a *scheduling* limit, not a hardware one, and the next lever is Gluon (see below) |
 
 ## Folder structure & file roles
@@ -86,33 +91,50 @@ languages/triton/
 │   ├── programming_model.md              # @jit, launch grid, @autotune/@heuristics, constexpr, param→HIPOptions map
 │   ├── language_api.md                   # tl.* kernel-body op reference (load/store/dot/reduce/math, masking)
 │   └── tl_dot_scaled_gfx950.md           # tl.dot_scaled → native v_mfma_scale_* (block-scaled MXFP8/MXFP4, CDNA4 only)
-├── skills/                               ← LAYER 3: authoring levers + problem-triggered diagnosis
+├── skills/                               ← authoring levers + problem-triggered diagnosis
 │   ├── optimize/triton_levers/
-│   │   ├── overview.md                   # authoring overview: NVIDIA→AMD cheat sheet, pipeline, 5 fatal mistakes (READ FIRST)
-│   │   ├── knobs.md                      # full HIPOptions knob set, ranges/defaults, autotune config space, baking winners
-│   │   ├── patterns.md                   # CDNA-tuned starting templates: dense GEMM, attention, reductions
-│   │   ├── deep_codegen.md               # tl.dot→MFMA, layouts, stream-pipeliner, TritonGPU→TritonAMDGPU→AMDGCN internals
-│   │   ├── isa_verify.md                 # AMDGCN_ENABLE_DUMP workflow; what good ISA looks like; catch scalar loads/spills
-│   │   └── pitfalls.md                   # NVIDIA→AMD porting checklist + AMD-specific anti-patterns
+│   │   ├── triton_amd_delta.md          # WHAT CHANGES vs NVIDIA + where Triton fits (READ FIRST)
+│   │   ├── triton_knob_space.md         # the HIPOptions knob set, ranges, autotune space, baking a winner
+│   │   ├── triton_templates.md          # CDNA-tuned starting bodies: dense GEMM, split-K decode, fp8, FA, softmax
+│   │   ├── triton_lowering.md           # tl.dot->MFMA, layouts/convert_layout, stream-pipeliner, buffer/async loads
+│   │   ├── triton_isa_check.md          # AMDGCN dump workflow; what good ISA looks like; the occupancy boundary check
+│   │   └── triton_traps.md              # the traps, indexed BY SYMPTOM
 │   ├── profile/profiling-triton.md       # read TRITON_PRINT_AUTOTUNING + rocprofv3 PMC → memory/compute verdict → which knob
 │   └── bottleneck/debug-triton-kernel.md # classify wrong/won't-lower/slow; FNUZ 2× trap, num_warps spill, ignored knobs
-└── operators/<op>/                       ← LAYER 2: per-operator knowledge (23 operators; catalog below)
-    ├── overview.md   # what/why, math contract, shape regimes, Amdahl weight, backend landscape
-    ├── triton.md     # Triton SOTA card: the kernel, knobs, measured perf, where it fits vs the library
-    ├── tuning.md     # per-operator knob space + the tune recipe
-    ├── numerics.md   # dtype/accumulate contract, parity bands, accuracy gating
-    └── fusion.md     # fusion neighbors & opportunities for this operator
+(no operators/ — see "Where operator knowledge lives" below)
 ```
 
-## Operator catalog (→ `operators/<op>/`)
-- **GEMM / linear**: `dense_gemm` (Amdahl head of prefill) · `batched_gemm` · `splitk_streamk_gemm` (skinny/decode fill) · `scaled_quant_gemm` (fp8/fp4)
-- **MoE**: `fused_moe_grouped_gemm` · `grouped_gemm_moe` · `moe_routing_topk`
-- **Attention**: `attention_prefill_fmha` · `attention_decode_paged` · `gqa_mqa_attention` · `mla_attention` · `sparse_attention_nsa`
-- **Norm / activation**: `rmsnorm` · `fused_add_rmsnorm` · `layernorm` · `softmax` · `act_and_mul_silu_gelu`
-- **Position**: `rope`
-- **Quantization**: `quant_dequant_fp8` · `quant_fp4_mxfp` (MXFP4/MXFP8, e8m0 block scale)
-- **Reduction / elementwise**: `reduction` · `elementwise`
-- **Sampling**: `sampling_topk_topp`
+## Where operator knowledge lives
+There is **no `operators/` folder here**. Per-operator cards were removed because they were
+operator-level facts (math contract, shape regimes, tuning space, parity bands, fusion neighbours) that
+do not change with the authoring language — keeping a copy per language meant the same card existed 3–5
+times over.
+
+Operator-level knowledge is **not maintained in this repo at all** — not per language, and no longer per
+framework either. It rots faster than it can be kept true: which backend wins, what the knobs are, which
+env var gates which path all turn over every release, and a stale card is worse than none — it sends you
+to an entry point that no longer exists, confidently. Where to get those facts instead:
+- **"Which API do I call for operator X?"** — `framework/aiter/overall/operator_catalog.md` (entry point
+  + signature, pinned to a commit).
+- **"Which backend will it dispatch to, and what can I tune?"** —
+  `framework/aiter/overall/dispatch_and_rebind.md` + `tuning_db.md`.
+- **"What are its shape constraints / numerics?"** — the `assert`s in the kernel source and `op_tests/`.
+  Nothing else is authoritative.
+- **`framework/mori/operators/`** — the one surviving operator folder: EP dispatch/combine, which is a
+  cross-GPU protocol, not a per-release config.
+
+
+When the task is "write this operator in Triton", get *what* you are building and where it matters from
+the kernel source, then use this folder for *how* to author it. `skills/optimize/triton_levers/triton_templates.md`
+carries the CDNA-tuned starting templates (dense GEMM, attention, reductions) that the per-operator
+`triton.md` cards used to duplicate.
+
+**Coverage note:** none of the operators this folder used to cover (`sparse_attention_nsa`,
+`elementwise`, `reduction`, `splitk_streamk_gemm`, the GEMM / attention / norm families) has an operator
+card in `local_knowledge` any more. For the NSA / data-dependent-gather case the load-bearing knowledge
+is the loop-form rule in
+`local_knowledge/common_methodology/optimization/lever_loop_form.md` plus
+`skills/optimize/triton_levers/triton_lowering.md` §3–4, both of which survive.
 
 ## Pinned reference sources
 Cards cite inline; this consolidates the most-used pins. Grow as cards are added.
@@ -142,7 +164,7 @@ Cards cite inline; this consolidates the most-used pins. Grow as cards are added
 `languages/gluon/` is **not a different backend** — Gluon is Triton's low-level dialect and shares this
 folder's entire substrate: the same `@…jit` frontend, the same
 `Triton → TritonGPU → TritonAMDGPU → AMDGCN` lowering, the same JIT cache, the same `@triton.autotune`,
-and the same AMDGCN ISA-verification workflow (`skills/optimize/triton_levers/isa_verify.md` applies
+and the same AMDGCN ISA-verification workflow (`skills/optimize/triton_levers/triton_isa_check.md` applies
 verbatim). What it changes is *who decides*: tile layouts, the software pipeline (there is no
 `num_stages` — you author the stages), the register budget, and the MFMA instruction all become source
 you write.
@@ -157,7 +179,7 @@ edit inside a campaign (change shape, and the version traps — Gluon is `triton
 shipped release-to-release breakage).
 
 ## Cross-links out of this folder
-Backend-neutral hardware constants (CDNA3 MI300 / CDNA4 MI350 / shared) live in `local_knowledge/hardware/` —
+Backend-neutral hardware constants (gfx950 only) live in `local_knowledge/hardware/` —
 Triton cards reference it rather than duplicating numbers. Backend-agnostic optimization methodology
 (roofline, bottleneck classification, benchmarking) lives in `local_knowledge/common_methodology/`. The
 library control plane that dispatches these kernels into the live sglang/vLLM path is `framework/aiter/`.

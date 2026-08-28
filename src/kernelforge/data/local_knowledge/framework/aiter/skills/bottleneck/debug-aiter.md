@@ -64,7 +64,9 @@ Details: [../../overall/jit_and_build.md](../../overall/jit_and_build.md).
 - **Causal + fused_backward / dropout → NaN grads** (CK FA limitation).
 - **32-bit stride overflow** on 128+ heads (LLaMA-3-405B) → `AITER_INT64_STRIDES=1`.
 - **fp8 tolerance is wide** (atol=0.3): a "passing" fp8 test ≠ parity — verify cosine ≥ 0.96.
-Full list: the per-operator `operators/*/numerics.md` and the `Pitfalls` sections of `operators/*/aiter.md`.
+This list is not exhaustive and is deliberately not maintained per-operator — the authoritative list is
+the `assert`s and shape guards in the aiter source plus `op_tests/test_<op>.py`. Read those for the
+operator you are on.
 
 ## 5. Confirm which kernel actually ran
 `AITER_LOG_TUNED_CONFIG=1` (config selection) + rocprofv3 kernel-trace → confirm the intended

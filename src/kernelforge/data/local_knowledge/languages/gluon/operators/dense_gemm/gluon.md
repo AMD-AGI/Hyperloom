@@ -29,8 +29,8 @@ sources:
 - The GEMM has an epilogue or a fusion the library cannot express, so hipBLASLt is not an option, and
   Triton's schedule is the limit.
 - Large-K, compute-bound shapes. **Skinny / decode-shaped GEMM is a different regime** — the ceilings
-  here do not transfer, and split-K / stream-K in Triton is usually the better lever there. See
-  `../../../triton/operators/splitk_streamk_gemm/`.
+  here do not transfer, and split-K / stream-K in Triton is usually the better lever there — see
+  `../../../triton/skills/optimize/triton_levers/triton_templates.md`.
 
 ## Reference design
 AMD's `a16w16` FP16 kernel (`ROCm/gfx950-gluon-tutorials:kernels/gemm/a16w16/`, MIT) is the reference,
@@ -84,6 +84,8 @@ v7. The task's own `correctness_command` decides — see
 [`../../skills/optimize/gluon_levers/forge_integration.md`](../../skills/optimize/gluon_levers/forge_integration.md).
 
 ## Cross-links
-`../../../triton/operators/dense_gemm/` — math contract, shape regimes, backend landscape (language-
-independent; read it for *what* to build). `../../../../framework/aiter/operators/dense_gemm/` — the
-library dispatch path and its per-shape tuned tables (read it before deciding to author at all).
+Math contract, shape regimes and backend landscape are not documented in this repo — read the kernel
+source for *what* to build. For the library path you would be competing with:
+`../../../../framework/aiter/overall/dispatch_and_rebind.md` (how a dense GEMM call resolves) and
+`../../../../framework/aiter/overall/tuning_db.md` (its per-shape tuned tables) — read those before
+deciding to author at all.

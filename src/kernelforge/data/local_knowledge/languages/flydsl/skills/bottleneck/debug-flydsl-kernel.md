@@ -1,267 +1,293 @@
 ---
 name: debug-flydsl-kernel
 description: >
-  Debug FlyDSL GPU kernels that produce NaN, inf, wrong results, or crash.
-  Covers cache invalidation, tracing pitfalls (runtime conditionals, range vs
-  range_constexpr), loop-carried state packing, buffer_load addressing, MFMA operand
-  layout verification, LDS bank conflict diagnosis, and systematic error
-  isolation (all-1s test, single-partition test, host-side tensor inspection).
-  Use when a FlyDSL kernel produces incorrect output or compilation errors.
+  Diagnose a FlyDSL kernel that is wrong, NaN, zero, hanging, or refusing to compile.
+  Symptom-indexed: start from what you observed, land on the cause. Covers the stale-cache
+  false negative, softmax -inf arithmetic, partition/stride addressing, FP8 error budgets,
+  the range vs range_constexpr split, loop-carried state typing, buffer_load offset units,
+  and barrier divergence. Use when a FlyDSL kernel produces incorrect output or fails to build.
   Usage: /debug-flydsl-kernel
 allowed-tools: Read Edit Bash Grep Glob Agent
 ---
 
-# Debug FlyDSL Kernel
+# Debugging a FlyDSL kernel
 
-## Step 0: Clear All Caches (ALWAYS DO THIS FIRST)
-
-FlyDSL aggressively caches compiled kernels. Stale cache is the #1 cause of "my fix didn't work":
+## Before anything else: clear the cache
+FlyDSL caches compiled kernels aggressively, and a stale cache is the single most common reason a
+correct fix appears not to work. **Do this before you believe any result**, including a failing one:
 
 ```bash
 rm -rf ~/.flydsl /tmp/flydsl*
 ```
 
-Also clear Python-level caches if using `@functools.lru_cache`:
+If the launch wrapper is memoized, clear that too:
+
 ```python
-compile_my_kernel.cache_clear()
+compile_my_kernel.cache_clear()      # any @functools.lru_cache on the compile path
 ```
 
-## Step 1: Classify the Error
+Everything below assumes you have done this. A debugging session that skips it can burn hours
+"fixing" a bug that was already fixed.
 
-| Symptom | Likely Cause | Go to |
+## Start from the symptom
+| What you observe | Most likely cause | Section |
 |---|---|---|
-| All NaN output | Softmax -inf/-inf, division by zero, uninitialized buffer | Section 2 |
-| All zeros output | Wrong output address, uninitialized temp buffer | Section 3 |
-| Partially wrong (>50% mismatch) | Wrong partition count, missing partitions, layout mismatch | Section 4 |
-| Small errors (1-5% mismatch) | FP8 quantization, scale factor, off-by-one masking | Section 5 |
-| Compilation error / crash | Type mismatch, loop-carried state, range vs range_constexpr | Section 6 |
-| GPU hang | Infinite loop, deadlock in barrier, OOB memory access | Section 7 |
+| Output is all NaN | `-inf` minus `-inf` in softmax, or divide by zero | [§1](#1-all-nan) |
+| Output is all zeros | wrong output address, or an unwritten intermediate | [§2](#2-all-zeros) |
+| More than half the elements are wrong | missing partitions, or a layout/addressing mismatch | [§3](#3-mostly-wrong) |
+| 1–5% of elements are slightly off | FP8 quantization, or a scale applied twice | [§4](#4-slightly-off) |
+| Won't compile, or crashes at trace time | `range` vs `range_constexpr`, loop-state typing, scalar/vector mismatch | [§5](#5-wont-compile) |
+| GPU hangs | loop bounds, or a divergent barrier | [§6](#6-hang) |
 
-## 2. Debugging NaN
+The distinction that matters most is **§3 versus §4**. A large mismatch is structural — you have the
+wrong data. A small mismatch is numeric — you have the right data at the wrong precision. They have
+disjoint cause sets, so classify before you dig.
 
-### 2.1 Softmax NaN: -inf minus -inf
+---
 
-When ALL tokens in a partition are masked (out of context), `qk_max = -inf`. Then `exp(s - qk_max) = exp(-inf - (-inf)) = exp(NaN) = NaN`.
+## 1. All NaN
 
-**Fix**: Guard the exp calculation:
+### `-inf` minus `-inf`
+When every token in a partition is masked out (past the end of the context), `qk_max` stays at `-inf`.
+Then `exp(s - qk_max)` becomes `exp(-inf - (-inf))` = `exp(NaN)` = NaN, and it propagates through the
+whole reduction.
+
 ```python
 safe_diff = (qk_max > NEG_INF).select(diff, ZERO_F)
 ```
 
-### 2.2 Division by zero in normalization
+### Divide by zero in normalization
+If every probability is zero, `exp_sum` is zero and `1/exp_sum` is `inf`.
 
-When `exp_sum = 0` (all probs zero), `1/exp_sum = inf`.
-
-**Fix**:
 ```python
 safe_sum = (running_sum > ZERO_F).select(running_sum, fx.Float32(1.0))
-inv_sum = fx.Float32(1.0) / safe_sum
+inv_sum  = fx.Float32(1.0) / safe_sum
 ```
 
-### 2.3 Host-side NaN check
+### Locate it from the host
+Do not guess which buffer went bad — print them:
 
-Add prints in the Python launch function to check intermediate buffers:
 ```python
 torch.cuda.synchronize()
-print(f"exp_sums nan={exp_sums.isnan().sum()}, inf={exp_sums.isinf().sum()}")
-print(f"max_logits nan={max_logits.isnan().sum()}, range=[{max_logits.min():.4f}, {max_logits.max():.4f}]")
-print(f"temp_out nan={temporary_output.isnan().sum()}")
+print(f"exp_sums   nan={exp_sums.isnan().sum()}  inf={exp_sums.isinf().sum()}")
+print(f"max_logits nan={max_logits.isnan().sum()}  range=[{max_logits.min():.4f}, {max_logits.max():.4f}]")
+print(f"temp_out   nan={temporary_output.isnan().sum()}")
 ```
 
-## 3. Debugging All-Zeros Output
+The first buffer in the chain that contains NaN is where to look. A NaN in `max_logits` and a NaN in
+`temp_out` are different bugs.
 
-### 3.1 Wrong output address
+---
 
-Check stride parameters: if `stride_out_seq` or `stride_out_part` is wrong, output writes go to incorrect locations. Print strides:
+## 2. All zeros
+
+Zeros almost always mean *the write went somewhere else*, not *the compute produced zero*.
+
+### Wrong stride
+A wrong `stride_out_seq` or `stride_out_part` sends every store to the wrong address:
+
 ```python
 print(f"out strides: {output.stride()}, temp strides: {temporary_output.stride()}")
 ```
 
-### 3.2 Partition slot mismatch
+### Partition slot versus partition index
+For multi-partition kernels, output must be written to the **`part_z` slot** (`0 .. grid_z-1`), not the
+absolute partition index. The reduce kernel reads slots. Writing by absolute index scatters results
+outside the range the reducer looks at.
 
-For multi-partition kernels, verify the output is written to `part_z` slot (not absolute partition index). The reduce kernel reads from `part_z = 0..grid_z-1` slots.
+### The intermediate was never written
+If the main kernel never writes `exp_sums` / `max_logits`, the reduce kernel faithfully reduces
+uninitialized memory. Prove it with a sentinel:
 
-### 3.3 exp_sums at zero / max_logits at -inf
-
-If the main kernel doesn't write exp_sums/max_logits, the reduce kernel produces zeros. Initialize sentinel values before kernel launch:
 ```python
-exp_sums.fill_(-999.0)  # sentinel
-# ... launch kernel ...
+exp_sums.fill_(-999.0)
+# ... launch ...
 torch.cuda.synchronize()
-print(f"exp_sums[0,0,0,:4] = {exp_sums[0,0,0,:4]}")  # should NOT be -999
+print(f"exp_sums[0,0,0,:4] = {exp_sums[0,0,0,:4]}")   # must NOT still be -999
 ```
 
-## 4. Debugging Large Mismatch (>50%)
+This distinguishes "wrote zeros" from "wrote nothing", which look identical otherwise.
 
-### 4.1 Missing partitions
+---
 
-If `grid_z < total_partitions` and the kernel processes only ONE partition per CTA (no loop), most of the context is skipped. Verify:
+## 3. Mostly wrong
+
+### Missing partitions
+If `grid_z < total_partitions` and the kernel handles exactly one partition per CTA with no loop, most
+of the context is silently skipped:
+
 ```python
 total_parts = math.ceil(context_len / KV_COMPUTE_BLOCK)
 print(f"grid_z={grid_z}, total_parts={total_parts}")
 assert grid_z == total_parts or kernel_has_multi_partition_loop
 ```
 
-### 4.2 All-1s isolation test
+### The all-1s isolation test
+Fill every input with `1.0`. All softmax probabilities become equal and the PV output is exactly
+`1.0`, so any deviation is a layout or addressing bug rather than a data-dependent one:
 
-Fill query, key_cache, value_cache with 1.0 to eliminate data-dependent bugs:
 ```python
-query.fill_(1.0)
-key_cache.fill_(1.0)
-value_cache.fill_(1.0)
+query.fill_(1.0); key_cache.fill_(1.0); value_cache.fill_(1.0)
 ```
-With uniform input: all softmax probs are equal, PV output = 1.0. Any deviation reveals layout/addressing bugs.
 
-**Caveat**: All-1s test does NOT catch V/P operand misalignment (since uniform values produce correct results regardless of ordering).
+**Know its blind spot.** Uniform inputs give the correct answer regardless of operand ordering, so
+this test **cannot** catch V/P operand misalignment in the MFMA. Passing all-1s narrows the search; it
+does not clear the layout.
 
-### 4.3 Single-partition test
+### Single-partition isolation
+Force `max_context_partition_num=1` (one-shot mode) to bypass the reduce kernel entirely. If it passes
+here and fails with multiple partitions, the bug is in partitioning or reduction, not in the main
+compute.
 
-Force `max_context_partition_num=1` (one_shot mode) to bypass the reduce kernel and test the main kernel in isolation.
-
-### 4.4 Compare against Gluon
-
-Run both Gluon and FlyDSL on the same input and compare element-wise:
+### Differential against another backend
 ```python
 torch.testing.assert_close(flydsl_output, gluon_output, atol=5e-3, rtol=5e-3)
 ```
+An element-wise comparison against a Gluon or Triton implementation of the same math localizes the
+divergence far faster than reasoning about the layout.
 
-## 5. Debugging Small Errors (1-5%)
+---
 
-### 5.1 FP8 probability requantization
+## 4. Slightly off
 
-FP8 PV MFMA introduces ~0.03 max error vs bf16 reference. This is inherent to the FP8 data path and NOT a bug. Expected tolerance: `atol=5e-3`.
+Before treating a small mismatch as a bug, check whether it is the expected error budget.
 
-### 5.2 Per-tensor vs per-row quantization
+| Source | Expected magnitude | Verdict |
+|---|---|---|
+| FP8 PV MFMA vs a bf16 reference | ~0.03 max error, `atol=5e-3` | **not a bug** — inherent to the FP8 data path |
+| Reference uses per-row Q quant, kernel uses per-tensor | ~1–3% | quantization mode mismatch, fix the kernel or the reference |
+| `_scale` composition | arbitrary | verify `_scale = softmax_scale * q_scale * k_scale` |
 
-If the reference uses per-row Q quantization but FlyDSL uses per-tensor, expect ~1-3% mismatch. Verify quantization mode matches.
+The recurring real bug in this class is **applying `v_scale` twice** — once while scaling the
+probabilities and again after the PV product. It produces a small, plausible, uniformly-scaled error
+that is easy to mistake for quantization noise.
 
-### 5.3 Scale factor mismatch
+---
 
-Verify `_scale = softmax_scale * q_scale * k_scale` matches the reference. Common bug: applying v_scale twice (once in prob scaling, once after PV).
+## 5. Won't compile
 
-## 6. Compilation Errors
+### `range()` versus `range_constexpr()`
+The AST rewriter turns a runtime `range()` into an MLIR loop, so the induction variable becomes an
+`ArithValue` and can no longer index a Python list. Compile-time loops need `range_constexpr`:
 
-### 6.1 `range()` vs `range_constexpr()` inside @flyc.kernel
-
-FlyDSL's AST rewriter converts runtime `range()` loops into MLIR loops. Use `range_constexpr()` for compile-time unrolled loops:
 ```python
-# WRONG: i becomes an ArithValue, can't index Python lists
-for i in range(4): result[i] = ...
+for i in range(4):            # WRONG: i is an ArithValue
+    result[i] = ...
 
-# CORRECT: i is a Python int
-for i in range_constexpr(4): result[i] = ...
+for i in range_constexpr(4):  # CORRECT: i is a Python int
+    result[i] = ...
 ```
 
-### 6.2 Runtime vs compile-time conditionals
+### Runtime versus compile-time conditionals
+Runtime comparisons in a Python `if` are supported — the rewriter lowers dynamic conditions to
+`scf.IfOp`. Write them with DSL operators, not hand-built MLIR predicates:
 
-Current FlyDSL supports runtime comparisons in Python `if`; the AST rewriter lowers dynamic conditions to `scf.IfOp`. Prefer readable DSL operators for runtime SSA values:
 ```python
-tid = gpu.thread_id("x")
+tid  = gpu.thread_id("x")
 lane = tid % fx.Index(64)
-c_zero = fx.Index(0)
-c_limit = fx.Index(8)
 
-# Runtime condition, lowered to scf.IfOp
-if lane == c_zero:
+if lane == fx.Index(0):                       # lowered to scf.IfOp
     fx.printf("lane zero")
 
-# Runtime predicate for select
-val = (lane < c_limit).select(good_val, zero_val)
-
+val = (lane < fx.Index(8)).select(good, zero) # runtime predicate for select
 ```
 
-Avoid spelling simple integer comparisons as `arith.cmpi(arith.CmpIPredicate.slt, lane, c_limit)` unless you are manually constructing low-level MLIR. If you pass a condition directly to `scf.IfOp`, unwrap the DSL boolean:
+Only reach for `arith.cmpi(arith.CmpIPredicate.slt, …)` when you are deliberately constructing
+low-level MLIR. Passing a condition straight to `scf.IfOp` requires unwrapping the DSL boolean:
+
 ```python
-cond = arith.unwrap(partition_idx >= visible_tile_count)
-if_op = scf.IfOp(cond, has_else=False)
+cond   = arith.unwrap(partition_idx >= visible_tile_count)
+if_op  = scf.IfOp(cond, has_else=False)
 ```
 
-Use `const_expr(...)` only for compile-time decisions:
+`const_expr(...)` is for **compile-time** decisions only:
+
 ```python
 if const_expr(trans_v):
     ...
 ```
 
-Do not use `const_expr(lane == 0)`: even with `known_block_size`, `gpu.thread_id("x")`, `lane`, and `warp_id` are runtime SSA values. The compiler knows their range, not the current executing lane.
+**Do not write `const_expr(lane == 0)`.** Even with `known_block_size`, `gpu.thread_id("x")`, `lane`,
+and `warp_id` are runtime SSA values — the compiler knows their *range*, not which lane is executing.
 
-### 6.3 Loop-carried state packing
+### Loop-carried state typing
+Keep loop-carried state in FlyDSL's own types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) and
+unwrap only where a low-level helper demands a raw `ir.Value`:
 
-Prefer FlyDSL internal types (`fx.Int32`, `fx.Float32`, `Vector`, `ArithValue`) for loop-carried state. Unwrap only when a low-level helper explicitly requires raw `ir.Value`:
 ```python
 def _unwrap(v):
-    return v.ir_value() if hasattr(v, 'ir_value') else v
+    return v.ir_value() if hasattr(v, "ir_value") else v
 
 init_state = [_unwrap(v) for v in [val1, val2, vec_val]]
 ```
 
-Supported state types: `f32` (scalar), vector values, `i32`, `i64`, `index`.
+Supported state types: `f32` scalar, vector values, `i32`, `i64`, `index`.
 
-### 6.4 buffer_load type mismatch
+### `buffer_load` offset units
+The offset is counted in units of `dtype`, not bytes. For FP8 data whose addresses you computed in
+bytes, divide:
 
-`buffer_ops.buffer_load(rsrc, offset, vec_width=4, dtype=T.i32)` — the offset is in units of `dtype`. For FP8 data addressed in bytes, divide by element size:
 ```python
-k_addr_bytes = ...  # address in FP8 elements (= bytes for FP8)
+k_addr_bytes = ...   # for FP8, elements == bytes
 k_4xi32 = buffer_ops.buffer_load(k_rsrc, k_addr_bytes // 4, vec_width=4, dtype=T.i32)
 ```
 
-### 6.5 Vector stores require vector values
+Getting this wrong reads from a 4×-off address — which usually lands *inside* the buffer, so it fails
+as garbage rather than as a fault.
 
-`Vector.store` requires the value to be a vector, not scalar:
+### Vector stores need vector values
 ```python
-# WRONG
-Vec(scalar_i32).store(lds_ptr, [idx])
-
-# CORRECT
-vec = Vec.from_elements([scalar_i32], fx.Int32)
-vec.store(lds_ptr, [idx])
+Vec(scalar_i32).store(lds_ptr, [idx])                     # WRONG
+Vec.from_elements([scalar_i32], fx.Int32).store(lds_ptr, [idx])   # CORRECT
 ```
 
-## 7. GPU Hang
+---
 
-### 7.1 Infinite runtime loop
+## 6. Hang
 
-If loop bounds are wrong (`stop < start` with unsigned comparison issues, or `step=0`), the GPU hangs. Verify bounds on host:
+### Loop bounds
+`stop < start` under unsigned comparison, or `step == 0`, hangs the GPU. Print the bounds on the host
+before launching — it costs nothing:
+
 ```python
 print(f"loop: start={part_start}, stop={part_end}, step={cpb}")
 ```
 
-### 7.2 Barrier deadlock
+### Divergent barrier
+`gpu.barrier()` requires **every** thread in the workgroup to reach it. If a runtime `if` sends some
+threads down another path, the barrier deadlocks. FlyDSL does not support divergent barriers — hoist
+the barrier out of the conditional, do not try to make the condition uniform.
 
-`gpu.barrier()` requires ALL threads in the workgroup to reach it. If some threads take a different branch (runtime `if`), the barrier deadlocks. FlyDSL doesn't support divergent barriers.
-
-### 7.3 Recovery from GPU hang
-
+### Recovery
 ```bash
-# Check GPU state
-rocm-smi
-# If GPU shows 100% usage with no progress, reset:
-sudo amdgpu-reset  # or reboot
+rocm-smi                # 100% busy with no progress confirms the hang
+sudo amdgpu-reset       # or reboot
 ```
 
-## 8. Diagnostic Workflow
+---
 
-```
-1. Clear caches (rm -rf ~/.flydsl)
-2. Run with all-1s input → passes? Layout is OK, data issue
-3. Run with single partition (one_shot) → passes? Multi-partition/reduce bug
-4. Add host-side prints (tensor shapes, strides, NaN checks)
-5. Compare intermediate buffers (exp_sums, max_logits, temp_out)
-6. If layout bug suspected: trace one thread's addresses manually
-   (tid=0: lane16id=0, rowid=0, warp_id=0)
-7. For MFMA bugs: verify operand order (K is LHS, Q is RHS for QK)
-```
+## The workflow, in order
+1. Clear `~/.flydsl`. (Everything below is meaningless without this.)
+2. All-1s input. Passes? The layout is probably fine and it is a data-dependent bug.
+3. Single partition (one-shot). Passes? The bug is in partitioning or the reduce.
+4. Host-side prints: shapes, strides, NaN counts.
+5. Walk the intermediate buffers in order (`exp_sums` → `max_logits` → `temp_out`) and find the first
+   one that is wrong.
+6. Still suspecting layout? Trace one thread's addresses by hand — `tid=0` gives `lane16id=0`,
+   `rowid=0`, `warp_id=0`, which is tractable on paper.
+7. MFMA suspected? Check operand order: `mfma(LHS, RHS, acc)` maps LHS→M and RHS→N. For QK, K is the
+   LHS and Q is the RHS.
 
-## 9. Common Pitfalls Checklist
-
-- [ ] Cleared `~/.flydsl` cache after code change
-- [ ] `range_constexpr()` for all compile-time loops (not `range()`)
-- [ ] No Python `if` on runtime GPU values
-- [ ] `buffer_load` offset units match dtype (bytes/4 for i32)
-- [ ] Vector stores use `Vector` values (not scalars)
-- [ ] `range(..., init=...)` state uses internal types, unwrapped only at hard boundaries
-- [ ] Output written to correct partition slot (`part_z`, not absolute index)
-- [ ] `exp_sums`/`max_logits` strides match actual tensor layout
-- [ ] Softmax guards against `-inf - (-inf) = NaN`
-- [ ] Division by zero guarded (`select(sum > 0, sum, 1.0)`)
-- [ ] K/V address calculation matches tensor layout (4D vs 5D trans_v)
-- [ ] MFMA operand order: `mfma(LHS, RHS, acc)` — LHS→M, RHS→N
+## Checklist
+- [ ] Cleared `~/.flydsl` after the last code change
+- [ ] `range_constexpr()` for every compile-time loop
+- [ ] No `const_expr` on a runtime GPU value (`lane`, `warp_id`, `thread_id`)
+- [ ] `buffer_load` offset units match `dtype` (bytes ÷ 4 for `i32`)
+- [ ] Vector stores pass `Vector` values, not scalars
+- [ ] Loop-carried state uses FlyDSL types, unwrapped only at hard boundaries
+- [ ] Output written to the `part_z` slot, not the absolute partition index
+- [ ] `exp_sums` / `max_logits` strides match the real tensor layout
+- [ ] Softmax guards `-inf - (-inf)`
+- [ ] Division guarded with `select(sum > 0, sum, 1.0)`
+- [ ] K/V addressing matches the tensor rank (4-D vs 5-D `trans_v`)
+- [ ] MFMA operand order verified — all-1s will not catch this one

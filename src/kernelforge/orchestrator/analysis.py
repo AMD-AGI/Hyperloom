@@ -48,10 +48,10 @@ from kernelforge.resources import assert_sandbox_grant
 ANALYSIS_SCHEMA_VERSION = 1
 ANALYSIS_SESSION_STEP_ID = "analysis_session"
 PROFILING_METHODOLOGY_FILES = (
-    "rocprof_compute_workflow.md",
-    "reading_a_kernel_bottleneck.md",
-    "roofline_on_mi.md",
-    "benchmarking_methodology.md",
+    "measure_rocpc_workflow.md",
+    "measure_triage.md",
+    "measure_roofline.md",
+    "measure_protocol.md",
 )
 
 log = logging.getLogger(__name__)

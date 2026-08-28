@@ -8,7 +8,7 @@ It implements the three modes of that contract for MoRI-EP's distributed
   * Correctness  ``python driver.py --mode <smoke|stability|determinism|full|bench>``
     -> spawns 8 ranks, each does a dispatch -> identity-expert -> combine
     round trip (the exact "isolated round-trip" recipe from
-    local_knowledge/.../moe_dispatch_combine/numerics.md: "dispatch ->
+    local_knowledge/framework/mori/operators/ep_dispatch_combine/: "dispatch ->
     (identity expert) -> combine round-trip must reconstruct the input
     within the dispatch dtype's tolerance"). ``smoke``/``stability``/
     ``determinism``/``full`` run cheap bf16-dispatch/bf16-combine round
@@ -32,7 +32,7 @@ It implements the three modes of that contract for MoRI-EP's distributed
 
   * Benchmark    ``python driver.py --bench-mode --warmup <n> --iters <n>``
     -> spawns 8 ranks running the REAL reference workload documented in
-    local_knowledge/.../moe_dispatch_combine/{overview,tuning}.md: EP8,
+    local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md: EP8,
     4096 tokens/rank, hidden_dim=7168, top-8 routing, fp8 (e4m3fnuz)
     dispatch + bf16 combine. Routing is fixed for the whole run (generated
     once, reused every round) so the one host sync needed to learn dispatch's
@@ -84,7 +84,7 @@ _WORLD_SIZE = 8
 _MASTER_PORT = "29581"
 
 # Fixed reference workload (see module docstring) — matches the numbers cited
-# in local_knowledge/framework/aiter/operators/moe_dispatch_combine/*.md.
+# in local_knowledge/framework/mori/operators/ep_dispatch_combine/tuning.md.
 # Overridable via env vars so the SAME driver contract can be pointed at a
 # different shape regime (decode-ish / large-prefill / narrower hidden) for a
 # generalization sweep, without hand-editing per-shape copies of this file.

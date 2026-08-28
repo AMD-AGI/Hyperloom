@@ -2,7 +2,7 @@
 title: Composable Kernel (CK) knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/ck
-updated: 2026-07-14
+updated: 2026-08-28
 ---
 
 # Composable Kernel (CK) — knowledge map
@@ -54,20 +54,20 @@ CK has **two front-ends, and choosing between them is the single load-bearing de
 ## Start here — problem → files → order
 | Task / symptom | Read in this order |
 |---|---|
-| "Which front-end — classic or ck_tile?" | `skills/optimize/ck_levers/ck_classic.md` + `ck_tile.md` (the decision) |
-| "Write / tune a dense square GEMM" | `ck_levers/ck_classic.md` → `gemm_template.md` → `knobs.md` |
-| "Write / tune attention (FMHA prefill/decode/SWA/GQA/MLA)" | `ck_levers/ck_tile.md` → `fmha_template.md` → `operators/<attn-op>/ck.md` |
-| "Fused MoE / grouped GEMM" | `ck_levers/ck_tile.md` → `operators/fused_moe_grouped_gemm/ck.md` (+ `grouped_gemm_moe`) |
-| "Tune a CK GEMM — which knob first?" | `ck_levers/knobs.md` → `gemm_template.md` |
-| "Classic device-op API / call lifecycle" | `API_docs/device_op_api.md` → `ck_levers/ck_classic.md` |
-| "CK-Tile API / tile verbs / kernel composition" | `API_docs/ck_tile_api.md` → `ck_levers/ck_tile.md` |
-| "Build takes forever / instance selection / codegen" | `ck_levers/codegen_instances.md` → `ck_levers/pitfalls.md` |
+| "Which front-end — classic or ck_tile?" | `skills/optimize/ck_levers/ck_frontend_classic.md` + `ck_frontend_tile.md` (the decision) |
+| "Write / tune a dense square GEMM" | `ck_levers/ck_frontend_classic.md` → `ck_gemm_stack.md` → `ck_tuning_knobs.md` |
+| "Write / tune attention (FMHA prefill/decode/SWA/GQA/MLA)" | `ck_levers/ck_frontend_tile.md` → `ck_fmha_stack.md` |
+| "Fused MoE / grouped GEMM" | `ck_levers/ck_frontend_tile.md` → `local_knowledge/framework/aiter/skills/optimize/aiter_levers/aiter_moe_pipeline.md` (the aiter-side dispatch + `tuned_fmoe` DB) |
+| "Tune a CK GEMM — which knob first?" | `ck_levers/ck_tuning_knobs.md` → `ck_gemm_stack.md` |
+| "Classic device-op API / call lifecycle" | `API_docs/device_op_api.md` → `ck_levers/ck_frontend_classic.md` |
+| "CK-Tile API / tile verbs / kernel composition" | `API_docs/ck_tile_api.md` → `ck_levers/ck_frontend_tile.md` |
+| "Build takes forever / instance selection / codegen" | `ck_levers/ck_instance_codegen.md` → `ck_levers/ck_traps.md` |
 | "Kernel is wrong / garbage / won't build-select / slow" | `skills/bottleneck/debug-ck-kernel.md` (symptom table → §) |
 | "What should I optimize next? (sweep + read profiler)" | `skills/profile/profiling-ck.md` → the knob it points to |
-| "Common CK traps before integrating" | `ck_levers/pitfalls.md` |
-| "fp8 gives wrong numbers" | `ck_levers/pitfalls.md` (fnuz/OCP) → `skills/bottleneck/debug-ck-kernel.md` (§6) → `local_knowledge/hardware/` |
-| "Author / optimize operator X in CK" | `operators/<X>/overview.md` → `operators/<X>/ck.md` → `fusion.md` / `numerics.md` / `tuning.md` |
-| "MFMA intrinsics / read the ISA" | `languages/hip/skills/optimize/hip_levers/intrinsics.md` + `languages/asm/` (CK does not re-doc) |
+| "Common CK traps before integrating" | `ck_levers/ck_traps.md` |
+| "fp8 gives wrong numbers" | `ck_levers/ck_traps.md` (fnuz/OCP) → `skills/bottleneck/debug-ck-kernel.md` (§6) → `local_knowledge/hardware/` |
+| "Author / optimize operator X in CK" | the kernel source (`framework/aiter/overall/operator_catalog.md` for the aiter entry point) → back here: `ck_levers/ck_frontend_classic.md` or `ck_frontend_tile.md` → `ck_gemm_stack.md`/`ck_fmha_stack.md` → `ck_tuning_knobs.md` |
+| "MFMA intrinsics / read the ISA" | `languages/hip/skills/optimize/hip_levers/hip_builtins.md` + `languages/asm/` (CK does not re-doc) |
 | "Hardware constants (CU / VGPR / LDS / peak)" | `local_knowledge/hardware/` (single source of truth) |
 
 ## Folder structure & file roles
@@ -81,40 +81,57 @@ languages/ck/
 │   ├── profile/profiling-ck.md           # ckProfiler sweep + rocprofv3 PMC → classify → map to a CK knob; cross-check vs hipBLASLt/aiter
 │   ├── bottleneck/debug-ck-kernel.md     # wrong/garbage/won't-select/slow: symptom→cause table, IsSupportedArgument, front-end, spills, fp8, ISA
 │   └── optimize/ck_levers/               ← the "how to optimize" levers (NO overview.md — ck_classic + ck_tile are the entry points)
-│       ├── ck_classic.md                 # the DeviceGemm* model: descriptor hierarchy, CShuffle, pipelines v1–v5, Intra/Interwave, sweep loop
-│       ├── ck_tile.md                    # the tile-programming model: TensorView/TileWindow/TileDistribution, pipeline/policy/WarpGemm/CShuffle
-│       ├── knobs.md                      # ranked tuning knobs (block tile → KPerBlock → pipeline → MFMA → wave map → load width) + LLM heuristics
-│       ├── gemm_template.md              # the XDL block-GEMM parameter stack + inter-level constraints + the 128-bit-load rule
-│       ├── fmha_template.md              # CK-Tile FlashAttention-2 fwd/bwd: FA-2→tile mapping, pipeline variants, paged-KV, masking knobs
-│       ├── codegen_instances.md          # classic instance factory vs ck_tile generate.py; trim build time; pin one config per shape
-│       └── pitfalls.md                   # the 11 recurring CK traps (front-end, gate, pin drift, repo, build scope, fp8, spills, ...)
-└── operators/<op>/                       ← per-operator CK cards (15 operators; catalog below)
-    ├── overview.md   # what/why, math contract, shape regimes, Amdahl weight, cross-backend landscape, how-to-bench
-    ├── ck.md         # the CK SOTA card: which front-end/instance/pipeline, the editable template, knobs, source pointers
-    ├── fusion.md     # fusion neighbors (epilogue bias/act/residual/quant, attention-entry, MoE stages)
-    ├── numerics.md   # dtype/accumulate contract, parity bands, accuracy gating
-    └── tuning.md     # instance/tile/pipeline knob space + the tune recipe
+│       ├── ck_frontend_classic.md       # DeviceGemm* model: descriptors, CShuffle, pipelines v1-v5, Intra/Interwave, the sweep loop
+│       ├── ck_frontend_tile.md          # tile-programming model: TensorView/TileWindow/TileDistribution, pipeline/policy/WarpGemm
+│       ├── ck_tuning_knobs.md           # the knob space RANKED (block tile -> KPerBlock -> pipeline -> MFMA -> wave map -> load width)
+│       ├── ck_gemm_stack.md             # the XDL parameter stack, the 3 inter-level constraints, the 128-bit-load rule
+│       ├── ck_fmha_stack.md             # FA-2 -> CK-Tile mapping, pipeline variants, paged-KV, masking knobs
+│       ├── ck_instance_codegen.md       # instance factory vs generate.py; trimming build time; how portable a pin is (it isn't)
+│       └── ck_traps.md                  # the 11 CK traps, indexed BY SYMPTOM
+(no operators/ — see "Where operator knowledge lives" below)
 ```
-All 15 operators carry the full 5-file set (`overview`/`ck`/`fusion`/`numerics`/`tuning`).
 
-## Operator catalog (→ `operators/<op>/`)
-- **GEMM / linear**: `dense_gemm` (the prefill Amdahl head; classic v3 baseline) · `batched_gemm` (per-head/per-expert; `DeviceBatchedGemmXdl`) · `splitk_streamk_gemm` (K/tile decomposition — only when CU-underutilized) · `scaled_quant_gemm` (fp8/fp6/fp4 block-scaled MFMA) · `gemm_epilogue_fused` (bias/act/residual/quant folded into the CShuffle write-out — the richest CK fusion)
-- **MoE**: `grouped_gemm_moe` (`DeviceGroupedGemm*` variable-M) · `fused_moe_grouped_gemm` (the fused up/gate/down mega-kernel; ck_tile `moe_ck2stages_*` stage-2 block-scale)
-- **Attention (all CK-Tile FMHA)**: `attention_prefill_fmha` (FA-2 forward — the default/fastest on MI300X) · `attention_decode_paged` (paged-KV flash-decoding) · `gqa_mqa_attention` (KV-broadcast trait, in-register not replicated) · `sliding_window_attention` (band mask + KV-block skipping) · `mla_attention` (DeepSeek weight-absorbed MQA on the latent)
-- **Quantization**: `quant_fp4_mxfp` (MXFP4/MXFP6 32-elem E8M0 block scale — **CDNA4-only** HW)
-- **Vision / convolution**: `conv2d` (implicit-GEMM on the matrix cores; MIOpen calls CK XDL solvers; **idle in a pure-LLM stack**, the VLM/diffusion lever)
-- **Primitive**: `reduction` (`DeviceReduce` multi-block/atomic/two-call; the primitive inside norm/softmax)
+## Where operator knowledge lives
+There is **no `operators/` folder here**. The per-operator CK cards were removed: `overview`/`fusion`/
+`numerics`/`tuning` are operator-level facts that do not change with the authoring language, and keeping
+a per-language copy meant the same card existed 3–5 times across `triton/`, `ck/`, `hip/`, `asm/` and
+`flydsl/`.
+
+Operator-level knowledge is **not maintained in this repo at all** — not per language, and no longer per
+framework either. It rots faster than it can be kept true: which backend wins, what the knobs are, which
+env var gates which path all turn over every release, and a stale card is worse than none — it sends you
+to an entry point that no longer exists, confidently. Where to get those facts instead:
+- **"Which API do I call for operator X?"** — `framework/aiter/overall/operator_catalog.md` (entry point
+  + signature, pinned to a commit).
+- **"Which backend will it dispatch to, and what can I tune?"** —
+  `framework/aiter/overall/dispatch_and_rebind.md` + `tuning_db.md`.
+- **"What are its shape constraints / numerics?"** — the `assert`s in the kernel source and `op_tests/`.
+  Nothing else is authoritative.
+- **`framework/mori/operators/`** — the one surviving operator folder: EP dispatch/combine, which is a
+  cross-GPU protocol, not a per-release config.
+
+
+For "write operator X in CK", get *what* you are building from the kernel source, then use this folder
+for *how*: `ck_levers/ck_frontend_classic.md` or `ck_frontend_tile.md` for the front-end decision,
+`ck_gemm_stack.md` / `ck_fmha_stack.md` for the parameter stack, `ck_tuning_knobs.md` for the tune order.
+The two templates carry the CK-specific structure that the per-operator `ck.md` cards duplicated.
+
+**Coverage note:** none of the operators this folder used to cover (`conv2d`,
+`sliding_window_attention`, `gemm_epilogue_fused`, `reduction`, `splitk_streamk_gemm`, the attention and
+MoE families) has an operator card in `local_knowledge` any more. The CK-side substance survives in the
+two templates: `ck_fmha_stack.md` documents FA-2 mapping, paged-KV and SWA masking; `ck_gemm_stack.md`
+documents the XDL parameter stack and the CShuffle epilogue.
 
 ## Reading-depth guide (how much to load)
-- **Deciding the front-end / a single fact**: `ck_levers/ck_classic.md` or `ck_tile.md` TL;DR — don't
+- **Deciding the front-end / a single fact**: `ck_levers/ck_frontend_classic.md` or `ck_frontend_tile.md` TL;DR — don't
   load the whole levers folder.
-- **Authoring/tuning a GEMM**: `ck_classic.md` (or `ck_tile.md`) → `gemm_template.md` → `knobs.md`;
-  add `pitfalls.md` before trusting a pinned config.
-- **Authoring attention**: `ck_tile.md` → `fmha_template.md` → the specific attention operator's `ck.md`.
+- **Authoring/tuning a GEMM**: `ck_frontend_classic.md` (or `ck_frontend_tile.md`) → `ck_gemm_stack.md` → `ck_tuning_knobs.md`;
+  add `ck_traps.md` before trusting a pinned config.
+- **Authoring attention**: `ck_frontend_tile.md` → `ck_fmha_stack.md`.
 - **Diagnosing a failure**: go straight to `skills/bottleneck/debug-ck-kernel.md` and follow its
   symptom→section table; `skills/profile/profiling-ck.md` when the question is "what next?".
-- **Per-operator work**: `operators/<op>/overview.md` first (cross-backend context + whether CK is the
-  right backend), then `ck.md`, then `fusion`/`numerics`/`tuning`.
+- **Per-operator work**: start from the kernel source and `framework/aiter/overall/dispatch_and_rebind.md`
+  (is CK even the backend this call resolves to?), then come back here for the .
 - **Hardware / MFMA numbers**: defer to `local_knowledge/hardware/` and `languages/hip|asm/` — never
   duplicated here.
 
@@ -141,7 +158,7 @@ Single place for the `repo@commit` / canonical-URL pins the `ck/` cards cite (ca
 - MI300X workload optimization (128-bit load, split-K, occupancy): https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 
 ## Cross-links out of this folder
-The MFMA layer CK's `WarpGemm` wraps: `languages/hip/skills/optimize/hip_levers/intrinsics.md` and
+The MFMA layer CK's `WarpGemm` wraps: `languages/hip/skills/optimize/hip_levers/hip_builtins.md` and
 `languages/asm/`. Backend-neutral hardware constants: `local_knowledge/hardware/`. Tuning/dispatch of
 CK-via-aiter: `local_knowledge/framework/aiter/`. Alternative authoring paths and cross-backend SOTA
 cards: `languages/{triton,gluon,flydsl,hip,asm}/`. Benchmark discipline: `local_knowledge/common_methodology/`.

@@ -75,7 +75,7 @@ This is `aiter/ops/triton/attention/pa_mqa_logits.py`: one file, one public entr
 Triton JIT kernel as the fallback. Note two things about it. First, the *directory* is named `triton`
 and holds both — **a path never tells you the language**. Second, the Gluon path is the more capable
 one: it supports `Preshuffle` and `KVBlockSize > 1`, which the Triton path does not. Going lower-level
-bought capability, not just speed. See `framework/aiter/operators/paged_mqa_logits/`.
+bought capability, not just speed. Read the file itself — this repo keeps no card for it.
 
 ### Keeping the fallback is not optional politeness
 It is what makes the candidate safe to keep. The task's `compile_command` often builds a **smaller
@@ -165,7 +165,7 @@ the AMD ladder. Inside a campaign there are exactly two honest ways to use them:
   them, and the committed kernel keeps behaving the way it was measured. This is usually right, because
   the flags are properties of the kernel design, not of the run.
 - **Sweep them explicitly** as `FORGE_SWEEP_*` knobs when the question is whether they help. One data
-  point per command, echoed, per `common_methodology/optimization/cheap_sweeps.md`.
+  point per command, echoed, per `common_methodology/optimization/lever_cheap_sweeps.md`.
 
 What is **not** honest is exporting them in your shell and then reporting the number as the kernel's.
 The loop's own canonical measurement will not have them set, and the candidate will regress on the
@@ -213,9 +213,10 @@ and pick a Triton-level direction instead.
 - When Gluon is the right call, and the full ladder: [`overview.md`](overview.md)
 - The AMD ops the ladder uses: [`../../../API_docs/amd_targets.md`](../../../API_docs/amd_targets.md)
 - Layouts and conversion costs: [`../../../API_docs/layouts.md`](../../../API_docs/layouts.md)
-- Sweep contract: `common_methodology/optimization/cheap_sweeps.md`
-- Edit surface: `common_methodology/optimization/edit_surface_reach.md`
-- Production dual-backend dispatch: `framework/aiter/operators/paged_mqa_logits/`
+- Sweep contract: `common_methodology/optimization/lever_cheap_sweeps.md`
+- Edit surface: `common_methodology/optimization/lever_edit_surface.md`
+- Production dual-backend dispatch: `aiter/ops/triton/attention/pa_mqa_logits.py` (read the source;
+  `framework/aiter/overall/dispatch_and_rebind.md` explains how aiter picks between the two paths)
 
 ## Sources
 - `gluon.aggregate` missing from 3.7.0; the exact 3.7.0 `__all__`:

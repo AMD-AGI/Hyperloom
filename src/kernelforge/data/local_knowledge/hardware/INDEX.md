@@ -1,118 +1,98 @@
 ---
-title: AMD GPU hardware knowledge map — index, file roles & problem-routing
+title: MI350X / MI355X hardware — knowledge map
 kind: index
 scope: hardware
-updated: 2026-07-14
+gens: [gfx950]
+updated: 2026-08-28
 ---
 
-# AMD GPU hardware — knowledge map
+# MI350X / MI355X hardware — knowledge map
 
-This file is the entry index for everything under `hardware/`. It gives (1) what this
-knowledge base covers and how it is organized, (2) for a given task/symptom, **which files to read and in
-what order**, and (3) the role of every file and folder.
+Entry index for `hardware/`. Backend-neutral facts about the metal: what the chip is, what the numbers
+are, and what each subsystem does to a kernel.
 
 > **Convention (KernelForge standard):** a knowledge folder that contains an `INDEX.md` is navigated
-> **through this file** — load it whole. Folders without an `INDEX.md` fall back to a generated
-> "filename — one-line description" listing.
+> **through this file** — load it whole.
 
-## What this knowledge base is
-Backend-neutral **AMD CDNA hardware facts** for authoring and tuning GPU kernels (GEMM, attention, MoE,
-norm, quant). It answers "how does the metal behave, and what are the concrete numbers on this chip?"
-independent of any framework or kernel language. Language/framework specifics live elsewhere
-(`languages/{hip,triton,gluon,flydsl,ck,asm}/`, `framework/`); this folder is the substrate they all sit on.
+## Scope: gfx950 only
 
-It is organized on **two axes**:
-- **`shared/`** — generation-neutral **mental models** and **cross-generation matrices** (the "how it
-  works" + "what each gen supports"). Covers all CDNA gens (gfx908/90a/942/950) in its tables.
-- **`cdna3_mi300/` and `cdna4_mi350/`** — per-generation **concrete numbers** and **gen-specific
-  instruction tables** for the two chips with dedicated coverage.
+Target parts are **MI350X** (air, 1000 W) and **MI355X** (liquid, 1400 W), CDNA4, ISA **gfx950**.
 
-**The load-bearing navigation rule:** for any subsystem, read the **`shared/` model doc first** (mental
-model + cross-gen capability matrix), then the **target generation's doc** (concrete numbers +
-gen-specific instruction/opcode table). One tells you *how it works and what differs across gens*; the
-other tells you *the exact values and opcodes on your chip*.
+**Earlier generations are not covered** — no CDNA1 (gfx908), CDNA2 (gfx90a), or **CDNA3 (gfx942 /
+MI300X / MI325X)** cards, and no cross-generation comparison tables. If you are targeting MI300X, the
+numbers here are wrong for you; use AMD's CDNA3 documentation instead. CDNA3 appears only as
+*porting warnings* ("that value is MI300X's — here it is X").
 
-> **Coverage caveat:** only **CDNA3 (gfx942, MI300X/MI325X)** and **CDNA4 (gfx950, MI350X/MI355X)** have
-> dedicated per-generation folders. **CDNA1 (gfx908, MI100)** and **CDNA2 (gfx90a, MI250/MI210)** appear
-> **only inside the `shared/` cross-gen tables** — there is no per-gen folder for them.
+## Layout — one flat folder, one file per subsystem
 
-## Portable golden rules (true across the covered gens)
-These recur in nearly every card; internalize them before optimizing:
-- **wave64 everywhere** — all divergence/shuffle/ballot/reduction math is **mod 64**, never 32.
-- **`mfma_16x16` beats `mfma_32x32`** at equal peak (smaller C-register footprint → better occupancy).
-- **Most inference kernels are HBM-bandwidth-bound** — optimize **bytes moved**, not FLOPs.
-- **L2 is per-XCD, not global** (chiplet gens) → **8-multiple tiles** + **≥1024 workgroups**.
-- **FP8 is FNUZ on CDNA3 but OCP on CDNA4** — re-cast checkpoints, never bit-copy across gens.
-- **Accumulate in FP32/INT32**; never down-convert inside the K-loop.
-- **Quote achieved, never peak** — sustained is ~45% of peak (arXiv 2510.27583).
+There are no subfolders. Each card carries **both** the mental model and the concrete gfx950 numbers
+for its subsystem, so a single Read answers a question end to end.
 
-## Start here — problem → files → order
-Substitute `<gen>` with your target: `cdna3_mi300` (MI300X/MI325X) or `cdna4_mi350` (MI350X/MI355X).
-
-| Task / symptom | Read in this order |
+| File | Subsystem |
 |---|---|
-| "Orient me on chip X / one-screen cheat sheet" | `<gen>/arch.md` |
-| "Which chip am I even on? / naming (gfx942 vs gfx950)" | `<gen>/arch.md` (TL;DR + cheat sheet) → `<gen>/isa_notes.md` (target/toolchain) |
-| "Write / tune a GEMM (MFMA)" | `shared/matrix_core_mfma_smfmac.md` → `<gen>/matrix_core*.md` → `shared/memory_model_lds_bank.md` → `<gen>/memory*.md` → `<gen>/occupancy.md`¹ |
-| "Low occupancy / register pressure / few waves/CU" | `shared/wavefront_simd_vgpr_agpr.md` → `cdna3_mi300/occupancy.md`¹ → (CDNA4 LDS delta) `cdna4_mi350/memory.md` |
-| "LDS bank conflicts / shared-memory stalls" | `shared/memory_model_lds_bank.md` → `<gen>/memory*.md` |
-| "Memory-bound / low HBM BW / coalescing / roofline" | `shared/hbm_infinity_fabric.md` → `<gen>/memory*.md` → `shared/l2_xcd_swizzle.md` |
-| "Chiplet locality / L2 reuse / tile swizzle / Tagram cliff" | `shared/l2_xcd_swizzle.md` → `cdna3_mi300/xcd_chiplet.md`² → `<gen>/memory*.md` |
-| "Partitioning: SPX / DPX / CPX × NPS1/2/4" | `cdna3_mi300/xcd_chiplet.md`² → `<gen>/arch.md` (partition section) |
-| "Which dtype? FP8 FNUZ vs OCP / numerics / accuracy" | `shared/dtype_numerics.md` → `<gen>/matrix_core*.md` (numerics section) |
-| "Low-bit MXFP4 / FP6 / block scaling (CDNA4 only)" | `cdna4_mi350/fp4_fp6_microscaling.md` → `cdna4_mi350/matrix_core_blockscale.md` → `shared/dtype_numerics.md` |
-| "Peak numbers / roofline ridge / FLOP·TOPS math" | `<gen>/peak_tables.md` |
-| "Which opcodes / intrinsics / compile target / read ISA dump" | `<gen>/isa_notes.md` → `<gen>/matrix_core*.md` |
-| "Benchmark variance / clock throttling / peak≠sustained" | `<gen>/clocks_power.md` → `cdna3_mi300/xcd_chiplet.md`² (per-XCD clock spread) |
-| "Port an MI300X kernel to MI350X" | `cdna4_mi350/arch.md` (deltas) → `cdna4_mi350/matrix_core_blockscale.md` + `cdna4_mi350/memory.md` + `cdna4_mi350/isa_notes.md` |
+| **`mi350_overview.md`** | **START HERE** — one-screen cheat sheet, peak tables, roofline ridges, topology, the four porting deltas |
+| `mi350_execution.md` | wave64, SIMD/CU hierarchy, VGPR/AGPR file, occupancy formula + worked examples |
+| `mi350_matrix_core.md` | MFMA model, shape/cycle table, per-lane registers, block-scaled MFMA, capability list |
+| `mi350_dtypes.md` | format table, the **OCP** FP8 trap, FP6/FP4, MXFP E8M0 block scaling, accumulation rules |
+| `mi350_lds.md` | 160 KiB / **64 banks**, conflicts, padding vs XOR swizzle, 128-bit direct-to-LDS, read-with-transpose |
+| `mi350_memory.md` | bandwidth ladder, HBM3E, Infinity Cache, per-XCD L2, coalescing, roofline ridge |
+| `mi350_chiplet.md` | 8 XCDs × 32 CU, L2 locality and CTA swizzle, 512 B stride cliff, clock variance, SPX/DPX/CPX × NPS |
+| `mi350_isa.md` | gfx950 target/toolchain, changed instruction families, **the disassembly checklist** |
+| `mi350_clocks.md` | MI350X vs MI355X, sustained clock, and what that does to measurements |
 
-¹ CDNA4 has **no** dedicated `occupancy.md`; the model + worked examples in `cdna3_mi300/occupancy.md`
-apply (VGPR limit unchanged), with the **160 KiB / 64-bank LDS delta** covered in `cdna4_mi350/memory.md`.
-² CDNA4 has **no** dedicated `xcd_chiplet.md`; the chiplet & partitioning mechanics in
-`cdna3_mi300/xcd_chiplet.md` apply (still 8 XCDs), with CDNA4-specific counts in `cdna4_mi350/arch.md`.
+## Constants you will look up most
 
-## Folder structure & file roles
-```
-hardware/
-├── INDEX.md                              ← this map (load first)
-├── shared/                               ← generation-neutral models + cross-gen matrices
-│   ├── wavefront_simd_vgpr_agpr.md       # execution model: wave64, SIMD, VGPR/AGPR/SGPR, occupancy math
-│   ├── memory_model_lds_bank.md          # LDS scratchpad model & bank-conflict rules (32 vs 64 banks)
-│   ├── matrix_core_mfma_smfmac.md        # MFMA/SMFMAC/scaled-MFMA model + cross-gen capability matrix
-│   ├── l2_xcd_swizzle.md                 # L2/XCD locality, tile swizzle, 512B Tagram cliff, coalescing
-│   ├── hbm_infinity_fabric.md            # HBM, Infinity Fabric/Cache, bandwidth ladder, roofline ridge
-│   └── dtype_numerics.md                 # FP8 FNUZ/OCP, FP6/FP4, MXFP (E8M0), TF32, rounding/subnormals
-├── cdna3_mi300/                          ← gfx942 · MI300X / MI325X (concrete numbers)
-│   ├── arch.md                           # orientation map + one-screen cheat sheet (START HERE for MI300X)
-│   ├── peak_tables.md                    # theoretical peak FLOPS/TOPS, memory peaks, sustained reality
-│   ├── matrix_core.md                    # CDNA3 MFMA instruction table + HIP intrinsics + FNUZ numerics
-│   ├── memory_hierarchy.md               # MI300X memory ladder, coalescing, direct global→LDS, double-buffer
-│   ├── occupancy.md                      # occupancy math + worked examples (the reference model for both gens)
-│   ├── xcd_chiplet.md                    # 8-XCD scheduling, cross-XCD cost, clock variance, SPX/DPX/CPX×NPS
-│   ├── isa_notes.md                      # gfx942 target/toolchain, instruction families, reading the ISA dump
-│   └── clocks_power.md                   # 2.1 GHz peak, 750/1000 W, peak≠sustained, benchmark hygiene
-└── cdna4_mi350/                          ← gfx950 · MI350X / MI355X (concrete numbers + CDNA4-only features)
-    ├── arch.md                           # orientation map + cheat sheet + CDNA3→CDNA4 deltas (START HERE for MI350X)
-    ├── peak_tables.md                    # FP16 2.5 PF / FP8 5 PF / FP6·FP4 10 PF, 288 GB @ 8 TB/s
-    ├── matrix_core_blockscale.md         # CDNA4 MFMA table + block-scaled v_mfma_scale_* intrinsic + layout
-    ├── fp4_fp6_microscaling.md           # FP6/FP4 formats + MXFP 32-elem E8M0 block scaling (CDNA4-only)
-    ├── memory.md                         # CDNA4 memory deltas: 160 KiB/64-bank LDS, 128-bit GLOBAL_LOAD_LDS
-    ├── isa_notes.md                      # gfx950 ISA deltas vs gfx942 (scaled MFMA, TF32 removed, ROCm 7.0+)
-    └── clocks_power.md                   # MI350X 1000 W air vs MI355X 1400 W liquid, sustained-clock effect
-```
+| | |
+|---|---|
+| 256 CU (8 XCD × 32) · 4 SIMD/CU · 1024 matrix cores | wave64 · 8 slots/SIMD → 32 waves/CU |
+| 512 regs/SIMD, 16-granule · ≤256 AGPR, unified pool | LDS **160 KiB/CU, 64 banks**, 256 B/clk, 320-DWORD granule |
+| HBM3E **288 GB @ 8 TB/s** · 256 MiB Infinity Cache · **L2 per-XCD** | FP16 **2.5 PF** · FP8 **5 PF** · FP6/FP4 **10 PF** |
+| FP16 ridge ≈ **312 FLOP/byte** | tuned GEMM sustains **~45–55% of peak** |
+| FP8 is **OCP**, not FNUZ | **TF32 removed** |
+| `global_load_lds` up to **128 b/lane** | `mfma_16x16` over `32x32`; ≥1024 WGs; 8-multiple tiles |
 
-## Reading-depth guide (how much to load)
-- **Just need a number/fact** (a peak, a cache size, a CU count): the target gen's `arch.md` cheat sheet
-  or `peak_tables.md` is enough — don't load the whole subsystem.
-- **Designing/tuning a kernel subsystem**: load the **`shared/` model** + the **gen-specific** doc for
-  that subsystem (the pairing in the routing table). This is the common case.
-- **Cross-generation reasoning / porting**: start from `cdna4_mi350/arch.md` (it enumerates the
-  CDNA3→CDNA4 deltas), then the specific gen docs on both sides.
-- **Authoring at the ISA level**: `<gen>/isa_notes.md` + `<gen>/matrix_core*.md`, and treat
-  `amd_matrix_instruction_calculator` (cited throughout) as authoritative over any table.
+## Portable golden rules
+
+- **wave64 everywhere** — all divergence/shuffle/ballot/reduction math is mod 64, never 32.
+- **`mfma_16x16` beats `mfma_32x32`** at equal peak — 4 C-registers/lane vs 16.
+- **Most inference kernels are HBM-bandwidth-bound** — optimize bytes moved, not FLOPs.
+- **L2 is per-XCD, not global** → 8-multiple tiles, ≥1024 workgroups across 256 CUs.
+- **FP8 is OCP** — re-cast any FNUZ checkpoint, never bit-copy it.
+- **TF32 is gone** — fall back to BF16 or FP32.
+- **LDS is 160 KiB over 64 banks** — re-derive any 32-bank swizzle; VGPR pressure, not LDS, is usually
+  the occupancy limiter now.
+- **Accumulate in FP32/INT32**; never down-convert inside the K-loop.
+- **Quote achieved, never peak** — sustained is ~45–55% of peak.
+
+## Problem → file
+
+| Task / symptom | Read |
+|---|---|
+| Orient me on the chip / one-screen cheat sheet | `mi350_overview.md` |
+| Peak numbers, roofline ridge, FLOP·TOPS math | `mi350_overview.md` |
+| Write / tune a GEMM (MFMA) | `mi350_matrix_core.md` → `mi350_lds.md` → `mi350_execution.md` |
+| Low occupancy / register pressure / few waves/CU | `mi350_execution.md` |
+| LDS bank conflicts / `ds_*` stalls / tile won't fit | `mi350_lds.md` |
+| Memory-bound / low HBM BW / coalescing | `mi350_memory.md` → `mi350_lds.md` |
+| Chiplet locality / L2 reuse / tile swizzle / Tagram cliff | `mi350_chiplet.md` → `mi350_memory.md` |
+| Partitioning: SPX / DPX / CPX × NPS | `mi350_chiplet.md` |
+| Which dtype? FP8 OCP / FP6 vs FP4 / numerics | `mi350_dtypes.md` |
+| Low-bit MXFP4 / FP6 / block scaling | `mi350_dtypes.md` → `mi350_matrix_core.md` |
+| Which opcodes / compile target / **read the ISA dump** | `mi350_isa.md` |
+| Benchmark variance / clock throttling / peak ≠ sustained | `mi350_clocks.md` → `mi350_chiplet.md` |
+| **Porting a kernel written for MI300X** | `mi350_overview.md` (the four deltas) → `mi350_dtypes.md` (FNUZ→OCP) → `mi350_lds.md` (32→64 banks) → `mi350_execution.md` (304→256 CU, 64→160 KiB) |
+
+## Reading depth
+
+- **A single number** (a peak, a cache size, a CU count) — `mi350_overview.md` alone.
+- **Designing or tuning a subsystem** — the one card for that subsystem; each is self-contained.
+- **Porting from MI300X** — `mi350_overview.md`, then the three delta cards it names.
+- **ISA-level authoring** — `mi350_isa.md` + `mi350_matrix_core.md`, and treat
+  `amd_matrix_instruction_calculator --architecture cdna4` as authoritative over any table here.
 
 ## Cross-links out of this folder
-Hardware facts are the substrate; kernel authoring and framework control live elsewhere. Operator/library
-cards (e.g. `framework/aiter/`) and language folders (`languages/{hip,triton,gluon,flydsl,ck,asm}/`) cite these
-hardware cards for the underlying constants. Primary AMD references (CDNA3/CDNA4 Matrix-Core programming
-guides, MI300X workload-optimization guide, ROCm docs) are cited inline in the individual cards.
+
+Hardware facts are the substrate. **How to decide what to change** lives in
+`common_methodology/optimization/` (the `lever_*` cards) and `common_methodology/profiling/` (the
+`measure_*` cards). **How to write it in a given language** lives in
+`languages/{hip,triton,gluon,flydsl,ck,asm}/`. The library control plane is `framework/aiter/`.

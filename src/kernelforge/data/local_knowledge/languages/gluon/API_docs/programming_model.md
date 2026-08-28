@@ -72,7 +72,7 @@ operand layouts, and MFMA selection are now program text, so they are varied by 
 `constexpr` you introduced for the purpose — not by a `triton.Config` field.
 
 > **Forge note.** A `constexpr` you drive from a host-side Python constant is exactly the shape the
-> `FORGE_SWEEP_*` mechanism wants — see `common_methodology/optimization/cheap_sweeps.md`. Pipeline
+> `FORGE_SWEEP_*` mechanism wants — see `common_methodology/optimization/lever_cheap_sweeps.md`. Pipeline
 > depth, unroll factor and tile dims are all cheap-sweepable in Gluon without an edit-and-gate cycle,
 > which is the main reason to introduce a named constant rather than a literal.
 

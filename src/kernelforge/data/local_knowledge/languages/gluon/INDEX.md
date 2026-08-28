@@ -69,16 +69,16 @@ Paths are relative to this folder.
 | "Should I use Gluon at all / Triton has plateaued" | `skills/optimize/gluon_levers/overview.md` (decision table) |
 | "First Gluon kernel — how do I declare and launch one?" | `API_docs/programming_model.md` → `API_docs/layouts.md` |
 | "I'm inside a forge campaign, about to edit" | `skills/optimize/gluon_levers/forge_integration.md` (**first**) → the two above |
-| "Which layout do I give this tensor?" | `API_docs/layouts.md` → `../triton/skills/optimize/triton_levers/deep_codegen.md` |
+| "Which layout do I give this tensor?" | `API_docs/layouts.md` → `../triton/skills/optimize/triton_levers/triton_lowering.md` |
 | "`convert_layout` is showing up in my ISA / it's slow" | `API_docs/layouts.md` (§ Conversions and what they cost) |
 | "Loads are branchy / masked-load overhead" | `API_docs/amd_targets.md` (§ Buffer ops) |
 | "I want global→LDS without staging in registers" | `API_docs/amd_targets.md` (§ Async copy to LDS) |
 | "MXFP4 / block-scaled GEMM on gfx950" | `API_docs/amd_targets.md` (§ Scaled MFMA) → `operators/quant_fp4_mxfp/gluon.md` |
 | "Bank conflicts on `ds_read`" | `API_docs/layouts.md` (§ Shared layouts) → `../../hardware/` LDS cards |
-| "Register spills / occupancy collapsed after a change" | `skills/optimize/gluon_levers/overview.md` (§ The ladder, v6 lesson) → `../triton/skills/optimize/triton_levers/isa_verify.md` |
+| "Register spills / occupancy collapsed after a change" | `skills/optimize/gluon_levers/overview.md` (§ The ladder, v6 lesson) → `../triton/skills/optimize/triton_levers/triton_isa_check.md` |
 | "MFMA efficiency is low but autotune converged" | `skills/optimize/gluon_levers/overview.md` (§ When Gluon is the answer) |
 | "Won't compile / `gluon.aggregate` missing / ABI error" | `skills/optimize/gluon_levers/forge_integration.md` (§ Version traps) |
-| "Verify the compiled kernel / read the ISA" | `../triton/skills/optimize/triton_levers/isa_verify.md` (shared — Gluon lowers the same way) |
+| "Verify the compiled kernel / read the ISA" | `../triton/skills/optimize/triton_levers/triton_isa_check.md` (shared — Gluon lowers the same way) |
 | "Bottleneck classification, roofline" | `../../common_methodology/` (backend-agnostic) |
 | "Wavefront / LDS / MFMA / occupancy numbers" | `../../hardware/` (backend-neutral facts) |
 
@@ -101,9 +101,12 @@ languages/gluon/
 - `scaled_quant_gemm` — FP8/BF8 with the same skeleton and a larger `BLOCK_K`.
 - `quant_fp4_mxfp` — MXFP4 via CDNA4 native scaled MFMA, plus its separate scale pipeline.
 
-Nothing else has a card yet. For an operator with no card, read the Triton card for the same operator
-(`../triton/operators/<op>/`) for the math contract, shape regimes and backend landscape — those are
-language-independent — then bring the Gluon levers from this folder.
+Nothing else has a card yet. For an operator with no card, read the source for the math contract and
+shape regimes — this repo does not maintain general operator theory — and check
+`local_knowledge/framework/aiter/overall/operator_catalog.md` for the aiter entry point plus
+`.../dispatch_and_rebind.md` for which backend it resolves to. Then bring the Gluon levers from this
+folder. (The sibling language folders no longer carry per-operator cards; `../triton/` is now
+language-level only.)
 
 ## Pinned reference sources
 Cards cite inline; this consolidates the most-used pins.
@@ -135,11 +138,12 @@ Cards cite inline; this consolidates the most-used pins.
 - **HipKittens** — https://arxiv.org/abs/2511.08083 — why wave specialization loses on CDNA and what
   the two winning wave patterns are; also the honest compiler-vs-hand-tuned gap.
 - **ROCm/aiter** — https://github.com/ROCm/aiter — production Gluon in a shipping library; see
-  `framework/aiter/operators/paged_mqa_logits/` for the dual-backend dispatch shape forge should copy.
+  `aiter/ops/triton/attention/pa_mqa_logits.py` — one public entry with a Gluon kernel and a
+  `@triton.jit` fallback selected at dispatch, the dual-backend shape forge should copy.
 
 ## Cross-links out of this folder
 The Triton substrate Gluon shares is in `languages/triton/` — read
-`skills/optimize/triton_levers/deep_codegen.md` for the lowering pipeline and MFMA layout selection,
+`skills/optimize/triton_levers/triton_lowering.md` for the lowering pipeline and MFMA layout selection,
 and `.../isa_verify.md` for the `AMDGCN_ENABLE_DUMP` workflow (identical for Gluon: same backend, same
 ISA). Backend-neutral hardware constants are in `local_knowledge/hardware/`; bottleneck
 classification, roofline and benchmarking methodology are in `local_knowledge/common_methodology/`.

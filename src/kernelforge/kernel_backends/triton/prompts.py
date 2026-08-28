@@ -32,7 +32,7 @@ code generation, plus `@triton.autotune` for configuration search.
 4. TEST correctness with the `test` tool, then the task's own correctness suite
 5. BENCH wall-clock with the `bench` tool (30-iter median, in-context)
 6. SWEEP the dispatch constants one case at a time (see the shared
-   `cheap_sweeps.md` pointer below) — measure the question instead of arguing it
+   `lever_cheap_sweeps.md` pointer below) — measure the question instead of arguing it
 7. AUTOTUNE — define config space, let Triton search, then verify winner
 8. PROFILE PMC with the `pmc` tool if needed
 9. CHECK register pressure — reduce num_stages/num_warps if spilling

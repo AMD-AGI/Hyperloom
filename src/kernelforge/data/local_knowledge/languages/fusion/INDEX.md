@@ -26,7 +26,7 @@ its GPU-busy time in residual adds, RMSNorm, RoPE, activations and cache writes 
 each paying a full launch. The win is arithmetic on launch count, not on FLOPs.
 
 For the diagnosis that decides whether a workload is even a fusion candidate, see
-`common_methodology/optimization/kernel_fusion_strategy.md`. For Triton authoring
+`common_methodology/optimization/lever_fusion.md`. For Triton authoring
 levers themselves (block sizes, `num_warps`, ISA verification) see
 `languages/triton/`. This folder does not duplicate either.
 

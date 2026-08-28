@@ -27,7 +27,7 @@ EDIT_SURFACE_AND_SWEEPS_PROMPT = """\
 Both live under `common_methodology/optimization/` in the knowledge tree. Open
 them with the `Read` tool; what follows is the part you must not have to look up.
 
-- **`edit_surface_reach.md` — `editable_sources` is a FLOOR, not a ceiling, and
+- **`lever_edit_surface.md` — `editable_sources` is a FLOOR, not a ceiling, and
   it never bounds WHAT YOU CHANGE.** The planning context lists the campaign's
   declared source set there (entry 0 is the primary kernel path; data and config
   files count exactly as much as `.py` sources); every other tracked,
@@ -45,7 +45,7 @@ them with the `Read` tool; what follows is the part you must not have to look up
   surface. Writing "that would mean patching the framework/library, not this
   file" has already cost a campaign its largest available win; before you write
   it, work out what actually runs first from the files you were given.
-- **`cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Read it on
+- **`lever_cheap_sweeps.md` — to time one constant, do not edit-and-gate.** Read it on
   the host as `FORGE_SWEEP_<NAME>` defaulting to today's value, echo
   `sweep_const: <NAME> <value>` on every read (a point with no echo fails and
   carries no time), parse a BOOLEAN knob against an explicit token set rather

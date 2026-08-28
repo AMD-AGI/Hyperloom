@@ -11,9 +11,10 @@ pinned_source: ROCm/mori@dc4bc75a
 This file is the entry index for everything under `framework/mori/`. `mori` (`ROCm/mori`) is AMD's
 GPU-initiated communication library — the counterpart to `framework/aiter/` for **expert-parallel
 all-to-all and symmetric-memory collectives**, rather than compute-op dispatch. Before this folder
-existed, mori only appeared as a *backend* of aiter's `moe_dispatch_combine` operator
-(`framework/aiter/operators/moe_dispatch_combine/backends/mori.md`); that card is accurate and stays
-the right place for "how aiter calls mori," but mori had no first-class identity of its own — no
+existed, mori only appeared as a *backend* of aiter's `moe_dispatch_combine` operator, documented from
+the aiter side. Those aiter operator cards have since been removed (operator-level knowledge went stale
+too fast to maintain), so **this folder is now the only place mori is written up** — but mori still had
+no first-class identity of its own before it existed: no
 per-shape tuning-DB documentation, no control-plane story, nowhere to record measurements taken
 directly against mori's own API. This folder is that home.
 
@@ -37,8 +38,8 @@ directly against mori's own API. This folder is that home.
 | "Is `use_external_inp_buf`/zero-copy worth trying?" | `operators/ep_dispatch_combine/tuning.md` §"combine buffer mode" |
 | "What did KernelForge itself measure on MI300X for this op?" | `operators/ep_dispatch_combine/tuning.md` §"KernelForge-measured results (MI300X)" |
 | "Is the FlyDSL/v2 dispatch-combine rewrite usable?" | `operators/ep_dispatch_combine/v2_flydsl.md` |
-| "How does aiter actually call mori in production?" | `../aiter/operators/moe_dispatch_combine/backends/mori.md` (existing, do not duplicate here) |
-| Math contract / numerics / fusion for dispatch-combine | `../aiter/operators/moe_dispatch_combine/{overview,numerics,fusion}.md` (existing, mori-agnostic content lives there) |
+| "How does aiter actually call mori in production?" | `overall/repo_layout.md` § "Relation to aiter" → the source: `aiter/dist/device_communicators/all2all.py` (`MoriAll2AllManager`) |
+| Math contract / numerics / fusion for dispatch-combine | Not documented in this repo (mori-agnostic, and it rots fast) — read `aiter/fused_moe.py` and `mori/ops/` |
 
 ## Folder structure & file roles
 ```

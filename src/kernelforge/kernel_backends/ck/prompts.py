@@ -57,8 +57,8 @@ high-performance kernels from reusable tiles (block, warp, MFMA instruction leve
 The concrete VGPR/AGPR budget, occupancy cliff, LDS size & banks, MFMA tables, and
 fp8 FNUZ/OCP rules for {config_gpu_target} live in the `<knowledge>` maps below. Load
 the relevant card with the `Read` tool instead of relying on a remembered value:
-- VGPR/occupancy → `hardware/` + `common_methodology/optimization/occupancy_and_registers.md`
-- LDS size & bank conflicts → `hardware/` + `common_methodology/optimization/lds_and_bank_conflicts.md`
+- VGPR/occupancy → `hardware/` + `common_methodology/optimization/lever_occupancy.md`
+- LDS size & bank conflicts → `hardware/` + `common_methodology/optimization/lever_lds_banks.md`
 - MFMA table & dtype numerics → `hardware/` (matrix_core, isa_notes, dtype_numerics)
 - CK authoring levers (tiles, LDS descriptors, pipelines) → `languages/ck/`
 

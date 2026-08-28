@@ -114,9 +114,9 @@ class TestForgeLoopPath:
 
 # ---------- shared edit-surface / sweep contract ----------------------------
 
-_SWEEP_CARD = "cheap_sweeps.md"
-_EDIT_SURFACE_CARD = "edit_surface_reach.md"
-_LOOP_FORM_CARD = "loop_form_and_pipelining.md"
+_SWEEP_CARD = "lever_cheap_sweeps.md"
+_EDIT_SURFACE_CARD = "lever_edit_surface.md"
+_LOOP_FORM_CARD = "lever_loop_form.md"
 
 
 class TestEditSurfaceAndSweepContract:

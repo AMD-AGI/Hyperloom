@@ -15,9 +15,9 @@ sources:
 
 The tile-programming front-end interface (`include/ck_tile`). This is the API surface; for the perf model
 (pipelines, policies, WarpGemm, LDS swizzle) see
-[../skills/optimize/ck_levers/ck_tile.md](../skills/optimize/ck_levers/ck_tile.md), and for FMHA/GEMM
-templates see [../skills/optimize/ck_levers/fmha_template.md](../skills/optimize/ck_levers/fmha_template.md) /
-[gemm_template](../skills/optimize/ck_levers/gemm_template.md).
+[../skills/optimize/ck_levers/ck_frontend_tile.md](../skills/optimize/ck_levers/ck_frontend_tile.md), and for FMHA/GEMM
+templates see [../skills/optimize/ck_levers/ck_fmha_stack.md](../skills/optimize/ck_levers/ck_fmha_stack.md) /
+[gemm_template](../skills/optimize/ck_levers/ck_gemm_stack.md).
 
 ## Headers
 ```cpp
@@ -66,7 +66,7 @@ ninja tile_example_universal_gemm && ./bin/tile_example_universal_gemm -m=4096 -
 ninja tile_example_fmha_fwd       && ./bin/tile_example_fmha_fwd -b=1 -h=8 -s=4096 -d=128 -v=1
 ```
 `generate.py` instantiates per-trait `.cpp` files (prune traits to your shapes — see
-[../skills/optimize/ck_levers/codegen_instances.md](../skills/optimize/ck_levers/codegen_instances.md)).
+[../skills/optimize/ck_levers/ck_instance_codegen.md](../skills/optimize/ck_levers/ck_instance_codegen.md)).
 
 ## Sources
 - ck_tile component layout (core/ops/gemm/ops/fmha): https://github.com/ROCm/composable_kernel/blob/develop/include/ck_tile/README.md

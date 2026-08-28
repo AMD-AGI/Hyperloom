@@ -13,11 +13,10 @@ sources:
 
 # mori EP dispatch/combine — API surface
 
-For the **math contract** (what dispatch/combine compute), **numerics** (quant/reduction-order), and
-**fusion neighbors** (grouped GEMM, routed-weight multiply placement), see the existing, accurate,
-mori-agnostic cards under
-[`../../aiter/operators/moe_dispatch_combine/{overview,numerics,fusion}.md`](../../../aiter/operators/moe_dispatch_combine/overview.md)
-— this card does not repeat them. This card documents mori's **own direct API** (as used by a caller
+The **math contract** (what dispatch/combine compute), **numerics** (quant/reduction-order), and
+**fusion neighbors** (grouped GEMM, routed-weight multiply placement) are mori-agnostic and are **not
+documented in this repo** — read `aiter/fused_moe.py` and `aiter/dist/device_communicators/all2all.py`
+at the pinned commit. This card documents mori's **own direct API** (as used by a caller
 that imports `mori.ops` directly, not through aiter's `MoriAll2AllManager` seam) and the **buffer-mode**
 knob that aiter's fixed integration never exposes.
 

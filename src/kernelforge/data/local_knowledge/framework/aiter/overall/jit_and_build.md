@@ -178,7 +178,7 @@ cp a8w8_tuned_gemm.csv aiter/configs/
 > `csrc/gemm_a16w16/gemm_a16w16_tune.py` (`--libtype all` across asm/opus/flydsl/triton/skinny/torch;
 > `--with-hipblaslt` opt-in, delegating to gradlib). Deploy any tuned CSV by env — the `AITER_CONFIG_*`
 > vars are resolved through the `AITER_CONFIGS` object in `aiter/jit/core.py` (`:`-merge + legacy `gfx`
-> backfill from `cu_num`). See [tuning_db.md](tuning_db.md) and [configs_db.md](configs_db.md).
+> backfill from `cu_num`). See [tuning_db.md](tuning_db.md) and [config_files_and_merge.md](config_files_and_merge.md).
 
 ## 3rd Party Dependencies
 

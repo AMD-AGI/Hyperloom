@@ -14,9 +14,9 @@ allowed-tools: Read Edit Bash Grep Glob
 # Debug Triton (AMD) Kernel
 
 Diagnostic workflow for Triton kernels on AMD Instinct (MI300X gfx942, MI350/MI355X gfx950). Reference:
-[../optimize/triton_levers/pitfalls.md](../optimize/triton_levers/pitfalls.md),
-[../optimize/triton_levers/knobs.md](../optimize/triton_levers/knobs.md),
-[../optimize/triton_levers/isa_verify.md](../optimize/triton_levers/isa_verify.md).
+[../optimize/triton_levers/triton_traps.md](../optimize/triton_levers/triton_traps.md),
+[../optimize/triton_levers/triton_knob_space.md](../optimize/triton_levers/triton_knob_space.md),
+[../optimize/triton_levers/triton_isa_check.md](../optimize/triton_levers/triton_isa_check.md).
 
 ## Step 1: classify the symptom
 | Symptom | Likely cause | Go to |
@@ -77,7 +77,7 @@ grep -E ".vgpr_count|.private_segment_fixed_size|.group_segment_fixed_size" dump
 | Accumulator | AGPR, no moves in loop | `v_accvgpr_read/write` in loop |
 | Scratch | `.private_segment_fixed_size: 0` | nonzero → spilling |
 
-Full workflow: [../optimize/triton_levers/isa_verify.md](../optimize/triton_levers/isa_verify.md).
+Full workflow: [../optimize/triton_levers/triton_isa_check.md](../optimize/triton_levers/triton_isa_check.md).
 
 ## 9. When Triton is the wrong tool
 On a *plain* dense GEMM, tuned hipBLASLt/aiter usually win. Triton's honest wins are **fusion**

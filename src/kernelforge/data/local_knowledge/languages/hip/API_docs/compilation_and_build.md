@@ -13,8 +13,8 @@ sources:
 # HIP Kernel Compilation & Build Reference
 
 > API/build reference (how to compile). For *perf-oriented* flag choices and ISA verification see
-> [../skills/optimize/hip_levers/overview.md](../skills/optimize/hip_levers/overview.md) and
-> [../skills/optimize/hip_levers/pitfalls.md](../skills/optimize/hip_levers/pitfalls.md).
+> [../skills/optimize/hip_levers/hip_authoring_model.md](../skills/optimize/hip_levers/hip_authoring_model.md) and
+> [../skills/optimize/hip_levers/hip_traps.md](../skills/optimize/hip_levers/hip_traps.md).
 
 ## hipcc Compiler Flags
 

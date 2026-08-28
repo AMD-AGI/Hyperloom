@@ -49,7 +49,7 @@ have official tuner output for `gfx942`/`gfx950`) — MI300X is untuned by mori'
 writing. Everything in this card's "KernelForge-measured results" section is the first real MI300X data
 point for this op, produced by forge-loop campaigns, not mori's own `tools/batch_intranode_tuning.sh`.
 **Confidence caveat**: these were single-shot-per-config forge-loop benchmark numbers (median of 5 warm
-iterations per candidate, not `local_knowledge/common_methodology/profiling/benchmarking_methodology.md`'s
+iterations per candidate, not `local_knowledge/common_methodology/profiling/measure_protocol.md`'s
 prescribed `REPEATS=7` same-session non-overlapping A/B) — treat as a strong, twice-independently-
 confirmed prior for `block_num`/`warp_per_block`/`kernel_type`, not a final production-grade number. See
 "What's still open" below.
@@ -57,9 +57,7 @@ confirmed prior for `block_num`/`warp_per_block`/`kernel_type`, not a final prod
 ## Reference workload
 Unless noted otherwise, all numbers below are EP8, 4096 tokens/rank, hidden_dim=7168, top-8 routing, fp8
 (e4m3fnuz) dispatch + bf16 combine, `IntraNode` kernel, single 8-GPU node (xGMI only, no RDMA) — the same
-shape MoRI's own reference table in
-[`../../../aiter/operators/moe_dispatch_combine/backends/mori.md`](../../../aiter/operators/moe_dispatch_combine/backends/mori.md)
-cites (307 GB/s dispatch / 330 GB/s combine).
+shape MoRI's own reference table cites (307 GB/s dispatch / 330 GB/s combine).
 
 ## KernelForge-measured results (MI300X, gfx942)
 
@@ -78,11 +76,11 @@ type across 5 shape variants:
 | Narrow hidden (4096 tok, h=4096) | 1.347 ms | 1.015 ms | 1.328× | dispatch 152/16, combine 304/16, IntraNode |
 
 **Pattern**: `combine_warp_per_block=16` (not 4) wins everywhere — but this is mostly a correction of the
-task's own stale baseline back to aiter's actual production value (`aiter.md` confirms aiter always
-calls mori with `warp_num_per_block=16` for both phases on single-node), not a novel finding.
-`dispatch_block_num=152, combine_block_num=304` (both scale with the MI300X CU count, 304 — the same
-lever `../../../aiter/operators/moe_dispatch_combine/tuning.md` documents for a *different*, hand-rolled
-a2a kernel at this exact reference shape) generalizes across 4096/8192-token shapes but **not** to the
+task's own stale baseline back to aiter's actual production value (`aiter/dist/device_communicators/
+all2all.py` shows aiter always calls mori with `warp_num_per_block=16` for both phases on single-node),
+not a novel finding. `dispatch_block_num=152, combine_block_num=304` (both scale with the MI300X CU
+count, 304 — the same lever that also governs a hand-rolled a2a kernel at this exact reference shape)
+generalizes across 4096/8192-token shapes but **not** to the
 256-token decode shape, which wants far fewer dispatch blocks (40) — there isn't enough work to fill 152
 blocks at that batch size, so extra blocks add scheduling overhead without payload. `IntraNodeLL` was
 consistently 2-4% **slower** than `IntraNode` at the 4096-token shape in both a manual A/B and the
@@ -151,7 +149,7 @@ in-session probes ranged 1.6135-1.6247 ms). Its best final submission wasn't eve
 small `dispatch_block_num` tweak (152→160, external buffer unchanged) measured 1.6162 ms, a ~0.5%
 improvement, which the outer canonical validation correctly **reverted** for falling inside this
 campaign's configured 2%-noise-floor gate (`noise_floor_pct: 2.0` in the experiment record) — consistent
-with `common_methodology/profiling/benchmarking_methodology.md`'s "don't accept a sub-band delta as a
+with `common_methodology/profiling/measure_protocol.md`'s "don't accept a sub-band delta as a
 win" rule. **Kept: 0. Final config unchanged from round 1.** Two independent lines of evidence agreed
 (this campaign's own broader internal search, and the manual 8-point probe above) that MI300X's zero-copy
 combine path does not clear round 1's external-buffer champion at this shape, unlike the clear +29% win
@@ -196,8 +194,8 @@ reasonable free default, not a substitute for tuning, and a knob that would make
 
 Rounds 1 and 2 above were run with `aiter-fellow`'s default forge-loop knowledge injection, which — as of
 this writing — only auto-injects `hardware/`, `common_methodology/`, and `framework/aiter/` into the
-agent's system prompt (see `src/kernelforge/knowledge/local_index.py` /
-`src/kernelforge/fellows/base.py`). **`framework/mori/` was never wired in.** Checking the round-2
+agent's system prompt (see `src/kernel_agents/knowledge/local_index.py` /
+`src/kernel_agents/fellows/base.py`). **`framework/mori/` was never wired in.** Checking the round-2
 Claude session transcript confirmed the agent made exactly 2 file reads all session
 (`mori_ep_config.py`, `driver.py`) — zero reads anywhere under `local_knowledge/`. So rounds 1-2 are not
 evidence this card helps; they are evidence forge-loop's generic search + a hand-written `program.md` can
@@ -426,7 +424,7 @@ than the without-KB arm's independently-discovered optimum.
 7. **`REPEATS=7`-grade confirmation of the 2026-08-06 re-run's numbers** — like round 1, these are
    forge-loop's in-session medians plus one independent cold-start confirmation (the without-KB arm
    rediscovering round 1's champion), not a dedicated same-session non-overlapping A/B per
-   `benchmarking_methodology.md`.
+   `measure_protocol.md`.
 
 ## Sources
 - MI308X official tuned dispatch/combine numbers at this shape (`num_tokens=4096, hidden_dim=7168`): `ROCm/mori@dc4bc75a:python/mori/ops/tuning_configs/gfx942_mi308x_IntraNode_ep8_{dispatch,combine}.json`.

@@ -99,4 +99,4 @@ TMA→buffer-load-to-lds, CUDA/NVCC→HIP/HIPCC.
 - HipKittens paper (tiles/ops §3, wave scheduling/register pinning/swizzling/XCD §4, Tables 1–5): https://arxiv.org/html/2511.08083v1 ; abstract https://arxiv.org/abs/2511.08083
 - Blog "AMD GPUs go brrr": https://hazyresearch.stanford.edu/blog/2025-11-09-hk
 - Code: https://github.com/HazyResearch/HipKittens
-- AGPR/`v_accvgpr_read` & LDS bank/phase facts also in [intrinsics.md](intrinsics.md) / [lds_async.md](lds_async.md).
+- AGPR/`v_accvgpr_read` & LDS bank/phase facts also in [hip_builtins.md](hip_builtins.md) / [hip_lds_staging.md](hip_lds_staging.md).

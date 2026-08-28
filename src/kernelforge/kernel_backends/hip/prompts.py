@@ -41,7 +41,7 @@ Every concrete hardware/ISA number and instruction table you need is in the
 `<knowledge>` maps below. Load the relevant card with the `Read` tool instead of
 relying on a remembered value — these differ per arch and go stale:
 - **VGPR/AGPR budget, occupancy cliff, LDS size & banks** → `hardware/` (occupancy,
-  wavefront/VGPR, LDS memory-model) + `common_methodology/optimization/occupancy_and_registers.md`.
+  wavefront/VGPR, LDS memory-model) + `common_methodology/optimization/lever_occupancy.md`.
 - **MFMA instruction table, fp8 FNUZ vs OCP, scaled-MFMA availability, output lane
   layout** → `hardware/` (matrix_core, isa_notes, dtype_numerics) for {config_gpu_target}.
 - **Memory hierarchy, direct-to-LDS width, XCD/CU count, L2 locality / tile swizzle**
@@ -97,7 +97,7 @@ hipcc -x hip --offload-arch={config_gpu_target} -O3 -std=c++17 \\
 Double-buffer the K-loop so the next operand tile is in flight while the current one
 computes (overlap MFMA with LDS reads and the next GMEM load; drain the pipeline in
 the epilogue). The full pattern, wait-counter usage, and per-arch tuning are in
-`languages/hip/skills/optimize/hip_levers/` (`lds_async.md`, `patterns.md`).
+`languages/hip/skills/optimize/hip_levers/` (`hip_lds_staging.md`, `hip_templates.md`).
 
 ## When to Stop
 

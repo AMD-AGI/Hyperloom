@@ -16,7 +16,7 @@ Measurement-driven diagnosis for Triton kernels on CDNA3/CDNA4. The forge-loop b
 benches EVERY iteration, but **profiles only at the baseline and after a KEEP** (a kept improvement) —
 not on every iteration, and reverted candidates are not profiled. You can also profile on demand
 yourself with `local_knowledge/common_methodology/profiling/rocpc_profile.py` (see
-`common_methodology/profiling/rocprof_compute_workflow.md`). This card explains how to read that
+`common_methodology/profiling/measure_rocpc_workflow.md`). This card explains how to read that
 profiling output and which knob each signal points to. Hardware peaks live in `local_knowledge/hardware/`.
 
 ## 1. Autotune + wall time
@@ -51,13 +51,13 @@ One granule over a boundary (e.g. 176 → 2 waves) → set `waves_per_eu = targe
 ## 4. Always cross-check with ISA
 PMC says *what* is slow; the AMDGCN says *why*. Confirm the inner loop against the checklist in
 [../bottleneck/debug-triton-kernel.md](../bottleneck/debug-triton-kernel.md) §8 and
-[../optimize/triton_levers/isa_verify.md](../optimize/triton_levers/isa_verify.md) before and after a
+[../optimize/triton_levers/triton_isa_check.md](../optimize/triton_levers/triton_isa_check.md) before and after a
 change — a "win" that doesn't change the ISA as expected is usually autotune noise.
 
 ## 5. e2e gate through the serving seam
 Isolated TFLOPS ≠ e2e win. Gate the tuned kernel through the actual seam (aiter for sglang/vLLM GEMM):
 keep it only if `pct_gpu_time × speedup` moves e2e past the noise band
-([../optimize/triton_levers/pitfalls.md](../optimize/triton_levers/pitfalls.md) integration note).
+([../optimize/triton_levers/triton_traps.md](../optimize/triton_levers/triton_traps.md) integration note).
 
 ## Sources
 - Optimizing Triton kernels (autotune, ISA dump, OPTIMIZE_EPILOGUE): https://rocm.docs.amd.com/en/latest/how-to/llm-fine-tuning-optimization/optimizing-triton-kernel.html

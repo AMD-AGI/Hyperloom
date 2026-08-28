@@ -14,9 +14,9 @@ sources:
 # Triton language API (`tl.*`)
 
 The device-body API you write inside a `@triton.jit` kernel. The Python surface is **identical on AMD and
-NVIDIA** — what differs is lowering (see [../skills/optimize/triton_levers/deep_codegen.md](../skills/optimize/triton_levers/deep_codegen.md))
+NVIDIA** — what differs is lowering (see [../skills/optimize/triton_levers/triton_lowering.md](../skills/optimize/triton_levers/triton_lowering.md))
 and the AMD dtype rules (FNUZ fp8). For tuning knobs see
-[../skills/optimize/triton_levers/knobs.md](../skills/optimize/triton_levers/knobs.md); for the launch/
+[../skills/optimize/triton_levers/triton_knob_space.md](../skills/optimize/triton_levers/triton_knob_space.md); for the launch/
 decorator surface see [programming_model.md](programming_model.md).
 
 ## Program / index
@@ -83,4 +83,4 @@ tl.debug_barrier()
 ## Sources
 - Triton language reference (tl.load/store/dot/reduce/atomic/math, block pointers): https://triton-lang.org/main/python-api/triton.language.html
 - Triton tutorials (softmax, matmul, flash-attention patterns): https://triton-lang.org/main/getting-started/tutorials/index.html
-- AMD dtype/lowering specifics: [../skills/optimize/triton_levers/deep_codegen.md](../skills/optimize/triton_levers/deep_codegen.md), [../skills/optimize/triton_levers/pitfalls.md](../skills/optimize/triton_levers/pitfalls.md)
+- AMD dtype/lowering specifics: [../skills/optimize/triton_levers/triton_lowering.md](../skills/optimize/triton_levers/triton_lowering.md), [../skills/optimize/triton_levers/triton_traps.md](../skills/optimize/triton_levers/triton_traps.md)

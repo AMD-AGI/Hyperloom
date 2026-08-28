@@ -15,9 +15,9 @@ sources:
 
 The public **interface** of the classic CK library (`ck::tensor_operation::device::DeviceGemm*` family):
 the call surface and lifecycle. For the template *parameters* and how to choose them see
-[../skills/optimize/ck_levers/gemm_template.md](../skills/optimize/ck_levers/gemm_template.md) and
-[../skills/optimize/ck_levers/ck_classic.md](../skills/optimize/ck_levers/ck_classic.md); for tuning
-priority see [../skills/optimize/ck_levers/knobs.md](../skills/optimize/ck_levers/knobs.md).
+[../skills/optimize/ck_levers/ck_gemm_stack.md](../skills/optimize/ck_levers/ck_gemm_stack.md) and
+[../skills/optimize/ck_levers/ck_frontend_classic.md](../skills/optimize/ck_levers/ck_frontend_classic.md); for tuning
+priority see [../skills/optimize/ck_levers/ck_tuning_knobs.md](../skills/optimize/ck_levers/ck_tuning_knobs.md).
 
 ## The device-op families
 | Template | Use |

@@ -16,7 +16,7 @@ Measurement-driven diagnosis for HIP/C++ CDNA kernels. The forge-loop builds →
 EVERY iteration, but **profiles only at the baseline and after a KEEP** (a kept improvement) — not on
 every iteration, and reverted candidates are not profiled. You can also profile on demand yourself with
 `local_knowledge/common_methodology/profiling/rocpc_profile.py` (see
-`common_methodology/profiling/rocprof_compute_workflow.md`). This card explains how to read that
+`common_methodology/profiling/measure_rocpc_workflow.md`). This card explains how to read that
 profiling output and what lever each signal points to. Hardware peaks live in `local_knowledge/hardware/`.
 
 ## 1. Wall time & basic trace
@@ -50,11 +50,11 @@ Practical rule for GEMM-like ops: small M (≤ 512) tends memory-bound; large M 
 ## 4. Tie PMC → HIP lever (decision, not prescription)
 The forge-loop passes the PMC *finding* (memory / compute / spill) as a neutral fact; you choose the
 technique. The mapping above is the menu:
-- memory-bound → [../optimize/hip_levers/lds_async.md](../optimize/hip_levers/lds_async.md),
-  [../optimize/hip_levers/patterns.md](../optimize/hip_levers/patterns.md) (vectorize / coalesce / async copy)
-- compute-bound → [../optimize/hip_levers/intrinsics.md](../optimize/hip_levers/intrinsics.md) (MFMA
+- memory-bound → [../optimize/hip_levers/hip_lds_staging.md](../optimize/hip_levers/hip_lds_staging.md),
+  [../optimize/hip_levers/hip_templates.md](../optimize/hip_levers/hip_templates.md) (vectorize / coalesce / async copy)
+- compute-bound → [../optimize/hip_levers/hip_builtins.md](../optimize/hip_levers/hip_builtins.md) (MFMA
   shape, sched_group_barrier), [../optimize/hip_levers/hipkittens.md](../optimize/hip_levers/hipkittens.md) (scheduling patterns)
-- register spill → [../optimize/hip_levers/pitfalls.md](../optimize/hip_levers/pitfalls.md) (occupancy,
+- register spill → [../optimize/hip_levers/hip_traps.md](../optimize/hip_levers/hip_traps.md) (occupancy,
   `__launch_bounds__`)
 
 ## 5. Always cross-check with ISA

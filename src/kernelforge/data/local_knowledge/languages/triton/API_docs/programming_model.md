@@ -15,7 +15,7 @@ sources:
 
 The host-side surface: how a kernel is declared, specialized, launched, and autotuned. The kernel body
 ops are in [language_api.md](language_api.md); AMD knob semantics in
-[../skills/optimize/triton_levers/knobs.md](../skills/optimize/triton_levers/knobs.md).
+[../skills/optimize/triton_levers/triton_knob_space.md](../skills/optimize/triton_levers/triton_knob_space.md).
 
 ## `@triton.jit` and launch
 ```python
@@ -78,4 +78,4 @@ compiled = kernel.warmup(x, y, N, BLOCK=1024, grid=(1,))   # force compile witho
 ## Sources
 - Triton runtime/JIT/autotune/heuristics API: https://triton-lang.org/main/python-api/triton.html
 - Triton language (constexpr, program_id, grid): https://triton-lang.org/main/python-api/triton.language.html
-- AMD knob mapping (HIPOptions): [../skills/optimize/triton_levers/knobs.md](../skills/optimize/triton_levers/knobs.md)
+- AMD knob mapping (HIPOptions): [../skills/optimize/triton_levers/triton_knob_space.md](../skills/optimize/triton_levers/triton_knob_space.md)
