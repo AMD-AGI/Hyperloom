@@ -33,6 +33,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     read_remote_recipe as _read_remote_recipe,
     write_final_remote_recipe,
 )
+from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files, merge_staged_sections
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
@@ -1915,6 +1916,27 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     published = {artifact.path for artifact in bundle.artifacts}
     assert refs[0] in published
     assert (tmp_path / "files" / refs[0]).is_file()
+
+
+def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
+    """Replay refs already on the section must union with newly staged refs, without duplicates."""
+    patch = tmp_path / "authored.patch"
+    patch.write_text("authored", encoding="utf-8")
+    sections = _sections(tmp_path)
+    staged_refs = FrameworkAgentKB(sections).stage_patches([patch], stack_index=2)
+    staged_ref = staged_refs[0]
+    prior_patch = "framework/overlays/000000/00-replayed.patch"
+    prior_artifact = "framework/artifacts/prior.bin"
+    value = {
+        "framework": {
+            "patches": [prior_patch, staged_ref],
+            "artifacts": [prior_artifact],
+        }
+    }
+    merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
+    assert merged == ["framework"]
+    assert value["framework"]["patches"] == [prior_patch, staged_ref]
+    assert value["framework"]["artifacts"] == [prior_artifact]
 
 
 def test_non_overlay_owner_patch_ref_fails_before_publish(
