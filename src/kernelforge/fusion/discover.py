@@ -1296,12 +1296,14 @@ def registered_agent_llm_fn(
     """Adapt one registered Agent backend into discovery's text interface.
 
     The source is already embedded in the prompt, so the session gets read/search
-    tools but no write or shell tools. ``read_only_resume`` selects the guarded
-    contract that accepts an arbitrary dirty worktree, snapshots all Git-visible
-    state, and verifies or restores it after the turn. A backend's explicit
-    external-sandbox bypass remains an OS-isolation choice, independent from this
-    logical write policy. No provider fallback occurs here; the caller owns runtime
-    resolution.
+    tools but no write or shell tools. ``allow_dirty_baseline`` lets the turn start
+    from a worktree the caller already left dirty, without also claiming the
+    ``read_only_resume`` contract: this is not a resume, and asserting it would opt
+    the session out of the workspace guard's read-only fast path and so demand that
+    ``cwd`` be a git worktree -- which a pip-installed framework never is. A
+    backend's explicit external-sandbox bypass remains an OS-isolation choice,
+    independent from this logical write policy. No provider fallback occurs here;
+    the caller owns runtime resolution.
     """
     import time as _time
 
@@ -1393,7 +1395,12 @@ def registered_agent_llm_fn(
                     max_turns=resolved_turns,
                 ),
                 protected_globs=["*"],
-                read_only_resume=True,
+                # Not read_only_resume: discovery only needs the "tolerate a dirty
+                # worktree" half of that flag, and claiming the resume contract
+                # disqualifies this session from the guard's read-only fast path
+                # (workspace_guard.is_read_only_session), forcing a git-worktree
+                # requirement on a cwd that is routinely a pip install root.
+                allow_dirty_baseline=True,
                 progress_log=progress,
             )
             try:

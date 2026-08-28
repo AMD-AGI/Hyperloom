@@ -18,7 +18,7 @@ from kernelforge.agent_backends.base import (
     AgentRunResult,
     AgentRuntimeConfig,
 )
-from kernelforge.agent_backends.workspace_guard import WorkspaceSafetyError
+from kernelforge.agent_backends.workspace_guard import WorkspaceGuard, WorkspaceSafetyError
 
 from kernelforge.fusion import discover as discover_module
 from kernelforge.fusion import author as author_module
@@ -419,10 +419,17 @@ def test_registered_discovery_returns_final_text_without_bare_openai(
     assert spec.system_prompt != spec.user_prompt
     assert spec.user_prompt == "DISCOVERY PROMPT"
     assert spec.writable is False
-    assert spec.read_only_resume is True
     assert spec.tool_policy.read is True and spec.tool_policy.search is True
     assert spec.tool_policy.write is False and spec.tool_policy.shell is False
     assert spec.protected_globs == ["*"]
+    # Discovery tolerates a dirty worktree, but must NOT claim the read-only-resume
+    # contract: that flag disqualifies the session from the workspace guard's
+    # read-only fast path, which then demands cwd be a git worktree. Discovery's cwd
+    # is the framework repo root, routinely a pip install root with no .git, so the
+    # guard rejected every LLM discovery against a pip-installed framework.
+    assert spec.read_only_resume is False
+    assert spec.allow_dirty_baseline is True
+    assert WorkspaceGuard.is_read_only_session(spec) is True
 
 
 def test_registered_discovery_rejects_and_restores_source_edits(tmp_path):
