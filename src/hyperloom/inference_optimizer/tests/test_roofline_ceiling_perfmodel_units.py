@@ -439,6 +439,55 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     assert peak == max(mem, cmp)
 
 
+def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path):
+    """Recognized --quantization wins; unrecognized quant falls through; precision tags do not."""
+    meta_fp32 = _dense_meta(weight_dtype_bytes=4.0)
+    meta_fp8 = _dense_meta(weight_dtype_bytes=1.0)
+
+    (tmp_path / "quant").mkdir()
+    (tmp_path / "prequant").mkdir()
+    (tmp_path / "dtype").mkdir()
+    (tmp_path / "fallback").mkdir()
+
+    quant_state = _state(
+        tmp_path / "quant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8 --dtype bfloat16"),
+        precision="fp4",
+    )
+    quant = rc.resolve_runtime_dtype(quant_state, meta_fp32)
+    assert quant.source == "server_args_quantization"
+    assert quant.quantization == "fp8"
+    assert quant.weight_dtype_bytes == 1.0
+    assert quant.activation_dtype_bytes == 2.0
+
+    prequant_state = _state(
+        tmp_path / "prequant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization not-a-method"),
+        precision="fp8",
+    )
+    prequant = rc.resolve_runtime_dtype(prequant_state, meta_fp8)
+    assert prequant.source == "quantization_config"
+    assert prequant.weight_dtype_bytes == 1.0
+
+    dtype_state = _state(
+        tmp_path / "dtype",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
+        precision="fp8",
+    )
+    dtype = rc.resolve_runtime_dtype(dtype_state, meta_fp32)
+    assert dtype.source == "server_args_dtype"
+    assert dtype.quantization == "none"
+    assert dtype.weight_dtype_bytes == 4.0
+    assert dtype.activation_dtype_bytes == 4.0
+
+    fallback_state = _state(tmp_path / "fallback", _serving_benchmark(tmp_path / "m"), precision="fp8")
+    fallback = rc.resolve_runtime_dtype(fallback_state, meta_fp32)
+    assert fallback.source == "config_torch_dtype"
+    assert fallback.quantization == "none"
+    assert fallback.weight_dtype_bytes == 2.0
+    assert fallback.activation_dtype_bytes == 2.0
+
+
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
