@@ -458,7 +458,7 @@ def infer_kernel_backend(source_paths: list[Path]) -> str:
             return "ck"
         if suffix in {".hip", ".cu", ".cuh", ".cpp", ".cc", ".cxx"}:
             return "hip"
-    raise ValueError(f"could not infer kernel kernel_backend; set {_ENV_OVERRIDE} to a known backend")
+    raise ValueError(f"could not infer the kernel backend; set {_ENV_OVERRIDE} to a known backend")
 
 
 def _derive_target_functions(
