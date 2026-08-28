@@ -3969,10 +3969,13 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
         if promoted:
-            # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
-            # advance validated_stack_len so the unvalidated-stack guard clears.
+            # A KEEP's own measurement promotes into cumulative_gain_validated and
+            # advances validated_stack_len so the unvalidated-stack guard clears.
+            # Search explore reports its decision round, so the basis is named as
+            # that rather than as a confirmation rebench the run no longer takes:
+            # a reader can then tell this number from a GEAK-revalidated one.
             if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                self._update_cumulative_gain_validated(best_tput)
+                self._update_cumulative_gain_validated(best_tput, measurement_basis="e2e_decision_round")
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
