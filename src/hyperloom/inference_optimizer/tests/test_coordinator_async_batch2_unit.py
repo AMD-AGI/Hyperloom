@@ -2049,7 +2049,7 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "x", {}))
 
     async def _scout():
@@ -2152,7 +2152,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     """
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(
         ps,
@@ -2554,7 +2554,7 @@ def _enter_framework(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     await coord._pump_framework_agent_phase()
 
 

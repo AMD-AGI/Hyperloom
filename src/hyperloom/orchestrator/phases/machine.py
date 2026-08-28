@@ -20,7 +20,12 @@ class MachinePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _ensure_phase_initialised(self) -> None:
-        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
+
+        Raises:
+            RuntimeError: When the session was recorded at a phase this build's
+                machine does not have.
+        """
         state = self.shared_state
         # Redistribute disabled phases' budget shares to the enabled work phases.
         # Done here (not in Coordinator.__init__) because the enablement flags on
@@ -35,6 +40,16 @@ class MachinePhase(PhaseHandler):
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
+        if current and current not in _phase_state.PHASE_NAMES:
+            # A phase this build does not have means the session was recorded
+            # by one whose machine differed. Falling through would read as a
+            # fresh start and re-run PRELUDE on top of a session that already
+            # has a KEPT stack, a baseline and hours of measurement.
+            raise RuntimeError(
+                f"session was recorded at phase {current!r}, which this build's phase machine "
+                f"does not have (known: {', '.join(_phase_state.PHASE_NAMES)}). "
+                f"Resume it with the version that wrote it, or start a new session."
+            )
         if current == _phase_state.PHASE_CLOSE:
             self._reopen_a_session_that_was_left_closed()
             current = _phase_state.PHASE_PRELUDE

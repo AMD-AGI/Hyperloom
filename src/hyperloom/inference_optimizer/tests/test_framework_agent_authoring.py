@@ -473,7 +473,7 @@ def test_record_authored_outcome_resolves_candidate_via_specialist_map(tmp_path:
 
 def test_record_authored_outcome_replaces_stale_empty_row(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.phase = "EXPLORE"
+    stub.shared_state.phase = "FRAMEWORK_AGENT"
     stub.shared_state.framework_agent_phase_progress = [
         {
             "candidate_id": "local_explore:2",
@@ -541,7 +541,7 @@ async def test_enqueue_authoring_stamps_recovery_failed_when_unrecoverable(tmp_p
 @pytest.mark.asyncio
 async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.phase = "EXPLORE"
+    stub.shared_state.phase = "FRAMEWORK_AGENT"
     specialist_task = SimpleNamespace(
         task_id="specialist-local-2",
         params={
@@ -601,7 +601,7 @@ async def test_recover_authored_outcome_uses_persisted_integrate_result(tmp_path
 @pytest.mark.asyncio
 async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=False)
-    stub.shared_state.phase = "EXPLORE"
+    stub.shared_state.phase = "FRAMEWORK_AGENT"
     recorded: list[str] = []
 
     async def _noop_async(*_args: Any, **_kwargs: Any) -> None:
@@ -670,7 +670,7 @@ def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):
 
 def test_empty_outcome_records_after_phase_transition(tmp_path: Path):
     stub = _Stub(tmp_path, authoring=True)
-    stub.shared_state.phase = "EXPLORE"
+    stub.shared_state.phase = "FRAMEWORK_AGENT"
     task = SimpleNamespace(
         task_id="spec-empty-cross-phase",
         params={
@@ -957,5 +957,5 @@ async def test_perf_explore_retry_stamps_immutable_explore_owner(
 
     assert task_id
     params = stub.tasks.created[-1]["params"]
-    assert params["source_phase"] == "EXPLORE"
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["gap_layer"] == "perf_explore"

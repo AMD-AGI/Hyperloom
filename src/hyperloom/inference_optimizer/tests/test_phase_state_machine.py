@@ -961,6 +961,23 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     assert c.shared_state.phase_budget_pct == dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
 
 
+def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
+    """A phase this build does not have was written by a build whose machine differed.
+
+    Treating it as a fresh start re-runs PRELUDE on top of a session that
+    already has a baseline, a KEPT stack and hours of measurement, and the
+    numbers of the two builds end up in one report.
+    """
+    c = coordinator_with_mocks
+    c.shared_state.phase = "EXPLORE"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        c._ensure_phase_initialised()
+
+    assert "EXPLORE" in str(excinfo.value)
+    assert c.shared_state.phase == "EXPLORE"
+
+
 @pytest.mark.asyncio
 async def test_coordinator_advances_to_the_optimize_phase_when_baseline_present(
     coordinator_with_mocks,

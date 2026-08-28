@@ -566,7 +566,7 @@ async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinat
 @pytest.mark.asyncio
 async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
     """skip_to_close is honored once a baseline exists (guard no longer active)."""
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
     coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(

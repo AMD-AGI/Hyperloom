@@ -126,15 +126,15 @@ def test_policy_allows_integrate_patch_on_approve():
     s.record_specialist_patch_verdict("t-spec-4", "approve")
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-4"})
-    # Phase check still requires EXPLORE; verify only the critic gate.
-    s.phase = "EXPLORE"
+    # The phase check still applies; verify only the critic gate.
+    s.phase = "FRAMEWORK_AGENT"
     gate.validate_intent("orchestration", intent)
 
 
 def test_policy_allows_integrate_patch_on_advise():
     s = SharedState()
     s.record_specialist_patch_verdict("t-spec-5", "advise")
-    s.phase = "EXPLORE"
+    s.phase = "FRAMEWORK_AGENT"
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-5"})
     gate.validate_intent("orchestration", intent)
