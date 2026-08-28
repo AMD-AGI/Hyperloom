@@ -1104,6 +1104,22 @@ class ExploreExecutor:
         # hot together or cold together: a session that opted out of the double
         # run has a COLD ``baseline_tput`` and must be graded cold.
         use_warm_decision = lifecycle_eligible and bool(getattr(ss, "baseline_double_run", True))
+
+        # The accuracy gate below grades every variant that has a reference, so
+        # the round it grades has to have actually evaluated. Force ``RUN_EVAL``
+        # on rather than assume it: it is resolved from the materialized YAML
+        # (base config, reference envs, the variant's own ``extra_envs``, the
+        # process env), none of which this executor controls, so a stale config
+        # or a variant-supplied ``RUN_EVAL=false`` would leave no score on disk
+        # and fail an otherwise good variant closed as ``accuracy_unavailable``.
+        # The two other gating paths already do exactly this -- see
+        # ``framework_agent`` and ``integrate_patch._framework_run_eval_envs``.
+        # ``--no-eval`` still wins: it means no reference was asked for, which
+        # also leaves ``baseline_accuracy`` at 0 and skips the gate entirely.
+        from hyperloom.inference_optimizer import framework_registry
+
+        scriptable = framework_registry.is_scriptable(framework)
+        force_run_eval = (scriptable or baseline_accuracy > 0) and not bool(getattr(ss, "eval_disabled", False))
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1229,6 +1245,14 @@ class ExploreExecutor:
                 run_unset_envs = list(dict.fromkeys(stack_unset_envs + to_str_list(getattr(gv, "unset_envs", []))))
                 run_extra_envs = dict(stack_extra_envs)
                 run_extra_envs.update(gv.extra_envs)
+                if force_run_eval:
+                    # Applied to the round the gate actually reads: the warmup
+                    # when warm-decision is on (the decision round is
+                    # throughput-only and ``parse_eval_results`` falls back to
+                    # the warmup's score), the decision round itself otherwise.
+                    # Set after the variant's own envs so a proposal cannot turn
+                    # off the eval its own KEEP is gated on.
+                    run_extra_envs["RUN_EVAL"] = "true"
                 run_gv = GridVariant(
                     name=gv.name,
                     extra_server_args=gv.extra_server_args,
@@ -1521,16 +1545,16 @@ class ExploreExecutor:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
                     else:
-                        # Accuracy gate. Every variant is gated: the
-                        # bench-eval-bench lifecycle already runs the eval on
-                        # every warmup_round unconditionally, so the result is
-                        # sitting on disk either way and skipping the parse only
-                        # discards a number already paid for. For scriptable
-                        # frameworks the image-quality gate is the sole
-                        # correctness signal, so a missing gate fails closed.
-                        from hyperloom.inference_optimizer import framework_registry
-
-                        scriptable = framework_registry.is_scriptable(framework)
+                        # Accuracy gate. Every variant with a reference is
+                        # gated. Whether the eval ran is decided by the
+                        # materialized ``RUN_EVAL`` contract and never by this
+                        # gate, so the score is on disk either way and skipping
+                        # the parse only discarded a number already paid for --
+                        # the ``force_run_eval`` injection above keeps that true
+                        # by construction instead of by assumption. For
+                        # scriptable frameworks the image-quality gate is the
+                        # sole correctness signal, so a missing gate fails
+                        # closed.
                         accuracy_ok = True
                         accuracy_value: float | None = None
                         # Serving still needs a baseline to compare against;
