@@ -268,7 +268,62 @@ async def test_geak_handoff_forwards_the_actual_gpu_pin(
         "var": "ROCR_VISIBLE_DEVICES",
         "value": "7",
         "ids": [7],
+        "count": 1,
         "source": "process_env",
     }
     # Logical inside the inherited mask: index 0 IS physical card 7.
     assert handoff["gpu_ids"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_geak_handoff_keeps_a_hip_pin_against_the_recipe_autofill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A materialized recipe always carries an autofilled ROCR mask (#1321 review).
+
+    ``materialize_config_with_envs`` writes ``ROCR_VISIBLE_DEVICES=0..tp-1``
+    into ``benchmark.envs`` whenever the mask is absent, and that file is what
+    ``state.baseline_config_path`` points at by the time KERNEL runs. Reading
+    the recipe first therefore overrode every HIP-pinned run with cards
+    ``0..tp-1`` — a new card-0 collision, in the change meant to remove one.
+    This is the production shape, so it is asserted end to end.
+    """
+    recipe = tmp_path / "baseline.yaml"
+    recipe.write_text(
+        "benchmark:\n  envs:\n    TP: 2\n    ROCR_VISIBLE_DEVICES: '0,1'\n    NUM_PROMPTS: 192\n",
+        encoding="utf-8",
+    )
+
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(
+        baseline_tput=100.0,
+        model_path="/models/m",
+        gpu_type="mi355x",
+        baseline_config_path=str(recipe),
+    )
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("TP", "2")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
+    monkeypatch.delenv("ROCR_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["gpu_pin"]["var"] == "HIP_VISIBLE_DEVICES"
+    assert handoff["gpu_pin"]["ids"] == [4, 5]
+    # The pre-PR value. The whole point is that this change did not move it.
+    assert handoff["gpu_ids"] == "4,5"
+    # tp comes from the same recipe as gpu_ids, so the two cannot disagree.
+    assert handoff["tp"] == 2

@@ -47,14 +47,26 @@ coordinate systems:
 
 | Field | Coordinate system | Value |
 |-------|-------------------|-------|
-| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an inherited `ROCR_VISIBLE_DEVICES` mask, capped at `tp` (`ROCR=6` → `"0"`); a `HIP`/`CUDA` mask verbatim (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned |
-| `gpu_pin` | absolute device ids | `{"var", "value", "ids", "source"}` for the winning mask — omitted entirely when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0" |
+| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an *inherited* `ROCR_VISIBLE_DEVICES` mask, capped at `tp` and at the mask width (`ROCR=6` → `"0"`); a `HIP`/`CUDA` mask uncapped (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned. Ids are re-serialized from the parsed mask, so whitespace and repeats are normalized |
+| `gpu_pin` | absolute device ids | `{"var", "value", "ids", "count", "source"}` for the winning mask — omitted entirely when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0". `value` is the mask verbatim (so a UUID mask can be re-exported); `ids` is empty for a non-numeric mask, hence `count` |
 
-The mask is resolved from the materialized baseline recipe's `benchmark.envs`
-first (the mask Hyperloom actually benched with), then the process environment,
-checking `ROCR_VISIBLE_DEVICES` before `HIP_VISIBLE_DEVICES` /
-`CUDA_VISIBLE_DEVICES` — the same precedence as `orchestrator/bus/gpu_pool.py`
-and `orchestrator/policy/gate.py`.
+The mask is resolved variable-major — `ROCR_VISIBLE_DEVICES` before
+`HIP_VISIBLE_DEVICES` before `CUDA_VISIBLE_DEVICES`, the same order as
+`orchestrator/bus/gpu_pool.py` and `orchestrator/policy/gate.py` — and within
+each variable the process environment before the materialized baseline
+recipe's `benchmark.envs`.
+
+The process env comes first because the recipe's ROCR key is not evidence of a
+pin: `materialize_config_with_envs` autofills `ROCR_VISIBLE_DEVICES=0..tp-1`
+into every materialized recipe when the mask is absent or narrower than `TP`.
+A recipe ROCR value byte-identical to that default is therefore ignored, so a
+`HIP`-pinned or genuinely unpinned run is not silently re-pinned to cards
+`0..tp-1`. A recipe mask that differs from the default *is* honoured — but its
+ids are forwarded absolute, not logical, because the GEAK child inherits the
+process environment and never sees that mask.
+
+`tp` in the handoff is read from the same resolved recipe as `gpu_ids`, so the
+two cannot disagree when the materializer clamps `TP` to the visible GPU count.
 
 A consumer that re-exports `HIP_VISIBLE_DEVICES` should use `gpu_ids`; one that
 writes `ROCR_VISIBLE_DEVICES` itself must use `gpu_pin["value"]`, because

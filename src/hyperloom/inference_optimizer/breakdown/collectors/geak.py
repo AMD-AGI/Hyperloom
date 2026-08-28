@@ -11,6 +11,7 @@ recorded in ``warnings`` and the section returns a best-effort partial.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -614,6 +615,34 @@ def _geak_accepted_kernels_from_integrate_results(
     return accepted
 
 
+def _handoff_gpu_fields(handoff: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Pull the device set + absolute GPU pin out of a handoff, if it has them.
+
+    A GEAK baseline that reads ``no_gain``/``incomplete`` because its servers
+    landed on a foreign tenant's card is otherwise indistinguishable from a
+    real result, so the breakdown records what the handoff told GEAK about the
+    run's cards (issue #1312).
+
+    Keys are inserted only when present, mirroring the writer's ``if gpu_pin:``
+    guard. An explicit ``null`` would conflate three different things: a
+    genuinely unpinned run, a pin that resolved empty, and a pre-v3 handoff on
+    disk (still produced by any session resumed from before this change).
+
+    Args:
+        handoff: The parsed ``geak/handoff.json``, or ``None``.
+
+    Returns:
+        A mapping with ``gpu_ids`` / ``gpu_pin`` for whichever keys the handoff
+        carries; ``{}`` when it carries neither.
+    """
+    out: dict[str, Any] = {}
+    for key in ("gpu_ids", "gpu_pin"):
+        val = (handoff or {}).get(key)
+        if val is not None:
+            out[key] = val
+    return out
+
+
 def _geak_reconstruct_from_disk(
     session_dir: Path,
     warnings: list[str],
@@ -671,11 +700,7 @@ def _geak_reconstruct_from_disk(
             "workload": handoff.get("workload"),
             "accepted_flags": handoff.get("accepted_flags"),
             "raw_baseline_tput": _to_float(handoff.get("raw_baseline_tput")),
-            # Device set + the run's absolute pin: a GEAK baseline that reads
-            # `no_gain`/`incomplete` because its servers landed on a foreign
-            # tenant's card is otherwise indistinguishable from a real result.
-            "gpu_ids": handoff.get("gpu_ids"),
-            "gpu_pin": handoff.get("gpu_pin"),
+            **_handoff_gpu_fields(handoff),
         }
 
     # 2) a flushed-but-unpromoted result.json (absent or non-ok status).
@@ -1008,9 +1033,23 @@ def collect_geak(
         else:
             accepted_kernels = []
 
+    # The cards GEAK was told to use. Read from the handoff on disk rather than
+    # from ``geak_result``, which never carried them — and recorded on THIS
+    # path, not just the crash-recovery one, because the outcome that needs
+    # disambiguating (`no_gain`) is a completed run.
+    _gpu_fields = _handoff_gpu_fields(
+        read_json(
+            session_dir / "geak" / "handoff.json",
+            default={},
+            require_dict=True,
+            on_error=lambda exc: warnings.append(f"geak: handoff read failed: {exc}"),
+        )
+    )
+
     section: dict[str, Any] = {
         "engaged": True,
         "status": status,
+        **_gpu_fields,
         # Failure provenance (None on success).
         "error_class": result.get("error_class"),
         "error": result.get("error"),

@@ -1549,10 +1549,17 @@ def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
 #: Visible-device env masks, in the repo's ROCm precedence order.
 #: ``ROCR_VISIBLE_DEVICES`` is canonical on ROCm (the CLI preflight drops
 #: ``HIP_VISIBLE_DEVICES`` when ROCR is set); HIP/CUDA cover CUDA-style and
-#: legacy pins. Same order as ``gpu_pool._visible_device_mask`` /
-#: ``policy.gate.detect_gpu_count`` so every layer agrees on "the pin".
+#: legacy pins. Same ORDER as ``gpu_pool._visible_device_mask`` /
+#: ``policy.gate.detect_gpu_count`` / ``cli.preflight``.
+#: The order agrees; the empty-mask semantics deliberately do not. Those layers
+#: read ``VAR=""`` as "zero devices visible" because they are counting capacity;
+#: this resolver is answering "where is the run pinned", and an empty string
+#: pins nothing, so it falls through to the next variable.
 #: (Kept local rather than imported from ``gpu_pool``: this module is the pure
-#: helper layer and ``gpu_pool`` drags in the SQLite connection.)
+#: helper layer and ``gpu_pool`` drags in the SQLite connection. The duplication
+#: is real — lifting the tuple and the parser into a dependency-free shared
+#: module is the right cleanup, but it touches all four call sites and does not
+#: belong in a bugfix.)
 _VISIBLE_DEVICE_VARS: tuple[str, ...] = (
     "ROCR_VISIBLE_DEVICES",
     "HIP_VISIBLE_DEVICES",
@@ -1560,22 +1567,41 @@ _VISIBLE_DEVICE_VARS: tuple[str, ...] = (
 )
 
 
-def _parse_device_list(raw: Any) -> list[int]:
-    """Parse a visible-devices mask string into absolute GPU ids.
+def _mask_tokens(raw: Any) -> list[str]:
+    """Split a visible-devices mask into its device tokens.
+
+    Tokens are NOT required to be numeric: ROCm accepts GPU UUID masks
+    (``ROCR_VISIBLE_DEVICES=GPU-a1b2c3,GPU-d4e5f6``), and those still tell us
+    how MANY devices the child will see, which is all the logical-index
+    arithmetic needs.
 
     Args:
-        raw: A ``,``/``;``-separated mask (``"4,5,6,7"``); ``None`` and
-            malformed entries are tolerated.
+        raw: A ``,``/``;``-separated mask, or an already-parsed YAML sequence.
 
     Returns:
-        Unique non-negative ids in first-seen order; ``[]`` for an empty or
-        fully malformed mask.
+        Non-empty tokens in order, duplicates preserved.
+    """
+    if isinstance(raw, (list, tuple)):
+        parts = [str(p) for p in raw]
+    else:
+        parts = str(raw if raw is not None else "").replace(";", ",").split(",")
+    return [tok for tok in (p.strip() for p in parts) if tok]
+
+
+def _parse_device_list(raw: Any) -> list[int]:
+    """Parse a visible-devices mask into absolute NUMERIC GPU ids.
+
+    Args:
+        raw: A ``,``/``;``-separated mask (``"4,5,6,7"``) or a YAML sequence;
+            ``None`` and malformed entries are tolerated.
+
+    Returns:
+        Unique non-negative ids in first-seen order; ``[]`` for an empty mask
+        and for a well-formed but non-numeric one (e.g. a UUID mask), which is
+        why callers that need a device COUNT must use :func:`_mask_tokens`.
     """
     out: list[int] = []
-    for part in str(raw or "").replace(";", ",").split(","):
-        tok = part.strip()
-        if not tok:
-            continue
+    for tok in _mask_tokens(raw):
         try:
             idx = int(tok)
         except ValueError:
@@ -1583,6 +1609,39 @@ def _parse_device_list(raw: Any) -> list[int]:
         if idx >= 0 and idx not in out:
             out.append(idx)
     return out
+
+
+def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
+    """Is this recipe's ROCR mask the materializer's autofill rather than a pin?
+
+    ``materialize_config_with_envs`` unconditionally writes
+    ``ROCR_VISIBLE_DEVICES=0..tp-1`` into ``benchmark.envs`` whenever the mask
+    is absent or narrower than TP (``_workload_envs.py``). Every materialized
+    recipe therefore carries the key, so a recipe ROCR value that is
+    byte-identical to that default carries no information about where the run
+    is actually pinned — treating it as a pin is what made this resolver
+    override a real ``HIP_VISIBLE_DEVICES`` and re-pin GEAK to cards ``0..tp-1``.
+
+    A hand-authored ``ROCR_VISIBLE_DEVICES: "0,1"`` at ``TP=2`` is
+    indistinguishable from the autofill and is also treated as "not a pin";
+    that is harmless, because the unpinned path emits the same ``gpu_ids`` and
+    merely omits ``gpu_pin``.
+
+    Args:
+        value: The recipe's ROCR mask, already stripped.
+        recipe_envs: The recipe's ``benchmark.envs`` (read for its resolved TP).
+
+    Returns:
+        ``True`` when the value equals the ``0..tp-1`` the materializer would
+        have synthesized.
+    """
+    try:
+        tp = int(str(recipe_envs.get("TP") or 0))
+    except (TypeError, ValueError):
+        return False
+    if tp <= 0:
+        return False
+    return _mask_tokens(value) == [str(i) for i in range(tp)]
 
 
 def _resolve_gpu_pin(
@@ -1598,9 +1657,12 @@ def _resolve_gpu_pin(
     run pinned elsewhere collided with a foreign tenant on card 0. Forwarding
     the pin lets the consumer compose masks instead of clobbering them.
 
-    Source precedence: the materialized baseline recipe's ``benchmark.envs``
-    (the mask Hyperloom actually benched with) before the process env, and
-    ``ROCR_VISIBLE_DEVICES`` before ``HIP``/``CUDA`` within each.
+    Precedence is VARIABLE-major: ``ROCR_VISIBLE_DEVICES`` before ``HIP``
+    before ``CUDA`` — the repo-wide order — and within each variable the
+    process env before the baseline recipe. Source-major ordering was wrong in
+    both directions: a leftover recipe ``CUDA_VISIBLE_DEVICES`` would outrank a
+    real process ROCR pin, and the recipe's autofilled ROCR (see
+    :func:`_is_autofilled_rocr`) would outrank everything.
 
     Args:
         recipe_envs: The baseline recipe's ``benchmark.envs`` mapping (may be
@@ -1608,19 +1670,35 @@ def _resolve_gpu_pin(
         environ: Environment mapping to read; defaults to ``os.environ``.
 
     Returns:
-        ``{"var", "value", "ids", "source"}`` for the winning mask, where
-        ``ids`` are ABSOLUTE device ids and ``source`` is
-        ``"baseline_recipe"`` or ``"process_env"``. ``{}`` when no mask is set
-        anywhere — meaning "whole machine visible", not "pinned to 0".
+        ``{"var", "value", "ids", "count", "source"}`` for the winning mask,
+        where ``ids`` are ABSOLUTE device ids (empty for a UUID mask, hence
+        ``count``) and ``source`` is ``"process_env"`` or ``"baseline_recipe"``.
+        ``{}`` when no mask is set anywhere — meaning "whole machine visible",
+        not "pinned to 0".
     """
     env = os.environ if environ is None else environ
-    for source, table in (("baseline_recipe", recipe_envs or {}), ("process_env", env)):
-        for var in _VISIBLE_DEVICE_VARS:
+    recipe = dict(recipe_envs or {})
+    for var in _VISIBLE_DEVICE_VARS:
+        for source, table in (("process_env", env), ("baseline_recipe", recipe)):
             raw = table.get(var)
-            if raw is None or str(raw).strip() == "":
+            if raw is None:
                 continue
-            value = str(raw).strip()
-            return {"var": var, "value": value, "ids": _parse_device_list(value), "source": source}
+            value = str(raw).strip() if not isinstance(raw, (list, tuple)) else ",".join(str(p) for p in raw)
+            if not value:
+                continue
+            if (
+                source == "baseline_recipe"
+                and var == "ROCR_VISIBLE_DEVICES"
+                and _is_autofilled_rocr(value=value, recipe_envs=recipe)
+            ):
+                continue
+            return {
+                "var": var,
+                "value": value,
+                "ids": _parse_device_list(value),
+                "count": len(_mask_tokens(value)),
+                "source": source,
+            }
     return {}
 
 
@@ -1633,9 +1711,13 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
 
       * pinned with ``ROCR_VISIBLE_DEVICES`` — the child inherits that mask, so
         the ids must be LOGICAL positions inside it (``ROCR=6`` → ``"0"``),
-        capped at ``tp`` as before (``ROCR=4,5,6,7`` with ``tp=2`` → ``"0,1"``);
-      * pinned with ``HIP``/``CUDA`` — ROCr still shows every card, so the mask
-        is forwarded VERBATIM (``HIP=4,5`` → ``"4,5"``);
+        capped at ``tp`` as before (``ROCR=4,5,6,7`` with ``tp=2`` → ``"0,1"``)
+        and at the mask width when ``tp`` overshoots it. Counted from the mask
+        TOKENS, so a UUID mask resolves to the right number of logical slots;
+      * pinned with ``HIP``/``CUDA`` — ROCr still shows every card, so the ids
+        pass through uncapped, as before this change (``HIP=4,5`` → ``"4,5"``).
+        They are re-serialized from the parsed list, so whitespace and repeats
+        are normalized (``" 4, 4 ,5"`` → ``"4,5"``);
       * not pinned — ``0..tp-1``, unchanged.
 
     The absolute pin travels separately in ``handoff["gpu_pin"]`` for consumers
@@ -1649,11 +1731,21 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
         A comma-separated device list, never empty.
     """
     width = max(int(tp or 1), 1)
-    ids = list((gpu_pin or {}).get("ids") or [])
+    pin = gpu_pin or {}
+    ids = list(pin.get("ids") or [])
+    # Logical remapping applies only to a mask the GEAK child actually
+    # INHERITS. The phase launches it with ``dict(os.environ)``, so a
+    # process-env ROCR mask is inherited and its ids are logical; a mask that
+    # only exists in the recipe is not, ROCr shows every card, and the absolute
+    # ids are the correct HIP indices.
+    if str(pin.get("var") or "") == "ROCR_VISIBLE_DEVICES" and str(pin.get("source") or "") == "process_env":
+        # Token count, not len(ids): a UUID mask parses to zero numeric ids but
+        # still exposes that many cards to the child.
+        visible = int(pin.get("count") or len(ids) or 0)
+        if visible > 0:
+            return ",".join(str(i) for i in range(min(visible, width)))
     if not ids:
         return ",".join(str(i) for i in range(width))
-    if str((gpu_pin or {}).get("var") or "") == "ROCR_VISIBLE_DEVICES":
-        return ",".join(str(i) for i in range(min(len(ids), width)))
     return ",".join(str(i) for i in ids)
 
 

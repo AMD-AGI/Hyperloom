@@ -653,14 +653,20 @@ class KernelPhase(PhaseHandler):
         return {}
 
     @classmethod
-    def _resolve_bench_protocol(cls, recipe_path: str) -> dict[str, Any]:
+    def _resolve_bench_protocol(cls, recipe_path: str, *, envs: dict[str, Any] | None = None) -> dict[str, Any]:
         """Extract Hyperloom's bench measurement protocol for the GEAK handoff.
 
         Reads the materialized baseline recipe's ``benchmark.envs`` (falling back
         to the process env) and returns only the keys that resolve, so absent
         values leave GEAK on its standalone defaults. Never raises.
+
+        Args:
+            recipe_path: Path to the baseline recipe YAML.
+            envs: An already-parsed ``benchmark.envs`` for that path. Pass it
+                when the caller needs the envs too, so the YAML is read once and
+                both consumers see the same snapshot.
         """
-        envs: dict[str, Any] = cls._read_recipe_bench_envs(recipe_path)
+        envs = cls._read_recipe_bench_envs(recipe_path) if envs is None else envs
 
         def _pick(key: str, cast: Callable[[str], Any]) -> Any:
             raw = envs.get(key)
@@ -762,13 +768,25 @@ class KernelPhase(PhaseHandler):
         # e2e measures identically; source = the baseline recipe's benchmark.envs
         # (process-env fallback). Only resolved keys are sent.
         _recipe_path = str(getattr(state, "baseline_config_path", "") or "")
-        bench_protocol = self._resolve_bench_protocol(_recipe_path)
+        # One read, two consumers: the recipe is parsed once so bench_protocol,
+        # the GPU pin and tp below all see the same snapshot.
+        _recipe_envs = self._read_recipe_bench_envs(_recipe_path)
+        bench_protocol = self._resolve_bench_protocol(_recipe_path, envs=_recipe_envs)
         # The run's ACTUAL GPU pin (issue #1312). GEAK launches full servers
         # out-of-process and writes its own visible-devices mask for each one;
         # with no pin in the handoff it defaults to physical GPU 0 and collides
-        # with whatever else holds that card. Recipe mask first (what Hyperloom
-        # benched with), then the process mask; {} means "whole machine".
-        gpu_pin = _resolve_gpu_pin(recipe_envs=self._read_recipe_bench_envs(_recipe_path))
+        # with whatever else holds that card. Process mask first, recipe as the
+        # fallback; {} means "whole machine", not "card 0".
+        gpu_pin = _resolve_gpu_pin(recipe_envs=_recipe_envs)
+        # tp must come from the SAME place as gpu_ids or the two can disagree.
+        # The materializer clamps TP to the visible GPU count, so a stale
+        # $TP=8 on a 4-card pod would otherwise ship `tp: 8` alongside four
+        # gpu_ids and GEAK would launch sglang with --tp 8 and fail to load.
+        try:
+            _tp = int(str(_recipe_envs.get("TP") or "").strip() or os.environ.get("TP", "1") or 1)
+        except (TypeError, ValueError):
+            _tp = int(os.environ.get("TP", "1") or 1)
+        _tp = max(_tp, 1)
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -793,7 +811,7 @@ class KernelPhase(PhaseHandler):
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
             "gpu_type": str(getattr(state, "gpu_type", "") or os.environ.get("GPU_TYPE", "")),
-            "tp": int(os.environ.get("TP", "1") or 1),
+            "tp": _tp,
             "workload": workload,
             "accepted_flags": accepted_flags,
             "accepted_env": accepted_env,
@@ -821,8 +839,8 @@ class KernelPhase(PhaseHandler):
             "inferencex_path": str(os.environ.get("INFERENCEX_PATH", "")),
             # The serving/optimization device set, as HIP-level ids (what the
             # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
-            # an inherited ROCR mask, a HIP/CUDA mask verbatim, else 0..tp-1.
-            "gpu_ids": _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=int(os.environ.get("TP", "1") or 1)),
+            # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
+            "gpu_ids": _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp),
         }
         if gpu_pin:
             # ABSOLUTE ids + the var they came from, so a consumer that writes
