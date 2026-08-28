@@ -986,7 +986,7 @@ async def test_advance_into_close_settles_pending_end_to_end(coordinator) -> Non
     """Real entry order: the transition cancels the rebench, CLOSE settles the slot."""
     c = coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.kernel_optimizer = "geak"
     st.geak_result = {"status": "ok", "accepted_config": {"flags": "--foo", "env": ""}}
     st.set_stop_reason("target_reached")

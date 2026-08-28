@@ -371,7 +371,6 @@ def _build_orchestration_prompt(
     framework: str,
     objective: Objective,
     max_minutes: int,
-    no_explore: bool = False,
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
@@ -386,7 +385,6 @@ def _build_orchestration_prompt(
         framework (str): The serving framework name (e.g. ``sglang``).
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
-        no_explore (bool): When ``True`` the EXPLORE phase is disabled.
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
@@ -401,14 +399,13 @@ def _build_orchestration_prompt(
         str: The composed Orchestration system prompt.
     """
     registry = action_registry or ACTION_CATALOGUE
-    enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
+    enabled = default_enabled_actions(no_kernel=no_kernel, no_optimize=no_framework_agent)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
-        explore_enabled=not no_explore,
         framework_agent_phase_enabled=not no_framework_agent,
         objective_kind=kind,
         objective_value=value,
@@ -1428,24 +1425,6 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
     )
 
 
-# Phases upstream of EXPLORE, so a resume may retroactively honour
-# --no-explore. Includes the legacy "FRAMEWORK" name for older sessions.
-_PRE_EXPLORE_PHASES: frozenset[str] = frozenset({"", "PRELUDE", "FRAMEWORK", "FRAMEWORK_AGENT"})
-
-
-def _resume_can_disable_explore(cur_phase: str) -> bool:
-    """Whether ``--no-explore`` may still disable EXPLORE for a resumed session.
-
-    Args:
-        cur_phase (str): The persisted ``state.phase``; case/whitespace-insensitive.
-
-    Returns:
-        bool: ``True`` when the phase is upstream of EXPLORE (EXPLORE not yet
-        entered), so the flag can be honoured retroactively.
-    """
-    return (cur_phase or "").strip().upper() in _PRE_EXPLORE_PHASES
-
-
 def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
     """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session.
 
@@ -1472,7 +1451,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     """
     from hyperloom.orchestrator.phases.machine_state import (
         PHASE_CLOSE,
-        PHASE_EXPLORE,
         PHASE_FRAMEWORK_AGENT,
         PHASE_KERNEL_AGENT,
         PHASE_PRELUDE,
@@ -1483,7 +1461,6 @@ def _build_phase_budget_pct(args: argparse.Namespace) -> dict[str, float]:
     for cli_field, phase_name in (
         ("phase_budget_prelude_pct", PHASE_PRELUDE),
         ("phase_budget_framework_pct", PHASE_FRAMEWORK_AGENT),
-        ("phase_budget_explore_pct", PHASE_EXPLORE),
         ("phase_budget_kernel_pct", PHASE_KERNEL_AGENT),
         ("phase_budget_sweep_pct", PHASE_SWEEP),
         ("phase_budget_close_pct", PHASE_CLOSE),
@@ -1998,22 +1975,6 @@ async def _run_optimize(args: argparse.Namespace) -> int:
                     f"session is already in phase={cur_phase!r} "
                     f"(cannot retroactively skip)"
                 )
-        # Same persistence contract for the EXPLORE phase toggle.
-        if not bool(getattr(state, "explore_enabled", True)):
-            args.no_explore = True
-            print("  explore phase         : DISABLED (persisted from original run)")
-        elif bool(getattr(args, "no_explore", False)):
-            # Honour --no-explore on resume only before EXPLORE is entered.
-            cur_phase = (getattr(state, "phase", "") or "").strip().upper()
-            if _resume_can_disable_explore(cur_phase):
-                state.explore_enabled = False
-                print(f"  explore phase         : DISABLING for resume (--no-explore + phase={cur_phase or 'PRELUDE'})")
-            else:
-                print(
-                    f"  explore phase         : WARN --no-explore ignored; "
-                    f"session is already in phase={cur_phase!r} "
-                    f"(cannot retroactively skip)"
-                )
         # Same persistence contract for the eval toggle.
         if state.eval_disabled:
             args.no_eval = True
@@ -2303,27 +2264,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
-    no_explore = getattr(args, "no_explore", False)
     no_framework_agent = bool(getattr(args, "no_framework_agent", False))
-    # Unconditional phase-toggle banner lines (mirror the kernel banner so all
-    # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
-    if no_explore:
+    # Mirror the kernel banner so both phase toggles surface their state.
+    if no_framework_agent:
         print(
-            "Explore phase   : DISABLED (--no-explore); "
+            "Optimize phase  : DISABLED (--no-framework-agent); "
             f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
         )
     else:
-        print("Explore phase   : ENABLED")
-    if no_framework_agent:
-        print("Framework-agent phase : DISABLED (--no-framework-agent)")
-    else:
-        print("Framework-agent phase : ENABLED")
-    if no_explore and no_kernel:
+        print("Optimize phase  : ENABLED")
+    if no_framework_agent and no_kernel:
         print(
-            "WARNING: --no-explore and --no-kernel are both set; the run "
-            "collapses to baseline -> SWEEP over an empty optimization_stack "
-            "(no EXPLORE param search, no KERNEL rewrites). SWEEP only "
-            "re-validates the baseline recipe. Continuing as requested.",
+            "WARNING: --no-framework-agent and --no-kernel are both set; the "
+            "run collapses to baseline -> SWEEP over an empty "
+            "optimization_stack (no config or source search, no KERNEL "
+            "rewrites). SWEEP only re-validates the baseline recipe. "
+            "Continuing as requested.",
             file=sys.stderr,
         )
     if bool(getattr(args, "research_scout", True)):
@@ -2489,8 +2445,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
             no_kernel=no_kernel,
-            no_explore=no_explore,
-            no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+            no_framework_agent=no_framework_agent,
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -2511,24 +2466,12 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator._rebuild_orch_prompt = _functools.partial(
         _build_orchestration_prompt,
         no_kernel=no_kernel,
-        no_explore=no_explore,
-        no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+        no_framework_agent=no_framework_agent,
         framework=framework_for_prompt,
         objective=objective,
         max_minutes=max_minutes_for_prompt,
         transport=_orch_transport,
     )
-    # ``fa phase-discover`` timeout override (falsy -> DEFAULT_FA_PHASE_TIMEOUT_SEC 180s).
-    # Reads the parser dest ``framework_discover_timeout_sec`` first, then the
-    # longer ``framework_agent_`` spelling for callers that set it directly.
-    try:
-        coordinator.framework_agent_discover_timeout_sec = float(
-            getattr(args, "framework_discover_timeout_sec", 0.0)
-            or getattr(args, "framework_agent_discover_timeout_sec", 0.0)
-            or 0.0
-        )
-    except (TypeError, ValueError):
-        coordinator.framework_agent_discover_timeout_sec = 0.0
     # Build specialist executor only when research_lane capacity > 0 (0 degrades to LLM-direct grid).
     specialist_capacity = int(getattr(args, "research_lane_capacity", 1) or 0)
     specialist_executor: "Any" = None

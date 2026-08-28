@@ -3790,7 +3790,7 @@ class BaselineExecutor:
         """Whether baseline double-run is enabled.
 
         Public CLI/env controls are intentionally unsupported. The session
-        default is on so EXPLORE warm-decision compares hot candidates against a
+        default is on so the warm decision compares hot candidates against a
         hot baseline. Internal callers may pass
         ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
         set the session state directly.

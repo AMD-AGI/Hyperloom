@@ -653,7 +653,7 @@ class TestCollectiveIntegratePromotion:
             _collective,
         )
 
-        await phase._on_enter_kernel(from_phase="EXPLORE")
+        await phase._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert calls == ["reprofile", "collective"]
         assert coord.shared_state.collective_only_mode is True
@@ -2333,7 +2333,7 @@ class TestBf16DenseFallback:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="EXPLORE")
+        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert [c["task_id"] for c in calls] == [
             "kernel_entry_gemm_tuning",
@@ -2392,7 +2392,7 @@ class TestBf16DenseFallback:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="EXPLORE")
+        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning_bf16_fallback"]
         assert calls[0]["precision"] == "bf16"

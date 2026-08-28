@@ -232,7 +232,7 @@ class _ConfigPatchAgentKB:
 
 
 class ExploreAgentKB(_ConfigPatchAgentKB):
-    """Read legacy EXPLORE config and stage accepted source overlays."""
+    """Read the configuration section and stage accepted source overlays."""
 
     SECTION = EXPLORE_SECTION
 

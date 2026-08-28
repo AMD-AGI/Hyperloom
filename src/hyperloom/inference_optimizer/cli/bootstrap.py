@@ -244,9 +244,6 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback
     # default when unset. Inherited env is NOT a config source (issue #903); the
@@ -417,7 +414,6 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        explore_enabled=not bool(getattr(args, "no_explore", False)),
         # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
         # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
         # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
@@ -427,10 +423,6 @@ def _seed_shared_state(
         # stopping the session. Routing AgentX through the same channel as
         # ``--no-eval`` is what makes the opt-out legible to that guard.
         eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
-        # FRAMEWORK config-exploration lane toggle (default OFF).
-        framework_config_exploration_enabled=bool(
-            getattr(args, "enable_framework_config_exploration", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),

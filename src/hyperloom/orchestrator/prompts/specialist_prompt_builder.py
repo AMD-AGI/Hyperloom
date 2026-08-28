@@ -449,39 +449,57 @@ def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the PR-intel specialist.
+def _focus_candidate_discovery_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the candidate-discovery specialist.
 
-    Frames the specialist as a cross-repo PR researcher that surfaces
-    upstream PRs / commits / issues rather than proposing config knobs.
+    Frames it as the owner of the whole upstream-candidate funnel: find, rank,
+    and judge. It replaced a Coordinator loop that did those three steps with
+    a fixed query, a scoring call and an audit call, so the block has to say
+    that a candidate is only useful once it carries a verdict and a route.
 
     Args:
         inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
 
     Returns:
-        list[str]: Markdown lines for the PR-intel specialist's focus block.
+        list[str]: Markdown lines for the discovery specialist's focus block.
     """
     return [
-        "You are a **cross-repo PR researcher**. Your role is NOT to propose",
-        "configuration knobs — it is to surface PRs / commits / issues from",
-        "(ROCm/aiter, sgl-project/sglang, ROCm/vllm, triton-lang/triton,",
-        "ROCm/rccl) that other specialists should follow up on.",
+        "You own the **upstream candidate funnel**: find what is worth landing,",
+        "rank it, and judge it. This is a first-class lever alongside",
+        "configuration search — not an occasional top-up.",
         "",
         "**What to do**",
-        "- Use ``mcp__pr_monitor__*`` + ``WebSearch`` to find recent PRs",
-        "  related to the gap.",
-        "- For each PR, extract: (repo, number, title, summary, files",
-        "  touched, NVIDIA equivalent if any).",
-        "- Surface as ``proposal_set`` entries where ``provenance`` = research",
-        "  and ``pr_evidence`` is non-empty. Do NOT propose source patches",
-        "  yourself — that's the kernel-switch / serving specialist's job once",
-        "  they read your PR list.",
+        "1. **Find.** Use ``mcp__pr_monitor__*`` + ``WebSearch`` across the",
+        "   allowlisted repos for work that addresses the live bottleneck.",
+        "   Read the gap and the profile evidence first; a PR that does not",
+        "   touch the hot path is not a candidate however good it looks.",
+        "2. **Rank.** Order what you found against the current stack, the",
+        "   already-tried ledger, and the KB priors you were given. Say why",
+        "   the top one is first — the ordering is the deliverable, not a",
+        "   by-product.",
+        "3. **Judge each one.** Exactly one verdict per candidate:",
+        "   - ``already_present`` — the change is already in the installed",
+        "     version. Cite the evidence; a guess here silently skips a real win.",
+        "   - ``not_applicable`` — wrong framework, wrong arch, or it cannot",
+        "     apply to this tree.",
+        "   - ``worth_a_bench`` — plus the route: apply the upstream diff",
+        "     directly, or have a specialist author against it as inspiration.",
+        "     Direct apply needs a git tree and a same-repo candidate; say so",
+        "     when either is missing.",
+        "",
+        "**What to return**",
+        "- ``proposal_set`` entries carrying (repo, number, title, diff_url,",
+        "  head_sha, files touched, verdict, route, and the reason for each).",
+        "  Orchestration reads these and proposes ``integrate_patch`` for the",
+        "  ones it wants benched; you do not apply or benchmark anything.",
         "",
         "**Pitfalls**",
         "- Citing a PR without verifying its target framework matches the",
         "  current install.",
-        "- Spending more than one round; PR intel is best dispatched once",
-        "  per gap and used as input to other specialists.",
+        "- An unevidenced ``already_present``: it is the one verdict that",
+        "  discards a candidate without ever measuring it.",
+        "- Returning candidates with no ordering and no verdicts. A bare list",
+        "  puts the work back on the caller that dispatched you.",
     ]
 
 
@@ -841,7 +859,7 @@ _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
-    "pr_intel_specialist": _focus_pr_intel_specialist,
+    "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
     "enablement_specialist": _focus_enablement_specialist,

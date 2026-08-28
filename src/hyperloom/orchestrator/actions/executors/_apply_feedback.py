@@ -216,7 +216,7 @@ def source_context_for_file(
 
     This is the shared "file resolve + window" primitive underlying both
     :func:`read_patch_source_context` and
-    :meth:`~framework.FrameworkPhase._read_enablement_source_context`.
+    :meth:`~enablement.params.EnablementParams._read_enablement_source_context`.
 
     Args:
         filepath: Absolute or relative path to the target file.
