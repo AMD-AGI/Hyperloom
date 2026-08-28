@@ -438,6 +438,7 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     peak, _kind = rc.select_peak_and_bound(mem, cmp)
     assert peak == max(mem, cmp)
 
+
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
     monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
