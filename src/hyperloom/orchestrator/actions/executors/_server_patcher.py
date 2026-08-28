@@ -46,14 +46,19 @@ _SGLANG_EXACT_VERSIONS_ENV = "HYPERLOOM_SGLANG_PATCH_EXACT_VERSIONS"
 _SGLANG_ALLOWED_MINORS_ENV = "HYPERLOOM_SGLANG_PATCH_ALLOWED_MINORS"
 _VLLM_EXACT_VERSIONS_ENV = "HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS"
 
-# vLLM >= 0.26 ships the profiler fields upstream; the patch set covers <= 0.25.
-_VLLM_NATIVE_PROFILER_MIN_VERSION: tuple[int, ...] = (0, 26)
-
 # Required in ``vllm/config/profiler.py`` for the server to accept the flags.
+# The patch set writes these below 0.26; from 0.26 they ship upstream.
 _VLLM_PROFILER_SENTINELS: tuple[str, ...] = (
-    "capture_torch_profiler_dir",
+    "capture_torch_profiler",
     "detailed_trace_annotation",
 )
+
+# From 0.26 the fields above are upstream, so they no longer prove the patch
+# landed. The graph-capture implementation moved to the v2 runner and is still
+# patch-only, and this module is the file the patch creates.
+_VLLM_GRAPH_CAPTURE_MIN_VERSION: tuple[int, ...] = (0, 26)
+_VLLM_GRAPH_CAPTURE_SENTINEL: tuple[str, ...] = ("vllm", "profiler", "graph_capture.py")
+_VLLM_GRAPH_CAPTURE_MARKERS: tuple[str, ...] = ("graph_capture_profiler", "capture_traces")
 
 # Vendor-shipped manifest filename(s). When present, the manifest is the
 # source of truth for supported versions (operator env pins still win). Format:
@@ -263,28 +268,20 @@ def ensure_vllm_patched_for_tracelens(
 ) -> bool:
     """Ensure the installed vLLM accepts the TraceLens profiler flags.
 
+    Every supported version takes the patch: 0.26+ ships the config fields
+    upstream but not the graph-capture implementation, which moved into the v2
+    runner and stayed patch-only.
+
     Args:
         tracelens_root: TraceLens checkout root; falls back to
             ``$TRACELENS_ROOT`` when ``None``.
 
     Returns:
-        True when the running vLLM accepts the flags.
+        True when the running vLLM accepts the flags and can write the
+        graph-capture sidecars.
     """
     install = _discover_vllm_install()
     if install is None:
-        return False
-    version, install_root = install
-    if _vllm_profiler_is_native(version) and not _vllm_patch_pinned_by_operator():
-        sentinel = install_root / "vllm" / "config" / "profiler.py"
-        if _markers_present(sentinel, _VLLM_PROFILER_SENTINELS):
-            log.info("_server_patcher: vLLM %s needs no patch", version)
-            return True
-        log.warning(
-            "_server_patcher: vLLM %s is missing %s in %s",
-            version,
-            ", ".join(_VLLM_PROFILER_SENTINELS),
-            sentinel,
-        )
         return False
     plan = _discover_vllm_plan(tracelens_root, install=install)
     if plan is None:
@@ -545,15 +542,21 @@ def _probe_isolated_vllm() -> tuple[str, Path] | None:
     return version, site
 
 
-def _vllm_profiler_is_native(version: str) -> bool:
-    """True when ``version`` ships the profiler fields upstream."""
+def _vllm_graph_capture_sentinel(version: str, install_root: Path) -> tuple[tuple[Path, tuple[str, ...]], ...]:
+    """Extra sentinels proving the graph-capture patch landed, for 0.26+.
+
+    Args:
+        version: Discovered vLLM version string.
+        install_root: Apply root holding the ``vllm`` package.
+
+    Returns:
+        A one-element tuple for 0.26+, else empty (below 0.26 the config
+        fields are themselves patch-written, so they already prove it).
+    """
     vt = _version_tuple(version)
-    return vt is not None and vt >= _VLLM_NATIVE_PROFILER_MIN_VERSION
-
-
-def _vllm_patch_pinned_by_operator() -> bool:
-    """True when ``$HYPERLOOM_VLLM_PATCH_EXACT_VERSIONS`` pins a patch version."""
-    return bool(os.environ.get(_VLLM_EXACT_VERSIONS_ENV, "").strip())
+    if vt is None or vt < _VLLM_GRAPH_CAPTURE_MIN_VERSION:
+        return ()
+    return ((install_root.joinpath(*_VLLM_GRAPH_CAPTURE_SENTINEL), _VLLM_GRAPH_CAPTURE_MARKERS),)
 
 
 def _discover_vllm_install() -> tuple[str, Path] | None:
@@ -656,6 +659,7 @@ def _discover_vllm_plan(
         patches=(patch_file,),
         sentinel_file=sentinel,
         sentinel_text=_VLLM_PROFILER_SENTINELS,
+        extra_sentinels=_vllm_graph_capture_sentinel(version, install_root),
     )
 
 
