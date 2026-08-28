@@ -101,29 +101,28 @@ def merge_server_args(*parts: str | None) -> str:
 
 
 def _tokenize_for_removal(text: str) -> list[str] | None:
-    """Tokenize for removal matching, keeping JSON values intact when possible.
+    """Tokenize for removal matching, or decline when quotes cannot be kept.
 
-    A POSIX ``shlex.split`` strips the inner double quotes of a JSON-valued flag
-    and the space-join below cannot put them back, so a value that
-    :func:`_repair_unquoted_json` also cannot re-quote (any bareword outside
-    :data:`_JSON_BAREWORD`, e.g. the ``*expert*`` wildcards in atom's
-    ``--online_quant_config``) reaches the server irreparably broken. Prefer the
-    quote-preserving tokenizer; it declines exactly the inputs that carry a
-    whitespace-bearing or shell-quoted operand, none of which can hold a JSON
-    value the unquoted transport could deliver anyway, so POSIX remains correct
-    for the fallback.
+    A POSIX ``shlex.split`` strips the inner double quotes of a compacted
+    JSON-valued flag and the space-join below cannot put them back, so a value
+    that :func:`_repair_unquoted_json` also cannot re-quote (any bareword
+    outside :data:`_JSON_BAREWORD`, e.g. the ``*expert*`` wildcards in atom's
+    ``--online_quant_config``) would reach the server irreparably broken.
+
+    There is deliberately no POSIX fallback. An input the quote-preserving
+    tokenizer declines carries a token the unquoted ``EXTRA_*_ARGS`` transport
+    cannot represent at all, so splitting it anyway would corrupt every JSON
+    blob sharing the string in order to strip a flag off a string that was
+    already unlaunchable. Every other caller of
+    :func:`tokenize_server_args_preserving_json` fails closed on ``None`` for
+    the same reason.
 
     Returns:
-        list[str] | None: The tokens, or ``None`` when ``text`` is not
-        tokenizable at all (caller leaves it untouched).
+        list[str] | None: The tokens, or ``None`` when ``text`` cannot be
+        tokenized without dropping quote bytes (caller leaves it untouched).
     """
     parsed = tokenize_server_args_preserving_json(text)
-    if parsed is not None:
-        return parsed[1]
-    try:
-        return shlex.split(text)
-    except ValueError:
-        return None
+    return None if parsed is None else parsed[1]
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
@@ -136,7 +135,9 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
 
     JSON-valued flags survive verbatim: both sides of the comparison are
     tokenized by :func:`_tokenize_for_removal`, so a retained neighbour is never
-    silently stripped of its quotes.
+    silently stripped of its quotes. A string carrying a token the unquoted
+    transport cannot represent is returned unchanged rather than split lossily,
+    which trades an unstripped flag for an intact JSON value.
     """
     args = str(server_args or "").strip()
     removes = to_str_list(remove_args)
@@ -190,7 +191,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         out.append(tok)
         i += 1
     # Compact the surviving JSON blobs to the one shape the unquoted transport
-    # can carry, and repair any that the POSIX fallback above stripped.
+    # can carry.
     return _reserialize_json_blobs(" ".join(out))
 
 

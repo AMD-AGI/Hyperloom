@@ -168,8 +168,42 @@ class TestRemovalStillWorks:
         assert "--max-num-seqs" not in out
         _json_value_of(out, "--online_quant_config")
 
-    def test_whitespace_bearing_value_keeps_posix_removal(self):
-        """Inputs the quote-preserving tokenizer declines fall back, not break."""
-        out = remove_server_args("--tool-call-parser 'my parser' --max-num-seqs 64", ["--max-num-seqs"])
-        assert "--max-num-seqs" not in out
-        assert "my parser" in out
+    def test_whitespace_bearing_value_is_left_untouched(self):
+        """Inputs the quote-preserving tokenizer declines are returned verbatim.
+
+        ``--tool-call-parser 'my parser'`` cannot survive Magpie's unquoted
+        ``EXTRA_*_ARGS`` expansion whatever this function does, so there is
+        nothing to buy by POSIX-splitting it -- and doing so strips the inner
+        quotes off every JSON blob sharing the string. Declining matches every
+        other caller of ``tokenize_server_args_preserving_json``.
+        """
+        args = "--tool-call-parser 'my parser' --max-num-seqs 64"
+        assert remove_server_args(args, ["--max-num-seqs"]) == args
+
+    def test_json_neighbour_survives_an_untokenizable_sibling(self):
+        """One undeliverable sibling must not corrupt a JSON value beside it.
+
+        The POSIX fallback applied to the WHOLE string, so a single
+        whitespace-bearing operand anywhere turned ``--online_quant_config``
+        into the ``{global_quant_config:ptpc_fp8,...}`` the server rejected --
+        the incident's exact signature, still reachable after the tokenizer was
+        made quote-preserving.
+        """
+        compacted = compact_json_server_args(
+            f"--tool-call-parser 'my parser' {_ATOM_ARGS} --max-num-seqs 64",
+            "atom",
+        )
+        out = remove_server_args(compacted, ["--max-num-seqs"])
+        assert _json_value_of(out, "--online_quant_config") == json.loads(_ATOM_QUANT_JSON)
+
+    def test_compose_keeps_json_intact_beside_an_untokenizable_sibling(self):
+        """The same guarantee through the hop that fires on every compose.
+
+        ``compose_server_args`` always ends in ``strip_benchmark_harness_flags``,
+        so this reaches ``remove_server_args`` even with no operator removals.
+        """
+        composed = compose_server_args(
+            base_extra_args="--tool-call-parser 'my parser' --max-num-seqs 64",
+            variant_extra_args=compact_json_server_args(_ATOM_ARGS, "atom"),
+        )
+        assert _json_value_of(composed, "--online_quant_config") == json.loads(_ATOM_QUANT_JSON)
