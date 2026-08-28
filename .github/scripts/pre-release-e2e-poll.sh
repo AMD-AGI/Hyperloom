@@ -40,6 +40,15 @@ POLL_INTERVAL_S="${POLL_INTERVAL_S:-120}"
 GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-50400}"
 MAX_CRASHES="${MAX_CRASHES:-0}"
 MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
+# Stop polling as soon as one leg FAILs. This is a release GATE: the first FAIL already
+# blocks the release, so the remaining legs cannot change the verdict -- and waiting them
+# out costs a 12h leg's GPUs plus the single self-hosted runner, which in turn keeps the
+# next fix's run stuck at run-level `pending` (a newer run gets no jobs at all while this
+# one holds the concurrency group). Set POLL_FAIL_FAST=0 to judge the whole matrix anyway.
+POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"
+# Sleep in short slices instead of one long one so a cancelled job tears down in seconds
+# rather than at the end of a full POLL_INTERVAL_S.
+POLL_SLEEP_SLICE_S="${POLL_SLEEP_SLICE_S:-5}"
 
 : "${SAFE_API_BASE:?SAFE_API_BASE is required}"
 : "${SAFE_API_KEY:?SAFE_API_KEY is required}"
@@ -245,6 +254,7 @@ resolve_comment_target
 report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
 start_s="$(date +%s)"
+fail_seen=0   # has any leg reached a FAIL verdict? -> the gate is already decided
 while :; do
   pending=0
   changed=0   # did any leg reach a verdict this tick? -> refresh the sticky comment
@@ -257,7 +267,7 @@ while :; do
       VERDICT["$leg"]="FAIL|workload phase=$wphase"
       summary "❌ **$leg** — FAIL (workload $wphase, wid=\`$wid\`)"
       post_status "$leg" failure "workload $wphase; wid=$wid"
-      changed=1
+      changed=1; fail_seen=1
       continue
     fi
     # Otherwise judge from the on-disk report (present once the leg finishes).
@@ -273,7 +283,7 @@ while :; do
       VERDICT["$leg"]="FAIL|$detail"
       summary "❌ **$leg** — FAIL ($detail)"
       post_status "$leg" failure "FAIL — $detail"
-      changed=1
+      changed=1; fail_seen=1
     else
       pending=$((pending + 1))   # still running; check again next tick
     fi
@@ -283,6 +293,20 @@ while :; do
   [ "$changed" -eq 1 ] && report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
   [ "$pending" -eq 0 ] && break
+
+  # Gate already lost -> stop here and free the GPUs + the runner. Remaining legs are
+  # recorded as unjudged rather than FAIL: they did not fail, we chose not to wait.
+  if [ "$POLL_FAIL_FAST" = "1" ] && [ "$fail_seen" -eq 1 ]; then
+    for leg in "${LEGS[@]}"; do
+      [ -n "${VERDICT[$leg]}" ] && continue
+      VERDICT["$leg"]="FAIL|not judged (gate already failed; fail-fast)"
+      summary "⏹ **$leg** — not judged (gate already failed; fail-fast)"
+      post_status "$leg" failure "not judged — gate already failed"
+    done
+    summary ""
+    summary "⏹ fail-fast: a leg already FAILed, so the gate is decided. Stopping the remaining ${pending} leg(s) instead of holding the GPUs. Set \`POLL_FAIL_FAST=0\` to judge the full matrix."
+    break
+  fi
 
   elapsed=$(( $(date +%s) - start_s ))
   if [ "$elapsed" -ge "$GLOBAL_TIMEOUT_S" ]; then
@@ -295,7 +319,11 @@ while :; do
     break
   fi
   echo "[poll] ${pending} leg(s) still running; elapsed $((elapsed/60))m; sleeping ${POLL_INTERVAL_S}s"
-  sleep "$POLL_INTERVAL_S"
+  slept=0
+  while [ "$slept" -lt "$POLL_INTERVAL_S" ]; do
+    sleep "$POLL_SLEEP_SLICE_S"
+    slept=$(( slept + POLL_SLEEP_SLICE_S ))
+  done
 done
 
 # ---- aggregate gate --------------------------------------------------------

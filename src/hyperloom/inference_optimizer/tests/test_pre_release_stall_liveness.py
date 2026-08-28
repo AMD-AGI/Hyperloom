@@ -21,6 +21,7 @@ These tests exercise the real ``leg_idle_s`` helper out of the script.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -123,8 +124,16 @@ def test_stall_check_watches_the_leg_root(script: str) -> None:
 def test_agent_turns_are_mirrored_to_nfs(script: str) -> None:
     """SaFE deletes a failed leg's pod, so every agent turn must reach NFS."""
     assert 'agent_log="${session}/agent-${leg}.log"' in script
-    # setup (retried), the demo turn, and each demo re-drive.
-    assert script.count('tee -a "$agent_log"') == 3
+    # Every turn goes through the one helper, which is the only place that tees, so no
+    # invocation can bypass the transcript.
+    assert script.count('tee -a "$alog"') == 1
+    invocations = [
+        line
+        for line in script.splitlines()
+        if "claude --print --dangerously-skip-permissions" in line
+        and not line.lstrip().startswith("#")
+    ]
+    assert invocations == ['  claude --print --dangerously-skip-permissions "$@" 2>&1 | tee -a "$alog"']
 
 
 def _leg_run_started(script: str, session: Path) -> bool:
@@ -169,9 +178,60 @@ def test_setup_marker_matches_every_setup_prompt(script: str) -> None:
 
 def test_an_early_turn_is_re_driven_not_fatal(script: str) -> None:
     """A turn that ends without finishing leaves nothing running; ask again, bounded."""
-    assert 'attempts="${LEG_TURN_ATTEMPTS:-3}"' in script
     assert 'max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"' in script
     assert 'demo_redrives=$(( demo_redrives + 1 ))' in script
+
+
+def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:
+    """A count-based cap of 3 turns was ~4min of wall clock and killed live installs.
+
+    A framework install runs 10-30min, and each turn ends after ~60-90s, so the budget
+    has to be a deadline plus a liveness check -- never a small turn count.
+    """
+    assert "LEG_TURN_ATTEMPTS" not in script
+    assert 'setup_deadline_s="${LEG_SETUP_DEADLINE_S:-2700}"' in script
+    assert 'setup_stall_s="${LEG_SETUP_STALL_S:-600}"' in script
+    assert 'sidle="$(leg_idle_s "$root" "$setup_t0" "$snow")"' in script
+    # The stall check must gate the failure, i.e. a progressing install is never reaped.
+    assert 'if [ "$sidle" -ge "$setup_stall_s" ]; then' in script
+
+
+def test_follow_up_turns_resume_the_same_conversation(script: str) -> None:
+    """Re-feeding the prompt as a fresh turn throws away what the agent already knows.
+
+    `--session-id` opens the leg's conversation and `--resume` continues it, so a
+    follow-up turn still knows what it launched and which log it was watching.
+    """
+    assert 'agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"' in script
+    assert script.count('--resume "$uuid"') == 3  # setup nudge, demo turn, demo re-drive
+    for nudge in ("SETUP_RESUME_NUDGE", "DEMO_RESUME_NUDGE"):
+        assert f"{nudge}='" in script
+    # Resuming can fail (no such session); that must degrade, not kill the leg.
+    assert script.count("could not resume session") == 3
+
+
+def test_leg_session_uuid_is_stable_and_well_formed(script: str, tmp_path: Path) -> None:
+    """--session-id rejects anything that is not a UUID."""
+    lines = script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("leg_session_uuid() {"))
+    end = next(i for i, line in enumerate(lines[start:], start) if line == "}")
+    fn = "\n".join(lines[start : end + 1])
+
+    def uuid_for(leg: str, version: str) -> str:
+        proc = subprocess.run(
+            ["bash", "-c", f'{fn}\nleg_session_uuid "$1" "$2"', "_", leg, version],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return proc.stdout.strip()
+
+    a = uuid_for("baremetal-vllm-3h", "1.0.0.dev1+ci")
+    assert re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}", a)
+    assert a == uuid_for("baremetal-vllm-3h", "1.0.0.dev1+ci")  # stable across turns
+    # Distinct per leg (four legs share the docker host) and per run.
+    assert a != uuid_for("baremetal-vllm-12h", "1.0.0.dev1+ci")
+    assert a != uuid_for("baremetal-vllm-3h", "1.0.0.dev2+ci")
 
 
 def test_re_drive_does_not_extend_the_hard_deadline(script: str) -> None:

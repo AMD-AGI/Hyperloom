@@ -90,6 +90,30 @@ leg_run_started() {
   [ -n "$(find "$1" -mindepth 2 -type f -name state.json -print -quit 2>/dev/null)" ]
 }
 
+# A stable per-leg conversation id, so a follow-up turn can --resume the SAME session
+# instead of starting from scratch. `--session-id` wants a UUID, so shape a sha1 of
+# leg+CI_VERSION into one (version nibble 4, variant nibble 8).
+# Args: leg ci_version
+leg_session_uuid() {
+  local h; h="$(printf '%s|%s' "$1" "$2" | sha1sum | cut -c1-32)"
+  printf '%s-%s-4%s-8%s-%s' "${h:0:8}" "${h:8:4}" "${h:12:3}" "${h:15:3}" "${h:18:12}"
+}
+
+# One agent turn, mirrored to the leg's NFS transcript so it survives pod deletion.
+# Args: agent_log [claude flags...]   (the prompt/nudge arrives on stdin)
+agent_turn() {
+  local alog="$1"; shift
+  claude --print --dangerously-skip-permissions "$@" 2>&1 | tee -a "$alog"
+}
+
+# Follow-up nudges for a conversation that ended before finishing. Deliberately short:
+# the resumed session still holds the context (what was launched, which log is being
+# watched), so restating the whole prompt would only add noise -- and re-feeding it as a
+# FRESH turn is worse, because the agent then has to rediscover all of that.
+SETUP_RESUME_NUDGE='Your previous turn ended before setup finished. Do NOT restart anything that is already running. Check on the install you launched: if it is still in progress, keep monitoring it and only answer once it has finished. Once it has finished successfully, complete any remaining setup steps and then reply with exactly the completion line the setup instructions asked for. If it has failed, report the failure.'
+
+DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize behind, and nothing has been written under the workspace since, so the work is not progressing. Do NOT fabricate a result. Finish the launch in THIS turn: complete the install if it is still needed, start optimize detached with setsid nohup so it survives the end of this turn, then confirm the nested session run dir and its state.json exist and report their paths.'
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -229,28 +253,66 @@ run_leg() {
   # the pod's stdout with it, so without this the agent's own account of the failure is
   # unrecoverable and a post-mortem is left reconstructing events from file mtimes.
   local agent_log="${session}/agent-${leg}.log"
-  # A `claude --print` turn can end EARLY with a progress note instead of finishing the
-  # job -- observed live: a setup turn whose whole answer was "Waiting on the vLLM ROCm
-  # wheel install", and a demo turn that reported "Install step started" and returned.
-  # Whatever the agent left running is a child of that turn and dies with it, so an early
-  # turn silently leaves the leg with nothing running at all. The setup prompt's contract
-  # is a literal `setup complete: <mode>/<backend>` line, so re-drive until we see it.
-  local attempts="${LEG_TURN_ATTEMPTS:-3}" i
-  for i in $(seq 1 "$attempts"); do
-    log "claude --print (setup, attempt $i/$attempts); agent transcript -> $agent_log"
-    claude --print --dangerously-skip-permissions < "$setup_prompt" 2>&1 | tee -a "$agent_log"
+  local uuid; uuid="$(leg_session_uuid "$leg" "$CI_VERSION")"
+  # `claude --print` is "print response and exit": ONE answer per invocation. Setup here
+  # means installing a framework layer -- a vLLM ROCm wheel into an isolated venv, or
+  # SGLang compiled from source for gfx950 -- which takes 10-30min, far longer than a
+  # single turn can hold. Every leg's agent therefore backgrounds the install and polls
+  # its log, and eventually answers with a progress note ("Phase 2 is installing the
+  # isolated vLLM env. Still running.") which ENDS the turn with setup incomplete.
+  #
+  # The install itself is detached and keeps running (verified: setup_vllm.log grew from
+  # 71KB to 77KB across a turn boundary), so the fix is to give the agent another turn --
+  # RESUMING the same conversation, so it still knows what it started and where the log
+  # is. Budget it in TIME, not turns: an earlier count-based cap of 3 turns amounted to
+  # ~4min of wall clock and killed two legs whose installs were demonstrably still
+  # progressing. A leg only fails here if the tree goes quiet (nothing installing) or the
+  # whole setup deadline elapses.
+  local setup_deadline_s="${LEG_SETUP_DEADLINE_S:-2700}"   # 45m of setup, then give up
+  local setup_stall_s="${LEG_SETUP_STALL_S:-600}"          # 10m with no writes -> dead
+  local setup_max_turns="${LEG_SETUP_MAX_TURNS:-30}"       # token-spend backstop
+  local setup_t0; setup_t0="$(date +%s)"
+  local turn=0 snow sidle
+  while :; do
+    turn=$(( turn + 1 ))
+    if [ "$turn" = 1 ]; then
+      log "claude --print (setup, turn 1, session $uuid); agent transcript -> $agent_log"
+      agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"
+    else
+      log "claude --print (setup, turn $turn, resuming session $uuid)"
+      if ! printf '%s\n' "$SETUP_RESUME_NUDGE" | agent_turn "$agent_log" --resume "$uuid"; then
+        log "WARN: leg $leg -- could not resume session $uuid; re-feeding the full setup prompt"
+        agent_turn "$agent_log" < "$setup_prompt" || true
+      fi
+    fi
     if grep -qiE "setup complete: ${run_mode}/${backend}" "$agent_log"; then
-      log "leg $leg setup reported complete on attempt $i"
+      log "leg $leg setup reported complete on turn $turn"
       break
     fi
-    if [ "$i" -ge "$attempts" ]; then
-      log "ERROR: leg $leg -- setup never reported 'setup complete: ${run_mode}/${backend}' in $attempts turns"
+    snow="$(date +%s)"
+    sidle="$(leg_idle_s "$root" "$setup_t0" "$snow")"
+    if [ "$sidle" -ge "$setup_stall_s" ]; then
+      log "ERROR: leg $leg -- setup turn $turn ended early and nothing was written under $root for ${sidle}s; the install is not progressing"
       return 1
     fi
-    log "WARN: leg $leg -- setup turn $i ended without completing; re-driving the setup prompt"
+    if [ $(( snow - setup_t0 )) -ge "$setup_deadline_s" ]; then
+      log "ERROR: leg $leg -- setup never reported 'setup complete: ${run_mode}/${backend}' within ${setup_deadline_s}s ($turn turns)"
+      return 1
+    fi
+    if [ "$turn" -ge "$setup_max_turns" ]; then
+      log "ERROR: leg $leg -- setup still incomplete after $setup_max_turns turns; giving up"
+      return 1
+    fi
+    log "WARN: leg $leg -- setup turn $turn ended early (install still progressing, idle ${sidle}s); resuming the conversation"
+    sleep "${LEG_TURN_GAP_S:-30}"
   done
-  log "claude --print (demo ${hours}h)"
-  claude --print --dangerously-skip-permissions < "$demo_prompt" 2>&1 | tee -a "$agent_log"
+  log "claude --print (demo ${hours}h, resuming session $uuid)"
+  # Same conversation as setup: the agent already knows this workspace, which framework
+  # got installed and where its logs are, exactly like a human continuing the same chat.
+  if ! agent_turn "$agent_log" --resume "$uuid" < "$demo_prompt"; then
+    log "WARN: leg $leg -- could not resume session $uuid for the demo; running it standalone"
+    agent_turn "$agent_log" < "$demo_prompt"
+  fi
   log "leg $leg demo turn returned; waiting for the background optimize to finish"
 
   # ---- wait for the backgrounded `optimize` to reach a terminal state --------
@@ -315,8 +377,11 @@ run_leg() {
         if [ "$idle" -ge "$stall_grace" ]; then
           if [ "$demo_redrives" -lt "$max_demo_redrives" ]; then
             demo_redrives=$(( demo_redrives + 1 ))
-            log "WARN: leg $leg -- idle ${idle}s with no state.json; the demo turn left nothing running. Re-driving the demo prompt ($demo_redrives/$max_demo_redrives)"
-            claude --print --dangerously-skip-permissions < "$demo_prompt" 2>&1 | tee -a "$agent_log"
+            log "WARN: leg $leg -- idle ${idle}s with no state.json; the demo turn left nothing running. Resuming the conversation to finish the launch ($demo_redrives/$max_demo_redrives)"
+            if ! printf '%s\n' "$DEMO_RESUME_NUDGE" | agent_turn "$agent_log" --resume "$uuid"; then
+              log "WARN: leg $leg -- could not resume session $uuid; re-feeding the demo prompt"
+              agent_turn "$agent_log" < "$demo_prompt" || true
+            fi
             log "leg $leg demo re-drive $demo_redrives returned"
             grace_ts="$(date +%s)"   # fresh stall grace for the new turn; deadline unchanged
             continue

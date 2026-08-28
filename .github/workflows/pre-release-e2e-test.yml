@@ -54,19 +54,24 @@ on:
         description: "Comma-separated subset of leg IDs (default: all 8)"
         required: false
 
-# One pre-release run at a time (design §13, point D): the peak GPU footprint stays at 8.
-# A NEWER push supersedes the in-flight run. cancel-in-progress cancels the old GitHub
-# JOB, but that alone does NOT reliably stop the old run's SaFE PyTorchJob pods (the
-# `if: cancelled()` cleanup step gets only a short grace window, and it runs on the single
-# busy baremetal runner). So the PRIMARY teardown is the `preempt` job (job 0): it runs
-# FIRST on a GitHub-hosted runner and stops every stale e2e-* workload up front, freeing
-# the GPUs BEFORE this run's resolve/build/dispatch queue for the baremetal runner. The
-# old run's poll then sees phase=Stopped -> its legs FAIL -> the old job ends as a
-# consequence. This makes "push a fix -> the stale run is torn down and the fresh code
-# reruns" automatic, instead of deadlocking on the reap being queued behind the run it
-# must reclaim. The `if: cancelled()` step + the dispatch-side reap remain as backstops.
-# Per-PR concurrency (group keyed by ref) so two different PRs don't cancel each other --
-# only newer commits on the SAME PR supersede.
+# One pre-release run at a time: a NEWER push supersedes the in-flight run. Per-PR group
+# so two different PRs don't cancel each other -- only newer commits on the SAME PR.
+#
+# A newer run CANNOT tear down the older one. While the group is held, GitHub keeps the
+# new run at run-level `pending` with an EMPTY jobs array (observed 2026-08-28: run
+# 33145644120 sat pending for 20min with zero jobs while 33144353030 held the group), so
+# no job of the new run exists to do any reclaiming. A short-lived `preempt` job on a
+# GitHub-hosted runner used to claim that role and could never work: it was both created
+# too late and unable to reach SAFE_API_BASE, an in-network NodePort -- every run logged
+# `[preempt] could not list workloads; skipping reclaim` after a 30s curl timeout, so it
+# never stopped a single workload. It has been removed rather than left to look effective.
+#
+# Teardown therefore runs the other way round: the OLD run releases the runner promptly.
+# The poll fails fast on the first FAIL (the gate is already lost, so there is nothing to
+# gain by holding 8 GPUs and the only self-hosted runner for another 12h) and sleeps in
+# short slices so a cancel lands in seconds. Leaked pods are then reclaimed by the
+# dispatch-side reap, which -- unlike `preempt` -- runs in-network and only ever executes
+# once this run holds the runner, i.e. once the previous run is provably done.
 concurrency:
   group: pre-release-e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -78,35 +83,8 @@ permissions:
   issues: write          # PR comments go through the issues API
 
 jobs:
-  # 0. preempt: STOP any stale SaFE e2e-* workloads from a superseded/older run BEFORE
-  # anything touches the single self-hosted GPU runner. Runs on a GitHub-hosted runner so
-  # it does NOT queue behind that busy baremetal runner (the deadlock we hit: the reap in
-  # `dispatch` needs [resolve,build] on the one runner, which is still held by the old run
-  # -> the reclaim can never run). Stopping the old pods frees the GPUs and makes the old
-  # run's poll see phase=Stopped -> its legs FAIL -> the old job ends as a consequence.
-  # Every other job needs this, so nothing dispatches until the reclaim has fired.
-  preempt:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Stop stale SaFE e2e workloads
-        env:
-          SAFE_API_BASE: ${{ vars.PRE_E2E_SAFE_API_BASE }}
-          SAFE_API_KEY: ${{ secrets.PRE_E2E_SAFE_API_KEY }}   # ADMIN token (stops privileged pods)
-          SAFE_WORKSPACE_ID: ${{ vars.PRE_E2E_SAFE_WORKSPACE_ID }}
-          SAFE_INSECURE: ${{ vars.PRE_E2E_SAFE_INSECURE || '1' }}
-        run: |
-          command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
-          chmod +x .github/scripts/pre-release-e2e-reap.sh
-          .github/scripts/pre-release-e2e-reap.sh
-
   # 1. resolve: gate on a real version bump (PR vs base) or manual input; compute CI_VERSION.
   resolve:
-    needs: preempt
-    # Pre-emption is best-effort reclamation: if it can't reach SaFE it still exits 0, but
-    # even a hard job failure must NOT block the release gate -- so proceed unless the whole
-    # run was cancelled (a newer commit superseding us).
-    if: ${{ !cancelled() }}
     runs-on: hyperloom-pre-e2e-baremetal
     outputs:
       run: ${{ steps.decide.outputs.run }}
