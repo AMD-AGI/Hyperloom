@@ -1139,6 +1139,70 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
 
 
+@pytest.mark.asyncio
+async def test_a_search_keep_stops_at_the_decision_round(sub_agent_runner, tmp_path, monkeypatch):
+    """With the confirmation round off, a KEEP is warmup + decision and reports the decision.
+
+    The third round used to overwrite the headline with a hotter measurement of
+    the same server, so the number a search reports is pinned to the round that
+    graded the variant. The fake feeds the confirmation slot a throughput far
+    above the decision round's: if that value reaches the ledger, the round ran.
+    """
+    sub, tr, _ = sub_agent_runner
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+    output_dir = tmp_path / "explore-decision-only"
+
+    bench_calls: list[str] = []
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        bench_calls.append(str(slot))
+        tput = 5000.0 if "stack_rebench" in str(slot) else 920.0
+        _fake_workspace(slot, tput=tput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(output_dir),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "warm_keep",
+                    "extra_args": "--warm-flag",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 30,
+            "baseline_runtime_sec": 10.0,
+            "baseline_warm_runtime_sec": 5.0,
+            "explore_overtime_kill_ratio": 1.20,
+            "enable_stack_rebench": False,
+        },
+        idempotency_key="ex-decision-only",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    # warmup (discarded) + decision == 2 Magpie runs; no confirmation round.
+    assert len(bench_calls) == 2, bench_calls
+    assert sum("warmup_round" in c for c in bench_calls) == 1
+    assert not [c for c in bench_calls if "stack_rebench" in c]
+    winner = next(w for w in out["winners"] if w["name"] == "warm_keep")
+    assert winner["tput"] == pytest.approx(920.0)
+    assert winner["gain_pct"] == pytest.approx(15.0)
+    assert "stack_rebench_tput" not in winner
+
+
 def _run_eval_of(cmd: list[str]) -> str:
     """Read RUN_EVAL out of the materialized YAML a Magpie call was handed."""
     cfg_idx = cmd.index("--benchmark-config")
