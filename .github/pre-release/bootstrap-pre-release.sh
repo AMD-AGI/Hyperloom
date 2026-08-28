@@ -211,9 +211,19 @@ run_leg() {
   # dir by globbing the newest one under $session that contains a state.json, and
   # re-point the poll's pin (.session_dir) at it.
   local wait_interval="${LEG_WAIT_INTERVAL_S:-45}"
-  local startup_grace="${LEG_STARTUP_GRACE_S:-900}"   # 15m for optimize to appear
+  # Liveness, NOT a wall-clock startup budget. The prior fixed "optimize must produce a
+  # state.json within N seconds" judged LIVE legs dead: baremetal SGLang builds from
+  # source (gfx950, py3.12), starts a Ray head, then loads the server -- >15m before the
+  # first state.json, and `optimize` isn't even a process yet during the build, so a pid
+  # check can't tell "not launched yet" from "died". Instead we ask "how long since ANY
+  # file under $session was last written?": USER_DATA_PATH=$session, so the build/runtime
+  # logs, Ray output, and session artifacts all land under this tree and keep its mtime
+  # fresh while anything is making progress. A leg is dead only if the tree has been
+  # completely IDLE for stall_grace AND no state.json exists yet -- this waits out slow
+  # builds (as long as they keep writing) but reaps a truly hung/exited launch quickly.
+  local stall_grace="${LEG_STALL_GRACE_S:-600}"       # 10m of NO file writes -> dead
   local final_grace="${LEG_FINAL_GRACE_S:-120}"       # state stop_reason -> final.json
-  local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin
+  local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin (hard cap)
   local start_ts; start_ts="$(date +%s)"
   local real_sdir="" final_json="" state_json=""
 
@@ -230,9 +240,18 @@ run_leg() {
         log "leg $leg real session dir: $real_sdir"
         # Re-pin so the poll (leg_session_dir -> head -n1 .session_dir) finds the report.
         echo "$real_sdir" > "${session}/.session_dir"
-      elif [ "$elapsed" -ge "$startup_grace" ]; then
-        log "ERROR: leg $leg -- no session dir with state.json under $session after ${elapsed}s (optimize never launched?)"
-        return 1
+      else
+        # No state.json yet -> judge liveness by how long since ANY file under $session
+        # was written. newest mtime across the tree; if the tree is empty, fall back to
+        # $session's own mtime so a brand-new leg isn't reaped on its first iteration.
+        local last_write idle
+        last_write="$(find "$session" -type f -printf '%T@\n' 2>/dev/null | sort -rn | head -n1)"
+        [ -n "$last_write" ] || last_write="$(stat -c %Y "$session" 2>/dev/null || echo "$now")"
+        idle=$(( now - ${last_write%.*} ))
+        if [ "$idle" -ge "$stall_grace" ]; then
+          log "ERROR: leg $leg -- no state.json and no file written under $session for ${idle}s (>= ${stall_grace}s stall; build/optimize hung or exited)"
+          return 1
+        fi
       fi
     fi
 
