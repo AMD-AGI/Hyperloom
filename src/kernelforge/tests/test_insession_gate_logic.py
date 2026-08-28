@@ -87,8 +87,10 @@ def test_infer_workspace_root_prefers_existing(tmp_path):
 
 
 def test_infer_workspace_root_none_when_nothing_exists():
-    assert InSessionGate._infer_workspace_root("", "") is None
-    assert InSessionGate._infer_workspace_root("/no/such/x.py", "") is None
+    assert InSessionGate._infer_workspace_root(None, "", "") is None
+    assert InSessionGate._infer_workspace_root(None, "/no/such/x.py", "") is None
+    # A declared workspace that does not exist is no better than none.
+    assert InSessionGate._infer_workspace_root("/no/such/ws", "", "") is None
 
 
 def test_extra_protected_globs_merged_and_deduped(tmp_path):

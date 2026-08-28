@@ -489,6 +489,7 @@ class InSessionGate:
         correctness_only: bool = False,
         bench_repeat: int = 1,
         interposed_driver_path: str | None = None,
+        workspace: str | Path | None = None,
     ):
         self.driver_script = driver_script
         # The wrapper script this session must reach the driver through, when a
@@ -567,7 +568,7 @@ class InSessionGate:
         for p in extra_protected_paths or []:
             if p:
                 self.protected_abs.add(os.path.normpath(os.path.abspath(p)))
-        self.workspace_root = self._infer_workspace_root(driver_script, kernel_file)
+        self.workspace_root = self._infer_workspace_root(workspace, driver_script, kernel_file)
 
         globs = list(protected_globs) if protected_globs is not None else list(_DEFAULT_PROTECTED_GLOBS)
         # Repository tasks ship the reference/test implementation INSIDE the repo
@@ -677,8 +678,21 @@ class InSessionGate:
         return ti.get("command") or ""
 
     @staticmethod
-    def _infer_workspace_root(driver_script: str, kernel_file: str) -> Path | None:
-        for candidate in (driver_script, kernel_file):
+    def _infer_workspace_root(workspace: str | Path | None, driver_script: str, kernel_file: str) -> Path | None:
+        """Resolve the tree this gate measures, preferring the declared one.
+
+        The caller's ``--workspace`` is authoritative when it is given: it is
+        the agent's own cwd, so it is the root the agent's relative tool paths
+        are relative to, the root ``protected_path_inventory`` must scan, and
+        the repository ``git diff HEAD`` runs in. Inferring it from the driver
+        instead only happens to work when the driver sits inside that tree.
+        ``forge-fuse`` writes its driver into the run's ``--output-dir``, so the
+        inferred root was the output dir -- not a repository at all, which made
+        ``git diff HEAD -- .`` fall into git's implicit ``--no-index`` mode and
+        fail with ``Could not access 'HEAD'`` on every stop, and pointed the
+        protected-file snapshot at a tree holding none of the protected files.
+        """
+        for candidate in (workspace, driver_script, kernel_file):
             if not candidate:
                 continue
             try:

@@ -617,6 +617,10 @@ Make your change(s) now.
                 # goes around it. Naming it in the prompt above states the
                 # requirement; this is what holds it.
                 interposed_driver_path=interposed_driver_path,
+                # The declared tree, not one guessed from the driver's location:
+                # forge-fuse keeps its driver in the run's output dir, which is
+                # outside the workspace and is not a repository.
+                workspace=configured_workspace,
             )
             if gate_stop_check:
                 scoring_context = (

@@ -423,3 +423,59 @@ def test_restore_protected_files_restores_nested_and_removes_added(
     assert nested.read_text() == "original\n"
     assert not added.exists()
     assert gate.integrity_verdict == "clean"
+
+
+def test_driver_outside_the_workspace_does_not_move_the_measured_root(tmp_path: Path):
+    """The declared workspace wins over the driver's own directory.
+
+    ``forge-fuse`` writes its driver into the run's ``--output-dir``, which sits
+    outside the framework tree and is not a repository. Inferring the root from
+    the driver put ``git diff HEAD -- .`` in a non-repo directory, where git
+    switches to its implicit ``--no-index`` mode, reads ``HEAD`` as a filename
+    and exits 1 with ``Could not access 'HEAD'`` -- so the stop-time fingerprint
+    raised on every session -- and pointed the protected-file inventory at a
+    directory containing none of the protected files.
+    """
+    import subprocess
+
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    (workspace / "config.yaml").write_text("task_type: repository\n")
+    kernel = workspace / "kernel.py"
+    kernel.write_text("VALUE = 1\n")
+    for cmd in (
+        ["git", "init", "-q", "."],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+        ["git", "add", "-A"],
+        ["git", "commit", "-q", "-m", "base"],
+    ):
+        subprocess.run(cmd, cwd=workspace, check=True, capture_output=True)
+
+    outside = tmp_path / "run_output"
+    outside.mkdir()
+    driver = outside / "driver_fusion.py"
+    driver.write_text("print('driver')\n")
+
+    def build(**extra):
+        return InSessionGate(
+            driver_script=str(driver),
+            snr_threshold=30.0,
+            baseline_case_times={"case": 1.0},
+            best_mean_case_speedup=1.0,
+            kernel_file=str(kernel),
+            target_files=[str(kernel)],
+            **extra,
+        )
+
+    gate = build(workspace=workspace)
+    assert gate.workspace_root == workspace.resolve()
+    # The whole point: this is what raised GitError in production.
+    assert isinstance(gate._candidate_diff_sha256(), str)
+    # And the harness next to the kernel is protected again -- matched relative
+    # to the tree the agent actually edits.
+    assert gate._is_protected("config.yaml")
+
+    # Without a declared workspace the driver's directory is still the fallback,
+    # which is correct for every task that keeps its driver inside the tree.
+    assert build().workspace_root == outside.resolve()
