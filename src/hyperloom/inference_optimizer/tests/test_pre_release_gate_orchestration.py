@@ -75,9 +75,7 @@ def test_nothing_that_talks_to_safe_runs_on_a_github_hosted_runner(workflow: dic
 
 def test_the_preempt_job_is_gone(workflow: dict) -> None:
     assert "preempt" not in workflow["jobs"]
-    assert workflow["jobs"] == {
-        k: v for k, v in workflow["jobs"].items() if k in {"resolve", "build", "run"}
-    }
+    assert workflow["jobs"] == {k: v for k, v in workflow["jobs"].items() if k in {"resolve", "build", "run"}}
     assert workflow["jobs"]["resolve"].get("needs") is None
 
 

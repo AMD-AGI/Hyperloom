@@ -13,6 +13,7 @@
 #   3. reports/final.json and reports/final.md both exist,
 #   4. crash_count / server_boot_failures are within tolerance.
 # Anything else (incl. "ran the full duration without target_reached") is FAIL.
+# Fail-fast leaves still-running optimize legs alive; dispatch reap stops stale e2e-* tags.
 #
 # The exit code is 0 only if every requested leg PASSed.
 #

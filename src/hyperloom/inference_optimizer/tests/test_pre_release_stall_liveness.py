@@ -118,7 +118,7 @@ def test_empty_tree_falls_back_to_the_loop_start(leg_idle_fn: str, tmp_path: Pat
 def test_stall_check_watches_the_leg_root(script: str) -> None:
     """Pin the call site: the check must be scoped to $root, not $session."""
     assert 'idle="$(leg_idle_s "$root" "$grace_ts" "$now")"' in script
-    assert 'no file written under $root' in script
+    assert "no file written under $root" in script
 
 
 def test_agent_turns_are_mirrored_to_nfs(script: str) -> None:
@@ -130,8 +130,7 @@ def test_agent_turns_are_mirrored_to_nfs(script: str) -> None:
     invocations = [
         line
         for line in script.splitlines()
-        if "claude --print --dangerously-skip-permissions" in line
-        and not line.lstrip().startswith("#")
+        if "claude --print --dangerously-skip-permissions" in line and not line.lstrip().startswith("#")
     ]
     assert invocations == ['  claude --print --dangerously-skip-permissions "$@" 2>&1 | tee -a "$alog"']
 
@@ -179,7 +178,7 @@ def test_setup_marker_matches_every_setup_prompt(script: str) -> None:
 def test_an_early_turn_is_re_driven_not_fatal(script: str) -> None:
     """A turn that ends without finishing leaves nothing running; ask again, bounded."""
     assert 'max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"' in script
-    assert 'demo_redrives=$(( demo_redrives + 1 ))' in script
+    assert "demo_redrives=$(( demo_redrives + 1 ))" in script
 
 
 def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:
@@ -243,7 +242,7 @@ def test_re_drive_does_not_extend_the_hard_deadline(script: str) -> None:
     body = script.split("run_leg() {", 1)[1]
     assert body.count('start_ts="$(date +%s)"') == 1
     assert 'grace_ts="$(date +%s)"' in body
-    assert 'elapsed=$(( now - start_ts ))' in body
+    assert "elapsed=$(( now - start_ts ))" in body
     assert 'idle="$(leg_idle_s "$root" "$grace_ts" "$now")"' in body
 
 
@@ -263,8 +262,6 @@ def test_dockerd_never_runs_on_vfs(script: str) -> None:
     fail rather than quietly reproduce the eviction.
     """
     assert "--storage-driver=vfs" not in script
-    drivers = next(
-        line for line in script.splitlines() if line.startswith("DOCKER_DRIVERS=")
-    )
+    drivers = next(line for line in script.splitlines() if line.startswith("DOCKER_DRIVERS="))
     assert "overlay2" in drivers
     assert "vfs" not in drivers
