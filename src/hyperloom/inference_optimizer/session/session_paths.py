@@ -272,6 +272,31 @@ def reports_dir(session_dir: Path) -> Path:
     return Path(session_dir) / "reports"
 
 
+def sbd_v6_dir(session_dir: Path) -> Path:
+    """Compute ``<sd>/reports/sbd_v6/`` for V6 timeline source events."""
+    return reports_dir(session_dir) / "sbd_v6"
+
+
+def sbd_v6_timeline_dir(session_dir: Path) -> Path:
+    """Compute the append-only V6 timeline event directory."""
+    return sbd_v6_dir(session_dir) / "timeline"
+
+
+def sbd_v6_timeline_event_path(session_dir: Path, sequence: int, event_type: str) -> Path:
+    """Compute one ordered V6 timeline event path."""
+    return sbd_v6_timeline_dir(session_dir) / f"{int(sequence):06d}-{event_type}.json"
+
+
+def sbd_v6_install_path(session_dir: Path) -> Path:
+    """Compute the persisted V6 ``install`` timeline event path."""
+    return sbd_v6_dir(session_dir) / "install.json"
+
+
+def sbd_v6_model_gate_path(session_dir: Path) -> Path:
+    """Compute the persisted V6 ``model_gate`` timeline event path."""
+    return sbd_v6_dir(session_dir) / "model_gate.json"
+
+
 def enablement_dir(session_dir: Path) -> Path:
     """``<sd>/reports/enablement/`` — enablement round artifacts.
 
@@ -880,6 +905,11 @@ __all__ = [
     "research_hints_md",
     "runs_dir",
     "runs_root",
+    "sbd_v6_dir",
+    "sbd_v6_install_path",
+    "sbd_v6_model_gate_path",
+    "sbd_v6_timeline_dir",
+    "sbd_v6_timeline_event_path",
     "state_path",
     "target_analysis_dir",
     "target_analysis_report_md",

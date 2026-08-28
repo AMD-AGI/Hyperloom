@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
+
 #: Historical collector-only schema retained for archived-reader identification.
 SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
@@ -2923,6 +2925,101 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
+class V6MetadataVersions(TypedDict, total=False):
+    """Version identifiers projected into V6 metadata."""
+
+    schema_version: str
+    hyperloom: str
+    framework: str | None
+    framework_version: str | None
+    tools: dict[str, str | None]
+
+
+class V6MetadataSession(TypedDict, total=False):
+    """Session identity and lifecycle fields exposed by V6 metadata."""
+
+    session_id: str
+    claw_session_id: str | None
+    sandbox_user_id: str | None
+    created_at_utc: str
+    start_ts: str
+    ended_at_utc: str
+    host: str
+    session_dir: str
+    user_data_path: str
+    code_revision: str
+    pid: int
+    max_minutes: int
+    elapsed_minutes: float
+    tick_count: int
+    recovery: dict[str, Any]
+
+
+class V6TaskConfig(TypedDict, total=False):
+    """Launch-time workload and model architecture projected into V6."""
+
+    model_name: str
+    model_path: str
+    framework_name: str
+    framework_version: str
+    gpu_type: str
+    tp: int | None
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    precision: str
+    max_model_len: int | None
+    objective: dict[str, Any]
+    launch_env: dict[str, str]
+    launch_server_args: str
+    architecture: dict[str, Any]
+
+
+class V6Metadata(TypedDict, total=False):
+    """V6 task identity, configuration, versions, and trace entrypoint."""
+
+    exported_at_utc: str
+    versions: V6MetadataVersions
+    session: V6MetadataSession
+    task_config: V6TaskConfig
+    langfuse: dict[str, Any]
+    warnings: list[str]
+
+
+class V6Outcome(TypedDict, total=False):
+    """V6 session result projection for downstream consumers."""
+
+    stop_reason: str
+    status: Literal["completed", "failed", "aborted"]
+    stage_reached: str
+    baseline: dict[str, Any]
+    final: dict[str, Any]
+    validation: dict[str, Any]
+
+
+class V6TimelineEvent(TypedDict, total=False):
+    """One ordered V6 business-stage event; CLOSE is intentionally excluded."""
+
+    type: str
+    kind: str
+    status: str
+    start_time: str
+    end_time: str
+    ext: dict[str, Any]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline."""
+
+    status: Literal["succeeded", "failed", "degraded"]
+    start_time: str
+    end_time: str
+    close_sequence_done: bool
+    steps: list[dict[str, Any]]
+    robustness: dict[str, Any]
+    artifacts: dict[str, Any]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -3018,6 +3115,10 @@ class SessionBreakdown(TypedDict, total=False):
     versions: dict[str, KernelToolMetadata]
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
+    metadata: V6Metadata
+    outcome: V6Outcome
+    timeline: list[V6TimelineEvent]
+    close: V6Close
 
     warnings: list[str]
     source_files: SourceFiles
@@ -3028,6 +3129,7 @@ __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
+    "SCHEMA_VERSION_V6",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -3122,6 +3224,13 @@ __all__ = [
     "TokenUsageAttribution",
     "TokenUsageBucket",
     "TokenUsageTimelineEntry",
+    "V6Metadata",
+    "V6MetadataSession",
+    "V6MetadataVersions",
+    "V6Close",
+    "V6Outcome",
+    "V6TaskConfig",
+    "V6TimelineEvent",
     "Workload",
     "WorkloadObjective",
 ]
