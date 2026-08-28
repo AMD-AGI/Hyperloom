@@ -28,8 +28,11 @@ continue without asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`
 ## Hard constraints (automated release gate)
 
 - Do **not** modify any GPU-related environment variable or device visibility.
-- Do **not** run `docker`, start/exec containers, or choose GPUs via `rocm-smi`. If
-  `HYPERLOOM_RUN_MODE=docker` you are already inside the correct single-GPU container.
+- Do **not** choose GPUs via `rocm-smi`.
+- If `HYPERLOOM_RUN_MODE=docker`, run `optimize` **inside the container you started in
+  setup** via `docker exec -w "$REPO_ROOT" "$HYPERLOOM_CONTAINER_NAME" …` (per the demo
+  skill's docker mode). Do **not** start a new container and do **not** change its
+  device/isolation flags. Otherwise (baremetal) run directly and do not run `docker`.
 - Do **not** modify `USER_DATA_PATH`.
 - Do **not** print or copy secret values into output, reports, or logs.
 

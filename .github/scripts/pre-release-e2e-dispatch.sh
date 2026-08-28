@@ -336,8 +336,9 @@ if [ "$want_docker_host" = 1 ]; then
   host_resources="$(jq -n --arg cpu "$HOST_CPU" --arg mem "$HOST_MEM" --arg shm "$HOST_SHM" \
     --arg eph "$HOST_EPHEMERAL" \
     '{replica:1, gpu:"8", cpu:$cpu, memory:$mem, sharedMemory:$shm, ephemeralStorage:$eph}')"
-  # The host env carries the per-leg GPU map so the host bootstrap launches the right
-  # nested containers via docker-run-hyperloom.sh <gpu_index> <leg>.
+  # The host env carries the per-leg GPU map so the host bootstrap runs each docker leg
+  # (run_leg, docker mode) with the right GPU index; each leg's agent then `docker run`s
+  # its own single-GPU container per the demo skill.
   docker_legs=""; gpu_map="{}"
   for leg in $REQ_TASKS; do
     case "$leg" in

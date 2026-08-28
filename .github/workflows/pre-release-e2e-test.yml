@@ -224,7 +224,7 @@ jobs:
           # Wheel named after CI_VERSION per design §5.
           cp "$WHEEL" "$wheel_dir/"
           # Stage the in-pod scripts + fixed prompts (pods read them from NFS).
-          cp .github/pre-release/bootstrap-pre-release.sh .github/pre-release/docker-run-hyperloom.sh "$boot_dir/"
+          cp .github/pre-release/bootstrap-pre-release.sh "$boot_dir/"
           cp .github/pre-release/prompts/pre-release/*.md "$boot_dir/prompts/pre-release/"
           chmod +x "$boot_dir"/*.sh
           # manifest.json (design §5).

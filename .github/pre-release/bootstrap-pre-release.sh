@@ -9,9 +9,12 @@
 # See hyperloom-pre-release-e2e-ci-design.md §12.
 #
 # Two modes, selected by E2E_DOCKER_HOST:
-#   * unset  -> a single baremetal/docker leg in THIS pod (LEG_ID given).
-#   * "1"     -> the privileged 8-GPU host: fan out DOCKER_LEGS to nested containers
-#                via docker-run-hyperloom.sh <gpu_index> <leg>, one GPU each.
+#   * unset  -> a single baremetal leg in THIS pod (LEG_ID given).
+#   * "1"     -> the privileged 8-GPU host: run each of DOCKER_LEGS as a backgrounded
+#                run_leg (docker mode) ON THE HOST POD. Each leg's agent follows the
+#                demo skill to `docker run` its OWN single-GPU container (renderD =
+#                128 + gpu_index*8), so the skill owns the container lifecycle. The
+#                per-leg GPU-isolation values are computed here and injected via .env.
 #
 # Inputs (env, injected by the dispatch script):
 #   CI_VERSION NFS_ROOT
@@ -25,7 +28,6 @@ set -euo pipefail
 : "${CLAUDE_MODEL:?}"; : "${CLAUDE_CLI_VERSION:?}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 
-SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROMPTS_DIR="${NFS_ROOT%/}/bootstrap/${CI_VERSION}/prompts/pre-release"
 WHEEL_DIR="${NFS_ROOT%/}/wheels/${CI_VERSION}"
 
@@ -85,6 +87,34 @@ run_leg() {
 
   # 2. decode the key and write the pod-local .env (NEVER on stdout / NEVER to a
   #    location the poll reads). Restrict perms; scrub on exit.
+  #
+  # For a docker leg the agent (not the harness) starts the single-GPU container per the
+  # demo skill. The demo skill's literal `docker run` cannot express our per-card
+  # isolation (single renderD node, NUMERIC device GIDs, cpu/mem caps, seccomp), so we
+  # compute those HERE -- on the host pod, where /dev/kfd + /dev/dri/renderD* exist -- and
+  # inject them as E2E_* .env values the setup prompt tells the agent to copy verbatim.
+  # renderD = 128 + GPU_INDEX*8 (stride 8, VERIFIED on a real privileged MI355X x8 pod).
+  # The pod /etc/group has no `video`/`render` NAMES, so numeric GIDs are required.
+  local dk_image="" dk_rd="" dk_kfd_gid="" dk_dri_gid="" dk_nfs_mount=""
+  if [ "$run_mode" = docker ]; then
+    : "${GPU_INDEX:?docker leg needs GPU_INDEX}"
+    dk_rd=$(( 128 + GPU_INDEX * 8 ))
+    dk_kfd_gid="$(stat -c %g /dev/kfd 2>/dev/null || echo 0)"
+    dk_dri_gid="$(stat -c %g "/dev/dri/renderD${dk_rd}" 2>/dev/null || stat -c %g /dev/dri 2>/dev/null || echo 0)"
+    if [ "$backend" = vllm ]; then
+      dk_image="${HYPERLOOM_IMAGE_VLLM:-vllm/vllm-openai-rocm:v0.27.1}"
+    else
+      dk_image="${HYPERLOOM_IMAGE_SGLANG:-lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-srt}"
+    fi
+    # The model path (e.g. /shared_nfs/models/<name>) is a SYMLINK into a DIFFERENT
+    # /shared_nfs subtree (/shared_nfs/huggingface_models/...). Mounting only NFS_ROOT
+    # (the CI subdir) or the model's parent leaves the symlink TARGET unmounted -> broken
+    # symlink in the container -> optimize can't boot. Mount the whole shared-NFS root
+    # (the top-level dir, e.g. /shared_nfs) so both the model and its symlink target
+    # resolve at the same absolute path inside the container. Derive it as the first path
+    # component of NFS_ROOT (override with E2E_SHARED_NFS_ROOT if the layout differs).
+    dk_nfs_mount="${E2E_SHARED_NFS_ROOT:-/$(printf '%s' "${NFS_ROOT#/}" | cut -d/ -f1)}"
+  fi
   local envf="${root}/.env"
   ( umask 077
     {
@@ -115,6 +145,20 @@ run_leg() {
       echo "MODEL_PATH=${model_path}"
       echo "TARGET_GAIN=${TARGET_GAIN}"
       echo "DEMO_HOURS=${hours}"
+      # docker leg: hand the container lifecycle to the agent (demo skill) and carry the
+      # CI hard constraints it must apply to its `docker run` (see setup-docker-*.md).
+      if [ "$run_mode" = docker ]; then
+        echo "HYPERLOOM_IMAGE=${dk_image}"
+        echo "HYPERLOOM_CONTAINER_NAME=hyperloom-${leg}"   # unique per leg (shared host dockerd)
+        echo "HYPERLOOM_SHM_SIZE=${LEG_SHM:-64g}"
+        echo "E2E_GPU_INDEX=${GPU_INDEX}"
+        echo "E2E_RENDERD=${dk_rd}"
+        echo "E2E_KFD_GID=${dk_kfd_gid}"
+        echo "E2E_DRI_GID=${dk_dri_gid}"
+        echo "E2E_LEG_CPUS=${LEG_CPUS:-32}"
+        echo "E2E_LEG_MEM=${LEG_MEM:-128g}"
+        echo "E2E_NFS_MOUNT=${dk_nfs_mount}"
+      fi
     } > "$envf"
   )
   trap 'sed -i "/^ANTHROPIC_API_KEY=/d" "'"$envf"'" 2>/dev/null || true' EXIT
@@ -247,23 +291,36 @@ ensure_dockerd() {
   return 1
 }
 
-# ---- docker host: fan out to nested containers -----------------------------
+# ---- docker host: run each leg (docker mode) ON THIS host pod ----------------
+# The privileged 8-GPU host runs a dockerd, then drives each docker leg as a backgrounded
+# run_leg in docker mode. Each leg's agent follows the demo skill to `docker run` its OWN
+# single-GPU container (renderD = 128 + gpu_index*8), applying the CI isolation flags that
+# run_leg injected into the leg .env. No nested bootstrap: session artifacts land under
+# $session on this pod's NFS exactly as for baremetal, so the wait-for-final.json loop in
+# run_leg works unchanged. Each `run_leg &` is its own subshell, so their per-leg EXIT
+# traps (the .env key scrub) don't clobber each other.
 run_docker_host() {
   : "${DOCKER_LEGS:?}"; : "${DOCKER_GPU_MAP:?}"; : "${MODEL_3H:?}"; : "${MODEL_12H:?}"
-  local runner="${SELF_DIR}/docker-run-hyperloom.sh"
-  [ -x "$runner" ] || chmod +x "$runner" 2>/dev/null || true
   ensure_dockerd || { log "ERROR: cannot provide docker on the host pod"; return 1; }
   log "docker host: legs='${DOCKER_LEGS}'"
-  local pids=()
+  local pids=() leg idx backend hours model_path
   for leg in $DOCKER_LEGS; do
-    local idx; idx="$(printf '%s' "$DOCKER_GPU_MAP" | jq -r --arg l "$leg" '.[$l]')"
-    log "launch nested container: gpu=$idx leg=$leg"
-    # Each nested container binds one card and runs THIS bootstrap inside, in
-    # single-leg mode. docker-run-hyperloom.sh enforces GPU + cpu/mem quota (§8).
-    "$runner" "$idx" "$leg" &
+    idx="$(printf '%s' "$DOCKER_GPU_MAP" | jq -r --arg l "$leg" '.[$l]')"
+    case "$leg" in
+      *-vllm-*)   backend=vllm ;;
+      *-sglang-*) backend=sglang ;;
+      *) log "ERROR: cannot infer backend from leg '$leg'"; return 1 ;;
+    esac
+    case "$leg" in
+      *-3h)  hours=3;  model_path="$MODEL_3H" ;;
+      *-12h) hours=12; model_path="$MODEL_12H" ;;
+      *) log "ERROR: cannot infer duration from leg '$leg'"; return 1 ;;
+    esac
+    log "launch docker leg: gpu=$idx renderD$(( 128 + idx * 8 )) leg=$leg backend=$backend hours=$hours"
+    ( GPU_INDEX="$idx" run_leg "$leg" "$backend" "$model_path" "$hours" docker ) &
     pids+=("$!")
   done
-  local rc=0
+  local rc=0 p
   for p in "${pids[@]}"; do wait "$p" || rc=1; done
   return "$rc"
 }
