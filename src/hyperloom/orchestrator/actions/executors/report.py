@@ -568,6 +568,9 @@ def _build_summary_dict(
         # Degraded-mode advisory: benchmark numbers reflect the text path only.
         "degraded_mode": bool(getattr(state, "degraded_mode", False)),
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
+        # The card's partition shape these numbers were measured in. A property
+        # of the session, not a result of it.
+        "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -723,6 +726,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
 
     lines.extend(_format_degraded_mode_section(summary))
+    lines.extend(_format_compute_partition_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
@@ -767,6 +771,71 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
         arch = w.get("architecture") or "?"
         signal = w.get("signal") or w.get("kind") or "multimodal signal"
         lines.append(f"- `{name}` (arch `{arch}`): {signal}")
+    lines.append("")
+    return lines
+
+
+def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
+    """State the compute-partition shape these numbers were measured in.
+
+    Only rendered for a partitioned card. An unpartitioned card is what every
+    other report in the corpus describes, so saying so on all of them would be
+    noise; a split card is the exception that changes how the numbers compare,
+    and it says so where someone reading two reports side by side will see it.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines, or ``[]`` when the card was whole or unknown.
+    """
+    shape = summary.get("compute_partition") or {}
+    partitions = int(shape.get("partitions") or 0)
+    if not shape.get("mode") or partitions <= 1:
+        return []
+    streams = int(shape.get("streams_per_partition") or 0)
+    lines = ["## Compute partitioning", ""]
+    lines.append(
+        f"This card was split into {partitions} partitions (`{shape['mode']}`), so these "
+        f"numbers are not comparable with an unpartitioned run of the same configuration."
+    )
+    lines.append("")
+    lines.append(f"- mode              : `{shape['mode']}` ({partitions} partitions)")
+    if shape.get("cu_per_partition"):
+        # Absent is its own answer. The published environment cannot carry the
+        # provenance flag, so a shape recovered from it knows the count but not
+        # where it came from -- and reporting that as the board table would be
+        # the exact false provenance this section exists to prevent.
+        probed = shape.get("cu_probed")
+        origin = "" if probed is None else (" (from the device)" if probed else " (derived from the board table)")
+        lines.append(f"- CU per partition  : {shape['cu_per_partition']}{origin}")
+    if shape.get("gib_per_partition"):
+        lines.append(f"- HBM per partition : `{float(shape['gib_per_partition']):.1f}` GiB")
+    # Omitted where nothing fans out: the number would describe a placement that
+    # never happened, directly above a paragraph saying it did not.
+    if streams and shape.get("fanout_expected") is not False:
+        lines.append(f"- streams/partition : {streams} ({streams * partitions} concurrent streams total)")
+    lines.append("")
+    if shape.get("fanout_expected") is False:
+        lines.append(
+            f"**This session's benchmark does not place work on individual partitions.** The "
+            f"throughput is therefore one device's, not the total across all {partitions}, and "
+            f"which device it was is not recorded here -- whole cards enumerate before "
+            f"partitions, so it may be a whole card or a single partition."
+        )
+    else:
+        lines.append(
+            f"Whether the throughput is one partition's or the total across all {partitions} "
+            f"depends on the benchmark placing work on each of them. The shape above is read "
+            f"from the card, but the fan-out is not this process's to do, and it cannot be "
+            f"verified from here -- so do not read the figure as an aggregate unless the "
+            f"benchmark entrypoint is known to fan out."
+        )
+    lines.append("")
+    lines.append(
+        "Partitioning only ever gives a single stream fewer CUs, so per-request latency "
+        "is worse here than on the whole card by construction."
+    )
     lines.append("")
     return lines
 

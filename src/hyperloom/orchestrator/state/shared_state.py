@@ -697,6 +697,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
     benchmark_backend: str = ""
+    # The card's compute-partition shape this session was measured in, as
+    # observed at launch: mode, partition count, CU and memory per partition,
+    # streams per partition. Empty when the card reported nothing. Part of the
+    # measurement contract, not a tuning knob -- the same configuration in SPX
+    # and in CPX is two different experiments.
+    compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1

@@ -288,6 +288,43 @@ def _build_parser() -> argparse.ArgumentParser:
         "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
     )
     opt.add_argument(
+        "--compute-partition-mode",
+        type=str,
+        default=None,
+        metavar="MODE",
+        help="Declare the compute-partition mode the GPU is already in: SPX "
+        "(whole card), DPX (2), QPX (4) or CPX (8). This is an assertion, not "
+        "a request -- nothing in the optimizer changes the mode, because doing "
+        "so is privileged, evicts every process on the card, and renumbers its "
+        "devices. Set the mode with amd-smi before launching this command: the "
+        "shape is checked and recorded at launch, so a mode applied later is "
+        "too late to be either. Passing this flag makes the session "
+        "refuse to start if the card is in a different mode, which is what "
+        "catches an external set that did not take effect before three hours "
+        "are spent recording the numbers under the wrong topology. The mode is "
+        "recorded in the platform fingerprint whether or not this flag is "
+        "passed. See also --streams-per-partition.",
+    )
+    opt.add_argument(
+        "--streams-per-partition",
+        type=int,
+        # None, not 2, so a resume can tell "not passed" from "passed 2" and
+        # let the persisted value stand. The 2 is applied where it is resolved.
+        default=None,
+        metavar="N",
+        help="Concurrent streams to place on each partition when the card is "
+        "partitioned. Defaults to 2, which is where every mode measured on "
+        "MI355X peaked: one stream leaves each partition idle through the "
+        "fixed per-pass cost, a second fills it, a third only adds queueing. "
+        "Raise it only with evidence, and note that every stream on a "
+        "partition holds its own copy of the weights -- so this multiplies "
+        "the memory the workload has to fit, and the session refuses to start "
+        "when it provably will not. A value below 1 is refused rather than "
+        "quietly replaced by the default. Only a scriptable framework's "
+        "benchmark places work per partition; passing this with a serving "
+        "framework warns, because nothing would act on it.",
+    )
+    opt.add_argument(
         "--framework",
         choices=list(framework_registry.names()),
         default=None,
