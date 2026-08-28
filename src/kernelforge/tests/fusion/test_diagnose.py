@@ -28,6 +28,27 @@ class TestCategorizeKernelName:
         assert dg.categorize_kernel_name("store_kvcache<1024l>") == "copy"
         assert dg.categorize_kernel_name("vectorized_elementwise CUDAFunctor_add<bf16>") == "add"
 
+    def test_snake_case_aiter_fp8_kernels(self):
+        # Regression: ``_`` is a regex word char, so the torch-eager-flavoured
+        # ``\bmul\b`` / ``rms_norm`` alternations matched none of AITER's fused FP8
+        # kernels and dumped 11.9% of Qwen3-14B-FP8's GPU time into ``other``,
+        # dropping launch_bound_share to 0.083 and failing the 0.10 entry gate.
+        assert dg.categorize_kernel_name("_act_mul_and_dynamic_fp8_group_quant_kernel") == "activation"
+        assert dg.categorize_kernel_name("_fused_rms_fp8_group_quant_kernel") == "rmsnorm"
+        assert (
+            dg.categorize_kernel_name("_ZN5aiter37dynamic_per_group_scaled_quant_kernelIDF16bDB8_Li32ELi128EEEv")
+            == "cast"
+        )
+        # ck_tile QuantGemmKernel: GEMM must claim it before any quant rule does.
+        assert (
+            dg.categorize_kernel_name(
+                "_ZN7ck_tile6kentryINS_11kernel_attrILb1EEELi1ENS_15QuantGemmKernelINS_21GemmTile1DPartitionerE"
+            )
+            == "gemm"
+        )
+        # ...and the new gemm alternations must not steal MoE kernels.
+        assert dg.categorize_kernel_name("fused_moe_gemm_kernel") == "moe"
+
 
 class TestDiagnoseFromShares:
     def test_launch_bound_is_candidate(self):

@@ -62,16 +62,27 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 # Ordered (first-match-wins) kernel-name -> category rules. Compute-bound buckets
 # (gemm/attention/conv/moe) are matched first so a fused kernel whose name also
 # mentions a launch-bound op (e.g. ``add_rmsnorm``) is not misfiled.
+#
+# The original alternations were written against torch-eager naming
+# (``CUDAFunctor_add``, ``at::native::...``), where ``\bmul\b``/``\badd\b`` fire.
+# AITER/vLLM fused kernels are snake_case, and ``_`` is a regex word char, so
+# ``_act_mul_``, ``_fused_rms_``, ``_..._quant_kernel`` matched nothing and fell to
+# ``other``. On Qwen3-14B-FP8 that buried 11.9% of GPU time (act_mul+rms+quant) and
+# pushed launch_bound_share to 0.083, below the 0.10 floor -- the FP8 variant of a
+# model whose BF16 form is a measured +6.2% fusion win (see 276aacf6). The
+# ``quantgemm|gemmkernel`` alternation likewise files ck_tile QuantGemmKernel as
+# GEMM instead of ``other``; it must stay in the first rule so the quant patterns
+# below never claim a GEMM.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
-    ("gemm", r"cijk_|tensile|hgemm|sgemm|\bgemm\b|matmul|_bhs_|f16_gemm"),
+    ("gemm", r"cijk_|tensile|hgemm|sgemm|\bgemm\b|matmul|_bhs_|f16_gemm|quantgemm|gemmkernel"),
     ("moe", r"fused_moe|moe_align|moe_sum|_routing|expert"),
     ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped"),
     ("conv", r"conv1d|_conv_|\bconv\b"),
-    ("rmsnorm", r"rmsnorm|rms_norm"),
+    ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
     ("layernorm", r"layernorm|layer_norm"),
     ("rope", r"rotary|\brope\b"),
-    ("activation", r"silu|gelu|\brelu\b|sigmoid|activation"),
-    ("cast", r"tofloat|tohalf|_cast|convert|dtype_"),
+    ("activation", r"silu|gelu|\brelu\b|sigmoid|activation|act_mul|_act_"),
+    ("cast", r"tofloat|tohalf|_cast|convert|dtype_|scaled_quant|_quant_kernel"),
     ("copy", r"kvcache|memcpy|\bcopy\b|indexselect|index_select|gather|scatter"),
     ("reduce", r"reduce|rocprim|trampoline|\bsum\b|\bmean\b"),
     ("sample", r"sample"),
