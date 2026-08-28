@@ -37,8 +37,19 @@ asking. Load LLM API keys/base URLs and `FRAMEWORK` from `.env`.
 - Do **not** modify `USER_DATA_PATH`.
 - Do **not** print or copy secret values into output, reports, or logs.
 
-## Termination
+## Termination — do not end this turn until the run is launched
 
-Let the run proceed to its terminal report (session `reports/final.json` +
-`reports/final.md`). When it terminates, stop. The harness judges PASS/FAIL from the
-session report — do not fabricate a result.
+This is a **single non-interactive turn**, and anything still running as a child of it is
+killed the moment the turn ends. So:
+
+1. Finish the install and the launch **inside this turn**. Do **not** end the turn with a
+   progress note such as "install started", "waiting on the pull", or "waiting on the
+   monitor" — that kills the work you just started and the leg ends up with nothing
+   running at all.
+2. Start `optimize` **detached** with `setsid nohup` (as the demo skill does) so it
+   survives the end of this turn.
+3. Before you finish, confirm the run is really live and report the paths: the nested
+   session run dir exists, `state.json` is present in it, and the optimizer PID is alive.
+
+Only then stop. The harness then waits for the terminal report (`reports/final.json` +
+`reports/final.md`) and judges PASS/FAIL from it — do not fabricate a result.

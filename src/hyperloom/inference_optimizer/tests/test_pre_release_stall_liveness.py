@@ -116,14 +116,84 @@ def test_empty_tree_falls_back_to_the_loop_start(leg_idle_fn: str, tmp_path: Pat
 
 def test_stall_check_watches_the_leg_root(script: str) -> None:
     """Pin the call site: the check must be scoped to $root, not $session."""
-    assert 'idle="$(leg_idle_s "$root" "$start_ts" "$now")"' in script
+    assert 'idle="$(leg_idle_s "$root" "$grace_ts" "$now")"' in script
     assert 'no file written under $root' in script
 
 
 def test_agent_turns_are_mirrored_to_nfs(script: str) -> None:
-    """SaFE deletes a failed leg's pod, so the agent transcript must reach NFS."""
+    """SaFE deletes a failed leg's pod, so every agent turn must reach NFS."""
     assert 'agent_log="${session}/agent-${leg}.log"' in script
-    assert script.count('tee -a "$agent_log"') == 2
+    # setup (retried), the demo turn, and each demo re-drive.
+    assert script.count('tee -a "$agent_log"') == 3
+
+
+def _leg_run_started(script: str, session: Path) -> bool:
+    """Run the real leg_run_started() against a session tree."""
+    lines = script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("leg_run_started() {"))
+    end = next(i for i, line in enumerate(lines[start:], start) if line == "}")
+    fn = "\n".join(lines[start : end + 1])
+    proc = subprocess.run(
+        ["bash", "-c", f'{fn}\nleg_run_started "$1"', "_", str(session)],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
+
+
+def test_launch_detection_needs_the_nested_run_dir(script: str, tmp_path: Path) -> None:
+    """optimize writes state.json into $session/<model>/<ts>-<rand>/, never at the top."""
+    session = tmp_path / "session"
+    session.mkdir()
+    assert not _leg_run_started(script, session)
+
+    # A stray state.json directly under the session must not count as a launch.
+    (session / "state.json").write_text("{}", encoding="utf-8")
+    assert not _leg_run_started(script, session)
+
+    nested = session / "Qwen3-8B" / "20260828T053223Z-4351891f"
+    nested.mkdir(parents=True)
+    (nested / "state.json").write_text("{}", encoding="utf-8")
+    assert _leg_run_started(script, session)
+
+
+def test_setup_marker_matches_every_setup_prompt(script: str) -> None:
+    """The retry gate greps a literal the prompts must actually ask the agent to print."""
+    assert 'grep -qiE "setup complete: ${run_mode}/${backend}" "$agent_log"' in script
+    prompts = _BOOTSTRAP.parent / "prompts" / "pre-release"  # type: ignore[union-attr]
+    for run_mode in ("baremetal", "docker"):
+        for backend in ("vllm", "sglang"):
+            prompt = prompts / f"setup-{run_mode}-{backend}.md"
+            assert f"setup complete: {run_mode}/{backend}" in prompt.read_text(encoding="utf-8")
+
+
+def test_an_early_turn_is_re_driven_not_fatal(script: str) -> None:
+    """A turn that ends without finishing leaves nothing running; ask again, bounded."""
+    assert 'attempts="${LEG_TURN_ATTEMPTS:-3}"' in script
+    assert 'max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"' in script
+    assert 'demo_redrives=$(( demo_redrives + 1 ))' in script
+
+
+def test_re_drive_does_not_extend_the_hard_deadline(script: str) -> None:
+    """The stall grace restarts per turn, but the pod-deadline clock must not.
+
+    bootstrap's own deadline has to stay below the SaFE pod timeout, or SaFE pre-empts
+    the pod mid-wait and the clean failure path is lost.
+    """
+    body = script.split("run_leg() {", 1)[1]
+    assert body.count('start_ts="$(date +%s)"') == 1
+    assert 'grace_ts="$(date +%s)"' in body
+    assert 'elapsed=$(( now - start_ts ))' in body
+    assert 'idle="$(leg_idle_s "$root" "$grace_ts" "$now")"' in body
+
+
+def test_demo_prompts_forbid_ending_the_turn_early(script: str) -> None:
+    prompts = _BOOTSTRAP.parent / "prompts" / "pre-release"  # type: ignore[union-attr]
+    for hours in (3, 12):
+        text = (prompts / f"demo-{hours}h.md").read_text(encoding="utf-8")
+        assert "single non-interactive turn" in text
+        assert "setsid nohup" in text
+        assert "state.json" in text
 
 
 def test_dockerd_never_runs_on_vfs(script: str) -> None:

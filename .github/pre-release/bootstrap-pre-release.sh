@@ -82,6 +82,14 @@ leg_idle_s() {
   echo $(( now - since ))
 }
 
+# 0 once the leg has a live run: `optimize` creates a NESTED per-run dir under the
+# session and writes state.json into it. Scoped to this leg's own session tree, so it
+# stays correct on the shared docker host where four legs run side by side.
+# Args: session_dir
+leg_run_started() {
+  [ -n "$(find "$1" -mindepth 2 -type f -name state.json -print -quit 2>/dev/null)" ]
+}
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -221,8 +229,26 @@ run_leg() {
   # the pod's stdout with it, so without this the agent's own account of the failure is
   # unrecoverable and a post-mortem is left reconstructing events from file mtimes.
   local agent_log="${session}/agent-${leg}.log"
-  log "claude --print (setup); agent transcript -> $agent_log"
-  claude --print --dangerously-skip-permissions < "$setup_prompt" 2>&1 | tee -a "$agent_log"
+  # A `claude --print` turn can end EARLY with a progress note instead of finishing the
+  # job -- observed live: a setup turn whose whole answer was "Waiting on the vLLM ROCm
+  # wheel install", and a demo turn that reported "Install step started" and returned.
+  # Whatever the agent left running is a child of that turn and dies with it, so an early
+  # turn silently leaves the leg with nothing running at all. The setup prompt's contract
+  # is a literal `setup complete: <mode>/<backend>` line, so re-drive until we see it.
+  local attempts="${LEG_TURN_ATTEMPTS:-3}" i
+  for i in $(seq 1 "$attempts"); do
+    log "claude --print (setup, attempt $i/$attempts); agent transcript -> $agent_log"
+    claude --print --dangerously-skip-permissions < "$setup_prompt" 2>&1 | tee -a "$agent_log"
+    if grep -qiE "setup complete: ${run_mode}/${backend}" "$agent_log"; then
+      log "leg $leg setup reported complete on attempt $i"
+      break
+    fi
+    if [ "$i" -ge "$attempts" ]; then
+      log "ERROR: leg $leg -- setup never reported 'setup complete: ${run_mode}/${backend}' in $attempts turns"
+      return 1
+    fi
+    log "WARN: leg $leg -- setup turn $i ended without completing; re-driving the setup prompt"
+  done
   log "claude --print (demo ${hours}h)"
   claude --print --dangerously-skip-permissions < "$demo_prompt" 2>&1 | tee -a "$agent_log"
   log "leg $leg demo turn returned; waiting for the background optimize to finish"
@@ -256,8 +282,19 @@ run_leg() {
   local stall_grace="${LEG_STALL_GRACE_S:-600}"       # 10m of NO file writes -> dead
   local final_grace="${LEG_FINAL_GRACE_S:-120}"       # state stop_reason -> final.json
   local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin (hard cap)
+  # Two clocks: start_ts backs the hard deadline and is NEVER reset (resetting it would
+  # let the leg outlive the SaFE pod timeout and lose the clean failure path); grace_ts
+  # backs the stall window and restarts after each re-driven turn.
   local start_ts; start_ts="$(date +%s)"
+  local grace_ts="$start_ts"
   local real_sdir="" final_json="" state_json=""
+  # An idle tree with no state.json means the demo turn ended without leaving a running
+  # `optimize` behind. That is recoverable -- ask the agent to finish the job rather than
+  # failing the leg -- but only a bounded number of times. Deliberately driven off the
+  # stall signal instead of an "is it launched yet" probe right after the turn: the demo
+  # skill's launcher runs install.sh BEFORE backgrounding optimize, so state.json can
+  # legitimately be 10+ minutes away, and re-driving on a short grace would double-launch.
+  local demo_redrives=0 max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"
 
   while :; do
     local now elapsed; now="$(date +%s)"; elapsed=$(( now - start_ts ))
@@ -274,9 +311,17 @@ run_leg() {
         echo "$real_sdir" > "${session}/.session_dir"
       else
         local idle
-        idle="$(leg_idle_s "$root" "$start_ts" "$now")"
+        idle="$(leg_idle_s "$root" "$grace_ts" "$now")"
         if [ "$idle" -ge "$stall_grace" ]; then
-          log "ERROR: leg $leg -- no state.json and no file written under $root for ${idle}s (>= ${stall_grace}s stall; build/optimize hung or exited)"
+          if [ "$demo_redrives" -lt "$max_demo_redrives" ]; then
+            demo_redrives=$(( demo_redrives + 1 ))
+            log "WARN: leg $leg -- idle ${idle}s with no state.json; the demo turn left nothing running. Re-driving the demo prompt ($demo_redrives/$max_demo_redrives)"
+            claude --print --dangerously-skip-permissions < "$demo_prompt" 2>&1 | tee -a "$agent_log"
+            log "leg $leg demo re-drive $demo_redrives returned"
+            grace_ts="$(date +%s)"   # fresh stall grace for the new turn; deadline unchanged
+            continue
+          fi
+          log "ERROR: leg $leg -- no state.json and no file written under $root for ${idle}s after $demo_redrives demo re-drive(s); giving up"
           return 1
         fi
       fi
