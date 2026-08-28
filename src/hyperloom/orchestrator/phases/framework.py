@@ -359,6 +359,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             "task_kind": "framework_authoring",
+            "source_phase": "FRAMEWORK_AGENT",
             "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
             "lever_kind": LEVER_UPSTREAM_PR,
             # Provenance markers for the dispatcher-side authored-patch bridge.

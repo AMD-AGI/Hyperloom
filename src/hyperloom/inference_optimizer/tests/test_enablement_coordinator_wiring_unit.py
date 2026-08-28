@@ -92,6 +92,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["domain"] == "enablement_specialist"
+    assert params["source_phase"] == "ENABLEMENT"
     # Reuses FRAMEWORK authoring machinery + tags the objective.
     assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True

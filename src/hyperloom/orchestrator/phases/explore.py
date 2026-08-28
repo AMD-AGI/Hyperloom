@@ -1868,7 +1868,18 @@ class ExplorePhase(CoordinatorCollaborator):
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
-        round_id = str((task.params or {}).get("round_id") or task.task_id)
+        task_params = task.params or {}
+        round_id = str(task_params.get("round_id") or task.task_id)
+        source_phase = (
+            str(
+                task_params.get("source_phase")
+                or done_payload.get("source_phase")
+                or getattr(getattr(self, "shared_state", None), "phase", "")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         from ..specialists.domains import normalize_dispatch_tags
 
         # Knowledge-domain tags; reported tags win over dispatch params.
@@ -1892,6 +1903,8 @@ class ExplorePhase(CoordinatorCollaborator):
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
+        if source_phase:
+            entry["source_phase"] = source_phase
         gpu_ids = done_payload.get("allocated_gpu_ids") or []
         if isinstance(gpu_ids, list) and gpu_ids:
             entry["allocated_gpu_ids"] = [
