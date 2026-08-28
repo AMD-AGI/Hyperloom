@@ -1446,10 +1446,19 @@ def verify_cpp_itfs_rebuilt(cache_backup: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(cache_backup, dict) or not cache_backup.get("is_cpp_itfs"):
         return {"verified": True, "status": "skipped", "reason": "non-cpp_itfs target"}
-    build_dir = Path(cache_backup.get("build_dir", ""))
+    build_dir_raw = cache_backup.get("build_dir", "")
     since = float(cache_backup.get("invalidated_unix") or 0.0)
     module_names = list(cache_backup.get("module_names") or [])
-    if not str(build_dir) or not build_dir.exists():
+    # Path("") is Path("."), so an empty/missing build_dir must be rejected
+    # before globbing — otherwise verify walks the process CWD.
+    if not str(build_dir_raw).strip():
+        return {
+            "verified": False,
+            "status": "stale",
+            "reason": f"cpp_itfs build dir absent after re-baseline: {build_dir_raw}",
+        }
+    build_dir = Path(build_dir_raw)
+    if not build_dir.exists():
         return {
             "verified": False,
             "status": "stale",
