@@ -560,6 +560,48 @@ def build(
         warnings,
         default={},
     )
+    v6_warnings = list(warnings)
+    timeline = _safe_collect(
+        "timeline",
+        lambda: collectors.collect_v6_timeline(
+            sd,
+            v6_warnings,
+            state=state,
+            recorded_operations=recorded_operations,
+        ),
+        v6_warnings,
+        default=[],
+    )
+    outcome = _safe_collect(
+        "outcome",
+        lambda: collectors.collect_v6_outcome(
+            session=session_section,
+            baseline=baseline,
+            final=final,
+            optimizations=optimizations,
+            state=state,
+            timeline=timeline,
+        ),
+        v6_warnings,
+        default={},
+    )
+    metadata = _safe_collect(
+        "metadata",
+        lambda: collectors.collect_v6_metadata(
+            exported_at_utc=exported_at,
+            session=session_section,
+            workload=workload,
+            model_info=model_info,
+            langfuse=langfuse,
+            versions=versions,
+            state=state,
+            warnings=v6_warnings,
+        ),
+        v6_warnings,
+        default={},
+    )
+    if isinstance(metadata, dict):
+        metadata["warnings"] = list(v6_warnings)
 
     breakdown = {
         "schema_version": schema_version,
@@ -619,6 +661,10 @@ def build(
         "versions": versions,
         # Enablement attempt-runtime observability; {} → hidden.
         "enablement": enablement,
+        "metadata": metadata,
+        "outcome": outcome,
+        "timeline": timeline,
+        "close": {},
         "warnings": warnings,
         "source_files": source_files,
     }
