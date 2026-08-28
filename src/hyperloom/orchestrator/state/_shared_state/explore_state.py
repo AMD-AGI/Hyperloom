@@ -54,6 +54,7 @@ class _ExploreStateMixin:
             instrument.record_specialist_round(
                 getattr(self, "_session_dir", None),
                 entry,
+                phase=str(getattr(self, "phase", "") or ""),
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("record_specialist_round capture failed", exc_info=True)

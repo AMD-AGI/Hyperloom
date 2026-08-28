@@ -3625,6 +3625,7 @@ def record_specialist_round(
     session_dir: Path | str | None,
     entry: dict[str, Any],
     *,
+    phase: str = "",
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
     """Record one ``specialist_runs`` round (idempotent by ``round_id``).
@@ -3634,6 +3635,10 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
+        phase (str): the phase the round ran in; falls back to
+            ``entry["phase"]``, then to the reader's timestamp backfill. A
+            specialist runs in more than one phase, so this cannot be a
+            constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3706,7 +3711,7 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase="EXPLORE",
+            phase=phase or str(entry.get("phase") or ""),
             status="succeeded" if entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
