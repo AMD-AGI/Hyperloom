@@ -100,6 +100,32 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+def _tokenize_for_removal(text: str) -> list[str] | None:
+    """Tokenize for removal matching, keeping JSON values intact when possible.
+
+    A POSIX ``shlex.split`` strips the inner double quotes of a JSON-valued flag
+    and the space-join below cannot put them back, so a value that
+    :func:`_repair_unquoted_json` also cannot re-quote (any bareword outside
+    :data:`_JSON_BAREWORD`, e.g. the ``*expert*`` wildcards in atom's
+    ``--online_quant_config``) reaches the server irreparably broken. Prefer the
+    quote-preserving tokenizer; it declines exactly the inputs that carry a
+    whitespace-bearing or shell-quoted operand, none of which can hold a JSON
+    value the unquoted transport could deliver anyway, so POSIX remains correct
+    for the fallback.
+
+    Returns:
+        list[str] | None: The tokens, or ``None`` when ``text`` is not
+        tokenizable at all (caller leaves it untouched).
+    """
+    parsed = tokenize_server_args_preserving_json(text)
+    if parsed is not None:
+        return parsed[1]
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return None
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
@@ -107,22 +133,24 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     its following value when one is present; ``"--foo=bar"`` removes that exact
     token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
     unparseable inputs are left untouched rather than guessed.
+
+    JSON-valued flags survive verbatim: both sides of the comparison are
+    tokenized by :func:`_tokenize_for_removal`, so a retained neighbour is never
+    silently stripped of its quotes.
     """
     args = str(server_args or "").strip()
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
-    try:
-        tokens = shlex.split(args)
-    except ValueError:
+    tokens = _tokenize_for_removal(args)
+    if tokens is None:
         return args
 
     remove_flags: set[str] = set()
     remove_pairs: set[tuple[str, str | None]] = set()
     for spec in removes:
-        try:
-            spec_tokens = shlex.split(spec)
-        except ValueError:
+        spec_tokens = _tokenize_for_removal(spec)
+        if spec_tokens is None:
             spec_tokens = spec.split()
         i = 0
         while i < len(spec_tokens):
@@ -161,10 +189,8 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    # ``shlex.split`` above strips the inner double quotes of any JSON-valued
-    # flag (``--compilation-config {"cudagraph_mode":"FULL"}`` ->
-    # ``{cudagraph_mode:FULL}``); re-quote/compact the JSON blobs so removal
-    # never corrupts a sibling flag that vLLM parses with ``json.loads``.
+    # Compact the surviving JSON blobs to the one shape the unquoted transport
+    # can carry, and repair any that the POSIX fallback above stripped.
     return _reserialize_json_blobs(" ".join(out))
 
 
@@ -342,29 +368,14 @@ def _reserialize_json_blobs(args: str) -> str:
     return "".join(out)
 
 
-# Flags whose values may be JSON or otherwise space-bearing. Kept public so the
-# coordinator and launch paths share one catalogue; JSON presence must NOT make
-# dedup abandon the entire arg string. Actual whitespace-bearing argv tokens are
-# detected by :func:`tokenize_server_args_preserving_json` and fail closed.
-SPACE_VALUE_FLAGS = (
-    "--json-model-override-args",
-    "--override-generation-config",
-    "--tool-call-parser",
-    # JSON-object-valued flags: after ``compact_json_server_args`` these are a
-    # single space-free shell word, but their value still contains inner double
-    # quotes (``{"cudagraph_mode":"PIECEWISE"}``). ``dedup_vllm_server_args``
-    # tokenizes with ``shlex.split`` (which STRIPS those quotes) and rejoins
-    # without re-quoting, corrupting the JSON to ``{cudagraph_mode:PIECEWISE}``
-    # -> vLLM boot fails with ``Invalid JSON``. Listing them here makes both
-    # dedup helpers leave the whole arg string untouched (round-trip safe), the
-    # same contract already relied on for the flags above.
-    "--compilation-config",
-    "--speculative-config",
-    "--hf-overrides",
-    "--kv-transfer-config",
-)
-# Compatibility export used by ``_grid_runner`` and out-of-tree tests.
-_SPACE_VALUE_FLAGS = SPACE_VALUE_FLAGS
+# Whitespace-bearing / JSON-valued flags are NOT enumerated here on purpose.
+# A by-name catalogue only ever protects the frameworks someone remembered to
+# enroll: the vLLM-shaped list this module used to carry had no reader left, yet
+# its docstring still promised dedup-time protection, so atom's
+# ``--online_quant_config`` looked covered while nothing guarded it. Value shape
+# is the property that actually matters, and
+# :func:`tokenize_server_args_preserving_json` decides it by parsing, which is
+# framework-agnostic and fails closed.
 
 _MULTI_VALUE_FLAGS = (
     "--cuda-graph-bs",

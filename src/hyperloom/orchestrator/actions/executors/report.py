@@ -405,7 +405,11 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
-    "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
+    "conc_sweep_failed": (
+        "Post-sweep concurrency sweep reached a failed terminal result, and no budget "
+        "remained for another macro-cycle. The optimization result itself is unaffected: "
+        "conc_sweep only scans concurrency after the search is done."
+    ),
     "explore_force_exit_low_budget": "EXPLORE force-exited: it had spent its own phase budget down to the force-exit threshold.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",

@@ -211,7 +211,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
-        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
+        "conc_sweep_failed",  # SWEEP exit on a failed conc_sweep; reloops when budget remains, else CLOSE
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # EXPLORE → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -3137,13 +3137,17 @@ def compute_next_phase(
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
             exit_reason, exit_evidence = norm
-            # Failed conc_sweep closeout is terminal: preserve the honest
-            # stop_reason instead of opening another macro-cycle.
-            if exit_reason == "conc_sweep_failed":
-                return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: loop back to EXPLORE (a new macro-cycle) while budget remains
             # and the run hasn't globally converged (R7); wind down to CLOSE
             # only when reloop is blocked (budget, convergence, or max_cycles).
+            #
+            # ``conc_sweep_failed`` is deliberately not short-circuited to CLOSE
+            # ahead of this. conc_sweep is a closeout concurrency scan, not the
+            # optimization itself, so its failure carries no evidence about
+            # whether the remaining budget could still find gain; treating it as
+            # terminal forfeited ~9.8h of a 16h run the one time it fired. It
+            # still becomes the stop_reason when reloop is blocked below, so the
+            # honest outcome survives without the budget being thrown away too.
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and (framework_agent_phase_enabled or explore_enabled):
                 # Reloop to the highest-leverage layer available: FRAMEWORK when
@@ -3156,6 +3160,10 @@ def compute_next_phase(
                         **exit_evidence,
                         **reloop_ev,
                         "loopback": True,
+                        # Which SWEEP exit opened this macro-cycle; the only way
+                        # to tell a clean closeout from a downgraded
+                        # ``conc_sweep_failed`` after the fact.
+                        "sweep_exit_reason": exit_reason,
                     },
                 )
             # R7: if looping was blocked by global convergence or the safety cap,

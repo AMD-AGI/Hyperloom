@@ -56,14 +56,39 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
     assert evidence["next_cycle"] == 1
 
 
-def test_sweep_closes_on_failed_conc_sweep_even_when_reloop_available():
+def test_sweep_reloops_on_failed_conc_sweep_when_reloop_available():
+    """A failed conc_sweep must not forfeit the remaining budget.
+
+    conc_sweep is a closeout concurrency scan, so its failure says nothing about
+    whether another macro-cycle could still find gain. Treating it as terminal
+    ended a 16h ATOM run at 6h09m with ~9.8h unspent.
+    """
     st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_EXPLORE
+    assert reason == "cycle_reloop"
+    assert evidence["loopback"] is True
+    # The failure is still recorded, just no longer terminal.
+    assert evidence.get("conc_sweep_status") == "failed"
+    assert evidence.get("sweep_exit_reason") == "conc_sweep_failed"
+
+
+def test_failed_conc_sweep_stays_the_stop_reason_when_reloop_is_blocked():
+    """Downgrading the exit must not launder the outcome.
+
+    With no budget left for another cycle there is nothing to salvage, so the
+    honest ``conc_sweep_failed`` has to survive as the stop_reason.
+    """
+    st = _sweep_state(max_minutes=48 * 60, started_hours_ago=48 - 10 / 60.0)
     st.last_sweep = {}
     st.last_conc_sweep = {"status": "failed"}
     target, reason, evidence = ps.compute_next_phase(st)
     assert target == ps.PHASE_CLOSE
     assert reason == "conc_sweep_failed"
     assert evidence.get("conc_sweep_status") == "failed"
+    assert evidence["reloop_blocked"] == "insufficient_remaining"
     assert "loopback" not in evidence
 
 

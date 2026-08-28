@@ -13,30 +13,16 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 
 
-class TestIsHighAccuracyRisk:
-    def test_no_risk_when_empty(self):
-        assert ag.is_high_accuracy_risk("", None) is False
-        assert ag.is_high_accuracy_risk(None or "", {}) is False
+class TestNoHighRiskPredicate:
+    def test_predicate_and_its_flag_lists_are_gone(self):
+        """The accuracy gate is unconditional; nothing may reintroduce a list.
 
-    @pytest.mark.parametrize(
-        "args",
-        [
-            "--kv-cache-dtype fp8_e4m3",
-            "--enforce-eager",
-            "--compilation-config '{\"x\": 1}'",
-            "--attention-backend aiter",
-            "--decode-attention-backend triton",
-        ],
-    )
-    def test_high_risk_cli_flags(self, args):
-        assert ag.is_high_accuracy_risk(args, None) is True
-
-    def test_high_risk_env_keys(self):
-        assert ag.is_high_accuracy_risk("", {"VLLM_ROCM_USE_AITER": "1"}) is True
-        assert ag.is_high_accuracy_risk("", {"SGLANG_USE_AITER": "1"}) is True
-
-    def test_neutral_inputs_are_low_risk(self):
-        assert ag.is_high_accuracy_risk("--max-num-seqs 64", {"FOO": "BAR"}) is False
+        A by-name catalogue of "risky" flags under-reports for any framework
+        that spells a knob differently or adds its own, which is how a whole
+        session's measured accuracies were discarded.
+        """
+        for name in ("is_high_accuracy_risk", "_HIGH_RISK_CLI_PATTERNS", "_HIGH_RISK_ENV_KEYS"):
+            assert not hasattr(ag, name), f"{name} should not be reintroduced"
 
 
 class TestParseEvalResults:

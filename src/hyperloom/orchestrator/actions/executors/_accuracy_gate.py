@@ -486,54 +486,16 @@ def accuracy_keep_block(
     return False, "", True
 
 
-# Flags indicating accuracy risk; matching variants must pass the gate.
-_HIGH_RISK_CLI_PATTERNS: tuple[str, ...] = (
-    "--kv-cache-dtype",
-    "--enforce-eager",
-    "--compilation-config",
-    "--attention-backend",
-    "--decode-attention-backend",
-)
-
-_HIGH_RISK_ENV_KEYS: frozenset[str] = frozenset(
-    {
-        "VLLM_ROCM_USE_AITER",
-        "VLLM_ROCM_USE_AITER_LINEAR",
-        "VLLM_ROCM_USE_AITER_RMSNORM",
-        "VLLM_ROCM_USE_AITER_FP8BMM",
-        "VLLM_ROCM_USE_AITER_FP4_ASM_GEMM",
-        "VLLM_ROCM_USE_AITER_TRITON_ROPE",
-        "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION",
-        "VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT",
-        "AMDGCN_USE_BUFFER_OPS",
-        "SGLANG_USE_AITER",
-    }
-)
-
-
-def is_high_accuracy_risk(
-    extra_args: str = "",
-    extra_envs: dict[str, str] | None = None,
-) -> bool:
-    """Return True if the variant changes precision or compute paths.
-
-    Args:
-        extra_args (str): The variant's server args to scan for high-risk
-            CLI flags.
-        extra_envs (dict[str, str] | None): The variant's env overrides to scan
-            for high-risk keys.
-
-    Returns:
-        bool: True when the variant matches any high-risk flag / env key.
-    """
-    args_lower = extra_args.lower()
-    for pattern in _HIGH_RISK_CLI_PATTERNS:
-        if pattern in args_lower:
-            return True
-    if extra_envs:
-        if set(extra_envs.keys()) & _HIGH_RISK_ENV_KEYS:
-            return True
-    return False
+# There is deliberately no "high accuracy risk" predicate here any more. It used
+# to decide whether EXPLORE bothered to parse a variant's eval result, matching
+# a hardcoded list of vLLM/SGLang flag names and VLLM_*/SGLANG_* env keys as
+# substrings. Two ways that silently under-reported: a framework spelling the
+# same knob differently (atom's ``--kv_cache_dtype`` never matched
+# ``--kv-cache-dtype``) and a framework-specific knob nobody enrolled (atom's
+# ``--online_quant_config``, which changes numeric precision directly). Since
+# bench-eval-bench runs the eval on every warmup_round regardless, the result is
+# already on disk and the only thing the predicate bought was discarding it, so
+# EXPLORE now parses and gates unconditionally.
 
 
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
@@ -844,7 +806,6 @@ __all__ = [
     "eval_contract_fingerprint",
     "eval_enablement_allowed",
     "eval_probe_summary",
-    "is_high_accuracy_risk",
     "launch_enablement_allowed",
     "parse_eval_results",
     "read_eval_probe",

@@ -12,7 +12,7 @@ Per-variant flow:
    ``explore_search`` results are evidence, never an eligibility gate.
 2. Render the variant's Magpie YAML, run E2E bench.
 3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
-   threshold + accuracy gate when ``is_high_accuracy_risk``).
+   threshold + accuracy gate on every variant that has a baseline).
 4. KEEP triggers an inlined stack rebench; if the rebench tput is below
    the threshold (default baseline_tput * 1.005) the variant is evicted
    (``KEEP_UNSTABLE`` → REVERT).
@@ -56,7 +56,6 @@ from ..stop_attribution import (
 )
 from ._accuracy_gate import (
     accuracy_passed,
-    is_high_accuracy_risk,
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
@@ -1522,24 +1521,21 @@ class ExploreExecutor:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
                     else:
-                        # Accuracy gate. For serving it runs only for high-risk
-                        # variants. For scriptable frameworks the image-quality
-                        # gate is the sole correctness signal, so every variant is
-                        # gated and a missing gate fails closed.
+                        # Accuracy gate. Every variant is gated: the
+                        # bench-eval-bench lifecycle already runs the eval on
+                        # every warmup_round unconditionally, so the result is
+                        # sitting on disk either way and skipping the parse only
+                        # discards a number already paid for. For scriptable
+                        # frameworks the image-quality gate is the sole
+                        # correctness signal, so a missing gate fails closed.
                         from hyperloom.inference_optimizer import framework_registry
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
-                        # Scriptable: gate every variant. Serving: only high-risk
-                        # variants, and only when a baseline accuracy was recorded.
-                        if scriptable or (
-                            baseline_accuracy > 0
-                            and is_high_accuracy_risk(
-                                extra_args=gv.extra_server_args,
-                                extra_envs=gv.extra_envs,
-                            )
-                        ):
+                        # Serving still needs a baseline to compare against;
+                        # scriptable compares against a fixed 1.0 reference.
+                        if scriptable or baseline_accuracy > 0:
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
@@ -1554,8 +1550,8 @@ class ExploreExecutor:
                             else:
                                 # No eval result. Both scriptable and serving
                                 # fail closed: a gated variant (scriptable, or a
-                                # high-risk serving variant with a baseline) that
-                                # yields no accuracy verdict likely broke the eval
+                                # serving variant with a baseline) that yields no
+                                # accuracy verdict likely broke the eval
                                 # path, so the change is reverted. The former
                                 # serving throughput-only skip is removed. Baseline
                                 # is where a missing accuracy result halts the run;
