@@ -47,6 +47,7 @@ class InternalTasksPhase(PhaseHandler):
         )
         params: dict[str, Any] = {
             "domain": "research_scout_specialist",
+            "source_phase": str(getattr(self.shared_state, "phase", "") or "PRELUDE").strip().upper(),
             "gap_canonical_id": f"gap.research_scout.round{int(round_id)}",
             "gap_symptom": (
                 "Collect proven priors (reference launch scripts, model "
@@ -180,6 +181,7 @@ class InternalTasksPhase(PhaseHandler):
         idempotency_key = "internal-static-recon-prelude"
         params: dict[str, Any] = {
             "domain": "static_recon_specialist",
+            "source_phase": str(getattr(state, "phase", "") or "PRELUDE").strip().upper(),
             "gap_canonical_id": "gap.static_recon.prelude",
             "gap_symptom": (
                 "Grep the framework source for un-bridged capability switches "
@@ -287,6 +289,7 @@ class InternalTasksPhase(PhaseHandler):
         domain = hint[0] if hint else "serving_specialist"
         params: dict[str, Any] = {
             "domain": domain,
+            "source_phase": str(getattr(state, "phase", "") or "INTERNAL").strip().upper(),
             "gap_canonical_id": f"gap.trajectory_review.cycle{cycle}",
             "gap_symptom": (
                 "The search has plateaued. Review the optimization trajectory "

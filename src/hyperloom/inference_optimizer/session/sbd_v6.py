@@ -87,13 +87,25 @@ def _read_event_file(
     return _public_event(event)
 
 
+def _event_identity(event_type: str, event: dict[str, Any]) -> tuple[str, str, str] | None:
+    ext = event.get("ext") if isinstance(event.get("ext"), dict) else {}
+    start_time = str(event.get("start_time") or "")
+    run_kind = str(ext.get("run_kind") or "")
+    if not start_time and not run_kind:
+        return None
+    return event_type, start_time, run_kind
+
+
 def _ensure_timeline_history(session_dir: Path | str) -> list[tuple[int, str, Path]]:
     history = _history_files(session_dir)
-    if history:
-        return history
-
     root = Path(session_dir)
-    sequence = 0
+    stored_events: list[tuple[int, str, Path, dict[str, Any]]] = []
+    for sequence, event_type, path in history:
+        event = _read_event_file(path, event_type)
+        if event is not None:
+            stored_events.append((sequence, event_type, path, event))
+
+    next_sequence = max((sequence for sequence, _, _ in history), default=0)
     for event_type in _EVENT_TYPES:
         legacy_path = _event_path(root, event_type)
         if not legacy_path.is_file():
@@ -101,11 +113,25 @@ def _ensure_timeline_history(session_dir: Path | str) -> list[tuple[int, str, Pa
         event = _read_event_file(legacy_path, event_type)
         if event is None:
             continue
-        sequence += 1
-        _write_event(
-            sbd_v6_timeline_event_path(root, sequence, event_type),
-            event,
+        if any(stored_event == event for _, _, _, stored_event in stored_events):
+            continue
+        identity = _event_identity(event_type, event)
+        matching = next(
+            (
+                row
+                for row in reversed(stored_events)
+                if identity is not None and _event_identity(row[1], row[3]) == identity
+            ),
+            None,
         )
+        if matching is not None:
+            _write_event(matching[2], event)
+            stored_events[stored_events.index(matching)] = (*matching[:3], event)
+            continue
+        next_sequence += 1
+        path = sbd_v6_timeline_event_path(root, next_sequence, event_type)
+        _write_event(path, event)
+        stored_events.append((next_sequence, event_type, path, event))
     return _history_files(root)
 
 
@@ -145,7 +171,7 @@ def read_timeline_event(
 ) -> dict[str, Any] | None:
     """Read the latest persisted event of one type."""
     _event_path(session_dir, event_type)
-    for _, stored_type, path in reversed(_history_files(session_dir)):
+    for _, stored_type, path in reversed(_ensure_timeline_history(session_dir)):
         if stored_type != event_type:
             continue
         event = _read_event_file(path, event_type)
@@ -180,7 +206,7 @@ def read_timeline_events(
     warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Read all persisted V6 events in execution order."""
-    history = _history_files(session_dir)
+    history = _ensure_timeline_history(session_dir)
     if history:
         events: list[dict[str, Any]] = []
         for _, event_type, path in history:

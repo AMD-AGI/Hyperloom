@@ -2272,11 +2272,36 @@ def _fail_install_step(
         category=category,
         status="failed",
         message=str(exc) or type(exc).__name__,
+        error_class=type(exc).__name__,
         **failure_fields,
     )
     event["status"] = "failed"
     event["end_time"] = now_iso(timespec="seconds")
     event["ext"]["hard_fail_step_id"] = step_id
+
+
+def _mark_pending_install_event_failed(
+    args: argparse.Namespace | None,
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    """Mark an unwrapped preflight exception on the pending install event."""
+    try:
+        from ..session.sbd_v6 import pending_install_event
+
+        event = pending_install_event(args)
+        if event is None:
+            event = _begin_install_event(args)
+        if str(event.get("status") or "") != "failed":
+            _fail_install_step(
+                event,
+                step_id="unhandled_preflight",
+                category="check",
+                exc=exc,
+            )
+        return event
+    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
+        return None
 
 
 def _run_install_step(

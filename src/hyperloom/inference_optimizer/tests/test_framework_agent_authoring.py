@@ -226,6 +226,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     params = spec["params"]
     assert params["framework_agent_authoring"] is True
     assert params["domain"] == "serving_specialist"
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
     assert params.get("task_kind") == "framework_authoring"
     pr_lead = params.get("pr_lead") or {}

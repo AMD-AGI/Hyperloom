@@ -266,6 +266,106 @@ def test_preflight_hard_failure_creates_session_and_final_sbd(tmp_path, monkeypa
     assert [(event["type"], event["status"]) for event in breakdown["timeline"]] == [("install", "failed")]
 
 
+def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    workspace = tmp_path / "sessions"
+    model = tmp_path / "Qwen-Test"
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+    monkeypatch.setattr(preflight, "_load_dotenv_fallback", lambda: None)
+    monkeypatch.setattr(preflight, "_provider_only_mode", lambda: "")
+    monkeypatch.setattr(preflight, "_load_kernel_agent_env_fallback", lambda: None)
+
+    def fail_runtime_paths():
+        raise RuntimeError("runtime path resolution failed")
+
+    monkeypatch.setattr(preflight, "_derive_runtime_paths", fail_runtime_paths)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--model", str(model)])
+
+    with pytest.raises(RuntimeError, match="runtime path resolution failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    session_dir = Path(os.environ[ENV_CURRENT_SESSION_DIR])
+    install = read_timeline_event(session_dir, "install")
+    assert install is not None
+    assert install["status"] == "failed"
+    assert install["end_time"]
+    assert install["ext"]["hard_fail_step_id"] == "unhandled_preflight"
+    failure = install["ext"]["steps"][-1]
+    assert failure["step_id"] == "unhandled_preflight"
+    assert failure["error_class"] == "RuntimeError"
+    assert failure["message"] == "runtime path resolution failed"
+
+
+def test_busy_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "active-session"
+    original_install = {
+        "type": "install",
+        "kind": "install",
+        "status": "succeeded",
+        "start_time": "2026-08-27T01:00:00+00:00",
+        "end_time": "2026-08-27T01:01:00+00:00",
+        "ext": {"run_kind": "fresh", "steps": []},
+    }
+    _write_json(resume_dir / "reports" / "sbd_v6" / "install.json", original_install)
+    _write_json(resume_dir / "session_breakdown.json", {"sentinel": "active"})
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    class FakeSessionLock:
+        def __init__(self, session_dir):
+            self.session_dir = Path(session_dir)
+
+        def acquire(self):
+            if self.session_dir == resume_dir:
+                raise optimizer_cli.SessionAlreadyRunning(resume_dir, {"pid": 123})
+            return self
+
+        def release(self):
+            return None
+
+    def fail_preflight(args):
+        preflight._begin_install_event(args)
+        raise RuntimeError("resume preflight failed")
+
+    monkeypatch.setattr(optimizer_cli, "SessionLock", FakeSessionLock)
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
+
+    with pytest.raises(RuntimeError, match="resume preflight failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    assert json.loads((resume_dir / "reports" / "sbd_v6" / "install.json").read_text(encoding="utf-8")) == (
+        original_install
+    )
+    assert json.loads((resume_dir / "session_breakdown.json").read_text(encoding="utf-8")) == {"sentinel": "active"}
+    failed_session = Path(os.environ[ENV_CURRENT_SESSION_DIR])
+    assert failed_session != resume_dir
+    install = read_timeline_event(failed_session, "install")
+    assert install is not None
+    assert install["status"] == "failed"
+    assert install["ext"]["run_kind"] == "resume"
+
+
 def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import model_gate
 
@@ -337,6 +437,48 @@ def test_timeline_history_bootstraps_legacy_fixed_events(tmp_path):
             "ext": {"run_kind": "fresh", "steps": []},
         },
     )
+    _write_json(
+        tmp_path / "reports" / "sbd_v6" / "model_gate.json",
+        {
+            "type": "model_gate",
+            "kind": "model_gate",
+            "status": "succeeded",
+            "start_time": "2026-08-27T01:02:00+00:00",
+            "end_time": "2026-08-27T01:03:00+00:00",
+            "ext": {"run_kind": "fresh", "checks": []},
+        },
+    )
+
+    write_timeline_event(
+        tmp_path,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T02:00:00+00:00",
+            "end_time": "2026-08-27T02:01:00+00:00",
+            "ext": {"run_kind": "resume", "steps": []},
+        },
+    )
+
+    assert [(event["type"], event["ext"]["run_kind"]) for event in read_timeline_events(tmp_path)] == [
+        ("install", "fresh"),
+        ("model_gate", "fresh"),
+        ("install", "resume"),
+    ]
+
+
+def test_timeline_history_recovers_after_partial_legacy_migration(tmp_path):
+    fresh_install = {
+        "type": "install",
+        "kind": "install",
+        "status": "succeeded",
+        "start_time": "2026-08-27T01:00:00+00:00",
+        "end_time": "2026-08-27T01:01:00+00:00",
+        "ext": {"run_kind": "fresh", "steps": []},
+    }
+    _write_json(tmp_path / "reports" / "sbd_v6" / "install.json", fresh_install)
+    _write_json(tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-install.json", fresh_install)
     _write_json(
         tmp_path / "reports" / "sbd_v6" / "model_gate.json",
         {
@@ -1198,6 +1340,38 @@ def test_framework_timeline_keeps_config_serving_specialist_out_of_source_arm(tm
     assert [row["task_id"] for row in event["ext"]["config_arm"]["specialist_runs"]] == ["config-task"]
     assert event["ext"]["source_arm"]["authoring_runs"] == []
     assert event["ext"]["critic_reviews"][0]["arm"] == "config"
+
+
+def test_framework_timeline_ignores_kernel_specialist_without_framework_evidence(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 4,
+        "specialist_rounds": [
+            {
+                "round_id": "kernel-specialist",
+                "task_id": "kernel-specialist",
+                "domain": "kernel_specialist",
+                "cycle": 4,
+                "completed_at": "2026-08-27T04:00:00+00:00",
+                "proposal_set": [{"name": "kernel-rewrite"}],
+            }
+        ],
+    }
+
+    operations = [
+        {
+            "operation_id": "op-kernel-specialist",
+            "kind": "specialist",
+            "name": "specialist round kernel-specialist",
+            "phase": "EXPLORE",
+            "source": "specialist_recorder_hook",
+            "macro_cycle": 4,
+            "status": "succeeded",
+            "outputs": state["specialist_rounds"][0],
+        }
+    ]
+
+    assert collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations) == []
 
 
 def test_framework_timeline_recovers_direct_upstream_patch_source(tmp_path):

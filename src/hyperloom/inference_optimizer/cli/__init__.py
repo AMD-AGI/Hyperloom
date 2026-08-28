@@ -130,6 +130,7 @@ from .parser import (
 )
 from .preflight import (
     _check_gfx_arch_resolvable,
+    _mark_pending_install_event_failed,
     _persist_install_event,
     _preflight as _preflight,
 )
@@ -1655,36 +1656,79 @@ def _preflight_failure_session_dir(args: argparse.Namespace) -> Path:
             if candidate.is_dir():
                 return candidate
 
+    return _new_preflight_failure_session_dir(args)
+
+
+def _new_preflight_failure_session_dir(
+    args: argparse.Namespace,
+    *,
+    failed_attempt: bool = False,
+) -> Path:
+    """Create a standalone session for a failed preflight attempt."""
     model_name = resolve_model_display_name(args)
     if not model_name:
         model_name = Path(os.environ.get("MODEL_PATH", "")).name
+    if not model_name:
+        resume_from = str(getattr(args, "resume_from", "") or "").strip()
+        if resume_from:
+            model_name = Path(resume_from).expanduser().parent.name
+    if failed_attempt:
+        model_name = f"{model_name or 'preflight'}-failed-attempt"
     return make_session_dir(model_name=model_name or "preflight-failure")
 
 
-def _persist_preflight_failure_artifacts(args: argparse.Namespace) -> Path | None:
+def _persist_preflight_failure_artifacts(
+    args: argparse.Namespace,
+    exc: BaseException,
+) -> Path | None:
     """Best-effort materialize the failed install event and final SBD."""
+    _mark_pending_install_event_failed(args, exc)
     try:
         session_dir = _preflight_failure_session_dir(args)
     except Exception:  # noqa: BLE001 — never replace the original preflight failure
         log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
         return None
 
-    if not (session_dir / "manifest.json").is_file():
-        try:
-            manifest_args = argparse.Namespace(**vars(args))
-            if not getattr(manifest_args, "model", None):
-                manifest_args.model = os.environ.get("MODEL_PATH", "")
-            write_manifest(session_dir, args=manifest_args)
-        except Exception:  # noqa: BLE001 — the install event can still stand alone
-            log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
-
-    _persist_install_event(args, session_dir)
+    session_lock = SessionLock(session_dir)
     try:
-        from ..breakdown import write_breakdown_json
+        session_lock.acquire()
+    except Exception as lock_exc:  # noqa: BLE001 — a busy resume must not mutate the active session
+        session_lock.release()
+        if not str(getattr(args, "resume_from", "") or "").strip():
+            log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
+            return None
+        log.warning(
+            "resume session unavailable for preflight failure artifacts (%s); using an isolated failed-attempt session",
+            lock_exc,
+        )
+        try:
+            session_dir = _new_preflight_failure_session_dir(args, failed_attempt=True)
+            session_lock = SessionLock(session_dir)
+            session_lock.acquire()
+        except Exception:  # noqa: BLE001 — never replace the original preflight failure
+            session_lock.release()
+            log.warning("failed to create an isolated SBD V6 preflight failure session", exc_info=True)
+            return None
 
-        write_breakdown_json(session_dir)
-    except Exception:  # noqa: BLE001 — never replace the original preflight failure
-        log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
+    try:
+        if not (session_dir / "manifest.json").is_file():
+            try:
+                manifest_args = argparse.Namespace(**vars(args))
+                if not getattr(manifest_args, "model", None):
+                    manifest_args.model = os.environ.get("MODEL_PATH", "")
+                write_manifest(session_dir, args=manifest_args)
+            except Exception:  # noqa: BLE001 — the install event can still stand alone
+                log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
+
+        _persist_install_event(args, session_dir)
+        try:
+            from ..breakdown import write_breakdown_json
+
+            write_breakdown_json(session_dir)
+        except Exception:  # noqa: BLE001 — never replace the original preflight failure
+            log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
+    finally:
+        session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
     return session_dir
 
@@ -1824,9 +1868,9 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
         resolved_urls = _preflight(args)
-    except BaseException:
+    except BaseException as exc:
         try:
-            _persist_preflight_failure_artifacts(args)
+            _persist_preflight_failure_artifacts(args, exc)
         except BaseException:  # noqa: BLE001 — preserve the original failure exactly
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise

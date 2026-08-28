@@ -274,6 +274,63 @@ def _operation_name(operation: dict[str, Any]) -> str:
     return str(operation.get("name") or operation.get("kind") or "").strip().lower()
 
 
+def _declared_source_phase(row: dict[str, Any]) -> str:
+    return (
+        str(
+            _first(
+                row.get("source_phase"),
+                _nested(row, "outputs", "source_phase"),
+                _nested(row, "inputs", "source_phase"),
+                _nested(row, "metadata", "extras", "source_phase"),
+            )
+            or ""
+        )
+        .strip()
+        .upper()
+    )
+
+
+def _source_phase(row: dict[str, Any]) -> str:
+    return _declared_source_phase(row) or str(row.get("phase") or "").strip().upper()
+
+
+def _specialist_payloads(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
+    return (
+        row,
+        _mapping(row.get("inputs")),
+        _mapping(row.get("outputs")),
+        _mapping(row.get("extensions")),
+    )
+
+
+def _is_framework_specialist(row: dict[str, Any], *, allow_legacy: bool) -> bool:
+    declared_phase = _declared_source_phase(row)
+    phase = declared_phase or str(row.get("phase") or "").strip().upper()
+    if not declared_phase and str(row.get("source") or "").strip().lower() == "specialist_recorder_hook":
+        phase = ""
+    if phase:
+        return phase in _FRAMEWORK_PHASES
+
+    agent = str(row.get("agent") or "").strip().lower()
+    if agent in {"framework_agent", "explore"}:
+        return True
+    if agent in {"enablement", "kernel", "kernel_agent", "prelude", "internal"}:
+        return False
+
+    payloads = _specialist_payloads(row)
+    if any(_optional_bool(payload.get("enablement")) is True for payload in payloads):
+        return False
+    if any(
+        _optional_bool(payload.get("framework_agent_authoring")) is True
+        or bool(payload.get("framework_agent_candidate_id"))
+        or bool(payload.get("framework_batch_id"))
+        or str(payload.get("task_kind") or "").strip().lower() in _AUTHORING_TASK_KINDS
+        for payload in payloads
+    ):
+        return True
+    return allow_legacy
+
+
 def _operation_task_id(operation: dict[str, Any]) -> str:
     return str(
         _first(
@@ -301,29 +358,26 @@ def _candidate_id(value: Any) -> str:
 
 def _is_framework_operation(operation: dict[str, Any]) -> bool:
     name = _operation_name(operation)
-    phase = str(operation.get("phase") or "").strip().upper()
+    phase = _source_phase(operation)
     agent = str(operation.get("agent") or "").strip().lower()
     outputs = _mapping(operation.get("outputs"))
-    source_phase = str(outputs.get("source_phase") or "").strip().upper()
     if name == "framework_agent":
         return True
     if name == "explore":
         if phase:
-            return phase in _FRAMEWORK_PHASES or source_phase in _FRAMEWORK_PHASES
-        if source_phase:
-            return source_phase in _FRAMEWORK_PHASES
+            return phase in _FRAMEWORK_PHASES
         return agent in {"framework_agent", "explore"}
     if name in {"integrate", "integrate_patch"}:
         if outputs.get("enablement") or outputs.get("enablement_landing"):
             return False
+        if phase:
+            return phase in _FRAMEWORK_PHASES
         return bool(
             agent in {"framework_agent", "explore"}
-            or phase in _FRAMEWORK_PHASES
             or outputs.get("framework_agent_authoring")
             or outputs.get("framework_agent_candidate_id")
-            or source_phase in _FRAMEWORK_PHASES
         )
-    return name.startswith("specialist") and (phase in _FRAMEWORK_PHASES or agent in {"framework_agent", "explore"})
+    return name.startswith("specialist") and _is_framework_specialist(operation, allow_legacy=True)
 
 
 def _new_framework_window(cycle: int, start_time: str = "") -> dict[str, Any]:
@@ -389,12 +443,21 @@ def _framework_windows(
     ):
         windows.append(_new_framework_window(current_cycle, str(state.get("phase_started_ts") or "")))
 
-    evidence_rows: list[dict[str, Any]] = [
-        operation for operation in recorded_operations if _is_framework_operation(operation)
-    ]
+    evidence_rows: list[dict[str, Any]] = []
+    for operation in recorded_operations:
+        if not _is_framework_operation(operation):
+            continue
+        if _operation_name(operation).startswith("specialist") and not _is_framework_specialist(
+            operation,
+            allow_legacy=False,
+        ):
+            continue
+        evidence_rows.append(operation)
     evidence_rows.extend(_dict_rows(state.get("framework_agent_batches")))
     evidence_rows.extend(_dict_rows(state.get("framework_agent_phase_progress")))
-    evidence_rows.extend(_dict_rows(state.get("specialist_rounds")))
+    evidence_rows.extend(
+        row for row in _dict_rows(state.get("specialist_rounds")) if _is_framework_specialist(row, allow_legacy=False)
+    )
     evidence_rows.extend(_dict_rows(state.get("framework_config_exploration_results")))
     explore_search = _mapping(state.get("explore_search"))
     tested = explore_search.get("tested")
@@ -569,6 +632,8 @@ def _specialist_rows(
         by_key[key] = merged
 
     for row in _window_state_rows(state, "specialist_rounds", window, window_count):
+        if not _is_framework_specialist(row, allow_legacy=True):
+            continue
         _upsert(row)
     for operation in operations:
         if not _operation_name(operation).startswith("specialist"):
