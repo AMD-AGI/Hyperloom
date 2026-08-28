@@ -423,6 +423,7 @@ def _clear_workload_env(monkeypatch):
         "ROCR_VISIBLE_DEVICES",
         "FRAMEWORK",
         "INFERENCEX_PATH",
+        "VLLM_USE_V2_MODEL_RUNNER",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -994,6 +995,80 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
     # Per-framework dispatch: the SGLang patcher must NOT run for a vLLM YAML.
     assert counts == {"vllm": 1, "sglang": 0}, counts
+
+
+def test_materialize_profile_vllm_forces_v1_model_runner(
+    tmp_path,
+    monkeypatch,
+):
+    """vLLM V2 skips torch profiler during CUDA graph capture, so profile forces V1."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["VLLM_USE_V2_MODEL_RUNNER"] == "0", envs.get("VLLM_USE_V2_MODEL_RUNNER")
+
+
+def test_materialize_profile_vllm_force_v1_wins_over_extra_envs(
+    tmp_path,
+    monkeypatch,
+):
+    """Profile must keep V1 even if a candidate extra_envs pin requests V2."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=True, sglang=False)
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(
+        src,
+        tmp_path,
+        extra_envs={"VLLM_USE_V2_MODEL_RUNNER": "1"},
+    )
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert envs["VLLM_USE_V2_MODEL_RUNNER"] == "0", envs.get("VLLM_USE_V2_MODEL_RUNNER")
+
+
+def test_materialize_baseline_vllm_does_not_force_v1_model_runner(
+    tmp_path,
+    monkeypatch,
+):
+    """Throughput baseline stays on vLLM's default runner selection."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    src = tmp_path / "baseline_vllm.yaml"
+    src.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "model": "/m",
+                    "envs": {"CONC": 32, "ISL": 256, "OSL": 1024},
+                },
+            }
+        )
+    )
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in envs, envs.get("VLLM_USE_V2_MODEL_RUNNER")
+
+
+def test_materialize_profile_sglang_does_not_force_vllm_v1(
+    tmp_path,
+    monkeypatch,
+):
+    """The V1 pin is vLLM-only; SGLang profile must not inherit it."""
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    _mock_patchers(monkeypatch, vllm=False, sglang=True)
+    src = _profile_yaml(tmp_path, "sglang", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    out = _materialize_config_with_envs(src, tmp_path)
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+    assert "VLLM_USE_V2_MODEL_RUNNER" not in envs, envs.get("VLLM_USE_V2_MODEL_RUNNER")
 
 
 def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(

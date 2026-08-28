@@ -30,6 +30,10 @@
 # today's safe behaviour: only delay_iterations / max_iterations +
 # ignore_frontend get injected.
 # Set HYPERLOOM_ENABLE_PATCH=0 to disable runtime patching entirely.
+#
+# vLLM V2 does not enable torch profiler during CUDA graph capture, so
+# materialize_config_with_envs forces VLLM_USE_V2_MODEL_RUNNER=0 on
+# profile/roofline only (baseline keeps vLLM's default runner).
 
 benchmark:
   framework: vllm

@@ -94,6 +94,9 @@ _SGLANG_DISABLE_CUDA_GRAPH_FLAG = "--disable-cuda-graph"
 # was attempted and did not apply. Distinct from "never attempted": patching can
 # be disabled for an image that already ships the patch.
 _TRACELENS_PATCH_UNAVAILABLE = "tracelens_runtime_patch_unavailable"
+# vLLM V2 does not wrap CUDA graph capture with torch profiler, so graph
+# kernels never land in capture_traces/. Profile/roofline force the V1 runner.
+_VLLM_USE_V2_MODEL_RUNNER = "VLLM_USE_V2_MODEL_RUNNER"
 _AGENTX_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
 
 # Quality-reference env names, in resolution order. Every scriptable workload
@@ -989,6 +992,7 @@ def materialize_config_with_envs(
     # a max_iterations that is above it (or non-positive, which vLLM reads as no limit)
     # instead of accepting the flag on its name alone.
     pending_vllm_profiler_cap: int = 0
+    pending_force_vllm_v1 = False
     if is_profile and not _is_scriptable_profile:
         try:
             r_val = float(envs.get("RANDOM_RANGE_RATIO", 1.0))
@@ -1131,6 +1135,7 @@ def materialize_config_with_envs(
             # (ATOM_PROFILE_OSL / ATOM_PROFILE_NUM_PROMPTS); defer to Magpie.
             profile_num_prompts = None
         elif "vllm" in fw:
+            pending_force_vllm_v1 = True
             existing_vllm_args = str(envs.get("EXTRA_VLLM_ARGS", ""))
             profiler_flags = [
                 ("delay_iterations", f"--profiler-config.delay_iterations {delay_iters}"),
@@ -1651,6 +1656,10 @@ def materialize_config_with_envs(
             # _finalize_framework_server_args already ran, so re-apply the sink-side
             # guard it ends with rather than shipping an unvalidated string.
             envs[framework_env] = validate_server_args_shell_safe(merged)
+    if pending_force_vllm_v1:
+        # Last word after extra_envs / unset_envs: V2 graph capture has no
+        # torch-profiler wrap, so profile must stay on V1.
+        envs[_VLLM_USE_V2_MODEL_RUNNER] = "0"
     # The rendered YAML is persisted, so credentials must not reach it.
     filtered_envs, dropped_credentials = filter_untrusted_env_mapping(
         envs,
