@@ -449,7 +449,8 @@ Two CLI flags configure this, both optional:
 - `--streams-per-partition N` (default `2`) is how many concurrent streams the
   benchmark places on each partition. One stream leaves each partition idle
   through the fixed per-pass cost; beyond two, on the workloads measured so far,
-  only queueing is added.
+  only queueing is added. A value below `1` is refused rather than replaced by
+  the default, so `0` is a usage error instead of a silent `2`.
 
 At launch the per-stream HBM footprint is checked against one partition's
 memory. A workload that provably will not fit is refused in milliseconds instead
@@ -470,7 +471,7 @@ declared mode there is a usage error rather than a silently unchecked assertion.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_PARTITION_GPU` | `0` | Which GPU's partition state describes this session. |
+| `HYPERLOOM_PARTITION_GPU` | `0` | Which GPU's partition state describes this session. A value that is not a GPU id falls back to `0` with a warning rather than silently — the fallback reads a different card, and every number the session files afterwards would carry that card's shape. |
 
 ### Runtime hand-off
 

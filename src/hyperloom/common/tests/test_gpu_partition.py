@@ -260,6 +260,29 @@ class TestFitsInPartition:
         layout = gp.layout_for("CPX", cu_per_partition=32, gib_per_partition=36.0)
         assert gp.fits_in_partition(18.0, layout, 2) is True
 
+    def test_a_zero_capacity_is_unknown_rather_than_a_limit(self):
+        """Shared with the caller's guard, which used to test ``is None`` instead."""
+        layout = gp.PartitionLayout(mode="CPX", partitions=8, cu_per_partition=32, gib_per_partition=0.0)
+        assert layout.capacity_known is False
+        assert gp.fits_in_partition(999.0, layout, 2) is True
+
+
+class TestCapacityKnown:
+    """One predicate for "is this capacity worth checking against".
+
+    Two call sites asked the question with different tests -- ``is None`` in the
+    validator and falsiness in the arithmetic -- so a zero took opposite paths
+    through them.
+    """
+
+    @pytest.mark.parametrize(
+        ("gib", "known"),
+        [(36.0, True), (0.1, True), (None, False), (0.0, False), (-1.0, False)],
+    )
+    def test_only_a_positive_capacity_is_known(self, gib, known):
+        layout = gp.PartitionLayout(mode="CPX", partitions=8, cu_per_partition=32, gib_per_partition=gib)
+        assert layout.capacity_known is known
+
 
 class TestPartitionDevicePredicate:
     def test_matches_a_partition_and_rejects_a_whole_card(self):
@@ -267,6 +290,35 @@ class TestPartitionDevicePredicate:
         is_partition = gp.partition_device_predicate(32)
         assert is_partition(32) is True
         assert is_partition(256) is False
+
+    def test_its_docstring_admits_it_has_no_in_tree_caller(self):
+        """Otherwise the next reader goes looking for the consumer and finds none."""
+        assert "No caller in this repository" in (gp.partition_device_predicate.__doc__ or "")
+
+
+class TestPublicSurface:
+    def test_the_dead_unpartitioned_mode_constant_is_gone(self):
+        """Defined and exported, referenced nowhere -- including by its own tests."""
+        assert not hasattr(gp, "UNPARTITIONED_MODE")
+        assert "UNPARTITIONED_MODE" not in gp.__all__
+
+    @pytest.mark.parametrize(
+        "name",
+        ["read_partition_mode", "read_partition_modes", "read_device_cu", "read_device_gib"],
+    )
+    def test_the_probe_helpers_behind_observe_partition_are_not_advertised(self, name):
+        """``observe_partition`` calls itself the single entry point a caller needs.
+
+        Listing the four steps it takes contradicted that: they are its call
+        graph, not the module's interface. They stay importable for the tests
+        that exercise each amd-smi payload shape.
+        """
+        assert name not in gp.__all__
+        assert callable(getattr(gp, name))
+
+    def test_everything_advertised_exists(self):
+        for name in gp.__all__:
+            assert hasattr(gp, name), name
 
 
 class TestPublishedShape:

@@ -319,9 +319,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "Raise it only with evidence, and note that every stream on a "
         "partition holds its own copy of the weights -- so this multiplies "
         "the memory the workload has to fit, and the session refuses to start "
-        "when it provably will not. Only a scriptable framework's benchmark "
-        "places work per partition; passing this with a serving framework "
-        "warns, because nothing would act on it.",
+        "when it provably will not. A value below 1 is refused rather than "
+        "quietly replaced by the default. Only a scriptable framework's "
+        "benchmark places work per partition; passing this with a serving "
+        "framework warns, because nothing would act on it.",
     )
     opt.add_argument(
         "--framework",

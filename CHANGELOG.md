@@ -29,7 +29,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   or if the card cannot be read — the flag exists to catch an external set that
   did not take, so an unverifiable assertion is treated as a failed one.
   `--streams-per-partition` (default `2`) is how many concurrent streams go on
-  each partition.<br/>
+  each partition; a value below `1` is refused rather than quietly replaced by
+  the default, since `0` is far more likely to be a mistake than a request.<br/>
   **The optimizer does not change the mode.** Setting it is privileged and
   disrupts every process holding a GPU context, which is not something an
   optimization loop should do between benchmark rounds. The card must be in its

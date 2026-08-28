@@ -1674,9 +1674,10 @@ def _export_partition_shape(
         model_path: Checkpoint to size the workload from. Without it the
             feasibility check has nothing to weigh and can only warn.
         precision: Resolved precision, which sets the bytes per weight.
-        shared_state: Persisted state on a resume, carrying any measured
-            per-stream peak. Tighter than the weight-bytes bound, so preferred
-            when present.
+        shared_state: Persisted state on a resume, consulted for the model
+            identity and for a ``peak_gib_per_stream`` that nothing in this
+            repository writes -- so in practice the footprint is the
+            weight-bytes bound either way.
 
     Returns:
         The published shape, or ``{}`` when this session has none.
@@ -2151,8 +2152,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
             nodes=max(int(getattr(args, "nodes", 1) or 1), int(getattr(state, "nodes", 1) or 1)),
             model_path=state.model_path or str(getattr(args, "model", "") or ""),
             precision=state.precision or getattr(args, "precision", None),
-            # A resume can size the workload against what the last session
-            # actually measured, which rules out a mode the weights alone fit.
+            # Passed for the persisted model identity. It is also where a
+            # measured per-stream peak would be read from, but nothing writes
+            # one, so a resume sizes against the same weight-bytes bound as a
+            # fresh launch.
             shared_state=state,
         )
         if state.compute_partition.get("mode"):

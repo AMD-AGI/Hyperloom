@@ -75,10 +75,6 @@ MODE_PARTITION_COUNTS: dict[str, int] = {
     "CPX": 8,
 }
 
-#: The unpartitioned mode: one partition spanning the whole card. The only mode
-#: every board supports, and what a card is in unless someone changed it.
-UNPARTITIONED_MODE = "SPX"
-
 #: The observed shape, published once at launch for the benchmark entrypoint to
 #: fan out across and for the provenance record to quote. Named here, in
 #: ``common``, because the platform fingerprint reads them and must not import
@@ -123,6 +119,18 @@ class PartitionLayout:
     def partitioned(self) -> bool:
         """Whether this mode splits the card at all."""
         return self.partitions > 1
+
+    @property
+    def capacity_known(self) -> bool:
+        """Whether :attr:`gib_per_partition` is a figure worth checking against.
+
+        One predicate for the two places that ask, so an unreadable capacity
+        cannot be treated as unknown by the caller that reports it and as a real
+        limit by the arithmetic that acts on it. A non-positive capacity is
+        unknown rather than tiny: no partition has zero memory, so the reading
+        is wrong rather than restrictive.
+        """
+        return self.gib_per_partition is not None and self.gib_per_partition > 0
 
     def describe(self) -> str:
         """Return a one-line summary for logs and reports."""
@@ -491,6 +499,11 @@ def published_shape(env: Mapping[str, str] | None = None) -> dict[str, Any] | No
 def partition_device_predicate(cu_per_partition: int):
     """Return a predicate selecting partition devices by CU count.
 
+    **No caller in this repository.** It is the reference implementation of a
+    rule the out-of-tree benchmark entrypoint is most likely to get wrong, kept
+    beside the documentation that states the rule rather than left to be
+    re-derived downstream; do not go looking for the consumer.
+
     The index-based alternative is what makes a partitioning measurement quietly
     wrong: HIP enumerates whole cards first, so under DPX on one card of eight
     ``device 0`` is a full 256-CU GPU and the partitions are devices 7 and 8.
@@ -535,14 +548,30 @@ def fits_in_partition(
         streams_per_partition: Concurrent streams intended per partition.
 
     Returns:
-        ``True`` when they fit, or when capacity is unknown -- an unknown is
+        ``True`` when they fit, or when either figure is unknown -- an unknown is
         reported by the caller that has the number, not guessed at here.
+
+    The unknown-capacity guard shares :attr:`PartitionLayout.capacity_known`
+    with :func:`~hyperloom.orchestrator.actions.executors._partition_shape.validate_session_shape`,
+    which tests it first so it can warn -- something a bool return cannot do.
+    That makes this guard unreachable from the in-tree caller by design, and it
+    stays because a predicate that silently multiplies by ``None`` for anyone
+    else is worse than one redundant test.
     """
-    if not layout.gib_per_partition or required_gib <= 0:
+    if not layout.capacity_known or required_gib <= 0:
         return True
-    return required_gib * max(1, int(streams_per_partition)) <= layout.gib_per_partition
+    # ``capacity_known`` has already established this is a positive float; the
+    # coercion is only so the shared predicate can carry the decision without
+    # the arithmetic having to re-assert the type.
+    capacity_gib = float(layout.gib_per_partition or 0.0)
+    return required_gib * max(1, int(streams_per_partition)) <= capacity_gib
 
 
+# The probe helpers behind observe_partition -- read_partition_mode(s),
+# read_device_cu, read_device_gib -- are deliberately absent. observe_partition's
+# docstring calls itself "the single entry point a caller needs", and listing the
+# steps it takes here would contradict that: they are the call graph, not the
+# interface. They stay importable for the tests that exercise each payload shape.
 __all__ = [
     "MODE_PARTITION_COUNTS",
     "PARTITION_COUNT_ENV",
@@ -550,7 +579,6 @@ __all__ = [
     "PARTITION_MODE_ENV",
     "PARTITION_STREAMS_ENV",
     "PARTITION_TOTAL_STREAMS_ENV",
-    "UNPARTITIONED_MODE",
     "PartitionError",
     "PartitionLayout",
     "fits_in_partition",
@@ -559,8 +587,4 @@ __all__ = [
     "parse_mode",
     "partition_device_predicate",
     "published_shape",
-    "read_device_cu",
-    "read_device_gib",
-    "read_partition_mode",
-    "read_partition_modes",
 ]

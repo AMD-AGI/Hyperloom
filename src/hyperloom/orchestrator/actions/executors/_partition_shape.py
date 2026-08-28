@@ -86,11 +86,29 @@ class ShapeVerdict:
 
 
 def partition_gpu_id() -> int:
-    """Return the GPU whose partition state describes this session (default 0)."""
-    try:
-        return max(0, int(os.environ.get(PARTITION_GPU_ENV, "0").strip() or 0))
-    except ValueError:
+    """Return the GPU whose partition state describes this session (default 0).
+
+    An unusable value is warned about rather than quietly replaced. Reading card
+    0 in silence is the exact mislabelling this module exists to prevent: the
+    session would file card 0's topology as its own while the benchmark ran on
+    the card the operator meant to name.
+    """
+    raw = os.environ.get(PARTITION_GPU_ENV, "").strip()
+    if not raw:
         return 0
+    try:
+        gpu = int(raw)
+    except ValueError:
+        gpu = -1
+    if gpu < 0:
+        log.warning(
+            "%s=%r is not a usable GPU id; reading compute partitioning from GPU 0 instead, "
+            "whose topology may not be this session's.",
+            PARTITION_GPU_ENV,
+            raw,
+        )
+        return 0
+    return gpu
 
 
 def per_stream_footprint_gib(
@@ -165,7 +183,7 @@ def per_stream_footprint_gib(
 def validate_session_shape(
     *,
     declared_mode: str = "",
-    streams: int = DEFAULT_STREAMS_PER_PARTITION,
+    streams: int | None = None,
     gpu_type: str | None = None,
     params: dict[str, Any] | None = None,
     shared_state: Any = None,
@@ -178,7 +196,11 @@ def validate_session_shape(
         declared_mode: The mode the operator asserts the card is in. Empty means
             no assertion, in which case an unreadable card is merely unrecorded
             rather than a refusal.
-        streams: Concurrent streams intended per partition.
+        streams: Concurrent streams intended per partition. ``None`` means the
+            caller named none and takes the default; a value below one is
+            refused, not quietly replaced by it. Tested against ``None`` rather
+            than falsiness for that reason -- ``0 or DEFAULT`` is ``DEFAULT``,
+            which would honour the one value most likely to be a mistake.
         gpu_type: Board name, used only if the CU probe fails.
         params: Task params, for the footprint resolution.
         shared_state: Live SharedState, for the footprint resolution.
@@ -204,8 +226,24 @@ def validate_session_shape(
     """
     warnings: list[str] = []
     notes: list[str] = []
+    try:
+        requested_streams = DEFAULT_STREAMS_PER_PARTITION if streams is None else int(streams)
+    except (TypeError, ValueError):
+        requested_streams = 0
+    if requested_streams < 1:
+        # Refused rather than defaulted, and refused before the card is touched:
+        # this is a usage error about the request, not a fact about the hardware,
+        # so it needs no probe to decide and must not differ from the CLI's own
+        # verdict on the same value.
+        return ShapeVerdict(
+            refusal=(
+                f"streams per partition must be >= 1, got {streams!r}. One stream per "
+                f"partition is the floor: a partition with no stream on it measures nothing, "
+                f"and a mode is only worth setting at two."
+            ),
+        )
+    streams = requested_streams
     gpu = partition_gpu_id() if gpu_id is None else gpu_id
-    streams = max(1, int(streams or DEFAULT_STREAMS_PER_PARTITION))
 
     layout = observe_partition(gpu, gpu_type=gpu_type)
     if layout is None:
@@ -270,13 +308,18 @@ def validate_session_shape(
         )
         return ShapeVerdict(layout=layout, warnings=tuple(warnings), notes=tuple(notes))
 
-    if layout.gib_per_partition is None:
+    if not layout.capacity_known:
+        # Shares its predicate with fits_in_partition rather than testing
+        # `is None` here and falsiness there, which sent a zero capacity down
+        # opposite paths. Checked here, ahead of the arithmetic, because only
+        # this side can say so out loud.
         warnings.append(
-            f"GPU {gpu} did not report its per-partition memory, so the {footprint_gib:.1f} GiB "
+            f"GPU {gpu} reported no usable per-partition memory, so the {footprint_gib:.1f} GiB "
             f"per stream could not be checked against a {layout.mode} partition."
         )
         return ShapeVerdict(layout=layout, warnings=tuple(warnings), notes=tuple(notes))
 
+    capacity_gib = float(layout.gib_per_partition or 0.0)
     needed = footprint_gib * streams
     if not fits_in_partition(footprint_gib, layout, streams):
         return ShapeVerdict(
@@ -284,7 +327,7 @@ def validate_session_shape(
             refusal=(
                 f"this workload does not fit GPU {gpu}'s {layout.mode} partitions: "
                 f"{streams} x {footprint_gib:.1f} GiB = {needed:.1f} GiB needed per partition, "
-                f"{layout.gib_per_partition:.1f} GiB available "
+                f"{capacity_gib:.1f} GiB available "
                 f"({layout.partitions} x {layout.cu_per_partition} CU). "
                 f"The {footprint_gib:.1f} GiB is "
                 + (
@@ -299,7 +342,7 @@ def validate_session_shape(
         )
 
     notes.append(
-        f"Per-partition memory : {needed:.1f} GiB needed of {layout.gib_per_partition:.1f} GiB "
+        f"Per-partition memory : {needed:.1f} GiB needed of {capacity_gib:.1f} GiB "
         f"({streams} x {footprint_gib:.1f} GiB, from {source})"
     )
     return ShapeVerdict(layout=layout, warnings=tuple(warnings), notes=tuple(notes))
@@ -350,26 +393,29 @@ def runtime_env(layout: PartitionLayout, streams: int, *, fanout: bool = True) -
 
 
 def session_shape_summary(
-    layout: PartitionLayout | None,
+    layout: PartitionLayout,
     streams: int,
     *,
     fanout_expected: bool = True,
 ) -> dict[str, Any]:
     """Summarize the session's partition shape for the report and the manifest.
 
+    A layout is required. An unknown shape is ``{}`` at the call site, not a
+    record of zeroes here: this used to accept ``None`` and answer with a
+    four-key mapping missing ``cu_probed``, ``gib_per_partition`` and
+    ``fanout_expected``, so a consumer that met it saw a second schema for the
+    same field -- one whose absent provenance key reads as a positive claim.
+
     Args:
-        layout: The observed topology, or ``None`` when unknown.
+        layout: The observed topology.
         streams: Streams placed on each partition.
         fanout_expected: Whether this session's benchmark places work on each
             partition. Recorded because it decides whether the throughput can be
             an aggregate at all, which the report has to state and cannot infer.
 
     Returns:
-        A JSON-safe mapping. ``mode`` is empty when the shape is unknown, which
-        the report distinguishes from an unpartitioned card.
+        A JSON-safe mapping, always carrying every key.
     """
-    if layout is None:
-        return {"mode": "", "partitions": 0, "cu_per_partition": 0, "streams_per_partition": 0}
     return {
         "mode": layout.mode,
         "partitions": layout.partitions,

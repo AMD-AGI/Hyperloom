@@ -168,7 +168,64 @@ class TestFeasibility:
         verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
 
         assert verdict.ok is True
-        assert any("did not report its per-partition memory" in w for w in verdict.warnings)
+        assert any("reported no usable per-partition memory" in w for w in verdict.warnings)
+
+    def test_a_zero_capacity_is_unknown_rather_than_a_limit_that_refuses_everything(self, card):
+        """The guard here and the one in ``fits_in_partition`` must not disagree.
+
+        A ``0.0`` capacity used to pass this side's ``is None`` test and then hit
+        the other side's falsiness test, so the arithmetic was skipped while the
+        warning that explains why was not printed. Both now ask
+        ``capacity_known``.
+        """
+        card(_layout("CPX", 32, gib=0.0))
+        verdict = ps.validate_session_shape(streams=2, params={"peak_gib_per_stream": 20.7})
+
+        assert verdict.ok is True
+        assert any("reported no usable per-partition memory" in w for w in verdict.warnings)
+        assert not any("GiB needed of" in n for n in verdict.notes)
+
+
+class TestStreamsAreRefusedNotDefaulted:
+    """``streams=0`` must not become the default, here or at the CLI.
+
+    The CLI already refuses it, and says in a comment why falsiness is the wrong
+    test. This entry point used ``streams or DEFAULT`` anyway, so the same value
+    exited 2 through one door and reported "Streams per partition: 2" through the
+    other.
+    """
+
+    @pytest.mark.parametrize("streams", [0, -1, -8])
+    def test_a_value_below_one_refuses(self, card, streams):
+        card(CPX_36)
+        verdict = ps.validate_session_shape(streams=streams, params={"peak_gib_per_stream": 1.0})
+
+        assert verdict.ok is False
+        assert "must be >= 1" in verdict.refusal
+        assert str(streams) in verdict.refusal
+
+    def test_it_refuses_before_the_card_is_read(self, monkeypatch):
+        """A usage error about the request needs no probe to decide."""
+
+        def _fail(*_args, **_kwargs):
+            raise AssertionError("the card must not be read to refuse streams=0")
+
+        monkeypatch.setattr(ps, "observe_partition", _fail)
+        assert ps.validate_session_shape(streams=0).ok is False
+
+    def test_omitted_streams_still_take_the_default(self, card):
+        """``None`` means "not named" and is the only thing that may default."""
+        card(CPX_36)
+        for verdict in (
+            ps.validate_session_shape(params={"peak_gib_per_stream": 1.0}),
+            ps.validate_session_shape(streams=None, params={"peak_gib_per_stream": 1.0}),
+        ):
+            assert verdict.ok is True
+            assert any(f"Streams per partition: {ps.DEFAULT_STREAMS_PER_PARTITION}" in n for n in verdict.notes)
+
+    def test_a_non_numeric_request_refuses_rather_than_raises(self, card):
+        card(CPX_36)
+        assert ps.validate_session_shape(streams="two").ok is False  # type: ignore[arg-type]
 
 
 class TestFitCheckNeedsAFanOut:
@@ -293,9 +350,30 @@ class TestRuntimeEnv:
 
 
 class TestSessionShapeSummary:
-    def test_an_unknown_shape_is_distinguishable_from_an_unpartitioned_one(self):
-        assert ps.session_shape_summary(None, 2)["mode"] == ""
+    def test_an_unknown_shape_is_absent_rather_than_a_second_schema(self):
+        """No ``layout is None`` branch: an unknown shape is ``{}`` at the caller.
+
+        The branch that used to answer ``None`` returned four keys where the live
+        path returns seven, so ``cu_probed`` and ``fanout_expected`` were missing
+        rather than false -- and a missing provenance key is how the report came
+        to claim a board-table derivation it had not made.
+        """
+        with pytest.raises(AttributeError):
+            ps.session_shape_summary(None, 2)  # type: ignore[arg-type]
         assert ps.session_shape_summary(SPX_288, 2)["mode"] == "SPX"
+
+    def test_every_key_is_present_on_every_call(self):
+        expected = {
+            "mode",
+            "partitions",
+            "cu_per_partition",
+            "gib_per_partition",
+            "streams_per_partition",
+            "cu_probed",
+            "fanout_expected",
+        }
+        assert set(ps.session_shape_summary(SPX_288, 2)) == expected
+        assert set(ps.session_shape_summary(CPX_36, 1, fanout_expected=False)) == expected
 
     def test_it_records_whether_the_cu_count_was_probed(self):
         assert ps.session_shape_summary(CPX_36, 2)["cu_probed"] is True
@@ -381,6 +459,30 @@ class TestEnvReaders:
     def test_the_gpu_id_is_clamped_and_never_raises(self, monkeypatch, raw, expected):
         monkeypatch.setenv(ps.PARTITION_GPU_ENV, raw)
         assert ps.partition_gpu_id() == expected
+
+    @pytest.mark.parametrize("raw", ["abc", "-1", "0x3", "2.5"])
+    def test_an_unusable_gpu_id_is_warned_about_not_swallowed(self, monkeypatch, caplog, raw):
+        """Card 0's topology filed as the session's is the mislabelling this prevents.
+
+        The reader returns 0 so a bad value cannot crash a launch, but it has to
+        say so: the fallback reads a different card, and every number the session
+        files afterwards carries that card's shape.
+        """
+        monkeypatch.setenv(ps.PARTITION_GPU_ENV, raw)
+        with caplog.at_level("WARNING"):
+            assert ps.partition_gpu_id() == 0
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any(ps.PARTITION_GPU_ENV in m for m in messages)
+        assert any(repr(raw) in m for m in messages)
+        assert any("may not be this session's" in m for m in messages)
+
+    @pytest.mark.parametrize("raw", ["0", "7", ""])
+    def test_a_usable_gpu_id_says_nothing(self, monkeypatch, caplog, raw):
+        monkeypatch.setenv(ps.PARTITION_GPU_ENV, raw)
+        with caplog.at_level("WARNING"):
+            ps.partition_gpu_id()
+        assert caplog.records == []
 
     def test_the_module_exports_no_reader_without_a_caller(self):
         """Two env readers shipped with only their own tests as callers; both are gone."""
