@@ -1546,6 +1546,117 @@ def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
     return None
 
 
+#: Visible-device env masks, in the repo's ROCm precedence order.
+#: ``ROCR_VISIBLE_DEVICES`` is canonical on ROCm (the CLI preflight drops
+#: ``HIP_VISIBLE_DEVICES`` when ROCR is set); HIP/CUDA cover CUDA-style and
+#: legacy pins. Same order as ``gpu_pool._visible_device_mask`` /
+#: ``policy.gate.detect_gpu_count`` so every layer agrees on "the pin".
+#: (Kept local rather than imported from ``gpu_pool``: this module is the pure
+#: helper layer and ``gpu_pool`` drags in the SQLite connection.)
+_VISIBLE_DEVICE_VARS: tuple[str, ...] = (
+    "ROCR_VISIBLE_DEVICES",
+    "HIP_VISIBLE_DEVICES",
+    "CUDA_VISIBLE_DEVICES",
+)
+
+
+def _parse_device_list(raw: Any) -> list[int]:
+    """Parse a visible-devices mask string into absolute GPU ids.
+
+    Args:
+        raw: A ``,``/``;``-separated mask (``"4,5,6,7"``); ``None`` and
+            malformed entries are tolerated.
+
+    Returns:
+        Unique non-negative ids in first-seen order; ``[]`` for an empty or
+        fully malformed mask.
+    """
+    out: list[int] = []
+    for part in str(raw or "").replace(";", ",").split(","):
+        tok = part.strip()
+        if not tok:
+            continue
+        try:
+            idx = int(tok)
+        except ValueError:
+            continue
+        if idx >= 0 and idx not in out:
+            out.append(idx)
+    return out
+
+
+def _resolve_gpu_pin(
+    *,
+    recipe_envs: Mapping[str, Any] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve the run's ACTUAL GPU pin for the geak handoff.
+
+    GEAK launches full servers out-of-process and re-writes a visible-devices
+    mask for each one. Without the pin it can only guess, and the guess
+    (``0..tp-1``) silently lands on physical GPU 0 — see issue #1312, where a
+    run pinned elsewhere collided with a foreign tenant on card 0. Forwarding
+    the pin lets the consumer compose masks instead of clobbering them.
+
+    Source precedence: the materialized baseline recipe's ``benchmark.envs``
+    (the mask Hyperloom actually benched with) before the process env, and
+    ``ROCR_VISIBLE_DEVICES`` before ``HIP``/``CUDA`` within each.
+
+    Args:
+        recipe_envs: The baseline recipe's ``benchmark.envs`` mapping (may be
+            ``None`` when no recipe is materialized yet).
+        environ: Environment mapping to read; defaults to ``os.environ``.
+
+    Returns:
+        ``{"var", "value", "ids", "source"}`` for the winning mask, where
+        ``ids`` are ABSOLUTE device ids and ``source`` is
+        ``"baseline_recipe"`` or ``"process_env"``. ``{}`` when no mask is set
+        anywhere — meaning "whole machine visible", not "pinned to 0".
+    """
+    env = os.environ if environ is None else environ
+    for source, table in (("baseline_recipe", recipe_envs or {}), ("process_env", env)):
+        for var in _VISIBLE_DEVICE_VARS:
+            raw = table.get(var)
+            if raw is None or str(raw).strip() == "":
+                continue
+            value = str(raw).strip()
+            return {"var": var, "value": value, "ids": _parse_device_list(value), "source": source}
+    return {}
+
+
+def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> str:
+    """Resolve the handoff's ``gpu_ids`` in the coordinate system GEAK applies it in.
+
+    ``gpu_ids`` is a HIP-level device list: the consumer exports it as
+    ``HIP_VISIBLE_DEVICES``/``CUDA_VISIBLE_DEVICES`` for the servers it
+    launches, and HIP indexes into the ROCr-visible set. So:
+
+      * pinned with ``ROCR_VISIBLE_DEVICES`` — the child inherits that mask, so
+        the ids must be LOGICAL positions inside it (``ROCR=6`` → ``"0"``),
+        capped at ``tp`` as before (``ROCR=4,5,6,7`` with ``tp=2`` → ``"0,1"``);
+      * pinned with ``HIP``/``CUDA`` — ROCr still shows every card, so the mask
+        is forwarded VERBATIM (``HIP=4,5`` → ``"4,5"``);
+      * not pinned — ``0..tp-1``, unchanged.
+
+    The absolute pin travels separately in ``handoff["gpu_pin"]`` for consumers
+    that write ``ROCR_VISIBLE_DEVICES`` themselves.
+
+    Args:
+        gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+        tp: Tensor-parallel size; ``<= 1`` is treated as 1.
+
+    Returns:
+        A comma-separated device list, never empty.
+    """
+    width = max(int(tp or 1), 1)
+    ids = list((gpu_pin or {}).get("ids") or [])
+    if not ids:
+        return ",".join(str(i) for i in range(width))
+    if str((gpu_pin or {}).get("var") or "") == "ROCR_VISIBLE_DEVICES":
+        return ",".join(str(i) for i in range(min(len(ids), width)))
+    return ",".join(str(i) for i in ids)
+
+
 def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
     """Extract a CLI flag's value from a server-args string.
 

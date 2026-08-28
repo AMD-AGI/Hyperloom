@@ -38,6 +38,29 @@ GEAK's `e2e_workflow` recursively drives `kernel_workflow` to author and tune th
 individual hot kernels worth fixing. See
 [Hyperloom optimization loop](../conceptual/optimization-loop.md).
 
+## GPU pinning in the handoff
+
+GEAK launches full servers out-of-process (baseline, profile, config-tuning
+validation) and writes a visible-devices mask for each one, so the handoff has
+to say which cards the run owns. Two fields carry that, in two different
+coordinate systems:
+
+| Field | Coordinate system | Value |
+|-------|-------------------|-------|
+| `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an inherited `ROCR_VISIBLE_DEVICES` mask, capped at `tp` (`ROCR=6` → `"0"`); a `HIP`/`CUDA` mask verbatim (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned |
+| `gpu_pin` | absolute device ids | `{"var", "value", "ids", "source"}` for the winning mask — omitted entirely when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0" |
+
+The mask is resolved from the materialized baseline recipe's `benchmark.envs`
+first (the mask Hyperloom actually benched with), then the process environment,
+checking `ROCR_VISIBLE_DEVICES` before `HIP_VISIBLE_DEVICES` /
+`CUDA_VISIBLE_DEVICES` — the same precedence as `orchestrator/bus/gpu_pool.py`
+and `orchestrator/policy/gate.py`.
+
+A consumer that re-exports `HIP_VISIBLE_DEVICES` should use `gpu_ids`; one that
+writes `ROCR_VISIBLE_DEVICES` itself must use `gpu_pin["value"]`, because
+writing `gpu_ids` into `ROCR_VISIBLE_DEVICES` resets the child to physical card
+0 regardless of the run's pin.
+
 ## GEAK documentation
 
 For detailed documentation on GEAK, see [GEAK on ROCm Docs](https://rocm.docs.amd.com/projects/geak/en/latest/).

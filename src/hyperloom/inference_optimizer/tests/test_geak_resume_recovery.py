@@ -226,3 +226,49 @@ async def test_geak_handoff_preserves_serving_fidelity_knobs_and_output_metric(
     assert handoff["accepted_flags"] == "--no-enable-prefix-caching"
     assert handoff["raw_baseline_tput"] == 100.0
     assert handoff["e2e_metric"] == "output"
+
+
+@pytest.mark.asyncio
+async def test_geak_handoff_forwards_the_actual_gpu_pin(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The handoff must carry the run's real pin, not the literal card 0 (#1312).
+
+    GEAK writes its own visible-devices mask for every server it launches. With
+    no pin in the handoff it defaults to physical GPU 0, so a run pinned to the
+    last card silently benchmarks on card 0 and OOMs against whatever else holds
+    it. ``gpu_ids`` stays HIP-logical (the consumer inherits the ROCR mask);
+    ``gpu_pin`` carries the absolute mask for consumers that write ROCR
+    themselves.
+    """
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = SharedState(baseline_tput=100.0, model_path="/models/m", gpu_type="mi355x")
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+
+    monkeypatch.setenv("TP", "1")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "7")
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+
+    def _runner_resolved(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _runner_resolved,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["schema_version"] >= 3
+    assert handoff["gpu_pin"] == {
+        "var": "ROCR_VISIBLE_DEVICES",
+        "value": "7",
+        "ids": [7],
+        "source": "process_env",
+    }
+    # Logical inside the inherited mask: index 0 IS physical card 7.
+    assert handoff["gpu_ids"] == "0"

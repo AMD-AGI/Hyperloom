@@ -671,6 +671,11 @@ def _geak_reconstruct_from_disk(
             "workload": handoff.get("workload"),
             "accepted_flags": handoff.get("accepted_flags"),
             "raw_baseline_tput": _to_float(handoff.get("raw_baseline_tput")),
+            # Device set + the run's absolute pin: a GEAK baseline that reads
+            # `no_gain`/`incomplete` because its servers landed on a foreign
+            # tenant's card is otherwise indistinguishable from a real result.
+            "gpu_ids": handoff.get("gpu_ids"),
+            "gpu_pin": handoff.get("gpu_pin"),
         }
 
     # 2) a flushed-but-unpromoted result.json (absent or non-ok status).
