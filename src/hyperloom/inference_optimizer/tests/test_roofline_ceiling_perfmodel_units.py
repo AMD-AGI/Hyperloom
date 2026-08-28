@@ -438,6 +438,7 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     peak, _kind = rc.select_peak_and_bound(mem, cmp)
     assert peak == max(mem, cmp)
 
+
 def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path):
     """Recognized --quantization wins; unrecognized quant falls through; precision tags do not."""
     meta_fp32 = _dense_meta(weight_dtype_bytes=4.0)
