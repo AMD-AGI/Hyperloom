@@ -62,6 +62,18 @@ class TestCategorizeKernelName:
             # 3.7% of that trace's GPU time; ``_quant_kernel`` had filed these as
             # ``cast``, which is launch-bound, inflating the fusible share.
             assert dg.categorize_kernel_name(name) == "gemm", name
+        # 49% of the trace: MLA attention, previously all of it ``other``.
+        assert dg.categorize_kernel_name("aiter::mla_pfl_bf16_a16w16_causal_subQ16_mqa16") == "attention"
+        assert dg.categorize_kernel_name("aiter::mla_a16w16_qh64_qseqlen1_gqaratio64_v3_ps") == "attention"
+        # A matrix-core MoE GEMM that already fuses SiLU is not an unfused
+        # elementwise op: counting it as ``activation`` overstated the headroom.
+        assert dg.categorize_kernel_name("mfma_moe1_silu_mul_afp4_wfp4_bf16_t32x128x256_pm1_async_v32") == "moe"
+        assert dg.categorize_kernel_name("mfma_moe2_afp4_wfp4_bf16_cshuffle_t32x128x256_vscale_fix3") == "moe"
+        assert dg.categorize_kernel_name("moe_reduction_kernel_plain_bf16_topk9_md6144") == "moe"
+        assert dg.categorize_kernel_name("void aiter::grouped_topk_kernel<hip_bfloat16, float>") == "moe"
+        # Narrow on purpose: a quant kernel that merely mentions MoE stays a
+        # fusion candidate rather than disappearing into the MoE bucket.
+        assert dg.categorize_kernel_name("void aiter::fused_mx_quant_moe_sort_kernel<std::bfloat16_t>") != "moe"
 
 
 class TestDiagnoseFromShares:

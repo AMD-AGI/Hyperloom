@@ -79,9 +79,9 @@ DEFAULT_MAX_BUSY_WALL = 0.45
 # GLM-5.2-MXFP4 trace) is filed as ``cast`` and wrongly counted as launch-bound.
 _KERNEL_CATEGORY_RULES: tuple[tuple[str, str], ...] = (
     # MoE first: its kernels are GEMMs too, and the table reports them separately.
-    ("moe", r"fused_moe|moe_align|moe_sum|_routing|expert"),
+    ("moe", r"fused_moe|mfma_moe|moe_align|moe_sum|moe_reduction|_routing|expert|grouped_topk"),
     ("gemm", r"cijk_|tensile|gemm|matmul|_bhs_"),
-    ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped"),
+    ("attention", r"paged_attention|flash|fmha|\bmha\b|attention|attn_|_fwd_kernel|_fwd_grouped|mla_|_mla"),
     ("conv", r"conv1d|_conv_|\bconv\b"),
     ("rmsnorm", r"rmsnorm|rms_norm|_rms_"),
     ("layernorm", r"layernorm|layer_norm"),
