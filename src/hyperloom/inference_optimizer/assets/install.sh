@@ -857,6 +857,18 @@ _kernel_forge_root() {
   return 1
 }
 
+# Readiness probe for kernel_agents, used both as the skip-the-install gate and
+# as the post-install verification so the two can never drift apart. Checks what
+# the runtime actually needs: the CLI module, the fusion pipeline, the codex SDK,
+# and that `forge-gemm-tune` is a registered subcommand of the CLI group (the
+# registration runs at import, so `main.commands` is populated by then).
+_KERNEL_AGENTS_READY_PY='
+import sys
+import kernel_agents, kernel_agents.fusion, openai_codex  # noqa: F401
+from kernel_agents.cli import main
+sys.exit(0 if "forge-gemm-tune" in main.commands else 1)
+'
+
 ensure_kernel_agents() {
   # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
   # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
@@ -873,14 +885,17 @@ ensure_kernel_agents() {
   # pod that already has kernel_agents but no openai_codex would skip the install
   # and leave the OpenAI-only side with a codex provider it cannot construct.
   # kernel_agents.fusion for the same reason: a checkout from before fusion was
-  # absorbed imports the CLI fine and then fails at forge-fuse.
-  if "$PYTHON" -c "import kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-      >/dev/null 2>&1; then
-    log "kernel_agents already importable; skipping install (codex SDK present)"
+  # absorbed imports the CLI fine and then fails at forge-fuse. And the
+  # forge-gemm-tune subcommand for the same reason once more: GEMM tuning now
+  # runs as `python -m kernel_agents.cli forge-gemm-tune run`, so a pre-existing
+  # install from before that command was registered passes every import here and
+  # then dies at the tuning step with "No such command 'forge-gemm-tune'".
+  if "$PYTHON" -c "$_KERNEL_AGENTS_READY_PY" >/dev/null 2>&1; then
+    log "kernel_agents already importable with forge-gemm-tune; skipping install (codex SDK present)"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "kernel_agents / codex SDK not importable (check-only; would install from ${root})"
+    warn "kernel_agents / forge-gemm-tune / codex SDK not ready (check-only; would install from ${root})"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -904,9 +919,9 @@ ensure_kernel_agents() {
   # KernelForge's provider fallback then turns that into a silent claude run that
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-    && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
-    || die "kernel_agents / codex SDK import failed after install from ${root}"
+  "$PYTHON" -c "$_KERNEL_AGENTS_READY_PY" \
+    && log "kernel_agents installed OK from ${root} (claude + codex extras, forge-gemm-tune registered)" \
+    || die "kernel_agents / forge-gemm-tune / codex SDK check failed after install from ${root}"
 }
 
 # --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---

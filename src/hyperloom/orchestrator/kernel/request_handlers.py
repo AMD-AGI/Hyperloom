@@ -1910,18 +1910,44 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
 
 
 def _forge_gemm_tune_available() -> bool:
-    """Check if the GEMM tuner is importable, or its host CLI is on PATH.
+    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
 
     `forge_gemm_tune` no longer ships a console script of its own -- its
-    commands live under `kernel-agents forge-gemm-tune`.
+    commands live under `kernel-agents forge-gemm-tune`, and the tool invokes
+    them as ``sys.executable -m kernel_agents.cli forge-gemm-tune run``. Two
+    weaker checks were tried first and both let the task through to a hard
+    failure:
+
+    * ``shutil.which("kernel-agents")`` -- a console script on PATH can belong
+      to a different virtualenv than ``sys.executable``, in which case ``-m
+      kernel_agents.cli`` still raises ``ModuleNotFoundError``.
+    * ``find_spec("forge_gemm_tune")`` -- ``FORGE_GEMM_TUNE_ROOT`` supports
+      installing ``src/forge_gemm_tune`` on its own, and that wheel explicitly
+      excludes ``kernel_agents``. It also says nothing about whether an already
+      installed, older ``kernel_agents`` registers the subcommand at all, which
+      is the case the install flow's importability probe skips over.
+
+    So ask the subcommand itself, in a subprocess, so a heavy CLI import cannot
+    land in the orchestrator's own process. ``--help`` exits 0 only if
+    ``kernel_agents.cli`` imported and ``forge-gemm-tune`` is registered on it.
     """
-    if shutil.which("kernel-agents"):
-        return True
     try:
-        spec = importlib.util.find_spec("forge_gemm_tune")
-        return spec is not None
-    except (ModuleNotFoundError, ValueError):
+        proc = subprocess.run(
+            [sys.executable, "-m", "kernel_agents.cli", "forge-gemm-tune", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
         return False
+    if proc.returncode == 0:
+        return True
+    log.info(
+        "forge-gemm-tune preflight failed (rc=%s): %s",
+        proc.returncode,
+        ((proc.stderr or proc.stdout or "").strip()[-400:] or "(no output)"),
+    )
+    return False
 
 
 def _resolve_aiter_root_for_forge() -> str:
@@ -3732,9 +3758,12 @@ async def _run_forge_gemm_tuning(
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "forge-gemm-tune not found (it runs as "
-                "'kernel-agents forge-gemm-tune'). Install via "
-                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
+                "forge-gemm-tune is not runnable in this interpreter: "
+                f"'{sys.executable} -m kernel_agents.cli forge-gemm-tune --help' "
+                "failed. It lives in the KernelForge root package, so installing "
+                "src/forge_gemm_tune alone is not enough -- install the "
+                "KernelForge root ('pip install <FORGE_PATH>[claude,codex]') or "
+                "set FORGE_PATH and re-run install.sh."
                 f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
             ),
             "backend": "forge",
