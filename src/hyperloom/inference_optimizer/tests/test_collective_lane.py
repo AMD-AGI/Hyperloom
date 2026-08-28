@@ -639,6 +639,7 @@ def test_resume_compat_old_integration_status_accepted(tmp_path):
     )
     assert collective_integration_pending(fake_state) is True
 
+
 def _keep_campaign(attempt_id: str, integration_id: str) -> dict:
     return {
         "collective_attempt_id": attempt_id,
