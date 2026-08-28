@@ -3637,10 +3637,9 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
-        phase (str): the phase the round ran in; falls back to
-            ``entry["phase"]``, then to the reader's timestamp backfill. A
-            specialist runs in more than one phase, so this cannot be a
-            constant.
+        phase (str): the runtime phase used when the entry does not already
+            declare ``source_phase``. A specialist runs in more than one phase,
+            so this cannot be a constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3648,21 +3647,24 @@ def record_specialist_round(
         trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
-        key = str(entry.get("round_id") or "") or None
+        source_phase = str(entry.get("source_phase") or phase or entry.get("phase") or "").strip().upper()
+        recorded_entry = dict(entry)
+        if source_phase:
+            recorded_entry.setdefault("source_phase", source_phase)
+        key = str(recorded_entry.get("round_id") or "") or None
         _recorder(session_dir, producer).record_item(
             "specialist_runs",
-            dict(entry),
+            recorded_entry,
             key=key,
         )
-        round_id = str(entry.get("round_id") or key or entry.get("task_id") or "unknown")
+        round_id = str(recorded_entry.get("round_id") or key or recorded_entry.get("task_id") or "unknown")
         operation_id = _stable_id("op", "specialist", round_id)
         round_subject_id = _stable_id("subject", "specialist-round", round_id)
-        domains = list(entry.get("domains") or [])
-        if entry.get("domain"):
-            domains.append(str(entry.get("domain")))
-        domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
+        domains = list(recorded_entry.get("domains") or [])
+        if recorded_entry.get("domain"):
+            domains.append(str(recorded_entry.get("domain")))
+        domains.extend(str(tag) for tag in (recorded_entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
-        source_phase = str(entry.get("source_phase") or "EXPLORE").strip().upper()
         record_subject(
             session_dir,
             subject_id=round_subject_id,
@@ -3671,7 +3673,7 @@ def record_specialist_round(
             name=round_id,
             attributes={
                 "domains": domains,
-                "proposals_total": entry.get("proposals_total"),
+                "proposals_total": recorded_entry.get("proposals_total"),
             },
             producer=producer,
         )
@@ -3689,7 +3691,7 @@ def record_specialist_round(
             )
             domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
         proposal_subjects: list[dict[str, Any]] = []
-        proposals = entry.get("proposal_set")
+        proposals = recorded_entry.get("proposal_set")
         if isinstance(proposals, list):
             for index, proposal in enumerate(proposals):
                 if not isinstance(proposal, Mapping):
@@ -3715,18 +3717,18 @@ def record_specialist_round(
             kind="specialist",
             name=f"specialist round {round_id}",
             phase=source_phase,
-            status="succeeded" if entry.get("completed_at") else "partial",
+            status="succeeded" if recorded_entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
             purpose="proposal",
-            scope=str(entry.get("scope") or ""),
+            scope=str(recorded_entry.get("scope") or ""),
             strategy_group="specialist",
             strategy="multi_domain",
             producer=producer,
-            ended_at=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            ended_at=str(recorded_entry.get("completed_at") or recorded_entry.get("dispatched_at") or ""),
             subject={"subject_id": round_subject_id, "subject_type": "specialist_round"},
             subjects=domain_subjects + proposal_subjects,
-            outputs=dict(entry),
+            outputs=recorded_entry,
             adoption_refs=[],
             extensions={"downstream_relation": "proposal_only"},
         )

@@ -1502,6 +1502,30 @@ def _source_attempts(
     progress_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     candidates = _candidate_index(state)
+    source_operations = [
+        operation
+        for operation in operations
+        if _operation_name(operation) in {"framework_agent", "integrate", "integrate_patch"}
+    ]
+    candidate_operation_counts: dict[str, int] = {}
+    source_operation_counts: dict[str, int] = {}
+    for operation in source_operations:
+        outputs = _mapping(operation.get("outputs"))
+        inputs = _mapping(operation.get("inputs"))
+        candidate_id = str(
+            _first(
+                _candidate_id(_first(outputs.get("candidate"), inputs.get("candidate"))),
+                outputs.get("framework_agent_candidate_id"),
+                inputs.get("framework_agent_candidate_id"),
+                _nested(operation, "metadata", "extras", "candidate_id"),
+            )
+            or ""
+        )
+        if candidate_id:
+            candidate_operation_counts[candidate_id] = candidate_operation_counts.get(candidate_id, 0) + 1
+        source_task_id = str(_first(outputs.get("specialist_task_id"), inputs.get("specialist_task_id")) or "")
+        if source_task_id:
+            source_operation_counts[source_task_id] = source_operation_counts.get(source_task_id, 0) + 1
     progress_by_integrate = {
         str(row.get("integrate_task_id") or ""): row for row in progress_rows if row.get("integrate_task_id")
     }
@@ -1513,26 +1537,25 @@ def _source_attempts(
     }
     used_progress: set[int] = set()
     attempts: list[dict[str, Any]] = []
-    for operation in operations:
-        if _operation_name(operation) not in {"framework_agent", "integrate", "integrate_patch"}:
-            continue
+    for operation in source_operations:
         outputs = _mapping(operation.get("outputs"))
+        inputs = _mapping(operation.get("inputs"))
         candidate_id = str(
             _first(
-                _candidate_id(outputs.get("candidate")),
+                _candidate_id(_first(outputs.get("candidate"), inputs.get("candidate"))),
                 outputs.get("framework_agent_candidate_id"),
+                inputs.get("framework_agent_candidate_id"),
                 _nested(operation, "metadata", "extras", "candidate_id"),
             )
             or ""
         )
         task_id = _operation_task_id(operation)
-        source_task_id = str(outputs.get("specialist_task_id") or "")
-        progress = (
-            progress_by_integrate.get(task_id)
-            or progress_by_candidate.get(candidate_id)
-            or progress_by_source.get(source_task_id)
-            or {}
-        )
+        source_task_id = str(_first(outputs.get("specialist_task_id"), inputs.get("specialist_task_id")) or "")
+        progress = progress_by_integrate.get(task_id) or {}
+        if not progress and source_operation_counts.get(source_task_id) == 1:
+            progress = progress_by_source.get(source_task_id) or {}
+        if not progress and candidate_operation_counts.get(candidate_id) == 1:
+            progress = progress_by_candidate.get(candidate_id) or {}
         if progress:
             used_progress.add(id(progress))
         attempts.append(_source_attempt(operation, progress, candidates))
@@ -1981,14 +2004,23 @@ def _framework_event(
         window_count,
         evidence,
     )
+    critic_reviews = _critic_review_rows(
+        session_dir,
+        warnings,
+        state,
+        recorded_operations,
+        window,
+        window_count,
+    )
     exit_details = _framework_exit(window, config_arm, source_arm)
     failure = _framework_failure(window)
     has_work = bool(
         config_arm["specialist_runs"]
         or config_arm["rounds"]
-        or any(run["candidates"] for run in source_arm["candidate_discovery_runs"])
+        or source_arm["candidate_discovery_runs"]
         or source_arm["authoring_runs"]
         or source_arm["attempts"]
+        or critic_reviews
     )
     if any(value is not None for value in failure.values()):
         status = "failed"
@@ -2007,14 +2039,7 @@ def _framework_event(
         "ext": {
             "macro_cycle": int(window["cycle"]),
             "policy": policy,
-            "critic_reviews": _critic_review_rows(
-                session_dir,
-                warnings,
-                state,
-                recorded_operations,
-                window,
-                window_count,
-            ),
+            "critic_reviews": critic_reviews,
             "config_arm": config_arm,
             "source_arm": source_arm,
             "exit": exit_details,

@@ -1807,3 +1807,160 @@ def test_framework_timeline_assigns_critic_reviews_from_request_cycle(tmp_path):
         ["proposal-cycle-0"],
         ["proposal-cycle-1"],
     ]
+
+
+def test_specialist_recorder_preserves_runtime_phase_when_entry_has_no_source_phase(tmp_path, monkeypatch):
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+    captured: dict[str, dict] = {}
+
+    class Recorder:
+        def record_item(self, stream, item, *, key=None):
+            captured["ledger"] = {"stream": stream, "item": item, "key": key}
+
+    monkeypatch.setattr(instrument, "_recorder", lambda *_args, **_kwargs: Recorder())
+    monkeypatch.setattr(instrument, "record_subject", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        instrument,
+        "record_operation",
+        lambda *_args, **kwargs: captured.setdefault("operation", kwargs),
+    )
+    monkeypatch.setattr(instrument, "record_trace_event", lambda *_args, **_kwargs: None)
+
+    instrument.record_specialist_round(
+        tmp_path,
+        {
+            "round_id": "kernel-specialist",
+            "task_id": "kernel-task",
+            "completed_at": "2026-08-28T01:00:00+00:00",
+        },
+        phase="KERNEL_AGENT",
+    )
+
+    assert captured["ledger"]["item"]["source_phase"] == "KERNEL_AGENT"
+    assert captured["operation"]["phase"] == "KERNEL_AGENT"
+    assert captured["operation"]["outputs"]["source_phase"] == "KERNEL_AGENT"
+
+
+def test_framework_timeline_treats_empty_discovery_as_executed_work(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "cycle": 1,
+                "ts": "2026-08-28T01:00:00+00:00",
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "cycle": 1,
+                "ts": "2026-08-28T01:05:00+00:00",
+                "reason": "optimize_no_more_leverage",
+            },
+        ],
+        "specialist_rounds": [
+            {
+                "round_id": "discovery-empty",
+                "task_id": "discovery-task",
+                "source_phase": "FRAMEWORK_AGENT",
+                "cycle": 1,
+                "task_kind": "candidate_discovery",
+                "domain": "candidate_discovery_specialist",
+                "proposal_set": [],
+                "empty": True,
+                "completed_at": "2026-08-28T01:03:00+00:00",
+            }
+        ],
+    }
+
+    events = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])
+
+    assert len(events) == 1
+    assert events[0]["status"] == "succeeded"
+    assert events[0]["ext"]["source_arm"]["candidate_discovery_runs"] == [
+        {
+            "task_id": "discovery-task",
+            "status": "empty",
+            "batch_id": None,
+            "gap_canonical_id": None,
+            "reason": None,
+            "candidates": [],
+        }
+    ]
+
+
+def test_framework_timeline_does_not_copy_final_progress_into_earlier_retry(tmp_path):
+    state = {
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "cycle": 1,
+                "ts": "2026-08-28T01:00:00+00:00",
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "cycle": 1,
+                "ts": "2026-08-28T01:10:00+00:00",
+            },
+        ],
+        "framework_agent_phase_progress": [
+            {
+                "candidate_id": "candidate-1",
+                "integrate_task_id": "integrate-2",
+                "status": "kept",
+                "kept": True,
+                "pre_tput": 100.0,
+                "post_tput": 120.0,
+                "gain_pct": 20.0,
+                "cycle": 1,
+                "ts": "2026-08-28T01:08:00+00:00",
+            }
+        ],
+    }
+    operations = [
+        {
+            "operation_id": "operation-1",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "extensions": {"task_id": "integrate-1"},
+            "outputs": {
+                "framework_agent_candidate_id": "candidate-1",
+                "specialist_task_id": "specialist-1",
+                "status": "apply_failed",
+            },
+            "ended_at": "2026-08-28T01:04:00+00:00",
+        },
+        {
+            "operation_id": "operation-2",
+            "name": "integrate_patch",
+            "phase": "FRAMEWORK_AGENT",
+            "macro_cycle": 1,
+            "extensions": {"task_id": "integrate-2"},
+            "outputs": {
+                "framework_agent_candidate_id": "candidate-1",
+                "specialist_task_id": "specialist-1",
+                "status": "kept",
+            },
+            "ended_at": "2026-08-28T01:08:00+00:00",
+        },
+    ]
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)[0]
+    attempts = event["ext"]["source_arm"]["attempts"]
+
+    assert attempts[0]["status"] == "FAILED"
+    assert attempts[0]["before_tput"] is None
+    assert attempts[0]["after_tput"] is None
+    assert attempts[0]["local_gain_pct"] is None
+    assert attempts[1]["status"] == "KEEP"
+    assert attempts[1]["before_tput"] == 100.0
+    assert attempts[1]["after_tput"] == 120.0
+    assert attempts[1]["local_gain_pct"] == 20.0
