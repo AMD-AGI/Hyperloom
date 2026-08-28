@@ -787,9 +787,17 @@ class IntentRouter:
             started (float): ``time.monotonic()`` at the step's start.
         """
 
+        # The same blind spot costs the KERNEL idle guard its in-flight signal:
+        # it probes the task registry, so an inline step reads as a dead phase.
+        # Stamped here rather than once at the start so a stamp left behind by a
+        # process that died mid-step expires instead of muting the guard.
+        def _mark_running() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = time.time()
+
         async def _beat() -> None:
             while True:
                 await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                _mark_running()
                 await self.bus.append_and_seq(
                     Message.new(
                         "orchestration",
@@ -803,6 +811,7 @@ class IntentRouter:
                     )
                 )
 
+        _mark_running()
         task = asyncio.create_task(_beat())
         try:
             yield
@@ -810,6 +819,7 @@ class IntentRouter:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
         """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.

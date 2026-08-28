@@ -234,7 +234,7 @@ class MachinePhase(PhaseHandler):
             state.kernel_idle_ticks = 0
             state.kernel_idle_since_unix = now
             return
-        if inflight:
+        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
             state.kernel_idle_since_unix = now
             return
         # Only reachable after a tick that opened the streak above, so

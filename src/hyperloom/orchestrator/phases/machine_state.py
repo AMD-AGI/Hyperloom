@@ -673,6 +673,42 @@ def _kernel_idle_min_seconds() -> float:
 
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
+
+#: How stale ``kernel_inline_step_seen_unix`` may be and still mean "running".
+#: The intent router refreshes it every 150s (``_KERNEL_HEARTBEAT_SEC``); three
+#: intervals of slack absorbs a late beat under load, and a stamp orphaned by a
+#: process that died mid-step expires soon after rather than muting the guard.
+KERNEL_INLINE_STEP_STALE_SECONDS: float = 450.0
+
+
+def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
+    """Report whether an inline kernel request is executing right now.
+
+    ``integrate`` / ``run_optimization`` are awaited directly in the intent
+    router and never become task-registry rows, so the idle guard's registry
+    probe reports an empty in-flight set while one is mid-flight. A nine-minute
+    ``integrate`` re-baseline therefore accrued a full idle streak and wound
+    KERNEL down to SWEEP four seconds after it completed, stranding every
+    remaining candidate.
+
+    Args:
+        state: Frozen SharedState view.
+        now_unix: Override for the current time.
+
+    Returns:
+        ``True`` when an inline kernel step reported itself recently enough.
+    """
+    seen = getattr(state, "kernel_inline_step_seen_unix", 0.0)
+    try:
+        seen = float(seen or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if seen <= 0.0:
+        return False
+    now = float(now_unix if now_unix is not None else _now_unix(state))
+    return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
+
+
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
