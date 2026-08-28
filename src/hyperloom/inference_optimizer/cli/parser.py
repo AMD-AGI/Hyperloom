@@ -711,16 +711,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "quick-win parameter path. Default: kernel enabled.",
     )
     opt.add_argument(
-        "--no-explore",
-        action="store_true",
-        default=False,
-        help="Alias for --no-framework-agent: skip the whole OPTIMIZE phase, "
-        "so PRELUDE routes straight to KERNEL — or to SWEEP when --no-kernel "
-        "is also set. Configuration search and source landing are two arms of "
-        "one phase and can no longer be disabled separately. "
-        "Default: optimize enabled.",
-    )
-    opt.add_argument(
         "--no-eval",
         action="store_true",
         default=False,

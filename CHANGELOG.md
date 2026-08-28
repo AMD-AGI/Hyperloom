@@ -13,8 +13,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   parallel; the phase advances only when both are dry. One arm plateauing
   raises `switch_bottleneck` for the next macro-cycle instead of ending the
   phase while the other lever still pays.
-  - `--no-explore` is an alias for `--no-framework-agent`; the two arms cannot
-    be disabled separately.
+  - **`--no-explore` is removed** rather than aliased. The two arms cannot be
+    disabled separately, so the flag's new meaning would be strictly wider
+    than the one an operator script asked for; an unrecognised argument says
+    so where a silent widening would not. Use `--no-framework-agent`.
   - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
     the framework budget option. The merged phase's default share is `0.40`,
     against `0.50` for KERNEL_AGENT.

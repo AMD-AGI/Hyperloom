@@ -1102,21 +1102,19 @@ def build_orchestration_prompt(
 def default_enabled_actions(
     *,
     no_kernel: bool,
-    no_explore: bool = False,
+    no_optimize: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
     Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
-    ``--no-kernel --no-explore`` run drops both kernel_agent-owned names and the
-    ``explore`` grid-runner. ``--no-framework-agent`` is intentionally absent — the
-    ``framework_agent`` action is Coordinator-internal and never appears in the
-    catalogue, so it has nothing to trim.
+    ``--no-kernel --no-framework-agent`` run drops both kernel_agent-owned
+    names and the ``explore`` grid-runner.
 
     Args:
         no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
             intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
-        no_explore (bool): When ``True``, drop the ``explore`` grid-runner
-            action (the optimisation phase is skipped).
+        no_optimize (bool): When ``True``, drop the ``explore`` grid-runner
+            action: the phase that dispatches it is skipped.
 
     Returns:
         tuple[str, ...]: The filtered enabled-action set, preserving
@@ -1125,7 +1123,7 @@ def default_enabled_actions(
     actions = list(FULL_ENABLED_ACTIONS)
     if no_kernel:
         actions = [a for a in actions if a in NO_KERNEL_AGENT_ENABLED_ACTIONS]
-    if no_explore:
+    if no_optimize:
         actions = [a for a in actions if a != "explore"]
     return tuple(actions)
 

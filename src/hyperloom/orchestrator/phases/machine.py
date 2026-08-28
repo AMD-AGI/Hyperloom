@@ -159,11 +159,9 @@ class MachinePhase(PhaseHandler):
         """Whether the optimisation phase is enabled for this run.
 
         Returns:
-            ``True`` unless ``--no-explore`` disabled it (collapsing to
-            KERNEL/SWEEP).
+            ``True`` unless ``--no-framework-agent`` disabled it, collapsing
+            the chain to KERNEL/SWEEP.
         """
-        # Mirror the persisted toggle; --no-framework-agent collapses the
-        # optimisation phase to KERNEL/SWEEP.
         return bool(self.shared_state.framework_agent_phase_enabled)
 
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:

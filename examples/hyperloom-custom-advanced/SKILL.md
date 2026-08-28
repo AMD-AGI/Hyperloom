@@ -154,7 +154,7 @@ resolved values in the launch plan before starting the optimizer.
 
 Collect these optional advanced values:
 
-- Phase toggles: `--no-kernel`, `--no-framework-agent` (`--no-explore` is an alias),
+- Phase toggles: `--no-kernel`, `--no-framework-agent`,
   `--no-enable-conc-sweep`, `--no-enable-roofline`.
 - Phase budget percentages:
   `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,

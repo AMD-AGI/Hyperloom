@@ -3525,7 +3525,11 @@ class IntegratePatchExecutor:
                 stash_state,
                 stash_note,
                 {
-                    "status": "apply_failed",
+                    # Applied, benched, then rolled back: the same terminal
+                    # shape every other post-apply rollback reports. Calling it
+                    # an apply failure sent the re-author loop after a diff
+                    # that had already passed the bench.
+                    "status": "reverted",
                     "error_class": "keep_commit_failed",
                     "error": commit_failure,
                     "specialist_task_id": specialist_task_id,

@@ -371,7 +371,6 @@ def _build_orchestration_prompt(
     framework: str,
     objective: Objective,
     max_minutes: int,
-    no_explore: bool = False,
     no_framework_agent: bool = False,
     macro_cycle: int = 0,
     cycle_directive: str = "",
@@ -386,7 +385,6 @@ def _build_orchestration_prompt(
         framework (str): The serving framework name (e.g. ``sglang``).
         objective (Objective): The run objective summarised into the prompt.
         max_minutes (int): The wall-clock budget in minutes.
-        no_explore (bool): Alias for ``no_framework_agent``; disables the optimisation phase.
         no_framework_agent (bool): When ``True`` the FRAMEWORK_AGENT phase is disabled.
         macro_cycle (int): Current macro-cycle counter; shown in the CYCLE DIRECTIVE section.
         cycle_directive (str): LLM-authored focus text for this cycle; empty renders the default arc.
@@ -401,14 +399,14 @@ def _build_orchestration_prompt(
         str: The composed Orchestration system prompt.
     """
     registry = action_registry or ACTION_CATALOGUE
-    enabled = default_enabled_actions(no_kernel=no_kernel, no_explore=no_explore)
+    enabled = default_enabled_actions(no_kernel=no_kernel, no_optimize=no_framework_agent)
     kind, value = _objective_summary_for_prompt(objective)
     return build_orchestration_prompt(
         action_registry=registry,
         enabled_actions=enabled,
         framework=framework,
         kernel_enabled=not no_kernel,
-        framework_agent_phase_enabled=not (no_framework_agent or no_explore),
+        framework_agent_phase_enabled=not no_framework_agent,
         objective_kind=kind,
         objective_value=value,
         max_minutes=int(max_minutes),
@@ -1427,10 +1425,6 @@ def _resolve_run_max_model_len_inner(args: argparse.Namespace) -> tuple[int, str
     )
 
 
-# Phases upstream of EXPLORE, so a resume may retroactively honour
-# --no-explore. Includes the legacy "FRAMEWORK" name for older sessions.
-
-
 def _resume_can_disable_eval(baseline_accuracy: float) -> bool:
     """Whether ``--no-eval`` may still disable the accuracy eval for a resumed session.
 
@@ -2270,27 +2264,22 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     )
     print(f"Objective       : kind={objective.kind()} {objective.describe()}")
     no_kernel = getattr(args, "no_kernel", False)
-    no_explore = getattr(args, "no_explore", False)
     no_framework_agent = bool(getattr(args, "no_framework_agent", False))
-    # Unconditional phase-toggle banner lines (mirror the kernel banner so all
-    # three --no-xxx flags surface their ENABLED/DISABLED state at startup).
-    if no_explore:
+    # Mirror the kernel banner so both phase toggles surface their state.
+    if no_framework_agent:
         print(
-            "Explore phase   : DISABLED (--no-explore); "
+            "Optimize phase  : DISABLED (--no-framework-agent); "
             f"{'baseline -> SWEEP' if no_kernel else 'baseline -> KERNEL -> SWEEP'}"
         )
     else:
-        print("Explore phase   : ENABLED")
-    if no_framework_agent:
-        print("Framework-agent phase : DISABLED (--no-framework-agent)")
-    else:
-        print("Framework-agent phase : ENABLED")
-    if no_explore and no_kernel:
+        print("Optimize phase  : ENABLED")
+    if no_framework_agent and no_kernel:
         print(
-            "WARNING: --no-explore and --no-kernel are both set; the run "
-            "collapses to baseline -> SWEEP over an empty optimization_stack "
-            "(no EXPLORE param search, no KERNEL rewrites). SWEEP only "
-            "re-validates the baseline recipe. Continuing as requested.",
+            "WARNING: --no-framework-agent and --no-kernel are both set; the "
+            "run collapses to baseline -> SWEEP over an empty "
+            "optimization_stack (no config or source search, no KERNEL "
+            "rewrites). SWEEP only re-validates the baseline recipe. "
+            "Continuing as requested.",
             file=sys.stderr,
         )
     if bool(getattr(args, "research_scout", True)):
@@ -2456,8 +2445,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
         "orchestration": args.orch_prompt
         or _build_orchestration_prompt(
             no_kernel=no_kernel,
-            no_explore=no_explore,
-            no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+            no_framework_agent=no_framework_agent,
             framework=framework_for_prompt,
             objective=objective,
             max_minutes=max_minutes_for_prompt,
@@ -2478,8 +2466,7 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     coordinator._rebuild_orch_prompt = _functools.partial(
         _build_orchestration_prompt,
         no_kernel=no_kernel,
-        no_explore=no_explore,
-        no_framework_agent=bool(getattr(args, "no_framework_agent", False)),
+        no_framework_agent=no_framework_agent,
         framework=framework_for_prompt,
         objective=objective,
         max_minutes=max_minutes_for_prompt,

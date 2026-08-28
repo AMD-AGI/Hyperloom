@@ -461,8 +461,7 @@ class FrameworkPhase(CoordinatorCollaborator):
           status → increment per-candidate apply-fail retry counter; below cap
           clear the in-flight guard so :meth:`_enqueue_author_specialist` can
           be called from the dispatcher; at/above cap stamp a terminal
-          progress row. A ``keep_commit_failed`` apply failure is excluded:
-          the diff applied and measured, so there is nothing to re-author.
+          progress row.
 
         All other statuses for perf lanes are not handled here (they go through
         the existing writeback / progress-stamp paths).
@@ -482,10 +481,6 @@ class FrameworkPhase(CoordinatorCollaborator):
         if status != "apply_failed":
             # Non-apply-failed perf-lane results go through the writeback path.
             return
-        if str(res.get("error_class") or "") == "keep_commit_failed":
-            # The patch applied and measured; the defect is not in the diff.
-            return
-
         if lane not in ("perf_framework", "perf_explore"):
             return
 
@@ -2148,7 +2143,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             provenance="authored",
             gain_pct=gain,
             extra={
-                "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
+                # The anchor the executor graded against, so post/pre and
+                # gain_pct in the same row agree once a stack has formed.
+                "pre_tput": float(res.get("base_tput") or params.get("base_tput") or 0.0),
                 "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
                 "accuracy_pass": res.get("accuracy_pass"),
                 "specialist_task_id": spec_tid,
