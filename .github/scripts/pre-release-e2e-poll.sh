@@ -42,10 +42,13 @@ MAX_CRASHES="${MAX_CRASHES:-0}"
 MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
 # Stop polling as soon as one leg FAILs. This is a release GATE: the first FAIL already
 # blocks the release, so the remaining legs cannot change the verdict -- and waiting them
-# out costs a 12h leg's GPUs plus the single self-hosted runner, which in turn keeps the
-# next fix's run stuck at run-level `pending` (a newer run gets no jobs at all while this
-# one holds the concurrency group). Set POLL_FAIL_FAST=0 to judge the whole matrix anyway.
+# out costs the single self-hosted runner, which in turn keeps the next fix's run stuck at
+# run-level `pending` (a newer run gets no jobs at all while this one holds the
+# concurrency group). Still-running workloads are LEFT ALIVE (see leave_running_wids) so
+# they can finish for debugging; only the poll job exits. Set POLL_FAIL_FAST=0 to keep
+# polling until every leg reaches a terminal verdict anyway.
 POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"
+LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
 # Sleep in short slices instead of one long one so a cancelled job tears down in seconds
 # rather than at the end of a full POLL_INTERVAL_S.
 POLL_SLEEP_SLICE_S="${POLL_SLEEP_SLICE_S:-5}"
@@ -294,17 +297,22 @@ while :; do
 
   [ "$pending" -eq 0 ] && break
 
-  # Gate already lost -> stop here and free the GPUs + the runner. Remaining legs are
-  # recorded as unjudged rather than FAIL: they did not fail, we chose not to wait.
+  # Gate already lost -> release the runner, but leave still-running workloads up so they
+  # can finish on the cluster (useful for debugging infra vs product failures).
   if [ "$POLL_FAIL_FAST" = "1" ] && [ "$fail_seen" -eq 1 ]; then
+    leave_wids=()
     for leg in "${LEGS[@]}"; do
       [ -n "${VERDICT[$leg]}" ] && continue
-      VERDICT["$leg"]="FAIL|not judged (gate already failed; fail-fast)"
-      summary "⏹ **$leg** — not judged (gate already failed; fail-fast)"
-      post_status "$leg" failure "not judged — gate already failed"
+      VERDICT["$leg"]="SKIP|still running (gate failed; workload left alive)"
+      summary "⏳ **$leg** — still running (gate already failed; workload left alive)"
+      post_status "$leg" pending "gate failed; workload left running"
+      leave_wids+=( "${WID[$leg]}" )
     done
-    summary ""
-    summary "⏹ fail-fast: a leg already FAILed, so the gate is decided. Stopping the remaining ${pending} leg(s) instead of holding the GPUs. Set \`POLL_FAIL_FAST=0\` to judge the full matrix."
+    if [ "${#leave_wids[@]}" -gt 0 ]; then
+      printf '%s\n' "${leave_wids[@]}" | sort -u | jq -R . | jq -s . > "$LEAVE_RUNNING_FILE"
+      summary ""
+      summary "⏹ fail-fast: gate is FAIL. Releasing the runner; ${pending} workload(s) left running for post-mortem. Wids recorded in \`$(basename "$LEAVE_RUNNING_FILE")\`. Set \`POLL_FAIL_FAST=0\` to poll until every leg finishes."
+    fi
     break
   fi
 
@@ -336,7 +344,11 @@ fail=0
 for leg in "${LEGS[@]}"; do
   v="${VERDICT[$leg]:-FAIL|no verdict}"
   vv="${v%%|*}"; vd="${v#*|}"
-  icon="✅"; [ "$vv" = "PASS" ] || { icon="❌"; fail=1; }
+  case "$vv" in
+    PASS) icon="✅" ;;
+    SKIP) icon="⏳"; fail=1 ;;
+    *) icon="❌"; fail=1 ;;
+  esac
   summary "| \`$leg\` | $icon $vv | $vd |"
 done
 summary ""
@@ -356,6 +368,12 @@ report_upsert "$(printf '%s\n\n%s\n' "$(report_body Complete "$(done_count)" "${
 # KEEPING the workload record + its pod filesystem for post-hoc inspection. SaFE has
 # no `start` endpoint, so these are not resumable; clean up Stopped records manually.
 # Verified 2026-08-27: POST /api/v1/workloads/{id}/stop exists and returns 200.
+leave_running_wid() { # wid -> 0 if this workload should stay up
+  local wid="$1"
+  [ -f "$LEAVE_RUNNING_FILE" ] || return 1
+  jq -e --arg w "$wid" 'index($w) != null' "$LEAVE_RUNNING_FILE" >/dev/null 2>&1
+}
+
 stop_workloads() {
   local wid seen=""
   for leg in "${LEGS[@]}"; do
@@ -363,6 +381,10 @@ stop_workloads() {
     # docker legs share one host workload -> stop each unique id once.
     case " $seen " in *" $wid "*) continue ;; esac
     seen="${seen} ${wid}"
+    if leave_running_wid "$wid"; then
+      summary "• left workload \`$wid\` running (fail-fast; post-mortem)"
+      continue
+    fi
     code="$(curl -sS "${tls[@]}" -o /dev/null -w '%{http_code}' -X POST \
       "$API/$wid/stop" "${auth[@]}" 2>/dev/null || echo 000)"
     summary "• stopped workload \`$wid\` (HTTP $code)"

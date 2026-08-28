@@ -67,11 +67,11 @@ on:
 # never stopped a single workload. It has been removed rather than left to look effective.
 #
 # Teardown therefore runs the other way round: the OLD run releases the runner promptly.
-# The poll fails fast on the first FAIL (the gate is already lost, so there is nothing to
-# gain by holding 8 GPUs and the only self-hosted runner for another 12h) and sleeps in
-# short slices so a cancel lands in seconds. Leaked pods are then reclaimed by the
-# dispatch-side reap, which -- unlike `preempt` -- runs in-network and only ever executes
-# once this run holds the runner, i.e. once the previous run is provably done.
+# The poll fails fast on the first FAIL (the gate is already lost) but leaves still-
+# running workloads up for post-mortem, and sleeps in short slices so a cancel lands in
+# seconds. Leaked pods are then reclaimed by the dispatch-side reap, which -- unlike
+# `preempt` -- runs in-network and only ever executes once this run holds the runner,
+# i.e. once the previous run is provably done.
 concurrency:
   group: pre-release-e2e-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -319,9 +319,11 @@ jobs:
         # (superseded push) or fails (dispatch/poll error, runner death) after dispatch
         # would idle-hold its GPUs. This idempotent cleanup fires on every abnormal end
         # and stops whatever landed in DISPATCH_MAP (stopping an already-terminal
-        # workload is a harmless no-op). The next run's pre-dispatch reap is the
-        # backstop for anything even this misses (e.g. the runner dying before this
-        # step). Success path is handled by the poll script's own stop_workloads().
+        # workload is a harmless no-op). Fail-fast poll failures that intentionally left
+        # workloads running write DISPATCH_MAP.leave_running; those wids are skipped here
+        # too. The next run's pre-dispatch reap is the backstop for anything even this
+        # misses (e.g. the runner dying before this step). Success path is handled by
+        # the poll script's own stop_workloads().
         if: cancelled() || failure()
         env:
           SAFE_API_BASE: ${{ vars.PRE_E2E_SAFE_API_BASE }}
@@ -330,7 +332,12 @@ jobs:
           # Policy: stop, don't delete (frees GPUs, keeps the record + pod fs for
           # inspection; SaFE has no restart, so clean up Stopped records manually).
           [ -f "$DISPATCH_MAP" ] || { echo "no dispatch map; nothing to stop"; exit 0; }
+          leave_file="${DISPATCH_MAP}.leave_running"
           for wid in $(jq -r '.[]' "$DISPATCH_MAP" | sort -u); do
+            if [ -f "$leave_file" ] && jq -e --arg w "$wid" 'index($w) != null' "$leave_file" >/dev/null 2>&1; then
+              echo "skipping workload $wid (left running for post-mortem)"
+              continue
+            fi
             echo "stopping workload $wid"
             curl -sS -k -o /dev/null -w 'STOP %{http_code}\n' -X POST \
               -H "Authorization: Bearer ${SAFE_API_KEY}" \

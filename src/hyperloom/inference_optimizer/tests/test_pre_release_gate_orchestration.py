@@ -15,8 +15,9 @@ workloads; skipping reclaim`` after a 30s curl timeout, having stopped nothing. 
 that talks to SaFE may run on a GitHub-hosted runner again.
 
 Teardown instead relies on the old run leaving promptly: the poll fails fast on the
-first FAIL (the gate is already decided) and sleeps in short slices so a cancel lands in
-seconds instead of at the end of a full poll interval.
+first FAIL (the gate is already decided), leaves still-running workloads up for post-
+mortem, and sleeps in short slices so a cancel lands in seconds instead of at the end
+of a full poll interval.
 
 There is no way to unit-test the scheduling itself short of running the workflow; these
 tests pin the invariants it depends on.
@@ -92,9 +93,12 @@ def test_the_reap_script_is_gone_and_unreferenced() -> None:
 
 
 def test_poll_fails_fast_once_the_gate_is_lost(poll_script: str) -> None:
-    """A decided gate must not keep 8 GPUs and the only runner busy for another 12h."""
+    """A decided gate must not keep the only runner busy for another 12h."""
     assert 'POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"' in poll_script
     assert 'if [ "$POLL_FAIL_FAST" = "1" ] && [ "$fail_seen" -eq 1 ]; then' in poll_script
+    assert "LEAVE_RUNNING_FILE=" in poll_script
+    assert 'VERDICT["$leg"]="SKIP|still running (gate failed; workload left alive)"' in poll_script
+    assert "leave_running_wid" in poll_script
     # Every path that records a FAIL has to arm the flag, or fail-fast never triggers.
     assert poll_script.count("fail_seen=1") == 2
     assert poll_script.count('VERDICT["$leg"]="FAIL|') >= 2
@@ -106,9 +110,11 @@ def test_poll_sleeps_in_slices_so_a_cancel_lands_quickly(poll_script: str) -> No
     assert 'sleep "$POLL_INTERVAL_S"' not in poll_script
 
 
-def test_abnormal_end_cleanup_still_stops_workloads(workflow: dict) -> None:
-    """With no preempt job, this step and the dispatch-side reap are the only backstops."""
+def test_abnormal_end_cleanup_respects_leave_running(workflow: dict) -> None:
+    """Fail-fast may leave workloads up; cleanup must not stop those wids."""
     steps = workflow["jobs"]["run"]["steps"]
     cleanup = [s for s in steps if "cancelled()" in str(s.get("if", ""))]
     assert cleanup, "the run job lost its cancel/failure cleanup step"
-    assert "/stop" in cleanup[0]["run"]
+    body = cleanup[0]["run"]
+    assert "/stop" in body
+    assert "leave_running" in body

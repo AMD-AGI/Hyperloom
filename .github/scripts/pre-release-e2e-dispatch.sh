@@ -41,8 +41,9 @@
 #                     (default $RUNNER_TEMP/pre_release_dispatch.json)
 #   HOST_CPU / HOST_MEM / HOST_SHM / HOST_EPHEMERAL  privileged host resource request
 #                     (default 128 / 2048Gi / 256Gi / 1792Gi -- ref 8-GPU Authoring pod)
-#   LEG_CPU  / LEG_MEM              baremetal leg resource request
-#                     (default 32 / 128Gi)
+#   LEG_CPU  / LEG_MEM / LEG_EPHEMERAL   baremetal leg resource request
+#                     (default 32 / 512Gi / 512Gi -- sglang 14B-FP8 + roofline/aiter JIT
+#                     exceeded 128Gi/100Gi on 2026-08-28)
 #   DEADLINE_3H_S / DEADLINE_12H_S pod hard-timeout per duration
 #                     (default 16200 = 3h+1h+30m / 48600 = 12h+1h+30m). The docker host
 #                     pod uses the MAX over its legs. SaFE kills the pod at the
@@ -63,7 +64,8 @@ TARGET_GAIN="${TARGET_GAIN:-100}"
 # layer-deduplicating docker storage driver (overlay2) to stay inside it.
 HOST_CPU="${HOST_CPU:-128}"; HOST_MEM="${HOST_MEM:-2048Gi}"; HOST_SHM="${HOST_SHM:-256Gi}"
 HOST_EPHEMERAL="${HOST_EPHEMERAL:-1792Gi}"
-LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-128Gi}"
+LEG_CPU="${LEG_CPU:-32}";    LEG_MEM="${LEG_MEM:-512Gi}"
+LEG_EPHEMERAL="${LEG_EPHEMERAL:-512Gi}"
 # SaFE workload scheduling priority (Spec.Priority, an int): High=2, Med=1, Low=0
 # (Primus-SaFE common/constant.go). The scheduler orders the queue by this value, and
 # the webhook clamps it into [0,2]. These release-gate legs hold 8 GPUs for up to 14h
@@ -307,8 +309,8 @@ record_dispatch() {  # leg workloadId -- add to the in-memory map AND the on-dis
 }
 
 # ---- baremetal legs: one non-privileged 1-GPU workload each ----------------
-leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" \
-  '{replica:1, gpu:"1", cpu:$cpu, memory:$mem, ephemeralStorage:"100Gi"}')"
+leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" --arg eph "$LEG_EPHEMERAL" \
+  '{replica:1, gpu:"1", cpu:$cpu, memory:$mem, ephemeralStorage:$eph}')"
 
 want_docker_host=0
 for leg in $REQ_TASKS; do
