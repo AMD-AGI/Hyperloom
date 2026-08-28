@@ -1143,10 +1143,12 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
 async def test_a_search_keep_stops_at_the_decision_round(sub_agent_runner, tmp_path, monkeypatch):
     """With the confirmation round off, a KEEP is warmup + decision and reports the decision.
 
-    The third round used to overwrite the headline with a hotter measurement of
-    the same server, so the number a search reports is pinned to the round that
-    graded the variant. The fake feeds the confirmation slot a throughput far
-    above the decision round's: if that value reaches the ledger, the round ran.
+    This states what the executor does with the flag, which is the shape a
+    search now asks for; the tests that the injectors ask for it live beside
+    ``_inject_explore_runtime_params`` and the multi-node grid builder. The
+    third round used to overwrite the headline with a hotter measurement of the
+    same server, so the fake feeds the confirmation slot a throughput far above
+    the decision round's: if that value reaches the ledger, the round ran.
     """
     sub, tr, _ = sub_agent_runner
     base = tmp_path / "base.yaml"

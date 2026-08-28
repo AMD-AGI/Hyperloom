@@ -103,7 +103,7 @@ class _RenderMixin:
             validated_age = f" (ts={self.cumulative_gain_validated_ts})"
         unvalidated = self.optimization_stack_has_unvalidated_keeps()
         unvalidated_tag = (
-            " ⚠ stack changed since last rebench — RUN `explore` (per-KEEP stack rebench is inlined)"
+            " ⚠ stack changed since last validation — RUN `explore` (a KEEP is measured on the stack)"
             if unvalidated
             else ""
         )

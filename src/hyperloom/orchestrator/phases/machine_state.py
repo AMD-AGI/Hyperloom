@@ -2993,7 +2993,7 @@ LIFECYCLE_STEP_LABELS: dict[str, str] = {
     "run_collective": "Collective optimization",
     "integrate": "Integrate",
     "apply_patch": "Integrate",
-    "explore": "Validate (stack rebench)",
+    "explore": "Validate (bench on the stack)",
     "sweep": "Concurrency sweep",
     "report": "Report",
     "session_breakdown": "Report (session breakdown)",

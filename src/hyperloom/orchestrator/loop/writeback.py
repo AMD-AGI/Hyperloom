@@ -546,7 +546,9 @@ class WritebackCollaborator:
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
             measurement_basis: ``e2e_rebench`` when ``new_tput`` was measured
-                end to end, ``derived_speedup`` when it was inferred from a
+                end to end, ``e2e_decision_round`` when it is a search's own
+                decision round (no confirmation round followed it),
+                ``derived_speedup`` when it was inferred from a
                 micro-benchmark.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
@@ -3971,11 +3973,20 @@ class WritebackCollaborator:
         if promoted:
             # A KEEP's own measurement promotes into cumulative_gain_validated and
             # advances validated_stack_len so the unvalidated-stack guard clears.
-            # Search explore reports its decision round, so the basis is named as
-            # that rather than as a confirmation rebench the run no longer takes:
-            # a reader can then tell this number from a GEAK-revalidated one.
+            # A search stops at the decision round, so the basis names that round
+            # rather than the confirmation one whose throughput used to overwrite
+            # it. Read from the winner rather than from the request: a variant
+            # carries ``stack_rebench_tput`` only when a confirmation round
+            # actually ran, which is what the label is asked to describe.
             if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                self._update_cumulative_gain_validated(best_tput, measurement_basis="e2e_decision_round")
+                confirmed = any(
+                    isinstance(w, dict) and w.get("stack_rebench_tput") is not None
+                    for w in (winners if isinstance(winners, list) else [])
+                )
+                self._update_cumulative_gain_validated(
+                    best_tput,
+                    measurement_basis="e2e_rebench" if confirmed else "e2e_decision_round",
+                )
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",

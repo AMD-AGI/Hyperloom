@@ -428,9 +428,10 @@ class ProposalsCollaborator:
         # warmed, so its throughput carried more cache than the decision round it
         # then overwrote as the headline -- and that inflated number also became
         # the anchor the next in-batch variant was graded against. The decision
-        # round is the reported result. Internal revalidation tasks build their
-        # params directly and never reach this injector, so they keep the
-        # confirmation round.
+        # round is the reported result. Revalidation tasks build their params
+        # directly and never reach this injector, so each states its own answer:
+        # the GEAK same-harness revalidation omits the key and takes the
+        # executor's default round, the resume full-stack one sets ``False``.
         params.setdefault("enable_stack_rebench", False)
 
     async def _materialize_approved_proposal(
