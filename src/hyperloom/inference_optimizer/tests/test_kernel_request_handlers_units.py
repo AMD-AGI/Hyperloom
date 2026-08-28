@@ -182,7 +182,7 @@ class TestForgeGemmHelperCoverage:
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
     def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
+        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/kernel-agents")
         assert krh._forge_gemm_tune_available() is True
 
         monkeypatch.setattr(krh.shutil, "which", lambda _name: None)

@@ -1910,8 +1910,12 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
 
 
 def _forge_gemm_tune_available() -> bool:
-    """Check if forge-gemm-tune CLI is importable or on PATH."""
-    if shutil.which("forge-gemm-tune"):
+    """Check if the GEMM tuner is importable, or its host CLI is on PATH.
+
+    `forge_gemm_tune` no longer ships a console script of its own -- its
+    commands live under `kernel-agents forge-gemm-tune`.
+    """
+    if shutil.which("kernel-agents"):
         return True
     try:
         spec = importlib.util.find_spec("forge_gemm_tune")
@@ -3728,7 +3732,8 @@ async def _run_forge_gemm_tuning(
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "forge-gemm-tune CLI not found. Install via "
+                "forge-gemm-tune not found (it runs as "
+                "'kernel-agents forge-gemm-tune'). Install via "
                 "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
                 f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
             ),

@@ -40,7 +40,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 
 
 def _build_cmd(args: dict[str, Any]) -> list[str]:
-    cmd = [sys.executable, "-m", "forge_gemm_tune.cli", "run"]
+    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-gemm-tune", "run"]
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
     _add_opt(cmd, args, "precision", "--precision", required=True)
