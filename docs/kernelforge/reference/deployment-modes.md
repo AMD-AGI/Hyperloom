@@ -33,7 +33,7 @@ kernelforge forge-loop --workspace <W> \
 Runs unattended with the driver-owned complete correctness suite, three
 independent benchmarks, and automatic git keep/revert. Stop it between
 iterations with `touch <workspace>/.stop`. See
-{doc}`Autonomous overnight loop </how-to/autonomous-loop>`.
+{doc}`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>`.
 
 ## Comparison
 

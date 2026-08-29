@@ -117,10 +117,10 @@ Or create a `.env` file (see `.env.example`).
 
 ## Step 3: Run your first campaign
 
-`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The `examples/` directory ships runnable tasks — the Triton softmax one is the smallest task that exercises the whole loop:
+`kernelforge forge-loop` runs one campaign: it proposes ONE change per iteration, validates it with your driver, benchmarks it, and keeps only measured improvements. The tasks ship inside the package, under `src/kernelforge/data/examples/` in a checkout — the Triton softmax one is the smallest task that exercises the whole loop:
 
 ```bash
-cd examples/triton-softmax-forge-loop
+cd src/kernelforge/data/examples/triton-softmax-forge-loop
 MAX_HOURS=1 ./run_example.sh /tmp/forge_softmax
 ```
 
@@ -152,7 +152,7 @@ docker run --rm \
   -v "$PWD:/workspace" -w /workspace \
   rocm/primus-training-private:<tag> \
   bash -lc 'pip install -q --break-system-packages -e ".[forge,forge-profiling]" && \
-            examples/triton-softmax-forge-loop/run_example.sh /tmp/forge_softmax' \
+            src/kernelforge/data/examples/triton-softmax-forge-loop/run_example.sh /tmp/forge_softmax' \
   > /tmp/forge.log 2>&1
 ```
 
@@ -296,6 +296,12 @@ remain available for the full time budget. The supervisor adds API
 calls only while stuck; bench remains the final gate on every accepted edit.
 
 ## Example Tasks
+
+Paths below are relative to `src/kernelforge/data/examples/` in a checkout. From
+an installed wheel, `python -c "import kernelforge, pathlib;
+print(pathlib.Path(kernelforge.__file__).parent / 'data/examples')"` prints the
+same tree — copy a task out of it rather than running in place, because the
+package directory is not meant to be written to.
 
 | Task | Backend | What it shows |
 |------|---------|---------------|

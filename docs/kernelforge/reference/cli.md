@@ -20,7 +20,7 @@ kernelforge forge-fuse --trace <t> --model-path <d> --framework sglang \
     --output-dir <d> [options]
 ```
 
-See {doc}`Experience store </reference/experience-store>` for the exact
+See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
 local/remote environment contract and durable local layout.
 
 ## forge-loop

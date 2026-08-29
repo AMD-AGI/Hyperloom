@@ -43,7 +43,7 @@ Key properties:
 
 ## Where to go next
 
-- Install and run your first task: {doc}`Quickstart </install/quickstart>`.
-- Understand the system: {doc}`Architecture </conceptual/architecture>` and the
-  {doc}`Optimization loop </conceptual/optimization-loop>`.
-- Drive a run: {doc}`Run a campaign </how-to/run-a-campaign>`.
+- Install and run your first task: {doc}`Quickstart </kernelforge/install/quickstart>`.
+- Understand the system: {doc}`Architecture </kernelforge/conceptual/architecture>` and the
+  {doc}`Optimization loop </kernelforge/conceptual/optimization-loop>`.
+- Drive a run: {doc}`Run a campaign </kernelforge/how-to/run-a-campaign>`.

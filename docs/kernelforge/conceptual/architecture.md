@@ -61,7 +61,7 @@ The kernel sources are the opposite: the anchor named by `--kernel` and any
 tracked implementation file outside the protected surface may be edited. What
 the agent cannot do is change how it is graded.
 
-See the {doc}`Optimization loop </conceptual/optimization-loop>` for the gates
+See the {doc}`Optimization loop </kernelforge/conceptual/optimization-loop>` for the gates
 each change clears, and the
-{doc}`Autonomous overnight loop </how-to/autonomous-loop>` for how a long
+{doc}`Autonomous overnight loop </kernelforge/how-to/autonomous-loop>` for how a long
 unattended campaign is structured.
