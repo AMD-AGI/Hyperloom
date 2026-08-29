@@ -542,6 +542,16 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
     except ValueError:
         return None  # source_file not inside the repo
 
+    # Being inside the repo is not the same as being tracked by it. A framework
+    # tree can host a git repo that indexes only part of itself (a scratch repo
+    # over site-packages that only added ``vllm/``, say). ``git worktree add``
+    # then succeeds and produces a worktree WITHOUT the kernel, and the failure
+    # surfaces far downstream as "prepared kernel does not exist". Fall back to
+    # the no-git scratch path instead, which copies the file in.
+    tracked = _run_git(["-C", repo, "ls-files", "--error-unmatch", "--", rel.as_posix()], timeout=30)
+    if tracked.returncode != 0:
+        return None
+
     wt = output_dir / "worktree"
     # A prior attempt at this path is retained for inspection. Never remove or
     # reuse it, and never let the caller reinterpret it as a no-git scratch.

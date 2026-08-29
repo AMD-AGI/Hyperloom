@@ -174,6 +174,32 @@ def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
     assert all(Path(path).is_relative_to(Path(workspace).resolve()) for path in sources)
 
 
+def test_untracked_kernel_inside_a_git_repo_is_not_worktree_prepared(tmp_path):
+    """A repo that indexes only part of its tree must not swallow the kernel.
+
+    A scratch git repo created over a framework install can track only one
+    subtree (``vllm/`` and nothing else). ``git worktree add`` still succeeds
+    there, but the checkout has no copy of an untracked kernel, so preparation
+    has to decline and let the caller fall back to the no-git scratch path.
+    """
+    repo, _kernel = _make_repo(tmp_path)
+    untracked = repo / "aiter" / "ops" / "gemm.py"
+    untracked.parent.mkdir(parents=True)
+    untracked.write_text("BASELINE\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    prepared = forge_submit._prepare_worktree(
+        str(untracked),
+        str(repo),
+        output_dir,
+        "forge/test/untracked-kernel",
+    )
+
+    assert prepared is None
+    assert not (output_dir / "worktree").exists()
+
+
 def test_unmappable_declared_source_fails_remapping(tmp_path):
     repo, kernel = _make_repo(tmp_path)
     output_dir = tmp_path / "attempt"
