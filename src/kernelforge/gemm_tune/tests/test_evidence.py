@@ -137,13 +137,58 @@ class TestDemandConsumption:
 
     def test_shapes_are_typed_and_ordered_by_requests(self):
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
-        shapes = ev.demand_shapes(entry)
+        shapes = ev.demand_shapes(entry, bucket=False)
         assert shapes[0]["M"] == 65536 and isinstance(shapes[0]["M"], int)
         assert shapes[0]["requests"] == 2
 
     def test_limit_truncates_by_request_order(self):
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
-        assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [65536]
+        got = ev.demand_shapes(entry, limit=1, bucket=False)
+        assert [s["M"] for s in got] == [65536]
+
+    def test_shapes_default_to_the_padded_M_a_row_must_be_written_at(self):
+        # aiter reaches a tuned row at the exact M, else at the padded M. 65536
+        # is past the 8192 clamp, so a row for it lives at 8192; writing it at
+        # 65536 produces a table no lookup can reach.
+        entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")
+        shapes = ev.demand_shapes(entry)
+        assert shapes[0]["M"] == 8192
+        assert shapes[0]["observed_M"] == [65536]
+
+    def test_keys_sharing_a_bucket_cost_one_slot_not_several(self):
+        # The whole point of bucketing: three raw keys in one padded bucket are
+        # served by a single tuned row, so they must not eat three of the budget.
+        # Listed most-requested first, as parse_log emits them.
+        entry = {
+            "keys": [
+                {"M": "64", "N": "4096", "K": "4096", "requests": 11},
+                {"M": "300", "N": "4096", "K": "4096", "requests": 5},
+                {"M": "400", "N": "4096", "K": "4096", "requests": 4},
+                {"M": "512", "N": "4096", "K": "4096", "requests": 3},
+            ]
+        }
+        shapes = ev.demand_shapes(entry)
+        assert [(s["M"], s["requests"]) for s in shapes] == [(512, 12), (64, 11)]
+        assert shapes[0]["observed_M"] == [300, 400, 512]
+        # ...and with one slot, the bucket worth 12 requests wins over the raw
+        # key worth 11, which the raw ordering would have picked first.
+        assert [s["M"] for s in ev.demand_shapes(entry, limit=1)] == [512]
+        assert [s["M"] for s in ev.demand_shapes(entry, limit=1, bucket=False)] == [64]
+
+    def test_padding_matches_aiter_next_power_of_two_capped(self):
+        assert [ev.padded_m(m) for m in (1, 2, 3, 15, 16, 17, 64, 100, 513)] == [1, 2, 4, 16, 16, 32, 64, 128, 1024]
+        assert ev.padded_m(8192) == 8192 and ev.padded_m(20000) == 8192
+
+    def test_buckets_do_not_merge_across_differing_extended_keys(self):
+        entry = {
+            "keys": [
+                {"M": "300", "N": "4096", "K": "4096", "bias": "True", "requests": 5},
+                {"M": "400", "N": "4096", "K": "4096", "bias": "False", "requests": 4},
+            ]
+        }
+        shapes = ev.demand_shapes(entry)
+        assert len(shapes) == 2
+        assert {s["bias"] for s in shapes} == {"True", "False"}
 
     def test_extended_fields_survive_into_shapes(self):
         entry = ev.demand_for_tuner(self._report(), "sglang_dense_bf16")

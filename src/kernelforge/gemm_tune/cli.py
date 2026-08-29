@@ -73,7 +73,7 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
     as it was rather than failing the run.
     """
     try:
-        from .evidence import parse_log_file, write_demand
+        from .evidence import moe_dispatch_keys, parse_log_file, write_demand
 
         report = parse_log_file(server_log)
     except Exception:  # noqa: BLE001 - deriving demand must never fail tuning
@@ -81,10 +81,19 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
         return ""
 
     demands = report.get("demands") or []
-    if not demands:
+    # The dense misses are not the only demand the log carries. A MoE dispatch
+    # line records the key the runtime actually asked fused_moe for, and that
+    # key lives outside report["demands"]. Gating on dense misses alone threw
+    # it away on exactly the runs that need it most: a MoE-only model, or one
+    # whose dense tables all hit while fused_moe still missed. fmoe_ck then saw
+    # no runtime key and skipped itself for want of evidence that was in the
+    # log all along.
+    moe_keys = moe_dispatch_keys(report) or []
+    if not demands and not moe_keys:
         av = (report.get("apply_verdict") or {}).get("verdict")
         log.info(
-            "serving log %s carries no tuned-config misses (verdict=%s); keeping the configured shape source",
+            "serving log %s carries no tuned-config misses and no MoE dispatch key (verdict=%s); "
+            "keeping the configured shape source",
             server_log,
             av,
         )
@@ -96,18 +105,34 @@ def _demand_from_serving_log(server_log: str, output_dir: Path) -> str:
         log.warning("could not write demand.json: %s", exc)
         return ""
 
-    log.info(
-        "Derived demand from %s: %s",
-        server_log,
-        ", ".join(
-            f"{d.get('table')} ({d.get('miss_count')} misses, {len(d.get('keys') or [])} distinct keys)"
-            for d in demands
-        ),
-    )
+    described = [
+        f"{d.get('table')} ({d.get('miss_count')} misses, {len(d.get('keys') or [])} distinct keys)" for d in demands
+    ]
+    if moe_keys:
+        described.append(f"fused_moe ({len(moe_keys)} runtime dispatch key(s))")
+    log.info("Derived demand from %s: %s", server_log, ", ".join(described))
     return str(path)
 
 
-def _coverage_gaps(demand_json: str, tuner_specs: list, output_dir: Path) -> list:
+def _load_demand_report(demand_json: str) -> dict | None:
+    """Parse the demand file once, for both selection and the coverage report.
+
+    Best-effort like everything else that reads it: a run without a demand file
+    is the normal case on a first pass, and an unreadable one must not stop the
+    tuning it was meant to inform.
+    """
+    if not demand_json:
+        return None
+    try:
+        from .evidence import load_demand
+
+        return load_demand(demand_json)
+    except Exception:  # noqa: BLE001 - evidence must never fail the run
+        log.debug("could not load demand report", exc_info=True)
+        return None
+
+
+def _coverage_gaps(demand_report: dict | None, tuner_specs: list, output_dir: Path) -> list:
     """Write the demanded tables no selected tuner will produce, and return them.
 
     The trigger for writing a tuner is "no official script and no forge
@@ -116,13 +141,12 @@ def _coverage_gaps(demand_json: str, tuner_specs: list, output_dir: Path) -> lis
     Best-effort: this is a report, and failing to write it must not affect the
     tuning it describes.
     """
-    if not demand_json:
+    if not demand_report:
         return []
     try:
-        from .evidence import load_demand
         from .tier3 import coverage_gaps
 
-        gaps = coverage_gaps(load_demand(demand_json), tuner_specs)
+        gaps = coverage_gaps(demand_report, tuner_specs)
         if not gaps:
             return []
         (output_dir / "coverage_gaps.json").write_text(
@@ -461,6 +485,10 @@ def run(
     token_list = compute_token_coverage(conc=conc, explicit_tokens=explicit_tokens)
     log.info("Token coverage: %s", token_list)
 
+    # Parsed once: selection needs the tables the runtime consulted, and the
+    # coverage report needs the same document to say what stayed uncovered.
+    demand_report = _load_demand_report(demand_json)
+
     # Select tuners
     tuner_specs = select_tuners(
         profile,
@@ -474,12 +502,16 @@ def run(
         # it lists the keys the runtime actually asked for.
         has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
         has_tunableop_input=bool(tunableop_input),
+        # ...and a stronger *selection* input for the same reason. Passing only
+        # the boolean left the router guessing the operator set from the
+        # precision label while this file named it.
+        demand_report=demand_report,
     )
 
     # What the runtime asked for that nothing selected can write. Always
     # recorded, so whether a generated tuner has any real target is a question
     # the fleet answers rather than one that gets argued about.
-    coverage_gap_list = _coverage_gaps(demand_json, tuner_specs, output_path)
+    coverage_gap_list = _coverage_gaps(demand_report, tuner_specs, output_path)
 
     # If --tuner specified, filter to only that one. An explicit --tuner is a
     # directive: if the router didn't auto-select it (e.g. a non-canonical
@@ -613,7 +645,16 @@ def run(
                 len(spec.token_hint),
                 spec.token_hint[:8],
             )
-            tuner_ctx = dataclasses.replace(tuner_ctx, tokens=list(spec.token_hint))
+            # Both fields: ``tokens`` so the config-derived paths sweep only
+            # what this kernel serves, and ``token_hint`` so the paths that
+            # start from runtime-observed tokens can tell "this is the allowed
+            # set" from "this is the coverage sweep" -- ``tokens`` alone cannot
+            # carry that distinction, since every run has one.
+            tuner_ctx = dataclasses.replace(
+                tuner_ctx,
+                tokens=list(spec.token_hint),
+                token_hint=list(spec.token_hint),
+            )
 
         log.info("Running tuner: %s (timeout=%ds)", spec.name, effective_timeout)
         tuner_instance = _create_tuner(spec.name, tuner_ctx)
@@ -794,6 +835,7 @@ def plan(
             has_untuned_csv=bool(untuned_csv),
             has_shapes_json=bool(shapes_json or shapes_manifest or demand_json),
             has_tunableop_input=bool(tunableop_input),
+            demand_report=_load_demand_report(demand_json),
         )
 
     click.echo(f"Model: {model_path}")

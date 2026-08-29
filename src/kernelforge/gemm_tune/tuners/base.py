@@ -141,6 +141,13 @@ class TuneContext:
     demand_json: Path | None = None
     tunableop_input: Path | None = None
     kernel_signature_log: Path | None = None
+    # The token counts the log shows this particular tuner's kernel actually
+    # serving, as opposed to ``tokens``, which is the run's coverage sweep. Set
+    # from TunerSpec.token_hint. A tuner that has one should treat it as the
+    # allowed set (intersect), not merely as a budget: on a MoE model the
+    # 1-stage and Triton paths serve token counts that CK never sees, and
+    # tuning those spends the budget on kernels that will not be dispatched.
+    token_hint: list[int] | None = None
     gpu_ids: str = ""
     # Additional env overrides from caller
     extra_env: dict[str, str] = field(default_factory=dict)

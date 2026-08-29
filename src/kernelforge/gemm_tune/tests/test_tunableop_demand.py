@@ -175,6 +175,40 @@ class TestDemandBecomesAnInput:
             "GemmTunableOp_BFloat16_TN,tn_4096_1024_7168_ld_7168_7168_4096",
         ]
 
+    def test_borrowed_demand_keeps_the_exact_m_the_runtime_asked_for(self, tmp_path):
+        # demand_shapes() buckets to the padded M by default, which is right for
+        # the aiter tuners only because aiter retries a failed lookup at the
+        # padded M. TunableOp keys on the exact shape, so a record written at
+        # M=512 does nothing for a request at M=464. The direct path already
+        # passed bucket=False; the borrow path did not, so the fallback that
+        # exists to make selection usable produced records nothing can hit.
+        from kernelforge.gemm_tune.evidence import SCHEMA_VERSION
+
+        path = tmp_path / "demand.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema": SCHEMA_VERSION,
+                    "demands": [
+                        {
+                            "table": "bf16_tuned_gemm.csv",
+                            "tuner": "sglang_dense_bf16",
+                            "key_schema": ["M", "N", "K"],
+                            "miss_count": 1,
+                            "keys": [{"M": 464, "N": 4096, "K": 4096, "requests": 7}],
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        lines = self._tuner(tmp_path, path)._resolve_input().read_text(encoding="utf-8").strip().splitlines()
+
+        assert lines == [
+            "GemmTunableOp_BFloat16_TN,tn_4096_464_4096_ld_4096_4096_4096",
+        ]
+
     def test_moe_demand_is_not_borrowed(self, tmp_path):
         # A MoE miss is not a dense (M, N, K) and tuning it here would be
         # tuning something the runtime never asked this path for.

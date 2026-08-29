@@ -48,6 +48,7 @@ class TestMixedDispatch:
         )
         cov = moe_stage_coverage(path)
         assert cov["tunable_ck_2stage"] is True
+        assert cov["missed_ck_keys"] == 0
         assert sorted(cov["stages_seen"]) == ["1stage", "2stage"]
         toks = cov["tokens_by_stage"]
         assert toks["2stage/default"] == [1, 32]

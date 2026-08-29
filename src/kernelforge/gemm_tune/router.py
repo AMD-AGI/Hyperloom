@@ -133,7 +133,9 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
     of it.
 
     Returns ``{"stages_seen": [...], "tunable_ck_2stage": bool,
-    "tokens_by_stage": {stage: [tokens]}}``; empty when there is nothing to read.
+    "tokens_by_stage": {stage: [tokens]}, "missed_ck_keys": int}``; empty when
+    there is nothing to read. ``tunable_ck_2stage`` describes dispatch capability;
+    ``missed_ck_keys`` says whether that capability actually needs tuning.
     """
     if not log_path:
         return {}
@@ -141,9 +143,10 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
     if not path.is_file():
         return {}
     try:
-        from .evidence import parse_log_file
+        from .evidence import moe_ck_missed_keys, parse_log_file
 
-        moe = (parse_log_file(path).get("dispatch") or {}).get("moe") or {}
+        report = parse_log_file(path)
+        moe = (report.get("dispatch") or {}).get("moe") or {}
     except Exception:  # noqa: BLE001 - detection must never break routing
         log.debug("MoE stage parse failed for %s", path, exc_info=True)
         return {}
@@ -152,6 +155,7 @@ def moe_stage_coverage(log_path: str | None) -> dict[str, Any]:
         "stages_seen": moe.get("stages_seen") or [],
         "tunable_ck_2stage": bool(moe.get("tunable_ck_2stage")),
         "tokens_by_stage": {k: v.get("tokens") or [] for k, v in by_stage.items()},
+        "missed_ck_keys": len(moe_ck_missed_keys(report)),
     }
 
 
@@ -269,6 +273,7 @@ def select_tuners(
     has_untuned_csv: bool = False,
     has_shapes_json: bool = False,
     has_tunableop_input: bool = False,
+    demand_report: dict[str, Any] | None = None,
 ) -> list[TunerSpec]:
     """Select which tuner(s) to run based on model + framework + precision.
 
@@ -283,6 +288,9 @@ def select_tuners(
         has_untuned_csv: Whether --untuned-csv was provided.
         has_shapes_json: Whether --shapes-json was provided.
         has_tunableop_input: Whether --tunableop-input was provided.
+        demand_report: Parsed demand.json from the serving run, when one was
+            recorded. Names the tables the runtime actually consulted, and
+            widens the framework branch when the runtime names another tuner.
 
     Returns:
         List of TunerSpec in execution order.
@@ -323,6 +331,10 @@ def select_tuners(
     else:
         log.warning("Unknown framework %r; no tuners selected", framework)
 
+    # Last, so it sees everything the framework branch decided and can only
+    # widen it.
+    tuners.extend(_tuners_the_demand_says_are_needed(demand_report, tuners))
+
     # Sort by priority
     tuners.sort(key=lambda t: t.priority)
     return tuners
@@ -333,7 +345,7 @@ def _moe_tuners_the_log_says_are_needed(
     already: list[TunerSpec],
     profile: ModelProfile,
 ) -> list[TunerSpec]:
-    """Add the CK MoE tuner when the log shows aiter serving part of the MoE.
+    """Add CK MoE tuning when a 2-stage key actually missed in the log.
 
     A vLLM run is routed by framework alone, which assumes the MoE is served by
     vLLM's Triton path. It is not always: aiter's CK fused-MoE can serve some or
@@ -350,7 +362,7 @@ def _moe_tuners_the_log_says_are_needed(
     if not profile.is_moe or not kernel_signature_log:
         return []
     moe = moe_stage_coverage(kernel_signature_log) or {}
-    if not moe.get("tunable_ck_2stage"):
+    if not moe.get("tunable_ck_2stage") or not moe.get("missed_ck_keys"):
         return []
     if any(t.name == "fmoe_ck" for t in already):
         return []
@@ -361,8 +373,9 @@ def _moe_tuners_the_log_says_are_needed(
         {int(tok) for stage, tokens in by_stage.items() if stage.startswith("2stage") for tok in (tokens or [])}
     )
     log.info(
-        "Serving log shows aiter CK 2-stage MoE (stages=%s, tokens=%s) on a vLLM "
-        "run; adding fmoe_ck, which owns the table that path reads",
+        "Serving log shows missed aiter CK 2-stage MoE "
+        "(stages=%s, tokens=%s) on a vLLM run; adding fmoe_ck, which owns "
+        "the table that path reads",
         moe.get("stages_seen"),
         by_stage,
     )
@@ -374,6 +387,57 @@ def _moe_tuners_the_log_says_are_needed(
             token_hint=ck_tokens or None,
         )
     ]
+
+
+def _tuners_the_demand_says_are_needed(
+    demand_report: dict[str, Any] | None,
+    already: list[TunerSpec],
+) -> list[TunerSpec]:
+    """Add the tuners that own tables the serving run actually looked up.
+
+    Every other input to selection is an inference about what the runtime will
+    do -- a precision label, a framework name, a config field. A demand report
+    is not: ``AITER_LOG_TUNED_CONFIG`` makes the serving process name the tables
+    it consulted and the keys it asked for, so ``demands[].tuner`` is the
+    runtime's own answer to the question the router is guessing at.
+
+    Where the two disagree, the log wins, for the same reason it wins on the MoE
+    side (:func:`_moe_tuners_the_log_says_are_needed`): a table with thousands
+    of recorded misses is being read, whatever the precision label implies.
+
+    Only ever adds. Selection stays with the framework branch; this is the run
+    saying that branch left out a table it spends its time in. A tuner already
+    present keeps its spec -- including a skip_reason, which is a capability
+    statement (wrong arch, unsupported combo) that demand does not overturn.
+    """
+    demands = (demand_report or {}).get("demands") or []
+    if not demands:
+        return []
+    have = {t.name for t in already}
+    added: list[TunerSpec] = []
+    for entry in demands:
+        name = str(entry.get("tuner") or "")
+        # A demand with no registered owner is a coverage gap, not a selection:
+        # tier3 handles those, and inventing a TunerSpec here would shadow it.
+        if not name or name in have:
+            continue
+        have.add(name)
+        added.append(
+            TunerSpec(
+                name,
+                priority=10 if name == "fmoe_ck" else 20,
+                estimated_minutes=15 if name == "fmoe_ck" else 20,
+            )
+        )
+        log.info(
+            "Serving log consulted %s (%s misses over %s distinct keys) but the "
+            "router did not select %s, which owns it; adding it",
+            entry.get("table"),
+            entry.get("miss_count"),
+            entry.get("distinct_keys"),
+            name,
+        )
+    return added
 
 
 def _select_sglang_tuners(
@@ -507,9 +571,11 @@ def _select_sglang_tuners(
             )
         else:
             tuners.append(_dense_spec("a4w4_blockscale"))
-    elif precision in ("bf16", "fp16") and quant_type == "none":
-        # Dense BF16/FP16 tuning via aiter's GemmTuner (hipblaslt search).
-        # Shapes are computed from config.json (no --untuned-csv needed).
+
+    # Deliberately not an ``elif``: bf16 dense is not the alternative to
+    # quantized dense, it runs alongside it. See _dense_bf16_is_dispatched.
+    # Shapes are computed from config.json (no --untuned-csv needed).
+    if _dense_bf16_is_dispatched(profile, precision, quant_type):
         tuners.append(
             TunerSpec(
                 "sglang_dense_bf16",
@@ -519,6 +585,40 @@ def _select_sglang_tuners(
         )
 
     return tuners
+
+
+def _dense_bf16_is_dispatched(
+    profile: ModelProfile,
+    precision: str,
+    quant_type: str,
+) -> bool:
+    """Whether this run issues bf16/fp16 dense GEMMs worth tuning.
+
+    ``precision`` describes the format of the quantized weights, which is a
+    different question from which dense GEMM operators get dispatched, and on a
+    quantized MoE model the two answers disagree almost completely. The experts
+    carry ~99% of the weight bytes and are served by the fused MoE kernel, not
+    by a dense GEMM at all; the attention projections and lm_head carry ~1% and
+    are excluded from quantization, so they are essentially the entire dense
+    GEMM traffic -- in bf16, against ``bf16_tuned_gemm.csv``.
+
+    An exclusion containing only ``lm_head`` is not enough evidence: on a
+    dense-only quantized model that is one GEMM per forward, while the quantized
+    projections dominate the workload. Actual bf16 misses still override this
+    heuristic through the demand report.
+
+    Reading the scalar as if it partitioned the operator set is what left that
+    table untuned while a4w4 dense, an operator the model never dispatches, was
+    tuned instead.
+    """
+    if profile.keeps_dense_layers_at_model_dtype:
+        # A quantized checkpoint with substantial excluded linear layers still
+        # runs those modules at the model dtype. lm_head alone is one GEMM per
+        # forward and does not justify competing with the quantized dense tuner
+        # for the shared budget; an observed bf16 miss can still add the tuner
+        # through demand_report.
+        return profile.model_dtype.lower() in ("bfloat16", "bf16", "float16", "fp16")
+    return precision in ("bf16", "fp16") and quant_type == "none"
 
 
 def _select_vllm_tuners(

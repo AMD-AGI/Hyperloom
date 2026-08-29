@@ -18,6 +18,7 @@ the reading that hid the original breakage.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from kernelforge.gemm_tune.tuners import _aiter_dense_common as adc
@@ -75,3 +76,35 @@ def test_a_context_without_the_flag_is_treated_as_fast():
         timeout_s = 3_600
 
     assert adc._demand_budget(_Old()) == ((3_600 - adc._DEMAND_RESERVE_S) // adc._DEMAND_PER_SHAPE_COST_S)
+
+
+def test_quantized_demand_uses_the_runtime_lookup_buckets(tmp_path):
+    """a8w8/a4w4 use the same padded-M retry sequence as a16w16."""
+    demand = tmp_path / "demand.json"
+    demand.write_text(
+        json.dumps(
+            {
+                "demands": [
+                    {
+                        "tuner": "a8w8_blockscale",
+                        "distinct_keys": 2,
+                        "keys": [
+                            {"M": 300, "N": 4096, "K": 4096, "requests": 7},
+                            {"M": 400, "N": 4096, "K": 4096, "requests": 3},
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    ctx = _Ctx(3_600)
+    ctx.demand_json = demand
+
+    out = adc._demand_input_csv(ctx, tmp_path, "a8w8_blockscale")
+
+    assert out is not None
+    assert out.read_text(encoding="utf-8").splitlines() == [
+        "M,N,K",
+        "512,4096,4096",
+    ]

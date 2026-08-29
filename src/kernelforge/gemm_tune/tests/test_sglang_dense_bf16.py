@@ -311,7 +311,17 @@ class TestWithHipblasltFlag:
         _run(tmp_path)
         cmd = cap["cmd"]
         assert "--with-hipblaslt" in cmd
-        assert cmd[cmd.index("--libtype") + 1] == "hipblaslt"
+        assert cmd[cmd.index("--libtype") + 1] == "hipblaslt,torch"
+
+    def test_fast_mode_asks_for_torch_so_the_run_has_a_baseline(self, tmp_path, monkeypatch):
+        # torch is not a serious contender against hipblaslt; it is the kernel
+        # aiter falls back to when a shape is untuned, so its profile row is the
+        # only baseline _parse_profile_defaults can read. Dropping it made every
+        # fast run report improved_shapes=0 for want of a comparison.
+        cap = _prep(tmp_path, monkeypatch, tuned_rows=[_row(1, 4096, 4096, "hipblaslt", 9.36)])
+        _run(tmp_path)
+        libtypes = cap["cmd"][cap["cmd"].index("--libtype") + 1].split(",")
+        assert "torch" in libtypes and "hipblaslt" in libtypes
 
     def test_thorough_mode_also_enables_hipblaslt(self, tmp_path, monkeypatch):
         # --libtype all is gated on --with-hipblaslt too: the `all` variants
@@ -438,6 +448,33 @@ class TestShapeBudgetIsModeAware:
         tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10, thorough=True))
         assert tuner._shape_budget() == 1
 
+    def test_default_timeout_fits_all_82_measured_buckets(self, tmp_path):
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10_800))
+        assert tuner._shape_budget() >= 82
+
+    def test_demand_log_compares_buckets_to_buckets(self, tmp_path, monkeypatch, caplog):
+        entry = {
+            "distinct_keys": 3,
+            "miss_count": 15,
+            "keys": [
+                {"M": 300, "N": 4096, "K": 4096, "requests": 7},
+                {"M": 400, "N": 4096, "K": 4096, "requests": 3},
+                {"M": 64, "N": 4096, "K": 4096, "requests": 5},
+            ],
+        }
+        monkeypatch.setattr(sd, "load_demand", lambda _path: {"demands": [entry]})
+        monkeypatch.setattr(sd, "demand_for_tuner", lambda _report, _name: entry)
+        monkeypatch.setenv(sd._MAX_SHAPES_ENV, "1")
+        tuner = sd.SglangDenseBf16Tuner(_ctx(tmp_path, timeout_s=10_800, demand_json=tmp_path / "demand.json"))
+
+        with caplog.at_level("INFO"):
+            shapes = tuner._demand_shapes()
+
+        assert [shape["M"] for shape in shapes] == [512]
+        assert "1 of 2 padded-M buckets selected" in caplog.text
+        assert "covering 2 of 3 distinct raw keys" in caplog.text
+        assert "from 10800s timeout" in caplog.text
+
 
 class TestDerivedShapesRespectTheBudget:
     """The derived cross product used to ignore the budget the demand list honours.
@@ -518,9 +555,11 @@ class TestDerivedShapesRespectTheBudget:
 
         untuned = Path(cap["cmd"][cap["cmd"].index("-i") + 1])
         rows = untuned.read_text(encoding="utf-8").strip().splitlines()[1:]
-        # 56 shapes at the fast cost is 4144s of work; the 1680s window pays for
-        # 22, so fast mode trims too -- just far less aggressively than thorough.
-        assert len(rows) == 4 * 5
+        # 56 shapes at the fast cost is 5208s of work; the 1680s window pays for
+        # 18, so fast mode trims too -- just far less aggressively than thorough.
+        # (18, not 22: carrying torch for the baseline costs ~19s a shape, and
+        # the budget has to charge for it or the batch is cut off part-way.)
+        assert len(rows) == 4 * 4
         assert len(rows) > 4 * 1
 
 
@@ -725,9 +764,12 @@ class TestRejectedArgument:
 
 
 class TestUnverifiedShapes:
-    def test_hipblaslt_only_has_no_baseline(self, tmp_path, monkeypatch):
-        # With --libtype hipblaslt the profile holds hipblaslt candidates only,
-        # so torch is never timed and no shape can show a micro speedup.
+    def test_a_profile_without_torch_rows_has_no_baseline(self, tmp_path, monkeypatch):
+        # What a torch-less profile CSV does downstream. Fast mode no longer
+        # produces one -- it asks for `hipblaslt,torch` -- but the parser still
+        # has to say "unverified" rather than "no gain" if torch is missing for
+        # any other reason (an aiter build without it, a candidate that never
+        # ran inside the batch budget).
         _prep(
             tmp_path,
             monkeypatch,
@@ -768,6 +810,30 @@ class TestUnverifiedShapes:
         res = _run(tmp_path, thorough=True)
         assert res.improved_shapes == 1  # only M=1 beat torch
         assert res.unverified_shapes == 0
+        assert res.best_micro_speedup == 1.25
+
+    def test_fast_mode_reports_a_measured_speedup_not_unverified(self, tmp_path, monkeypatch):
+        # The whole point of carrying torch in fast mode. Kimi-K3 on vLLM lands
+        # here: 38600 misses in bf16_tuned_gemm.csv, every one of them falling
+        # back to torch, and the run still reported best_micro_speedup=1.0
+        # because nothing timed the kernel it was falling back to.
+        _prep(
+            tmp_path,
+            monkeypatch,
+            tuned_rows=[
+                _row(1, 4096, 4096, "hipblaslt", 8.0),
+                _row(512, 4096, 4096, "hipblaslt", 25.0),
+            ],
+            profile_rows=[
+                _row(1, 4096, 4096, "torch", 10.0),
+                _row(1, 4096, 4096, "hipblaslt", 8.0),
+                _row(512, 4096, 4096, "torch", 20.0),
+                _row(512, 4096, 4096, "hipblaslt", 25.0),
+            ],
+        )
+        res = _run(tmp_path)  # fast, not thorough
+        assert res.unverified_shapes == 0
+        assert res.improved_shapes == 1
         assert res.best_micro_speedup == 1.25
         assert res.status == "ok"
 

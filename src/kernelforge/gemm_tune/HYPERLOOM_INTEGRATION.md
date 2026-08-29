@@ -28,8 +28,36 @@ kernelforge gemm-tune run \
   [--untuned-csv <path>] \
   [--shapes-json <path>] \
   [--tunableop-input <path>] \
-  [--kernel-signature-log <server.log>]
+  [--kernel-signature-log <server.log>] \
+  [--demand <demand.json>]
 ```
+
+#### `--kernel-signature-log` is the one that decides whether tuning does anything
+
+Bracketed above means "the CLI does not require it", not "it is optional in
+practice". Everything the tuners need beyond the model config comes from this
+log:
+
+* **Dense shapes.** Shapes derived from `config.json` served **0.4%** of the
+  lookups the runtime actually made across 42 measured arms. The log's own miss
+  list is the shape source; without it the dense tuners either skip or tune a
+  table nothing reads.
+* **The MoE dispatch key.** `fmoe_ck` refuses to tune a key inferred from the
+  config, because the quantisation pair, the per-partition `inter_dim` and the
+  EP path's extra masked expert slot are all chosen by the serving framework.
+  The log prints the tuple aiter dispatched, which supplies all three. Without a
+  log, `fmoe_ck` skips every MoE model — measured as 27 skips out of 27 on a
+  box with 33 models.
+
+Passing `--demand` with an already-parsed `demand.json` (from
+`kernelforge gemm-tune evidence`) is equivalent and takes priority; `run`
+derives one from the log automatically when only `--kernel-signature-log` is
+given.
+
+The log must come from a server that actually served traffic — a boot-only log
+records no lookups. Hyperloom populates this from the current-best or baseline
+benchmark workspace; all 169 production `forge_gemm_tuning_input.json` files on
+`/shared_nfs` carry it.
 
 ### Output (stdout, sentinel-wrapped)
 

@@ -128,7 +128,7 @@ class FmoeCKTuner(BaseTuner):
                 f"moe_intermediate_size {profile.effective_moe_intermediate} is not "
                 f"divisible by tp {tp}; cannot derive the per-partition inter_dim"
             )
-        if getattr(self.ctx, "moe_untuned_csv", None) is None:
+        if getattr(self.ctx, "moe_untuned_csv", None) is None and not self._demand_key():
             # Refuse rather than tune a guessed key. Three properties of the
             # dispatch key are set by the serving framework and are not derivable
             # from the model config: the activation/weight dtype pair, the
@@ -138,14 +138,136 @@ class FmoeCKTuner(BaseTuner):
             # lookup reaches, and the end-to-end round then reports the unchanged
             # config as "tuning did not pay off" -- hours spent to learn nothing.
             #
-            # A model genuinely served by aiter always logs its dispatch tuple, so
-            # the absence of one means MoE is not on aiter (or no server ever
-            # booted), and neither case is tunable here.
+            # No missed key means either every observed lookup hit, MoE was not
+            # served by aiter, or no server booted. None needs a new CK table.
             return (
-                "no runtime-observed MoE dispatch key supplied (moe_untuned_csv); "
-                "refusing to tune a key inferred from the model config"
+                "no runtime-observed MoE miss available (neither "
+                "moe_untuned_csv nor a serving log with a missed aiter "
+                "fused_moe dispatch key); refusing to tune a key inferred "
+                "from the model config"
             )
         return None
+
+    def _demand_key(self) -> dict[str, Any] | None:
+        """The most-missed MoE dispatch key, or None when every lookup hit.
+
+        Same provenance as an explicit ``moe_untuned_csv`` -- both are the tuple
+        aiter printed at dispatch -- so this satisfies the guard above for the
+        same reason. It exists because the caller already hands forge a serving
+        log for the dense tuners' shapes, and that log carries the MoE key too;
+        requiring a separately-prepared CSV for it left this tuner refusing every
+        model it was ever asked to tune. A dispatch alone is not demand: that line
+        is printed for hits too, so only keys with a miss count or untuned token
+        are eligible.
+        """
+        if hasattr(self, "_cached_demand_key"):
+            return self._cached_demand_key
+
+        path = getattr(self.ctx, "demand_json", None)
+        if not path:
+            self._cached_demand_key = None
+            return None
+        # Keep evidence parsing out of module import: CLI registration must not
+        # acquire this optional analysis path merely by importing the tuner.
+        from ..evidence import load_demand, moe_ck_missed_keys
+
+        report = load_demand(path)
+        if report is None:
+            self._cached_demand_key = None
+            return None
+        keys = moe_ck_missed_keys(report)
+        if not keys:
+            self._cached_demand_key = None
+            return None
+        if len(keys) > 1:
+            # More than one MoE shape in one log means the server changed layout
+            # mid-run (or two logs were concatenated). Tune the most-missed one
+            # and say so, rather than silently picking whichever sorted first.
+            log.warning(
+                "serving log carries %d distinct MoE dispatch keys; tuning the "
+                "most-missed one (inter_dim=%s, q_dtype_w=%s)",
+                len(keys),
+                keys[0].get("inter_dim"),
+                keys[0].get("q_dtype_w"),
+            )
+        self._cached_demand_key = keys[0]
+        return self._cached_demand_key
+
+    def _untuned_csv_from_demand(self, key: dict[str, Any]) -> Path:
+        """Write the observed key out as an untuned fmoe CSV."""
+        from ..evidence import moe_untuned_csv_text
+
+        tokens = sorted({int(t) for t in (key.get("untuned_tokens") or key.get("tokens") or [])})
+        # A token hint is a *set*, not a count. The router sets it to the token
+        # counts the log shows CK 2-stage actually serving, precisely so the
+        # ones the 1-stage and Triton paths own are left out; spending budget
+        # slots on those writes rows nothing will ever look up. Intersect first,
+        # then let the budget thin whatever survives.
+        hint = getattr(self.ctx, "token_hint", None)
+        if hint and tokens:
+            allowed = {int(t) for t in hint}
+            kept = [t for t in tokens if t in allowed]
+            if kept:
+                if len(kept) != len(tokens):
+                    log.info(
+                        "observed %d MoE token count(s); %d of them are served by "
+                        "this backend per the log, dropping %s",
+                        len(tokens),
+                        len(kept),
+                        [t for t in tokens if t not in allowed][:8],
+                    )
+                tokens = kept
+            else:
+                # Both sets came from the same serving log. A disjoint pair is
+                # positive evidence that these misses belong to a different
+                # stage/backend, so emitting CK rows for them is certainly
+                # wrong rather than a useful fail-open fallback.
+                raise ValueError(
+                    "none of the %d observed MoE token count(s) appear in the "
+                    "CK 2-stage token hint %s" % (len(tokens), sorted(allowed)[:8])
+                )
+        # Without a restrictive token hint, honour the caller's token-list
+        # length as a budget, the same way the derived path does. A router hint
+        # normally makes this a no-op because ctx.tokens and token_hint carry
+        # the same set. When it does bite, thin the list *evenly across the
+        # observed range* rather than keeping one end: the counts aiter
+        # dispatches are powers of two
+        # spanning decode (1..32) to prefill (4096..16384), so keeping the
+        # largest N would tune only prefill and leave decode -- where a serving
+        # run spends most of its time -- on the untuned heuristic fallback.
+        # Both extremes are always kept.
+        budget = len(self.ctx.tokens) if self.ctx.tokens else 0
+        if budget and len(tokens) > budget:
+            observed = len(tokens)
+            if budget == 1:
+                kept = [tokens[-1]]
+            else:
+                step = (observed - 1) / (budget - 1)
+                kept = sorted({tokens[round(i * step)] for i in range(budget)})
+            log.info(
+                "observed %d MoE token counts, tuning %d spread across the range %d..%d: %s",
+                observed,
+                len(kept),
+                tokens[0],
+                tokens[-1],
+                kept,
+            )
+            tokens = kept
+        csv_path = self.work_dir / "untuned_fmoe.csv"
+        csv_path.write_text(moe_untuned_csv_text(key, tokens=tokens), encoding="utf-8")
+        log.info(
+            "Untuned CSV from runtime-observed MoE key at %s: %d token(s), "
+            "model_dim=%s inter_dim=%s expert=%s topk=%s %s/%s",
+            csv_path,
+            len(tokens),
+            key.get("model_dim"),
+            key.get("inter_dim"),
+            key.get("expert"),
+            key.get("topk"),
+            key.get("q_dtype_a"),
+            key.get("q_dtype_w"),
+        )
+        return csv_path
 
     def _generate_untuned_csv(self) -> Path:
         """Generate untuned CSV from model profile and token coverage."""
@@ -203,6 +325,9 @@ class FmoeCKTuner(BaseTuner):
         """
         external = getattr(self.ctx, "moe_untuned_csv", None)
         if external is None:
+            key = self._demand_key()
+            if key is not None:
+                return self._untuned_csv_from_demand(key), "runtime_observed"
             return self._generate_untuned_csv(), "config_derived"
 
         path = Path(external)

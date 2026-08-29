@@ -45,7 +45,9 @@ class TestLineBound:
     def test_the_shapes_read_before_the_limit_are_still_usable(self, monkeypatch):
         monkeypatch.setenv(ev._MAX_LINES_ENV, "5")
         entry = ev.demand_for_tuner(ev.parse_log(_log(50)), "sglang_dense_bf16")
-        shapes = ev.demand_shapes(entry)
+        # bucket=False: this is about which lines were read before the bound,
+        # so it wants the raw M values rather than a padded cover of them.
+        shapes = ev.demand_shapes(entry, bucket=False)
         assert [s["M"] for s in shapes] == [1, 2, 3, 4, 5]
 
 

@@ -274,6 +274,10 @@ def _demand_input_csv(
     if entry is None:
         return None
     budget = _demand_budget(ctx)
+    # The a8w8 blockscale, a8w8 quant-type, and a4w4 lookup paths all retry the
+    # exact M followed by get_padded_m(..., gl=0) and gl=1, using the same
+    # gemm_op_common implementation as a16w16. Spend the budget on those lookup
+    # buckets so one row covers every observed M that resolves to it.
     shapes = demand_shapes(entry, limit=budget)
     if not shapes:
         return None
@@ -289,7 +293,7 @@ def _demand_input_csv(
                 row += f",{q_dtype_w}"
             fh.write(row + "\n")
     log.info(
-        "%s: %d demand shapes (of %d distinct keys, budget %d) -> %s",
+        "%s: %d padded-M demand shapes (of %d distinct keys, budget %d) -> %s",
         tuner_name,
         len(shapes),
         entry.get("distinct_keys", 0),

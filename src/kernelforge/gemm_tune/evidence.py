@@ -68,6 +68,48 @@ FUSED_MOE = re.compile(
     r"\[aiter\]\s+\[fused_moe\]\s+using\s+(?P<stage>\S+)\s+(?P<tag>\S+)\s+for\s+\((?P<tuple>[^)]*)\)"
 )
 
+# The same tuple, on the line that says the lookup MISSED. This is the MoE
+# equivalent of DENSE_LOOKUP's miss branch and the only unambiguous "this key
+# needs tuning" signal the MoE path emits -- the dispatch line above is printed
+# whether or not a tuned row was found, so reading it alone cannot distinguish
+# "tuned" from "fell back to a heuristic".
+FUSED_MOE_MISS = re.compile(r"\[aiter\]\s+\[fused_moe\]\s+no tuned (?P<flavour>\S+) config for\s+\((?P<tuple>[^)]*)\)")
+
+# Field order of the aiter fused-MoE dispatch tuple, read off a production log:
+#
+#   ('gfx950', 256, 1, 6144, 384, 128, 4, <ActivationType.Swiglu: 2>,
+#    'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2',
+#    'QuantType.per_1x32', True, False)
+#
+# The first two entries are the architecture and the CU count, which are
+# properties of the box rather than of the key; everything after them is, in
+# this exact order, the twelve columns of aiter's untuned/tuned fmoe CSV. So
+# MOE_TUPLE_FIELDS[2:] == the fmoe CSV header, and the slice is the whole
+# conversion. An earlier version of this parser documented the layout as
+# starting at ``cu_num`` and so read ``token`` out of the CU-count slot,
+# reporting every model's token set as the constant [256].
+MOE_TUPLE_FIELDS = (
+    "arch",
+    "cu_num",
+    "token",
+    "model_dim",
+    "inter_dim",
+    "expert",
+    "topk",
+    "act_type",
+    "dtype",
+    "q_dtype_a",
+    "q_dtype_w",
+    "q_type",
+    "use_g1u1",
+    "doweight_stage1",
+)
+# The subset that keys the CSV -- i.e. the fields that are not box properties.
+MOE_KEY_FIELDS = MOE_TUPLE_FIELDS[2:]
+# ``token`` varies per request; the rest of the key is fixed for a given model
+# and parallelism layout, so it is what identifies "the MoE shape to tune".
+MOE_SHAPE_FIELDS = tuple(f for f in MOE_KEY_FIELDS if f != "token")
+
 # vLLM Triton MoE: found vs not-found are two different lines.
 VLLM_MOE_HIT = re.compile(r"Using configuration from (?P<path>\S+) for MoE layer")
 VLLM_MOE_MISS = re.compile(r"Config file not found at (?P<path>\S+)")
@@ -191,6 +233,99 @@ def _blank_key() -> dict[str, str | None]:
     return {f: None for f in KEY_FIELDS}
 
 
+def _moe_field(raw: str) -> str:
+    """Normalise one dispatch-tuple entry to the spelling the fmoe CSV uses.
+
+    The log prints Python ``repr``s; aiter's own untuned_fmoe.csv wants the bare
+    values. Three shapes differ:
+
+      ``'torch.bfloat16'``           -> ``torch.bfloat16``   (quotes)
+      ``<ActivationType.Swiglu: 2>`` -> ``ActivationType.Swiglu``
+      ``True`` / ``False``           -> ``1`` / ``0``
+    """
+    value = raw.strip()
+    if value.startswith("<") and value.endswith(">"):
+        # An enum repr: "<ActivationType.Swiglu: 2>". Keep the dotted name, drop
+        # the numeric value -- the CSV is keyed on the name.
+        value = value[1:-1].split(":", 1)[0].strip()
+    value = value.strip("'\"")
+    if value == "True":
+        return "1"
+    if value == "False":
+        return "0"
+    return value
+
+
+def _moe_tuple(raw: str) -> list[str]:
+    """Split a dispatch tuple into normalised fields."""
+    return [_moe_field(p) for p in raw.split(",")]
+
+
+def _blank_moe() -> dict[str, Any]:
+    return {"impl": "aiter_ck", "by_stage": {}, "keys": {}}
+
+
+def _moe_token_offset(parts: list[str]) -> int:
+    """Index of ``token`` in a dispatch tuple.
+
+    aiter prefixes the tuple with the architecture on the builds that print one
+    ('gfx950', 256, 1, ...) and starts at the CU count on those that do not
+    (304, 1, ...). Both forms put ``token`` immediately after the box-property
+    prefix, and the arch is the only non-numeric field there, so its presence is
+    what the offset keys on. Assuming one layout is what previously made every
+    model report its token set as the constant [256] -- the CU count read out of
+    the token slot.
+    """
+    return 2 if parts and _as_int(parts[0]) is None else 1
+
+
+def _record_moe_key(moe: dict[str, Any], parts: list[str], *, miss: bool) -> int | None:
+    """Fold one dispatch tuple into the observed-key table. Returns its token.
+
+    Keys are grouped on everything except ``token``: one model serving at one
+    parallelism layout dispatches a single MoE shape and simply varies the token
+    count per batch, so collapsing on token is what turns thousands of log lines
+    into the handful of rows a tuner is actually asked to produce.
+    """
+    offset = _moe_token_offset(parts)
+    if len(parts) <= offset:
+        return None
+    token = _as_int(parts[offset])
+    key_parts = parts[offset:]
+    if len(key_parts) != len(MOE_KEY_FIELDS):
+        # A truncated tuple still tells us which token counts were dispatched,
+        # which is all the stage-coverage consumer needs. It cannot key a tuned
+        # table, though, so no MoE key is recorded and fmoe_ck keeps refusing --
+        # recording a short row would silently zero-fill the quantisation pair.
+        moe["_unkeyed_tuple_count"] = moe.get("_unkeyed_tuple_count", 0) + 1
+        if miss:
+            moe["_unkeyed_miss_count"] = moe.get("_unkeyed_miss_count", 0) + 1
+        moe.setdefault("_unkeyed_field_counts", set()).add(len(key_parts))
+        return token
+    fields = dict(zip(MOE_KEY_FIELDS, key_parts, strict=True))
+    fields["arch"] = parts[0] if offset == 2 else ""
+    fields["cu_num"] = parts[offset - 1]
+    shape = tuple(fields[f] for f in MOE_SHAPE_FIELDS)
+    rec = moe["keys"].get(shape)
+    if rec is None:
+        rec = {
+            **{f: fields[f] for f in MOE_SHAPE_FIELDS},
+            "arch": fields["arch"],
+            "cu_num": fields["cu_num"],
+            "tokens": set(),
+            "untuned_tokens": set(),
+            "miss_count": 0,
+        }
+        moe["keys"][shape] = rec
+    if token is not None:
+        rec["tokens"].add(token)
+        if miss:
+            rec["untuned_tokens"].add(token)
+    if miss:
+        rec["miss_count"] += 1
+    return token
+
+
 def parse_log(text: str) -> dict[str, Any]:
     """Parse a serving log into demands, an apply verdict and dispatch facts."""
     demands: dict[str, Demand] = {}
@@ -275,13 +410,28 @@ def parse_log(text: str) -> dict[str, Any]:
             # One model dispatches DIFFERENT stages at different token counts, so
             # a single "saw 1stage" boolean collapses the decode range away and
             # suppresses tuning that 2stage would have covered.
-            parts = [p.strip().strip("'") for p in fm.group("tuple").split(",")]
-            moe = dispatch.setdefault("moe", {"impl": "aiter_ck", "by_stage": {}})
+            parts = _moe_tuple(fm.group("tuple"))
+            moe = dispatch.setdefault("moe", _blank_moe())
+            moe.setdefault("by_stage", {})
+            moe.setdefault("keys", {})
             stage_key = f"{fm.group('stage')}/{fm.group('tag')}"
             rec = moe["by_stage"].setdefault(stage_key, {"tokens": set(), "tuple": parts})
-            # tuple layout: cu_num, token, model_dim, inter_dim, expert, topk, ...
-            if len(parts) > 1 and parts[1].isdigit():
-                rec["tokens"].add(int(parts[1]))
+            token = _record_moe_key(moe, parts, miss=False)
+            if token is not None:
+                rec["tokens"].add(token)
+            continue
+
+        fmm = FUSED_MOE_MISS.search(line)
+        if fmm:
+            # The dispatch line above says which stage ran, not whether a tuned
+            # row was found -- it prints identically either way. This line is the
+            # actual miss, and it is the MoE counterpart of the dense
+            # "not found tuned config in ..." branch that drives dense demand.
+            moe = dispatch.setdefault("moe", _blank_moe())
+            moe.setdefault("by_stage", {})
+            moe.setdefault("keys", {})
+            moe["fallback_flavour"] = fmm.group("flavour")
+            _record_moe_key(moe, _moe_tuple(fmm.group("tuple")), miss=True)
             continue
 
         vh = VLLM_MOE_HIT.search(line)
@@ -293,6 +443,23 @@ def parse_log(text: str) -> dict[str, Any]:
             vllm_moe["miss"].append(vm.group("path"))
 
     moe = dispatch.get("moe")
+    if moe:
+        unkeyed_count = moe.pop("_unkeyed_tuple_count", 0)
+        unkeyed_misses = moe.pop("_unkeyed_miss_count", 0)
+        field_counts = sorted(moe.pop("_unkeyed_field_counts", set()))
+        if unkeyed_count:
+            # Short tuples are a supported aiter build variant and may appear
+            # thousands of times in one serving log. Report the limitation once
+            # per parse instead of emitting one warning for every dispatch.
+            log.warning(
+                "%d fused_moe tuple line(s) (%d misses) carry %s key fields; expected %d, recording tokens only",
+                unkeyed_count,
+                unkeyed_misses,
+                field_counts,
+                len(MOE_KEY_FIELDS),
+            )
+            moe["unkeyed_tuple_count"] = unkeyed_count
+            moe["unkeyed_miss_count"] = unkeyed_misses
     if moe and "by_stage" in moe:
         for rec in moe["by_stage"].values():
             rec["tokens"] = sorted(rec["tokens"])
@@ -300,6 +467,14 @@ def parse_log(text: str) -> dict[str, Any]:
         # A stage that only covers large token counts must not suppress tuning
         # for the range the other stage serves.
         moe["tunable_ck_2stage"] = any(k.startswith("2stage") for k in moe["by_stage"])
+    if moe and isinstance(moe.get("keys"), dict):
+        # Most-missed key first, so a consumer that can only afford one row tunes
+        # the one the runtime asked for most.
+        moe["keys"] = [
+            {**rec, "tokens": sorted(rec["tokens"]), "untuned_tokens": sorted(rec["untuned_tokens"])}
+            for rec in sorted(moe["keys"].values(), key=lambda r: (-r["miss_count"], -len(r["tokens"])))
+        ]
+        moe["miss_count"] = sum(r["miss_count"] for r in moe["keys"])
 
     if vllm_moe["hit"] or vllm_moe["miss"]:
         moe_entry = dispatch.setdefault("moe", {"impl": "vllm_triton"})
@@ -390,19 +565,61 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+# Upper bound aiter clamps the gl=1 padding to; beyond it every M shares one row.
+_PADDED_M_CAP = 8192
+
+
+def padded_m(m: int) -> int:
+    """The M a tuned row must be written at to serve ``m``.
+
+    aiter resolves a lookup three times before giving up: the exact M, then
+    ``get_padded_m(..., gl=0)``, then ``get_padded_m(..., gl=1)``. The gl=1 form
+    is the next power of two, capped at 8192, and does not depend on N or K --
+    verified against the installed aiter for every M in 1..4096 plus 5000, 8192,
+    8193, 10000, 16384, 20000 and 100000, with zero mismatches. aiter's own
+    shipped ``bf16_tuned_gemm.csv`` is keyed almost entirely on powers of two,
+    which is the same statement from the other direction: rows are *meant* to sit
+    at the padded M and serve the bucket below them.
+
+    A row written at a raw observed M, by contrast, is reachable only by a
+    request repeating that exact M.
+    """
+    if m <= 1:
+        return 1
+    return min(1 << (m - 1).bit_length(), _PADDED_M_CAP)
+
+
 def demand_shapes(
     entry: dict[str, Any],
     *,
     limit: int | None = None,
+    bucket: bool = True,
 ) -> list[dict[str, Any]]:
     """Requested keys for one table, most-requested first.
 
-    ``limit`` is a budget, not a filter: a shape costs ~74s to tune (58-155s
-    measured), so an hour buys roughly 48 of them while a single arm can ask for
-    492-849 distinct M values. Truncating by request count is the only ordering
-    the log itself justifies -- see the caveat in the master doc about fp8 arms,
-    where every key is requested exactly once and this ordering carries no
-    information.
+    ``limit`` is a budget, not a filter: the bf16 fast path costs ~93s per shape
+    after including its torch baseline, so an hour buys roughly 37 of them while
+    a single arm can ask for 492-849 distinct M values.
+
+    With ``bucket`` (the default) the budget is spent on *lookup buckets* rather
+    than on raw keys: keys are grouped by the M a tuned row must be written at
+    (see ``padded_m``), the groups are ranked by total request count, and each
+    chosen group contributes one row at its padded M. Ranking raw keys instead
+    spends several slots inside one bucket and covers no more than one
+    bucket-aware slot would have. Measured over the 17 models with a production
+    serving log on /shared_nfs, as the share of logged misses a tuned table would
+    actually serve:
+
+        budget  24:  raw keys   1.1%   padded buckets  95.6%
+        budget  48:  raw keys   2.2%   padded buckets  99.5%
+        budget  96:  raw keys   4.2%   padded buckets 100.0%
+
+    This also repairs the fp8 caveat noted below: where every key is requested
+    exactly once the raw ordering carries no information, but summing those
+    requests per bucket does.
+
+    ``bucket=False`` restores the raw-key ordering, for a caller that wants the
+    exact M values the runtime asked for rather than a tunable cover of them.
     """
     shapes: list[dict[str, Any]] = []
     for key in entry.get("keys") or []:
@@ -414,9 +631,102 @@ def demand_shapes(
             if key.get(extra) is not None:
                 shape[extra] = key[extra]
         shapes.append(shape)
+
+    if bucket:
+        grouped: dict[tuple, dict[str, Any]] = {}
+        for shape in shapes:
+            padded = padded_m(shape["M"])
+            rest = tuple(sorted((f, v) for f, v in shape.items() if f not in ("M", "requests")))
+            got = grouped.get((padded, rest))
+            if got is None:
+                grouped[(padded, rest)] = {
+                    **shape,
+                    "M": padded,
+                    "observed_M": [shape["M"]],
+                }
+            else:
+                got["requests"] += shape["requests"]
+                got["observed_M"].append(shape["M"])
+        shapes = sorted(grouped.values(), key=lambda s: -s["requests"])
+        for shape in shapes:
+            shape["observed_M"] = sorted(set(shape["observed_M"]))
+
     if limit is not None and limit > 0:
         shapes = shapes[:limit]
     return shapes
+
+
+def moe_dispatch_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Runtime-observed MoE dispatch keys, most-missed first. Empty if none."""
+    moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
+    keys = moe.get("keys")
+    return list(keys) if isinstance(keys, list) else []
+
+
+def moe_ck_missed_keys(report: dict[str, Any]) -> list[dict[str, Any]]:
+    """MoE keys whose missed tokens were actually served by CK 2-stage.
+
+    Miss lines do not name the dispatch stage, and keys deliberately collapse
+    across token counts. Attribute misses by intersecting their tokens with the
+    tokens observed on 2-stage dispatch lines. When an older report has no stage
+    detail, retain the old fail-open behaviour; when stage detail exists, never
+    hand CK a token observed only on 1-stage or another backend.
+    """
+    moe = ((report or {}).get("dispatch") or {}).get("moe") or {}
+    by_stage = moe.get("by_stage") or {}
+    ck_tokens = {
+        token
+        for stage, rec in by_stage.items()
+        if str(stage).startswith("2stage")
+        for value in (rec.get("tokens") or [])
+        if (token := _as_int(value)) is not None
+    }
+    stage_tokens = {
+        token
+        for rec in by_stage.values()
+        for value in (rec.get("tokens") or [])
+        if (token := _as_int(value)) is not None
+    }
+    has_stage_detail = bool(stage_tokens)
+    missed: list[dict[str, Any]] = []
+    for key in moe_dispatch_keys(report):
+        untuned = {token for value in (key.get("untuned_tokens") or []) if (token := _as_int(value)) is not None}
+        if not untuned and (_as_int(key.get("miss_count")) or 0) > 0:
+            # Compatibility with reports written before untuned_tokens was
+            # persisted: all observed tokens are the best available bound.
+            untuned = {token for value in (key.get("tokens") or []) if (token := _as_int(value)) is not None}
+        if has_stage_detail:
+            untuned &= ck_tokens
+        if not untuned:
+            continue
+        missed.append({**key, "untuned_tokens": sorted(untuned)})
+    return missed
+
+
+def moe_untuned_csv_text(
+    key: dict[str, Any],
+    *,
+    tokens: list[int] | None = None,
+) -> str:
+    """Render one observed MoE key as an aiter untuned-fmoe CSV.
+
+    The twelve CSV columns are exactly the dispatch tuple minus its two
+    box-property fields, in the same order, so this is a projection of what the
+    runtime asked for rather than a reconstruction of it -- which is the whole
+    point: the quantisation pair, the per-partition ``inter_dim`` and the EP
+    path's extra masked expert slot are all chosen by the serving framework and
+    cannot be recovered from the model config.
+
+    ``tokens`` defaults to the token counts whose lookup actually missed, and
+    falls back to every token seen for this key.
+    """
+    header = list(MOE_KEY_FIELDS)
+    want = tokens or key.get("untuned_tokens") or key.get("tokens") or []
+    lines = [",".join(header)]
+    for token in sorted({int(t) for t in want}):
+        row = [str(token)] + [str(key.get(f, "")) for f in header[1:]]
+        lines.append(",".join(row))
+    return "\n".join(lines) + "\n"
 
 
 def write_demand(report: dict[str, Any], path: Path) -> Path:

@@ -33,6 +33,16 @@ _HIT = (
 )
 
 
+# Verbatim from a production sglang MiniMax-M3-MXFP4 run (TP8, gfx950).
+_MOE_MISS = (
+    "[aiter] [fused_moe] no tuned FlyDSL config for "
+    "('gfx950', 256, {tok}, 6144, 384, 128, 4, <ActivationType.Swiglu: 2>, "
+    "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+    "'QuantType.per_1x32', True, False), using heuristic FlyDSL fallback "
+    "(kn1='flydsl_moe1_afp4_wfp4_bf16', kn2='flydsl_moe2_afp4_wfp4_bf16')"
+)
+
+
 def _log(tmp_path, lines):
     p = tmp_path / "server.log"
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -65,6 +75,27 @@ class TestDerivingDemand:
 
         assert cli._demand_from_serving_log(src, out) == ""
         assert not (out / "demand.json").exists()
+
+    def test_a_moe_only_log_still_produces_a_demand_file(self, tmp_path):
+        # The MoE dispatch key does not live in report["demands"], so gating on
+        # dense misses threw it away: a pure-MoE model, or one whose dense
+        # tables all hit, got no demand file at all and fmoe_ck then skipped
+        # itself for "no runtime-observed MoE dispatch key" -- with the key
+        # sitting in the log it had just been handed.
+        from kernelforge.gemm_tune.evidence import moe_dispatch_keys
+
+        src = _log(tmp_path, [_MOE_MISS.format(tok=16), _HIT])
+        out = tmp_path / "out"
+        out.mkdir()
+
+        path = cli._demand_from_serving_log(src, out)
+
+        assert path == str(out / "demand.json")
+        report = json.loads((out / "demand.json").read_text(encoding="utf-8"))
+        assert not report["demands"]  # no dense miss anywhere in this log
+        (key,) = moe_dispatch_keys(report)
+        assert key["tokens"] == [16]
+        assert key["inter_dim"] == "384"
 
     def test_an_unrelated_log_is_not_demand(self, tmp_path):
         src = _log(tmp_path, ["INFO server started", "INFO ready"])

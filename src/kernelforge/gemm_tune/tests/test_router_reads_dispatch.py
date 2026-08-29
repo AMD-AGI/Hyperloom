@@ -18,6 +18,12 @@ from kernelforge.gemm_tune.router import select_tuners
 
 _CK = "[aiter] [fused_moe] using 2stage ck for (256, {tok}, 4096, 2048, 8, 2)"
 _ASM = "[aiter] [fused_moe] using 1stage asm for (256, {tok}, 4096, 2048, 8, 2)"
+_MISS = (
+    "[aiter] [fused_moe] no tuned FlyDSL config for "
+    "('gfx950', 256, {tok}, 4096, 2048, 8, 2, <ActivationType.Swiglu: 2>, "
+    "'torch.bfloat16', 'torch.float4_e2m1fn_x2', 'torch.float4_e2m1fn_x2', "
+    "'QuantType.per_1x32', True, False), using heuristic FlyDSL fallback"
+)
 _TRITON = "Using configuration from /x/E=8,N=14336.json for MoE layer"
 
 
@@ -58,7 +64,12 @@ def _select(tmp_path, lines, **kw):
 
 class TestVllmMoeRouting:
     def test_ck_in_the_log_adds_the_ck_tuner(self, tmp_path):
-        names = _names(_select(tmp_path, [_CK.format(tok=16), _CK.format(tok=64)]))
+        names = _names(
+            _select(
+                tmp_path,
+                [_CK.format(tok=16), _CK.format(tok=64), _MISS.format(tok=16)],
+            )
+        )
         assert "fmoe_ck" in names
         # And the Triton tuner stays: the log does not say Triton served nothing.
         assert "vllm_moe_triton" in names
@@ -66,7 +77,17 @@ class TestVllmMoeRouting:
     def test_a_mixed_log_keeps_both(self, tmp_path):
         # Part of the token range is CK-served and part is Triton-served, so
         # both tables need tuning.
-        names = _names(_select(tmp_path, [_ASM.format(tok=4096), _CK.format(tok=16), _TRITON]))
+        names = _names(
+            _select(
+                tmp_path,
+                [
+                    _ASM.format(tok=4096),
+                    _CK.format(tok=16),
+                    _MISS.format(tok=16),
+                    _TRITON,
+                ],
+            )
+        )
         assert {"fmoe_ck", "vllm_moe_triton"} <= set(names)
 
     def test_the_ck_tuner_is_given_only_the_tokens_ck_served(self, tmp_path):
@@ -77,6 +98,7 @@ class TestVllmMoeRouting:
             [
                 _CK.format(tok=16),
                 _CK.format(tok=64),
+                _MISS.format(tok=16),
                 _ASM.format(tok=4096),
                 _TRITON,
             ],
@@ -88,8 +110,30 @@ class TestVllmMoeRouting:
         # A log naming the stage but no token count says nothing about which
         # part of the range CK served, so narrowing would be a guess.
         line = "[aiter] [fused_moe] using 2stage ck for (x, y, z)"
-        (ck,) = [s for s in _select(tmp_path, [line]) if s.name == "fmoe_ck"]
+        (ck,) = [s for s in _select(tmp_path, [line, _MISS.format(tok=16)]) if s.name == "fmoe_ck"]
         assert ck.token_hint is None
+
+    def test_ck_dispatches_with_no_misses_do_not_add_the_ck_tuner(self, tmp_path):
+        names = _names(_select(tmp_path, [_CK.format(tok=16), _CK.format(tok=64)]))
+        assert "fmoe_ck" not in names
+        assert "vllm_moe_triton" in names
+
+    def test_misses_only_on_asm_tokens_do_not_add_the_ck_tuner(self, tmp_path):
+        names = _names(
+            _select(
+                tmp_path,
+                [
+                    _CK.format(tok=16),
+                    _CK.format(tok=64),
+                    _ASM.format(tok=4096),
+                    _ASM.format(tok=8192),
+                    _MISS.format(tok=4096),
+                    _MISS.format(tok=8192),
+                ],
+            )
+        )
+        assert "fmoe_ck" not in names
+        assert "vllm_moe_triton" in names
 
     def test_a_triton_only_log_does_not_add_the_ck_tuner(self, tmp_path):
         names = _names(_select(tmp_path, [_TRITON]))
@@ -122,7 +166,7 @@ class TestVllmMoeRouting:
         assert "fmoe_ck" not in [s.name for s in specs]
 
     def test_the_ck_tuner_is_never_added_twice(self, tmp_path):
-        names = [s.name for s in _select(tmp_path, [_CK.format(tok=16)])]
+        names = [s.name for s in _select(tmp_path, [_CK.format(tok=16), _MISS.format(tok=16)])]
         assert names.count("fmoe_ck") == 1
 
     def test_sglang_routing_is_unchanged(self, tmp_path):
@@ -134,7 +178,7 @@ class TestVllmMoeRouting:
             precision="bf16",
             quant_type="none",
             gpu_type="mi355x",
-            kernel_signature_log=_log(tmp_path, [_CK.format(tok=16)]),
+            kernel_signature_log=_log(tmp_path, [_CK.format(tok=16), _MISS.format(tok=16)]),
         )
         names = [s.name for s in specs]
         assert names.count("fmoe_ck") == 1

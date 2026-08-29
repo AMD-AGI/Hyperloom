@@ -249,7 +249,12 @@ class VllmDenseTunableopTuner(BaseTuner):
         if report is None:
             return None
 
-        shapes = demand_shapes(entry, limit=_DEMAND_SHAPE_LIMIT) if entry else []
+        # bucket=False: the padded-M cover that the aiter tuners want is wrong
+        # here. That cover is only reachable because aiter retries a failed
+        # lookup at the padded M; TunableOp keys on the exact shape and has no
+        # such fallback, so a row written at 512 does nothing for a request at
+        # 464. This tuner needs the M values the runtime literally asked for.
+        shapes = demand_shapes(entry, limit=_DEMAND_SHAPE_LIMIT, bucket=False) if entry else []
         if not shapes:
             # No demand names this tuner, which is the normal case: the runtime
             # logs lookups against aiter's tables, and TunableOp has no table of
@@ -262,7 +267,10 @@ class VllmDenseTunableopTuner(BaseTuner):
                 table = str(other.get("table") or "")
                 if table not in TABLE_KEY_SCHEMA:
                     continue  # MoE and anything else that is not a dense GEMM
-                borrowed.extend(demand_shapes(other, limit=_DEMAND_SHAPE_LIMIT))
+                # bucket=False for the same reason as the direct path above:
+                # borrowing another table's misses does not borrow aiter's
+                # padded-M retry along with them.
+                borrowed.extend(demand_shapes(other, limit=_DEMAND_SHAPE_LIMIT, bucket=False))
             if borrowed:
                 log.info(
                     "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",

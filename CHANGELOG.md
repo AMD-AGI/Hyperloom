@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
   Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
-  `85264fc6` into `src/kernelforge/`, and that repository is archived read-only;
+  `85b49f2f` (upstream `main`, PR #53 included) into `src/kernelforge/`;
   Hyperloom is the sole source from here on. The three former top-level
   packages collapsed into one: `kernel_agents` -> `kernelforge`, `forge_llm` ->
   `kernelforge.llm` / `kernelforge.agent_backends`, `forge_gemm_tune` ->
@@ -126,6 +126,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   there is a tagging gap, not a category.
 
 ### Fixed
+
+- **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
+  derived its demand file only when the serving log carried dense tuned-config
+  misses, so a MoE-only model -- or one whose dense tables all hit while
+  `fused_moe` missed -- threw away the dispatch tuple the log had recorded.
+  `fmoe_ck` then skipped itself for want of evidence that was in the log all
+  along. A log with either kind of demand now produces a demand file. (Ported
+  from KernelForge #53.)
+- **Dense GEMM shape selection reads the demand file, not the precision label.**
+  The router was handed a boolean saying a demand file existed and inferred the
+  operator set from the precision label instead; it now receives the parsed
+  report, which names the tables the runtime actually consulted. The file is
+  parsed once and shared with the coverage-gap report. (Ported from
+  KernelForge #53.)
+- **A token-restricted tuner now gets `token_hint` as well as `tokens`.**
+  Setting only `tokens` erased the distinction between "this is the allowed
+  set" and "this is the coverage sweep", which every run has, so paths starting
+  from runtime-observed tokens could not tell the two apart. (Ported from
+  KernelForge #53.)
 
 - **rocprof-compute's Python dependencies were never installed.** `install.sh`
   claimed they arrived with the KernelForge root install; they were in that

@@ -64,6 +64,44 @@ class ModelProfile:
         return self.moe_intermediate_size or self.intermediate_size
 
     @property
+    def unquantized_linear_modules(self) -> list[str]:
+        """Linear modules the checkpoint deliberately left at the model dtype.
+
+        Quantization is decided per module, not per model. A checkpoint labelled
+        ``mxfp4`` or ``fp8`` normally keeps ``lm_head`` and the attention
+        projections in bf16 -- they are the numerically sensitive ones, and on a
+        MoE model they are a rounding error of the weight bytes anyway (experts
+        carry ~99% of the parameters). Quark writes that list as ``exclude``;
+        AWQ/GPTQ call it ``modules_to_not_convert``.
+
+        Norm layers are dropped: they are in the same list but are not GEMMs.
+
+        Returns:
+            Module names, empty when the config records no exclusions.
+        """
+        qconfig = self.raw_config.get("quantization_config")
+        if not isinstance(qconfig, dict):
+            return []
+        for key in ("exclude", "modules_to_not_convert", "exclude_layers"):
+            entries = qconfig.get(key)
+            if isinstance(entries, list) and entries:
+                return [str(name) for name in entries if "norm" not in str(name).lower()]
+        return []
+
+    @property
+    def keeps_dense_layers_at_model_dtype(self) -> bool:
+        """Whether substantial dense GEMMs stay at model dtype after quantization.
+
+        The router asks this because ``precision`` cannot answer it: that field
+        describes the weight format of the quantized majority, while the
+        untouched minority is what the dense GEMM path actually dispatches.
+        ``lm_head`` alone is excluded: one output projection per forward does
+        not justify competing with the quantized dense tuner for a shared time
+        budget. Runtime evidence can still request bf16 tuning explicitly.
+        """
+        return any(name.rsplit(".", 1)[-1].lower() != "lm_head" for name in self.unquantized_linear_modules)
+
+    @property
     def activation_type_str(self) -> str:
         """Map hidden_act to aiter ActivationType enum string."""
         mapping = {

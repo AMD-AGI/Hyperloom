@@ -12,6 +12,8 @@ the installed aiter.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from kernelforge.gemm_tune.model_analyzer import ModelProfile
@@ -163,7 +165,39 @@ def test_fmoe_validate_requires_a_runtime_observed_key(tmp_path, monkeypatch):
     monkeypatch.setattr(fm, "find_tuner_script", lambda _name: "/fake/gemm_moe_tune.py")
     err = fm.FmoeCKTuner(_moe_ctx(tmp_path)).validate()
     assert err is not None
-    assert "no runtime-observed MoE dispatch key" in err
+    assert "no runtime-observed MoE miss" in err
+
+
+def test_fmoe_does_not_run_for_a_hit_only_dispatch_key(tmp_path, monkeypatch):
+    """A dispatch identifies the key, but only a miss makes it tuning demand."""
+    demand = tmp_path / "demand.json"
+    demand.write_text(
+        json.dumps(
+            {
+                "demands": [],
+                "dispatch": {
+                    "moe": {
+                        "keys": [
+                            {
+                                "miss_count": 0,
+                                "tokens": [32],
+                                "untuned_tokens": [],
+                            }
+                        ]
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(fm, "find_tuner_script", lambda _name: "/fake/gemm_moe_tune.py")
+    tuner = fm.FmoeCKTuner(_moe_ctx(tmp_path, demand_json=demand))
+    monkeypatch.setattr(tuner, "run", lambda: pytest.fail("zero-miss key was tuned"))
+
+    result = tuner.execute()
+
+    assert result.error_class == "validation_error"
+    assert "no runtime-observed MoE miss" in result.error
 
 
 def test_fmoe_validate_passes_with_a_runtime_observed_key(tmp_path, monkeypatch):

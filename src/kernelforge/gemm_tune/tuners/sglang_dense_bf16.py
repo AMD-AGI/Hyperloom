@@ -53,14 +53,21 @@ _UNRECOGNIZED_ARG_MARKER = "unrecognized arguments"
 # 1458s, and even that finished only 3 of the 4. flydsl is not droppable: it won
 # two of the four shapes, by 37% at M=16 N=1536 K=7168, so the decode range
 # depends on it. Thorough mode is simply expensive, and the budget has to say so.
-_PER_SHAPE_BUDGET_S = 180
+#
+# Fast mode also runs `torch`, measured at 19s/shape above, so both fast
+# figures below carry it: the ceiling covers 155+19=174 and the mean cost
+# covers 74+19=93. Leaving them at the hipblaslt-only numbers would under-size
+# the run in exactly the way _PER_SHAPE_COST_THOROUGH_S documents below --
+# shapes that do not fit get silently written as nothing, which reads as a
+# tuner that found no improvement.
+_PER_SHAPE_BUDGET_S = 210
 # ~407s/shape measured end to end; keep the same ~1.2x headroom over the worst
 # observed shape that the fast ceiling has over its own.
 _PER_SHAPE_BUDGET_THOROUGH_S = 600
 # Mean observed cost, used to decide *how many* shapes fit in the time budget.
 # Distinct from the per-shape timeout above, which is a ceiling with headroom
 # over the observed 155s worst case.
-_PER_SHAPE_COST_S = 74
+_PER_SHAPE_COST_S = 93
 # The same figure for `--libtype all`. Sizing a thorough run with the fast cost
 # over-commits by 5.5x: an hour "buys" 47 shapes that would need over five, so
 # the grouped batch runs out of budget part-way and the rest are written as
@@ -200,9 +207,11 @@ def _parse_profile_defaults(profile_csv: Path) -> dict[tuple[int, int, int], flo
 
     torch is the kernel aiter falls back to when a shape has no tuned entry, so
     its row is the only untuned baseline the tuner ever measures. It is present
-    only when torch is in the candidate set (`--libtype all` / default): under
-    `--libtype hipblaslt` the profile holds hipblaslt candidates exclusively and
-    the shape has nothing to compare against.
+    only when torch is in the candidate set, which is why both modes ask for it
+    (`--libtype all` in thorough, `hipblaslt,torch` in fast). A torch-less
+    `--libtype hipblaslt` leaves the profile holding hipblaslt candidates
+    exclusively, and every shape then has nothing to compare against -- an
+    unmeasurable run, not an unimproved one.
 
     Rows whose time is not finite are dropped -- aiter writes ``inf`` for a
     candidate that never got to run within the batch budget.
@@ -387,7 +396,7 @@ class SglangDenseBf16Tuner(BaseTuner):
     def _shape_budget(self) -> int:
         """How many shapes the time budget actually pays for.
 
-        At ~74s per shape an hour buys about 48, while one real arm asks for
+        At ~93s per shape an hour buys about 37, while one real arm asks for
         492-849 distinct M values. Trimming is therefore mandatory, not a
         tuning knob -- the only question is what gets cut.
 
@@ -418,13 +427,20 @@ class SglangDenseBf16Tuner(BaseTuner):
             log.info("demand file has no entry for %s; falling back to derived shapes", self.name)
             return []
         budget = self._shape_budget()
-        shapes = demand_shapes(entry, limit=budget)
+        buckets = demand_shapes(entry)
+        shapes = buckets[:budget]
+        covered_raw_keys = sum(len(shape.get("observed_M") or []) for shape in shapes)
         log.info(
-            "Demand-driven shapes for %s: %d of %d distinct keys (budget %d, %d misses logged)",
+            "Demand-driven shapes for %s: %d of %d padded-M buckets selected, "
+            "covering %d of %d distinct raw keys "
+            "(budget %d from %ds timeout, %d misses logged)",
             self.name,
             len(shapes),
+            len(buckets),
+            covered_raw_keys,
             entry.get("distinct_keys", 0),
             budget,
+            self.ctx.timeout_s,
             entry.get("miss_count", 0),
         )
         return shapes
@@ -523,7 +539,31 @@ class SglangDenseBf16Tuner(BaseTuner):
             libtype_args = ["--libtype", "all", "--with-hipblaslt"]
             iters, warmup = self.ctx.iters, self.ctx.warmup
         else:
-            libtype_args = ["--libtype", "hipblaslt", "--with-hipblaslt"]
+            # `torch` rides along for measurement, not for winning. The only
+            # untuned baseline this tuner ever gets is the `torch` row of the
+            # -o2 profile CSV (see _parse_profile_defaults), and that row exists
+            # only when torch is in the candidate set. Under a torch-less
+            # `--libtype hipblaslt` every shape came back with default_us=None,
+            # so _parse_tuner_results marked it tuned_unverified and the run
+            # reported improved_shapes=0 / best_micro_speedup=1.0 -- "no gain"
+            # when the truth was "no measurement". Every sglang_dense_bf16
+            # record in CI reads that way for this reason.
+            #
+            # It is the honest baseline, not a convenient one: aiter's untuned
+            # default is hipblaslt/asm only under bpreshuffle and `skinny` for
+            # is_skinny_default_shape(), and `torch` for everything else
+            # (aiter/tuned_gemm.py:265-296). Checked against Kimi-K3's serving
+            # log: 38600/38600 misses and 4756/4756 distinct shapes print
+            # "will use default config! using torch", so torch is what the
+            # runtime would actually have run for all of them.
+            #
+            # The comma is legal -- aiter's --libtype takes libtype_list, i.e.
+            # string.split(","), and gemm_a16w16_tune.py:974 gates the torch
+            # candidates on `"all" in libtype or "torch" in libtype`. A shape
+            # torch happens to win dispatches fine at serving time
+            # (tuned_gemm.py:389 `solfunc = solMap[libtype]`), and thorough
+            # mode has been shipping torch winners via `--libtype all` already.
+            libtype_args = ["--libtype", "hipblaslt,torch", "--with-hipblaslt"]
             iters, warmup = min(self.ctx.iters, 50), min(self.ctx.warmup, 10)
 
         tail = [
