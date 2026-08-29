@@ -130,6 +130,11 @@ class IntentRouter:
             # Layer first, phase last: both lanes share one phase, so the live
             # phase no longer says which lever a specialist moves. The phase
             # stays as the fallback when the mandate named neither.
+            #
+            # ``EXPLORE`` below is an owner namespace, not a phase this build
+            # can enter: it is the published KB section name for the
+            # configuration lever, and renaming it would orphan the overlays
+            # every record already stores under that prefix.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):

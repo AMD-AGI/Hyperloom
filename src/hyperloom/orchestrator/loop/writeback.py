@@ -15,6 +15,9 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_ENABLEMENT,
+    LEVER_KERNEL,
+    LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
     patch_lever_kind,
     patch_owner_phase,
@@ -100,9 +103,36 @@ _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
+    "geak_e2e": LEVER_KERNEL,
+    "gemm_tuning": LEVER_KERNEL,
+    "collective": LEVER_KERNEL,
+    "fusion": LEVER_KERNEL,
+    "integrate": LEVER_KERNEL,
+    # Reachable when a session recorded before the action was retired is
+    # resumed and its orphaned KEEPs are reconciled against the stack.
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
+
+
+#: Lever -> the section that owns the KEEP it produced. Mirrors the routing the
+#: publisher applies to the entry's own content, so a KEEP cannot stage into one
+#: section while its content is filed under another.
+_KEEP_OWNER_BY_LEVER = {
+    LEVER_CONFIG: "EXPLORE",
+    LEVER_SOURCE_PATCH: "FRAMEWORK_AGENT",
+    LEVER_UPSTREAM_PR: "FRAMEWORK_AGENT",
+    LEVER_ENABLEMENT: "FRAMEWORK_AGENT",
+}
+
+
+def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    """Name the section a KEEP stages into, preferring the lever it moved."""
+    lever = patch_lever_kind(task_params) or patch_lever_kind(result)
+    by_lever = _KEEP_OWNER_BY_LEVER.get(lever, "")
+    if by_lever:
+        return by_lever
+    return str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
 
 
 def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
@@ -4173,7 +4203,7 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+            owner = _keep_owner_section(task_params, result)
             if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
                 self._enqueue_agent_keep_outbox(
                     owner=owner,

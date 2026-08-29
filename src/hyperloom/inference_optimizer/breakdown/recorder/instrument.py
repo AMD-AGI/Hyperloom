@@ -41,7 +41,13 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
-from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..agent_ownership import (
+    UNATTRIBUTED,
+    agent_from_lever,
+    agent_from_phase,
+    patch_author,
+    patch_lever_kind,
+)
 from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
@@ -187,9 +193,6 @@ _AGENT_BY_ACTION = {
     "framework_agent": "framework_agent",
     "framework": "framework_agent",
     "explore": "explore",
-    "backends": "explore",
-    "params": "explore",
-    "specialist": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
     "baseline": "coordinator",
@@ -224,13 +227,24 @@ def _resolve_agent(
     if name.startswith("integrate_patch") or name == "integrate":
         return patch_author(result)
 
+    # A mandate asking for a source patch routinely comes back holding server
+    # args, so what the specialist delivered names its owner and what it was
+    # asked for does not.
+    if name == "specialist":
+        return agent_from_lever(patch_lever_kind(result)) or "explore"
+
     direct = _AGENT_BY_ACTION.get(name)
     if direct:
         return direct
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    return agent_from_phase(result.get("source_phase")) or agent_from_phase(phase) or UNATTRIBUTED
+    return (
+        agent_from_lever(patch_lever_kind(result))
+        or agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
