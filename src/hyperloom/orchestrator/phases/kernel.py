@@ -49,12 +49,6 @@ log = _logging.getLogger(__name__)
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
-# Idempotency key of the same-harness GEAK rebench enqueued by
-# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
-# ``geak_pending`` before the task row exists, so the phase guard already sees a
-# pending revalidation while the enqueue is in flight.
-_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
-
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact

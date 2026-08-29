@@ -607,9 +607,9 @@ async def test_a_rule_named_only_in_prose_still_holds_the_verdict(coord):
     pending = PendingProposal(
         proposal_msg_id="msg-prose",
         from_agent="orchestration",
-        action_name="framework_agent",
+        action_name="specialist",
         predicted_gain_pct=0.0,
-        payload={"action_name": "framework_agent", "params": {}},
+        payload={"action_name": "specialist", "params": {}},
     )
     coord.state.pending_proposals["msg-prose"] = pending
     intent = Intent(

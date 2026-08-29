@@ -1260,11 +1260,6 @@ class DispatcherCollaborator:
                             "FRAMEWORK: candidate discovery ingest failed for task=%s",
                             task.task_id,
                         )
-                # Bump the per-round specialist dispatch counter.
-                try:
-                    self.shared_state.bump_specialist_dispatched()
-                except Exception:  # noqa: BLE001
-                    log.exception("bump_specialist_dispatched failed")
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
                 try:

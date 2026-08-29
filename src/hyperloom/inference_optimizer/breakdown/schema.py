@@ -929,7 +929,6 @@ class ParamSearchLedger(TypedDict, total=False):
         accepted (list[ParamSearchEntry]): Variants that were accepted.
         rejected (list[ParamSearchEntry]): Variants that were rejected.
         top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
-        winner_history (list[dict[str, Any]]): History of winning variants.
         no_promote_streak (int): Consecutive evaluations without a promotion.
     """
 
@@ -938,7 +937,6 @@ class ParamSearchLedger(TypedDict, total=False):
     accepted: list[ParamSearchEntry]
     rejected: list[ParamSearchEntry]
     top_by_gain: list[ParamSearchEntry]
-    winner_history: list[dict[str, Any]]
     no_promote_streak: int
 
 
@@ -950,14 +948,12 @@ class ParamSearch(TypedDict, total=False):
         backends (ParamSearchLedger): Ledger for the backend-tuning family.
         synergy_attempted (list[str]): Synergy combinations that were attempted.
         discovered_flags (dict[str, Any]): Flags discovered during search.
-        backend_winners_history (list[dict[str, Any]]): History of backend winners.
     """
 
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
     discovered_flags: dict[str, Any]
-    backend_winners_history: list[dict[str, Any]]
 
 
 # Sweep

@@ -978,8 +978,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # switch ``--no-static-recon``. PRELUDE-only one-shot source reconnaissance.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
-    # Total specialist dispatches in current EXPLORE entry; reset on fresh entry. Robustness detects specialist storms.
-    explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at

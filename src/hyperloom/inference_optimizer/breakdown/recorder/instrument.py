@@ -190,8 +190,6 @@ def _operation_status(status: Any) -> str:
 
 
 _AGENT_BY_ACTION = {
-    "framework_agent": "framework_agent",
-    "framework": "framework_agent",
     "explore": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
@@ -526,7 +524,6 @@ def _mirror_action_v4(
         "baseline": "workload",
         "profile": "profile",
         "roofline": "roofline_snapshot",
-        "framework_agent": "framework_candidate",
         "explore": "variant",
         "sweep": "sweep",
         "conc_sweep": "concurrency_sweep",
@@ -635,36 +632,7 @@ def _mirror_action_v4(
                 "metadata": {"trace_health": result.get("trace_health")},
             }
         )
-    elif action == "framework_agent":
-        for name in ("apply", "benchmark", "evaluation", "decision"):
-            substeps.append(
-                {
-                    "substep_id": _stable_id("substep", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": status,
-                    "ended_at": ended_at,
-                }
-            )
     gates: list[dict[str, Any]] = []
-    if action == "framework_agent":
-        for name, value in (
-            ("accuracy", result.get("accuracy_pass")),
-            ("throughput", result.get("throughput_pass")),
-            ("critic", result.get("critic_pass")),
-        ):
-            if value is None:
-                continue
-            gates.append(
-                {
-                    "gate_id": _stable_id("gate", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": "passed" if bool(value) else "failed",
-                    "decision": "allow" if bool(value) else "deny",
-                    "evaluated_at": ended_at,
-                }
-            )
     agent = _resolve_agent(action, result=result, phase=phase)
     # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
     # zero is a verdict, not a missing value.
@@ -709,7 +677,6 @@ def _mirror_action_v4(
     if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
         verdict = executor_verdict
     adoptable_actions = {
-        "framework_agent",
         "explore",
         "integrate",
         "integrate_patch",
@@ -773,7 +740,7 @@ def _mirror_action_v4(
         session_dir,
         operation_id=operation_id,
         root_operation_id=operation_id,
-        kind="composite" if action in {"baseline", "roofline", "framework_agent"} else action,
+        kind="composite" if action in {"baseline", "roofline"} else action,
         name=action,
         phase=phase,
         macro_cycle=int(macro_cycle or 0),
@@ -1129,11 +1096,9 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
-    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 

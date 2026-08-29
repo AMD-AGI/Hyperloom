@@ -121,7 +121,6 @@ from .roofline import (
 )
 from .explore import (
     _shape_ledger as _shape_ledger,
-    _patch_winners_history as _patch_winners_history,
     _shape_winners_history as _shape_winners_history,
     collect_explore_search as collect_explore_search,
     _VARIANT_NAME_RE as _VARIANT_NAME_RE,
