@@ -534,9 +534,8 @@ def test_reloop_feasibility_matches_the_transition_decision():
     assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
-def test_reloop_infeasible_when_both_target_phases_are_disabled():
+def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
-    s.explore_enabled = False
     s.framework_agent_phase_enabled = False
     line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
