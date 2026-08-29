@@ -534,8 +534,18 @@ second indexes into the first.
 The privileged `amd-smi set` lives here and nowhere else. An operator-run script
 between benchmarks is a reasonable place for a card-wide mutation that evicts
 every GPU context; an optimization loop that also runs agent-authored code is
-not. Exit codes: `0` swept, `1` nothing measurable, `2` refused before anything
-changed, `3` swept but the card could not be restored to its entry mode.
+not. Before setting anything it refuses if a process holds a context on the card
+being swept — and only that card, since no other card is repartitioned. A
+neighbour's benchmark on a shared node is not a reason to stop. If `amd-smi`
+reports its process list in a shape the script cannot read, that is also a
+refusal rather than an assumption that the card is idle: `--allow-busy` is the
+way past both, and `--dry-run` never asks.
+
+Exit codes: `0` swept, `1` nothing measurable, `2` refused before anything
+changed, `3` swept but the card could not be restored to its entry mode, `4`
+stopped on an error it does not model. Every path out of a started sweep goes
+through the restore and the report, so a mode that fails unexpectedly costs its
+own result and nothing else.
 
 ---
 

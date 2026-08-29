@@ -66,6 +66,12 @@ Exit codes:
     1  the sweep ran but no mode produced a valid measurement
     2  the request was refused before anything was changed
     3  the sweep finished but the card could not be restored to its entry mode
+    4  the sweep stopped on an error it does not model, after reporting whatever
+       it had already measured and restoring the card
+
+Every path out of a started sweep goes through the restore and the report,
+including an unexpected exception, so ``3`` stays reachable and the modes
+measured before a failure are never lost to it.
 """
 
 from __future__ import annotations
@@ -79,6 +85,7 @@ import signal
 import subprocess  # nosec B404 - fixed argv, never a shell.
 import sys
 import time
+import traceback
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
@@ -342,6 +349,44 @@ def supported_modes(payload: object) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _live_processes(listing: object, *, gpu_id: int) -> int:
+    """Count the entries of one card's ``process_list`` that are real processes.
+
+    The idle sentinel turns up at either depth -- as the whole ``process_list``,
+    or as the lone entry's ``process_info`` -- and a process turns up either
+    wrapped in ``process_info`` or as the entry itself. All four were observed.
+    Anything else raises, because a shape this function does not recognise is
+    indistinguishable from an idle card once it has been counted as zero.
+    """
+    if isinstance(listing, str):
+        entries: list[object] = [listing]
+    elif isinstance(listing, list):
+        entries = list(listing)
+    else:
+        raise SweepError(
+            f"amd-smi process gave GPU {gpu_id} a process_list of type "
+            f"{type(listing).__name__}; expected a list or the idle string"
+        )
+    live = 0
+    for entry in entries:
+        info = entry.get("process_info", entry) if isinstance(entry, dict) else entry
+        if isinstance(info, str):
+            # Only the known idle sentinel means idle. An unrecognised string
+            # counts as a process: over-counting refuses a sweep, under-counting
+            # evicts somebody's work.
+            if _NO_PROCESS_MARKER not in info.lower():
+                live += 1
+        elif isinstance(info, dict):
+            if str(info.get("name") or "").strip():
+                live += 1
+        else:
+            raise SweepError(
+                f"amd-smi process gave GPU {gpu_id} a process entry of type "
+                f"{type(info).__name__}; expected a mapping or a string"
+            )
+    return live
+
+
 def resident_processes(payload: object) -> dict[int, int]:
     """Count real processes holding a context on each GPU.
 
@@ -349,25 +394,36 @@ def resident_processes(payload: object) -> dict[int, int]:
     ``"No running processes detected"`` rather than an empty list, so a naive
     length check finds one process on every idle card and this sweep would
     refuse to start on a free node.
+
+    Every departure from the documented shape raises instead of being skipped.
+    This count is the only thing between a payload this parser does not
+    understand and an ``amd-smi set`` that evicts whatever is running, and a
+    parser that answers ``{}`` for a payload it cannot read reports a busy node
+    as a free one -- the single wrong answer here that destroys work. Refusing
+    costs an operator one ``--allow-busy``; guessing costs somebody a job.
+
+    Raises:
+        SweepError: If the payload is not a list of per-GPU rows, or a row is
+            missing ``gpu`` or ``process_list``, or either field has a type
+            this parser does not model.
     """
-    rows = payload if isinstance(payload, list) else []
+    if not isinstance(payload, list):
+        raise SweepError(
+            f"amd-smi process returned {type(payload).__name__}, not the expected list of "
+            f"per-GPU rows, so which cards are in use cannot be read from it"
+        )
     counts: dict[int, int] = {}
-    for row in rows:
+    for row in payload:
         if not isinstance(row, dict):
-            continue
+            raise SweepError(f"amd-smi process returned a {type(row).__name__} where a GPU row was expected")
+        missing = [key for key in ("gpu", "process_list") if key not in row]
+        if missing:
+            raise SweepError(f"amd-smi process returned a GPU row without {' or '.join(missing)}")
         try:
-            gpu_id = int(row.get("gpu"))
-        except (TypeError, ValueError):
-            continue
-        live = 0
-        for entry in row.get("process_list") or []:
-            info = entry.get("process_info") if isinstance(entry, dict) else entry
-            if isinstance(info, str):
-                if _NO_PROCESS_MARKER not in info.lower():
-                    live += 1
-            elif isinstance(info, dict) and str(info.get("name") or "").strip():
-                live += 1
-        counts[gpu_id] = live
+            gpu_id = int(row["gpu"])
+        except (TypeError, ValueError) as exc:
+            raise SweepError(f"amd-smi process reported a GPU id of {row['gpu']!r}, which is not a number") from exc
+        counts[gpu_id] = _live_processes(row["process_list"], gpu_id=gpu_id)
     return counts
 
 
@@ -938,6 +994,38 @@ def resolve_modes(requested: str | None, available: Sequence[str]) -> tuple[str,
     return tuple(modes)
 
 
+def _restore_entry_mode(gpu_id: int, entry_mode: str, *, sudo: bool) -> bool:
+    """Put the card back in the mode it was found in. True if it could not be.
+
+    Raises nothing, because it is called from a ``finally``: an exception here
+    would replace whatever sent the sweep into the restore and would take the
+    report down with it, losing both the diagnosis and the modes already
+    measured.
+
+    A read-back that fails is treated as "mode unknown" and the set is attempted
+    regardless. The alternative is skipping the restore because the check that
+    would have proved it necessary is the thing that broke, which leaves a card
+    in a shape nobody asked for.
+    """
+    try:
+        if read_mode(gpu_id) == entry_mode:
+            return False
+    except Exception as exc:
+        print(f"note: could not read GPU {gpu_id}'s mode ({exc}); attempting the restore anyway")
+    try:
+        print(f"\nrestoring {entry_mode} on GPU {gpu_id}")
+        set_mode(gpu_id, entry_mode, sudo=sudo)
+    except Exception as exc:
+        print(
+            f"ERROR: could not restore {entry_mode} on GPU {gpu_id}: {exc}\n"
+            f"The card is NOT in the mode it started in. Anything that runs on it now "
+            f"will be measured under a shape nobody asked for.",
+            file=sys.stderr,
+        )
+        return True
+    return False
+
+
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--gpu", type=int, default=0, help="Card to repartition and sweep (default 0).")
@@ -983,7 +1071,9 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     ap.add_argument(
         "--allow-busy",
         action="store_true",
-        help="Proceed even though processes hold GPU contexts. They will be evicted by the set.",
+        help="Proceed even though processes hold a context on the swept card; the set evicts them. "
+        "Skips the check entirely, so it is also the way past an amd-smi process payload this "
+        "script cannot parse.",
     )
     return ap.parse_args(argv)
 
@@ -1012,17 +1102,37 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
             print(f"note: could not read partition profiles ({exc}); not restricting the mode list")
             available = ()
         modes = resolve_modes(args.modes, available)
-        busy = resident_processes(_amd_smi_json(["process"]))
-        occupied = {gpu: n for gpu, n in busy.items() if n}
-        if occupied and not args.allow_busy:
-            raise SweepError(
-                f"processes still hold GPU contexts ({occupied}). Repartitioning evicts them, "
-                f"so this refuses rather than killing someone's work. Stop them, or pass "
-                f"--allow-busy if they are yours."
-            )
-    except SweepError as exc:
+        # Scoped to the swept card because that is the only card a set touches.
+        # A neighbour's benchmark is not a reason to refuse, and refusing on one
+        # left --allow-busy as the only way forward -- which drops the guard on
+        # the target card too, the one card it exists to protect. Skipped
+        # entirely when no set will follow, so a payload it cannot read never
+        # blocks a caller it was not protecting.
+        if not (args.allow_busy or args.dry_run):
+            busy = resident_processes(_amd_smi_json(["process"]))
+            if args.gpu not in busy:
+                raise SweepError(
+                    f"amd-smi process listed no GPU {args.gpu}, so whether the card is in use "
+                    f"is unknown. Repartitioning evicts every context on it, so this refuses "
+                    f"rather than assume it is idle. Pass --allow-busy to sweep anyway."
+                )
+            if busy[args.gpu]:
+                raise SweepError(
+                    f"{busy[args.gpu]} process(es) still hold a context on GPU {args.gpu}. "
+                    f"Repartitioning evicts them, so this refuses rather than killing "
+                    f"someone's work. Stop them, or pass --allow-busy if they are yours."
+                )
+    except (SweepError, PartitionError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
+    except Exception:
+        # Nothing has been set at this point, so there is no card to restore --
+        # but the exit code still has to mean something. 2 is for a refusal this
+        # script decided on, so an unmodelled failure gets its own code rather
+        # than borrowing that one.
+        traceback.print_exc()
+        print("ERROR: unexpected error while reading the card; nothing was changed.", file=sys.stderr)
+        return 4
 
     print(f"GPU {args.gpu} on PCI bus {bus:02x} is in {entry_mode}; sweeping {', '.join(modes)}.")
     if args.dry_run:
@@ -1037,6 +1147,7 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
     output_root = args.output_dir.expanduser().resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     results: list[ModeResult] = []
+    unexpected: str | None = None
     interrupted = {"flag": False}
 
     def _on_signal(signum: int, _frame: Any) -> None:
@@ -1090,32 +1201,46 @@ def main(argv: Sequence[str] | None = None) -> int:  # noqa: C901
             except (SweepError, PartitionError) as exc:
                 result.error = str(exc)
                 print(f"  failed: {exc}")
+            except Exception as exc:
+                # Everything this script anticipates arrives as a SweepError or a
+                # PartitionError. Anything else is a bug here or an amd-smi
+                # behaviour not modelled, which means the assumptions driving
+                # privileged sets no longer hold -- so stop sweeping. Stopping by
+                # breaking rather than propagating is the point: the card still
+                # gets restored, and the modes already measured still get
+                # reported. Letting it escape lost the table, the summary file,
+                # and the exit code that says the card was left wrong.
+                unexpected = f"{type(exc).__name__}: {exc}"
+                result.error = f"unexpected error: {unexpected}"
+                print(f"  aborted: {result.error}", file=sys.stderr)
+                traceback.print_exc()
+                break
     finally:
-        restore_failed = False
-        try:
-            if read_mode(args.gpu) != entry_mode:
-                print(f"\nrestoring {entry_mode} on GPU {args.gpu}")
-                set_mode(args.gpu, entry_mode, sudo=args.sudo)
-        except (SweepError, PartitionError) as exc:
-            restore_failed = True
-            print(
-                f"ERROR: could not restore {entry_mode} on GPU {args.gpu}: {exc}\n"
-                f"The card is NOT in the mode it started in. Anything that runs on it now "
-                f"will be measured under a shape nobody asked for.",
-                file=sys.stderr,
-            )
+        restore_failed = _restore_entry_mode(args.gpu, entry_mode, sudo=args.sudo)
 
-    lines = render(results, entry_mode=entry_mode)
-    print("\n".join(lines))
     summary = output_root / "sweep_summary.json"
-    summary.write_text(
-        json.dumps(summary_json(results, entry_mode=entry_mode, gpu_id=args.gpu), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    print(f"wrote {summary}")
+    try:
+        print("\n".join(render(results, entry_mode=entry_mode)))
+        summary.write_text(
+            json.dumps(summary_json(results, entry_mode=entry_mode, gpu_id=args.gpu), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        print(f"wrote {summary}")
+    except Exception as exc:
+        # A full disk or an unrenderable result must not cost the caller the exit
+        # code, which is the one thing it cannot reconstruct for itself -- least
+        # of all the code saying the card was left in the wrong mode.
+        traceback.print_exc()
+        print(f"ERROR: could not write the report to {summary}: {exc}", file=sys.stderr)
+        unexpected = unexpected or f"{type(exc).__name__}: {exc}"
 
+    # A card left in the wrong shape outranks everything else: it mislabels
+    # whatever runs on the node next, not just this sweep.
     if restore_failed:
         return 3
+    if unexpected:
+        print(f"ERROR: sweep stopped on an unexpected error ({unexpected}).", file=sys.stderr)
+        return 4
     return 0 if any(r.measured for r in results) else 1
 
 

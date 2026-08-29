@@ -19,6 +19,7 @@ block, and HSA enumerating whole cards ahead of partitions.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -219,6 +220,61 @@ class TestResidentProcesses:
             {"gpu": 1, "process_list": [{"process_info": {"name": "vllm"}}]},
         ]
         assert pms.resident_processes(payload) == {0: 0, 1: 1}
+
+    def test_the_idle_sentinel_is_also_recognised_unwrapped(self):
+        """Observed at both depths: as the list, and as the entry's process_info."""
+        assert pms.resident_processes([{"gpu": 0, "process_list": "No running processes detected"}]) == {0: 0}
+
+    def test_a_process_is_counted_without_the_process_info_wrapper(self):
+        assert pms.resident_processes([{"gpu": 0, "process_list": [{"name": "python", "pid": 42}]}]) == {0: 1}
+
+    def test_an_empty_list_is_an_idle_card(self):
+        assert pms.resident_processes([{"gpu": 0, "process_list": []}]) == {0: 0}
+
+
+class TestResidentProcessesRefusesDrift:
+    """Schema drift must raise, never read as "nobody is using the node".
+
+    This count is the only thing between an ``amd-smi`` payload this parser does
+    not understand and a partition set that evicts whatever is running. Every
+    case below used to return ``{}`` or silently skip the row, which the sweep
+    read as an idle node and acted on.
+    """
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"process": [{"gpu": 0, "process_list": []}]},  # a wrapper key appears
+            "No running processes detected",  # the whole payload degrades to a string
+            None,  # the query answers nothing
+            42,
+        ],
+    )
+    def test_a_payload_that_is_not_a_list_of_rows_is_refused(self, payload):
+        with pytest.raises(pms.SweepError, match="amd-smi process returned"):
+            pms.resident_processes(payload)
+
+    def test_a_row_that_is_not_a_mapping_is_refused(self):
+        with pytest.raises(pms.SweepError, match="where a GPU row was expected"):
+            pms.resident_processes([["gpu", 0]])
+
+    @pytest.mark.parametrize("row", [{"process_list": []}, {"gpu": 0}, {}])
+    def test_a_row_missing_either_field_is_refused(self, row):
+        with pytest.raises(pms.SweepError, match="without gpu|without process_list|without gpu or process_list"):
+            pms.resident_processes([row])
+
+    def test_a_renamed_gpu_id_is_refused_rather_than_skipped(self):
+        """A row filed under a name this parser cannot read is not an absent row."""
+        with pytest.raises(pms.SweepError, match="not a number"):
+            pms.resident_processes([{"gpu": "card0", "process_list": []}])
+
+    def test_a_process_list_of_an_unmodelled_type_is_refused(self):
+        with pytest.raises(pms.SweepError, match="process_list of type dict"):
+            pms.resident_processes([{"gpu": 0, "process_list": {"pid": 42}}])
+
+    def test_a_process_entry_of_an_unmodelled_type_is_refused(self):
+        with pytest.raises(pms.SweepError, match="process entry of type NoneType"):
+            pms.resident_processes([{"gpu": 0, "process_list": [None]}])
 
 
 class TestCurrentModes:
@@ -607,3 +663,235 @@ class TestSudoPrefix:
     def test_the_prefix_never_prompts(self):
         """An unattended sweep that stops at a password prompt hangs silently."""
         assert pms._sudo_prefix(True) == ["sudo", "-n"]
+
+
+# ------------------------------------------------------------ control flow
+#
+# The tests above are pure functions. What follows drives main() end to end
+# against a fake node, because the decisions being pinned -- which card's
+# processes block a set, and what happens on the way out of a failure -- live in
+# its control flow and cannot be reached any other way. Nothing here touches a
+# GPU: every call that would is replaced.
+
+
+IDLE = "No running processes detected"
+
+
+class FakeNode:
+    """One MI355X-shaped card on PCI bus 0x09, plus an untouched neighbour."""
+
+    def __init__(self, tmp_path):
+        self.mode = "SPX"
+        self.sets: list[str] = []
+        self.processes: object = [{"gpu": 0, "process_list": IDLE}, {"gpu": 1, "process_list": IDLE}]
+        self.output_dir = tmp_path / "out"
+        #: Raised by the next set of this mode, once. Simulates a mid-sweep fault.
+        self.fail_set_on: dict[str, BaseException] = {}
+        #: Raised instead of enumerating agents for this mode.
+        self.fail_agents_on: dict[str, BaseException] = {}
+
+    def summary(self) -> dict:
+        return json.loads((self.output_dir / "sweep_summary.json").read_text())
+
+
+@pytest.fixture
+def node(monkeypatch, tmp_path):
+    fake = FakeNode(tmp_path)
+
+    def _amd_smi_json(args, timeout_s=None, *, sudo=False):
+        if args[0] == "list":
+            return [{"gpu": 0, "bdf": "0000:09:00.0"}, {"gpu": 1, "bdf": "0000:0a:00.0"}]
+        if args[0] == "partition":
+            return []  # no profile table, so the mode list is taken as given
+        if args[0] == "process":
+            return fake.processes
+        raise AssertionError(f"unexpected amd-smi call: {args}")
+
+    def _set_mode(gpu_id, mode, *, sudo=False):
+        boom = fake.fail_set_on.pop(mode, None)
+        if boom is not None:
+            raise boom
+        fake.sets.append(mode)
+        fake.mode = mode
+        return mode
+
+    def _read_hsa_agents():
+        boom = fake.fail_agents_on.pop(fake.mode, None)
+        if boom is not None:
+            raise boom
+        partitions = pms.MODE_PARTITION_COUNTS[fake.mode]
+        cu = 256 // partitions
+        return tuple(pms.HsaAgent(index=i, cu=cu, bus=0x09, device=0, function=i) for i in range(partitions))
+
+    def _run_mode(layout, devices, **kwargs):
+        return [
+            pms.PartitionRun(i, d, tmp_path, returncode=0, measurement={"output_throughput": 100.0})
+            for i, d in enumerate(devices)
+        ]
+
+    monkeypatch.setattr(pms, "_amd_smi_json", _amd_smi_json)
+    monkeypatch.setattr(pms, "read_mode", lambda gpu_id: fake.mode)
+    monkeypatch.setattr(pms, "set_mode", _set_mode)
+    monkeypatch.setattr(pms, "read_hsa_agents", _read_hsa_agents)
+    monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: 288.0)
+    monkeypatch.setattr(pms, "run_mode", _run_mode)
+    # main() installs handlers and never removes them; leaving pytest's own
+    # SIGINT replaced for the rest of the session is not this test's business.
+    monkeypatch.setattr(pms.signal, "signal", lambda *a, **k: None)
+    return fake
+
+
+def _sweep(node, *extra, modes="SPX,DPX", gpu=0):
+    return pms.main(
+        [
+            "--benchmark-command",
+            "bench --gpu {device}",
+            "--modes",
+            modes,
+            "--gpu",
+            str(gpu),
+            "--output-dir",
+            str(node.output_dir),
+            *extra,
+        ]
+    )
+
+
+class TestBusyCheckScope:
+    """Only the swept card is repartitioned, so only its contexts are at risk.
+
+    The check was node-wide while the set is per-card, so any busy card on a
+    shared node blocked sweeping an idle one -- and the only way past it,
+    ``--allow-busy``, also gave up the protection on the target card itself.
+    """
+
+    def test_a_busy_neighbour_does_not_block_an_idle_target(self, node):
+        """The set never touches card 1, so card 1's tenant is not this sweep's business."""
+        node.processes = [
+            {"gpu": 0, "process_list": IDLE},
+            {"gpu": 1, "process_list": [{"process_info": {"name": "vllm"}}]},
+        ]
+        assert _sweep(node, gpu=0) == 0
+        assert node.sets  # the sweep actually ran
+
+    def test_a_process_on_the_target_card_still_refuses(self, node):
+        node.processes = [{"gpu": 0, "process_list": [{"process_info": {"name": "vllm"}}]}]
+        assert _sweep(node, gpu=0) == 2
+        assert node.sets == []
+
+    def test_the_refusal_names_the_card_and_the_count(self, node, capsys):
+        node.processes = [{"gpu": 0, "process_list": [{"process_info": {"name": "vllm"}}]}]
+        _sweep(node, gpu=0)
+        assert "1 process(es) still hold a context on GPU 0" in capsys.readouterr().err
+
+    def test_a_target_missing_from_the_listing_is_refused_not_assumed_idle(self, node):
+        """An absent row is "unknown", and unknown does not license an eviction."""
+        node.processes = [{"gpu": 1, "process_list": IDLE}]
+        assert _sweep(node, gpu=0) == 2
+        assert node.sets == []
+
+    def test_allow_busy_proceeds_on_the_target_card(self, node):
+        node.processes = [{"gpu": 0, "process_list": [{"process_info": {"name": "vllm"}}]}]
+        assert _sweep(node, "--allow-busy", gpu=0) == 0
+
+    def test_an_unreadable_payload_refuses_by_default(self, node):
+        node.processes = {"process": [{"gpu": 0, "process_list": []}]}
+        assert _sweep(node, gpu=0) == 2
+        assert node.sets == []
+
+    def test_allow_busy_is_the_way_past_an_unreadable_payload(self, node):
+        """The check cannot change what happens next, so it is not consulted."""
+        node.processes = {"process": [{"gpu": 0, "process_list": []}]}
+        assert _sweep(node, "--allow-busy", gpu=0) == 0
+
+    def test_a_dry_run_does_not_consult_it_at_all(self, node):
+        """--dry-run sets nothing, so nothing it might evict is at stake."""
+        node.processes = {"unparseable": True}
+        assert _sweep(node, "--dry-run", gpu=0) == 0
+        assert node.sets == []
+
+
+class TestExitCodeContract:
+    def test_a_clean_sweep_reports_and_restores(self, node):
+        assert _sweep(node) == 0
+        assert node.mode == "SPX"
+        assert node.summary()["entry_mode"] == "SPX"
+
+    def test_an_expected_failure_moves_on_to_the_next_mode(self, node):
+        node.fail_agents_on["DPX"] = pms.SweepError("rocminfo timed out")
+        assert _sweep(node) == 0
+        assert node.summary()["modes"][0]["mode"] == "SPX"
+
+    def test_an_unexpected_error_still_renders_and_writes_the_summary(self, node):
+        """The finding: anything not a SweepError escaped main() past the report."""
+        node.fail_agents_on["DPX"] = KeyError("compute_partition")
+        assert _sweep(node) == 4
+        assert node.summary()["modes"][0]["mode"] == "SPX"
+
+    def test_an_unexpected_error_does_not_lose_the_modes_already_measured(self, node, capsys):
+        """SPX measured before DPX broke; escaping main() threw that away."""
+        node.fail_agents_on["DPX"] = KeyError("compute_partition")
+        _sweep(node)
+        out = capsys.readouterr().out
+        assert "Fastest measured mode: SPX" in out
+        assert node.summary()["modes"][0]["aggregate_throughput"] == pytest.approx(100.0)
+
+    def test_an_unexpected_error_still_restores_the_card(self, node):
+        node.fail_agents_on["DPX"] = KeyError("compute_partition")
+        _sweep(node)
+        assert node.mode == "SPX"
+
+    def test_an_unexpected_error_stops_the_sweep_rather_than_setting_more_modes(self, node):
+        """An assumption this script does not understand is broken; stop mutating."""
+        node.fail_agents_on["DPX"] = KeyError("compute_partition")
+        _sweep(node, modes="SPX,DPX,QPX")
+        assert "QPX" not in node.sets
+
+    def test_the_unexpected_error_is_named_not_swallowed(self, node, capsys):
+        node.fail_agents_on["DPX"] = KeyError("compute_partition")
+        _sweep(node)
+        assert "KeyError" in capsys.readouterr().err
+
+    def test_a_failed_restore_after_a_clean_sweep_exits_3(self, node):
+        # Entry mode is SPX and only DPX is swept, so the one set of SPX is the
+        # restore itself.
+        node.fail_set_on["SPX"] = pms.SweepError("permission denied")
+        assert _sweep(node, modes="DPX") == 3
+
+    def test_a_failed_restore_outranks_an_unexpected_error(self, node):
+        """A card left in the wrong shape mislabels whatever runs next, so it wins."""
+        node.fail_agents_on["QPX"] = KeyError("compute_partition")
+        node.fail_set_on["SPX"] = pms.SweepError("permission denied")
+        assert _sweep(node, modes="DPX,QPX") == 3
+
+    def test_an_unexpected_error_in_the_restore_is_still_a_restore_failure(self, node):
+        """Not a SweepError, so it used to propagate out of the finally and exit 1."""
+        node.fail_set_on["SPX"] = RuntimeError("amd-smi vanished")
+        assert _sweep(node, modes="DPX") == 3
+
+    def test_the_reported_reproduction_a_key_error_from_set_mode(self, node):
+        """As reviewed: KeyError out of set_mode escaped main() and exited 1."""
+        node.fail_set_on["DPX"] = KeyError("compute_partition")
+        assert _sweep(node) == 4
+        assert node.mode == "SPX"
+        assert node.summary()["modes"][0]["measured"] is True
+
+    def test_an_unwritable_report_does_not_cost_the_restore_failure_its_code(self, node, monkeypatch):
+        """The exit code is the one thing a caller cannot reconstruct itself."""
+        node.fail_set_on["SPX"] = pms.SweepError("permission denied")
+        monkeypatch.setattr(pms, "render", lambda results, *, entry_mode: (_ for _ in ()).throw(OSError("no space")))
+        assert _sweep(node, modes="DPX") == 3
+
+    def test_an_unwritable_report_is_not_reported_as_a_clean_sweep(self, node, monkeypatch):
+        monkeypatch.setattr(pms, "render", lambda results, *, entry_mode: (_ for _ in ()).throw(OSError("no space")))
+        assert _sweep(node) == 4
+
+    def test_a_sweep_that_measures_nothing_exits_1(self, node, monkeypatch):
+        monkeypatch.setattr(pms, "run_mode", lambda layout, devices, **kw: [])
+        assert _sweep(node) == 1
+
+    def test_an_unexpected_error_before_anything_is_set_does_not_report_a_refusal(self, node, monkeypatch):
+        """Exit 2 means this script decided to refuse; a bug is not a decision."""
+        monkeypatch.setattr(pms, "read_device_gib", lambda gpu_id: (_ for _ in ()).throw(KeyError("vram")))
+        assert _sweep(node) == 4
+        assert node.sets == []

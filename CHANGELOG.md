@@ -55,7 +55,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   benchmarks in a script an operator ran on purpose, and unreasonable inside an
   optimization loop that also runs agent-authored code, so `optimize` continues
   to only read the mode. Together the two halves are a boundary: the sweep
-  chooses the shape, the session asserts it.
+  chooses the shape, the session asserts it.<br/>
+  Because that set evicts work, the check standing in front of it fails closed:
+  an `amd-smi` process listing in a shape the parser does not model is a refusal,
+  not an empty one, since the only wrong answer that destroys anything is reading
+  a busy node as free. It is scoped to the card being swept, so a neighbour's
+  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
+  of the guard on the target card. Every exit from a started sweep runs the
+  restore and the report, including on an error the script does not model — which
+  exits `4`, keeps the modes already measured, and still yields `3` if the card
+  could not be put back.
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
