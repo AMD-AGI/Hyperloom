@@ -132,6 +132,13 @@ def test_dispatch_version_tag_is_unique_per_run(dispatch_script: str) -> None:
     )
 
 
+def test_docker_host_is_dispatched_before_baremetal(dispatch_script: str) -> None:
+    """The 8-GPU docker host schedules slowly; queue it before the 1-GPU baremetal pods."""
+    docker_pos = dispatch_script.index("queue it before the four 1-GPU baremetal pods")
+    bare_pos = dispatch_script.index("# ---- baremetal legs: one non-privileged 1-GPU workload each")
+    assert docker_pos < bare_pos
+
+
 def test_poll_exits_when_a_newer_run_is_queued(poll_script: str, workflow: dict) -> None:
     """A pending successor cannot dispatch until this poll releases the runner."""
     assert "superseded_by_newer_run" in poll_script

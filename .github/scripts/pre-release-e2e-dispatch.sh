@@ -318,27 +318,21 @@ record_dispatch() {  # leg workloadId -- add to the in-memory map AND the on-dis
   fi
 }
 
-# ---- baremetal legs: one non-privileged 1-GPU workload each ----------------
 leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" --arg eph "$LEG_EPHEMERAL" \
   '{replica:1, gpu:"1", cpu:$cpu, memory:$mem, ephemeralStorage:$eph}')"
 
+# Discover requested docker legs up front so the 8-GPU host can be dispatched first.
+# It schedules more slowly and spends minutes on dockerd + image pulls before the
+# nested legs even start setup, so queue it before the four 1-GPU baremetal pods.
 want_docker_host=0
+docker_legs=""; gpu_map="{}"
 for leg in $REQ_TASKS; do
   case "$leg" in
-    baremetal-*)
-      env_json="$(common_env_json "$(leg_model_path "$leg")" "$(leg_hours "$leg")" "$(leg_backend "$leg")" \
-        | jq --arg leg "$leg" '. + {LEG_ID:$leg, HYPERLOOM_RUN_MODE:"baremetal"}')"
-      entry="$(bootstrap_entry_b64 "")"
-      dl="$(leg_deadline_s "$leg")"
-      wid="$(create_workload "$(workload_name "$leg")" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
-      record_dispatch "$leg" "$wid"
-      summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU, deadline $((dl/3600))h)"
-      ;;
     docker-*)
       want_docker_host=1
-      ;;
-    *)
-      summary "⚠️  unknown leg '$leg' ignored"
+      idx="$(docker_gpu_index "$leg")"
+      docker_legs="${docker_legs}${docker_legs:+ }${leg}"
+      gpu_map="$(printf '%s' "$gpu_map" | jq --arg l "$leg" --arg i "$idx" '. + {($l): $i}')"
       ;;
   esac
 done
@@ -351,18 +345,6 @@ if [ "$want_docker_host" = 1 ]; then
   # The host env carries the per-leg GPU map so the host bootstrap runs each docker leg
   # (run_leg, docker mode) with the right GPU index; each leg's agent then `docker run`s
   # its own single-GPU container per the demo skill.
-  docker_legs=""; gpu_map="{}"
-  for leg in $REQ_TASKS; do
-    case "$leg" in
-      docker-*)
-        idx="$(docker_gpu_index "$leg")"
-        docker_legs="${docker_legs}${docker_legs:+ }${leg}"
-        gpu_map="$(printf '%s' "$gpu_map" | jq --arg l "$leg" --arg i "$idx" '. + {($l): $i}')"
-        ;;
-    esac
-  done
-  # Host env: model paths for both durations, plus the leg->gpu map. Per-leg model/
-  # backend are resolved inside the host bootstrap from the leg id.
   host_env="$(jq -n \
     --arg civ "$CI_VERSION" --arg nfs "$NFS_ROOT" \
     --arg m3 "$MODEL_3H" --arg m12 "$MODEL_12H" \
@@ -404,6 +386,26 @@ if [ "$want_docker_host" = 1 ]; then
     summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_gpu_index "$leg"), deadline $((host_dl/3600))h)"
   done
 fi
+
+# ---- baremetal legs: one non-privileged 1-GPU workload each ----------------
+for leg in $REQ_TASKS; do
+  case "$leg" in
+    baremetal-*)
+      env_json="$(common_env_json "$(leg_model_path "$leg")" "$(leg_hours "$leg")" "$(leg_backend "$leg")" \
+        | jq --arg leg "$leg" '. + {LEG_ID:$leg, HYPERLOOM_RUN_MODE:"baremetal"}')"
+      entry="$(bootstrap_entry_b64 "")"
+      dl="$(leg_deadline_s "$leg")"
+      wid="$(create_workload "$(workload_name "$leg")" "$leg_resources_1gpu" "$env_json" false "$entry" "$dl")"
+      record_dispatch "$leg" "$wid"
+      summary "• \`$leg\` → workloadId \`$wid\` (baremetal, 1 GPU, deadline $((dl/3600))h)"
+      ;;
+    docker-*)
+      ;;
+    *)
+      summary "⚠️  unknown leg '$leg' ignored"
+      ;;
+  esac
+done
 
 # ---- dispatch map already written incrementally by record_dispatch ---------
 # (so a mid-dispatch cancel still leaves a complete-so-far map for cleanup to stop).
