@@ -189,6 +189,13 @@ def test_bootstrap_completes_on_clean_stop_reason_without_final_json(script: str
     assert "state.json stop_reason='$stop' after" in script
 
 
+def test_bootstrap_publishes_state_json_for_poll_reader(script: str) -> None:
+    """The poll runner reads state.json as ubuntu; bootstrap opens it after each write."""
+    assert "publish_state_for_poll" in script
+    assert 'chmod a+r "$state_json"' in script
+    assert 'publish_state_for_poll "$state_json" "$real_sdir" "$session"' in script
+
+
 def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:
     """A count-based cap of 3 turns was ~4min of wall clock and killed live installs.
 

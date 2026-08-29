@@ -14,10 +14,9 @@ is an in-network NodePort: every observed run logged ``[preempt] could not list
 workloads; skipping reclaim`` after a 30s curl timeout, having stopped nothing. Nothing
 that talks to SaFE may run on a GitHub-hosted runner again.
 
-Teardown instead relies on the old run leaving promptly: the poll fails fast on the
-first FAIL (the gate is already decided), leaves still-running workloads up for post-
-mortem, and sleeps in short slices so a cancel lands in seconds instead of at the end
-of a full poll interval.
+Teardown instead relies on the old run leaving promptly when superseded: the poll
+sleeps in short slices so a cancel lands in seconds instead of at the end of a full
+poll interval. After the gate is lost it keeps polling until every leg reports.
 
 There is no way to unit-test the scheduling itself short of running the workflow; these
 tests pin the invariants it depends on.
@@ -96,16 +95,27 @@ def test_the_reap_script_is_gone_and_unreferenced() -> None:
             assert "pre-release-e2e-reap.sh" not in line, f"{wf.name} still runs the reap script"
 
 
-def test_poll_fails_fast_once_the_gate_is_lost(poll_script: str) -> None:
-    """A decided gate must not keep the only runner busy for another 12h."""
-    assert 'POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"' in poll_script
-    assert 'if [ "$POLL_FAIL_FAST" = "1" ] && [ "$fail_seen" -eq 1 ]; then' in poll_script
-    assert "LEAVE_RUNNING_FILE=" in poll_script
-    assert 'VERDICT["$leg"]="SKIP|still running (gate failed; workload left alive)"' in poll_script
-    assert "leave_running_wid" in poll_script
-    # Every path that records a FAIL has to arm the flag, or fail-fast never triggers.
+def test_poll_keeps_polling_after_the_gate_is_lost(poll_script: str) -> None:
+    """Each leg must reach a terminal verdict even after the gate is already FAIL."""
+    assert "gate_fail_announced" in poll_script
+    assert "Continuing to poll until every leg reaches a terminal verdict" in poll_script
+    assert 'VERDICT["$leg"]="SKIP|still running (gate failed; workload left alive)"' not in poll_script
+    assert "POLL_FAIL_FAST" not in poll_script
     assert poll_script.count("fail_seen=1") == 2
     assert poll_script.count('VERDICT["$leg"]="FAIL|') >= 2
+
+
+def test_poll_reads_root_only_state_json_via_sudo(poll_script: str) -> None:
+    """Pods write state.json mode 600; the runner user reads it with sudo -n."""
+    assert "state_json_query" in poll_script
+    assert "sudo -n jq" in poll_script
+    assert "state.json not readable" in poll_script
+    assert "__UNREADABLE__" in poll_script
+
+
+def test_poll_report_icons_distinguish_skip_from_fail(poll_script: str) -> None:
+    assert "verdict_icon" in poll_script
+    assert 'SKIP|PENDING' in poll_script
 
 
 def test_poll_sleeps_in_slices_so_a_cancel_lands_quickly(poll_script: str) -> None:
@@ -114,8 +124,10 @@ def test_poll_sleeps_in_slices_so_a_cancel_lands_quickly(poll_script: str) -> No
     assert 'sleep "$POLL_INTERVAL_S"' not in poll_script
 
 
-def test_abnormal_end_cleanup_respects_leave_running(workflow: dict) -> None:
-    """Fail-fast may leave workloads up; cleanup must not stop those wids."""
+def test_abnormal_end_cleanup_respects_leave_running(workflow: dict, poll_script: str) -> None:
+    """Superseded runs may leave workloads up; cleanup must not stop those wids."""
+    assert "LEAVE_RUNNING_FILE=" in poll_script
+    assert "leave_running_wid" in poll_script
     steps = workflow["jobs"]["run"]["steps"]
     cleanup = [s for s in steps if "cancelled()" in str(s.get("if", ""))]
     assert cleanup, "the run job lost its cancel/failure cleanup step"

@@ -123,6 +123,14 @@ is_clean_stop_reason() {
   esac
 }
 
+# Optimize writes state.json root-only; the poll runner reads as ubuntu.
+publish_state_for_poll() {
+  local state_json="$1" sdir="$2" session="$3"
+  [ -f "$state_json" ] || return 0
+  chmod a+r "$state_json" 2>/dev/null || true
+  chmod a+X "$sdir" "$session" 2>/dev/null || true
+}
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -394,6 +402,7 @@ run_leg() {
         log "leg $leg real session dir: $real_sdir"
         # Re-pin so the poll (leg_session_dir -> head -n1 .session_dir) finds the report.
         echo "$real_sdir" > "${session}/.session_dir"
+        publish_state_for_poll "$state_json" "$real_sdir" "$session"
       else
         local idle
         idle="$(leg_idle_s "$root" "$grace_ts" "$now")"
@@ -416,6 +425,9 @@ run_leg() {
     fi
 
     if [ -n "$real_sdir" ]; then
+      if [ -f "$state_json" ]; then
+        publish_state_for_poll "$state_json" "$real_sdir" "$session"
+      fi
       if [ -f "$final_json" ]; then
         log "leg $leg final.json present after ${elapsed}s; demo complete"
         return 0

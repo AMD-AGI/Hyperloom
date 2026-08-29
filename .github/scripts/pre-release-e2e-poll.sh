@@ -11,12 +11,15 @@
 #   2. crash_count is within tolerance (read from state.json).
 # final.json is not required; bootstrap may fail waiting for it while optimize succeeded.
 # TARGET_GAIN still flows to optimize via the demo skill; it is NOT used here to judge PASS.
-# Fail-fast leaves still-running optimize legs alive; dispatch reap stops stale e2e-* tags.
+# When the gate is already FAIL, poll keeps running until every leg reaches a terminal
+# verdict so per-leg GitHub checks and the sticky report stay aligned with optimize.
+# Superseded runs still exit early and leave workloads for dispatch reap.
 #
 # The exit code is 0 only if every requested leg PASSed.
 #
-# Requires: bash, curl, jq on the (self-hosted, in-network) runner with the NFS
-# runs/ tree readable.
+# Requires: bash, curl, jq on the (self-hosted, in-network) runner. state.json is
+# written root-only inside pods; poll reads it via sudo -n when needed (passwordless
+# sudo on the baremetal runner, same as the NFS-root setup step).
 #
 # Inputs (env):
 #   SAFE_API_BASE / SAFE_API_KEY   SaFE API                       (required)
@@ -41,14 +44,6 @@ POLL_INTERVAL_S="${POLL_INTERVAL_S:-120}"
 GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-50400}"
 MAX_CRASHES="${MAX_CRASHES:-0}"
 MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
-# Stop polling as soon as one leg FAILs. This is a release GATE: the first FAIL already
-# blocks the release, so the remaining legs cannot change the verdict -- and waiting them
-# out costs the single self-hosted runner, which in turn keeps the next fix's run stuck at
-# run-level `pending` (a newer run gets no jobs at all while this one holds the
-# concurrency group). Still-running workloads are LEFT ALIVE (see leave_running_wids) so
-# they can finish for debugging; only the poll job exits. Set POLL_FAIL_FAST=0 to keep
-# polling until every leg reaches a terminal verdict anyway.
-POLL_FAIL_FAST="${POLL_FAIL_FAST:-1}"
 LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
 # Sleep in short slices instead of one long one so a cancelled job tears down in seconds
 # rather than at the end of a full POLL_INTERVAL_S. Each slice also re-checks whether a
@@ -122,14 +117,18 @@ superseded_by_newer_run() {
 }
 
 mark_superseded_and_exit_poll() { # -> sets superseded=1, marks pending legs SKIP, breaks caller loop
-  local leg pending=0
+  local leg pending=0 leave_wids=()
   for leg in "${LEGS[@]}"; do
     [ -n "${VERDICT[$leg]}" ] && continue
     VERDICT["$leg"]="SKIP|superseded by newer run (dispatch reap will stop)"
     summary "⏳ **$leg** — superseded (newer run queued; workload left for dispatch reap)"
     post_status "$leg" pending "superseded; newer run queued"
+    leave_wids+=( "${WID[$leg]}" )
     pending=$((pending + 1))
   done
+  if [ "${#leave_wids[@]}" -gt 0 ]; then
+    printf '%s\n' "${leave_wids[@]}" | sort -u | jq -R . | jq -s . > "$LEAVE_RUNNING_FILE"
+  fi
   summary ""
   summary "⏹ superseded: newer pre-release run queued (run_id>${GITHUB_RUN_ID}). Releasing the runner; ${pending} workload(s) left for the successor's dispatch reap."
   superseded=1
@@ -220,6 +219,15 @@ report_upsert() { # body(markdown, already includes the marker on line 1)
   fi
 }
 
+# Icon for a leg verdict in the sticky report table.
+verdict_icon() {
+  case "$1" in
+    PASS) printf '%s' "✅" ;;
+    SKIP|PENDING) printf '%s' "⏳" ;;
+    *) printf '%s' "❌" ;;
+  esac
+}
+
 # Build the sticky report body from the current VERDICT map. `phase` is a short
 # status word (Running|Complete) shown in the heading. Legs with no verdict yet
 # render as "⏳ pending".
@@ -233,7 +241,7 @@ report_body() { # phase  done_count  total_count
       continue
     fi
     vv="${v%%|*}"; vd="${v#*|}"
-    icon="✅"; [ "$vv" = "PASS" ] || icon="❌"
+    icon="$(verdict_icon "$vv")"
     rows="${rows}| \`${leg}\` | ${icon} ${vv} | ${vd} |
 "
   done
@@ -265,6 +273,25 @@ leg_session_dir() {
   echo ""
 }
 
+# Read one jq filter from state.json. Pods write it root-only (mode 600); the runner
+# user reads via sudo -n when needed. Echoes "__UNREADABLE__" when the file exists
+# but cannot be opened.
+state_json_query() {
+  local file="$1" filter="$2"
+  if [ ! -f "$file" ]; then
+    echo ""; return 0
+  fi
+  if [ -r "$file" ]; then
+    jq -r "$filter" "$file" 2>/dev/null || echo ""
+    return 0
+  fi
+  if sudo -n test -r "$file" 2>/dev/null; then
+    sudo -n jq -r "$filter" "$file" 2>/dev/null || echo ""
+    return 0
+  fi
+  echo "__UNREADABLE__"
+}
+
 # Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {
   case "$1" in
@@ -285,9 +312,12 @@ judge_leg() {
   if [ ! -f "$state" ]; then
     echo "PENDING|state.json missing (workload phase=$wphase)"; return
   fi
-  stop="$(jq -r '.stop_reason // ""' "$state" 2>/dev/null || echo "")"
-  gain="$(jq -r '.cumulative_gain_validated // 0' "$state" 2>/dev/null || echo 0)"
-  crashes="$(jq -r '.crash_count // 0' "$state" 2>/dev/null || echo 0)"
+  stop="$(state_json_query "$state" '.stop_reason // ""')"
+  gain="$(state_json_query "$state" '.cumulative_gain_validated // 0')"
+  crashes="$(state_json_query "$state" '.crash_count // 0')"
+  if [ "$stop" = "__UNREADABLE__" ] || [ "$gain" = "__UNREADABLE__" ] || [ "$crashes" = "__UNREADABLE__" ]; then
+    echo "PENDING|state.json not readable (workload phase=$wphase)"; return
+  fi
   if [ "$crashes" -gt "$MAX_CRASHES" ] 2>/dev/null; then
     echo "FAIL|crash_count=$crashes > $MAX_CRASHES"; return
   fi
@@ -320,6 +350,7 @@ report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
 start_s="$(date +%s)"
 fail_seen=0   # has any leg reached a FAIL verdict? -> the gate is already decided
+gate_fail_announced=0
 superseded=0  # a newer workflow run is queued -> release runner without stopping pods
 while :; do
   if superseded_by_newer_run; then
@@ -341,7 +372,7 @@ while :; do
       changed=1
     elif [ "$verdict" = "PENDING" ]; then
       if [ "$wphase" = "Succeeded" ] || [ "$wphase" = "Failed" ] || [ "$wphase" = "Stopped" ]; then
-        VERDICT["$leg"]="FAIL|$detail (workload phase=$wphase)"
+        VERDICT["$leg"]="FAIL|$detail"
         summary "❌ **$leg** — FAIL ($detail; workload $wphase, wid=\`$wid\`)"
         post_status "$leg" failure "FAIL — $detail"
         changed=1; fail_seen=1
@@ -359,26 +390,13 @@ while :; do
   # A leg finished this tick -> refresh the single sticky report comment (point C).
   [ "$changed" -eq 1 ] && report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"
 
-  [ "$pending" -eq 0 ] && break
-
-  # Gate already lost -> release the runner, but leave still-running workloads up so they
-  # can finish on the cluster (useful for debugging infra vs product failures).
-  if [ "$POLL_FAIL_FAST" = "1" ] && [ "$fail_seen" -eq 1 ]; then
-    leave_wids=()
-    for leg in "${LEGS[@]}"; do
-      [ -n "${VERDICT[$leg]}" ] && continue
-      VERDICT["$leg"]="SKIP|still running (gate failed; workload left alive)"
-      summary "⏳ **$leg** — still running (gate already failed; workload left alive)"
-      post_status "$leg" pending "gate failed; workload left running"
-      leave_wids+=( "${WID[$leg]}" )
-    done
-    if [ "${#leave_wids[@]}" -gt 0 ]; then
-      printf '%s\n' "${leave_wids[@]}" | sort -u | jq -R . | jq -s . > "$LEAVE_RUNNING_FILE"
-      summary ""
-      summary "⏹ fail-fast: gate is FAIL. Releasing the runner; ${pending} workload(s) left running for post-mortem. Wids recorded in \`$(basename "$LEAVE_RUNNING_FILE")\`. Set \`POLL_FAIL_FAST=0\` to poll until every leg finishes."
-    fi
-    break
+  if [ "$fail_seen" -eq 1 ] && [ "$gate_fail_announced" -eq 0 ]; then
+    summary ""
+    summary "⚠️ **GATE: FAIL** — at least one leg did not pass. Continuing to poll until every leg reaches a terminal verdict."
+    gate_fail_announced=1
   fi
+
+  [ "$pending" -eq 0 ] && break
 
   elapsed=$(( $(date +%s) - start_s ))
   if [ "$elapsed" -ge "$GLOBAL_TIMEOUT_S" ]; then
@@ -469,7 +487,7 @@ stop_workloads() {
     case " $seen " in *" $wid "*) continue ;; esac
     seen="${seen} ${wid}"
     if leave_running_wid "$wid"; then
-      summary "• left workload \`$wid\` running (fail-fast; post-mortem)"
+      summary "• left workload \`$wid\` running (superseded; dispatch reap)"
       continue
     fi
     code="$(curl -sS "${tls[@]}" -o /dev/null -w '%{http_code}' -X POST \
