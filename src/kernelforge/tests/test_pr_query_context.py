@@ -24,10 +24,9 @@ from kernelforge.knowledge.pr_query_context import (
 TRACKED = PR_REPOS_EXPECTED
 
 
-def test_normalize_kernel_backend_strips_the_suffix():
+def test_normalize_kernel_backend_reduces_a_label_to_its_key():
     assert normalize_kernel_backend("flydsl") == "flydsl"
-    assert normalize_kernel_backend("flydsl-fellow") == "flydsl"  # rename: keep-literal
-    assert normalize_kernel_backend("  AITER-Fellow ") == "aiter"  # rename: keep-literal
+    assert normalize_kernel_backend("  AITER ") == "aiter"
     assert normalize_kernel_backend("") == ""
 
 

@@ -111,17 +111,10 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
 # appeared as fellow / Fellow / FELLOW / fellows and each had its own sites.
 _FELLOW_PATTERN = re.compile(r"fellow", re.IGNORECASE)
 
+# The back-compat shims that used to be exempt here are gone: the old spelling
+# is no longer accepted anywhere in code, so nothing outside a historical record
+# may name it. What remains are records, which rewriting would falsify.
 _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
-    (
-        "*",
-        r"rename: keep-literal",
-        "The back-compat shims. The canonical value flipped from "
-        '"<backend>-fellow" to the bare backend key, and these lines hold the old '
-        "spelling so a stored KB row, a resumed campaign config or an operator's "
-        "exported FORGE_FELLOW still resolves instead of silently falling through "
-        "to the fallback backend. A compatibility literal that gets renamed is not "
-        "a compatibility literal.",
-    ),
     (
         "src/kernelforge/data/*",
         r"(?i)fellow",
@@ -138,26 +131,6 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "CHANGELOG.md",
         r"(?i)fellow",
         "Historical release notes. An entry that gets renamed stops telling the reader which spelling to migrate from.",
-    ),
-    # A shim nobody can read is a shim nobody trusts, so the comment or docstring
-    # that explains WHY the old spelling is still accepted has to be able to name
-    # it -- and it sits on the line above the literal, where the line-granular
-    # ``keep-literal`` marker cannot reach. Listed file by file, so the exemption
-    # covers the sites that actually carry a shim (plus the one page documenting
-    # the accepted input) and cannot quietly swallow a real miss elsewhere.
-    *(
-        (
-            path,
-            r"(?i)-fellow|FORGE_FELLOW|``\"fellow\"``",
-            "Prose explaining the back-compat literal on a neighbouring line.",
-        )
-        for path in (
-            "src/kernelforge/kernel_backends/base.py",
-            "src/kernelforge/knowledge/pr_query_context.py",
-            "src/kernelforge/loop/campaign_config.py",
-            "src/kernelforge/loop/analysis_evidence.py",
-            "docs/kernelforge/quickstart.md",
-        )
     ),
 )
 
@@ -264,22 +237,6 @@ def test_the_rename_did_not_space_out_an_unrelated_identifier() -> None:
         "a quoted two-word spelling of kernel_backend: the identifier lost its "
         "underscore to the rename and must get it back:\n  " + "\n  ".join(stray[:40])
     )
-
-
-def test_every_kernel_backend_resolves_from_its_legacy_spelling() -> None:
-    """The suffixed form written before the rename must still resolve.
-
-    This is the whole promise of keeping the strip: a campaign paused under the
-    old vocabulary and resumed under the new one has ``"triton-fellow"`` sitting
-    in its immutable config, and must not silently continue on the fallback
-    backend with a different prompt than it started with.
-    """
-    from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
-    from kernelforge.loop.campaign_config import resolve_kernel_backend_override
-
-    for backend in KERNEL_BACKENDS:
-        assert resolve_kernel_backend_override(f"{backend}-fellow") == backend
-        assert resolve_kernel_backend_override(backend) == backend
 
 
 def test_kernel_backend_prompt_modules_are_importable() -> None:

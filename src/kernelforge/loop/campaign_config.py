@@ -103,18 +103,6 @@ class CampaignConfig:
                 f"unsupported campaign config schema {version}; expected one "
                 "of " + ", ".join(str(known) for known in READABLE_SCHEMA_VERSIONS)
             )
-        # A campaign paused before the rename has ``"fellow"`` on disk, and the
-        # unknown-field check below is strict on purpose, so translate the key
-        # before it gets there rather than teaching every reader two spellings.
-        # Migrating the dict (instead of reading both keys at the use site) also
-        # keeps ``to_dict()`` round-tripping to exactly one spelling.
-        legacy_key = "fellow"  # rename: keep-literal
-        if legacy_key in payload:
-            payload = dict(payload)
-            legacy_value = payload.pop(legacy_key)
-            if not payload.get("kernel_backend"):
-                payload["kernel_backend"] = legacy_value
-
         unknown_fields = set(payload) - {item.name for item in fields(cls)}
         if unknown_fields:
             raise ValueError("unsupported campaign config fields: " + ", ".join(sorted(unknown_fields)))
@@ -374,46 +362,16 @@ def detect_gpu_target() -> str:
 
 
 def normalize_kernel_backend_name(kernel_backend: str) -> str:
-    """Reduce a backend label to its bare canonical name.
-
-    The canonical form used to be ``"<backend>-fellow"`` and this function
-    appended that suffix; it is now the bare backend key and this function
-    strips it. Keeping the strip (rather than rejecting the old spelling) is
-    what makes the rename free for data written before it: a ``"triton-fellow"``
-    in a stored KB row or a resumed campaign's config still resolves to
-    ``"triton"`` instead of falling through to the fallback backend.
-    """
-    requested = kernel_backend.strip()
-    return requested.removesuffix("-fellow")  # rename: keep-literal
+    """Reduce a backend label to its bare canonical name."""
+    return kernel_backend.strip()
 
 
-# The environment override, current name first. ``FORGE_FELLOW`` stays readable
-# because it is set in deployed install scripts, operator shells and running
-# sessions that predate the rename; dropping it would silently ignore an
-# override an operator had every reason to believe was in effect.
 _ENV_OVERRIDE = "FORGE_KERNEL_BACKEND"
-_ENV_OVERRIDE_LEGACY = "FORGE_FELLOW"  # rename: keep-literal
 
 
 def env_backend_override() -> str:
-    """The backend named by the environment, or ``""``.
-
-    Reads :data:`_ENV_OVERRIDE` and falls back to the pre-rename
-    :data:`_ENV_OVERRIDE_LEGACY`, warning once so the operator learns the new
-    spelling instead of discovering it when the legacy name is finally removed.
-    """
-    value = os.environ.get(_ENV_OVERRIDE, "").strip()
-    if value:
-        return value
-    legacy = os.environ.get(_ENV_OVERRIDE_LEGACY, "").strip()
-    if legacy:
-        log.warning(
-            "%s is deprecated and will be removed; set %s=%s instead",
-            _ENV_OVERRIDE_LEGACY,
-            _ENV_OVERRIDE,
-            legacy,
-        )
-    return legacy
+    """The backend named by the environment, or ``""``."""
+    return os.environ.get(_ENV_OVERRIDE, "").strip()
 
 
 def resolve_kernel_backend_override(kernel_backend: str) -> str:

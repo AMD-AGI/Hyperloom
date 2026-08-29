@@ -233,7 +233,7 @@ class AnalysisEvidenceMixin:
             try:
                 from kernelforge.knowledge import build_forge_knowledge
 
-                stored = (self.ic.kernel_backend or "").removesuffix("-fellow")  # rename: keep-literal
+                stored = (self.ic.kernel_backend or "").strip()
                 backend = stored or self.ic.backend or ""
                 root = Path(local_knowledge_root)
                 language = resolve_language_dirs(backend, root)

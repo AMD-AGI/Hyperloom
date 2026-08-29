@@ -120,9 +120,8 @@ class WhitelistDrift:
 
 
 def normalize_kernel_backend(kernel_backend: str) -> str:
-    """Reduce a backend label to its key, tolerating the legacy '-fellow' suffix."""
-    name = (kernel_backend or "").strip().lower()
-    return name.removesuffix("-fellow")  # rename: keep-literal
+    """Reduce a backend label to its canonical key."""
+    return (kernel_backend or "").strip().lower()
 
 
 def parse_git_remote(url: str) -> str:

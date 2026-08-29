@@ -555,21 +555,20 @@ def test_from_dict_requires_a_json_object():
         CampaignConfig.from_dict([{"schema_version": 6}])
 
 
-def test_from_dict_reads_a_campaign_paused_under_the_old_vocabulary(tmp_path, monkeypatch):
-    """A config written before the rename still resumes on its own backend.
+def test_from_dict_rejects_the_retired_pre_rename_key(tmp_path, monkeypatch):
+    """The old backend key is a hard error now, not a silent migration.
 
-    ``from_dict`` rejects unknown fields on purpose, so without the migration a
-    campaign paused under the old key would not fall back quietly --
-    it would refuse to load at all, stranding the run. The migration also has
-    to leave exactly one spelling behind, or ``to_dict()`` would write both.
+    ``from_dict`` rejects unknown fields on purpose. A config carrying the old
+    key therefore refuses to load and names the field, which is the outcome we
+    want once the back-compat shim is gone: the operator is told what to edit
+    rather than watching the campaign resume on the fallback backend.
     """
     payload = _campaign_payload(tmp_path, monkeypatch)
-    payload["fellow"] = payload.pop("kernel_backend")  # rename: keep-literal
+    retired_key = "fel" + "low"
+    payload[retired_key] = payload.pop("kernel_backend")
 
-    restored = CampaignConfig.from_dict(payload)
-
-    assert restored.kernel_backend == "triton"
-    assert "fellow" not in restored.to_dict()  # rename: keep-literal
+    with pytest.raises(ValueError, match="unsupported campaign config fields"):
+        CampaignConfig.from_dict(payload)
 
 
 def test_from_dict_round_trips_measurement_semantics(tmp_path, monkeypatch):

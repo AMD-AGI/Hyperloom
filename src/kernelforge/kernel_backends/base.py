@@ -64,10 +64,7 @@ def build_single_kernel_backend_prompt(
 
     Returns the prompt text, or "" for an unknown kernel_backend.
     """
-    # The canonical spelling is the bare backend key; the ``"<backend>-fellow"``
-    # form predates the rename and still arrives from stored campaign configs,
-    # KB rows and operator shells, so it is normalized rather than rejected.
-    backend = (kernel_backend_name or "").strip().removesuffix("-fellow")  # rename: keep-literal
+    backend = (kernel_backend_name or "").strip()
     module_path = KERNEL_BACKEND_PROMPT_MODULES.get(backend)
     if module_path is None:
         return ""
