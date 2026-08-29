@@ -727,6 +727,11 @@ def test_submit_vendor_playbook_runs_from_the_packaged_bundle_without_forge_path
     """
     calls: list[dict] = []
     _stub_run_loop(monkeypatch, calls)
+    # This is the only test here that drives submit() far enough to resolve a
+    # gfx target, and that resolver ends in rocminfo. Left to the host, the test
+    # passes on a GPU box and fails on a CI runner -- and what it is about is the
+    # bundle, not the hardware. Name the target so the answer is the same either way.
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
 
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     candidate = _mori_dispatch_candidate(
