@@ -48,8 +48,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
 
     grid_size = sw.get("grid_size") or len(variants)
-    successes = [v for v in variants if v.get("status") == "success"]
-    failures = [v for v in variants if v.get("status") != "success"]
+    successes = [v for v in variants if v.get("status") == "ok"]
+    failures = [v for v in variants if v.get("status") == "failed"]
+    skipped = [v for v in variants if v.get("status") == "skipped"]
 
     def _ot(v: dict[str, Any]) -> float:
         """Extract a variant's output throughput as a float sort key.
@@ -58,23 +59,23 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             v (dict[str, Any]): A sweep variant record.
 
         Returns:
-            float: The ``output_throughput`` value, or ``0.0`` when missing or
-                non-numeric.
+            float: The ``output_throughput_tok_s`` value, or ``0.0`` when
+                missing or non-numeric.
         """
         try:
-            return float(v.get("output_throughput") or 0.0)
+            return float(v.get("output_throughput_tok_s") or 0.0)
         except (TypeError, ValueError):
             return 0.0
 
-    best = max(successes, key=_ot, default=None)
+    best = max((v for v in successes if _ot(v) > 0), key=_ot, default=None)
 
     facts: list[str] = []
-    facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}.")
+    facts.append(f"Sweep grid={grid_size}, success={len(successes)}, failed={len(failures)}, skipped={len(skipped)}.")
     if best:
         facts.append(
             f"Best point: conc={best.get('conc')} isl={best.get('isl')} "
-            f"osl={best.get('osl')} → tput={best.get('output_throughput')} "
-            f"ttft={best.get('ttft')}ms"
+            f"osl={best.get('osl')} → tput={best.get('output_throughput_tok_s')} "
+            f"ttft={best.get('ttft_mean_ms')}ms"
         )
 
     decisions: list[Decision] = [
@@ -94,9 +95,9 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
                 v.get("isl"),
                 v.get("osl"),
                 v.get("status"),
-                v.get("output_throughput"),
-                v.get("ttft"),
-                v.get("e2el"),
+                v.get("output_throughput_tok_s"),
+                v.get("ttft_mean_ms"),
+                v.get("e2el_mean_ms"),
                 (v.get("error") or "")[:60],
             ]
         )

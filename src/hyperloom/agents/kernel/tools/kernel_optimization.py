@@ -41,6 +41,16 @@ from _task_group_contract import task_group_shape_cases  # noqa: E402
 
 sys.path.pop(0)
 
+try:
+    from hyperloom.common.kernel_shape_contract import (
+        REVIEW_SHAPE_PROVENANCE as _REVIEW_SHAPE_PROVENANCE,
+    )
+except ImportError:  # pragma: no cover - standalone invocation
+    # Runs as a subprocess against the installed hyperloom, which may predate
+    # the constant. An unrecognised provenance then reads as measured, which is
+    # the pre-existing wording rather than a new claim.
+    _REVIEW_SHAPE_PROVENANCE = frozenset({"review_backfill", "review_derived"})
+
 
 def update_status(
     status_path: Path,
@@ -833,16 +843,19 @@ def _structured_benchmark_shape_cases(candidate: dict[str, Any]) -> dict[str, An
 def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     """Fallback shapes block when no TraceLens ``task_group`` is attached.
 
-    Surfaces the candidate's TraceLens-captured argument shapes so GEAK binds
-    its harness to the exact shapes the kernel saw during serving. Returns ``""``
-    when no captured shapes exist.
+    Pins the harness to the candidate's argument shapes so the backend does not
+    pick its own. The heading states where the dims came from: a graph replay
+    records no arguments, so the hottest kernels of a captured model can only be
+    given dims the candidate review recovered or computed. Telling the backend
+    those were measured would misrepresent the one thing worth knowing when the
+    tuned kernel later fails to move end-to-end throughput.
 
     Args:
         candidate: The kernel candidate dict, possibly carrying captured
             shapes.
 
     Returns:
-        The captured-shapes prompt block, or ``""`` when no shapes exist.
+        The shapes prompt block, or ``""`` when the candidate has no shapes.
     """
     shapes = candidate.get("shapes") or candidate.get("kernel_shapes")
     rendered = _format_shapes_for_case(shapes)
@@ -850,13 +863,27 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
         return ""
     bound = str(candidate.get("bound_type") or candidate.get("bound") or "").strip()
     bound_line = f" (bound: {bound})" if bound else ""
+    provenance = str(candidate.get("shape_provenance") or "").strip().lower()
+    if provenance in _REVIEW_SHAPE_PROVENANCE:
+        heading = "Benchmark shapes (reconstructed for this serving run)"
+        origin = (
+            "The profiler recorded no arguments for this kernel because it runs\n"
+            "inside a captured graph; these dims were reconstructed from the run's\n"
+            f"own artifacts and serving configuration (provenance: {provenance}).\n"
+            "They are the workload this kernel actually serves, so optimizing\n"
+            "against them is what produces an end-to-end gain -- whereas shapes you\n"
+            "choose yourself cannot account for the serving configuration:\n"
+        )
+    else:
+        heading = "Benchmark shapes (TraceLens-captured from the serving run)"
+        origin = (
+            "They are what the kernel saw during sglang/vLLM serving, so optimizing\n"
+            "against them is what produces an end-to-end gain on the workload:\n"
+        )
     return (
-        "\n## Benchmark shapes (TraceLens-captured from the serving run)\n\n"
+        f"\n## {heading}\n\n"
         "Build your harness shape sweep / `get_inputs()` from EXACTLY these\n"
-        f"captured argument shapes{bound_line} -- do NOT invent shapes. They are what\n"
-        "the kernel saw during sglang/vLLM serving, so optimizing against them is\n"
-        "what produces an end-to-end gain on the workload:\n"
-        f"- args: {rendered}\n"
+        f"argument shapes{bound_line} -- do NOT invent shapes.\n" + origin + f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
         + _build_kernel_contract_block(candidate)
@@ -1209,8 +1236,8 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
             "for the corresponding P-item. Treat them as starting points —",
             "verify each against the source / a quick micro-benchmark before",
             "committing to a direction. If your measurements contradict any",
-            "hypothesis, follow the data and document the discrepancy in",
-            "`optimization_report.md`.",
+            "hypothesis, follow the data and record the discrepancy in your",
+            "final summary.",
             "",
         ]
         for entry in all_prose:
@@ -1258,7 +1285,7 @@ def _build_hypothesis_block(candidate: dict[str, Any]) -> str:
         "verify the reasoning against the source / a quick micro-benchmark",
         "before committing to the recommended direction. If your",
         "measurements contradict the hypothesis, follow the data and",
-        "document the discrepancy in `optimization_report.md`.",
+        "record the discrepancy in your final summary.",
         "",
     ]
     if identification:
@@ -1513,22 +1540,26 @@ def build_prompt(
     *,
     backend: str | None = None,
 ) -> str:
-    """Render the full optimization prompt handed to a rewrite backend.
+    """Render the optimization prompt handed to a rewrite backend.
 
-    Assembles the hardware/budget/source-attribution preamble, the source
-    listing, semantically-ordered benchmark references, and the TraceLens
-    benchmark-cases / priority / hypothesis blocks into one prompt string.
+    Two shapes, because the backends own different amounts of the run. GEAK is
+    handed the whole harness: budget protocol, sandbox rules, the deliverable
+    contract Hyperloom later parses, and the A/B recipes it needs because it
+    brings no benchmark of its own. Forge brings its own driver, clock, gate and
+    artifact export, so it is handed only what it cannot derive -- the trace
+    evidence and the source-attribution guards. See the ``backend == "forge"``
+    branch for why the omitted sections are not merely redundant there.
 
     Args:
         candidate (dict[str, Any]): Kernel candidate dict supplying source,
             benchmarks, shapes, and TraceLens context.
         args (argparse.Namespace): Parsed CLI args (source override, GPU
             count, kernel id, etc.).
-        backend (str | None): Target backend name, used to tailor backend-
-            specific prompt sections; None for the generic prompt.
+        backend (str | None): Target backend name. ``"forge"`` selects the slim
+            prompt; every other value (including None) renders the full one.
 
     Returns:
-        str: The fully rendered prompt text for the rewrite backend.
+        str: The rendered prompt text for the rewrite backend.
     """
     source_file = args.source_file or candidate.get("source_file", "")
     source_block = ""
@@ -1751,8 +1782,28 @@ def build_prompt(
         is_multinode_run = int(os.environ.get("INFERENCE_OPTIMIZER_NODES", "0") or 0) >= 2
     except ValueError:
         is_multinode_run = False
+    # Held separately from ``safety``: the GPU-less sandbox applies to whichever
+    # backend runs, while the rest of ``safety`` describes the GEAK harness only.
+    #
+    # Two shapes, for the same reason the prompt has two. The constraint -- no
+    # GPU on this node -- is a fact about the host and belongs to both backends.
+    # The procedure below it is not: it routes measurements through
+    # ``kernel-bench`` and names ``optimized_versions/`` and
+    # ``optimization_report.md``, which are the two paths forge's workspace guard
+    # refuses and the reason the deliverable contract was dropped in the first
+    # place. Handing forge the whole block put them straight back, so a
+    # multi-node forge run lost its first iteration exactly as before.
+    multinode_notice = ""
+    multinode_block = ""
     if is_multinode_run:
-        safety += (
+        multinode_notice = (
+            "\nMULTI-NODE SANDBOX: this node has no GPU. Nothing you run here can\n"
+            "compile against or measure a device -- `hipcc`, `torch.cuda.*` and\n"
+            "`torch.utils.cpp_extension.load` will hang or crash. Do not stand up a\n"
+            "measurement of your own; the harness that owns benchmarking dispatches\n"
+            "it to a GPU-bearing pod.\n"
+        )
+        multinode_block = (
             "\nMULTI-NODE SANDBOX (no local GPU): every compile + benchmark\n"
             "step MUST be dispatched to a GPU-bearing RayJob pod. Do NOT\n"
             "call `hipcc`, `torch.cuda.*`, or `torch.utils.cpp_extension.load`\n"
@@ -1774,6 +1825,7 @@ def build_prompt(
             "Treat `kernel-bench` as your only measurement gate; everything\n"
             "else (code edits, correctness reasoning) still happens locally.\n"
         )
+    safety += multinode_block
     if not is_multigpu:
         safety += "- Use the provided benchmark/test files above for correctness/perf measurement.\n"
     elif num_gpus >= 2:
@@ -1812,6 +1864,56 @@ def build_prompt(
                 else:
                     focus_line = "Use the report below as full context for this kernel.\n"
                 tracelens_context_block = "\n## TraceLens Context\n\n" + focus_line + "\n" + full_report
+    if (backend or "").strip().lower() == "forge":
+        # Forge already owns everything the sections below describe, and two of
+        # them fight it. The deliverables (``optimization_report.md``, a copy
+        # under ``optimized_versions/``) arrive as new untracked paths that its
+        # workspace guard refuses, which costs the iteration that wrote them --
+        # while Hyperloom writes both itself from forge's published manifest and
+        # git diff, so nothing reads the agent's copies. The A/B recipes
+        # (standalone hipcc program, ``cpp_extension.load``) tell the agent to
+        # stand up a second benchmark beside the driver its own in-session gate
+        # scores, and a number from the wrong benchmark is worse than no number.
+        # The budget protocol narrates a mini-swe-agent cost meter forge has no
+        # header for, and the runtime-metadata block is labelled for GEAK's
+        # parser -- forge reads the invocation spec instead, which carries the
+        # same operands in more detail.
+        #
+        # What is left is what forge cannot derive: the trace evidence, and the
+        # two source-attribution guards that keep a rewrite off a @compile_ops
+        # wrapper and on the right ``__global__``.
+        forge_sections = [
+            f"# TASK: Optimize the `{kernel_name}` kernel",
+            f"kernel_name: {kernel_name}\nkernel_url: {source_file}",
+            # The target architecture, which forge cannot derive: it is told
+            # which kernel to rewrite, not which card the measurement runs on,
+            # and a gfx942 intrinsic emitted for a gfx950 host does not compile.
+            platform_intro,
+            hardware_notes,
+            promotion_block,
+            device_symbol_block,
+            hypothesis_block,
+            extra_context_block,
+            benchmark_cases_block,
+            # The harnesses the trace resolved, and the only channel by which a
+            # review-verified ``benchmark_files`` reaches this backend at all.
+            bench_block,
+            priority_block,
+            "Preserve function name, signature, decorators, and numerical behavior.",
+            repo_block,
+            multinode_notice,
+            # The same fallback GEAK gets, for the same reason: the hypothesis
+            # block is built from TraceLens p-items, and a kernel the trace
+            # ranked without one renders it empty. Building it after the forge
+            # return meant those kernels reached forge with no trace context at
+            # all -- so the shape that keeps "the trace evidence forge cannot
+            # derive" dropped exactly the rows where that evidence only exists
+            # in analysis.md.
+            tracelens_context_block,
+        ]
+        # Most of these blocks render empty for any given kernel; joining them
+        # unfiltered leaves runs of blank lines where a section was skipped.
+        return "\n\n".join(part.strip() for part in forge_sections if part.strip())
     # Use GEAK task_parser field names so its parser can extract them.
     return "\n".join(
         [
@@ -2908,9 +3010,26 @@ def resolve_deploy_repo_root(
     """Resolve the consumer repo root for repo-relative patch paths.
 
     Producer worktree paths are not portable to installed framework trees.
-    Resolve against an explicit root when supplied; otherwise walk ancestors
-    of the traced absolute source and require exactly one root whose existing
-    preimage files match every non-new patch entry.
+    Resolve against an explicit root when supplied; then anchor on the traced
+    source, whose absolute path already names the root once the entry that
+    describes it is stripped off its tail; and only then fall back to walking
+    ancestors and requiring exactly one whose existing preimage files match
+    every non-new patch entry.
+
+    The anchor exists because the ancestor walk cannot break a tie it has no
+    information about. A producer rooted below the consumer's package -- aiter
+    puts a copy of the same file under both ``ops/triton`` and
+    ``ops/triton/_triton_kernels``, and forge's worktree sits at the deeper one
+    -- exports ``gemm/basic/<kernel>.py``, which then resolves under two
+    ancestors of the traced source. The walk finds two matches, refuses, and a
+    correct rewrite is reported as an unresolvable artifact. Refusing was right:
+    the two files differ, and deploying to the wrong one measures nothing at a
+    full re-baseline's cost. But the tie was never real -- the trace resolved
+    which of them defines the kernel, and that answer is in ``target_file``.
+
+    The anchor concludes nothing the walk would not have to confirm anyway: the
+    derived root still has to satisfy the same preimage check, so a descriptor
+    set that does not belong to the traced tree falls through to the walk.
     """
 
     def _matches(root: Path, *, require_preimage: bool) -> bool:
@@ -2937,6 +3056,26 @@ def resolve_deploy_repo_root(
         target = Path(target_file).resolve()
     except OSError:
         return ""
+
+    # Anchor on the traced source: the descriptor that names it is a tail of its
+    # absolute path, so removing that tail leaves the root the producer was
+    # rooted at. Longest tail first, so a descriptor that is merely a basename
+    # collision cannot claim the anchor ahead of the full relative path.
+    anchors = sorted(
+        (Path(str(desc.get("path") or "")) for desc in descriptors if str(desc.get("path") or "")),
+        key=lambda rel: len(rel.parts),
+        reverse=True,
+    )
+    for rel in anchors:
+        if rel.is_absolute() or ".." in rel.parts:
+            continue
+        depth = len(rel.parts)
+        if depth >= len(target.parts) or target.parts[-depth:] != rel.parts:
+            continue
+        anchored = Path(*target.parts[:-depth])
+        if anchored.is_dir() and _matches(anchored, require_preimage=True):
+            return str(anchored)
+
     matches: list[Path] = []
     for root in target.parents:
         if _matches(root, require_preimage=True):

@@ -96,7 +96,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
-  `--no-explore`, `--no-eval`.
+  `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
@@ -195,7 +195,8 @@ The following variables control the kernel optimization backend ladder.
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE` | `1`                           | Enables automatic runtime GEMM-shape capture for eligible single-node dense vLLM Forge tuning when no explicit shape input is available. Block-FP8 first reuses shapes from the TraceLens-selected steady-state trace of a successful Roofline with exactly matching model, workload, server arguments, environment, and backend controls. Missing or stale evidence triggers the same standard Roofline/ProfileExecutor/TraceLens steady-state pipeline as a fallback. Set to `0` to preserve the no-capture path. |
 | `HYPERLOOM_GEMM_SHAPE_CAPTURE_TIMEOUT_SEC` | `1800`          | Timeout in seconds for the dense vLLM TunableOp recording benchmark. Block-FP8 fallback uses the standard Roofline/ProfileExecutor timeout. Values below `60` are clamped to `60`. |
 | `INFERENCE_OPTIMIZER`<br>`_KERNEL_OPT_MAX_PARTIAL` | Unset           | Cap on how many `PARTIAL` kernel-opt verdicts an action can yield before it short-circuits to `NEEDS_REVIEW`. Useful for keeping budget contained when GEAK is consistently timing out.            |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `60`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `60` leaves roughly 30 minutes of real iteration. |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | `90`                         | Wall-clock budget in minutes for one optimization, mirrored by the `kernel_optimization.py` wrapper. The env deliberately wins over the payload `budget_minutes`, which is LLM-authored from a prompt template, so an operator raising the budget is not silently overridden. forge-loop reserves half the window for finalize, so `90` leaves roughly 45 minutes of real iteration. |
+| `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` | `5.0`                     | GPU-time share a reusable hot kernel must clear to be worth a dispatch, in percent. Three readers share it and must agree, or the report explains a skip the dispatcher never made: the batch filter that selects candidates, the phase-advance gate that decides KERNEL still owes work, and the report's unattempted-reason breakdown. It was `10.0` until a 60-layer sparse-MoE decoder showed the assumption behind that number — that hot kernels concentrate — does not hold: nothing but a graph-launch wrapper reached double digits, the largest real operator sat at 9.47%, and the batch dispatcher selected nothing for six hours. Lower it when a trace's rewritable candidates cluster below the default and the operators above them are vendor binaries; a dropped candidate is reported as `below_min_gpu_pct=<value>` rather than as a failed attempt. |
 | `AITER_LOG_TUNED_CONFIG`       | `1` (set for every serving run) | Makes aiter log each tuned-config lookup it *hits*, not only the ones it misses. Two checks have no input without it: the GEMM demand list, which learns the shapes the runtime actually asks for (config-derived shapes covered 0.4% of them), and the apply verdict, which cannot tell "the tuned table was never read" from "it was read and did not help". A scan of 60 production logs found it set in none of them, so it is now injected by default. An operator value wins — set `0` to turn hit logging off, at the cost of both checks going inconclusive. Every miss already prints a line regardless of this setting; hit logging adds roughly one line per lookup that succeeds. |
 | `HYPERLOOM_GEMM_PAIRED_PAIRS`  | `0` (off)                     | How many interleaved baseline/tuned pairs to re-measure before a GEMM tuning KEEP is reported as confirmed. One end-to-end measurement cannot separate a gain from drift on this fleet: three rounds of a single unchanged configuration spanned 58%, and one controlled repeat moved 16%. Each pair costs two extra benchmark rounds. When `0`, the gain is still promoted — it is the best number available — but recorded as an unpaired block comparison rather than presented as a paired one. |
 
@@ -242,115 +243,116 @@ symbols are opaque binaries and never qualify.
 A kernel candidate must resolve to a real source file before any backend can
 rewrite it. Resolution runs as a ladder: curated dictionary, then the
 trace-derived launcher frame, then a name grep. All three are deterministic and
-require no configuration. Agent analysis might add the model-backed tiers below.
+require no configuration. Agent analysis might add the review stage below.
 
 Every run writes `kernel_source_resolution.json` next to the candidate report.
 It answers one question per hot kernel — which file defines it, and which tier
 decided that — in a versioned schema (`schema_version`, currently `1.0.0`), so
 consumers and triage read a contract rather than candidate internals.
 
-Two model-backed tiers might sit on top of the deterministic ladder when
-`--analysis-route agent` is used. The `deterministic` route never invokes either
-tier. Agent-route network calls require an explicit
-`HYPERLOOM_LLM_SOURCE_PROVIDER`; a model name alone never implies a provider or
-endpoint. The tiers differ in scope, authority, and data exposure; the
-constraints of one do not apply to the other.
+### Candidate review
 
-Neither can fail a run: no model configured, a gateway error, a timeout or an
-unparseable reply all leave the deterministic result standing.
+One agent session may audit the finished candidate table when
+`--analysis-route agent` is used. The `deterministic` route never runs it, and
+keeps its no-model guarantee by not reaching the stage at all.
 
-### Fallback tier
+The stage is tool-enabled rather than a completion call because the deterministic
+tiers' real failure mode is not coming up empty but coming up confidently wrong,
+and a model ranking paths by keyword off a prompt assembled in advance cannot
+tell the difference — it never sees what a kernel actually *is*.
 
-**When it runs.** Only for a candidate whose `source_file` is still empty after
-all three deterministic tiers, and whose GPU share is at least 5%.
+**What it is handed: paths, not contents.** The raw table, the resolution audit,
+the TraceLens report, the model directory and the framework source roots — as
+locations. The session reads with `Read`, `Grep` and `Glob`, so it opens what the
+evidence leads it to instead of what was guessed to be relevant, and can confirm
+a file defines the kernel it is credited with. A mangled vendor symbol is
+demangled by the host before the session starts and arrives in the table as
+`device_kernel_name_demangled` — that was the one job a shell was granted for,
+so granting one is no longer necessary.
 
-**What it sends.** One chat completion per such candidate, containing the kernel
-symbol and every shortlisted path. The shortlist comes from a relaxed grep over
-the known framework roots. **File contents are not sent unless
-`HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it** (see [Source egress](#source-egress));
-with it, each path is accompanied by its first 40 lines, capped at 2000
-characters.
+**It cannot write to the code under optimization.** That is the whole guarantee,
+and there is no detection layer behind it. On the Claude backend `Write` is the
+answer channel and is refused outside the run directory; every other tool,
+including any shell, is denied by a default-deny callback, so a tool introduced
+by a later SDK arrives refused rather than pre-authorised — and an SDK that will
+not accept that callback gets no session at all. On the Codex backend the
+containment is the OS sandbox: this stage states `workspace-write` rather than
+inheriting the deployment's mode, so it cannot run under a configured
+`bypass` (see [Codex (OpenAI) agent sandbox](#codex-openai-agent-sandbox)). The
+two are not equivalent — Codex has a shell and its own file tools, confined by
+the sandbox rather than refused per call — and the mode in force is logged,
+because the backend is chosen by credentials rather than by an operator.
 
-**What it costs.** One call per qualifying candidate, 60-second ceiling, no
-retry. `HYPERLOOM_LLM_SOURCE_MODEL` overrides the selected provider's model
-setting. Claude uses `CLAUDE_MODEL`, then the project-wide
-`DEFAULT_CLAUDE_MODEL`. Model settings are never borrowed across providers.
+**What it costs.** One session per analysis, not one call per candidate. 900
+seconds per attempt and two attempts by default. On the Claude backend each wait
+for the next SDK message is bounded separately, because a stalled gateway would
+otherwise hold the full window (see
+`HYPERLOOM_TRACELENS_STREAM_IDLE_TIMEOUT_SEC` and
+`HYPERLOOM_TRACELENS_TOOL_IDLE_TIMEOUT_SEC`, which this stage reuses). The Codex
+entry point is one-shot and exposes no stream to bound, so a stalled Codex review
+costs the full 900 seconds. `--dry-run` skips the stage entirely: it plans, and
+nothing dispatches from the table it publishes.
 
-**Authority: selection only.** The model might return one of the exact shortlist
-strings and nothing else. An invented path is rejected, as is any answer below
-0.7 confidence. This is deliberate — an LLM-produced sentinel written into
-`source_file` is what broke this pipeline originally.
-
-### Review tier
-
-The fallback only fires on an empty `source_file`, so it cannot catch the
-deterministic tiers' actual failure mode: not coming up empty, but coming up
-*confidently wrong*. Measured across historical sessions, only 59% of
-verifiable resolutions mention the kernel they claim to define, and
-`aten::fill_` alone has been resolved to four unrelated business files — each a
-real, existing, root-resident source file passing every mechanical check.
-
-**When it runs.** On the whole resolution table, including entries already
-filled in by the deterministic tiers. Entries below 1% GPU share are skipped.
-
-**What it sends.** A single chat completion carrying up to 40 entries at once.
-For each entry it includes the kernel symbol, GPU share, current path and
-deciding tier. File contents follow the same rule as the fallback tier: nothing
-is sent unless `HYPERLOOM_LLM_SOURCE_PREVIEW` authorises it. When it does, one
-call can ship up to 40 file heads, considerably more than the fallback tier
-sends per call — which is why the switch is global rather than per-tier.
-
-**What it costs.** One call per run (not per candidate), 180-second ceiling, no
-retry. Same provider and model resolution as the fallback tier. The response
-must include every sent `kernel_id` exactly once. A missing, duplicate or extra
-ID rejects the whole batch so a truncated response cannot masquerade as a
-complete review.
+**Model and backend.** `HYPERLOOM_LLM_SOURCE_MODEL` overrides everything. With
+it unset the backend follows the configured credentials — Anthropic-only selects
+Claude, an OpenAI side selects Codex — and the model comes from `CLAUDE_MODEL`
+or `CODEX_MODEL` respectively. Model settings are never borrowed across
+backends.
 
 <div class="callout warn">
 
-**Authority: it might rewrite, and it has no confidence threshold.** Unlike the
-fallback tier, this one is not restricted to a shortlist — it can replace any
-entry's path with any path, or drop a resolved entry back to unresolved. There
-is no 0.7 confidence gate. The mechanical limit is that a rewritten path must
-exist on disk **and** its resolved target must sit under a known framework root.
-Symlinks cannot escape that boundary. TraceLens-style
-`path.py(247): function` answers are split into a bare, openable path plus line
-and function metadata. An unverifiable path is rejected and the original
-stands. Curated `op_to_source` verdicts — including `non_rewritable` and
-`no_kernel` — are authoritative and cannot be replaced by model review.
+**Authority: proposals, bounded four ways.** The session may revise where a
+kernel lives, supply the operand dims a graph-launched kernel never recorded,
+correct a harness list, and refuse a candidate as not worth a session. It may
+not touch what the trace measured — GPU share, durations, call counts, the keys
+a row is joined by — because the impact ranking and the closing gain figure are
+computed from those.
+
+- A revised path must resolve under a known framework root; symlinks cannot
+  escape it. TraceLens-style `path.py(247): function` answers are split into an
+  openable path plus line and function metadata, and an unverifiable path is
+  rejected with the original left standing. A proposed harness path is held to
+  the same test — existence alone would let a proposal point the measurement at
+  a file outside the traced tree, and a backend runs what that list names.
+- A candidate the active finder already resolved is not overridable: reading the
+  tree cannot beat knowing which symbol the binary exports. Nor is one matched to
+  a vendor operator playbook, whatever tier resolved the path the playbook anchor
+  replaced — its `source_file` points at a task bundle, and pointing it back at
+  framework source would route the candidate to a backend with nothing to
+  rewrite there.
+- A restrictive routability hint is honoured, a permissive one is not —
+  `classify_patchability` stays the only gate that admits a kernel, so a hint
+  cannot talk it into dispatching something the deterministic rules rejected. A
+  refusal carrying no stated reason is dropped as an echo of the input.
+- Operand dims are taken only where the trace recorded none, and carry their own
+  provenance: a session cannot claim `torch_trace` for a dim it derived.
 
 </div>
 
-Every revision records `previous_source_file` and `previous_method`, so a bad
-review is auditable and reversible, and `review_notes` lists every applied and
-rejected change. The batch is staged before it is committed, so an exception
-while validating one revision leaves every entry untouched. Failures — no model
-configured, gateway error, timeout, unparseable reply — leave the deterministic
-table untouched and are recorded in `review_notes`.
+The stage cannot fail a run. No model configured, a gateway error, a timeout, an
+unparseable reply or an unforeseen fault all leave the deterministic table
+standing and record an error-severity trace-health warning: losing the audit
+costs some candidates, while failing the run costs the hours of benchmarking
+behind the trace.
 
-Accepted revisions are folded back into `hot_kernels`, all metadata derived from
-the old path is cleared, and patchability is recomputed. The resolution JSON is
-the audit view of the same effective candidate state, not a detached suggestion.
+**Artifacts.** `kernel_candidates.raw.json` is the deterministic table,
+`kernel_candidates.json` the reviewed one, and
+`kernel_candidates_revisions.json` records what changed and why — so a bad
+dispatch can be traced to the stage that caused it. Only the reviewed table is
+resolvable as a backend's candidate source. A completed review also rebuilds
+`kernel_source_resolution.json`, so the artifact a human reads and the table a
+backend is handed cannot name different files for the same kernel.
 
 ### Source egress
 
-Both tiers call an external model provider, so what leaves the host is a
-deliberate boundary rather than a side effect of building a useful prompt.
+The session reads the tree on the host rather than being handed a prompt
+assembled from file contents up front, so what leaves is whatever it quotes back
+to the model. It cannot write to that tree — see the tool scope above — so this
+section is about disclosure only. Two boundaries apply to the material the prompt
+does carry.
 
-**Provider routing is explicit.** Set `HYPERLOOM_LLM_SOURCE_PROVIDER` to
-`claude_agent_sdk`. Claude requests use the native Claude
-Agent SDK with all repository, shell, and web tools denied.
-`kernel_source_resolution.json` records the provider, model, source-preview
-decision, outcome and endpoint hostname. It never records keys, custom
-headers, URL userinfo, query parameters or the full prompt.
-
-**Repository source is not sent by default.** The file heads described above are
-withheld unless `HYPERLOOM_LLM_SOURCE_PREVIEW` is set to `1`/`true`/`yes`/`on`.
-Without it both tiers still see candidate paths, which carry most of the
-selection signal; with it, a review call can ship up to 40 file heads.
-
-**The serving command line is never forwarded verbatim.** The tiers need backend
-flags — the same MoE operator dispatches differently under
+**The serving command line is never forwarded verbatim.** The stage needs
+backend flags — the same MoE operator dispatches differently under
 `--moe-runner-backend triton` and `aiter` — but `EXTRA_*_ARGS` also carries
 credentials, model paths and user data. It is therefore tokenised, and only
 flags on an explicit allowlist of backend selectors survive. A denied flag
@@ -370,30 +372,7 @@ metadata and credential-shaped values are dropped.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PROVIDER` | Unset (no network call) | Required provider for source fallback/review: `claude_agent_sdk` (native Claude SDK, tools denied). Common provider aliases are normalized to the canonical audit value. |
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional source-resolution model override. Otherwise resolves only from the selected provider's own model variables; no cross-provider fallback. |
-| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_PREVIEW` | Unset (off) | Authorise sending the first 40 lines of candidate source files to the model provider. Applies to both the fallback and review tiers. Leave unset unless the provider is an approved destination for repository content. |
-
-### How fallback failures surface
-
-The fallback tier is advisory and never fails a run. Every
-outcome is recorded on the candidate as `source_resolution_reason`, so a skip
-can be told apart from a genuine failure:
-
-| `source_resolution_reason` | Meaning |
-|----------------------------|---------|
-| *(absent)* | Resolved before fallback, so the tier was not reached |
-| `llm_fallback_skipped: deterministic route` | Deterministic analysis explicitly prohibited model tiers |
-| `llm_fallback_skipped: gpu_pct ...` | Candidate below the 5% GPU-share floor; no call made |
-| `llm_fallback_skipped: no provider configured` | No `HYPERLOOM_LLM_SOURCE_PROVIDER`; settled before the shortlist grep, so an unconfigured tier costs nothing |
-| `llm_fallback_no_shortlist` | Grep found nothing to choose from; no call made |
-| `llm_fallback_declined: ...` | Model answered but the pick was rejected (invented path, low confidence, or refusal) |
-| `llm_fallback_error: ...` | Call failed — import error, gateway rejection, or timeout |
-
-Accepted answers are stamped `source_resolution_method="llm_fallback"` alongside
-a `source_resolution_confidence`, so they can be audited separately from
-deterministic resolutions. Failures in the trace-launcher tier are recorded the
-same way under `trace_resolver_error: ...`, and both are logged at `WARNING`.
+| `HYPERLOOM_`<br>`LLM_SOURCE`<br>`_MODEL` | Unset | Optional candidate-review model override. With it unset the model comes from `CLAUDE_MODEL` or `CODEX_MODEL`, whichever matches the backend the configured credentials select; there is no cross-backend fallback. |
 
 ---
 
@@ -443,6 +422,83 @@ multi-node runs or when the Ray backend is disabled.
 |----------|---------|-------------|
 | `INFERENCE_OPTIMIZER_RAY_GPU_PENDING_LIMIT` | `4` | Maximum number of GPU specialists that can be simultaneously in-flight (pending Ray scheduling + running) on the single-node Ray path. Ray still serializes execution on the physical GPU(s) using `num_gpus`; this limit caps how many actors can queue behind the current one. Floored at `1`. **Reduce to `1` or `2` when GPU memory or per-process overhead is a concern** (each queued actor holds a Ray worker slot even while it waits). |
 | `INFERENCE_OPTIMIZER_RAY_SERVING_PRIORITY` | On | When enabled (default), the dispatcher defers admitting new GPU research specialists while a serving benchmark holds the whole-machine `serving_slot`, preventing research work from starving serving. The slot is probed immediately before each specialist is admitted so a serving start that races the dispatch pass is caught. Set to `0`, `false`, `no`, or `off` to disable. |
+
+---
+
+## Compute partitioning (AMD)
+
+An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
+`QPX`, `CPX`). Splitting it trades per-request latency for aggregate throughput,
+so a partitioned measurement is not comparable with a whole-card one.
+
+**The optimizer does not set the mode.** Changing it is privileged, disruptive to
+every process holding a GPU context, and not something an optimization loop
+should be doing between benchmark rounds. The card is put in its mode before
+launch — by the operator or the provisioning platform — and `optimize` only
+observes what it is in, refuses a session that cannot work in that shape, and
+hands the shape to the benchmark entrypoint that places work across partitions.
+
+Two CLI flags configure this, both optional:
+
+- `--compute-partition-mode {SPX,DPX,QPX,CPX}` **asserts** the mode the card is
+  already in. It is a check, not a request: if the card is in a different mode
+  the session is refused rather than silently measuring the wrong topology. If
+  the card cannot be read at all, a declared mode is also a refusal — the flag
+  exists to catch an external set that did not take, and an unverifiable
+  assertion is not a satisfied one.
+- `--streams-per-partition N` (default `2`) is how many concurrent streams the
+  benchmark places on each partition. One stream leaves each partition idle
+  through the fixed per-pass cost; beyond two, on the workloads measured so far,
+  only queueing is added. A value below `1` is refused rather than replaced by
+  the default, so `0` is a usage error instead of a silent `2`.
+
+At launch the per-stream HBM footprint is checked against one partition's
+memory. A workload that provably will not fit is refused in milliseconds instead
+of failing out of memory hours in. The footprint is the checkpoint's weight bytes
+— a lower bound, since each stream holds its own copy of the weights, which is
+why a "does not fit" verdict from it is trustworthy and a "fits" verdict proves
+nothing. When the checkpoint cannot be sized the session runs with a warning.
+
+The check only applies where streams will actually share a partition: with a
+serving framework and no partition flags, the shape is recorded and nothing is
+refused, because nothing in that session places work per partition and, since
+whole cards enumerate before partitions, its benchmark may not even land on one.
+
+Multi-node sessions (`--nodes >= 2`) record no shape at all. The card this
+process can read is not the card the benchmark runs on, and a shape recorded from
+the wrong node is the exact mislabelling this feature exists to prevent. A
+declared mode there is a usage error rather than a silently unchecked assertion.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_PARTITION_GPU` | `0` | Which GPU's partition state describes this session. A value that is not a GPU id falls back to `0` with a warning rather than silently — the fallback reads a different card, and every number the session files afterwards would carry that card's shape. |
+
+### Runtime hand-off
+
+Published once at launch by the CLI and read by the benchmark entrypoint. Do not
+set these by hand: they are overwritten at every launch, and clearing them first
+is what stops a second session in the same shell from inheriting a shape that
+was not asked for.
+
+The first three describe the card and are published for every session on a
+readable card, because `platform_fingerprint()` reads them back from here — it
+runs on the crash path, where spawning `amd-smi` is not acceptable. The last two
+are instructions to a benchmark that places work on each partition, so they are
+published only when one will.
+
+| Variable | Published | Description |
+|----------|-----------|-------------|
+| `HYPERLOOM_PARTITION_MODE` | Always | The observed mode. Also recorded in the platform fingerprint, so a result is never filed under a topology it was not measured on. |
+| `HYPERLOOM_PARTITION_COUNT` | Always | Partitions the card presents in that mode. |
+| `HYPERLOOM_PARTITION_CU` | Always | Compute units per partition. The entrypoint selects partition devices by matching this exactly — HIP enumerates whole cards before partitions, so an index list computed at launch would be wrong in the one case that matters, and wrong invisibly. |
+| `HYPERLOOM_PARTITION_STREAMS_PER_PARTITION` | Fan-out only | Streams to place on each partition. |
+| `HYPERLOOM_PARTITION_TOTAL_STREAMS` | Fan-out only | `count × streams`; the total concurrency the entrypoint should drive if it fans out across every partition. |
+
+Only scriptable frameworks (`xdit`, `custom`) place work per partition. A serving
+session is handed no fan-out instruction rather than a concurrency nothing will
+drive, and passing the flags with one warns. Its shape is still recorded in the
+report and the fingerprint — that is provenance, not a hand-off — and the report
+states plainly that the figure cannot be read as an aggregate.
 
 ---
 
@@ -607,6 +663,7 @@ package to populate `session_breakdown.json` for downstream consumers.
 | `CLAW_SESSION_ID` | Hosted SaFE / Claw session id, written to `session.claw_session_id` in `session_breakdown.json`. Set by the Primus-Claw sandbox; unset for local runs. |
 | `SANDBOX_USER_ID` | Hosted SaFE / Claw user id, written to `session.sandbox_user_id`. Set by Primus-Claw; unset for local runs.                                            |
 | `HYPERLOOM_LANGFUSE_ENABLE` | Primary switch (default **off**) for live Langfuse trace push. See details below. |
+| `HYPERLOOM_LLM_ATTRIBUTION` | Names the gateway whose attribution headers every LLM call should carry (default **unset**, emitting none). See details below. |
 
 **`HYPERLOOM_LANGFUSE_ENABLE`** details:
 
@@ -616,7 +673,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -700,7 +757,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
-* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
+* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
 * `attribution`: `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess
@@ -716,6 +773,43 @@ To get the single "total tokens for this run" number, read
 or `.total_in_out` (visible prompt+completion only). Read
 `.total_reasoning_out` on its own when comparing a reasoning model against a
 non-reasoning one — the latter reports `0` there.
+
+### Gateway attribution (`HYPERLOOM_LLM_ATTRIBUTION`)
+
+`token_usage` above is Hyperloom's own account of its spend, assembled from
+calls that report themselves to the ledger. The gateway keeps a second account,
+from the calls it actually metered, and the two disagree whenever a component
+spends without a ledger producer. This variable makes the gateway's account
+readable along the same axes, by tagging every outbound call with who made it.
+
+Set it to the name of the gateway in front of the deployment; `litellm` is the
+only preset today. Leave it unset (the default) and nothing is emitted.
+
+```bash
+export HYPERLOOM_LLM_ATTRIBUTION=litellm
+```
+
+Each call then carries, on headers that gateway understands:
+
+| Field | Value |
+|-------|-------|
+| `application` | Always `hyperloom`, to separate this product's spend on a shared gateway. |
+| `session` | `CLAW_SESSION_ID`, the same id `session_breakdown.json` records — this is what joins the two accounts. |
+| `component` | The producer, from the same vocabulary as `token_usage.by_component`. |
+| `phase` | The phase the run had reached, matching `token_usage.by_phase`. |
+| `type` | The action executing inside that phase, e.g. `kernel_opt`. |
+| `operation` | What the individual call was for, e.g. `generate_candidate`. |
+
+For LiteLLM these arrive as `x-litellm-tags` (a comma-separated list landing in
+the `request_tags` column of `LiteLLM_SpendLogs`) and `x-litellm-trace-id` (the
+session id, which sets the `session_id` column and propagates to nested calls).
+A spend report can then be grouped by component or phase, or reconciled against
+`token_usage` for one session.
+
+Fields with per-call cardinality (a task or kernel id) are deliberately not in
+the tag list: one tag per task would give the rollup as many buckets as there
+are tasks. Supporting another gateway means adding a preset in
+`src/hyperloom/common/llm_attribution.py`, not setting a different string here.
 
 ---
 

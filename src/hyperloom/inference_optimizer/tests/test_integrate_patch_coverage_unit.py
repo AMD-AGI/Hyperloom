@@ -17,6 +17,8 @@ import pytest
 from .conftest import patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+
+from ._optimize_fixtures import variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
@@ -109,7 +111,7 @@ async def test_no_framework_agent_root(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ip,
         "_resolve_framework_root",
-        lambda explicit, patch_paths=None: None,
+        lambda explicit, patch_paths=None, patch_texts=None, recorded_root=None: None,
     )
     ex = IntegratePatchExecutor(session_dir=session)
     res = await ex(_make_ctx("t", {"specialist_task_id": "spec"}))
@@ -1043,19 +1045,16 @@ def test_read_done_payload_bad_json(tmp_path):
     assert _read_done_payload(tmp_path) is None
 
 
-class _FakeVR:
-    """Minimal VariantResult stand-in for _bench_patch."""
+def _FakeVR(**kw):
+    """A real ``VariantResult`` for ``_bench_patch``.
 
-    def __init__(self, **kw):
-        self.name = kw.get("name", "v")
-        self.status = kw.get("status", "succeeded")
-        self.output_throughput = kw.get("output_throughput", 123.0)
-        self.ttft_ms = kw.get("ttft_ms", 10.0)
-        self.itl_ms = kw.get("itl_ms", 5.0)
-        # Mirror the real VariantResult ``workspace`` attribute (the accuracy-gate eval dir).
-        self.workspace = kw.get("workspace", "/tmp/rd")
-        self.error = kw.get("error", "")
-        self.nonfatal_warnings = kw.get("nonfatal_warnings", [])
+    Was a hand-rolled stand-in carrying ``ttft_ms`` / ``itl_ms`` -- names the
+    real dataclass does not have, copied from what the executor read while it
+    was wrong. The stand-in made the bug untestable and then broke when it was
+    fixed, so the fake is gone and the dataclass is used directly.
+    """
+    kw.setdefault("workspace", "/tmp/rd")
+    return variant_result(**kw)
 
 
 @pytest.mark.asyncio
@@ -1185,6 +1184,7 @@ async def test_artifact_install_failed_restores_user_stash(tmp_path, monkeypatch
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []
@@ -1287,6 +1287,7 @@ async def test_a_cancel_in_the_apply_stage_still_hands_the_stash_back(tmp_path, 
             source=tmp_path / "tuned.json",
             target=repo / "tuned.json",
             rel_target="tuned.json",
+            root=repo,
             kind="config_json",
         )
         return [spec], []

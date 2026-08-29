@@ -1131,6 +1131,7 @@ class PreludePhase(PhaseHandler):
         )
         owner_kbs = {"explore": explore, "framework": framework}
         owner_ref_lists = {owner: kb.read_patches() for owner, kb in owner_kbs.items()}
+        owner_patch_roots = {owner: kb.read_patch_roots() for owner, kb in owner_kbs.items()}
         timeline = replay.read_patch_timeline()
         all_owner_refs = [ref for refs in owner_ref_lists.values() for ref in refs]
         if len(timeline) != len(set(timeline)):
@@ -1157,16 +1158,18 @@ class PreludePhase(PhaseHandler):
             source = kb.prior_file(ref)
             if source is None:
                 raise ValueError(f"current Recipe timeline artifact is unavailable: {ref!r}")
-            patches.append(
-                {
-                    "patch_file": ref,
-                    "patch_ref": str(source),
-                    "patch_content": "",
-                    "measured_gain_pct": 1e-6,
-                    "required": True,
-                    "timeline_index": index,
-                }
-            )
+            recorded_root = str(owner_patch_roots.get(owner, {}).get(ref) or "").strip()
+            patch_entry: dict[str, Any] = {
+                "patch_file": ref,
+                "patch_ref": str(source),
+                "patch_content": "",
+                "measured_gain_pct": 1e-6,
+                "required": True,
+                "timeline_index": index,
+            }
+            if recorded_root:
+                patch_entry["framework_root"] = recorded_root
+            patches.append(patch_entry)
         return {
             "extra_server_args": args,
             "extra_envs": envs,
@@ -1580,12 +1583,13 @@ class PreludePhase(PhaseHandler):
             "workload_compatibility": workload_compatibility,
         }
         try:
+            lanes, ttl = self._registry_lanes_ttl("replay_warm_recipe")
             task, was_existing = await self.tasks.create_or_return_existing(
                 kind="replay_warm_recipe",
                 params=params,
                 idempotency_key="warm-replay-prelude",
-                # Without a TTL the row is invisible to ``reclaim_expired_running``.
-                lease_ttl_sec=self._registry_lanes_ttl("replay_warm_recipe")[1],
+                requires_lanes=lanes,
+                lease_ttl_sec=ttl,
             )
         except Exception as exc:
             rollback = self._revert_warm_kernel_patches(

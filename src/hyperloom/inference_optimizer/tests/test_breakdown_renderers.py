@@ -208,9 +208,32 @@ def test_sweep_skipped_when_no_variants():
 
 def test_sweep_full_with_best_point():
     variants = [
-        {"conc": 32, "isl": 128, "osl": 128, "status": "success", "output_throughput": 800.0, "ttft": 50, "e2el": 1000},
-        {"conc": 64, "isl": 128, "osl": 128, "status": "success", "output_throughput": 950.0, "ttft": 40, "e2el": 900},
-        {"conc": 128, "isl": 128, "osl": 128, "status": "failed", "output_throughput": None, "error": "oom" * 40},
+        {
+            "conc": 32,
+            "isl": 128,
+            "osl": 128,
+            "status": "ok",
+            "output_throughput_tok_s": 800.0,
+            "ttft_mean_ms": 50,
+            "e2el_mean_ms": 1000,
+        },
+        {
+            "conc": 64,
+            "isl": 128,
+            "osl": 128,
+            "status": "ok",
+            "output_throughput_tok_s": 950.0,
+            "ttft_mean_ms": 40,
+            "e2el_mean_ms": 900,
+        },
+        {
+            "conc": 128,
+            "isl": 128,
+            "osl": 128,
+            "status": "failed",
+            "output_throughput_tok_s": None,
+            "error": "oom" * 40,
+        },
     ]
     out = sw.render({"sweep": {"grid_size": 3, "all_variants": variants}})
     assert out.skipped is False
@@ -219,7 +242,7 @@ def test_sweep_full_with_best_point():
 
 
 def test_sweep_truncates_over_max_rows():
-    variants = [{"conc": i, "status": "success", "output_throughput": float(i)} for i in range(sw._MAX_ROWS + 5)]
+    variants = [{"conc": i, "status": "ok", "output_throughput_tok_s": float(i)} for i in range(sw._MAX_ROWS + 5)]
     out = sw.render({"sweep": {"all_variants": variants}})
     assert f"first {sw._MAX_ROWS}" in out.markdown_block
 
@@ -235,12 +258,14 @@ def test_sweep_ot_handles_bad_value():
         {
             "sweep": {
                 "all_variants": [
-                    {"status": "success", "output_throughput": "NaNish"},
+                    {"status": "ok", "output_throughput_tok_s": "NaNish"},
                 ]
             }
         }
     )
     assert out.skipped is False
+    assert out.decisions[0].kind == "attempted"
+    assert not any("Best point" in f for f in out.key_facts)
 
 
 # ---- kernel_lifecycle -----------------------------------------------------

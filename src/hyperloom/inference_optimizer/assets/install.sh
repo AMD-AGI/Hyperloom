@@ -269,11 +269,9 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
-    optimize-time, candidate discovery via `fa phase-discover`) is provided
-    by this same editable install (tree-reform.MD P2.5 promoted
-    framework-agent into src/hyperloom/agents/framework/, so it no longer
-    has its own separate installer/venv to chain to).
+  - The `fa` CLI is provided by this same editable install; framework-agent
+    lives in src/hyperloom/agents/framework/ and has no separate
+    installer/venv to chain to.
 
 Options:
   --check-only           Verify only, do not install
@@ -777,73 +775,12 @@ PY
   fi
 }
 
-# --- 1b. forge-gemm-tune (KernelForge deterministic GEMM tuning CLI) ---
-_forge_gemm_tune_candidates() {
-  # Explicit gemm-tune override first.
-  [ -n "${FORGE_GEMM_TUNE_ROOT:-}" ] && printf '%s\n' "$FORGE_GEMM_TUNE_ROOT"
-  # KernelForge root (single canonical var: FORGE_PATH).
-  [ -n "${FORGE_PATH:-}" ] && printf '%s\n' "${FORGE_PATH%/}/src/forge_gemm_tune" "${FORGE_PATH%/}/forge_gemm_tune"
-}
-
-_resolve_forge_gemm_tune_root() {
-  local cand
-  while IFS= read -r cand; do
-    [ -n "$cand" ] || continue
-    if [ -f "${cand%/}/pyproject.toml" ] && { [ -f "${cand%/}/forge_gemm_tune/cli.py" ] || [ -f "${cand%/}/cli.py" ]; }; then
-      realpath "$cand" 2>/dev/null || printf '%s\n' "$cand"
-      return 0
-    fi
-  done < <(_forge_gemm_tune_candidates)
-  return 1
-}
-
-ensure_forge_gemm_tune() {
-  local root resolved
-  if root="$(_resolve_forge_gemm_tune_root)"; then
-    log "ensuring forge-gemm-tune from ${root}"
-    if [ "$CHECK_ONLY" -eq 1 ]; then
-      "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1 \
-        && log "forge-gemm-tune import OK" \
-        || warn "forge-gemm-tune not importable (check-only; would install from ${root})"
-      return 0
-    fi
-    if [ "$DRY_RUN" -eq 1 ]; then
-      log "would run: ${PYTHON} -m pip install -e ${root}"
-      return 0
-    fi
-    resolved="$("$PYTHON" -c 'import forge_gemm_tune, os; print(os.path.realpath(os.path.dirname(forge_gemm_tune.__file__)))' 2>/dev/null || true)"
-    case "$resolved" in
-      "$root" | "$root"/*)
-        log "forge-gemm-tune already installed from ${root}; skipping editable reinstall"
-        ;;
-      *)
-        "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "$root"
-        "$PYTHON" -c "import forge_gemm_tune; import forge_gemm_tune.cli" >/dev/null
-        log "forge-gemm-tune installed OK from ${root}"
-        ;;
-    esac
-  else
-    if "$PYTHON" -c "import forge_gemm_tune" >/dev/null 2>&1; then
-      log "forge-gemm-tune import OK"
-    else
-      log "forge-gemm-tune source not configured; skipping optional forge GEMM tuning install"
-    fi
-  fi
-}
-
-# --- 1c. kernel_agents (KernelForge forge-loop CLI) ---
+# --- 1b. kernel_agents (KernelForge forge-loop + GEMM tuning CLI) ---
 # forge-loop shells out to `python -m kernel_agents.cli` (see forge_submit.py).
-# Unlike forge_gemm_tune — which has a standalone sub-pyproject and gets
-# pip-installed by the carrier from its sub-package dir — `kernel_agents` is only
-# packaged by the KernelForge *root* pyproject and was never installed here. So
-# forge-loop relied entirely on $FORGE_PATH being present and prepended to the
-# child PYTHONPATH by _ensure_forge_on_path() at call time. When FORGE_PATH is
-# unset (as in the 2026-07-28 CI runs) `python -m kernel_agents.cli` dies with
-# `ModuleNotFoundError: No module named 'kernel_agents'` and every forge kernel
-# attempt REVERTs. Installing kernel_agents from the KernelForge root makes the
-# import succeed regardless of FORGE_PATH, and it is now the ONLY way to get the
-# fusion pipeline: `kernel-agents forge-fuse` lives in the root package since
-# forge_fusion was absorbed into it.
+# The same root package now owns `kernel-agents forge-gemm-tune`; installing the
+# standalone `src/forge_gemm_tune` sub-package only makes its Python modules
+# importable and cannot provide that command. Keep one canonical install path so
+# the readiness check and every runtime invocation observe the same distribution.
 _kernel_forge_root() {
   # KernelForge repo root that actually contains kernel_agents. Keyed on
   # FORGE_PATH only (CI guarantees it is exported; it is also the repo-canonical
@@ -857,9 +794,24 @@ _kernel_forge_root() {
   return 1
 }
 
+# Readiness probe for kernel_agents, used both as the skip-the-install gate and
+# as the post-install verification so the two can never drift apart. Checks what
+# the runtime actually needs: the CLI module, the fusion pipeline, the codex SDK,
+# and that `forge-gemm-tune` is a registered subcommand of the CLI group (the
+# registration runs at import, so `main.commands` is populated by then).
+_kernel_agents_ready() {
+  local probe='
+import sys
+import kernel_agents, kernel_agents.fusion, openai_codex  # noqa: F401
+from kernel_agents.cli import main
+sys.exit(0 if "forge-gemm-tune" in getattr(main, "commands", {}) else 1)
+'
+  "$PYTHON" -c "$probe"
+}
+
 ensure_kernel_agents() {
-  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER (mirrors
-  # ensure_forge_gemm_tune). install.sh frequently runs at setup time under the
+  # Gate on checkout availability, NOT on KERNEL_OPT_BACKEND_ORDER. install.sh
+  # frequently runs at setup time under the
   # default geak backend, so a backend gate here would skip the install; a later
   # forge session whose child has no FORGE_PATH would then still hit
   # ModuleNotFoundError. Keying on the KernelForge checkout instead covers the
@@ -873,14 +825,17 @@ ensure_kernel_agents() {
   # pod that already has kernel_agents but no openai_codex would skip the install
   # and leave the OpenAI-only side with a codex provider it cannot construct.
   # kernel_agents.fusion for the same reason: a checkout from before fusion was
-  # absorbed imports the CLI fine and then fails at forge-fuse.
-  if "$PYTHON" -c "import kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-      >/dev/null 2>&1; then
-    log "kernel_agents already importable; skipping install (codex SDK present)"
+  # absorbed imports the CLI fine and then fails at forge-fuse. And the
+  # forge-gemm-tune subcommand for the same reason once more: GEMM tuning now
+  # runs as `python -m kernel_agents.cli forge-gemm-tune run`, so a pre-existing
+  # install from before that command was registered passes every import here and
+  # then dies at the tuning step with "No such command 'forge-gemm-tune'".
+  if _kernel_agents_ready >/dev/null 2>&1; then
+    log "kernel_agents already importable with forge-gemm-tune; skipping install (codex SDK present)"
     return 0
   fi
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "kernel_agents / codex SDK not importable (check-only; would install from ${root})"
+    warn "kernel_agents / forge-gemm-tune / codex SDK not ready (check-only; would install from ${root})"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -891,9 +846,7 @@ ensure_kernel_agents() {
   # Deliberately NON-editable (no -e): ${root} is a shared, often read-only
   # KernelForge checkout used by concurrent sessions. A non-editable install
   # builds in a temp dir and never writes egg-info/build artifacts back into the
-  # checkout, so parallel runs can't race on it — this mirrors the carrier's
-  # own forge_gemm_tune install (see _incontainer.sh: "Non-editable installs
-  # build in a temp dir and never write to the read-only shared checkout").
+  # checkout, so parallel runs can't race on it.
   # Installing the root also provides forge_gemm_tune and the fusion pipeline.
   # A carrier that still installs from <KernelForge>/src/forge_fusion will fail:
   # that directory and its sub-pyproject were removed when fusion was absorbed.
@@ -904,12 +857,12 @@ ensure_kernel_agents() {
   # KernelForge's provider fallback then turns that into a silent claude run that
   # dies at its first turn on "Not logged in".
   "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${root}[claude,codex]"
-  "$PYTHON" -c "import kernel_agents, kernel_agents.cli, kernel_agents.fusion, openai_codex" \
-    && log "kernel_agents installed OK from ${root} (claude + codex extras)" \
-    || die "kernel_agents / codex SDK import failed after install from ${root}"
+  _kernel_agents_ready \
+    && log "kernel_agents installed OK from ${root} (claude + codex extras, forge-gemm-tune registered)" \
+    || die "kernel_agents / forge-gemm-tune / codex SDK check failed after install from ${root}"
 }
 
-# --- 1d. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
+# --- 1c. rocprof-compute (rocprofiler-compute) for the forge profiling stage ---
 # forge-loop's profiling stage prefers rocprof-compute (roofline / speed-of-light)
 # and only falls back to the thin rocprofv3 "PMC" path when the tool is absent.
 # KernelForge's resolve_rocpc() looks for the tool at
@@ -1664,7 +1617,6 @@ chain_kernel_agent() {
 }
 
 ensure_inference_optimizer
-ensure_forge_gemm_tune
 ensure_kernel_agents
 ensure_langfuse_when_enabled
 # Hold the install lock for the whole mirror-mutating region (Magpie /

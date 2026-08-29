@@ -181,15 +181,30 @@ class TestForgeGemmHelperCoverage:
         state.current_best = {"extra_server_args": "--quantization fp8", "extra_envs": {}}
         assert krh._resolve_forge_precision_and_quant(state, {}) == ("fp8", "auto")
 
-    def test_forge_gemm_tune_available_by_path_and_import(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: "/usr/bin/forge-gemm-tune")
-        assert krh._forge_gemm_tune_available() is True
+    def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
+        # The probe must be the same invocation the tool makes, in the same
+        # interpreter: a `kernel-agents` script on PATH from another venv, or a
+        # bare `forge_gemm_tune` import, both used to pass here and then fail
+        # the run with ModuleNotFoundError / "No such command".
+        seen: list[list[str]] = []
 
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
-        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: object())
-        assert krh._forge_gemm_tune_available() is True
+        def _fake_run(cmd, **_kwargs):
+            seen.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "usage: ...", "")
 
-        monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
+        monkeypatch.setattr(krh.subprocess, "run", _fake_run)
+        assert krh._forge_gemm_tune_available() is True
+        assert seen == [krh._forge_gemm_tune_probe_cmd()]
+        assert seen[0][0] == sys.executable
+
+    def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
+        # An older kernel_agents imports fine but has no forge-gemm-tune group;
+        # click exits 2 on an unknown command.
+        monkeypatch.setattr(
+            krh.subprocess,
+            "run",
+            lambda cmd, **_k: subprocess.CompletedProcess(cmd, 2, "", "Error: No such command 'forge-gemm-tune'."),
+        )
         assert krh._forge_gemm_tune_available() is False
 
     @pytest.mark.asyncio
@@ -211,14 +226,33 @@ class TestForgeGemmHelperCoverage:
         assert result["error_class"] == "forge_gemm_tune_not_found"
         assert result["backend"] == "forge"
 
-    def test_forge_gemm_tune_available_swallows_find_spec_error(self, monkeypatch):
-        monkeypatch.setattr(krh.shutil, "which", lambda _name: None)
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            OSError("no interpreter"),
+            subprocess.SubprocessError("bad subprocess"),
+        ],
+    )
+    def test_forge_gemm_tune_available_swallows_probe_failures(self, monkeypatch, exc):
+        def _boom(_cmd, **_kwargs):
+            raise exc
 
-        def _boom(_name):
-            raise ValueError("ambiguous spec")
-
-        monkeypatch.setattr(krh.importlib.util, "find_spec", _boom)
+        monkeypatch.setattr(krh.subprocess, "run", _boom)
         assert krh._forge_gemm_tune_available() is False
+
+    def test_forge_gemm_tune_available_logs_probe_timeout(self, monkeypatch, caplog):
+        def _boom(_cmd, **_kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd="probe",
+                timeout=krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+            )
+
+        monkeypatch.setattr(krh.subprocess, "run", _boom)
+        with caplog.at_level("WARNING"):
+            assert krh._forge_gemm_tune_available() is False
+
+        assert "preflight timed out" in caplog.text
+        assert str(krh._FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC) in caplog.text
 
     def test_resolve_forge_precision_falls_back_to_bf16(self, monkeypatch):
         # Empty session precision + no fp8/fp4 quantization -> bf16/auto default.
@@ -1294,6 +1328,7 @@ class TestForgeGemmHelperCoverage:
             "resolve_local_model_dir",
             lambda _model_path: snapshot,
         )
+        monkeypatch.setattr(krh, "_resolve_aiter_root_for_forge", lambda: "/opt/aiter")
         durable = {}
 
         def _capture_durable_envs(extra_envs, *, model_path, session_dir):
@@ -1306,7 +1341,10 @@ class TestForgeGemmHelperCoverage:
             _capture_durable_envs,
         )
 
+        subprocess_cmd = []
+
         async def _fake_subprocess(_cmd, *, timeout_sec):
+            subprocess_cmd.extend(_cmd)
             sentinel = (
                 "FORGE_GEMM_TUNE_RESULT_BEGIN\n"
                 + json.dumps(
@@ -1328,6 +1366,8 @@ class TestForgeGemmHelperCoverage:
         workspace = krh._gemm_tuning_workspace(payload, session_dir=tmp_path)
         written = json.loads((workspace / "forge_gemm_tuning_input.json").read_text(encoding="utf-8"))
         assert written["model_path"] == str(snapshot)
+        assert subprocess_cmd[:2] == ["env", "AITER_ROOT_DIR=/opt/aiter"]
+        assert subprocess_cmd[2] == sys.executable
         assert result["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
         assert durable["model_path"] == "amd/DeepSeek-V4-Pro-MXFP4"
 

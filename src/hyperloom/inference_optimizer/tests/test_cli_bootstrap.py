@@ -12,6 +12,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -32,7 +34,7 @@ def _args(**overrides):
         osl=1024,
         max_model_len=13312,
         no_kernel=False,
-        continue_kernel_after_gemm=True,
+        auto_kernel_opt=True,
         target_summary="",
         target_gain=60.0,
         target_tput=None,
@@ -45,13 +47,11 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_force_exit_budget_pct=0.2,
         explore_overtime_kill_ratio="bad",
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
-        no_explore=True,
         research_scout=False,
         research_scout_interval=0,
         target_advisory=False,
@@ -133,8 +133,8 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
+    # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
-    assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
     assert state.conc_sweep_variant_timeout_sec == 30
@@ -162,6 +162,48 @@ def test_seed_shared_state_records_custom_workload_paths(
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
     assert state.benchmark_backend == "bypass"
+
+
+def _neutralize_seed_io(monkeypatch):
+    """Stub the model/recipe reads so a seed can be asserted on one field."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+
+def test_seed_records_the_launch_verdict_for_the_partition_shape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The verdict carries provenance the published env cannot express.
+
+    ``published_shape()`` reads back mode, count, CU and streams, but nothing
+    that says the CU count was probed from the device rather than derived from
+    the board table. Re-reading the env therefore reported a fresh launch's
+    probed count as a table guess, which is the one thing the section is for.
+    """
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "CPX", "cu_per_partition": 32})
+
+    verdict = {"mode": "CPX", "partitions": 8, "cu_per_partition": 32, "cu_probed": True}
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-shape", compute_partition=verdict)
+
+    assert state.compute_partition == verdict
+
+
+def test_seed_falls_back_to_the_published_shape_when_handed_no_verdict(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "DPX"})
+
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-fallback")
+    assert state.compute_partition == {"mode": "DPX"}
 
 
 def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
@@ -303,6 +345,52 @@ def test_resolve_model_display_name_helper() -> None:
 
     empty_override = SimpleNamespace(model="/models/Foo", model_display_name="")
     assert cb.resolve_model_display_name(empty_override) == "Foo"
+
+
+def test_auto_kernel_opt_defaults_to_dispatching() -> None:
+    """Neither spelling passed: the entry dispatches on its own."""
+    unset = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=None)
+    assert cb.resolve_auto_kernel_opt(unset) is True
+    # A caller that predates both dests must not crash on the lookup.
+    assert cb.resolve_auto_kernel_opt(SimpleNamespace()) is True
+
+
+def test_auto_kernel_opt_honours_the_current_flag() -> None:
+    """``--no-auto-kernel-opt`` alone opts out."""
+    opted_out = SimpleNamespace(auto_kernel_opt=False, continue_kernel_after_gemm=None)
+    assert cb.resolve_auto_kernel_opt(opted_out) is False
+
+
+def test_deprecated_gemm_spelling_still_opts_out_and_warns() -> None:
+    """The old flag keeps working, because dropping it would silently opt back in."""
+    legacy = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=False)
+    with pytest.warns(DeprecationWarning, match="--auto-kernel-opt"):
+        assert cb.resolve_auto_kernel_opt(legacy) is False
+
+
+def test_current_flag_outranks_the_deprecated_spelling() -> None:
+    """Both passed and disagreeing: the current flag decides."""
+    both = SimpleNamespace(auto_kernel_opt=True, continue_kernel_after_gemm=False)
+    with pytest.warns(DeprecationWarning):
+        assert cb.resolve_auto_kernel_opt(both) is True
+
+
+def test_seed_shared_state_records_the_auto_kernel_opt_optout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The resolved switch lands on the field the KERNEL phase reads."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+
+    state = cb._seed_shared_state(
+        tmp_path,
+        _args(auto_kernel_opt=False),
+        session_id="session-auto-kernel-opt",
+    )
+
+    assert state.auto_kernel_opt_enabled is False
 
 
 def test_target_summary_and_conc_sweep_parser(caplog) -> None:

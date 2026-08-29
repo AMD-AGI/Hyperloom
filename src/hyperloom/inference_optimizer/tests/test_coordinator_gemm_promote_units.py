@@ -653,7 +653,7 @@ class TestCollectiveIntegratePromotion:
             _collective,
         )
 
-        await phase._on_enter_kernel(from_phase="EXPLORE")
+        await phase._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert calls == ["reprofile", "collective"]
         assert coord.shared_state.collective_only_mode is True
@@ -2290,7 +2290,7 @@ class TestBf16DenseFallback:
         coord.phase_kernel._geak_enabled = lambda: False
         coord._gemm_tuning_required_before_kernel_opt = lambda: True
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
-        coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
+        coord.phase_kernel._kernel_opt_work_remains = lambda: False
 
         async def _noop(*_args, **_kwargs):
             return None
@@ -2333,7 +2333,7 @@ class TestBf16DenseFallback:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="EXPLORE")
+        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert [c["task_id"] for c in calls] == [
             "kernel_entry_gemm_tuning",
@@ -2371,7 +2371,7 @@ class TestBf16DenseFallback:
         coord.phase_machine._kernel_enabled = lambda: True
         coord.phase_kernel._geak_enabled = lambda: False
         coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
-        coord.phase_kernel._should_continue_kernel_after_gemm = lambda: False
+        coord.phase_kernel._kernel_opt_work_remains = lambda: False
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
         monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
 
@@ -2392,7 +2392,7 @@ class TestBf16DenseFallback:
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
-        await coord._on_enter_kernel(from_phase="EXPLORE")
+        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning_bf16_fallback"]
         assert calls[0]["precision"] == "bf16"

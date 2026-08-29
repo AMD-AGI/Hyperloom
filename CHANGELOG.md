@@ -66,6 +66,141 @@ Current packaged version (`pyproject.toml`). See
 [release notes](docs/release-notes.md) and the
 [GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
 for the user-facing summary.
+### Added
+
+- **The card's compute-partition shape is now recorded, checked, and published.**
+  An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
+  `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
+  throughput. Until now nothing in a session recorded which shape a
+  number came from, so two runs of the same configuration on the same card in
+  `SPX` and in `CPX` were indistinguishable in the history — different
+  experiments filed under one name.<br/>
+  The observed mode now goes into the platform fingerprint alongside NPS, the
+  session report names it on partitioned runs, and the shape is published to
+  the environment for the benchmark entrypoint to fan work out across
+  partitions. That entrypoint lives outside this repository, so until it reads
+  them a session on a split card measures one partition rather than the total;
+  the recorded shape is still what stops a `CPX` number being filed as though
+  it were `SPX`. The published variables are set only for the scriptable
+  frameworks whose benchmarks can fan out; a serving session records the shape
+  but is handed no fan-out contract, and its report says the figure cannot be
+  read as an aggregate.<br/>
+  Two optional flags configure it. `--compute-partition-mode` **asserts** the
+  mode the card is already in and refuses the session if it is in another one,
+  or if the card cannot be read — the flag exists to catch an external set that
+  did not take, so an unverifiable assertion is treated as a failed one.
+  `--streams-per-partition` (default `2`) is how many concurrent streams go on
+  each partition; a value below `1` is refused rather than quietly replaced by
+  the default, since `0` is far more likely to be a mistake than a request.<br/>
+  **The optimizer does not change the mode.** Setting it is privileged and
+  disrupts every process holding a GPU context, which is not something an
+  optimization loop should do between benchmark rounds. The card must be in its
+  mode before `optimize` starts: the shape is checked and recorded at launch, so
+  a mode applied later — by the benchmark entrypoint, for instance — is too late
+  to be either. Nothing added here needs privilege: every probe is an
+  unprivileged read, and a host without `amd-smi` behaves exactly as before.<br/>
+  **Operator note**: launch now refuses a session whose streams provably will
+  not fit one partition, sized from the checkpoint's weight bytes as a lower
+  bound. The arithmetic costs milliseconds and the failure it replaces is an
+  out-of-memory crash hours in. When the checkpoint cannot be sized the session
+  runs and says so. The refusal applies where streams will actually share a
+  partition — a scriptable framework, or an operator who named the flags — and
+  not to a serving session that merely happens to start on a card someone else
+  left split. Multi-node sessions record no shape, since the readable card is
+  not the benchmark's.
+
+### Changed
+
+- **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
+  now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
+  search and source/upstream landing are two arms of one phase, worked in
+  parallel; the phase advances only when both are dry. One arm plateauing
+  raises `switch_bottleneck` for the next macro-cycle instead of ending the
+  phase while the other lever still pays.
+  - **`--no-explore` is removed** rather than aliased. The two arms cannot be
+    disabled separately, so the flag's new meaning would be strictly wider
+    than the one an operator script asked for; an unrecognised argument says
+    so where a silent widening would not. Use `--no-framework-agent`.
+  - `--max-minutes-explore-pct` / `--phase-budget-explore-pct` are aliases for
+    the framework budget option. The merged phase's default share is `0.40`,
+    against `0.50` for KERNEL_AGENT.
+  - Exit reasons `explore_*` and `framework_agent_*` are replaced by
+    `optimize_no_more_leverage`, `optimize_phase_budget_exhausted` and
+    `optimize_budget_cap`.
+  - **A session recorded at `EXPLORE` cannot be resumed by this build.** Its
+    phase names a machine that no longer exists, and starting over would
+    re-run PRELUDE on top of its baseline and KEPT stack, so the Coordinator
+    refuses at startup. Archived sessions still *read* — the attribution and
+    recorder paths understand the old labels — they just cannot be continued.
+
+- **BREAKING: the `framework_agent` action is retired.** Upstream PRs land
+  through `integrate_patch` with `patch_source='upstream_pr'`, the same action
+  and the same apply / vet / bench / KEEP-REVERT pipeline every other patch
+  source uses. `runs/framework_agent/<task_id>/` is no longer produced; PR
+  candidate workspaces are under `runs/integrate_patch/<task_id>/`.
+
+- **BREAKING: `pr_intel_specialist` is replaced by
+  `candidate_discovery_specialist`,** which owns finding, ranking and judging
+  upstream candidates rather than being an occasional PR top-up.
+
+- **Gain is attributed by lever, not by phase.** Both arms run inside one
+  phase, so the phase that was live when a KEEP landed no longer says which
+  lever moved it. `lever_kind` is the attribution key, read from what a
+  specialist delivered rather than from what its mandate asked for, and
+  `attribution.lever_breakdown` splits validated gain by it. The values are:
+  - `config` — server args / envs; nothing on disk is touched.
+  - `source_patch` — a diff a specialist wrote for this session.
+  - `upstream_pr` — a diff fetched from an upstream pull request.
+  - `enablement` — graded on runnability and the accuracy floor, not throughput.
+  - `kernel` — a tuned or authored kernel, graded on the end-to-end bench.
+
+  Gain that carried no stamp lands under `unattributed`; a non-zero figure
+  there is a tagging gap, not a category.
+
+### Fixed
+
+- **The upstream-PR arm was gated shut at dispatch.** A PR candidate is
+  pre-screened by the Critic before any specialist exists, so its task carries
+  a candidate id and no `specialist_task_id` — and every enforcement point read
+  only the latter. The verdict was never recorded, PolicyGate denied the
+  dispatched row as if its params had been forged, and the dispatch reconcile
+  could not re-queue it. A patch's review subject is now resolved in one place
+  (the specialist task id for an authored patch, the candidate id for a
+  pre-screen) and `specialist_patch_verdicts` is keyed by it. The executor's
+  upstream-PR lane also gained the pre-side-effect verdict check the specialist
+  lane already ran.
+- **The framework accuracy gate never passed.** `_bench_candidate` read a
+  `result_dir` field that does not exist on `VariantResult`, so the eval parse
+  searched the process CWD, found nothing, and blocked every KEEP with
+  `accuracy_unavailable_reject` whenever a baseline accuracy existed.
+- **Untrusted diffs reached `git apply` unvetted.** `vet_patches` runs at
+  authoring time inside the specialist runner, so patches supplied directly —
+  including every upstream PR diff — were never structurally checked.
+  `patch_escapes_tree` also missed absolute paths in headers without the
+  conventional `a/` prefix.
+- **The authored-lane retry state did not survive a resume**, letting the
+  re-author cap be re-spent once per resume.
+- **Seven Coordinator-internal enqueues took no lane lease,** launching servers
+  and benchmarks without `server_lifecycle` / `benchmark_lane`; the enablement
+  build probe took the research lane instead of its own kind's.
+- **The stack-rebench floor could exceed the KEEP gate it confirmed** from
+  macro-cycle 2 onward, rejecting variants the same round had admitted.
+- **A session's `--no-eval` was silently overridden** on the framework patch
+  lane.
+
+- **`canonical_fingerprint` now uses pair-aware arg normalization.**
+  The previous implementation sorted all arg tokens as a flat list, which
+  destroyed the flag→value binding: `--max-num-seqs 128 --max-model-len 4096`
+  and `--max-num-seqs 4096 --max-model-len 128` produced the same fingerprint
+  and were incorrectly treated as duplicates by the `explore_search` dedup
+  ledger.  Args are now parsed into sorted `(flag, value)` pairs with
+  last-wins semantics for repeated flags, matching the semantics of
+  `_shell_safe_dedupe`.<br/>
+  **Operator note**: this changes the hash for any variant whose `extra_args`
+  contains at least one flag with a value.  All fingerprint keys already
+  persisted in `explore_search.tested`, `accepted`, `rejected`, and
+  `name_index` inside `state.json` are invalidated.  On the next resume the
+  session will re-bench its full explored history.
 
 ### Removed
 
@@ -87,6 +222,21 @@ for the user-facing summary.
   through `is_allowed_external_env_key` — strictly stronger than the
   `valid_env_key` shape check applied here. The pass dropped nothing in
   production and its warning log could never fire.
+
+- **BREAKING — the two tool-free LLM source tiers are gone**, along with
+  `HYPERLOOM_LLM_SOURCE_PROVIDER` and `HYPERLOOM_LLM_SOURCE_PREVIEW` and the
+  `llm_fallback_*` reason codes they produced. A per-kernel fallback picking a
+  path off a grep shortlist and a whole-table pass auditing the result were both
+  shown a prompt assembled in advance, so neither could see what a kernel
+  actually is — and the deterministic tiers' failure mode is not coming up empty
+  but coming up confidently wrong, which ranking paths by keyword cannot tell
+  apart. One tool-enabled review session on the agent analysis route replaces
+  both: it is handed locations rather than contents and opens what the evidence
+  leads it to. `HYPERLOOM_LLM_SOURCE_MODEL` still selects the model.
+  **Operators on `--analysis-route deterministic` should note that route now has
+  no model assistance of any kind** — it keeps its no-model guarantee by not
+  reaching the stage, so a kernel the curated, trace-launcher and grep tiers all
+  miss stays unresolved instead of being completed by a model.
 
 - **`FORGE_MAX_ITERS` and `FORGE_COMPILED_MAX_ITERS` are gone**, along with the
   `--max-iters` this repository put on every `forge-loop` and
@@ -140,6 +290,24 @@ for the user-facing summary.
   the glibc dynamic loader, git, and the Node.js-based agent CLIs. `PERL5OPT`
   stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
   timestamped logging shim pipes through.
+
+- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
+  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
+  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
+  so the old name described a dependency that does not exist and read as a no-op
+  on a run that never tunes GEMM. The old spelling still works and still opts
+  out, with a `DeprecationWarning`; the current flag wins when both are passed.
+  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
+  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
+  The switch covers that dispatch only: orchestration can still request
+  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
+
+- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
+  decode trace with a flat kernel distribution nothing but a graph-launch
+  wrapper reaches double digits, so the 10% floor admitted no real kernel and
+  left the batch dispatcher idle while the orchestrator picked candidates one at
+  a time. Expect more candidates dispatched per run, and correspondingly more
+  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
 
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
@@ -199,6 +367,12 @@ for the user-facing summary.
   fail closed on a bump that changed none of them. The eight tests that already
   covered this salvage path were passing only because their fixtures carried
   the same wrong version.
+
+## [v1.0.0] - 2026-08-26
+Current packaged version (`pyproject.toml`). See
+[release notes](docs/release-notes.md) and the
+[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
+for the user-facing summary.
 
 ## [v1.0.0b2] - 2026-08-19
 See [release notes](docs/release-notes.md) and the

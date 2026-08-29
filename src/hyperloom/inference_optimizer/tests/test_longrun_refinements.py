@@ -103,8 +103,8 @@ def test_saturation_convergence_is_always_enabled():
 
 # Absolute per-phase cap + 14-day ceiling for unbounded runs
 def test_phase_cap_binds_on_session_term_for_short_runs():
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=120)
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
+    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=120)
     cap = ps.phase_cap_seconds(st)
     assert cap == pytest.approx(120 * 60 * pct)
 
@@ -112,49 +112,49 @@ def test_phase_cap_binds_on_session_term_for_short_runs():
 def test_phase_cap_binds_on_24h_reference_for_unbounded_runs():
     import math
 
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
+    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0)
     cap = ps.phase_cap_seconds(st)
     assert cap == pytest.approx(math.ceil(24 * 60 * pct) * 60)
 
 
 def test_effective_max_minutes_unbounded_is_14_days():
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0)
+    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0)
     assert ps.effective_max_minutes(st) == ps.DEFAULT_LONGRUN_MAX_MINUTES
     assert ps.DEFAULT_LONGRUN_MAX_MINUTES == 14 * 24 * 60
 
 
 def test_unbounded_explore_exits_when_cap_exceeded():
     now = 1_000_000.0
-    cap = ps.phase_cap_seconds(SharedState(phase=ps.PHASE_EXPLORE, max_minutes=0))
+    cap = ps.phase_cap_seconds(SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=0))
     st = SharedState(
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         max_minutes=0,
         phase_started_unix=now - (cap + 10),
         phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
-    out = ps.exit_normal_explore(st, now_unix=now)
+    out = ps.exit_normal_optimize(st, now_unix=now)
     assert out is not None
-    assert out[0] == "explore_budget_cap"
+    assert out[0] == "optimize_budget_cap"
 
 
 def test_bounded_explore_does_not_hit_absolute_cap():
     now = 1_000_000.0
     st = SharedState(
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         max_minutes=600,
         phase_started_unix=now - 60,
         phase_budget_pct=dict(ps.DEFAULT_PHASE_BUDGET_PCT),
     )
-    assert ps.exit_normal_explore(st, now_unix=now) is None
+    assert ps.exit_normal_optimize(st, now_unix=now) is None
 
 
 # Vocab: renamed reasons are phase-exit only, never terminal stop reasons
 def test_renamed_leverage_reasons_are_phase_exit_not_stop_reason():
-    assert ps.is_valid_phase_exit_reason("explore_no_more_leverage")
+    assert ps.is_valid_phase_exit_reason("optimize_no_more_leverage")
     assert ps.is_valid_phase_exit_reason("kernel_no_more_leverage")
     assert not ps.is_valid_stop_reason("no_more_leverage")
-    assert not ps.is_valid_stop_reason("explore_no_more_leverage")
+    assert not ps.is_valid_stop_reason("optimize_no_more_leverage")
 
 
 # Trailing-window crash rate

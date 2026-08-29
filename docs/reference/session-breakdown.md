@@ -95,7 +95,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
      Consumers MUST tolerate their absence (total=False TypedDict). */
   "model_info":                  { /* model architecture summary */ },
   "phase_segments":              [ /* per-phase segment records */ ],
-  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
   "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
@@ -527,6 +527,16 @@ sessions and old readers. The section also includes
 Final concurrency / input sequence length (ISL) / output sequence length (OSL) sweep. Always includes `all_variants`
 (a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
 `pareto_front` are populated when the sweep grid is large enough.
+
+Each `all_variants` row carries `status`:
+
+* `ok` — a readable JSON object was loaded from `benchmark_report.json` and its `success` field was not `false`. Metrics may still be `null` (for example an empty object, or `success: true` with throughput 0); `ok` means the measurement landed, not that it is selectable.
+* `failed` — the report recorded a failure, the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value), or no report was found but `abort_reason.json` is present (the grid runner's tested-but-failed marker).
+* `skipped` — neither `benchmark_report.json` nor `abort_reason.json` was found for that variant.
+
+`error` is present on every row and is always a non-empty string when `status` is `failed` (singular `error`, Magpie-compatible `errors` list, abort marker, or a fixed fallback). It is `null` on `ok` / `skipped` rows. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
+
+This `status` tightening does not bump `schema_version`. No field is renamed or removed; `error` is additive; the value set remains `ok` / `failed` / `skipped`. The change restores the stability guarantee that missing measurements are not fabricated as success.
 
 ---
 

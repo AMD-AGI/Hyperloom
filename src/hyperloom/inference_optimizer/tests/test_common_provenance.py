@@ -329,3 +329,51 @@ def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
     root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
     fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=False)
     assert fp["vllm"] == "unknown"
+
+
+def test_the_lever_is_what_came_back_not_what_was_asked_for():
+    """A config deliverable is a config lever, whoever dispatched it.
+
+    Observed on a real MI355X session: the local-exploration arm asked for a
+    source patch and the specialist returned ``--max-num-batched-tokens``. It
+    was recorded as a framework source lesson with an empty ``changed_files``,
+    and had it been kept, the source arm would have been credited for a
+    configuration win.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_CONFIG,
+        LEVER_SOURCE_PATCH,
+        patch_lever_kind,
+    )
+
+    config_deliverable = {
+        "framework_agent_candidate_id": "local_explore:0",
+        "specialist_task_id": "t1",
+        "extra_server_args": "--max-num-batched-tokens 16384",
+        "extra_envs": {},
+        "patch_name": "",
+    }
+    assert patch_lever_kind(config_deliverable) == LEVER_CONFIG
+
+    # The same arm, when it really does write a diff.
+    source_deliverable = {
+        "framework_agent_candidate_id": "local_explore:0",
+        "specialist_task_id": "t1",
+        "patches_applied": ["/w/a.patch"],
+        "extra_server_args": "",
+    }
+    assert patch_lever_kind(source_deliverable) == LEVER_SOURCE_PATCH
+
+
+def test_an_explicit_stamp_still_outranks_the_derivation():
+    """Callers that do know the lever keep saying so.
+
+    An upstream PR carries server args in its integrate params on the way to
+    the bench; the fetched diff is still what it moves.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_UPSTREAM_PR,
+        patch_lever_kind,
+    )
+
+    assert patch_lever_kind({"lever_kind": "upstream_pr", "extra_server_args": "--x"}) == LEVER_UPSTREAM_PR

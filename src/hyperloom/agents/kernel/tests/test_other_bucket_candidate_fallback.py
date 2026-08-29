@@ -393,7 +393,7 @@ def test_locate_source_resolves_profiler_wrapped_name(tmp_path, monkeypatch):
     """locate_source_via_grep resolves a profiler-wrapped op name to its kernel
     source via trailing sub-window keywords (hermetic — uses a fake source tree)."""
     src = _make_fake_sglang_tree(tmp_path / "src")
-    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "src"),))
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "src"),))
     tla._GREP_CACHE.clear()
     resolved = tla.locate_source_via_grep(_REAL_MOE_NAME)
     assert resolved == str(src)
@@ -405,7 +405,7 @@ def test_recovered_moe_fused_real_schema_routes_to_geak(tmp_path, monkeypatch):
     _write(tmp_path / "ops_summary.csv", _real_ops_summary_csv())
     src = _make_fake_sglang_tree(tmp_path / "src")
     fake_root = str(tmp_path / "src") + "/"
-    monkeypatch.setattr(tla, "KNOWN_SEARCH_ROOTS", (str(tmp_path / "src"),))
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: (str(tmp_path / "src"),))
     monkeypatch.setattr(tla, "_reusable_roots", lambda: (fake_root,))
     tla._GREP_CACHE.clear()
 

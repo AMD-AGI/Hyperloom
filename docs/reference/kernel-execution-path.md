@@ -85,19 +85,44 @@ if geak_enabled:                      # geak_selected(): order is not exactly `f
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
-# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge.
+# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
+#    one shared tail, chosen by whether GEMM tuning is due.
+if not self._gemm_tuning_required_before_kernel_opt():
+    await self._finish_kernel_entry()
+    return
 result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
-# then the two Coordinator-owned lanes, each behind its own gate; both first
-# resume a pending integration from the previous entry before starting anew:
-await self._maybe_run_forge_fusion_before_kernel_opt()
-await self._maybe_run_collective_before_kernel_opt()
-# then, if candidates remain:
-result = await run_optimization_handler({...}, session_dir=session_dir)
+...                                    # handle result, post the bus response
+await self._finish_kernel_entry()
 ```
 
-GEMM tuning is itself gated by `_gemm_tuning_required_before_kernel_opt()`; when
-it is not required the forge branch reprofiles and goes straight to the fusion
-and collective lanes.
+Both routes end in `_finish_kernel_entry()`, and that is where the rest of the
+phase's own work happens:
+
+```python
+async def _finish_kernel_entry(self) -> None:
+    await self._maybe_reprofile_for_kernel()
+    await self._maybe_run_forge_fusion_before_kernel_opt()
+    await self._maybe_run_collective_before_kernel_opt()
+    if self._kernel_opt_work_remains():
+        await self._run_kernel_opt_entry_batch()
+```
+
+**The source-level dispatch is not downstream of GEMM tuning.** Tuning GEMM
+shape tables and rewriting kernel source are unrelated jobs, so each stage in
+the shared tail consults only its own switch and each skip is a return inside
+its own helper rather than out of the entry hook.
+`INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the source-level
+dispatch alone.
+
+`_run_kernel_opt_entry_batch()` names no `kernel_id`, leaving the set to
+`_batch_kernel_candidates`' own filter: every candidate that clears the dispatch
+floor and has retries left goes in one batch. Naming one here would put the
+phase back in the business of picking, which is the part that stalls when nobody
+picks. `_kernel_opt_work_remains()` gates it on `auto_kernel_opt_enabled`
+(`--no-auto-kernel-opt`) and a non-empty `untried_hot_reusable_kernels()`. The
+switch covers this dispatch only: `kernel_opt` stays in the phase's allowed
+actions, so orchestration can still request it, and the fusion and collective
+lanes keep their own gates.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the
@@ -236,7 +261,7 @@ Optional:
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
 | `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 60); wins over the LLM-authored payload value |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 90); wins over the LLM-authored payload value |
 
 Fusion lane:
 

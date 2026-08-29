@@ -263,6 +263,21 @@ class BaseAdapter:
         """
         return None
 
+    def source_import_root(self, framework_root: str) -> str:
+        """Return the import root relative to a source snapshot's ``files/`` dir.
+
+        A dist-packages install stores modules at the tree root, so ``""`` is
+        correct; a repo checkout that nests them (e.g. under ``python/``)
+        overrides this.
+
+        Args:
+            framework_root: Absolute path to the framework checkout or install.
+
+        Returns:
+            str: The import-root path component, or ``""``.
+        """
+        return ""
+
 
 def _pr_number_from_ref(candidate_ref: str) -> int:
     """Parse a PR number from a ``"PR:1234"`` ref or a PR html_url; 0 if absent."""
@@ -482,6 +497,13 @@ class SglangAdapter(_VenvProvisionMixin):
     """SGLang adapter: editable checkout at a ref, or wheel install."""
 
     framework = "sglang"
+
+    def source_import_root(self, framework_root: str) -> str:
+        """Return ``"python"`` for a sglang checkout (``python/sglang/...``), else ``""``."""
+        if not framework_root:
+            return ""
+        root = Path(framework_root)
+        return "python" if (root / "python" / "sglang").is_dir() else ""
 
     def supports(self, gap: CapabilityGap) -> bool:
         """True for code-acquirable gaps (never for resource constraints)."""
