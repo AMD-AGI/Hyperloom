@@ -150,4 +150,6 @@ def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) ->
     assert 'echo "PASS|stop=${stop} gain=${gain}%"' in poll_script
     assert "gain=${gain}% < ${TARGET_GAIN}" not in poll_script
     assert "reached target_gain=" not in poll_script
-    assert "clean terminal stop_reason" in poll_script
+    assert "state.json stop_reason" in poll_script
+    assert "reports/final.json missing" not in poll_script
+    assert 'echo "PENDING|state.json stop_reason not set yet' in poll_script

@@ -3,8 +3,8 @@
 
 """Regression guard for the pre-release E2E leg liveness (stall) check.
 
-``bootstrap-pre-release.sh`` blocks after the demo turn until ``optimize`` writes
-``reports/final.json``, and declares a leg dead when nothing has been written for
+``bootstrap-pre-release.sh`` blocks after the demo turn until ``optimize`` writes a
+clean terminal ``stop_reason`` into ``state.json``, and declares a leg dead when nothing has been written for
 ``LEG_STALL_GRACE_S``. Two properties of that check killed legs that were provably
 still alive (run 1.0.1a0.dev202608280354+ci, both baremetal-sglang legs):
 
@@ -177,8 +177,16 @@ def test_setup_marker_matches_every_setup_prompt(script: str) -> None:
 
 def test_an_early_turn_is_re_driven_not_fatal(script: str) -> None:
     """A turn that ends without finishing leaves nothing running; ask again, bounded."""
-    assert 'max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"' in script
+    assert 'max_demo_redrives="${LEG_DEMO_REDRIVES:-5}"' in script
     assert "demo_redrives=$(( demo_redrives + 1 ))" in script
+
+
+def test_bootstrap_completes_on_clean_stop_reason_without_final_json(script: str) -> None:
+    """Align with the poll gate: a clean terminal stop_reason is enough to exit 0."""
+    assert "is_clean_stop_reason" in script
+    assert "final.json never appeared" not in script
+    assert "LEG_FINAL_GRACE_S" not in script
+    assert "state.json stop_reason='$stop' after" in script
 
 
 def test_setup_is_budgeted_in_time_not_in_turns(script: str) -> None:

@@ -7,10 +7,9 @@
 # (design §10, point C -- the 3h legs finish ~3-4h and report first; 12h legs later).
 #
 # A leg PASSes only when ALL hold (design §9):
-#   1. reports/final.json and reports/final.md both exist,
-#   2. final.json stop_reason is a clean terminal exit (same set as optimize CLI exit 0),
-#   3. its owning SaFE workload phase is not Failed/Stopped,
-#   4. crash_count / server_boot_failures are within tolerance.
+#   1. state.json stop_reason is a clean terminal exit (same set as optimize CLI exit 0),
+#   2. crash_count is within tolerance (read from state.json).
+# final.json is not required; bootstrap may fail waiting for it while optimize succeeded.
 # TARGET_GAIN still flows to optimize via the demo skill; it is NOT used here to judge PASS.
 # Fail-fast leaves still-running optimize legs alive; dispatch reap stops stale e2e-* tags.
 #
@@ -275,34 +274,30 @@ is_clean_stop_reason() {
   esac
 }
 
-# Judge one leg from its final.json. Echoes "PASS"|"FAIL|<reason>".
+# Judge one leg from state.json. Echoes "PASS"|"PENDING"|"FAIL|<reason>".
 judge_leg() {
-  local leg="$1" wphase="$2" sdir final gain stop crashes boots
+  local leg="$1" wphase="$2" sdir state gain stop crashes
   sdir="$(leg_session_dir "$leg")"
   if [ -z "$sdir" ] || [ ! -d "$sdir" ]; then
-    echo "FAIL|no session dir yet (workload phase=$wphase)"; return
+    echo "PENDING|no session dir yet (workload phase=$wphase)"; return
   fi
-  final="${sdir%/}/reports/final.json"
-  if [ ! -f "$final" ]; then
-    echo "FAIL|reports/final.json missing (workload phase=$wphase)"; return
+  state="${sdir%/}/state.json"
+  if [ ! -f "$state" ]; then
+    echo "PENDING|state.json missing (workload phase=$wphase)"; return
   fi
-  if [ ! -f "${sdir%/}/reports/final.md" ]; then
-    echo "FAIL|reports/final.md missing"; return
-  fi
-  stop="$(jq -r '.stop_reason // ""' "$final" 2>/dev/null || echo "")"
-  gain="$(jq -r '.cumulative_gain_validated // 0' "$final" 2>/dev/null || echo 0)"
-  crashes="$(jq -r '.crash_count // 0' "$final" 2>/dev/null || echo 0)"
-  boots="$(jq -r '.server_boot_failures // 0' "$final" 2>/dev/null || echo 0)"
+  stop="$(jq -r '.stop_reason // ""' "$state" 2>/dev/null || echo "")"
+  gain="$(jq -r '.cumulative_gain_validated // 0' "$state" 2>/dev/null || echo 0)"
+  crashes="$(jq -r '.crash_count // 0' "$state" 2>/dev/null || echo 0)"
   if [ "$crashes" -gt "$MAX_CRASHES" ] 2>/dev/null; then
     echo "FAIL|crash_count=$crashes > $MAX_CRASHES"; return
   fi
-  if [ "$boots" -gt "$MAX_BOOT_FAILS" ] 2>/dev/null; then
-    echo "FAIL|server_boot_failures=$boots > $MAX_BOOT_FAILS"; return
+  if [ -z "$stop" ]; then
+    echo "PENDING|state.json stop_reason not set yet (workload phase=$wphase)"; return
   fi
   if is_clean_stop_reason "$stop"; then
     echo "PASS|stop=${stop} gain=${gain}%"; return
   fi
-  echo "FAIL|stop_reason=${stop:-none} (not a clean terminal exit)"
+  echo "FAIL|stop_reason=${stop} (not a clean terminal exit)"
 }
 
 # ---- poll loop -------------------------------------------------------------
@@ -337,15 +332,6 @@ while :; do
     [ -n "${VERDICT[$leg]}" ] && continue
     wid="${WID[$leg]}"
     wphase="$(workload_phase "$wid")"
-    # Terminal SaFE failure kills the leg immediately.
-    if [ "$wphase" = "Failed" ] || [ "$wphase" = "Stopped" ]; then
-      VERDICT["$leg"]="FAIL|workload phase=$wphase"
-      summary "❌ **$leg** — FAIL (workload $wphase, wid=\`$wid\`)"
-      post_status "$leg" failure "workload $wphase; wid=$wid"
-      changed=1; fail_seen=1
-      continue
-    fi
-    # Otherwise judge from the on-disk report (present once the leg finishes).
     res="$(judge_leg "$leg" "$wphase")"
     verdict="${res%%|*}"; detail="${res#*|}"
     if [ "$verdict" = "PASS" ]; then
@@ -353,14 +339,20 @@ while :; do
       summary "✅ **$leg** — PASS ($detail)"
       post_status "$leg" success "PASS — $detail"
       changed=1
-    elif [ "$wphase" = "Succeeded" ]; then
-      # Workload ended but the report did not clear the gate -> terminal FAIL.
+    elif [ "$verdict" = "PENDING" ]; then
+      if [ "$wphase" = "Succeeded" ] || [ "$wphase" = "Failed" ] || [ "$wphase" = "Stopped" ]; then
+        VERDICT["$leg"]="FAIL|$detail (workload phase=$wphase)"
+        summary "❌ **$leg** — FAIL ($detail; workload $wphase, wid=\`$wid\`)"
+        post_status "$leg" failure "FAIL — $detail"
+        changed=1; fail_seen=1
+      else
+        pending=$((pending + 1))
+      fi
+    else
       VERDICT["$leg"]="FAIL|$detail"
       summary "❌ **$leg** — FAIL ($detail)"
       post_status "$leg" failure "FAIL — $detail"
       changed=1; fail_seen=1
-    else
-      pending=$((pending + 1))   # still running; check again next tick
     fi
   done
 

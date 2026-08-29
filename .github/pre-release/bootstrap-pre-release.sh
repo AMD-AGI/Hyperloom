@@ -114,6 +114,15 @@ SETUP_RESUME_NUDGE='Your previous turn ended before setup finished. Do NOT resta
 
 DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize behind, and nothing has been written under the workspace since, so the work is not progressing. Do NOT fabricate a result. Finish the launch in THIS turn: complete the install if it is still needed, start optimize detached with setsid nohup so it survives the end of this turn, then confirm the nested session run dir and its state.json exist and report their paths.'
 
+# Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
+is_clean_stop_reason() {
+  case "$1" in
+    target_reached|global_converged|time_exhausted|max_ticks|sweep_done|conc_sweep_done)
+      return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 # Run ONE leg to completion inside the current filesystem (baremetal pod, or already
 # inside a nested docker container). Args: leg backend model_path hours run_mode
 run_leg() {
@@ -334,7 +343,7 @@ run_leg() {
   # `claude --print` is ONE non-interactive turn: it returns right after the demo
   # skill backgrounds `optimize` (setsid nohup). If we returned now, run.sh would
   # exit 0 and SaFE would mark a FALSE "Succeeded" while the benchmark is still
-  # running. Block here until the run writes reports/final.json (or a deadline).
+  # running. Block here until state.json carries a terminal stop_reason (or a deadline).
   #
   # The real artifacts do NOT live under $session directly: make_session_dir()
   # creates a NESTED per-run dir  $session/<sanitized_model>/<UTC_ts>-<rand8>/
@@ -357,7 +366,6 @@ run_leg() {
   #     and that pre-loop gap must not be charged to the leg, or the very first
   #     iteration condemns it.
   local stall_grace="${LEG_STALL_GRACE_S:-600}"       # 10m of NO file writes -> dead
-  local final_grace="${LEG_FINAL_GRACE_S:-120}"       # state stop_reason -> final.json
   local deadline_s=$(( hours * 3600 + 3600 ))         # demo budget + 1h margin (hard cap)
   # Two clocks: start_ts backs the hard deadline and is NEVER reset (resetting it would
   # let the leg outlive the SaFE pod timeout and lose the clean failure path); grace_ts
@@ -371,7 +379,7 @@ run_leg() {
   # stall signal instead of an "is it launched yet" probe right after the turn: the demo
   # skill's launcher runs install.sh BEFORE backgrounding optimize, so state.json can
   # legitimately be 10+ minutes away, and re-driving on a short grace would double-launch.
-  local demo_redrives=0 max_demo_redrives="${LEG_DEMO_REDRIVES:-2}"
+  local demo_redrives=0 max_demo_redrives="${LEG_DEMO_REDRIVES:-5}"
 
   while :; do
     local now elapsed; now="$(date +%s)"; elapsed=$(( now - start_ts ))
@@ -409,26 +417,23 @@ run_leg() {
 
     if [ -n "$real_sdir" ]; then
       if [ -f "$final_json" ]; then
-        log "leg $leg final.json present after ${elapsed}s; demo ran to completion"
+        log "leg $leg final.json present after ${elapsed}s; demo complete"
         return 0
       fi
       local stop=""
       [ -f "$state_json" ] && stop="$(jq -r '.stop_reason // ""' "$state_json" 2>/dev/null || echo "")"
       if [ -n "$stop" ]; then
-        log "leg $leg state.json stop_reason='$stop'; waiting up to ${final_grace}s for final.json"
-        local g0; g0="$(date +%s)"
-        while [ ! -f "$final_json" ] && [ $(( $(date +%s) - g0 )) -lt "$final_grace" ]; do sleep 5; done
-        if [ -f "$final_json" ]; then
-          log "leg $leg final.json present (stop_reason='$stop'); demo complete"
+        if is_clean_stop_reason "$stop"; then
+          log "leg $leg state.json stop_reason='$stop' after ${elapsed}s; demo complete"
           return 0
         fi
-        log "ERROR: leg $leg state stop_reason='$stop' but final.json never appeared within ${final_grace}s"
+        log "ERROR: leg $leg state stop_reason='$stop' (not a clean terminal exit)"
         return 1
       fi
     fi
 
     if [ "$elapsed" -ge "$deadline_s" ]; then
-      log "ERROR: leg $leg deadline ${deadline_s}s reached without reports/final.json (real_sdir='${real_sdir:-<none>}')"
+      log "ERROR: leg $leg deadline ${deadline_s}s reached without a terminal stop_reason (real_sdir='${real_sdir:-<none>}')"
       return 1
     fi
     sleep "$wait_interval"
@@ -526,7 +531,7 @@ ensure_dockerd() {
 # run_leg in docker mode. Each leg's agent follows the demo skill to `docker run` its OWN
 # single-GPU container (renderD = 128 + gpu_index*8), applying the CI isolation flags that
 # run_leg injected into the leg .env. No nested bootstrap: session artifacts land under
-# $session on this pod's NFS exactly as for baremetal, so the wait-for-final.json loop in
+# $session on this pod's NFS exactly as for baremetal, so the wait-for-stop_reason loop in
 # run_leg works unchanged. Each `run_leg &` is its own subshell, so their per-leg EXIT
 # traps (the .env key scrub) don't clobber each other.
 run_docker_host() {

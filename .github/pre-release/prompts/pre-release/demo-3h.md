@@ -8,16 +8,18 @@ exact default flags.
 
 ## Flags
 
-- **OVERRIDE:** use `--target-gain 100` (NOT the skill's default of 30). This is the
-  pre-release release gate — the run must reach a validated cumulative gain of 100%.
+- **OVERRIDE:** use `--target-gain 100` (NOT the skill's default of 30). This shapes
+  optimize prompts only; the poll gate judges PASS/FAIL from `stop_reason`, not gain.
 - Keep every other required flag exactly as the skill defines them:
 
   ```
   --tp 1 --conc 64 --isl 1024 --osl 1024 --precision bf16 --max-hours 3
-  --max-minutes-explore-pct 0.39 --max-minutes-sweep-pct 0.01
-  --explore-force-exit-budget-pct 0.01 --no-framework-agent --no-kernel
-  --no-enable-conc-sweep --no-enable-roofline
+  --max-minutes-framework-pct 0.90 --max-minutes-sweep-pct 0.01
+  --no-kernel --no-enable-conc-sweep --no-enable-roofline
   ```
+
+  Do **not** pass `--no-framework-agent` — the 3h demo runs FRAMEWORK_AGENT (OPTIMIZE)
+  only; kernel is skipped via `--no-kernel`.
 
 ## Model path
 
@@ -51,5 +53,5 @@ killed the moment the turn ends. So:
 3. Before you finish, confirm the run is really live and report the paths: the nested
    session run dir exists, `state.json` is present in it, and the optimizer PID is alive.
 
-Only then stop. The harness then waits for the terminal report (`reports/final.json` +
-`reports/final.md`) and judges PASS/FAIL from it — do not fabricate a result.
+Only then stop. The harness polls `state.json` for a clean terminal `stop_reason` to
+judge PASS/FAIL — do not fabricate a result.
