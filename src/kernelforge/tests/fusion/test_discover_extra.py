@@ -5,12 +5,21 @@
 
 from __future__ import annotations
 
+import importlib
 import json
 import sys
 import types
 
-import httpx as _REAL_HTTPX
+import anthropic as _REAL_ANTHROPIC
 import pytest
+
+# The httpx flavour the installed anthropic SDK was built against. anthropic 1.x
+# moved to httpx2 and type-checks ``http_client`` against it, so a Response or
+# MockTransport from the wrong module is rejected at client construction -- the
+# same failure this file's production counterpart guards, arriving through the
+# stub instead. Derived from the SDK rather than imported, so the tests follow
+# it across the migration.
+_REAL_HTTPX = importlib.import_module(_REAL_ANTHROPIC.DefaultHttpxClient.__mro__[1].__module__)
 
 from kernelforge.fusion.diagnose import diagnose_from_shares
 from kernelforge.fusion.llm_failure import (
@@ -54,10 +63,8 @@ def test_default_llm_fn_passes_apim_default_headers(monkeypatch):
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **k: object()
+    fake_openai.DefaultHttpxClient = lambda **_k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     fn = default_llm_fn()
     fn("prompt")
@@ -83,10 +90,10 @@ def _install_capturing_openai(monkeypatch):
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **k: object()
+    # discover.py asks the SDK for its own client class, so the fake SDK has to
+    # offer one; a bare httpx stub would no longer be consulted.
+    fake_openai.DefaultHttpxClient = lambda **k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     return captured
 
 
@@ -430,10 +437,8 @@ def test_default_llm_fn_success_writes_log(monkeypatch, tmp_path):
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **k: object()
+    fake_openai.DefaultHttpxClient = lambda **_k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     log = tmp_path / "llm.log"
     fn = default_llm_fn(log_path=str(log))
@@ -475,10 +480,8 @@ def test_default_llm_fn_uses_the_resolved_pair(monkeypatch):
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **k: object()
+    fake_openai.DefaultHttpxClient = lambda **_k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
 
     for k in (
         "OPENAI_BASE_URL",
@@ -534,10 +537,8 @@ def test_default_llm_fn_retries_then_raises(monkeypatch):
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **k: object()
+    fake_openai.DefaultHttpxClient = lambda **_k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     import time
 
     monkeypatch.setattr(time, "sleep", lambda *_: None)
@@ -588,3 +589,50 @@ def test_discover_recipes_unreadable_source(tmp_path):
         llm_fn=lambda p: "[]",
     )
     assert rs == []
+
+
+def _fake_anthropic_reply():
+    return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text="[]")])
+
+
+def test_anthropic_adapter_sends_temperature_in_the_body_when_the_sdk_wont_name_it():
+    """anthropic 1.x dropped ``temperature`` from ``Messages.create()``.
+
+    The signature has no ``**kwargs``, so passing it named is a TypeError --
+    which classify_llm_error reads as transient, so discovery burned its whole
+    retry budget on a call that could never succeed. It is still a Messages API
+    field, so it travels in ``extra_body`` instead.
+    """
+    from kernelforge.fusion.discover import _AnthropicChatCompletions
+
+    seen: dict = {}
+
+    class _OneXMessages:
+        def create(self, *, model, max_tokens, messages, extra_body=None):
+            seen.update(model=model, max_tokens=max_tokens, extra_body=extra_body)
+            return _fake_anthropic_reply()
+
+    client = types.SimpleNamespace(messages=_OneXMessages())
+    out = _AnthropicChatCompletions(client).create(
+        model="claude-opus-5", temperature=0, max_tokens=64, messages=[{"role": "user", "content": "p"}]
+    )
+    assert out.choices[0].message.content == "[]"
+    assert seen["extra_body"] == {"temperature": 0}
+
+
+def test_anthropic_adapter_still_names_temperature_when_the_sdk_declares_it():
+    """The 0.x signature takes it by name; do not push it into the body there."""
+    from kernelforge.fusion.discover import _AnthropicChatCompletions
+
+    seen: dict = {}
+
+    class _ZeroXMessages:
+        def create(self, *, model, max_tokens, messages, temperature=None):
+            seen.update(temperature=temperature)
+            return _fake_anthropic_reply()
+
+    client = types.SimpleNamespace(messages=_ZeroXMessages())
+    _AnthropicChatCompletions(client).create(
+        model="claude-opus-5", temperature=0, max_tokens=64, messages=[{"role": "user", "content": "p"}]
+    )
+    assert seen == {"temperature": 0}

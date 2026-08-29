@@ -40,10 +40,8 @@ def _capture_create_kwargs(monkeypatch) -> dict:
 
     fake_openai = types.ModuleType("openai")
     fake_openai.OpenAI = _FakeClient
-    fake_httpx = types.ModuleType("httpx")
-    fake_httpx.Client = lambda **_k: object()
+    fake_openai.DefaultHttpxClient = lambda **_k: object()
     monkeypatch.setitem(sys.modules, "openai", fake_openai)
-    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
     monkeypatch.setenv("OPENAI_BASE_URL", "http://gw")
     monkeypatch.setenv("OPENAI_API_KEY", "KEY")
     monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)

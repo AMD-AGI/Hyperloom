@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import gzip
+import inspect
 import json
 import logging
 import os
@@ -1576,13 +1577,34 @@ class _AnthropicChatCompletions:
         # APIStatusError carries status_code, which classify_llm_error reads
         # before it falls back to scanning the message, so a 401/403/413 stops
         # on the first attempt instead of consuming the retry budget.
-        reply = self._client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            messages=messages,
-        )
+        #
+        # ``temperature`` is still a Messages API field, but anthropic 1.x
+        # dropped it from create()'s typed signature, and that signature has no
+        # **kwargs -- passing it named is a TypeError. classify_llm_error reads
+        # that as a transient fault, so it burned the whole retry budget on a
+        # call that could never succeed. Send it in the body when the installed
+        # SDK will not name it.
+        payload: dict[str, Any] = {"model": model, "max_tokens": max_tokens, "messages": messages}
+        if _anthropic_create_names_temperature(self._client):
+            payload["temperature"] = temperature
+        else:
+            payload["extra_body"] = {"temperature": temperature}
+        reply = self._client.messages.create(**payload)
         return _Completion.of(_anthropic_text(reply))
+
+
+def _anthropic_create_names_temperature(client: Any) -> bool:
+    """Whether this SDK's ``messages.create`` takes ``temperature`` by name.
+
+    Defaults to True for anything unintrospectable -- a stub or a ``**kwargs``
+    passthrough is happier with the named form, and the caller only needs the
+    negative answer to be right.
+    """
+    try:
+        params = inspect.signature(client.messages.create).parameters
+    except (AttributeError, TypeError, ValueError):  # pragma: no cover - exotic stubs
+        return True
+    return "temperature" in params or any(pm.kind is inspect.Parameter.VAR_KEYWORD for pm in params.values())
 
 
 def _anthropic_client(*, timeout_s: int, verify: bool) -> Any | None:
@@ -1603,14 +1625,17 @@ def _anthropic_client(*, timeout_s: int, verify: bool) -> Any | None:
     if not gateway.has_endpoint or not key:
         return None
 
-    import httpx
-    from anthropic import Anthropic
+    # DefaultHttpxClient, not httpx.Client: the SDK validates http_client
+    # against the httpx flavour it was built on, and anthropic 1.x moved to
+    # httpx2. Handing it the wrong one is a TypeError at construction, which
+    # surfaces as "llm setup failed" on every discovery call.
+    from anthropic import Anthropic, DefaultHttpxClient
 
     credential = {"auth_token": key} if gateway.key_env == "ANTHROPIC_AUTH_TOKEN" else {"api_key": key}
     sdk = Anthropic(
         base_url=normalize_anthropic_base_url(gateway.base_url),
         default_headers=gateway.headers or None,
-        http_client=httpx.Client(verify=verify, timeout=timeout_s),
+        http_client=DefaultHttpxClient(verify=verify, timeout=timeout_s),
         # Discovery owns the retry policy: complete_with_retry classifies each
         # failure and enforces a wall-clock deadline, and a second silent layer
         # underneath it would multiply the attempts and blow through that bound.
@@ -1672,13 +1697,14 @@ def default_llm_fn(
                 # default_headers the gateway 401s "missing subscription key".
                 # These come from the resolved provider, so the other side's
                 # headers can never leak onto this endpoint.
-                import httpx
-                from openai import OpenAI
+                # DefaultHttpxClient for the same reason as the Anthropic leg
+                # above: the SDK type-checks http_client against its own httpx.
+                from openai import DefaultHttpxClient, OpenAI
 
                 client_kwargs: dict[str, Any] = {
                     "base_url": gateway.base_url,
                     "api_key": key,
-                    "http_client": httpx.Client(verify=not skip_tls, timeout=timeout_s),
+                    "http_client": DefaultHttpxClient(verify=not skip_tls, timeout=timeout_s),
                 }
                 if gateway.headers:
                     client_kwargs["default_headers"] = gateway.headers
