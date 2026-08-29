@@ -243,6 +243,29 @@ def test_no_stray_fellow_references() -> None:
     )
 
 
+def test_the_rename_did_not_space_out_an_unrelated_identifier() -> None:
+    """``kernel_backend`` must never appear quoted with a space instead.
+
+    The fellow rename replaced prose with the two-word phrase and identifiers
+    with the underscored one, and it over-reached: twelve pre-existing
+    ``kernel_backend`` sites that had nothing to do with fellows -- a torch
+    profiler cpu_op args key, a vendor-playbook JSON key, a breakdown
+    ``strategy_group`` label -- came out of it spelled with a space. Nothing
+    raises on a dict key that no longer matches; the reader just gets ``""``
+    or a fallback forever. Only a grep for the quoted two-word form sees it.
+    """
+    root = _repo_root()
+    if root is None:
+        pytest.skip("not a source checkout")
+    stray = [
+        f"{rel}:{lineno}: {line}" for rel, lineno, line in _tracked_hits(root, re.compile(r'["\']kernel backend["\']'))
+    ]
+    assert not stray, (
+        "a quoted two-word spelling of kernel_backend: the identifier lost its "
+        "underscore to the rename and must get it back:\n  " + "\n  ".join(stray[:40])
+    )
+
+
 def test_every_kernel_backend_resolves_from_its_legacy_spelling() -> None:
     """The suffixed form written before the rename must still resolve.
 

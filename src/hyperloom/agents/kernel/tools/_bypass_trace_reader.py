@@ -660,7 +660,7 @@ def _finalize(
         corr_to_extid: ``correlation -> External id`` (from cuda_runtime events).
         extid_to_opname: ``External id -> op name`` (from cpu_op events).
         extid_to_opmeta: ``External id -> {shapes, dtypes, kernel_file,
-            kernel backend}`` (from cpu_op args); powers per-kernel shape and
+            kernel_backend}`` (from cpu_op args); powers per-kernel shape and
             Triton-source enrichment on the hot-kernel rows.
         window: Optional ``(start_us, end_us)`` steady-state filter; a device
             event is kept when its start ``ts`` falls in ``[start, end)``.
@@ -865,7 +865,7 @@ def _finalize(
                 row["op_shapes"] = meta.get("shapes") or []
                 row["op_dtypes"] = meta.get("dtypes") or []
                 row["op_kernel_file"] = meta.get("kernel_file") or ""
-                row["op_kernel_backend"] = meta.get("kernel backend") or ""
+                row["op_kernel_backend"] = meta.get("kernel_backend") or ""
                 # Shape fallbacks for a kernel whose own launch had no cpu_op
                 # shape: (a) same-name capture-time shape, (b) launch geometry.
                 bf = kern_name_backfill_meta.get(nm) or {}
@@ -902,7 +902,7 @@ def _finalize(
                     "shapes": _meta.get("shapes") or [],
                     "dtypes": _meta.get("dtypes") or [],
                     "kernel_file": _meta.get("kernel_file") or "",
-                    "kernel backend": _meta.get("kernel backend") or "",
+                    "kernel_backend": _meta.get("kernel_backend") or "",
                     "correlation": _corr,
                 }
             )
@@ -1044,7 +1044,7 @@ def analyze_trace(
                         kfile = args.get("kernel_file")
                         if kfile:
                             meta["kernel_file"] = kfile
-                            meta["kernel backend"] = args.get("kernel backend") or ""
+                            meta["kernel_backend"] = args.get("kernel_backend") or ""
                         if meta:
                             extid_to_opmeta[extid] = meta
                 continue

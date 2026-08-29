@@ -4151,7 +4151,7 @@ def _run_claimed_vendor_playbook(
         branch=branch,
         gpu_target=gpu_target,
         gpu_type=gpu_type,
-        kernel_backend=str(playbook.get("kernel backend") or "aiter"),
+        kernel_backend=str(playbook.get("kernel_backend") or "aiter"),
         program_md_file=str(program_md),
         target_functions=[str(f) for f in (playbook.get("target_functions") or [])],
         experiments_dir=experiments_dir,

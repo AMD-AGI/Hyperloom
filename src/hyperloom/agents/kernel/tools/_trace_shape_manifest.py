@@ -237,7 +237,7 @@ def build_row(
         "graph_variant": graph_variant,
         "node_ordinal": node_ordinal,
         "op": op,
-        "backend": launch.get("kernel backend", "") or "",
+        "backend": launch.get("kernel_backend", "") or "",
         "in_dtype": in_dtype,
         "out_dtype": out_dtype,
         "quant": launch.get("quant", "") or "",
@@ -261,7 +261,7 @@ def build_row(
         "source": {
             "kernel_symbol": name,
             "kernel_file": launch.get("kernel_file", "") or "",
-            "library": launch.get("kernel backend", "") or "",
+            "library": launch.get("kernel_backend", "") or "",
             "op_name": op_name,
             "raw_shapes": (launch.get("shapes") or []),
             "raw_dtypes": dtypes or [],
