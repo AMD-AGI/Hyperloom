@@ -13,7 +13,7 @@ import pytest
 
 from kernelforge.mcp_server import pr_stdio_server as server
 
-from .conftest import SRC_ROOT
+from kernelforge.conftest import SRC_ROOT
 
 
 def _call(method, params=None):

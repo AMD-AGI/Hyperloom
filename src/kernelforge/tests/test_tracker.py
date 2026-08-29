@@ -13,7 +13,7 @@ import pytest
 
 from kernelforge.tracker import ExperimentTracker, Experiment
 
-from .conftest import SRC_ROOT
+from kernelforge.conftest import SRC_ROOT
 
 
 def _log_iterations_worker(

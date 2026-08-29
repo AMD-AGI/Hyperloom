@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from .conftest import REPO_ROOT, requires_repo_root
+from kernelforge.conftest import REPO_ROOT, requires_repo_root
 
 _SCRIPT = (REPO_ROOT or Path()) / ".github" / "scripts" / "ci-e2e-dispatch.sh"
 

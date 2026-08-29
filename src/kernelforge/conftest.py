@@ -1,7 +1,21 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Shared fixtures and guardrails for the KernelForge test tree."""
+"""Shared fixtures and guardrails for every KernelForge test tree.
+
+This sits at the package root, not inside ``tests/``, because a conftest only
+reaches its own directory and below. The guardrails here are the kind that are
+worthless when partially applied -- the site-packages write guard, the isolated
+``KERNELFORGE_PROJECT_ROOT``, the child-process ``PYTHONPATH`` -- and forge has
+a second test tree under ``gemm_tune/tests/`` that a conftest in ``tests/``
+silently skipped, along with any tree added next to it later. Package root is
+the only location that covers all of them without a copy per directory that
+would drift.
+
+It ships in the wheel as a consequence. That is a few KB of a module pytest
+imports during collection and nothing imports at runtime; the packaging lint
+covers it as an ordinary module.
+"""
 
 from __future__ import annotations
 
