@@ -205,7 +205,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply a batch of N candidate variants serially; KEEP/REVERT each, stack onto optimization_stack. "
-                "Per-KEEP stack rebench inlined (replaces backends/params/validate_stack)."
+                "Each variant is benched on the stack (replaces backends/params/validate_stack)."
             ),
         ),
         "gemm_tuning": ActionMetadata(

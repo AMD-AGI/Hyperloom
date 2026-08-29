@@ -198,12 +198,10 @@ async def test_enqueue_internal_stack_rebench_uses_macro_cycle_idempotency_key(
     first = await c._enqueue_internal_stack_rebench(reason="geak_e2e_win")
     row0 = await c.tasks.get(str(first["task_id"]))
     assert row0.idempotency_key == "geak-revalidate-c0"
-    # GEAK follows the same default cold/hot + confirmation path as explore.
+    # GEAK's revalidation is a plain explore over the stack: it names no
+    # protocol of its own and takes the executor's grading as it stands.
     assert {
-        "enable_stack_rebench",
         "rebench_required",
-        "stack_rebench_repeats",
-        "stack_rebench_max_spread_pct",
         "revalidation_protocol",
         "expected_geak_ttft_ms",
         "expected_config_file_digests",

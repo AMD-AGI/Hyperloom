@@ -1446,11 +1446,6 @@ class ExplorePhase(CoordinatorCollaborator):
             "source": "coordinator_internal_mn",
             "reason": f"mn_auto_materialize:{domain or 'specialist'}",
             "grid": grid,
-            # Same search lever as a delegated explore, so it reports the same
-            # measurement: the decision round, not a post-KEEP confirmation one.
-            # This grid is built here rather than through the proposal injector,
-            # so the flag has to be stated rather than inherited.
-            "enable_stack_rebench": False,
         }
         if state.baseline_config_path:
             params["config_path"] = state.baseline_config_path

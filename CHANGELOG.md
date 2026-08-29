@@ -125,6 +125,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   kernel backends off would silently get them back. It is not honoured, but it
   is now detected and warned about once per run.
 
+- **BREAKING: the post-KEEP confirmation round is removed.** An `explore`
+  variant and an `integrate_patch` candidate were each re-benched once more
+  after they had already been graded, and the second measurement overwrote the
+  first as the reported number. Both now report the round that graded them.
+  - `explore` measured that round as a third run on the server its warmup and
+    decision rounds had already warmed, so it carried more cache than the round
+    it overwrote — and the inflated value became the anchor the next in-batch
+    variant was graded against. Removing it takes the bias out of the reported
+    gain and saves a full benchmark per KEEP.
+  - `integrate_patch` measured it on a server of its own, so removing it costs
+    two things and they are worth stating: a patch that only cleared the bar on
+    one measurement is no longer asked to clear it again before being committed
+    to the framework tree, and `delta_pct` is now read off the same measurement
+    that selected the patch, which reads higher than an independent re-measure
+    would.
+  - GEAK's same-harness revalidation dispatched an `explore` that inherited the
+    confirmation round. It now measures like every other explore, so its
+    throughput is graded colder against the engagement and current-best gates:
+    expect more `fallback` (2a harness replay) and `no_promote` verdicts.
+  - **Removed from the session record:** the `KEEP_UNSTABLE` outcome, the
+    `keep_unstable_in_stack` result key, and the `stack_rebench_tput` /
+    `stack_rebench_workspace` / `stack_rebench_warnings` fields. Readers of
+    `keep_unstable_count` stay so a session recorded before this change still
+    renders. `cumulative_gain_validated` now records `e2e_decision_round` as
+    its measurement basis for explore promotions.
+  - `enable_stack_rebench` and `rebench_stable_threshold_pct` are no longer
+    read from task params.
+
 - **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
   now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
   search and source/upstream landing are two arms of one phase, worked in

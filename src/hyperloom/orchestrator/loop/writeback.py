@@ -1501,6 +1501,8 @@ class WritebackCollaborator:
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
             outcome = OUTCOME_KEEP
+        # ``KEEP_UNSTABLE`` is only reachable for a session recorded before the
+        # per-KEEP confirmation round was removed; it still reads as a revert.
         elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
             outcome = OUTCOME_REVERT
         elif outcome_raw == "SKIPPED_DEDUP":
@@ -1537,7 +1539,6 @@ class WritebackCollaborator:
             for k in (
                 "runtime_sec",
                 "wall_clock_ratio_vs_baseline",
-                "stack_rebench_tput",
                 "estimated_output_throughput",
             )
             if isinstance(metrics, dict) and metrics.get(k) is not None
@@ -3973,20 +3974,10 @@ class WritebackCollaborator:
         if promoted:
             # A KEEP's own measurement promotes into cumulative_gain_validated and
             # advances validated_stack_len so the unvalidated-stack guard clears.
-            # A search stops at the decision round, so the basis names that round
-            # rather than the confirmation one whose throughput used to overwrite
-            # it. Read from the winner rather than from the request: a variant
-            # carries ``stack_rebench_tput`` only when a confirmation round
-            # actually ran, which is what the label is asked to describe.
+            # An explore round grades a variant on its decision round and reports
+            # that, so the basis names the round the number came from.
             if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                confirmed = any(
-                    isinstance(w, dict) and w.get("stack_rebench_tput") is not None
-                    for w in (winners if isinstance(winners, list) else [])
-                )
-                self._update_cumulative_gain_validated(
-                    best_tput,
-                    measurement_basis="e2e_rebench" if confirmed else "e2e_decision_round",
-                )
+                self._update_cumulative_gain_validated(best_tput, measurement_basis="e2e_decision_round")
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
@@ -4007,7 +3998,6 @@ class WritebackCollaborator:
             "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
             "best_gain_pct_vs_base": result.get("best_gain_pct"),
             "output_throughput": best_tput,
-            "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
             "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
         }
         outcome.changed = changed
@@ -4962,9 +4952,9 @@ class WritebackCollaborator:
         single-variant bench + accuracy gate passed and the patch was committed),
         so a kept-but-absent one is a crash before the append landed → replay it
         (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
-        kept explore variant from the stack), so they are surfaced as a
-        ``medium`` alert rather than resurrected. Whatever the stack ends up as
+        / ``framework`` KEEPs are ambiguous (the stack they landed on is only
+        known to the round that ran), so they are surfaced as a ``medium``
+        alert rather than resurrected. Whatever the stack ends up as
         is re-validated by the Gap A full-stack rebench.
 
         Args:
@@ -5228,7 +5218,6 @@ class WritebackCollaborator:
             ],
             # Cumulative-vs-baseline, same as the geak revalidation above.
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "enable_stack_rebench": False,
         }
         if cb_remove:
             params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])

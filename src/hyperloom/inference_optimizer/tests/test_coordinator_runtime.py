@@ -981,28 +981,6 @@ def test_inject_explore_runtime_params_includes_baseline_accuracy():
     assert params["accuracy_baseline"] == pytest.approx(0.81)
 
 
-def test_inject_explore_runtime_params_turns_off_the_confirmation_rebench():
-    """A search explore reports its decision round, so it takes no third round."""
-
-    class DummyCoordinator:
-        shared_state = SharedState()
-
-    params: dict[str, Any] = {}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
-    assert params["enable_stack_rebench"] is False
-
-
-def test_inject_explore_runtime_params_lets_a_caller_ask_for_the_rebench():
-    """setdefault, so an explicit request still wins over the search default."""
-
-    class DummyCoordinator:
-        shared_state = SharedState()
-
-    params: dict[str, Any] = {"enable_stack_rebench": True}
-    ProposalsCollaborator(DummyCoordinator())._inject_explore_runtime_params(params)
-    assert params["enable_stack_rebench"] is True
-
-
 @pytest.mark.asyncio
 async def test_promote_baseline_accepts_higher_rebaseline(session_dir):
     c = Coordinator(session_dir, backends=_silent_backends())

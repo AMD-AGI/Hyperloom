@@ -126,9 +126,6 @@ def test_multi_node_builds_explore_grid(monkeypatch):
     assert params["base_extra_args"] == "--base-arg 1"
     assert params["base_tput"] == 123.0
     assert params["benchmark_script"] == "bench.sh"
-    # Same search lever as a delegated explore, so it is graded the same way:
-    # on the decision round, with no post-KEEP confirmation round.
-    assert params["enable_stack_rebench"] is False
 
 
 def test_grid_capped_at_grid_cap(monkeypatch):

@@ -467,8 +467,8 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "surface this combination within its own-domain prompt. A "
             "simple specialist-A + specialist-B concatenation is a grid "
             "combo (explore grid), not a cross-domain change; advise when "
-            "the motivation degenerates so the stack rebench + KEEP "
-            "threshold can adjudicate."
+            "the motivation degenerates so the KEEP threshold can "
+            "adjudicate."
         ),
         failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_motivation_invalid",

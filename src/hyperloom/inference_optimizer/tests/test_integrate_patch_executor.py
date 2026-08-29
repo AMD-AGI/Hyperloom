@@ -874,7 +874,6 @@ async def _run_enablement_integrate(
         "specialist_task_id": "t-spec-en",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
     }
     if before_signature is not None:
         params["enablement_before_signature"] = before_signature
@@ -1113,7 +1112,6 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "specialist_task_id": "t-spec-stack",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
         "enablement_base_patches": [str(base_patch)],
     }
     result = await executor(_make_ctx("t-int-stack", params))
@@ -1239,7 +1237,6 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
         "specialist_task_id": "t-spec-setup",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
         "enablement_setup_commands": ["pip install -U transformers"],
     }
     result = await executor(_make_ctx("t-int-setup", params))
@@ -1506,7 +1503,6 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
         "framework_source_root": str(repo),
         "base_tput": 1083.0,
         "base_extra_args": "",
-        "enable_stack_rebench": False,
     }
     task = Task(
         task_id="t-int-toctou",
