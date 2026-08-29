@@ -31,15 +31,27 @@ def _excluded_dir_names(cfg: dict) -> set[str]:
     Derived rather than hardcoded so this cannot narrow while the exclude list
     widens: ``*.testing.*`` contributes ``testing``, the ``*`` segments nothing.
 
-    Patterns under a package-data key are skipped. ``kernelforge.data`` is
-    excluded from *package* discovery -- its resource trees contain .py sample
-    kernels that must not be handed out as importable modules -- but its files
-    do ship, declared as ``kernelforge = ["data/**/*"]``. Reading its segments
-    literally would put "kernelforge" and "data" in the leak vocabulary and
-    flag the entire package as a test tree.
+    Patterns under a shipped package-data *subtree* are skipped.
+    ``kernelforge.data`` is excluded from *package* discovery -- its resource
+    trees contain .py sample kernels that must not be handed out as importable
+    modules -- but its files do ship, declared as ``kernelforge =
+    ["data/**/*"]``. Reading its segments literally would put "kernelforge" and
+    "data" in the leak vocabulary and flag the entire package as a test tree.
+
+    The skip is keyed on the subtree the globs actually name (``kernelforge`` +
+    ``data/**/*`` -> ``kernelforge.data``), not on the package-data key alone.
+    A bare ``startswith("kernelforge.")`` would also swallow a future
+    ``kernelforge.tests`` exclusion -- narrowing this function while the exclude
+    list widened, which is the exact failure the paragraph above says it is
+    written to prevent.
     """
     patterns = cfg["tool"]["setuptools"]["packages"]["find"].get("exclude", [])
-    shipped = tuple(cfg["tool"]["setuptools"].get("package-data", {}))
+    shipped = tuple(
+        f"{key}.{glob.split('/', 1)[0]}"
+        for key, globs in cfg["tool"]["setuptools"].get("package-data", {}).items()
+        for glob in globs
+        if "/" in glob and "*" not in glob.split("/", 1)[0]
+    )
     return {
         segment
         for pattern in patterns
@@ -111,8 +123,19 @@ _NON_EMPTY_TREES = {
     # 120 keeps that guard meaningful against the current 134 files.
     "kernelforge/data/local_knowledge/": 120,
     "kernelforge/data/examples/": 40,
-    "kernelforge/data/serving_patches/": 3,
+    # 1, not 3. The tree holds exactly three files today, so a floor of 3 was
+    # really "all of them", and the two non-patch files (a README and a
+    # SUPPORTED_VERSIONS.txt) are documentation whose legitimate removal would
+    # have turned this check red for no packaging reason. What must actually
+    # ship is the patch itself, and _REQUIRED_FILES asserts that by name --
+    # a floor cannot, since three READMEs would satisfy it.
+    "kernelforge/data/serving_patches/": 1,
 }
+
+#: Individual resources whose absence is a packaging bug rather than a smaller
+#: tree. A count floor cannot express "this specific file", and for a tree of
+#: three files the distinction is the whole guard.
+_REQUIRED_FILES = ("kernelforge/data/serving_patches/sglang/sglang_0_5_12/fp8_blockscale_ck_routing.patch",)
 
 
 def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
@@ -121,6 +144,10 @@ def _check_resource_trees_are_populated(names: list[str]) -> list[str]:
         count = sum(1 for n in names if n.startswith(prefix) and not n.endswith("/"))
         if count < floor:
             errors.append(f"{prefix} ships {count} files, below the floor of {floor}")
+    present = set(names)
+    errors.extend(
+        f"{required} is declared but missing from the wheel" for required in _REQUIRED_FILES if required not in present
+    )
     return errors
 
 
