@@ -119,8 +119,8 @@ CK → `languages/ck/` · HIP/C++ → `languages/hip/` · Triton → `languages/
 > `ops/triton/attention/pa_mqa_logits.py` holds a Gluon kernel and a `@triton.jit` fallback behind one
 > public entry, selected at dispatch, and the Gluon path is the more capable one (it supports
 > `Preshuffle` and `KVBlockSize > 1`, which the Triton path does not). Read the source before picking a
-> language folder. Note also that a campaign inferred onto `aiter-fellow` gets these framework cards
-> but **no language layer at all**, so pass `--fellow gluon-fellow` (or `triton-fellow`) explicitly when
+> language folder. Note also that a campaign inferred onto `aiter` gets these framework cards
+> but **no language layer at all**, so pass `--kernel-backend gluon` (or `triton`) explicitly when
 > the work is kernel authoring rather than DB tuning.
 
 Backend-neutral hardware constants live in `local_knowledge/hardware/`.

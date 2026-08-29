@@ -54,13 +54,13 @@ How forge handles it — **no per-user configuration**:
 2. **Runs the supported CLI directly** — in a subprocess, so rocprof-compute's `sys.exit`/global state
    stays isolated from the loop. It never patches the shared `/opt/rocm` install.
 
-### Enabling it — install forge with the `profiling` extra (recommended)
-The forge package (`kernel-agents`) ships rocprof-compute's dependency set as an optional extra, so
+### Enabling it — install the `forge-profiling` extra (recommended)
+Hyperloom, which ships forge, carries rocprof-compute's dependency set as an optional extra, so
 installing forge with it drops those deps into forge's OWN interpreter — the first one the profiler
 auto-detects. Nothing else to configure:
 
 ```bash
-pip install -e ".[profiling]"          # docker run line: pip install -e "/path/to/kernel-agents[profiling]"
+pip install -e ".[forge-profiling]"    # docker run line: pip install -e "/path/to/Hyperloom[forge-profiling]"
 ```
 
 Without the extra, forge stays lean and profiling degrades to the PMC path.

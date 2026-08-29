@@ -11,7 +11,7 @@ Design notes (why it looks like this):
     keeps working regardless of changes elsewhere in the repo. It only shells out
     to the supported `rocprof-compute` CLI.
   * ZERO-CONFIG availability: rocprof-compute needs its own Python deps — installed
-    by forge's `[profiling]` extra (`pip install -e ".[profiling]"`), or by
+    by the `[forge-profiling]` extra (`pip install -e ".[forge-profiling]"`), or by
     rocprof-compute's requirements.txt. This script AUTO-DETECTS an interpreter
     that can run the CLI — the current interpreter, the system /usr/bin/python3,
     then `python3` on PATH — and runs the profiler under the first that works. If
@@ -206,7 +206,7 @@ def main() -> int:
     if not rocpc_python:
         print("rocprof-compute is installed, but its Python deps are not available in any detected "
               "interpreter (current / /usr/bin/python3 / python3 on PATH) — skipping profiling.")
-        print("To enable it, install forge's profiling extra (pip install -e \".[profiling]\") — or "
+        print("To enable it, install the forge-profiling extra (pip install -e \".[forge-profiling]\") — or "
               f"rocprof-compute's requirements.txt ({libexec}/requirements.txt) — into one of them.")
         return 3
 

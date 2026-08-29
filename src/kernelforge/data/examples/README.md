@@ -77,7 +77,7 @@ MAX_HOURS=2 ./run_example.sh /tmp/my_run
 ```
 
 Each `run_example.sh` copies its task into a scratch git workspace, `git init`s
-it, and launches forge-loop with that task's fellow / target functions / task
+it, and launches forge-loop with that task's kernel backend / target functions / task
 type. GPU arch is autodetected via `rocminfo` (override with `GPU_TARGET=gfx942`).
 The loop leaves the best-kept kernel in the workspace and writes its iteration
 archive, profiles, and a machine-readable `forge_result.json` under
@@ -326,7 +326,7 @@ specific flags differ. It must:
   vary per task are:
 
 ```sh
---fellow flydsl-fellow                          # <backend>-fellow
+--kernel-backend flydsl                          # <backend>
 --kernel  .../softmax_kernel.py                 # the edited anchor
 --driver  .../driver.py                         # the protected driver
 --program-md-file .../program.md                # agent guidance

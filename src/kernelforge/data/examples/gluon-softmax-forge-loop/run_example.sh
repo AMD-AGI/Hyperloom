@@ -129,7 +129,7 @@ kernelforge forge-loop \
   --experiments-dir "$WORKSPACE/forge_experiments" \
   --result-json "$WORKSPACE/forge_experiments/forge_result.json" \
   --program-md-file "$WORKSPACE/program.md" \
-  --fellow gluon-fellow \
+  --kernel-backend gluon \
   --gpu-target "$GPU_TARGET" \
   --snr-threshold 30.0 \
   --max-hours "$MAX_HOURS" \

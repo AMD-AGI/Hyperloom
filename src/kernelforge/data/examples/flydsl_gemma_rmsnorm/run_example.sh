@@ -83,7 +83,7 @@ kernelforge forge-loop \
   --experiments-dir "$WORKSPACE/forge_experiments" \
   --result-json "$WORKSPACE/forge_experiments/forge_result.json" \
   --program-md-file "$WORKSPACE/program.md" \
-  --fellow flydsl-fellow \
+  --kernel-backend flydsl \
   --task-type flydsl2flydsl \
   --gpu-target "$GPU_TARGET" \
   --snr-threshold 40.0 \

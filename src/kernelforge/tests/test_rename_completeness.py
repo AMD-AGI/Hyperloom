@@ -116,11 +116,16 @@ _FELLOW_PATTERN = re.compile(r"fellow", re.IGNORECASE)
 # may name it. What remains are records, which rewriting would falsify.
 _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
     (
-        "src/kernelforge/data/*",
+        "src/kernelforge/data/*.md",
         r"(?i)fellow",
         "Knowledge-base records of campaigns that really did run under the old "
         "vocabulary. The P2 rule stands: paths and commands may be renamed, the "
-        "narrative may not, because rewriting it falsifies the record.",
+        "narrative may not, because rewriting it falsifies the record. Scoped to "
+        "*.md for the same reason its kernel_agents sibling is: a data/* glob also "
+        "swallowed examples/*/run_example.sh, seven of which kept passing a "
+        "--fellow flag the CLI no longer declares. forge-loop is a TolerantCommand, "
+        "so those runs did not fail -- they silently ran an inferred backend "
+        "instead of the intended one.",
     ),
     (
         "src/kernelforge/tests/test_rename_completeness.py",

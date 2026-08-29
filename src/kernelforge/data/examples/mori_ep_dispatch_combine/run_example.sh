@@ -32,7 +32,7 @@
 #                          package -- the correctness gate reuses mori's own
 #                          test-suite reference math)   (default: /work/mori)
 #   KERNELFORGE_INCLUDE_MORI_KB  inject local_knowledge/framework/mori/ into
-#                          the fellow's system prompt (default: 1 -- on for
+#                          the kernel backend's system prompt (default: 1 -- on for
 #                          this example; set 0 to run the KB-ablation arm)
 #   FORGE_ALLOW_EXISTING_WORKSPACE  set 1 to allow reusing a non-empty/
 #                          already-git WORKSPACE_DIR (default: 0, refuse)
@@ -144,7 +144,7 @@ kernelforge forge-loop \
   --experiments-dir "$WORKSPACE/forge_experiments" \
   --result-json "$WORKSPACE/forge_experiments/forge_result.json" \
   --program-md-file "$WORKSPACE/program.md" \
-  --fellow aiter-fellow \
+  --kernel-backend aiter \
   --gpu-target "$GPU_TARGET" \
   --snr-threshold 30.0 \
   --max-hours "$MAX_HOURS" \

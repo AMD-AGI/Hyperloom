@@ -315,8 +315,8 @@ unset KERNELFORGE_INCLUDE_MORI_KB
 # Arm B (with KB):
 export KERNELFORGE_INCLUDE_MORI_KB=1
 
-kernel-agents forge-loop --kernel mori_ep_config.py --driver driver.py \
-  --workspace . --program-md-file program.md --fellow aiter-fellow \
+kernelforge forge-loop --kernel mori_ep_config.py --driver driver.py \
+  --workspace . --program-md-file program.md --kernel-backend aiter \
   --gpu-target gfx942 --max-hours 1.0 \
   --target-functions get_ep_launch_config,dispatch,combine \
   --no-profiling --no-prepare-task
