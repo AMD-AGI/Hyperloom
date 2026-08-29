@@ -104,10 +104,10 @@ subtrees:
     title: Experience store
   - file: kernelforge/reference/api-reference.rst
     title: API reference
+  - file: kernelforge/reference/measured-results.md
+    title: Measured results
   - file: kernelforge/forge_long_horizon_state.md
     title: Long-horizon loop state
-  - file: kernelforge/kernelforge-release.md
-    title: KernelForge release notes
 
 - caption: About
   entries:

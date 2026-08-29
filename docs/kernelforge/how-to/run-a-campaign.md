@@ -13,7 +13,7 @@ the measurement improves.
 
 ## Prerequisites
 
-- KernelForge installed (`pip install -e ".[dev]"`; see
+- Hyperloom installed (`pip install -e ".[forge]"`; see
   {doc}`Quickstart </install/quickstart>`).
 - Claude credentials: a logged-in `claude` CLI for in-session mode, or
   `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` / a gateway's
@@ -129,7 +129,8 @@ git -C "$W" log --oneline forge-optimize       # the commits the loop kept
 ```
 
 Lessons distilled from the run accumulate under
-`knowledge_base/<backend>/learned/`.
+`knowledge_base/<backend>/learned/`, rooted at `$KERNELFORGE_PROJECT_ROOT`
+(default `~/.cache/hyperloom/kernelforge`) -- not in the installed package.
 
 For the two ways to launch and bill a run — Claude Code in-session and the
 unattended autonomous loop — see

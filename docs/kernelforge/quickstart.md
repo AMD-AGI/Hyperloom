@@ -20,14 +20,18 @@ Optional but recommended:
 
 ## Step 1: Install
 
+forge ships inside Hyperloom, so installing Hyperloom installs forge:
+
 ```bash
-git clone git@github.com:AMD-AGI/KernelForge.git
-cd KernelForge
-pip install -e ".[dev]"
+git clone git@github.com:AMD-AGI/Hyperloom.git
+cd Hyperloom
+pip install -e ".[forge]"
 ```
 
-For rocprof-compute hardware profiling (System Speed-of-Light + roofline), add the `profiling` extra:
-`pip install -e ".[dev,profiling]"`. Without it, profiling degrades to the lightweight PMC path.
+For rocprof-compute hardware profiling (System Speed-of-Light + roofline), add the
+`forge-profiling` extra: `pip install -e ".[forge,forge-profiling]"`. Without it,
+profiling degrades to the lightweight PMC path. (`install.sh` installs it for you
+unless you set `SKIP_FORGE_PROFILING=1`.)
 
 Verify:
 
@@ -147,7 +151,7 @@ docker run --rm \
   -e ANTHROPIC_BASE_URL -e ANTHROPIC_AUTH_TOKEN -e PYTHONUNBUFFERED=1 \
   -v "$PWD:/workspace" -w /workspace \
   rocm/primus-training-private:<tag> \
-  bash -lc 'pip install -q --break-system-packages -e ".[profiling]" && \
+  bash -lc 'pip install -q --break-system-packages -e ".[forge,forge-profiling]" && \
             examples/triton-softmax-forge-loop/run_example.sh /tmp/forge_softmax' \
   > /tmp/forge.log 2>&1
 ```
@@ -229,7 +233,10 @@ When a campaign finishes it runs its own postmortem — pitfalls from regression
   Transfer rules discovered: 1
 ```
 
-The lesson documents land under the backend's `learned/` directory in the knowledge base, and the (config, performance) pairs go to the tuning database:
+The lesson documents land under the backend's `learned/` directory in the writable
+knowledge base — `$KERNELFORGE_PROJECT_ROOT/knowledge_base`, defaulting to
+`~/.cache/hyperloom/kernelforge/knowledge_base` — and the (config, performance)
+pairs go to the tuning database:
 
 ```
 knowledge_base/triton/learned/optimization_BLOCK_N_256.md
@@ -326,7 +333,7 @@ python driver.py --warmup 10 --iters 200 --bench-mode   # wall_ms: 0.081920 per 
                                                         # case_ms: case_001 0.081920
 ```
 
-The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [examples/README.md](https://github.com/AMD-AGI/KernelForge/blob/main/examples/README.md).
+The full contract — every mode, every line, and the rules for multi-rank and self-managed-stream tasks — is in [`src/kernelforge/data/examples/README.md`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/kernelforge/data/examples/README.md).
 
 ## Troubleshooting
 
@@ -362,10 +369,11 @@ Common causes:
 - CK: AGPR asm bug (`"+a"` constraint drops reg_idx=0)
 - Tensor layout: `.clone()` preserving non-contiguous strides
 
-Check the knowledge base for your backend — `knowledge_base/<backend>/pitfalls.md` collects the ones that have already cost someone a campaign:
+Check the shipped knowledge base for your language — the `*_traps.md` levers collect the ones that have already cost someone a campaign:
 
 ```bash
-less knowledge_base/flydsl/pitfalls.md
+python3 -c "import kernelforge.resources as r; print(r.resource_path('local_knowledge'))"
+less .../local_knowledge/languages/triton/skills/optimize/triton_levers/triton_traps.md
 ```
 
 ### The campaign runs longer than you wanted
@@ -380,6 +388,6 @@ The loop checks for that file at the next iteration boundary, then finalizes nor
 
 ## Next Steps
 
-- Read the [knowledge base](https://github.com/AMD-AGI/KernelForge/tree/main/knowledge_base) to understand what the agent knows
-- Browse the [runnable examples](https://github.com/AMD-AGI/KernelForge/tree/main/examples) for task templates and the full driver contract
-- Check the [main README](https://github.com/AMD-AGI/KernelForge/blob/main/README.md) for architecture details and extending the system
+- Read the shipped knowledge base under `src/kernelforge/data/local_knowledge/` to understand what the agent knows
+- Browse the [runnable examples](https://github.com/AMD-AGI/Hyperloom/tree/main/src/kernelforge/data/examples) for task templates and the full driver contract
+- See {doc}`Architecture </kernelforge/conceptual/architecture>` and {doc}`Extending forge </kernelforge/how-to/extending>`

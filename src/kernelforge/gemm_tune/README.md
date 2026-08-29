@@ -265,10 +265,32 @@ output-dir/
 
 ## Hyperloom Integration
 
-See [HYPERLOOM_INTEGRATION.md](./HYPERLOOM_INTEGRATION.md) for the full integration guide.
-
-Key points:
 - Hyperloom calls `kernelforge gemm-tune run` as a subprocess
 - Reads `recommended_env` from result.json
 - Restarts serving with those env vars → runs E2E benchmark → decides KEEP/REVERT
 - CLI does NOT make the final KEEP/REVERT decision (only `micro_decision`)
+
+### `--kernel-signature-log` decides whether tuning does anything
+
+The CLI does not *require* it, which is not the same as it being optional in
+practice. Everything the tuners need beyond the model config comes from this
+log:
+
+- **Dense shapes.** Shapes derived from `config.json` served **0.4%** of the
+  lookups the runtime actually made, across 42 measured arms. The log's own
+  miss list is the shape source; without it the dense tuners either skip, or
+  tune a table nothing reads.
+- **The MoE dispatch key.** `fmoe_ck` refuses to tune a key inferred from the
+  config, because the quantisation pair, the per-partition `inter_dim` and the
+  EP path's extra masked expert slot are all chosen by the serving framework.
+  The log prints the tuple aiter dispatched, which supplies all three. With no
+  log, `fmoe_ck` skips every MoE model — measured as 27 skips out of 27 on a
+  box with 33 models.
+
+The log must come from a server that actually served traffic; a boot-only log
+records no lookups. Hyperloom populates it from the current-best or baseline
+benchmark workspace.
+
+`--demand <demand.json>`, an already-parsed demand file from
+`kernelforge gemm-tune evidence`, is equivalent and takes priority. Given only
+`--kernel-signature-log`, `run` derives one from the log itself.

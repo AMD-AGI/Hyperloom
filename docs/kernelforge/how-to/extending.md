@@ -29,6 +29,13 @@ are a new kernel backend, a new GPU tool, and new knowledge.
 
 ## Add knowledge
 
-Drop a `.md` file into `knowledge_base/<backend>/`. It is automatically loaded
-and injected into the relevant kernel backend's prompt. Keep each file under about
-2K tokens so prompts stay focused.
+Drop a `.md` file into the shipped tree at
+`src/kernelforge/data/local_knowledge/languages/<language>/`, following the
+`INDEX.md` layout already there. It is automatically loaded and injected into
+the relevant kernel backend's prompt. Keep each file under about 2K tokens so
+prompts stay focused.
+
+Lessons the loop distils for itself go somewhere else — the *writable*
+`knowledge_base/<backend>/learned/` under `$KERNELFORGE_PROJECT_ROOT` (default
+`~/.cache/hyperloom/kernelforge`). Nothing under the installed package is
+written at runtime.
