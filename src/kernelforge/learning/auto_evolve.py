@@ -37,10 +37,9 @@ class AutoEvolver:
     def from_config(cls, config: Config) -> AutoEvolver:
         """Create an AutoEvolver from standard config.
 
-        Both sinks are *writers*, so they target the writable knowledge root
-        rather than ``config.knowledge_dir`` -- that one resolves to the curated
-        tree packaged inside ``kernelforge/data``, which lives in site-packages
-        and is replaced on upgrade.
+        Both sinks are *writers*, so they target the writable knowledge root --
+        a directory next to the user's experiments, not anything inside the
+        installed package.
         """
         kb_dir = writable_knowledge_root()
         return cls(

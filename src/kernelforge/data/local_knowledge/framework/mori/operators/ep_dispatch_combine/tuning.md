@@ -194,8 +194,8 @@ reasonable free default, not a substitute for tuning, and a knob that would make
 
 Rounds 1 and 2 above were run with `aiter-fellow`'s default forge-loop knowledge injection, which — as of
 this writing — only auto-injects `hardware/`, `common_methodology/`, and `framework/aiter/` into the
-agent's system prompt (see `src/kernel_agents/knowledge/local_index.py` /
-`src/kernel_agents/fellows/base.py`). **`framework/mori/` was never wired in.** Checking the round-2
+agent's system prompt (see `src/kernelforge/knowledge/local_index.py` /
+`src/kernelforge/kernel_backends/base.py`). **`framework/mori/` was never wired in.** Checking the round-2
 Claude session transcript confirmed the agent made exactly 2 file reads all session
 (`mori_ep_config.py`, `driver.py`) — zero reads anywhere under `local_knowledge/`. So rounds 1-2 are not
 evidence this card helps; they are evidence forge-loop's generic search + a hand-written `program.md` can

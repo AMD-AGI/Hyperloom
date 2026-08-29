@@ -83,7 +83,10 @@ class Config:
     # Paths (derived)
     project_root: Path = field(default_factory=default_project_root)
     experiments_dir: Path = field(default=None)
-    knowledge_dir: Path = field(default=None)
+    # There is no `knowledge_dir` here any more. It used to resolve the packaged
+    # `data/knowledge_base` tree, which no caller ever read; the tree is gone and
+    # the field went with it. Knowledge the loop *produces* goes to
+    # `resources.writable_knowledge_root()`, which is a different directory.
     # Curated per-backend knowledge tree injected into the forge-loop system
     # prompt as an on-demand index (hardware / common_methodology / flydsl).
     local_knowledge_dir: Path = field(default=None)
@@ -152,8 +155,6 @@ class Config:
             raise ValueError("agent_options must be a dict")
         if self.experiments_dir is None:
             self.experiments_dir = self.project_root / "experiments"
-        if self.knowledge_dir is None:
-            self.knowledge_dir = resource_path("knowledge_base", self.project_root)
         if self.local_knowledge_dir is None:
             self.local_knowledge_dir = resource_path("local_knowledge", self.project_root)
         if self.knowledge_config is None:

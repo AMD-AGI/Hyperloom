@@ -78,9 +78,13 @@ def default_project_root() -> Path:
 def writable_knowledge_root() -> Path:
     """Writable destination for knowledge the loop *produces*.
 
-    The curated knowledge base resolved by ``resource_path("knowledge_base")``
-    is packaged and read-only; postmortem lessons and the tuning DB go here
-    instead. The directory is created on demand by its callers.
+    Postmortem lessons and the tuning DB are written here. The directory is
+    created on demand by its callers.
+
+    Note the name: there used to be a packaged, read-only ``knowledge_base``
+    tree under ``kernelforge/data`` as well, and the two were easy to confuse.
+    That one was removed once an audit found nothing read it. This path is the
+    only ``knowledge_base`` left, and it is writable and outside the package.
     """
     return default_project_root() / "knowledge_base"
 

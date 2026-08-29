@@ -54,24 +54,28 @@ def forge_loop_prompts(monkeypatch):
 # backend is served (``resolve_language_dirs``) leaves every hash here alone --
 # which makes an unexpected diff in this table a precise signal that prompt text
 # moved, not that knowledge assembly did.
-# Every hash below was re-snapshotted twice: once in the KernelForge ->
-# Hyperloom merge (which rewrote one runnable command in a shared knowledge
+# Every hash below has been re-snapshotted three times: once in the KernelForge
+# -> Hyperloom merge (which rewrote one runnable command in a shared knowledge
 # card -- the old package name in ``python3 -m <pkg>.mcp_server.tools.bench``),
-# and once for the backend-vocabulary rename, which reaches the prompt
-# TEXT because each backend introduces itself by name ("You are the CK kernel
-# backend --"). Both times the rendered prompts were diffed line by line
-# against their previous rendering and the identity line was the only
-# difference; see test_rename_completeness.py for the tree-wide check.
+# once for the backend-vocabulary rename, which reaches the prompt TEXT because
+# each backend introduces itself by name ("You are the CK kernel backend --"),
+# and once for the local_knowledge card renames (cheap_sweeps.md ->
+# lever_cheap_sweeps.md and friends). That last one moved all nine hashes even
+# though only ck/hip/triton prompts.py changed, because the two cards every
+# backend is pointed at live in the shared prompt_utils.py preamble.
+# Each time the rendered prompts were diffed line by line against their previous
+# rendering; for the card renames every changed line was a card name and nothing
+# else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "d502c3538e574804dcdb85b578a790c5b3a175eb3679da5d9db90e74340c89ee",
-    "ck": "c78c34fcbb029adaea9d66ef61c430acd969b06a9a4a100f29d91dea6eb9d99c",
-    "flydsl": "a1fd410844aa28127cb491bf5943704f53c006a74d61dafbab3e56b2871d03c7",
-    "fusion": "ab922c29b893b9919320ed008760bd26d19a6bac992f050fb5b70c9be96c43ca",
-    "gluon": "727355f591b86b0e5f6be2cb016e3aa3974eea2a5ab845b4f6ae7551333b15d0",
-    "hip": "de5256fa94690d93f434603eced71c8cd5a510d5ed551743628e58ff42826069",
-    "hipblaslt": "fa158c1b2e44fc15449958a57fed741b9751e18c12b161baecae6aa5cc732fab",
-    "intellikit": "ebafd583f439e13e8bd29ac5d5ef3aca22a425a2474449072238c4f794eb2ef7",
-    "triton": "a18840426da7af9776f2ba0756dc46b09b1e8ba5137a79ae2bdc93c2b1ee3f8c",
+    "aiter": "6e1775b899971812b9c9f9b598e72d70a9534157182b5c747d2bfc9a962e59d5",
+    "ck": "ec949d82a4226152c4a4e288a8109c3d51eabc23cf0739ed2acd925408a88c01",
+    "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
+    "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
+    "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
+    "hip": "43261f32b4877c306f60ab62a9a87d4deff8dd6906e88b9380e7aca21487896e",
+    "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
+    "intellikit": "eb0cf7258a84d000b8b08431a5fddf0110fbaaf8786b1b8d3a3b4b3360954207",
+    "triton": "7c682cdc1debbcd42deacce2b6f18e5b694f00fc7c527e772708b436d926a2d3",
 }
 
 

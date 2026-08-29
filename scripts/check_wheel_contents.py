@@ -96,7 +96,10 @@ def _check_data_files_are_present(cfg: dict, names: list[str]) -> list[str]:
 #: an empty knowledge base produces no error, just worse kernels. Absorbed from
 #: KernelForge's deleted ``test_wheel_content.py``, which built its own wheel.
 _NON_EMPTY_TREES = {
-    "kernelforge/data/knowledge_base/": 100,
+    # kernelforge/data/knowledge_base/ used to be listed here with a floor of
+    # 100. The tree was removed after an audit found no reader: nothing consumed
+    # config.knowledge_dir, no prompt pointed at it, and it was never granted to
+    # an agent sandbox.
     # Was 700, when local_knowledge still carried per-operator cards duplicated
     # across every language folder. That duplication was removed deliberately
     # (the same card existed 3-5 times over, and operator-level facts go stale
