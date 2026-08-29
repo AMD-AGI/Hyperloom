@@ -25,6 +25,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   does not exist, and runtime state that used to be written next to those
   resources goes to a writable root instead of into `site-packages`.
 
+  Two things in the snapshot did not come across. The `intellikit` kernel
+  backend is removed: nothing in Hyperloom could reach it -- `infer_kernel_backend`
+  has no arm for it and the dispatch path only ever passes triton/flydsl/ck/aiter
+  -- and its author confirms it is no longer needed. Its `languages/asm/`
+  knowledge tree (117 files, a vendored copy of `ROCm/intellikit-asm-skills`
+  plus CDNA4 ISA extracts) went with it, being reachable from no other backend.
+  Eight kernel backends remain: CK, FlyDSL, Triton, Gluon, AITER, HIP,
+  hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
+  it targets the retired repository.
+
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
