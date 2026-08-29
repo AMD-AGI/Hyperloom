@@ -739,6 +739,12 @@ def _local_scratch_dir(output_dir: Path) -> Path:
     network mount it is placed on local disk instead. Only the worktree moves;
     the durable archive under ``output_dir`` stays where the operator put it.
     Override the local root with ``$FORGE_LOCAL_SCRATCH_ROOT``.
+
+    The local tree mirrors ``<session_id>/<attempt>`` from the durable side.
+    The attempt name alone is the kernel's, so two sessions optimizing one
+    kernel would claim one path and the second would be refused for a collision
+    with the first; carrying the session as well is also what lets the sweep
+    below recognise a live tree.
     """
     if not _is_on_network_fs(output_dir):
         return output_dir / "worktree"
@@ -746,22 +752,29 @@ def _local_scratch_dir(output_dir: Path) -> Path:
     local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
     local_root.mkdir(parents=True, exist_ok=True)
     _sweep_orphaned_scratch(local_root, output_dir)
-    return local_root / output_dir.name / "worktree"
+    return local_root / output_dir.parent.name / output_dir.name / "worktree"
 
 
 def _sweep_orphaned_scratch(local_root: Path, current_output_dir: Path) -> None:
-    """Delete local worktrees whose durable session directory is already gone.
+    """Delete local scratch whose durable session directory is already gone.
 
     A SIGKILL skips the normal teardown, and each abandoned tree holds the whole
     framework copy, so without this the local root grows by GB per crash.
+
+    Liveness is decided per session, against the durable sessions root that
+    ``current_output_dir`` sits under. Anything not shaped like this function's
+    own output is left alone rather than assumed dead.
     """
     sessions_root = current_output_dir.parent.parent
+    current_session = current_output_dir.parent.name
     for child in local_root.iterdir():
-        if not child.is_dir() or child.name == current_output_dir.name:
+        if not child.is_dir() or child.name == current_session:
             continue
-        if (child / "worktree").is_dir() and not (sessions_root / child.name).exists():
+        if not any(child.glob("*/worktree")):
+            continue
+        if not (sessions_root / child.name).exists():
             shutil.rmtree(child, ignore_errors=True)
-            log.info("forge: swept orphaned scratch worktree %s", child)
+            log.info("forge: swept orphaned scratch session %s", child)
 
 
 def _prepare_worktree_nogit(
