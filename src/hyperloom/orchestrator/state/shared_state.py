@@ -892,7 +892,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision
     # run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM
-    # measure time when active else the cold baseline; warmup + stack-rebench exempt.
+    # measure time when active else the cold baseline; the warmup round is exempt.
     explore_overtime_kill_ratio: float = 2.0
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
@@ -946,7 +946,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
+    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
