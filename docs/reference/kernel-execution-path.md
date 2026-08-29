@@ -253,6 +253,12 @@ Required env vars:
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
 
+Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
+`FORGE_PATH` that used to be required here is removed and nothing reads it. The
+optional dev override is `KERNELFORGE_PROJECT_ROOT` (a writable root whose
+resource subtrees take precedence over the packaged copies); see
+[environment variables](environment-variables.md).
+
 Optional:
 
 | Variable | Purpose |
