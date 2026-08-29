@@ -1,7 +1,41 @@
 version = 1
 
+# Default for everything Hyperloom and KernelForge wrote.
+#
+# ``aggregate`` means a file's own notice is added to this one rather than
+# replacing it, which is right for AMD-authored files and wrong for anything
+# third-party: it would assert AMD copyright over someone else's work. Files
+# with an upstream notice are therefore listed below with ``override``, which
+# makes their real licence the only one REUSE reports.
 [[annotations]]
 path = "**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Advanced Micro Devices, Inc."
 SPDX-License-Identifier = "MIT"
+
+# Reference kernels copied from the FlyDSL project, carried in forge's
+# knowledge base so the agent can read working examples of the language. They
+# keep their own headers; this stops the blanket entry above from adding an AMD
+# claim on top.
+[[annotations]]
+path = [
+    "src/kernelforge/data/examples/flydsl-softmax-forge-loop/softmax_kernel.py",
+    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/01-vectorAdd.py",
+    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/02-tiledCopy.py",
+    "src/kernelforge/data/local_knowledge/languages/flydsl/API_docs/examples/03-tiledMma.py",
+]
+precedence = "override"
+SPDX-FileCopyrightText = "FlyDSL Project Contributors"
+SPDX-License-Identifier = "Apache-2.0"
+
+# Source patches against SGLang. The added lines are AMD's; the diff context
+# and the file paths are SGLang's, which is Apache-2.0, so the patch as a whole
+# is a derivative work of it and cannot be described as MIT alone.
+[[annotations]]
+path = "src/kernelforge/data/serving_patches/sglang/**/*.patch"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2026 Advanced Micro Devices, Inc.",
+    "SGLang Team and contributors",
+]
+SPDX-License-Identifier = "Apache-2.0 AND MIT"
