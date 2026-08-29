@@ -5241,8 +5241,6 @@ def _finalize_candidates(
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
         if res is None or res.status == "unresolved":
-            # The tracer frame is a direct runtime observation, so a grep result
-            # corroborates or annotates it but never vetoes it.
             frame = None
             trace_source = ""
             if not item.get("source_file"):
