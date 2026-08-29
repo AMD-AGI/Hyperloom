@@ -45,27 +45,6 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "every faulted-shape blocklist an operator has already accumulated.",
     ),
     (
-        # The retired-name detector, and the test that pins it. This is the one
-        # place the old spelling may appear in live code, because the whole
-        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
-        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
-        # the run and then ignored, silently re-enabling the compiled kernel
-        # backends the operator had switched off. The line regex is the literal
-        # variable name rather than /fellow/, so this entry cannot grow to cover
-        # any other residue in either file.
-        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
-        "Detects the pre-rename opt-out variable so it fails loudly instead of "
-        "being forwarded and ignored. Honouring it would keep the retired "
-        "vocabulary alive; not naming it at all would make the silent "
-        "re-enablement undetectable.",
-    ),
-    (
-        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
-        "The test that pins the detector above. It must spell the retired name to assert on it.",
-    ),
-    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spellings in order to forbid them.",
@@ -74,16 +53,6 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
 
 # Occurrences that are deliberate. Each entry is (path glob, line regex, why).
 _ALLOWED: tuple[tuple[str, str, str], ...] = (
-    (
-        "src/kernelforge/data/*.md",
-        r"kernel-agents",
-        "Knowledge-base prose describing historical campaigns -- ${KA_WORKSPACE}/"
-        "kernel-agents-workspace/... paths that were real when those runs happened. "
-        "Rewriting them would falsify the record. Scoped to *.md on purpose: the "
-        "exemption is for narrative, and a data/* glob also swallowed the runnable "
-        "examples/*/run_example.sh, which kept invoking the deprecated kernel-agents "
-        "console alias and telling readers to pip install a repo that is now archived.",
-    ),
     (
         "*",
         r"KERNEL_AGENTS_MAX_TURNS",
@@ -101,27 +70,6 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"kernel_agents\.agent_providers",
         "Pre-rename entry-point group, still read so third-party provider plugins "
         "keep loading (with a DeprecationWarning).",
-    ),
-    (
-        # The retired-name detector, and the test that pins it. This is the one
-        # place the old spelling may appear in live code, because the whole
-        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
-        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
-        # the run and then ignored, silently re-enabling the compiled kernel
-        # backends the operator had switched off. The line regex is the literal
-        # variable name rather than /fellow/, so this entry cannot grow to cover
-        # any other residue in either file.
-        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
-        "Detects the pre-rename opt-out variable so it fails loudly instead of "
-        "being forwarded and ignored. Honouring it would keep the retired "
-        "vocabulary alive; not naming it at all would make the silent "
-        "re-enablement undetectable.",
-    ),
-    (
-        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
-        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
-        "The test that pins the detector above. It must spell the retired name to assert on it.",
     ),
     (
         "src/kernelforge/tests/test_rename_completeness.py",
@@ -232,6 +180,32 @@ def _is_allowed(rel: str, line: str, allowed: tuple[tuple[str, str, str], ...] =
         if (glob == "*" or fnmatchcase(rel, glob)) and re.search(line_re, line):
             return True
     return False
+
+
+def test_every_allowlist_entry_still_exempts_something() -> None:
+    """An exemption that matches nothing is a hole nobody is watching.
+
+    Each entry above widens what the greps accept. Once the code it was written
+    for is gone, the entry keeps standing -- silently pre-approving whatever
+    later lands on that path and matches that regex. Deleting the code is only
+    half the removal; this makes the other half fail loudly instead of rotting.
+    """
+    root = _repo_root()
+    if root is None:
+        pytest.skip("not a source checkout")
+    dead: list[str] = []
+    for label, allowed, pattern in (
+        ("_ALLOWED", _ALLOWED, _PATTERN),
+        ("_COLLAPSE_ALLOWED", _COLLAPSE_ALLOWED, _COLLAPSE_PATTERN),
+        ("_FELLOW_ALLOWED", _FELLOW_ALLOWED, _FELLOW_PATTERN),
+    ):
+        hits = _tracked_hits(root, pattern)
+        for glob, line_re, _why in allowed:
+            if not any(
+                (glob == "*" or fnmatchcase(rel, glob)) and re.search(line_re, line) for rel, _lineno, line in hits
+            ):
+                dead.append(f"{label}: {glob}  /{line_re}/")
+    assert not dead, "allowlist entries that exempt nothing -- delete them:\n  " + "\n  ".join(dead)
 
 
 def test_no_stray_kernel_agents_references() -> None:
