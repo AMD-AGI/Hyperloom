@@ -1303,11 +1303,6 @@ class SpecialistRunner:
         # Re-stamp gap_canonical_id/domain so the on-disk artifact is authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
-        # Re-stamp cross-framework provenance from task params for the KB ledger.
-        _cf_params = ctx.task.params or {}
-        if _cf_params.get("cross_framework"):
-            done_payload["source_framework"] = str(_cf_params.get("source_framework") or "")
-            done_payload["target_framework"] = str(_cf_params.get("target_framework") or "")
         if gpu_ids:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:

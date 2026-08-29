@@ -221,23 +221,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "frameworks) and kernel_switch_specialist (operator kernels)."
         ),
     ),
-    SpecialistDomain(
-        key="cross_framework_rewrite_specialist",
-        llm_selectable=False,
-        layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
-        kb_anchor="framework",
-        available_in="M6",
-        description=(
-            "Authoring specialist for cross-framework feature porting (#5-P2). "
-            "Given a source-framework PR diff, symbol-level landing points in "
-            "the TARGET framework, and the target module's current source, it "
-            "re-implements the equivalent feature against the target API into "
-            "an isolated worktree (NEVER git-apply the source diff). Edits are "
-            "confined to the landing points plus their direct dependencies. "
-            "Gated by the same throughput/accuracy double gate as same-framework "
-            "patches; distinct from serving_specialist (same-framework tuning)."
-        ),
-    ),
 )
 
 

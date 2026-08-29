@@ -808,34 +808,6 @@ def test_empty_outcome_skips_when_config_levers_present(tmp_path: Path):
     assert stub.shared_state.framework_agent_phase_progress == []
 
 
-def test_authoring_specialist_cross_framework_seed(tmp_path: Path):
-    """A cross_framework audit seeds the specialist with rewrite contract + provenance."""
-    stub = _Stub(tmp_path)
-    stub.shared_state.framework = "vllm"  # session (target) framework
-    audit = {
-        "layer": "cross_framework",
-        "metrics": {"src_framework": "sglang", "dst_framework": "vllm"},
-        "evidence": [
-            {
-                "dst_module": "vllm/core/block/prefix_caching_block.py",
-                "src_path": "python/sglang/srt/mem_cache/radix_cache.py",
-                "feature": "radix_prefix_cache",
-            }
-        ],
-        "recommended_next_step": "author_via_specialist",
-    }
-    tid = asyncio.run(stub._enqueue_framework_agent_authoring_specialist(dict(_CANDIDATE), audit))
-    assert tid
-    params = stub.tasks.created[-1]["params"]
-    assert params.get("cross_framework") is True
-    assert params.get("source_framework") == "sglang"
-    assert params.get("target_framework") == "vllm"
-    notes = params.get("notes") or ""
-    assert "CROSS-FRAMEWORK PORT" in notes
-    assert "specialist:serving:framework:cross_framework:sglang->vllm" in notes
-    assert "prefix_caching_block.py" in notes
-
-
 def test_authoring_specialist_same_framework_no_cross(tmp_path: Path):
     """A non-cross audit must NOT stamp cross-framework params."""
     stub = _Stub(tmp_path)

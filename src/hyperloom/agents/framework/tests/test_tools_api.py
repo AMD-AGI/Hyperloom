@@ -101,35 +101,6 @@ def test_find_relevant_prs_smart_github_only_when_primus_url_missing(
     assert [c.ref for c in out] == ["PR:9"]
 
 
-def test_fetch_pr_audit_material_writes_two_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """fetch_pr_audit_material writes pr.patches + pr_files.json."""
-
-    def fake_patches(repo_slug, number, *, base_url, timeout_sec):  # noqa: ARG001
-        return "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
-
-    def fake_files(repo_slug, number, *, base_url, timeout_sec):  # noqa: ARG001
-        return [{"file_path": "x"}]
-
-    monkeypatch.setattr(tools_api, "pr_patches", fake_patches)
-    monkeypatch.setattr(tools_api, "pr_files", fake_files)
-
-    out_dir = tmp_path / "audit"
-    paths = tools_api.fetch_pr_audit_material(
-        "https://github.com/sgl-project/sglang.git",
-        42,
-        out_dir=out_dir,
-        primus_cortex_url="http://primus",
-    )
-    assert (out_dir / "pr.patches").is_file()
-    assert (out_dir / "pr_files.json").is_file()
-    payload = json.loads((out_dir / "pr_files.json").read_text(encoding="utf-8"))
-    assert payload["number"] == 42
-    assert payload["repo"] == "sgl-project/sglang"
-    assert payload["files"] == [{"file_path": "x"}]
-    assert paths["patches_path"].endswith("pr.patches")
-    assert paths["files_json_path"].endswith("pr_files.json")
-
-
 def test_evaluate_candidate_outcome_winner_pass() -> None:
     """Throughput >= ratio + accuracy drop <= max + completed parity -> winner."""
     out = tools_api.evaluate_candidate_outcome(
