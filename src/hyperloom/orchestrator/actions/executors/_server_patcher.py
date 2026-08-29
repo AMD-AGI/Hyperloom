@@ -839,7 +839,10 @@ def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
     Every miss on this path is silent by design (an unpatched tree just leaves
     ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` no-opping), so an override that wins is
     logged at WARNING: patching SGLang from somewhere other than the shipped
-    tree is not something to discover by reading a diff months later.
+    tree is not something to discover by reading a diff months later. An
+    override that *loses* -- ``arg`` given but holding no ``serving_patches``
+    directory -- is logged too, for the same reason in reverse: the caller named
+    a tree and a different one is about to be applied.
 
     ``kernelforge`` is imported inside the function on purpose: Hyperloom must
     stay importable on a host where the forge extra was not installed, and this
@@ -862,6 +865,15 @@ def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
                 candidate,
             )
             return candidate
+        # An override that does not resolve falls through to the packaged tree,
+        # which is the right fail-soft behaviour but the wrong silence: the
+        # caller asked for a specific tree and got a different one. A mistyped
+        # root would otherwise look exactly like no override at all.
+        log.warning(
+            "_server_patcher: explicit KernelForge root %s has no serving_patches directory; "
+            "falling back to the packaged tree, so the requested patches are NOT the ones applied",
+            arg,
+        )
 
     try:
         from kernelforge.resources import default_project_root, packaged_data_root, resource_path

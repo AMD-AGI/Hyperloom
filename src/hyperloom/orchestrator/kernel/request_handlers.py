@@ -3162,6 +3162,14 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
     try:
         from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
+        # Same reasoning as apply_verification._parse: kernelforge is in this
+        # wheel, so a miss is a broken install, and a bare return makes the
+        # missing routing warning indistinguishable from a clean run.
+        log.warning(
+            "kernelforge.gemm_tune is not importable, so the aiter/vLLM MoE "
+            "routing check is skipped -- it ships with Hyperloom, so this means "
+            'an incomplete install; reinstall with pip install -e ".[forge]"'
+        )
         return
     try:
         moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
