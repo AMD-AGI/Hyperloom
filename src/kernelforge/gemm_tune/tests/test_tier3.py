@@ -399,3 +399,25 @@ class TestReferee:
             dispatch=lambda c: clock.call(1e-6),
         )
         assert json.loads(json.dumps(j.to_dict()))["improved"] is True
+
+
+@pytest.mark.parametrize("bad", ["", "16x1536", "16x1536x7168x4", "16xNx7168", "not-a-shape"])
+def test_shape_key_rejects_a_shape_it_cannot_turn_into_m_n_k(bad: str) -> None:
+    """It used to answer ``()`` here, which helped nobody.
+
+    Every caller unpacks the result into three names, so the empty tuple only
+    moved the failure a few frames out and stripped the shape from the message
+    -- and ``"16x1536"`` did not even fail here, it returned a 2-tuple that blew
+    up the same way. The adapter's caller already treats a raised error as
+    "tier3 attempt failed; tuning continues", so this loses no tolerance.
+    """
+    from kernelforge.gemm_tune.tier3.dispatch import shape_key
+
+    with pytest.raises(ValueError, match="MxNxK"):
+        shape_key(bad)
+
+
+def test_shape_key_parses_the_well_formed_case() -> None:
+    from kernelforge.gemm_tune.tier3.dispatch import shape_key
+
+    assert shape_key("16x1536x7168") == (16, 1536, 7168)

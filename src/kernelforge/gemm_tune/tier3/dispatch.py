@@ -88,12 +88,25 @@ def parse_config(cfg: Any) -> dict[str, Any]:
     return out
 
 
-def shape_key(shape: str) -> tuple[int, ...]:
-    """``"16x1536x7168"`` into ``(16, 1536, 7168)``; empty tuple if malformed."""
+def shape_key(shape: str) -> tuple[int, int, int]:
+    """``"16x1536x7168"`` into ``(16, 1536, 7168)``.
+
+    Raises ``ValueError`` on anything else. It used to return ``()`` instead,
+    which did not spare any caller: every one of them unpacks the result into
+    three names, so a malformed shape became a bare ``ValueError`` about tuple
+    lengths several frames away -- and ``"16x1536"`` parsed "successfully" into
+    a 2-tuple that failed the same way. Failing here says which shape and why;
+    the caller in ``cli.py`` already treats that as "tier3 attempt failed;
+    tuning continues".
+    """
+    parts = str(shape).split("x")
+    if len(parts) != 3:
+        raise ValueError(f"tier3 shape must be MxNxK, got {shape!r}")
     try:
-        return tuple(int(part) for part in str(shape).split("x"))
-    except ValueError:
-        return ()
+        m, n, k = (int(part) for part in parts)
+    except ValueError as exc:
+        raise ValueError(f"tier3 shape must be MxNxK of integers, got {shape!r}") from exc
+    return (m, n, k)
 
 
 class _Bf16DenseAdapter:
@@ -153,7 +166,7 @@ class _Bf16DenseAdapter:
     def make_baseline(self, shape: str) -> Callable[[], Any]:
         torch = self._torch()
         key = shape_key(shape)
-        a, b = self._ops(key)  # type: ignore[arg-type]
+        a, b = self._ops(key)
         return self.as_graph(lambda: torch.matmul(a, b.t()))
 
     def make_dispatch(self, shape: str) -> Callable[[dict[str, Any]], Callable[[], Any] | None]:
@@ -164,7 +177,7 @@ class _Bf16DenseAdapter:
             # which candidate is in play, because it has to rebuild against
             # fresh inputs rather than reuse this callable's fixed operands.
             self._in_play[shape] = cand
-            call = self._build(key, cand)  # type: ignore[arg-type]
+            call = self._build(key, cand)
             return self.as_graph(call) if call is not None else None
 
         return dispatch
@@ -176,7 +189,7 @@ class _Bf16DenseAdapter:
             cand = self._in_play.get(shape)
             if cand is None:
                 return True
-            return self._is_correct(key, cand)  # type: ignore[arg-type]
+            return self._is_correct(key, cand)
 
         return check
 
