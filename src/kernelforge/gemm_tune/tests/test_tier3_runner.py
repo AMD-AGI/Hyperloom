@@ -422,7 +422,7 @@ class TestTheWholeChain:
         assert out.stage == "referee" and out.ok
         assert out.improved_shapes == 1
         # Recorded, but still a candidate until a person says otherwise.
-        assert not out.trusted
+        assert not out.operator_signed
 
     def test_the_scripts_own_claim_does_not_survive_re_timing(self, tmp_path, monkeypatch, open_gate):
         # Its CSV says 2x. Our clock says it is slower.
