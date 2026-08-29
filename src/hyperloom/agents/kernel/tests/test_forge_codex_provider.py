@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import json
 import subprocess
-import tomllib
 import sys
 from pathlib import Path
 
 import pytest
+
+try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on py3.10
+    import tomli as tomllib  # type: ignore[no-redef]
 
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
