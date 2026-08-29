@@ -3945,7 +3945,7 @@ class WritebackCollaborator:
             # reflects the full stack.  Lifting only the highest-gain winner credited
             # that stacked throughput to a config missing the others' args, and the
             # missed winners' recipe_deltas never reached the ledger at all.
-            # Each winner carries its own tput from the decision or stack-rebench round.
+            # Each winner carries its own tput from the round that graded it.
             # Because KEEP requires a positive gain over the advancing running base, each
             # winner's tput is strictly greater than the previous one, so the anchor
             # check inside _lift_to_current_best clears for every in-round winner.

@@ -4377,7 +4377,8 @@ def record_session_validation(
         stack_len: Adopted-stack length this figure was validated at.
         source: The path that promoted it, e.g. ``integrate_patch``.
         measurement_basis: ``e2e_rebench`` when the throughput was measured
-            end to end, ``derived_speedup`` when it was inferred from a
+            end to end, ``e2e_decision_round`` when it is an explore round's own
+            grading measurement, ``derived_speedup`` when it was inferred from a
             micro-benchmark's speedup.
         ts: Author-time stamp; defaults to now.
         producer: Recorder producer label.

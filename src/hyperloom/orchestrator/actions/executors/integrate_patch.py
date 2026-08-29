@@ -3241,15 +3241,15 @@ class IntegratePatchExecutor:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
-        # The parity leg is an additional full bench, so it needs the same
-        # session bound the first bench got.
-        # Resolved here rather than threaded from the caller because the deadline
-        # is an absolute monotonic timestamp: the budget the first bench spent is
-        # already reflected in it.
-        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
-
         parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
         if switch_manifest:
+            # The parity leg is an additional full bench, so it needs the same
+            # session bound the first bench got. Resolved here rather than
+            # threaded from the caller because the deadline is an absolute
+            # monotonic timestamp: the budget the first bench spent is already
+            # reflected in it. Only this leg reads it, so it is resolved only
+            # when the leg runs.
+            session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
             parity = await self._switch_off_parity(
                 params=params,
                 output_root=output_root,

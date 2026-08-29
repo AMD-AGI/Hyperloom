@@ -1044,10 +1044,9 @@ class ExploreExecutor:
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
         # This round's own ledger writes, kept apart from the ledger it inherited
-        # and merged over it once the loop is done. A variant whose confirmation
-        # round the run reaps has to be rolled back, and a fingerprint may be
-        # re-run across rounds -- so rolling back against a merged dict deletes
-        # the earlier round's measured row along with this round's write.
+        # and merged over it once the loop is done. A fingerprint may be re-run
+        # across rounds, so writing straight into the merged dict would lose the
+        # earlier round's measured row under this round's write.
         round_tested: dict[str, dict[str, Any]] = {}
         round_name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
@@ -1061,8 +1060,6 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
-        # In-batch KEEP'd entries (for full vs incremental stack recompose).
-        in_batch_keeps: list[dict[str, Any]] = []
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a fresh cold boot for round 2).
@@ -1236,9 +1233,10 @@ class ExploreExecutor:
                     )
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
-                # Round 1 + round 2 share this slot as the lifecycle pid_dir so
-                # round 2 re-attaches to round 1's hot server.
-                round1_lifecycle = (
+                # The warmup and decision rounds share this slot as the
+                # lifecycle pid_dir so the decision round re-attaches to the
+                # server the warmup left hot.
+                variant_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
@@ -1269,7 +1267,7 @@ class ExploreExecutor:
                             benchmark_script=override_script,
                             result_dir=override_result_dir,
                             soft_deadline_sec=None,
-                            server_lifecycle=round1_lifecycle,
+                            server_lifecycle=variant_lifecycle,
                             base_args_mode=stack_base_args_mode,
                             serving_lease=variant_lease,
                             session_deadline_sec=session_deadline_sec,
@@ -1361,7 +1359,7 @@ class ExploreExecutor:
                         benchmark_script=override_script,
                         result_dir=override_result_dir,
                         soft_deadline_sec=decision_deadline_sec,
-                        server_lifecycle=round1_lifecycle,
+                        server_lifecycle=variant_lifecycle,
                         base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
@@ -1639,8 +1637,6 @@ class ExploreExecutor:
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        in_batch_keeps.append(keep_entry)
-
                         # The variant KEEPs on the round that graded it. Folding
                         # it onto the stack advances the anchor the next in-batch
                         # variant is graded against.
