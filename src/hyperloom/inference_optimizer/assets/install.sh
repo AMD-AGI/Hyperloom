@@ -988,7 +988,16 @@ ensure_rocprof_compute() {
   # setup pays a full wheel build of a tree that vendoring doubled in size.
   # Asking for the same shape leaves the install in place and resolves only
   # the extra.
-  if [ "$CHECK_ONLY" -eq 1 ]; then
+  #
+  # Installed by default, with an opt-out rather than an opt-in: an opt-in
+  # reproduces the bug this block exists to fix -- profiling silently degrading
+  # to the PMC path on every pod that did not know to ask. `SKIP_FORGE_PROFILING=1`
+  # is for environments that cannot afford ~20 extra wheels (kaleido and
+  # astunparse are exact pins carried over from rocprofiler-compute's own
+  # requirements.txt), or that already have them.
+  if [ "${SKIP_FORGE_PROFILING:-0}" = "1" ]; then
+    log "rocprof-compute: SKIP_FORGE_PROFILING=1 — skipping the forge-profiling extra; profiling degrades to the PMC path"
+  elif [ "$CHECK_ONLY" -eq 1 ]; then
     warn "rocprof-compute: check-only — would install -e '${REPO_ROOT}[forge-profiling]'"
   elif [ "$DRY_RUN" -eq 1 ]; then
     log "would run: ${PYTHON} -m pip install -e '${REPO_ROOT}[forge-profiling]'"

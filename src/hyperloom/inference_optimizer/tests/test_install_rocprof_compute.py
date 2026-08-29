@@ -19,7 +19,9 @@ unusable. Two things break it on a stock ROCm serving image:
      ``forge-profiling`` extra, which nothing used to request.
 
 ``ensure_rocprof_compute()`` installs that extra, apt-installs the tool, and pins
-``pandas<3`` in the forge interpreter. It runs UNCONDITIONALLY — in particular it
+``pandas<3`` in the forge interpreter. The extra install is the one step with an
+escape hatch, ``SKIP_FORGE_PROFILING=1`` -- an opt-OUT, because an opt-in would
+recreate exactly the silent-PMC failure below. It runs UNCONDITIONALLY — in particular it
 is not gated on ``KERNEL_OPT_BACKEND_ORDER``: install.sh runs at setup time under
 the default geak backend and the carrier only sets
 ``KERNEL_OPT_BACKEND_ORDER=forge`` later on the optimize command, so a backend
@@ -171,6 +173,7 @@ def _run(
     tmpdir: str | None = None,
     check_only: int = 0,
     dry_run: int = 0,
+    skip_forge_profiling: str | None = None,
 ) -> dict:
     """Run the extracted rocprof-compute functions under set -euo pipefail."""
     rocm_root = tmp_path / "rocm"
@@ -213,6 +216,7 @@ export PROBE_RC="{probe_rc}"
 {f'export TMPDIR="{tmpdir}"' if tmpdir is not None else "true"}
 {backend_line}
 {forge_line}
+{f'export SKIP_FORGE_PROFILING="{skip_forge_profiling}"' if skip_forge_profiling is not None else "unset SKIP_FORGE_PROFILING || true"}
 
 {_extract_fn("_rocpc_effective_python")}
 
@@ -326,6 +330,30 @@ def test_forge_profiling_extra_is_installed_editable(tmp_path: Path) -> None:
     assert calls, r["pip_calls"]
     for call in calls:
         assert " -e " in f" {call} ", f"the forge-profiling install must be editable: {call}"
+
+
+def test_skip_forge_profiling_opts_out(tmp_path: Path) -> None:
+    """``SKIP_FORGE_PROFILING=1`` is an opt-OUT, and only skips this one step.
+
+    The extra is ~20 wheels, so an environment that cannot afford them needs a
+    way out. It is not an opt-in for the reason the module docstring gives: an
+    opt-in is what the old ``$FORGE_PATH`` gate effectively was, and it made
+    every pod profile on PMC without saying so.
+    """
+    # pandas 3 so the later pin step has work to do: the opt-out must skip the
+    # extra and nothing else.
+    r = _run(tmp_path, tool_present=True, pandas_state="v3", skip_forge_profiling="1")
+    assert r["rc"] == 0 and r["reached_end"], r["out"]
+    assert not r["extra_installed"], f"SKIP_FORGE_PROFILING=1 must skip the extra:\n{r['pip_calls']}"
+    assert "SKIP_FORGE_PROFILING=1" in r["out"], "the skip must be logged, not silent"
+    assert r["pandas_pinned"], f"the opt-out must skip only the extra:\n{r['pip_calls']}"
+
+
+def test_forge_profiling_installs_when_the_opt_out_is_not_1(tmp_path: Path) -> None:
+    """Only the exact string ``1`` opts out; anything else keeps the default."""
+    for value in ("0", "", "true", "yes"):
+        r = _run(tmp_path / f"v{value or 'empty'}", tool_present=True, pandas_state="v2", skip_forge_profiling=value)
+        assert r["extra_installed"], f"SKIP_FORGE_PROFILING={value!r} must not skip: {r['pip_calls']}"
 
 
 def test_forge_profiling_extra_install_is_fail_soft(tmp_path: Path) -> None:
