@@ -2,7 +2,7 @@
 title: Gluon on AMD Instinct knowledge map — index, file roles, problem-routing & pinned sources
 kind: index
 scope: languages/gluon
-updated: 2026-08-23
+updated: 2026-08-29
 ---
 
 # Gluon on AMD — knowledge map
@@ -144,7 +144,7 @@ Cards cite inline; this consolidates the most-used pins.
 ## Cross-links out of this folder
 The Triton substrate Gluon shares is in `languages/triton/` — read
 `skills/optimize/triton_levers/triton_lowering.md` for the lowering pipeline and MFMA layout selection,
-and `.../isa_verify.md` for the `AMDGCN_ENABLE_DUMP` workflow (identical for Gluon: same backend, same
+and `.../triton_isa_check.md` for the `AMDGCN_ENABLE_DUMP` workflow (identical for Gluon: same backend, same
 ISA). Backend-neutral hardware constants are in `local_knowledge/hardware/`; bottleneck
 classification, roofline and benchmarking methodology are in `local_knowledge/common_methodology/`.
 The library control plane that dispatches these kernels into a live sglang/vLLM path is

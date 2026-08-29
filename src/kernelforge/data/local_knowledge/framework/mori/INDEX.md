@@ -2,7 +2,7 @@
 title: mori knowledge map — index, file roles & problem-routing
 kind: index
 scope: framework/mori
-updated: 2026-08-04
+updated: 2026-08-29
 pinned_source: ROCm/mori@dc4bc75a
 ---
 
@@ -50,22 +50,26 @@ framework/mori/
 │   └── launch_config_tuning.md           # MANUAL/AUTO mode, JSON tuning-DB schema, mori's own tuner
 └── operators/
     └── ep_dispatch_combine/
-        ├── overview.md                   # mori's OWN API surface (kernel types, config, buffer modes) —
-        │                                 # cross-links to ../../aiter/... for math contract/numerics,
-        │                                 # does not repeat them
+        ├── overview.md                   # mori's OWN API surface (kernel types, config, buffer modes);
+        │                                 # math contract and numerics are not documented here — read
+        │                                 # aiter/fused_moe.py and mori/ops/
         ├── tuning.md                     # THE measured-data card: mori's official per-chip tuning-DB
         │                                 # numbers + KernelForge's own MI300X forge-loop campaign results
         └── v2_flydsl.md                  # the experimental FlyDSL/cco-LSA reimplementation (dispatch_combine_v2)
 ```
 
-## Why this split from `framework/aiter/.../backends/mori.md`
-That card (still accurate, last updated 2026-07-30) documents mori **as aiter's EP seam**: what
-`MoriAll2AllManager` passes, the integration points, the aiter-side pitfalls. It is the right file for
-"how does aiter use mori." This folder documents mori **as its own library with its own tuning
-control-plane** — the JSON per-shape DB, MANUAL vs AUTO mode, and (new) our own measured MI300X data —
-which is a different question (aiter mostly just calls mori with fixed kwargs; it does not expose or
-consume mori's own tuning-DB mechanism at all today, which is itself a gap noted in
-`operators/ep_dispatch_combine/tuning.md`).
+## Why mori has its own folder
+mori used to be documented only from the aiter side, as a backend of aiter's `moe_dispatch_combine`
+operator: what `MoriAll2AllManager` passes, the integration points, the aiter-side pitfalls. That
+answered "how does aiter use mori" and nothing else, and it has since been deleted along with the rest
+of the aiter operator cards — for that question, read
+`aiter/dist/device_communicators/all2all.py` directly.
+
+This folder answers a different question: mori **as its own library, with its own tuning control
+plane** — the JSON per-shape DB, MANUAL vs AUTO mode, and our own measured MI300X numbers. The two are
+not the same subject, and the gap between them is real: aiter calls mori with a fixed set of kwargs and
+neither exposes nor consumes mori's tuning-DB mechanism at all today. That gap is documented in
+`operators/ep_dispatch_combine/tuning.md`.
 
 ## What to sync when mori is upgraded
 1. Re-verify every card against the new commit (config fields, kernel type list, tuning-config JSON schema).
