@@ -1062,7 +1062,8 @@ class ExploreExecutor:
         running_base_tput = base_tput
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
-        # script / profiler-on falls back to a fresh cold boot for round 2).
+        # script / profiler-on falls back to a cold decision round instead of
+        # one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(config_path)
         lifecycle_eligible = bool(lifecycle.get("eligible"))
         lifecycle_framework = str(lifecycle.get("framework") or "")

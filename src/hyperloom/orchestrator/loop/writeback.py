@@ -545,11 +545,10 @@ class WritebackCollaborator:
                 gain anchor.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: ``e2e_rebench`` when ``new_tput`` was measured
-                end to end, ``e2e_decision_round`` when it is a search's own
-                decision round (no confirmation round followed it),
-                ``derived_speedup`` when it was inferred from a
-                micro-benchmark.
+            measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
+                full-stack revalidation, ``e2e_decision_round`` when it is the
+                round an explore variant was graded on, ``derived_speedup``
+                when it was inferred from a micro-benchmark.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
