@@ -644,7 +644,7 @@ def _compute_explore_variant_timeout(
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
-    Per-variant KEEP/REVERT gating + inlined per-KEEP stack rebench.
+    Per-variant KEEP/REVERT gating over a running optimization stack.
     """
 
     def __init__(
@@ -677,8 +677,7 @@ class ExploreExecutor:
 
         Resolves the benchmark config and output workspace, builds the
         candidate grid (programmatic seed and/or LLM/specialist variants),
-        benchmarks each variant with per-variant KEEP/REVERT gating, and
-        optionally performs an inlined per-KEEP stack rebench.
+        and benchmarks each variant with per-variant KEEP/REVERT gating.
 
         Args:
             ctx: The action runner context carrying the task and params.
@@ -1243,8 +1242,8 @@ class ExploreExecutor:
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
-                # lease (actor) for this variant's warmup + decision + stack-
-                # rebench rounds; they all reuse one persistent server, so no GPU
+                # lease (actor) for this variant's warmup and decision
+                # rounds; they reuse one persistent server, so no GPU
                 # process outlives the lease. ``None`` on the local path keeps the
                 # legacy behaviour. The actor is NOT closed per variant — only its
                 # child server is reaped in the ``finally`` below (raylet-free);
@@ -1349,9 +1348,8 @@ class ExploreExecutor:
                             continue
                     # Decision round: warm (re-attaches to the warmup's hot
                     # server, client-only) when ``use_warm_decision``, otherwise a
-                    # fresh cold boot. cleanup=false keeps it hot for the stack-
-                    # rebench round below. ``soft_deadline_sec`` is the overtime
-                    # kill; round-2 stack-rebench inherits the same deadline.
+                    # fresh cold boot. It is the round the variant is graded on.
+                    # ``soft_deadline_sec`` is the overtime kill.
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -1484,9 +1482,8 @@ class ExploreExecutor:
                         )
                         continue
 
-                    # Decision-round gain is the cost gate: only variants that
-                    # clear keep_threshold (and the accuracy gate) earn a warm
-                    # stack-rebench round.
+                    # Decision-round gain is the gate: a variant KEEPs when it
+                    # clears keep_threshold and the accuracy gate.
                     gain = gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""
@@ -1569,9 +1566,9 @@ class ExploreExecutor:
                     if gv.name:
                         round_name_index[gv.name] = fp
 
-                    # ---- KEEP path (with warm round-2 rebench) ----
+                    # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack BEFORE rebench. For
+                        # Layer onto the running stack. For
                         # removal variants, next_args/next_envs are the
                         # effective launch config that must persist if the KEEP
                         # survives; gv.extra_* remain only the candidate delta.

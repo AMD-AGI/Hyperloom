@@ -3241,8 +3241,8 @@ class IntegratePatchExecutor:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
-        # Both the parity leg and the stack rebench below are additional full
-        # benches, so they need the same session bound the first bench got.
+        # The parity leg is an additional full bench, so it needs the same
+        # session bound the first bench got.
         # Resolved here rather than threaded from the caller because the deadline
         # is an absolute monotonic timestamp: the budget the first bench spent is
         # already reflected in it.
