@@ -65,8 +65,8 @@ The flags that decide what a campaign is:
 - `--driver` — the measurement driver. The loop treats it as a black box,
   talks to it over stdout, and blocks edits to it.
 - `--kernel-backend` — which backend's domain knowledge is injected into the agent's
-  prompt: one of `ck`, `flydsl`, `triton`, `aiter`, `hip`, `hipblaslt`, or
-  `intellikit`, written as the bare `<backend>` key.
+  prompt: one of `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`, or
+  `hipblaslt`, written as the bare `<backend>` key.
 - `--snr-threshold` — the correctness gate in dB, fixed for the campaign.
 - `--max-hours` — the wall-clock budget (minimum 1.0). The campaign is
   time-driven; it does not stop at a fixed iteration count. It stops when what

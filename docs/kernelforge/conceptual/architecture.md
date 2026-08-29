@@ -46,7 +46,6 @@ the kernel the loop is editing.
 | `aiter` | Pre-built AITER operators: dispatch, JIT integration, baselines |
 | `hip` | Raw HIP C++ and HipKittens: MFMA intrinsics, AGPR management, register pinning |
 | `hipblaslt` | Dense GEMM via hipBLASLt: TensileLite solutions, FP8, fused epilogues |
-| `intellikit` | Hand-written gfx950 AMDGCN assembly: MFMA scheduling, LDS layout, hazard management |
 | `fusion` | Decode-path kernel fusion for sglang and vLLM: CUDA-graph-safe Triton kernels |
 
 ## The measurement surface

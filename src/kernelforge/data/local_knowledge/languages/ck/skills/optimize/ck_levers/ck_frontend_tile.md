@@ -102,7 +102,7 @@ the intrinsic itself:
 c = __builtin_amdgcn_mfma_f32_32x32x16_bf16(a, b, c, 0, 0, 0);
 ```
 
-(Shapes and builtins: `../../../../asm/skills/optimize/asm_levers/asm_mfma_builtins.md`.)
+(Shapes and builtins: `../../../../hip/skills/optimize/hip_levers/hip_builtins.md`.)
 
 **Epilogue / CShuffle** exists because of a hardware fact: the MFMA accumulator leaves C scattered
 across lanes in a layout that cannot be stored coalesced. CShuffle routes C back through LDS

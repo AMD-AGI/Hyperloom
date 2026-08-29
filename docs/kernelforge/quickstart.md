@@ -136,7 +136,7 @@ kernelforge forge-loop \
     --max-hours 1
 ```
 
-`--kernel-backend` picks which kernel backend's domain knowledge is injected into the agent's prompt: `ck`, `flydsl`, `triton`, `aiter`, `hip`, `hipblaslt`, or `intellikit`. Omit it and the backend is inferred from the kernel sources.
+`--kernel-backend` picks which kernel backend's domain knowledge is injected into the agent's prompt: `ck`, `flydsl`, `triton`, `gluon`, `aiter`, `hip`, or `hipblaslt`. Omit it and the backend is inferred from the kernel sources.
 
 **In a container.** On a GPU host, a ROCm image with torch and your backend already installed needs nothing else from the environment except the credential line and a `claude` CLI on PATH:
 

@@ -80,7 +80,6 @@ class TestLanguagePairing:
         """The pairing is opt-in per backend, not a change to the default."""
         root = Path(config.local_knowledge_dir)
         assert resolve_language_dirs("flydsl", root) == ("flydsl",)
-        assert resolve_language_dirs("intellikit", root) == ("asm",)
         assert resolve_language_dirs("hipblaslt", root) == ()
 
     def test_missing_folder_degrades_instead_of_emitting_a_dead_section(self, tmp_path):
@@ -326,7 +325,7 @@ class TestAiterKernelBackendRoutesToAuthoringKnowledge:
     def test_names_the_authoring_route(self, aiter_prompt):
         assert "languages/<lang>/" in aiter_prompt
 
-    @pytest.mark.parametrize("lang", ["triton", "gluon", "hip", "ck", "asm", "flydsl"])
+    @pytest.mark.parametrize("lang", ["triton", "gluon", "hip", "ck", "flydsl"])
     def test_every_authoring_language_is_reachable(self, aiter_prompt, lang):
         assert f"languages/{lang}/" in aiter_prompt
 

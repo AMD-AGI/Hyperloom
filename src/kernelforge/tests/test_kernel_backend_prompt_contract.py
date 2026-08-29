@@ -23,8 +23,8 @@ from kernelforge.kernel_backends.constants import KERNEL_BACKENDS
 _GPU = "gfx950"
 _KB_SENTINEL = "KB_SENTINEL_VALUE"
 
-# Directory of the kernel backends package as actually loaded, so the intellikit prompt's
-# embedded PATCH_CO path does not make hashes depend on the checkout location.
+# Directory of the kernel backends package as actually loaded, so a prompt that
+# embeds a tool path does not make hashes depend on the checkout location.
 _KERNEL_BACKENDS_ABS = os.path.abspath(os.path.dirname(_kernel_backends_pkg.__file__))
 
 
@@ -60,21 +60,23 @@ def forge_loop_prompts(monkeypatch):
 # once for the backend-vocabulary rename, which reaches the prompt TEXT because
 # each backend introduces itself by name ("You are the CK kernel backend --"),
 # and once for the local_knowledge card renames (cheap_sweeps.md ->
-# lever_cheap_sweeps.md and friends). That last one moved all nine hashes even
+# lever_cheap_sweeps.md and friends). That last one moved every hash even
 # though only ck/hip/triton prompts.py changed, because the two cards every
 # backend is pointed at live in the shared prompt_utils.py preamble.
+# The intellikit backend's removal moved only aiter's hash: its prompt listed
+# `languages/asm/` in the language-folder routing, and that folder went with the
+# backend (diffed: one line changed, nothing else).
 # Each time the rendered prompts were diffed line by line against their previous
 # rendering; for the card renames every changed line was a card name and nothing
 # else moved. See test_rename_completeness.py for the tree-wide check.
 _SHA256_FORGE_LOOP: dict[str, str] = {
-    "aiter": "6e1775b899971812b9c9f9b598e72d70a9534157182b5c747d2bfc9a962e59d5",
+    "aiter": "67005fca12b430faff552dbf2ed432fc8d2c84836a746ad819f8b9a2633ca33b",
     "ck": "ec949d82a4226152c4a4e288a8109c3d51eabc23cf0739ed2acd925408a88c01",
     "flydsl": "59115fbf5dd6c4cd22dc0c547d7a95c9992b64b6ac3f8f5f8a88853f03055937",
     "fusion": "d158dc07a0d00e0b36c5bc6d5e20d2f207285517829f5b96131b582ee4df3d3d",
     "gluon": "f127190e0da7240c7b05a6951d7f046cc88c7ce145383daf483d69ad8f4123cd",
     "hip": "43261f32b4877c306f60ab62a9a87d4deff8dd6906e88b9380e7aca21487896e",
     "hipblaslt": "1ccbabae411cb958862fe9bf3cfbe5b1b9406467af18fa689e3bba1ccd2d646b",
-    "intellikit": "eb0cf7258a84d000b8b08431a5fddf0110fbaaf8786b1b8d3a3b4b3360954207",
     "triton": "7c682cdc1debbcd42deacce2b6f18e5b694f00fc7c527e772708b436d926a2d3",
 }
 

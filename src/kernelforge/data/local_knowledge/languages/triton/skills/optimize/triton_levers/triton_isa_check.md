@@ -103,8 +103,7 @@ llvm-objdump -d --arch=amdgcn --mcpu=gfx950 kernel.hsaco | less
 ```
 
 Counter and instruction semantics (`s_waitcnt vmcnt/lgkmcnt`, buffer descriptors, sched barriers) are in
-the LLVM AMDGPU backend guide, and per-instruction measured cycles are in
-`languages/asm/skills/optimize/asm_levers/intellikit/instructions/`.
+the LLVM AMDGPU backend guide.
 
 ## The one-line rule
 

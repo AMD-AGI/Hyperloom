@@ -56,7 +56,7 @@ aiter/                         (ROCm/aiter@b467ce342 = v0.1.16-283)
 │   ├── cpp_itfs/              # CK-tile codegen interfaces (sampling, pa, ...)
 │   ├── kernels/               # hand-written HIP (rmsnorm_quant_kernels.cu, quant_kernels.cu, ...)  -> languages/hip/
 │   └── pybind/, include/      # torch bindings + headers (incl. opus/)
-├── hsa/                       # PRECOMPILED ASM code-objects (.co HSACO) + CSV metadata  -> languages/asm/
+├── hsa/                       # PRECOMPILED ASM code-objects (.co HSACO) + CSV metadata
 │   ├── gfx942/, gfx950/, gfx1250/   # per-arch .co: pa/ mla/ mla_v4/ fmoe_*.co flatmm_uk_*.co gemm_a8w8_*.co ...
 │   ├── {op}/{op}_asm.csv      # CSV metadata mapping kernel params -> .co filename + function ptr
 │   └── codegen.py             # CSV -> C++ dispatch-table codegen (python hsa/codegen.py -m {pa,fmha,mla})
@@ -75,7 +75,7 @@ aiter/                         (ROCm/aiter@b467ce342 = v0.1.16-283)
 | **TopK-softmax** | `hsa/gfx942/topksoftmax/` | pre-FMOE expert selection |
 | **AllReduce** | `all_reduce.co`, `allreduce_{layernorm,rmsnorm}_*.co` | XGMI ring + fused post-attn norm |
 Note: aiter does **not** check in `.s` source — it ships `.co` binaries + CSV metadata + a round-trip ISA
-toolchain. To read/edit an asm kernel, disassemble the `.co` (see `languages/asm/`). gfx1250 (CDNA-next) has
+toolchain. To read/edit an asm kernel, disassemble the `.co` with `llvm-objdump`. gfx1250 (CDNA-next) has
 its own `hsa/gfx1250/` tree (FMHA / MLA / MLA-v4 / f4gemm).
 
 ## The dispatcher model (how a call resolves)
@@ -121,4 +121,4 @@ is what preserves the hand-tuned kernel through `torch.compile`.
   `aiter/configs/`, `csrc/gemm_a16w16/`, `csrc/opus_gemm/`, `hsa/{gfx942,gfx950,gfx1250}/`, `gradlib/`).
 - aiter as the central engine / default backend: https://github.com/ROCm/aiter ;
   https://rocm.blogs.amd.com/software-tools-optimization/aiter-ai-tensor-engine/README.html
-- Kernel families on disk (hsa/ HSACO): synthesized from the on-box `hsa/` tree (see `languages/asm/`).
+- Kernel families on disk (hsa/ HSACO): synthesized from the on-box `hsa/` tree.

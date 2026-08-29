@@ -412,7 +412,6 @@ def test_infer_kernel_backend_falls_back_from_unknown_environment_override(monke
         ("hip", "hip"),
         ("hip", "hip"),
         ("triton", "triton"),
-        ("intellikit", "intellikit"),
         ("tilelang", "flydsl"),
         ("tilelang", "flydsl"),
     ],

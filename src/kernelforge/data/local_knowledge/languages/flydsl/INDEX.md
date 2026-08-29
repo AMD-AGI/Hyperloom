@@ -159,4 +159,4 @@ Backend-agnostic optimization methodology (roofline, bottleneck classification, 
 `local_knowledge/common_methodology/`. The library control plane that dispatches FlyDSL kernels into the
 live sglang/vLLM path — and the decision of when to reach for the FlyDSL backend — is in
 `framework/aiter/` (`skills/optimize/aiter_levers/aiter_flydsl_libtype.md`). Lower-level MFMA/ISA detail is in
-`languages/asm/`.
+`languages/hip/skills/optimize/hip_levers/`.

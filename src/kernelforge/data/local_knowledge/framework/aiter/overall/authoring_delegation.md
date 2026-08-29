@@ -20,7 +20,7 @@ card is the router; it deliberately does **not** duplicate MFMA/LDS/knob docs.
 | aiter kernel family | written in | source location (aiter repo) | authoring knowledge |
 |---|---|---|---|
 | CK GEMM/attention/norm (`gemm_a8w8_ck`, `ck_moe_*`, `*_cktile`) | Composable Kernel (C++ templates) | `csrc/ck_*`, `3rdparty/composable_kernel` | `local_knowledge/languages/ck/` (ck_tile, ck_classic, gemm/fmha templates, knobs) |
-| ASM kernels (`*_asm`, `pa_fwd_asm`, `mla_*_asm`, HSACO) | raw AMDGCN assembly | `hsa/{gfx}/…` | `local_knowledge/languages/asm/` (asm_levers + IntelliKit per-instruction ISA); CDNA ISA facts also in `languages/hip/skills/optimize/hip_levers/` |
+| ASM kernels (`*_asm`, `pa_fwd_asm`, `mla_*_asm`, HSACO) | raw AMDGCN assembly | `hsa/{gfx}/…` | CDNA ISA facts in `languages/hip/skills/optimize/hip_levers/`; kernelforge ships no assembly authoring layer |
 | HIP/C++ ops (incl. HipKittens) | HIP C++ | `csrc/*` | `local_knowledge/languages/hip/` (intrinsics, lds_async, patterns, hipkittens) |
 | Triton ops (`aiter.ops.triton.*`) | Triton | `aiter/ops/triton/*` | `local_knowledge/languages/triton/` (knobs, patterns, isa_verify) |
 | FlyDSL ops (`aiter.ops.flydsl.*`) | FlyDSL | `aiter/ops/flydsl/*` | `local_knowledge/languages/flydsl/` |
@@ -41,4 +41,4 @@ card is the router; it deliberately does **not** duplicate MFMA/LDS/knob docs.
 Copying MFMA intrinsics, LDS swizzle, or Triton knobs into an aiter folder would fork the same facts
 across backends and rot. aiter's unique knowledge is the **library control plane** (catalog, build,
 DB tuning, dispatch); the language facts stay single-sourced in `languages/hip/`, `languages/triton/`,
-`languages/flydsl/`, `languages/ck/`, `languages/asm/`. Follow the links; don't re-document.
+`languages/flydsl/`, `languages/ck/`. Follow the links; don't re-document.

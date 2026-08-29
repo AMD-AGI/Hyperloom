@@ -107,5 +107,4 @@ A "win" whose ISA is byte-identical to the baseline is measurement noise, every 
 
 ## Related
 `mi350_matrix_core.md` (shapes, cycles, the scaled intrinsic) · `mi350_lds.md` (direct-to-LDS) ·
-`mi350_dtypes.md` (OCP FP8, MXFP) · `languages/asm/` (hand-written assembly and the IntelliKit
-instruction reference)
+`mi350_dtypes.md` (OCP FP8, MXFP)

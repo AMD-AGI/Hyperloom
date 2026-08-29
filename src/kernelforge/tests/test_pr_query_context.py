@@ -54,7 +54,7 @@ def test_mapped_kernel_backends_resolve_to_a_tracked_repo(kernel_backend, repo):
     assert repo in TRACKED
 
 
-@pytest.mark.parametrize("kernel_backend", ["ck", "hipblaslt", "intellikit"])
+@pytest.mark.parametrize("kernel_backend", ["ck", "hipblaslt"])
 def test_unmapped_kernel_backends_fall_to_repo_unresolved(kernel_backend):
     """Reject approximate repository matches."""
     assert resolve_repo(kernel_backend=kernel_backend, tracked=TRACKED) == ("", REASON_REPO_UNRESOLVED)

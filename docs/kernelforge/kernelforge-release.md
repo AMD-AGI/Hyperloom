@@ -33,7 +33,7 @@ This work is done by a small number of domain experts, creating a critical bottl
 
 ## The Solution
 
-KernelForge deploys 8 kernel backend agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
+KernelForge deploys kernel backend agents, each with domain-specific knowledge and GPU tooling access, driven by a measurement-gated iteration loop.
 
 ### Architecture
 
@@ -41,13 +41,13 @@ KernelForge deploys 8 kernel backend agents, each with domain-specific knowledge
                    Campaign — kernelforge forge-loop
               One kernel, one driver, one change per iteration
                               |
-        Kernel backends (8) — domain knowledge for the kernel at hand
-        +----------+----------+----------+----------+----------+----------+----------+
-        |          |          |          |          |          |          |          |
-         CK         FlyDSL     Triton     AITER      HIP        hipBLASLt  IntelliKit
-         (C++ CK    (MLIR      (JIT       (Pre-      (Raw HIP   (Dense     (ISA-level
-         templates) DSL)       Python)    built)     + HK)      GEMM)      ASM tune)
-        |          |          |          |          |          |          |          |
+        Kernel backends — domain knowledge for the kernel at hand
+        +----------+----------+----------+----------+----------+----------+
+        |          |          |          |          |          |          |
+         CK         FlyDSL     Triton     AITER      HIP        hipBLASLt
+         (C++ CK    (MLIR      (JIT       (Pre-      (Raw HIP   (Dense
+         templates) DSL)       Python)    built)     + HK)      GEMM)
+        |          |          |          |          |          |          |
         +----------+----------+----------+----------+----------+----------+----------+
                               |
                  GPU toolchain (Bash on the host)
@@ -177,8 +177,8 @@ searches invoke Supervisor guidance while measurement remains authoritative.
 | Python source files | ~90 |
 | Lines of code | ~12,700 |
 | Test coverage | 65 unit tests |
-| Knowledge base files | 30+ curated + auto-generated, plus vendored playbooks (CK, asm, HipKittens, CDNA4 ISA) |
-| Supported backends | 7 (CK, FlyDSL, Triton, AITER, HIP, hipBLASLt, IntelliKit) |
+| Knowledge base files | 30+ curated + auto-generated, plus vendored playbooks (CK, HipKittens) |
+| Supported backends | CK, FlyDSL, Triton, Gluon, AITER, HIP, hipBLASLt, plus a fusion backend |
 | Runnable examples shipped | 9 (softmax tutorials, production hot kernels, a collective, a distributed op, 2 FlyDSL rewrites) |
 | GPU toolchain stages | 5 (build, test, bench, pmc, registers) |
 

@@ -18,7 +18,6 @@ KERNEL_BACKEND_PROMPT_MODULES = {
     "aiter": "kernelforge.kernel_backends.aiter.prompts",
     "hip": "kernelforge.kernel_backends.hip.prompts",
     "hipblaslt": "kernelforge.kernel_backends.hipblaslt.prompts",
-    "intellikit": "kernelforge.kernel_backends.intellikit.prompts",
     "fusion": "kernelforge.kernel_backends.fusion.prompts",
 }
 KERNEL_BACKENDS = list(KERNEL_BACKEND_PROMPT_MODULES)
@@ -27,9 +26,8 @@ KERNEL_BACKENDS = list(KERNEL_BACKEND_PROMPT_MODULES)
 # backend absent from this map serves the folder named after itself, which is
 # the ordinary case.
 #
-# Two backends need more than one. The intellikit kernel backend writes AMDGCN assembly,
-# so its tree is keyed by that language rather than by the kernel_backend. Triton and
-# Gluon are one toolchain -- same frontend, same JIT, same
+# Triton and Gluon need more than one, because they are one toolchain -- same
+# frontend, same JIT, same
 # Triton -> TritonGPU -> TritonAMDGPU -> AMDGCN lowering, same cache -- differing
 # only in who assigns layouts, pipeline stages, register budget and the MFMA. So
 # each carries the other: a Triton campaign has to know that dropping to Gluon
@@ -39,7 +37,6 @@ KERNEL_BACKENDS = list(KERNEL_BACKEND_PROMPT_MODULES)
 # restating the substrate, and it means a misinferred kernel backend costs a prompt
 # template rather than a whole knowledge layer.
 _BACKEND_LANGUAGE_DIRS: dict[str, tuple[str, ...]] = {
-    "intellikit": ("asm",),
     "triton": ("triton", "gluon"),
     "gluon": ("gluon", "triton"),
 }

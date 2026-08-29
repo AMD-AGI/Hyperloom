@@ -110,7 +110,7 @@ behind is worse than no card — it sends the agent to an entry point that no lo
 
 ## Kernel-source authoring (delegated) & shared facts
 Editing kernel source ≠ tuning the DB. To author/replace a kernel, open the language folder by backend:
-CK → `languages/ck/` · ASM → `languages/asm/` · HIP/C++ → `languages/hip/` · Triton → `languages/triton/` ·
+CK → `languages/ck/` · HIP/C++ → `languages/hip/` · Triton → `languages/triton/` ·
 **Gluon → `languages/gluon/`** · FlyDSL → `languages/flydsl/`. opus split-K is aiter-internal — read
 `aiter/ops/opus/*` and `csrc/opus_gemm/*` directly, and tune it via
 `gemm_a16w16_tune.py --libtype opus` (see `overall/tuning_db.md`).

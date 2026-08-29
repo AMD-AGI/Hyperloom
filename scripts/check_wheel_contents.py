@@ -104,9 +104,12 @@ _NON_EMPTY_TREES = {
     # across every language folder. That duplication was removed deliberately
     # (the same card existed 3-5 times over, and operator-level facts go stale
     # faster than they can be maintained), taking the tree from 720 .md files to
-    # 213. The floor is a "did the tree get wiped" guard, not a size assertion --
-    # 200 keeps that guard meaningful against the current 251 files.
-    "kernelforge/data/local_knowledge/": 200,
+    # 213. Then languages/asm/ went too (117 files: AMD RAD's vendored IntelliKit
+    # ASM skills plus the CDNA4 ISA extracts), when the intellikit kernel backend
+    # it served was removed -- no other backend maps to that language folder.
+    # The floor is a "did the tree get wiped" guard, not a size assertion --
+    # 120 keeps that guard meaningful against the current 134 files.
+    "kernelforge/data/local_knowledge/": 120,
     "kernelforge/data/examples/": 40,
     "kernelforge/data/serving_patches/": 3,
 }

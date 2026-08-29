@@ -49,7 +49,7 @@ CK has **two front-ends, and choosing between them is the single load-bearing de
   your shape, **tune via the aiter DB first**; author/modify CK templates only for a fusion the library
   can't express or a shape it doesn't cover.
 - **MFMA/ISA facts and hardware constants are NOT duplicated here** — MFMA intrinsics live in
-  `languages/hip/` + `languages/asm/`; CU/VGPR/LDS/peak numbers in `local_knowledge/hardware/`.
+  `languages/hip/`; CU/VGPR/LDS/peak numbers in `local_knowledge/hardware/`.
 
 ## Start here — problem → files → order
 | Task / symptom | Read in this order |
@@ -67,7 +67,7 @@ CK has **two front-ends, and choosing between them is the single load-bearing de
 | "Common CK traps before integrating" | `ck_levers/ck_traps.md` |
 | "fp8 gives wrong numbers" | `ck_levers/ck_traps.md` (fnuz/OCP) → `skills/bottleneck/debug-ck-kernel.md` (§6) → `local_knowledge/hardware/` |
 | "Author / optimize operator X in CK" | the kernel source (`framework/aiter/overall/operator_catalog.md` for the aiter entry point) → back here: `ck_levers/ck_frontend_classic.md` or `ck_frontend_tile.md` → `ck_gemm_stack.md`/`ck_fmha_stack.md` → `ck_tuning_knobs.md` |
-| "MFMA intrinsics / read the ISA" | `languages/hip/skills/optimize/hip_levers/hip_builtins.md` + `languages/asm/` (CK does not re-doc) |
+| "MFMA intrinsics / read the ISA" | `languages/hip/skills/optimize/hip_levers/hip_builtins.md` (CK does not re-doc) |
 | "Hardware constants (CU / VGPR / LDS / peak)" | `local_knowledge/hardware/` (single source of truth) |
 
 ## Folder structure & file roles
@@ -158,7 +158,7 @@ Single place for the `repo@commit` / canonical-URL pins the `ck/` cards cite (ca
 - MI300X workload optimization (128-bit load, split-K, occupancy): https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html
 
 ## Cross-links out of this folder
-The MFMA layer CK's `WarpGemm` wraps: `languages/hip/skills/optimize/hip_levers/hip_builtins.md` and
-`languages/asm/`. Backend-neutral hardware constants: `local_knowledge/hardware/`. Tuning/dispatch of
+The MFMA layer CK's `WarpGemm` wraps: `languages/hip/skills/optimize/hip_levers/hip_builtins.md`.
+Backend-neutral hardware constants: `local_knowledge/hardware/`. Tuning/dispatch of
 CK-via-aiter: `local_knowledge/framework/aiter/`. Alternative authoring paths and cross-backend SOTA
-cards: `languages/{triton,gluon,flydsl,hip,asm}/`. Benchmark discipline: `local_knowledge/common_methodology/`.
+cards: `languages/{triton,gluon,flydsl,hip}/`. Benchmark discipline: `local_knowledge/common_methodology/`.

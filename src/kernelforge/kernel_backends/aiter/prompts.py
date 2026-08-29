@@ -58,7 +58,7 @@ the `Read` tool for {config_gpu_target} instead of relying on a remembered value
 - profiling & bottleneck methodology → `common_methodology/`
 - **kernel-source authoring, once DB tuning has plateaued** → `languages/<lang>/`,
   by the language of the source you are editing: `languages/triton/`,
-  `languages/gluon/`, `languages/hip/`, `languages/ck/`, `languages/asm/`,
+  `languages/gluon/`, `languages/hip/`, `languages/ck/`,
   `languages/flydsl/`. This layer is NOT inlined below — only the three maps
   above are — so open the folder's `INDEX.md` yourself when you need it. The
   `framework/aiter/` map's "Kernel-source authoring (delegated)" section lists

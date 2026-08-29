@@ -64,21 +64,10 @@ def test_resolve_language_dir_matches_backend_named_folders(tmp_path):
     assert resolve_language_dir("triton", tmp_path) == "triton"
 
 
-def test_resolve_language_dir_aliases_intellikit_to_asm(tmp_path):
-    (tmp_path / "languages" / "asm").mkdir(parents=True)
-    assert resolve_language_dir("intellikit", tmp_path) == "asm"
-
-
 def test_resolve_language_dir_none_without_folder(tmp_path):
     (tmp_path / "languages").mkdir()
     assert resolve_language_dir("hipblaslt", tmp_path) is None
     assert resolve_language_dir("", tmp_path) is None
-
-
-def test_intellikit_prompt_carries_the_asm_knowledge_layer():
-    config = Config(gpu_target="gfx950")
-    prompt = build_single_kernel_backend_prompt(config, "intellikit")
-    assert "languages/asm" in prompt
 
 
 def test_build_single_kernel_backend_prompt_aiter_operator():

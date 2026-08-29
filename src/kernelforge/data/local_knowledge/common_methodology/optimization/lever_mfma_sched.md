@@ -124,4 +124,4 @@ Wave-pattern rework (specialized → symmetric): closes the gap from ~80% to ~95
 
 ## Deeper
 `hardware/mi350_matrix_core.md` (the model, capability list, instruction table, scaled MFMA) ·
-`languages/asm/` (hand-scheduling) · `lever_occupancy.md` · `lever_prefetch.md`
+`lever_occupancy.md` · `lever_prefetch.md`

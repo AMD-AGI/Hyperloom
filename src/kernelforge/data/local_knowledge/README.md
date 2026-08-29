@@ -125,7 +125,6 @@ an external copy:
 | `lever_` | `common_methodology/optimization/` | a technique you apply |
 | `measure_` | `common_methodology/profiling/` | a way to observe |
 | `mi350_` | `hardware/` | a gfx950 subsystem |
-| `asm_` | `languages/asm/skills/optimize/asm_levers/` | an ISA-level authoring lever |
 | `ck_` | `languages/ck/skills/optimize/ck_levers/` | a CK authoring/tuning lever |
 | `triton_` | `languages/triton/skills/optimize/triton_levers/` | a Triton authoring/tuning lever |
 | `hip_` | `languages/hip/skills/optimize/hip_levers/` | a HIP/C++ authoring lever |
