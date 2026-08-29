@@ -311,17 +311,43 @@ def test_installs_the_forge_profiling_extra(tmp_path: Path) -> None:
     assert any("[forge-profiling]" in call for call in r["pip_calls"]), r["pip_calls"]
 
 
+def test_forge_profiling_extra_is_installed_editable(tmp_path: Path) -> None:
+    """Same shape as the main install, or pip replaces it with a copy.
+
+    install.sh installs the repo editable at Step 1 and this extra at the very
+    last step. pip records the editable marker in direct_url.json and treats a
+    non-editable request for the same local path as a mismatch, so dropping
+    ``-e`` here silently converts the whole installation: source edits stop
+    taking effect, and each setup rebuilds a wheel from a tree that vendoring
+    forge doubled in size. Asserting on the extra alone cannot see that.
+    """
+    r = _run(tmp_path, tool_present=True, pandas_state="v2")
+    calls = [c for c in r["pip_calls"] if "[forge-profiling]" in c]
+    assert calls, r["pip_calls"]
+    for call in calls:
+        assert " -e " in f" {call} ", f"the forge-profiling install must be editable: {call}"
+
+
 def test_forge_profiling_extra_install_is_fail_soft(tmp_path: Path) -> None:
     r = _run(tmp_path, tool_present=True, pandas_state="v2", pip_rc=7)
     assert r["rc"] == 0 and r["reached_end"], f"a failed extra install must not abort install.sh:\n{r['out']}"
     assert "installing the forge-profiling extra failed" in r["out"]
 
 
-def test_forge_profiling_extra_falls_back_to_the_dist_name(tmp_path: Path) -> None:
-    # A packaged install has no REPO_ROOT checkout to point pip at.
+def test_forge_profiling_fallback_never_names_the_distribution(tmp_path: Path) -> None:
+    """A packaged install has no checkout, and must not re-resolve itself.
+
+    ``pip install hyperloom-inference_optimizer[forge-profiling]`` asks an index
+    for the *distribution*, which can overwrite the very installation that is
+    running with a published build of another version. The fallback reads
+    Requires-Dist off the installed metadata instead, so it can only ever
+    request the profiling dependencies.
+    """
     r = _run(tmp_path, repo_root="", tool_present=True, pandas_state="v2")
     assert r["rc"] == 0 and r["reached_end"], r["out"]
-    assert any("hyperloom-inference_optimizer[forge-profiling]" in call for call in r["pip_calls"]), r["pip_calls"]
+    assert not any("hyperloom-inference_optimizer[" in call for call in r["pip_calls"]), (
+        f"the fallback must not name the distribution:\n{r['pip_calls']}"
+    )
 
 
 # --- Tool install (Step 1) ------------------------------------------------

@@ -981,17 +981,48 @@ ensure_rocprof_compute() {
   # them in as base deps; it did not — they were in KernelForge's own
   # `profiling` extra, which that install never requested, so this has been
   # missing on every pod. Fail-soft like the rest of this function.
+  # `-e`, matching the `pip install -e "${REPO_ROOT}[test]"` further up. pip
+  # compares the editable marker in direct_url.json, so a non-editable install
+  # of the same local path is a *mismatch* and pip reinstalls: the editable
+  # install is replaced by a copy, source edits stop taking effect, and every
+  # setup pays a full wheel build of a tree that vendoring doubled in size.
+  # Asking for the same shape leaves the install in place and resolves only
+  # the extra.
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    warn "rocprof-compute: check-only — would install '${REPO_ROOT}[forge-profiling]'"
+    warn "rocprof-compute: check-only — would install -e '${REPO_ROOT}[forge-profiling]'"
   elif [ "$DRY_RUN" -eq 1 ]; then
-    log "would run: ${PYTHON} -m pip install '${REPO_ROOT}[forge-profiling]'"
+    log "would run: ${PYTHON} -m pip install -e '${REPO_ROOT}[forge-profiling]'"
   elif [ -n "${REPO_ROOT:-}" ] && [ -f "${REPO_ROOT%/}/pyproject.toml" ]; then
-    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "${REPO_ROOT}[forge-profiling]" \
+    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" -e "${REPO_ROOT}[forge-profiling]" \
       || warn "rocprof-compute: installing the forge-profiling extra failed; profiling will degrade to the PMC path. Check pip/network."
   else
-    "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
-      "hyperloom-inference_optimizer[forge-profiling]" \
-      || warn "rocprof-compute: installing the forge-profiling extra failed; profiling will degrade to the PMC path. Check pip/network."
+    # No source tree to extend, so name the extra's requirements rather than
+    # the distribution: `pip install hyperloom-inference_optimizer[...]` would
+    # resolve the *distribution* against an index and could overwrite the
+    # installation now running with a published build of a different version.
+    # Reading Requires-Dist off the installed metadata asks for exactly the
+    # profiling dependencies and can touch nothing else.
+    local reqs
+    reqs="$("$PYTHON" -c '
+from importlib.metadata import PackageNotFoundError, requires
+from packaging.requirements import Requirement
+try:
+    specs = requires("hyperloom-inference_optimizer") or []
+except PackageNotFoundError:
+    raise SystemExit(1)
+for spec in specs:
+    req = Requirement(spec)
+    if req.marker and req.marker.evaluate({"extra": "forge-profiling"}):
+        req.marker = None
+        print(str(req))
+' 2>/dev/null)" || reqs=""
+    if [ -n "$reqs" ]; then
+      # shellcheck disable=SC2086 -- one requirement per line, split intended
+      "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" $reqs \
+        || warn "rocprof-compute: installing the forge-profiling extra failed; profiling will degrade to the PMC path. Check pip/network."
+    else
+      warn "rocprof-compute: could not read the forge-profiling requirements from installed metadata; profiling will degrade to the PMC path"
+    fi
   fi
 
   # --- Step 1: ensure the rocprof-compute tool exists ---
