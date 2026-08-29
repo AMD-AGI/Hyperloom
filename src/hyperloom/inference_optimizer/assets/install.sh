@@ -743,15 +743,21 @@ ensure_inference_optimizer() {
 import hyperloom.inference_optimizer  # noqa: F401
 PY
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
-      # PyYAML: hard import-time dep of the CLI startup path. llm extra
-      # (claude-agent-sdk/openai/httpx/openai-codex): Coordinator backends and,
-      # for openai-codex, the agent runtime the forge kernel_backend uses on an
-      # OpenAI-only deployment. click/anthropic: the built-in kernel-opt agent
-      # (`kernelforge`), which ships in this wheel and used to be installed
-      # separately from a KernelForge checkout.
+      # The bare wheel ships with empty base deps, so the runtime set is
+      # installed here: `llm` (Coordinator backends; openai-codex is the agent
+      # runtime an OpenAI-only deployment needs to run at all) and `forge` (the
+      # built-in kernel-opt agent, which ships in this wheel and used to be
+      # installed separately from a KernelForge checkout, and which pulls
+      # `llm` itself). PyYAML rides in on `forge`.
+      #
+      # Named by EXTRA, not by a hand-copied pin list. The list this replaces
+      # restated seven specifiers from pyproject.toml with no sync mechanism:
+      # raising a lower bound there left the packaged install path silently
+      # holding the old one. pip resolves `[llm,forge]` against the already
+      # installed distribution -- verified to need no index for the top-level
+      # package -- so this is a metadata read, not a reinstall.
       "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" \
-        "PyYAML>=6.0" "claude-agent-sdk>=0.2.110" "openai>=1.50" "httpx>=0.27" \
-        "openai-codex>=0.144" "click>=8.0" "anthropic>=0.40"
+        "hyperloom-inference_optimizer[llm,forge]"
       # web extra only when critic web tools are enabled (off by default).
       if [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "true" ] || [ "${CRITIC_WEB_TOOLS_ENABLED:-}" = "1" ]; then
         "$PYTHON" -m pip install --quiet "${PIP_EXTRA[@]}" "markdownify>=0.11" "cachetools>=5.3"
@@ -831,7 +837,12 @@ sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
   if "$PYTHON" -c "$probe" >/dev/null 2>&1; then
     log "kernelforge gemm-tune OK (subcommand registered)"
   else
-    warn "kernelforge gemm-tune not runnable; forge GEMM tuning will be unavailable"
+    # die, not warn. When the tuner was a separate distribution resolved from a
+    # checkout, a miss meant "that optional side-install did not happen" and
+    # degrading was right. It now ships in the same wheel as everything else
+    # this script just verified, so a miss means that wheel is incomplete --
+    # the one condition an install script exists to refuse.
+    die "kernelforge gemm-tune is not runnable, but it ships in this wheel; the install is incomplete"
   fi
 }
 

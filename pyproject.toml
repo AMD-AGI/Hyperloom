@@ -46,14 +46,20 @@ runtime = [
     "PyYAML>=6.0",
     "hyperloom-inference_optimizer[llm,web,forge]",
 ]
-# Built-in kernel-opt agent (``kernelforge``). ``httpx``/``openai`` come from
-# the ``llm`` extra, which ``runtime`` already pulls in. ``torch`` is
-# deliberately absent: the ROCm build is supplied by the container image and a
-# bare specifier would resolve to the CUDA wheel from PyPI.
+# Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
+# the ROCm build is supplied by the container image and a bare specifier would
+# resolve to the CUDA wheel from PyPI.
+#
+# ``llm`` is a hard requirement, not a convenience: forge's agent backends
+# lazy-import ``claude_agent_sdk`` and ``openai_codex`` at the first agent turn,
+# so a ``[forge]``-only install imports cleanly and then fails minutes into a
+# campaign. It only looked self-contained because ``runtime`` happens to pull
+# ``[llm,web,forge]`` together.
 forge = [
     "click>=8.0",
     "PyYAML>=6.0",
     "anthropic>=0.40",
+    "hyperloom-inference_optimizer[llm]",
 ]
 # ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
 # repository imports them: they satisfy the profiler, whose binary is supplied

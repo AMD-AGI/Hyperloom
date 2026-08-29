@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
 import sys
 from pathlib import Path
 
@@ -335,15 +336,29 @@ def test_install_sh_installs_the_codex_runtime():
     This used to assert on a ``kernelforge[claude,codex]`` install line, from
     when forge was a separate distribution installed from a checkout. forge now
     ships in this distribution: the editable path gets ``openai-codex`` through
-    ``[test]`` -> ``[runtime]`` -> ``[llm]``, and the packaged-wheel path names
-    it explicitly. Both then run the same readiness probe.
+    ``[test]`` -> ``[runtime]`` -> ``[llm]``, and the packaged-wheel path pulls
+    the same extras by name. Both then run the same readiness probe.
+
+    The assertion follows the extra rather than the pin. It used to look for the
+    literal ``openai-codex>=0.144`` in install.sh, which only passed because
+    install.sh restated pyproject's specifiers verbatim -- so the test was
+    pinning the duplication instead of catching it, and would have gone green on
+    a stale copy. What must hold is the *chain*: the packaged path names an
+    extra, and that extra reaches openai-codex.
     """
     install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
-    assert "openai-codex>=0.144" in text, (
-        "the packaged-wheel install path must pull in the codex agent runtime explicitly "
-        "(the bare wheel ships no third-party deps)"
+    assert "hyperloom-inference_optimizer[llm,forge]" in text, (
+        "the packaged-wheel install path must install the llm+forge extras (the bare wheel ships no third-party deps)"
+    )
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[4].parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    extras = pyproject["project"]["optional-dependencies"]
+    assert any(req.startswith("openai-codex") for req in extras["llm"]), (
+        "the llm extra must carry the codex agent runtime; install.sh reaches it "
+        "through [llm,forge] and no longer names it directly"
     )
     assert "import openai_codex" in text, (
         "install.sh must verify the codex runtime imports; a missing one silently "
