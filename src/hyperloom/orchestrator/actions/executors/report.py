@@ -656,7 +656,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
     else:
-        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — no full-stack rebench ran in this session")
+        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — nothing has promoted in this session")
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
@@ -860,7 +860,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if unvalidated:
         lines.append(
             "- ⚠ `optimization_stack` has KEEPs landed since the last "
-            "full-stack rebench — `cumulative_gain_validated` does not "
+            "validated measurement — `cumulative_gain_validated` does not "
             "yet reflect them (unvalidated)."
         )
     if pending_keeps:

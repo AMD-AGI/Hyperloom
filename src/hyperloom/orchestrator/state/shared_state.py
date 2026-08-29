@@ -25,7 +25,9 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain_validated float — % over baseline at the last full-stack rebench
+    cumulative_gain_validated float — % over baseline at the last measurement
+                                that promoted (an explore KEEP's decision round,
+                                or a full-stack revalidation)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -722,7 +724,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
+    # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
     # non-transactional integrate_patch window and cleared after stack/current
@@ -3916,7 +3918,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
+        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
 
         Returns:
             bool: ``True`` when ``optimization_stack`` is longer than

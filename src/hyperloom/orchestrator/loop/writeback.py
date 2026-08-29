@@ -3578,8 +3578,8 @@ class WritebackCollaborator:
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
-        # Winners arrive already graded by the executor (per-variant KEEP/REVERT +
-        # rebench); Coordinator is single-writer for explore_search.accepted +
+        # Winners arrive already graded by the executor, on the decision round
+        # that judged them; Coordinator is single-writer for explore_search.accepted +
         # current_best + optimization_stack. The lift still refuses a winner that
         # no longer beats the live anchor.
         # 1. Apply the executor's ledger increment.
