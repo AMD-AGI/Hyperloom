@@ -45,6 +45,27 @@ _COLLAPSE_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "every faulted-shape blocklist an operator has already accumulated.",
     ),
     (
+        # The retired-name detector, and the test that pins it. This is the one
+        # place the old spelling may appear in live code, because the whole
+        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
+        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
+        # the run and then ignored, silently re-enabling the compiled kernel
+        # backends the operator had switched off. The line regex is the literal
+        # variable name rather than /fellow/, so this entry cannot grow to cover
+        # any other residue in either file.
+        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
+        "Detects the pre-rename opt-out variable so it fails loudly instead of "
+        "being forwarded and ignored. Honouring it would keep the retired "
+        "vocabulary alive; not naming it at all would make the silent "
+        "re-enablement undetectable.",
+    ),
+    (
+        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
+        "The test that pins the detector above. It must spell the retired name to assert on it.",
+    ),
+    (
         "src/kernelforge/tests/test_rename_completeness.py",
         r".",
         "This file names the old spellings in order to forbid them.",
@@ -80,6 +101,27 @@ _ALLOWED: tuple[tuple[str, str, str], ...] = (
         r"kernel_agents\.agent_providers",
         "Pre-rename entry-point group, still read so third-party provider plugins "
         "keep loading (with a DeprecationWarning).",
+    ),
+    (
+        # The retired-name detector, and the test that pins it. This is the one
+        # place the old spelling may appear in live code, because the whole
+        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
+        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
+        # the run and then ignored, silently re-enabling the compiled kernel
+        # backends the operator had switched off. The line regex is the literal
+        # variable name rather than /fellow/, so this entry cannot grow to cover
+        # any other residue in either file.
+        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
+        "Detects the pre-rename opt-out variable so it fails loudly instead of "
+        "being forwarded and ignored. Honouring it would keep the retired "
+        "vocabulary alive; not naming it at all would make the silent "
+        "re-enablement undetectable.",
+    ),
+    (
+        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
+        "The test that pins the detector above. It must spell the retired name to assert on it.",
     ),
     (
         "src/kernelforge/tests/test_rename_completeness.py",
@@ -126,6 +168,27 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "--fellow flag the CLI no longer declares. forge-loop is a TolerantCommand, "
         "so those runs did not fail -- they silently ran an inferred backend "
         "instead of the intended one.",
+    ),
+    (
+        # The retired-name detector, and the test that pins it. This is the one
+        # place the old spelling may appear in live code, because the whole
+        # point is to recognise it: FORGE_ is on env_safety's dotenv prefix
+        # allowlist, so a stale FORGE_DISABLE_COMPILED_FELLOWS is forwarded into
+        # the run and then ignored, silently re-enabling the compiled kernel
+        # backends the operator had switched off. The line regex is the literal
+        # variable name rather than /fellow/, so this entry cannot grow to cover
+        # any other residue in either file.
+        "src/hyperloom/agents/kernel/tools/backends/forge_submit.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow -> kernel_backend rename",
+        "Detects the pre-rename opt-out variable so it fails loudly instead of "
+        "being forwarded and ignored. Honouring it would keep the retired "
+        "vocabulary alive; not naming it at all would make the silent "
+        "re-enablement undetectable.",
+    ),
+    (
+        "src/hyperloom/agents/kernel/tests/test_forge_retired_env.py",
+        r"FORGE_DISABLE_COMPILED_FELLOWS|fellow|FELLOWS",
+        "The test that pins the detector above. It must spell the retired name to assert on it.",
     ),
     (
         "src/kernelforge/tests/test_rename_completeness.py",

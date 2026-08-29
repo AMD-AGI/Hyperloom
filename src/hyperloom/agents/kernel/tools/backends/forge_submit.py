@@ -449,6 +449,31 @@ def _resolve_kernel_kind(source_type: str, kernel_kind: str) -> str:
     return ""
 
 
+# ``FORGE_DISABLE_COMPILED_FELLOWS`` was this knob's name before the
+# fellow -> kernel_backend rename. It cannot simply be dropped: ``FORGE_`` is on
+# env_safety's dotenv prefix allowlist, so an operator's old value is still
+# forwarded into the run and then ignored, which silently re-enables the
+# compiled kernel backends they had switched off. Honouring the old spelling
+# would keep the retired vocabulary alive, so it is refused instead -- once, and
+# loudly enough to be actionable.
+_RETIRED_COMPILED_OPT_OUT = "FORGE_DISABLE_COMPILED_FELLOWS"
+_retired_opt_out_warned = False
+
+
+def _warn_on_retired_compiled_opt_out() -> None:
+    """Warn once if the pre-rename opt-out variable is still set."""
+    global _retired_opt_out_warned
+    if _retired_opt_out_warned or not os.environ.get(_RETIRED_COMPILED_OPT_OUT, "").strip():
+        return
+    _retired_opt_out_warned = True
+    log.warning(
+        "%s is set but no longer read; it was renamed to "
+        "FORGE_DISABLE_COMPILED_KERNEL_BACKENDS. Compiled kernel backends are "
+        "ENABLED for this run -- set the new name to keep them off.",
+        _RETIRED_COMPILED_OPT_OUT,
+    )
+
+
 def _kernel_backend_for_source_type(source_type: str) -> str | None:
     """Map source_type to a Forge kernel_backend. None if unsupported.
 
@@ -460,6 +485,7 @@ def _kernel_backend_for_source_type(source_type: str) -> str | None:
     kernel_backend = _SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
     if kernel_backend is not None:
         return kernel_backend
+    _warn_on_retired_compiled_opt_out()
     if os.environ.get("FORGE_DISABLE_COMPILED_KERNEL_BACKENDS", "").strip().lower() in ("1", "true", "yes"):
         return None
     return _COMPILED_SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
