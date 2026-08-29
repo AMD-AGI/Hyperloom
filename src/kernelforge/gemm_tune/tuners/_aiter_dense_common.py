@@ -353,36 +353,6 @@ def _resolve_input_csv(ctx: TuneContext, work_dir: Path, needs_q_dtype_w: bool =
     return csv
 
 
-def _parse_nk_and_m_from_csv(csv: Path) -> tuple[set[tuple[int, int]], set[int]]:
-    """Extract the ``(N, K)`` pairs and the ``M`` values from an untuned CSV."""
-    try:
-        lines = csv.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
-        return set(), set()
-    if len(lines) < 2:
-        return set(), set()
-    header = [h.strip().upper() for h in lines[0].split(",")]
-    idx = {h: i for i, h in enumerate(header)}
-    if "N" not in idx or "K" not in idx:
-        return set(), set()
-    m_idx = idx.get("M")
-    nk: set[tuple[int, int]] = set()
-    ms: set[int] = set()
-    for line in lines[1:]:
-        parts = [p.strip() for p in line.split(",")]
-        try:
-            n, k = int(parts[idx["N"]]), int(parts[idx["K"]])
-            if n > 0 and k > 0:
-                nk.add((n, k))
-            if m_idx is not None and m_idx < len(parts):
-                ms.add(int(parts[m_idx]))
-        except (ValueError, IndexError):
-            # Malformed or short row: skip it rather than abort the scan, so one
-            # bad line cannot cost us the shapes recorded on every other line.
-            continue
-    return nk, ms
-
-
 def _padded_m_gl0(m: int) -> int:
     """aiter's ``get_padded_m(..., gl=0)``: round up to a tile multiple.
 

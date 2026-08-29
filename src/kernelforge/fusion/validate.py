@@ -4,11 +4,7 @@
 """Kernel-level validation of an authored fusion (Phase 4; e2e is out of scope).
 
 forge-fuse validates at the KERNEL level, NOT full serving e2e (that is
-Hyperloom's job). This module provides two complementary validators:
-
-* :func:`run_ab` -- the coarse decode A/B: runs ``sglang.bench_one_batch`` twice
-  (eager vs fused) and reports the decode-step-median speedup. Kept for the
-  legacy single-shot CLI path; it needs a live model + GPU.
+Hyperloom's job). The validator this module provides is:
 
 * :func:`validate_recipe` -- the fine-grained, GPU-optional KERNEL validator used
   by the autoloop (see ``loop.py``). Given a :class:`~kernelforge.fusion.models.Recipe`
@@ -55,125 +51,6 @@ from kernelforge.loop.scoring import DEFAULT_SNR_THRESHOLD_DB
 from .models import Recipe, ValidationResult
 
 log = logging.getLogger("forge_fusion")
-
-_DECODE_MEDIAN_RE = re.compile(r"Decode\.\s+median latency:\s*([0-9.]+)\s*s")
-
-
-def _bench_one_batch_cmd(model_path: str, *, batch: int, isl: int, osl: int, extra: str = "") -> list[str]:
-    return [
-        "python3",
-        "-m",
-        "sglang.bench_one_batch",
-        "--model-path",
-        model_path,
-        "--trust-remote-code",
-        "--tp",
-        "1",
-        "--mem-fraction-static",
-        "0.85",
-        "--context-length",
-        "4096",
-        "--batch-size",
-        str(batch),
-        "--input-len",
-        str(isl),
-        "--output-len",
-        str(osl),
-        *([p for p in extra.split() if p]),
-    ]
-
-
-def _run_arm(
-    model_path: str,
-    env_overrides: dict[str, str],
-    *,
-    batch: int,
-    isl: int,
-    osl: int,
-    gpu: str,
-    timeout_s: int,
-    extra: str,
-    log_path: Optional[str],
-) -> Optional[float]:
-    """Run one bench_one_batch arm; return decode-step median latency (s) or None."""
-    env = dict(os.environ)
-    env["HIP_VISIBLE_DEVICES"] = gpu
-    env["SGLANG_USE_AITER"] = "1"
-    env.update({k: str(v) for k, v in env_overrides.items()})
-    try:
-        proc = subprocess.run(
-            _bench_one_batch_cmd(model_path, batch=batch, isl=isl, osl=osl, extra=extra),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            env=env,
-            cwd=str(_runtime_dir("bench_one_batch")),
-        )
-    except subprocess.TimeoutExpired:
-        log.warning("bench arm timed out after %ss (flags=%s)", timeout_s, env_overrides)
-        return None
-    out = (proc.stdout or "") + "\n" + (proc.stderr or "")
-    if log_path:
-        with contextlib.suppress(OSError):
-            with open(log_path, "a", encoding="utf-8") as fh:
-                fh.write(f"\n===== arm flags={env_overrides} rc={proc.returncode} =====\n{out}")
-    medians = [float(m) for m in _DECODE_MEDIAN_RE.findall(out)]
-    return medians[-1] if medians else None
-
-
-def run_ab(
-    model_path: str,
-    env_flags: dict[str, str],
-    *,
-    batch: int = 16,
-    isl: int = 512,
-    osl: int = 128,
-    gpu: str = "0",
-    timeout_s: int = 1800,
-    extra: str = "",
-    log_path: Optional[str] = None,
-) -> dict[str, Optional[float]]:
-    """A/B the decode-step median latency: eager (flags off) vs fused (flags on).
-
-    Args:
-        model_path: Model directory.
-        env_flags: The fusion env flags to enable for the fused arm (e.g.
-            ``{"LFM2_FUSED_RESIDUAL": "1"}``). The eager arm forces each to ``0``.
-        batch/isl/osl: bench_one_batch decode config.
-        gpu: HIP device id.
-        extra: Extra bench_one_batch args (e.g. ``--attention-backend triton``).
-
-    Returns:
-        ``{"eager_s", "fused_s", "speedup"}``; values are ``None`` on failure.
-    """
-    eager_off = {k: "0" for k in env_flags}
-    eager_s = _run_arm(
-        model_path,
-        eager_off,
-        batch=batch,
-        isl=isl,
-        osl=osl,
-        gpu=gpu,
-        timeout_s=timeout_s,
-        extra=extra,
-        log_path=log_path,
-    )
-    fused_s = _run_arm(
-        model_path,
-        env_flags,
-        batch=batch,
-        isl=isl,
-        osl=osl,
-        gpu=gpu,
-        timeout_s=timeout_s,
-        extra=extra,
-        log_path=log_path,
-    )
-    speedup: Optional[float] = None
-    if eager_s and fused_s and fused_s > 0:
-        speedup = eager_s / fused_s
-    log.info("A/B decode-median: eager=%ss fused=%ss speedup=%s", eager_s, fused_s, speedup)
-    return {"eager_s": eager_s, "fused_s": fused_s, "speedup": speedup}
 
 
 # ───────────────────────── serving smoke (CUDA-graph-ON) ─────────────────────
@@ -659,44 +536,6 @@ def _published_attribute_names(source: str) -> set[str]:
             if isinstance(base, ast.Name) and base.id in modules:
                 names.add(target.attr)
     return names
-
-
-def _defines_name(tree: ast.Module, name: str) -> bool:
-    """Whether this module is where ``name`` is defined."""
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            if node.name == name:
-                return True
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == name:
-                    return True
-    return False
-
-
-def _reads_name(source: str, name: str) -> bool:
-    """Whether this file reads ``name`` back.
-
-    A module that defines the symbol is not a reader of it, however many times
-    the name appears in it -- the authored kernel module mentions its own entry
-    point in ``__all__`` and in its docstring, and neither is a call site.
-    """
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
-        return name in source
-    if _defines_name(tree, name):
-        return False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Attribute) and node.attr == name:
-            if isinstance(node.ctx, ast.Load):
-                return True
-        elif isinstance(node, ast.Name) and node.id == name:
-            if isinstance(node.ctx, ast.Load):
-                return True
-        elif isinstance(node, ast.Constant) and node.value == name:
-            return True
-    return False
 
 
 def _top_level_names(source: str) -> set[str]:

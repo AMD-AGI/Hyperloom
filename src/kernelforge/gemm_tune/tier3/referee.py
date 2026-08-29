@@ -45,7 +45,6 @@ log = logging.getLogger(__name__)
 WARMUP_CALLS = 20
 CALLS_PER_SAMPLE = 30
 REPEATS = 9
-RAMP_SECONDS = 8.0
 
 
 @dataclass(frozen=True)
@@ -94,13 +93,6 @@ class Judgement:
             "rejected_incorrect": self.rejected_incorrect,
             "candidates_timed": len(self.timings),
         }
-
-
-def ramp_clocks(warm: Callable[[], Any], seconds: float = RAMP_SECONDS) -> None:
-    """Run ``warm`` until the clocks have settled, so nothing pays the ramp."""
-    end = time.perf_counter() + max(seconds, 0.0)
-    while time.perf_counter() < end:
-        warm()
 
 
 def _sample(call: Callable[[], Any], sync: Callable[[], Any]) -> float:

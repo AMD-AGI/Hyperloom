@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover run_ab arms, serving_smoke, runtime helpers, harness error paths."""
+"""Cover serving_smoke, runtime helpers, and harness error paths."""
 
 from __future__ import annotations
 
@@ -10,16 +10,13 @@ import subprocess
 from kernelforge.fusion.models import Recipe
 from kernelforge.fusion.validate import (
     HarnessKernelRunner,
-    _bench_one_batch_cmd,
     _parse_harness_json,
-    _run_arm,
     _runtime_dir,
     _serving_crash_reason,
     _serving_smoke_launch_cmd,
     _tail_text,
     _vllm_decode_probe,
     classify_serving_smoke_failure,
-    run_ab,
     serving_smoke,
     snr_db,
     validate_recipe,
@@ -236,13 +233,6 @@ class _Proc:
         self.returncode = rc
 
 
-# ── low-level helpers ────────────────────────────────────────────────────────
-def test_bench_one_batch_cmd_includes_extra():
-    cmd = _bench_one_batch_cmd("/m", batch=4, isl=64, osl=8, extra="--foo bar")
-    assert "--model-path" in cmd and "/m" in cmd
-    assert "--foo" in cmd and "bar" in cmd
-
-
 def test_snr_zero_signal_returns_zero():
     # noise>0 but signal==0 -> 0.0 branch (line 332)
     assert snr_db([0.0, 0.0], [1.0, 1.0]) == 0.0
@@ -268,38 +258,6 @@ def test_serving_crash_reason_finds_marker():
 
 def test_serving_crash_reason_default_when_no_marker():
     assert "no explicit GPU-fault" in _serving_crash_reason("all fine\nstill fine")
-
-
-# ── _run_arm / run_ab ────────────────────────────────────────────────────────
-def test_run_arm_parses_last_median(tmp_path, monkeypatch):
-    out = "Decode.  median latency: 0.5 s\nDecode.  median latency: 0.25 s\n"
-    monkeypatch.setattr(validate.subprocess, "run", lambda *a, **k: _Proc(stdout=out))
-    log = tmp_path / "arm.log"
-    med = _run_arm("/m", {"F": "1"}, batch=1, isl=8, osl=2, gpu="0", timeout_s=10, extra="", log_path=str(log))
-    assert med == 0.25
-    assert log.exists()
-
-
-def test_run_arm_timeout_returns_none(monkeypatch):
-    def boom(*a, **k):
-        raise subprocess.TimeoutExpired(cmd="x", timeout=1)
-
-    monkeypatch.setattr(validate.subprocess, "run", boom)
-    assert _run_arm("/m", {}, batch=1, isl=8, osl=2, gpu="0", timeout_s=1, extra="", log_path=None) is None
-
-
-def test_run_ab_computes_speedup(monkeypatch):
-    seq = iter([1.0, 0.5])  # eager, fused
-    monkeypatch.setattr(validate, "_run_arm", lambda *a, **k: next(seq))
-    r = run_ab("/m", {"F": "1"})
-    assert r["eager_s"] == 1.0 and r["fused_s"] == 0.5
-    assert r["speedup"] == 2.0
-
-
-def test_run_ab_none_when_arm_fails(monkeypatch):
-    monkeypatch.setattr(validate, "_run_arm", lambda *a, **k: None)
-    r = run_ab("/m", {"F": "1"})
-    assert r["speedup"] is None
 
 
 # ── serving_smoke ────────────────────────────────────────────────────────────

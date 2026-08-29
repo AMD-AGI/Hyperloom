@@ -229,10 +229,6 @@ class Demand:
         }
 
 
-def _blank_key() -> dict[str, str | None]:
-    return {f: None for f in KEY_FIELDS}
-
-
 def _moe_field(raw: str) -> str:
     """Normalise one dispatch-tuple entry to the spelling the fmoe CSV uses.
 

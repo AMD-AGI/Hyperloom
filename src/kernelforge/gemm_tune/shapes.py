@@ -12,60 +12,6 @@ _HIGH_CONC_TOKENS = [768, 1024]
 _VERY_HIGH_CONC_TOKENS = [1536, 2048, 4096, 8192]
 
 # sglang CUDAGraph capture batch sizes (server_args default list)
-_SGLANG_CUDAGRAPH_BS = [
-    1,
-    2,
-    4,
-    8,
-    12,
-    16,
-    24,
-    32,
-    40,
-    48,
-    56,
-    64,
-    72,
-    80,
-    88,
-    96,
-    104,
-    112,
-    120,
-    128,
-    136,
-    144,
-    152,
-    160,
-    168,
-    176,
-    184,
-    192,
-    200,
-    208,
-    216,
-    224,
-    232,
-    240,
-    248,
-    256,
-    272,
-    288,
-    304,
-    320,
-    336,
-    352,
-    368,
-    384,
-    400,
-    416,
-    432,
-    448,
-    464,
-    480,
-    496,
-    512,
-]
 
 
 def compute_token_coverage(
@@ -144,23 +90,3 @@ def compute_vllm_moe_batch_sizes(
     if conc < 64:
         sizes = [s for s in sizes if s <= 2048]
     return sizes
-
-
-def compute_sglang_cudagraph_m_values(
-    conc: int = 64,
-    max_bs: int = 512,
-) -> list[int]:
-    """Compute M values matching sglang CUDAGraph capture batch sizes.
-
-    sglang captures CUDAGraphs at specific batch sizes. GEMM tuning must
-    cover these exact M values for the tuned config to be used at runtime.
-
-    Args:
-        conc: Target serving concurrency. Determines how far up the BS list to tune.
-        max_bs: Maximum batch size to include. Higher = more shapes but longer tuning.
-
-    Returns:
-        Sorted list of batch sizes that will be captured as CUDAGraphs.
-    """
-    effective_max = min(max_bs, max(conc * 4, 128))
-    return [bs for bs in _SGLANG_CUDAGRAPH_BS if bs <= effective_max]

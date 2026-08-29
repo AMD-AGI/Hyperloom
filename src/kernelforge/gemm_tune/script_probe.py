@@ -293,9 +293,3 @@ def filter_args(args: list[str], surface: ScriptSurface) -> ArgFilter:
             ", ".join(dropped),
         )
     return ArgFilter(kept, rejected_required, dropped)
-
-
-def unsupported_required(script: Path | str, flags: list[str]) -> list[str]:
-    """Convenience: which of ``flags`` does ``script`` not accept?"""
-    surface = probe_script(script)
-    return [f for f in flags if not surface.supports(f)]
