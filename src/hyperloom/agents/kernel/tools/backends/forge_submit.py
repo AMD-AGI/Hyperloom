@@ -1365,15 +1365,25 @@ _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
 # owns the authoritative list and is asked for it first, so the two stay in step
 # wherever it is installed -- but it is not a declared dependency of this
 # package and CI does not install it, so requiring it would turn every scratch
-# copy into an ImportError on a node that never needed the producer. These are
-# the artefacts no repository should ever hash, not a mirror of the manifest; a
-# producer-specific addition arrives through the import below.
-_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "build", "dist", "flydsl_cache", "jit"})
-_FALLBACK_RUNTIME_FILE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo", ".so")
+# copy into an ImportError on a node that never needed the producer.
+#
+# What a copy may drop and what an index may drop are different questions. A
+# scratch copy is placed ahead of site-packages and shadows the install
+# outright, so a name dropped from it has to be one no package imports from:
+# aiter/jit carries the extension modules `import aiter` loads and aiter/dist
+# carries its distributed sources, so neither name can appear here. Extension
+# modules are the same case one level down -- copied always, hashed never.
+_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "build", "flydsl_cache", "jit_cache"})
+_FALLBACK_RUNTIME_FILE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo")
+_FALLBACK_COMPILED_FILE_SUFFIXES: tuple[str, ...] = (".so",)
 
 
 def _runtime_artifact_names() -> tuple[frozenset[str], tuple[str, ...]]:
-    """Return the directory names and file suffixes a scratch copy must skip."""
+    """Return the directory names and file suffixes a scratch copy must skip.
+
+    Narrower than :func:`_runtime_artifact_globs`, which also covers what the
+    copy has to keep.
+    """
     _ensure_forge_on_path()
     try:
         from kernel_agents.loop.path_ownership import (  # noqa: PLC0415
@@ -1391,9 +1401,10 @@ def _runtime_artifact_globs() -> tuple[str, ...]:
     try:
         from kernel_agents.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
     except ImportError:
-        directories = sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)
+        suffixes = sorted(_FALLBACK_RUNTIME_FILE_SUFFIXES + _FALLBACK_COMPILED_FILE_SUFFIXES)
         return tuple(
-            [f"{name}/" for name in directories] + [f"*{suffix}" for suffix in _FALLBACK_RUNTIME_FILE_SUFFIXES]
+            [f"{name}/" for name in sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)]
+            + [f"*{suffix}" for suffix in suffixes]
         )
     return runtime_gitignore_globs()
 
