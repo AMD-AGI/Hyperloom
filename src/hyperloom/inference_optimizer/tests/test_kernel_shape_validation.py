@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Kernel-opt dispatch shape / path validation.
+"""Kernel-opt dispatch shape-provenance / path validation.
 
-A candidate may only dispatch with a non-empty trace-anchored shape and
-existing source/workspace paths; ``dry_run`` and an escape flag bypass the gate.
+A shapeless candidate dispatches: the backend's driver preparation recovers the
+operand dims the trace never recorded. Provenance is validated only for a shape
+that is present, and source/workspace paths must exist; ``dry_run`` bypasses all
+of it.
 """
 
 from __future__ import annotations
@@ -27,12 +29,58 @@ def _candidate(**over):
     return base
 
 
-def test_empty_shape_is_rejected(tmp_path: Path):
+def test_empty_shape_dispatches(tmp_path: Path):
+    # A graph-launched kernel records no cpu_op parent, so the trace carries no
+    # argument dims for it. Refusing the dispatch does not produce a measured
+    # shape, it only makes the hottest kernels of a captured model permanently
+    # unoptimizable.
     payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
-    res = krh._validate_kernel_shape_and_paths(payload, session_dir=tmp_path)
-    assert res is not None
-    assert res["error_class"] == "empty_kernel_shape"
-    assert res["status"] == "failed"
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("malformed", [{"input_shape": "(8,4096)"}, "(8,4096) bf16", 42])
+def test_a_malformed_shape_is_refused_not_read_as_absent(tmp_path: Path, malformed):
+    """Absent dims are dispatchable; a broken producer is not.
+
+    All three of these are truthy, so a bare truthiness test admitted them and
+    the type error surfaced in driver preparation -- charged to this kernel's
+    retry quota and reported as an optimization failure. Reading them as
+    shapeless would be worse than refusing: an empty ``shapes`` is evidence the
+    trace could not record and the backend recovers it from source, so a
+    producer that broke would be indistinguishable from a graph-launched kernel
+    and stay broken.
+    """
+    payload = {"kernel_id": "k001", "candidate": _candidate(shapes=malformed)}
+    out = krh._validate_kernel_shape_and_paths(payload, session_dir=tmp_path)
+    assert out is not None
+    assert out["error_class"] == "malformed_kernel_shapes"
+
+
+@pytest.mark.parametrize("provenance", ["unresolved", "launch_grid", "tile_name"])
+def test_empty_shape_dispatches_whatever_provenance_says(
+    tmp_path: Path,
+    provenance: str,
+):
+    # On a shapeless row the marker names why the dims are absent, so it must
+    # not be read as an untrusted operand dim -- that would close the removed
+    # empty-shape gate from the provenance side.
+    payload = {
+        "kernel_id": "k001",
+        "candidate": _candidate(shapes=[], shape_provenance=provenance),
+    }
+    assert (
+        krh._validate_kernel_shape_and_paths(
+            payload,
+            session_dir=tmp_path,
+        )
+        is None
+    )
 
 
 def test_non_empty_shape_passes(tmp_path: Path):
@@ -111,46 +159,6 @@ def test_existing_source_path_passes(tmp_path: Path):
     )
 
 
-def test_escape_flag_allows_empty_shape(tmp_path: Path):
-    payload = {
-        "kernel_id": "k001",
-        "allow_empty_kernel_shape": True,
-        "candidate": _candidate(shapes=[]),
-    }
-    assert (
-        krh._validate_kernel_shape_and_paths(
-            payload,
-            session_dir=tmp_path,
-        )
-        is None
-    )
-
-
-def test_escape_env_no_longer_allows_empty_shape(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_ALLOW_EMPTY_KERNEL_SHAPE", "1")
-    payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
-    krh.set_allow_empty_kernel_shape(False)
-    result = krh._validate_kernel_shape_and_paths(
-        payload,
-        session_dir=tmp_path,
-    )
-    assert result is not None
-    assert result["error_class"] == "empty_kernel_shape"
-
-
-def test_escape_process_flag_allows_empty_shape(tmp_path: Path):
-    krh.set_allow_empty_kernel_shape(True)
-    payload = {"kernel_id": "k001", "candidate": _candidate(shapes=[])}
-    assert (
-        krh._validate_kernel_shape_and_paths(
-            payload,
-            session_dir=tmp_path,
-        )
-        is None
-    )
-    krh.set_allow_empty_kernel_shape(False)
-
-
 def test_dry_run_bypasses_validation(tmp_path: Path):
     payload = {
         "kernel_id": "k001",
@@ -168,7 +176,10 @@ def test_dry_run_bypasses_validation(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_run_optimization_single_rejects_empty_shape(tmp_path: Path):
+async def test_run_optimization_single_passes_the_shape_gate(tmp_path: Path):
+    # The shapeless candidate reaches the path check instead of being turned
+    # away for its missing dims, so the failure reported is the one the payload
+    # actually has.
     payload = {
         "kernel_id": "k001",
         "source_file": "/sgl-workspace/sglang/kernels/x.py",
@@ -183,7 +194,7 @@ async def test_run_optimization_single_rejects_empty_shape(tmp_path: Path):
     }
     res = await krh._run_optimization_single(payload, session_dir=tmp_path)
     assert res["status"] == "failed"
-    assert res["error_class"] == "empty_kernel_shape"
+    assert res["error_class"] == "missing_source_path"
 
 
 def test_finalize_candidates_stamps_trace_provenance():

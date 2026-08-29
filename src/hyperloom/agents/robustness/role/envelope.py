@@ -96,6 +96,7 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_path",
         "model_name",
         "model_class",
+        "compute_partition",
         "start_ts",
         "resumed_ts",
         "max_minutes",

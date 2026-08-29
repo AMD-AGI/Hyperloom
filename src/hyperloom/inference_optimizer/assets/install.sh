@@ -269,11 +269,9 @@ Installs:
   - Clones InferenceX pinned to INFERENCEX_REF and exports INFERENCEX_PATH
   - Chains to src/hyperloom/agents/kernel/scripts/install.sh for Ray + ray-head start,
     TraceLens, GEAK, and LLM gateway env.
-  - The `fa` CLI (used by the Coordinator-owned FRAMEWORK_AGENT phase at
-    optimize-time, candidate discovery via `fa phase-discover`) is provided
-    by this same editable install (tree-reform.MD P2.5 promoted
-    framework-agent into src/hyperloom/agents/framework/, so it no longer
-    has its own separate installer/venv to chain to).
+  - The `fa` CLI is provided by this same editable install; framework-agent
+    lives in src/hyperloom/agents/framework/ and has no separate
+    installer/venv to chain to.
 
 Options:
   --check-only           Verify only, do not install
@@ -817,10 +815,23 @@ _check_kernelforge_ready() {
 # keeping as a probe, because a partial install shows up here rather than in the
 # middle of a tuning run.
 ensure_forge_gemm_tune() {
-  if "$PYTHON" -c "import kernelforge.gemm_tune.cli" >/dev/null 2>&1; then
-    log "kernelforge gemm-tune import OK"
+  # Ask whether the subcommand is REGISTERED, not merely whether the module
+  # imports. Tuning runs as `python -m kernelforge.cli gemm-tune run`, and a
+  # tree whose module imports fine while the command never registered passes an
+  # import probe and then dies mid-run on "No such command 'gemm-tune'".
+  # Registration happens at import, so main.commands is populated by then.
+  # (Absorbed from the FORGE_PATH-era probe this replaced, which learned the
+  # same lesson against a checkout instead of against a packaged subpackage.)
+  local probe='
+import sys
+import kernelforge.gemm_tune.cli  # noqa: F401
+from kernelforge.cli import main
+sys.exit(0 if "gemm-tune" in getattr(main, "commands", {}) else 1)
+'
+  if "$PYTHON" -c "$probe" >/dev/null 2>&1; then
+    log "kernelforge gemm-tune OK (subcommand registered)"
   else
-    warn "kernelforge.gemm_tune not importable; forge GEMM tuning will be unavailable"
+    warn "kernelforge gemm-tune not runnable; forge GEMM tuning will be unavailable"
   fi
 }
 

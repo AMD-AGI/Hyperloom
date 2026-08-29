@@ -158,3 +158,33 @@ def test_static_probe_is_called_from_both_install_paths() -> None:
     assert body.count("_check_kernelforge_ready") == 2, (
         "both the packaged and the editable branch must run the readiness probe:\n" + body
     )
+
+
+def test_static_gemm_tune_probe_checks_registration_not_just_import() -> None:
+    """An importable tuner is not a runnable one.
+
+    GEMM tuning runs as ``python -m kernelforge.cli gemm-tune run``. A tree
+    whose ``kernelforge.gemm_tune`` imports cleanly while the subcommand never
+    registered on the CLI group passes an import-only probe and then dies mid
+    run on ``No such command 'gemm-tune'``. The pre-vendoring installer learned
+    this against a KernelForge checkout; the lesson survives the move in-tree,
+    because the thing being asserted was never about where the code lives.
+    """
+    fn = _extract_fn("ensure_forge_gemm_tune")
+    assert "from kernelforge.cli import main" in fn, "probe must reach the CLI group, not just the module"
+    assert '"gemm-tune" in getattr(main, "commands"' in fn, "probe must assert the subcommand is registered"
+
+
+def test_static_gemm_tune_probe_installs_nothing() -> None:
+    """The tuner ships in this distribution; there is nothing left to install.
+
+    Its sub-install used to resolve a checkout via ``FORGE_GEMM_TUNE_ROOT`` /
+    ``$FORGE_PATH`` and pip-install it editable on the side. A ``pip install``
+    reappearing here means that resolver came back with it.
+    """
+    # Code only: the comments deliberately name the resolver they replaced, and
+    # a guard that cannot tell an explanation from an instruction is a guard
+    # that punishes writing the explanation down.
+    code = "\n".join(ln for ln in _extract_fn("ensure_forge_gemm_tune").splitlines() if not ln.lstrip().startswith("#"))
+    assert "pip install" not in code
+    assert "FORGE_PATH" not in code and "FORGE_GEMM_TUNE_ROOT" not in code

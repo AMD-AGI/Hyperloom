@@ -25,9 +25,32 @@ from ._grid_runner import GridVariant, run_grid
 # noise -- rather than merely not regressing (a 0.0 floor only checks
 # non-regression and lets noise-level "wins" survive). Kept below the KEEP gate
 # (the grid noise floor) so confirmation is a stability check, not a second
-# discovery gate. Override per task via ``params['stack_stable_threshold_pct']``
-# / ``params['rebench_stable_threshold_pct']``.
+# discovery gate -- see :func:`resolve_stable_threshold_pct`, which enforces
+# that relationship. Override the request per task via
+# ``params['rebench_stable_threshold_pct']``.
 DEFAULT_STACK_STABLE_PCT = 0.5
+
+
+def resolve_stable_threshold_pct(requested_pct: float, keep_threshold_pct: float) -> float:
+    """The floor a confirmation rebench is graded against, clamped to half the KEEP gate.
+
+    A confirmation must stay a stability check rather than become a stricter
+    second discovery gate as the per-cycle KEEP threshold decays
+    (``decaying_keep_threshold_pct`` falls toward 0.1%). An absolute floor
+    inverts past cycle 1: at a 0.40% KEEP gate a fixed 0.5% band rejects
+    variants the same round admitted. An explicit lower per-task floor stays
+    valid; it simply cannot exceed half of the threshold that admitted this
+    candidate.
+
+    Args:
+        requested_pct: The per-task request, defaulting to
+            :data:`DEFAULT_STACK_STABLE_PCT`.
+        keep_threshold_pct: The KEEP gate this candidate cleared.
+
+    Returns:
+        float: The stability floor as a percentage over the base throughput.
+    """
+    return min(float(requested_pct), max(0.0, float(keep_threshold_pct) / 2.0))
 
 
 @dataclass
@@ -138,4 +161,9 @@ async def measure_stack_rebench(
     )
 
 
-__all__ = ["DEFAULT_STACK_STABLE_PCT", "StackRebenchResult", "measure_stack_rebench"]
+__all__ = [
+    "DEFAULT_STACK_STABLE_PCT",
+    "StackRebenchResult",
+    "measure_stack_rebench",
+    "resolve_stable_threshold_pct",
+]

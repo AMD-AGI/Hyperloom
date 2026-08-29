@@ -465,7 +465,7 @@ class SpecialistGpuPool:
 
         ``try_acquire`` already clears expired rows opportunistically, but a
         multi-day run may go long stretches without an acquire (e.g. an idle
-        EXPLORE phase), leaking capacity. The reaper tick calls this so stale
+        optimisation phase), leaking capacity. The reaper tick calls this so stale
         leases never pin a GPU id indefinitely.
 
         Returns:

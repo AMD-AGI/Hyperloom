@@ -1137,6 +1137,7 @@ def materialize_config_with_envs(
                 ("max_iterations", f"--profiler-config.max_iterations {max_iters}"),
             ]
             if tracelens_patch_ok:
+                profiler_flags.append(("capture_torch_profiler", "--profiler-config.capture_torch_profiler True"))
                 profiler_flags.append(("detailed_trace_annotation", "--profiler-config.detailed_trace_annotation True"))
             # vLLM's AsyncLLM-side profiler tracks no iterations and captures the
             # whole start_profile..stop_profile range, so it has to stay off

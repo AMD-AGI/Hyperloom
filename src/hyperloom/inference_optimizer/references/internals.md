@@ -2,15 +2,35 @@
 
 Reference for the optimizer's internal phases and contracts. The launcher only
 needs to know these exist; it never proposes or executes them. Read this when
-debugging optimizer behavior or interpreting EXPLORE / FRAMEWORK_AGENT / KERNEL
+debugging optimizer behavior or interpreting FRAMEWORK_AGENT / KERNEL
 decisions.
 
-## IR-4 / IR-6 — EXPLORE phase contracts
+## FRAMEWORK_AGENT — the optimisation phase
 
-These govern the optimizer's EXPLORE phase, not the launcher; the full contract
-lives in `orchestrator/prompts/orchestration.md`. In brief:
+One phase carries two arms: a **configuration** arm (server-arg / env grids,
+sourced by specialist fan-out) and a **source** arm (upstream PRs and
+specialist-authored patches). Rotation between them is the arms' own plateau
+judgement, not a wall-clock split, and the phase leaves only when both report
+dry. `--no-framework-agent` skips it entirely.
 
-- **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
+The source arm's supply is the `candidate_discovery_specialist`: it finds
+upstream work, judges each entry against the live source, and returns a batch
+already ordered and routed (`direct_framework` -> apply the diff,
+`author_via_specialist` -> rewrite it against live source). The pump takes that
+order as given. When discovery comes back empty its full retry budget, the
+local-exploration arm authors against profile evidence instead; when that is
+off too, the source arm reports itself dry.
+
+`integrate_patch` lands every diff, config-only or source, with
+`patch_source` naming where it came from. KEEP commits to the live tree (the
+next candidate stacks on top); REVERT does `git reset --hard`.
+
+## IR-4 — optimisation-phase contracts
+
+These govern the optimizer, not the launcher; the full contract lives in
+`orchestrator/prompts/orchestration.md`. In brief:
+
+- **IR-4 — exploration is specialist-informed**: prefer specialist- or
   research-backed variants when available, but `llm_direct`, `default_grid`,
   `specialist:<domain-or-tag>`, and `dynamic` provenance values are all accepted
   audit labels when phase and sequence gates pass. Specialist- and
@@ -30,33 +50,13 @@ lives in `orchestrator/prompts/orchestration.md`. In brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: EXPLORE exits the moment the unspent fraction of its
-  own phase budget drops to `--explore-force-exit-budget-pct` (default 20%).
-  Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is already
-  inside that fraction, since charge-back rebuilds the allotment from the time
-  left at phase entry; there is no session-remaining arm.
-- **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals are
-  computed every tick and rendered as advisory in the orchestration prompt. They
-  do NOT drive phase advance — the LLM may emit
+- **Plateau advisory**: both arms' signals and KERNEL_AGENT's are computed every
+  tick and rendered as advisory in the orchestration prompt. One arm dry is not
+  a plateau; the prompt says so. They do NOT drive phase advance — the LLM may
+  emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. IR-6 force-exit and the per-phase
-  budget remain the only hard advance gates.
-
-## FRAMEWORK_AGENT phase
-
-Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
-Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework_agent` action. It discovers a candidate batch **once** via `fa phase-discover`; each
-exploration then processes exactly **one** candidate, with the agent ranking the
-still-available candidates and choosing the one most likely to raise throughput
-(LLM ranker; deterministic discovery-order fallback on any failure). The chosen
-candidate is Critic-gated, then `git apply`d against the live
-framework_source_roots and benchmarked; KEEP commits to the live tree (next
-candidate stacks on top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), plateau (5 consecutive benchmarked candidate tests with no
-KEEP), or an empty
-discovery batch. Resume skips completed candidates by idempotency key. The
-launcher only chooses whether the phase runs (`--no-framework-agent`).
+  when it judges further effort unproductive. The per-phase budget and the
+  absolute cap remain the only hard advance gates.
 
 ## Retired modules and rules (do not re-introduce)
 
@@ -67,14 +67,9 @@ modules, nor the `actions/_meta/*.yaml` catalogue and its loader.
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework first-explore priority` rule** in
-  `prompts/orchestration.md` — conflicts with the EXPLORE
-  specialist-informed flow. Framework-agent runs in the dedicated
-  **FRAMEWORK** phase before EXPLORE; the LLM never proposes the
-  `framework_agent` action — it is Coordinator-managed and absent from
-  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any LLM-side propose /
-  delegate with `rule='phase_incompatible'`. Use `--no-framework-agent` to skip the
-  phase entirely.
+- **No `framework first` ordering rule** in `prompts/orchestration.md` — the
+  two arms share one phase and rotate on their own plateau judgement, so a
+  fixed priority between them conflicts with the specialist-informed flow.
 - **`kernel_opt` sequencing** is no longer gated by an explore-minimum check
   (the `explore_attempts_minimum_before_kernel_opt` rule was retired in
   loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt` directly; the

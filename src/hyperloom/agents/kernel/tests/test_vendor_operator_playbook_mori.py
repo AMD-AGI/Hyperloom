@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -50,6 +51,7 @@ import tracelens_analysis as tla  # noqa: E402
 import forge_submit  # noqa: E402
 import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
+    load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
     _reset_vendor_operator_playbooks_cache,
@@ -305,6 +307,123 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         # The stand-in must look like a real path so it survives
         # looks_like_source_path()/the non-empty CLI gate either way.
         assert tla.looks_like_source_path(source_file)
+
+
+def test_playbook_anchor_overrides_a_same_word_grep_collision():
+    """A registry match outranks whatever the grep tier guessed.
+
+    These operators reduce to the keywords "dispatch" and "combine", which
+    collide with unrelated vendor files (``mxfp4_moe_aux_dispatch.h``,
+    ``fmha_fwd_d64_bf16_combine.cu``) once the search roots actually resolve.
+    The registry is a curated statement that the operator is tuned through a
+    task bundle, so handing a backend the colliding path would rewrite the
+    wrong file.
+    """
+    collision = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/x_dispatch.h"
+    candidates = [
+        _mori_dispatch_candidate(source_file=collision),
+        _mori_combine_candidate(source_file=collision),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert item["source_file"] != collision
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+
+
+def test_playbook_anchor_also_overrides_a_correct_grep_hit():
+    """The override does not depend on the guess being wrong.
+
+    ``dispatch_combine.py`` under site-packages really is where these operators
+    live, so this is the case where the grep tier was right. The anchor still
+    wins: the registry says the operator is tuned through a task bundle, and a
+    backend handed the device source has nothing to rewrite there. The
+    displaced path stays on the row so the override is auditable rather than
+    silent.
+    """
+    candidates = [
+        _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+        _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+        assert item["source_file_superseded_by_playbook"] == _MORI_SITE_PACKAGES_FILE
+
+
+def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
+    """Nothing displaced, nothing recorded.
+
+    The search roots are emptied so the grep tier cannot resolve anything: on a
+    host with the frameworks installed it reaches the same-word collision this
+    file's other cases describe, which is a displacement rather than the
+    graph-captured no-source shape under test here.
+    """
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
+    candidates = [_mori_dispatch_candidate(source_file="")]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert str(out[0]["source_file"]).endswith("mori_ep_config.py")
+    assert "source_file_superseded_by_playbook" not in out[0]
+
+
+def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog, tmp_path):
+    """The anchorless entry is kept out of the pipeline, not guarded against.
+
+    Every consumer of a match overrides ``source_file`` with the anchor, so an
+    entry without one substitutes nothing for whatever tier resolved the path
+    and lands the candidate as ``missing_native_source``. Guarding each consumer
+    was tried and went wrong in a way the data never justified: the guard's
+    marker gated on ``source_file``, so a row with neither anchor nor path read
+    as anchor-backed, went into ``protected_ids``, and the row most in need of
+    the review was refused it. Refusing the entry at load makes the shape
+    unreachable instead.
+    """
+    registry = tmp_path / "vendor_operator_playbooks.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "playbooks": [
+                    {"id": "with-anchor", "kernel_anchor": "mori_ep_config.py"},
+                    {"id": "no-anchor", "role": "dispatch"},
+                    {"id": "blank-anchor", "kernel_anchor": "   "},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Redirect the registry rather than patching ``Path.read_text``, which is
+    # ``pathlib.Path``'s and would answer for every read in the process.
+    monkeypatch.setattr("_vendor_operator_playbooks._REGISTRY_PATH", registry)
+    _reset_vendor_operator_playbooks_cache()
+    with caplog.at_level(logging.WARNING, logger="_vendor_operator_playbooks"):
+        loaded = load_vendor_operator_playbooks()
+    _reset_vendor_operator_playbooks_cache()
+
+    assert [entry["id"] for entry in loaded] == ["with-anchor"]
+    assert "no-anchor" in caplog.text
+    assert "blank-anchor" in caplog.text
+
+
+def test_a_playbook_candidate_is_not_open_to_review_rewriting():
+    """Protection cannot key on the tier that resolved the replaced path.
+
+    ``source_file`` holds the task bundle's anchor whatever tier ran before, so
+    keying protection on that tier alone leaves the row open: a review proposal
+    could point the field back at framework source, routing the candidate to a
+    backend with nothing to rewrite and losing the playbook route.
+    """
+    resolved_by_grep = {
+        "kernel_id": "k010",
+        "source_resolution_method": "name_grep",
+        "op_to_source_status": "",
+    }
+    assert tla._is_curated_resolution(resolved_by_grep) is False
+
+    assert tla._is_curated_resolution({**resolved_by_grep, "patch_strategy": "vendor_playbook"}) is True
 
 
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --

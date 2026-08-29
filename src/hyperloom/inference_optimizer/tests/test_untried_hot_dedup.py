@@ -75,6 +75,62 @@ def test_distinct_kernels_are_not_collapsed():
     assert untried == ["k002"]
 
 
+def test_an_op_fanout_sibling_retires_with_its_representative():
+    # Op fanout: two different operations over one file. The batch filter
+    # dispatches the stronger one and reports the other as
+    # ``opfanout_merged_into``, which means no backend ever saw it and so writes
+    # no ledger row of its own. The representative's row records the merge, and
+    # that is what retires the sibling: without it k002 owes an attempt no
+    # dispatch will ever make, kernel_work_pending() never goes False, and
+    # KERNEL redispatches the entry batch every tick while ``report`` stays
+    # forbidden -- the same spin the identity dedup closes, reached through the
+    # dispatcher instead of through synthetic ids. The identity key cannot see
+    # it: op fanout is by definition several *different* operations, so name and
+    # gpu_pct both differ.
+    hot = [
+        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
+        _hot("k002", name="attention_fwd", gpu_pct=7.0),
+    ]
+    attempts = {
+        "k001": {
+            "kernel_id": "k001",
+            "current_kernel_id": "k001",
+            "last_source_file": "model.py",
+            "task_group_key": "",
+            "attempts": 1,
+            "opfanout_collapsed_ids": ["k001", "k002"],
+        }
+    }
+    state = _state(hot, attempts=attempts)
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == []
+
+
+def test_a_sibling_the_representative_did_not_cover_still_owes_an_attempt():
+    # The retirement follows the recorded merge, not the shared file. Two ops in
+    # one file that the dispatcher never merged are two units of work, which is
+    # what several real-session regressions in test_shared_state_kernel_opt.py
+    # depend on.
+    hot = [
+        _hot("k001", name="gemm_a8w8", gpu_pct=9.0),
+        _hot("k002", name="attention_fwd", gpu_pct=7.0),
+    ]
+    attempts = {
+        "k001": {
+            "kernel_id": "k001",
+            "current_kernel_id": "k001",
+            "last_source_file": "model.py",
+            "task_group_key": "",
+            "attempts": 1,
+        }
+    }
+    state = _state(hot, attempts=attempts)
+
+    untried = kd.untried_hot_reusable_kernels(state, min_gpu_pct=1.0, top_n=10)
+    assert untried == ["k002"]
+
+
 def test_no_attempts_all_untried_but_deduped():
     # No attempts at all: both twins collapse to a single untried entry (one
     # kernel, one attempt owed), not two.

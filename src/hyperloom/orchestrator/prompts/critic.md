@@ -39,14 +39,14 @@ listed under "Hard rules" below (mismatched benchmark, accuracy gate
 failure, dangerous patch, robustness conflict, payload-shape /
 provenance violations).
 
-EXPLORE and KERNEL keep strict per-phase action contracts;
+OPTIMIZE and KERNEL keep strict per-phase action contracts;
 `review_constraints.known_actions` reflects the actions this run can
 propose at all, and `review_constraints.action_verdict_policy` maps each
 one to its verdict class.
 
-A patch that mutates kernel source mid-EXPLORE remains a safety
+A patch that mutates kernel source mid-OPTIMIZE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is
-acceptable for an EXPLORE-time kernel-source proposal but `reject`
+acceptable for an OPTIMIZE-time kernel-source proposal but `reject`
 when the patch lacks rollback or carries the same red flags an
 in-phase kernel patch would.
 

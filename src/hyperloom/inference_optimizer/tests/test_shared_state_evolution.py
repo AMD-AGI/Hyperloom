@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
@@ -502,6 +503,82 @@ def test_v5_rename_table_targets_are_real_fields():
     assert not missing, f"rename targets that are no longer fields: {missing}"
     stale = sorted(legacy for legacy in _FRAMEWORK_FIELD_RENAMES_V5 if legacy in fields)
     assert not stale, f"legacy names that are somehow still fields: {stale}"
+
+
+def test_class_constants_are_not_persisted_fields():
+    """A constant must be ``ClassVar`` (or module-level), never a bare annotation.
+
+    A bare annotation makes it a dataclass field, which puts a value that was
+    never session state into every ``state.json``, accepts it back on load, and
+    exposes it to ``apply_changes`` -- ``CORE_STATE_FIELDS`` locks the fields
+    someone thought to lock, and nobody locks a constant. Naming is the only
+    signal available here, so this keys on the SCREAMING_CASE convention the
+    file already follows.
+    """
+    leaked = sorted(f.name for f in dataclasses.fields(SharedState) if f.name.isupper())
+    assert not leaked, (
+        f"constants declared as dataclass fields (annotate them ClassVar[...] or move them to module level): {leaked}"
+    )
+
+
+def test_the_profile_identity_keys_stay_off_disk(tmp_path):
+    """The projection keys decide trace staleness; a stored copy must not.
+
+    An existing session's state.json still carries the key from when it was a
+    field, and ``__init__`` no longer accepts it, so loading one has to ignore
+    the key rather than raise.
+    """
+    sd = tmp_path / "session"
+    sd.mkdir()
+    SharedState(session_id="s").save(sd)
+    raw = json.loads((sd / "state.json").read_text())
+    assert "PROFILE_WORKLOAD_IDENTITY_KEYS" not in raw
+
+    # An older state.json carrying the key cannot reintroduce it either.
+    (sd / "state.json").write_text(json.dumps({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}))
+    loaded = SharedState.load_or_init(sd)
+    assert loaded.PROFILE_WORKLOAD_IDENTITY_KEYS == (SharedState.PROFILE_WORKLOAD_IDENTITY_KEYS)
+    assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
+
+
+def test_v6_rename_table_targets_are_real_fields():
+    """Same contract as the v5 table: targets exist, legacy names do not."""
+    from hyperloom.orchestrator.state.shared_state import _KERNEL_OPT_FIELD_RENAMES_V6
+
+    fields = set(SharedState.__dataclass_fields__)
+    missing = sorted(t for t in _KERNEL_OPT_FIELD_RENAMES_V6.values() if t not in fields)
+    assert not missing, f"rename targets that are no longer fields: {missing}"
+    stale = sorted(legacy for legacy in _KERNEL_OPT_FIELD_RENAMES_V6 if legacy in fields)
+    assert not stale, f"legacy names that are somehow still fields: {stale}"
+
+
+def test_v6_carries_the_pre_rename_kernel_opt_optout(tmp_path):
+    """A resumed opt-out keeps opting out instead of reverting to the default."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(json.dumps({"schema_version": 5, "continue_kernel_after_gemm": False}))
+
+    loaded = SharedState.load_or_init(sd)
+
+    assert loaded.auto_kernel_opt_enabled is False
+    assert loaded.schema_version == LATEST_STATE_SCHEMA_VERSION
+
+
+def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):
+    """A mid-migration state holding both keys resolves to the current one."""
+    sd = tmp_path / "session"
+    sd.mkdir()
+    (sd / "state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 5,
+                "continue_kernel_after_gemm": False,
+                "auto_kernel_opt_enabled": True,
+            }
+        )
+    )
+
+    assert SharedState.load_or_init(sd).auto_kernel_opt_enabled is True
 
 
 def test_v4_nested_enablement_roundtrips(tmp_path):

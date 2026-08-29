@@ -139,6 +139,8 @@ class CodexAgentBackend:
                 sandbox_mode=resolved_sandbox,
                 codex_bin=self.codex_bin,
                 env=self.env,
+                component="specialist",
+                operation="run_agent",
             )
         except CodexSessionError as exc:
             raise LLMCallFailed(f"Codex Agent SDK specialist turn failed: {redact_secret_values(str(exc))}") from exc

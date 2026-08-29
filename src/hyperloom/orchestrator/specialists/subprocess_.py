@@ -44,6 +44,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.env import is_truthy
+from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
     scrub_child_process_env,
@@ -143,6 +144,9 @@ _SPECIALIST_ENV_ALLOWLIST: frozenset[str] = frozenset(
         "ANTHROPIC_BASE_URL",
         "AWS_DEFAULT_REGION",
         "AWS_REGION",
+        # Session identity, so a child that reports its own spend files it under
+        # the same session the parent does. Not a credential.
+        "CLAW_SESSION_ID",
         "CLAUDE_CODE_USE_BEDROCK",
         "CLAUDE_MODEL",
         "CODEX_MODEL",
@@ -613,6 +617,12 @@ class SpecialistSubprocessResult:
     roots are session-absolute). Consumers read and sandbox-check these
     directly — do not join them onto a base."""
 
+    patch_roots: dict[str, str] = field(default_factory=dict)
+    """Apply root per patch path, for patches harvested from a worktree.
+
+    Empty for patches merely found on disk, whose target tree is not knowable at
+    collection time and must therefore still be resolved from their contents."""
+
     usage: dict[str, Any] | None = None
     """Token usage recovered from the agent CLI's ``process.log``. Carries the
     four canonical counters (``input_tokens`` / ``output_tokens`` /
@@ -902,6 +912,12 @@ class SpecialistSubprocessDispatcher:
         from ..roles._llm_stability_env import apply_llm_stability_env
 
         apply_llm_stability_env(env)
+        # The child spends against the gateway, so tag it or its spend lands
+        # under no component at all. The task is offered but no preset selects
+        # it: one tag per task would give the spend rollup as many buckets as
+        # there are tasks, which is the opposite of what it is read for. Reading
+        # spend per task needs a header of its own, not a value in this one.
+        inject_attribution_env(env, component="specialist", operation="run_agent", task_id=task_id)
 
         backend = ""
         try:
@@ -1092,8 +1108,8 @@ class SpecialistSubprocessDispatcher:
                 log_fh.close()
             clear_wall_budget_extension(task_id)
 
-        # Patches: scan worktree/patches/ (Arbor convention).
-        patches = self._collect_patches(worktree, workspace)
+        # Patches: harvest from the worktree via git diff first; fall back to disk scan.
+        patches, collected_patch_roots = self._collect_patches(worktree, workspace, worktree_base)
 
         # Parse done.json (best-effort) — first existing candidate.
         done_payload = None
@@ -1145,6 +1161,7 @@ class SpecialistSubprocessDispatcher:
             stale_heartbeat=outcome["stale_heartbeat"],
             process_log_path=str(process_log),
             patches=patches,
+            patch_roots=collected_patch_roots,
             usage=usage,
             response=response,
             tool_calls=tool_calls,
@@ -1593,23 +1610,74 @@ class SpecialistSubprocessDispatcher:
                 pass
 
     @staticmethod
+    def _harvest_worktree_diff(worktree: Path) -> str:
+        """Return the worktree's edits as one ``-p1`` diff, or ``""``.
+
+        A new file is untracked, and ``git diff`` does not see untracked paths.
+        Intent-to-add stages their existence so they render as creations without
+        committing anything, which is what keeps "edited a file and added one"
+        from harvesting a patch that silently omits the addition. ``patches/`` is
+        excluded because the harvest itself lands there.
+
+        Args:
+            worktree: Per-task worktree holding a ``.git`` marker.
+
+        Returns:
+            str: The diff text, or ``""`` when there is nothing to harvest or
+                git could not be run.
+        """
+
+        def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+            try:
+                return subprocess.run(
+                    ["git", "-C", str(worktree), *args],
+                    capture_output=True,
+                    text=True,
+                    timeout=120.0,
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                log.warning("specialist: git %s in %s failed: %r", args[0], worktree, exc)
+                return None
+
+        _git("add", "-A", "-N", "--", ".", ":(exclude)patches")
+        diff = _git("diff", "HEAD", "--", ".", ":(exclude)patches")
+        if diff is None or diff.returncode != 0:
+            return ""
+        return diff.stdout if diff.stdout.strip() else ""
+
+    @staticmethod
     def _collect_patches(
         worktree: Path | None,
         workspace: Path,
-    ) -> list[str]:
-        """Discover patch files written by the specialist.
+        worktree_base: Path | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """Harvest the specialist's edits, else collect the patch files it wrote.
 
-        Scans both ``worktree/patches/`` and ``workspace/patches/``
-        (defense in depth — the agent may write to either) for ``*.patch``
-        and ``*.diff`` files.
+        Editing the worktree is the primary contract: ``git diff HEAD`` renders
+        those edits as one canonical ``-p1`` patch and names its apply root, so
+        nothing downstream has to infer which tree it belongs to. Scanning
+        ``patches/`` remains for dispatches that never got a worktree, and for
+        any git failure here -- a harvest that raises would otherwise discard
+        the whole specialist result, done-file included.
 
         Args:
-            worktree (Path | None): Per-task worktree, or None.
-            workspace (Path): Task workspace.
+            worktree: Per-task worktree, or None.
+            workspace: Task workspace.
+            worktree_base: Checkout the worktree was branched off, which is the
+                apply root of anything harvested from it.
 
         Returns:
-            list[str]: Discovered patch file paths.
+            ``(patch_paths, patch_roots)``; the latter is empty for scanned files.
         """
+        if worktree is not None and (worktree / ".git").exists():
+            harvested_diff = SpecialistSubprocessDispatcher._harvest_worktree_diff(worktree)
+            if harvested_diff:
+                harvested = worktree / "patches" / "_worktree_diff.patch"
+                harvested.parent.mkdir(exist_ok=True)
+                harvested.write_text(harvested_diff, encoding="utf-8")
+                return [str(harvested)], {str(harvested): str(worktree_base or worktree)}
+
         out: list[str] = []
         for base in (worktree, workspace):
             if base is None:
@@ -1620,7 +1688,7 @@ class SpecialistSubprocessDispatcher:
             for ext in ("*.patch", "*.diff"):
                 for p in sorted(patches_dir.glob(ext)):
                     out.append(str(p))
-        return out
+        return out, {}
 
     @staticmethod
     def _read_done(done_file: Path) -> dict[str, Any] | None:

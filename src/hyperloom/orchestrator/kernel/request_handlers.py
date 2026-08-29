@@ -79,6 +79,7 @@ from ._kernel_decisions import (
     kernel_opt_attempts_count as kernel_opt_attempts_count,
     untried_hot_reusable_kernels as untried_hot_reusable_kernels,
     is_collective_candidate as is_collective_candidate,
+    unattempted_skip_reason as unattempted_skip_reason,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
 )
 from ..state.kernel_decision_settings import (
@@ -292,7 +293,13 @@ _APPLY_TOOL_MODULE: Any | None = None
 _DEFAULT_KERNEL_PHASE_BACKEND_ORDER = ("geak",)
 # Soft cap on concurrent kernel-backend coroutines (pin with KERNEL_OPT_MAX_PARALLEL).
 _DEFAULT_KERNEL_BATCH_PARALLEL = 8
-_DEFAULT_BACKEND_BUDGET_MINUTES = 60.0
+# forge-loop holds back a finalize reserve of half this window, so the figure
+# here buys only half as much search as it reads. At 60 a campaign completed one
+# iteration -- planning alone took 16 of its 30 usable minutes -- and terminated
+# on budget_exhausted with nothing kept, which reads as "the kernel cannot be
+# optimized" rather than "the kernel was tried once". 90 leaves ~45 usable
+# minutes, enough for a second iteration to act on what the first measured.
+_DEFAULT_BACKEND_BUDGET_MINUTES = 90.0
 # Minimum wall-clock a fallback backend needs; below this the ladder stops.
 _KERNEL_LADDER_MIN_BACKEND_SEC = 180
 # Outer subprocess cap for the whole GEMM-tuning run (all shapes/tuners); sized
@@ -899,35 +906,23 @@ def _validate_reusable_native_kernel(payload: dict) -> HandlerResult | None:
     return None
 
 
-_ALLOW_EMPTY_KERNEL_SHAPE = False
-
-
-def set_allow_empty_kernel_shape(value: bool) -> None:
-    """Set the process-local empty-shape escape hatch used by CLI runs."""
-    global _ALLOW_EMPTY_KERNEL_SHAPE
-    _ALLOW_EMPTY_KERNEL_SHAPE = bool(value)
-
-
-def _allow_empty_kernel_shape(payload: dict) -> bool:
-    """Escape hatch (default off) via ``payload['allow_empty_kernel_shape']`` or the CLI process flag.
-
-    Args:
-        payload: Request payload that may carry ``allow_empty_kernel_shape``.
-
-    Returns:
-        ``True`` when empty kernel shapes are explicitly permitted.
-    """
-    if bool(payload.get("allow_empty_kernel_shape")):
-        return True
-    return _ALLOW_EMPTY_KERNEL_SHAPE
-
-
 def _validate_kernel_shape_and_paths(
     payload: dict,
     *,
     session_dir: Path,
 ) -> HandlerResult | None:
-    """Reject a kernel-opt dispatch with no trace-anchored shape or a missing source/workspace path.
+    """Reject a kernel-opt dispatch with untrusted shape provenance or a missing source/workspace path.
+
+    A shapeless candidate is NOT rejected. A graph-launched kernel records no
+    CPU-side parent, so the profiler strips its argument dims; refusing to
+    dispatch those means the hottest kernels of a captured model can never be
+    optimized. The invocation spec reports the absent operands under its
+    ``missing`` list and the backend's driver preparation recovers them from the
+    kernel source, the tests it names and the deployment context the spec
+    carries. Provenance is still checked, but only for a shape that is actually
+    there: on a shapeless row the marker names why the dims are absent
+    (``unresolved``), and reading that as an untrusted operand dim would close
+    the same door from the other side.
 
     Args:
         payload: Kernel-opt dispatch payload to validate.
@@ -944,24 +939,25 @@ def _validate_kernel_shape_and_paths(
     kernel_id = str(payload.get("kernel_id") or "")
     name = str(candidate.get("name") or payload.get("kernel_name") or kernel_id)
 
-    shapes = candidate.get("shapes")
-    if not isinstance(shapes, list):
-        shapes = []
-    provenance = str(candidate.get("shape_provenance") or payload.get("shape_provenance") or "").strip()
-    if not shapes and not _allow_empty_kernel_shape(payload):
+    # Absent dims are dispatchable; malformed ones are not. A dict or a bare
+    # string here is truthy, so a bare truthiness test admitted it and the type
+    # error surfaced deep in driver preparation -- against this kernel's retry
+    # quota, reported as an optimization failure. Nor is it right to read one as
+    # shapeless: an empty ``shapes`` is evidence the trace could not record,
+    # which the backend recovers from source, while a malformed one is a
+    # producer that broke, and reading it as absent hides that indefinitely.
+    raw_shapes = candidate.get("shapes")
+    if raw_shapes and not isinstance(raw_shapes, list):
         return {
             "status": "failed",
-            "error_class": "empty_kernel_shape",
-            "error": (
-                "selected kernel candidate has no trace-anchored shape; "
-                "re-run trace_analyze to capture shapes before optimizing "
-                "(or pass --allow-empty-kernel-shape to override)"
-            ),
+            "error_class": "malformed_kernel_shapes",
+            "error": f"shapes must be a list of operand dims, got {type(raw_shapes).__name__}",
             "kernel_id": kernel_id,
             "kernel_name": name,
-            "shape_provenance": provenance,
         }
-    if provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
+    has_shapes = bool(raw_shapes)
+    provenance = str(candidate.get("shape_provenance") or payload.get("shape_provenance") or "").strip()
+    if has_shapes and provenance and provenance not in _ALLOWED_SHAPE_PROVENANCE:
         return {
             "status": "failed",
             "error_class": "untrusted_shape_provenance",
@@ -1913,21 +1909,52 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
     return "; ".join(parts)
 
 
-def _forge_gemm_tune_available() -> bool:
-    """Report whether the ``kernelforge gemm-tune`` tuner can be run.
+_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC = 30
 
-    Importability is the whole question now: the tuner is a subpackage of the
-    kernelforge that ships in this distribution, invoked as
-    ``python -m kernelforge.cli gemm-tune``. It used to also answer yes to a
-    ``forge-gemm-tune`` console script on PATH, from the era when it was its own
-    wheel -- that probe is dropped rather than repointed, because a stale script
-    left behind by an old standalone install would resolve to an unrelated tree.
+
+def _forge_gemm_tune_probe_cmd() -> list[str]:
+    """Return the exact interpreter and CLI prefix used by GEMM tuning."""
+    return [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "--help"]
+
+
+def _forge_gemm_tune_available() -> bool:
+    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
+
+    The tuner is a subpackage of the ``kernelforge`` that ships in this
+    distribution, invoked as ``sys.executable -m kernelforge.cli gemm-tune run``.
+    Vendoring forge in-tree removes the cross-checkout failures this probe was
+    built for, but not the reason it is a subprocess: ``find_spec`` proves the
+    module is importable and says nothing about whether ``gemm-tune`` is
+    registered on the CLI, which is the thing ``_build_cmd`` actually needs. So
+    ask the subcommand itself -- in a subprocess, so a heavy CLI import cannot
+    land in the orchestrator's own process. ``--help`` exits 0 only if
+    ``kernelforge.cli`` imported and ``gemm-tune`` is registered on it.
     """
     try:
-        spec = importlib.util.find_spec("kernelforge.gemm_tune")
-        return spec is not None
-    except (ModuleNotFoundError, ValueError):
+        proc = subprocess.run(
+            _forge_gemm_tune_probe_cmd(),
+            capture_output=True,
+            text=True,
+            timeout=_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "forge-gemm-tune preflight timed out after %ss in %s",
+            _FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+            sys.executable,
+        )
         return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.info("forge-gemm-tune preflight could not start in %s: %s", sys.executable, exc)
+        return False
+    if proc.returncode == 0:
+        return True
+    log.info(
+        "forge-gemm-tune preflight failed (rc=%s): %s",
+        proc.returncode,
+        ((proc.stderr or proc.stdout or "").strip()[-400:] or "(no output)"),
+    )
+    return False
 
 
 def _resolve_aiter_root_for_forge() -> str:
@@ -3732,14 +3759,19 @@ async def _run_forge_gemm_tuning(
 
     state = SharedState.load_or_init(session_dir)
 
-    if not _forge_gemm_tune_available():
+    # Importing kernelforge.cli is deliberately isolated in a subprocess, but
+    # that subprocess may still take until the bounded timeout to fail. Keep the
+    # synchronous probe off the orchestrator reactor.
+    if not await asyncio.to_thread(_forge_gemm_tune_available):
         return {
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "kernelforge.gemm_tune is not importable. It ships with this "
-                "distribution, so this means a partial install: reinstall with "
-                "'pip install -e .[forge]'."
+                "forge-gemm-tune is not runnable in this interpreter: "
+                f"'{sys.executable} -m kernelforge.cli gemm-tune --help' failed. "
+                "kernelforge ships with this distribution, so this means a "
+                "partial install: reinstall with 'pip install -e .[forge]'."
+                f" (interpreter: {sys.executable!r})"
             ),
             "backend": "forge",
         }
@@ -3962,7 +3994,7 @@ async def _run_forge_gemm_tuning(
     input_json = workspace / "forge_gemm_tuning_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [
-        "python3",
+        sys.executable,
         str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
         "--input-json",
         str(input_json),
@@ -5728,7 +5760,12 @@ async def run_optimization_handler(
         return data_guard
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
-    candidates = _batch_kernel_candidates(payload, session_dir=session_dir)
+    dispatch_skips: dict[str, str] = {}
+    candidates = _batch_kernel_candidates(
+        payload,
+        session_dir=session_dir,
+        skipped_out=dispatch_skips,
+    )
     if len(candidates) <= 1:
         single_payload = dict(payload)
         kernel_id_pinned = False
@@ -5743,18 +5780,56 @@ async def run_optimization_handler(
             # that does not exist on the raw hot-kernel row reloaded by the
             # kernel_optimization subprocess.
             single_payload["candidate"] = candidates[0]
-            single_payload.setdefault(
-                "source_file",
-                candidates[0].get("source_file"),
-            )
+            # Assigned, not defaulted. Reconciliation can name a different
+            # kernel than the payload asked for, and this is the same object's
+            # path: a ``setdefault`` kept the requested kernel's source beside
+            # the selected kernel's candidate, so the backend rewrote one
+            # kernel's file while the ledger charged the attempt to the other.
+            selected_source = str(candidates[0].get("source_file") or "")
+            if selected_source:
+                single_payload["source_file"] = selected_source
+            else:
+                single_payload.setdefault("source_file", "")
         else:
             # No routable candidate: canonicalize an aliased id against the full set.
+            all_candidates = _all_kernel_candidates(payload)
             canon = _resolve_candidate_id(
                 single_payload.get("kernel_id"),
-                _all_kernel_candidates(payload),
+                all_candidates,
             )
             if canon:
                 single_payload["kernel_id"] = canon
+                # The filter dropped this kernel for a reason it already knows.
+                # When that reason means "never dispatched", say so instead of
+                # falling through to the validation guards: a failure recorded
+                # here spends the source's retry quota on a decision no backend
+                # made, and the report then explains a technical failure that
+                # never happened.
+                skip_reason = dispatch_skips.get(canon, "")
+                if unattempted_skip_reason(skip_reason):
+                    return {
+                        "status": "skipped",
+                        "reason": skip_reason,
+                        "kernel_id": canon,
+                        "kernels_considered": len(all_candidates),
+                        "message": (f"kernel {canon} was not dispatched: {skip_reason}"),
+                    }
+                # Otherwise the guards below decide, and they need the candidate
+                # to report against. Without it the attempt ledger files this
+                # kernel under an empty source and splits its identity from the
+                # one a later dispatch would use.
+                named = next(
+                    (
+                        row
+                        for row in all_candidates
+                        if isinstance(row, dict) and str(row.get("kernel_id") or "") == canon
+                    ),
+                    None,
+                )
+                if named is not None:
+                    single_payload.setdefault("candidate", named)
+                    if named.get("source_file"):
+                        single_payload.setdefault("source_file", named["source_file"])
             elif not _names_specific_kernel(single_payload):
                 # Empty eligible queue and no specific target (e.g. the post-GEMM
                 # auto pass): finish cleanly as "skipped", not a failure.
@@ -6170,6 +6245,7 @@ def _batch_kernel_candidates(
     payload: dict,
     *,
     session_dir: Path | None = None,
+    skipped_out: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Select the reusable native kernels to dispatch for a batch run.
 
@@ -6192,6 +6268,7 @@ def _batch_kernel_candidates(
             carrying its ``task_group`` when grouped), or an empty list when
             the artifact is missing/unreadable or nothing is eligible.
     """
+
     candidates_path = payload.get("candidates_path")
     if not candidates_path:
         return []
@@ -6256,12 +6333,20 @@ def _batch_kernel_candidates(
                 return src_attempts < attempt_cap
         return int(entry.get("attempts", 0)) < attempt_cap
 
-    def _is_live(
+    def _liveness_reason(
         kid: str,
         current_source: str = "",
         current_task_group_key: str = "",
-    ) -> bool:
-        """A kernel_id is live (batch-eligible) when it is not in-flight and is under the attempt cap for the current source_file; liveness is scoped per (kernel_id, source_file, task_group_key).
+    ) -> str:
+        """Return ``""`` when the kernel is batch-eligible, else why it is not.
+
+        The distinction the bare boolean could not draw: a kernel held back
+        because a sibling dispatch is in flight has had no backend look at it,
+        while one held back for a rejection or an exhausted attempt cap has. A
+        single ``not_live`` reason conflated the two, so the "a gate rejection is
+        not a failed attempt" exemption could not cover the first without also
+        covering the last two -- and covering those would retire a kernel that
+        really did spend its attempts.
 
         Two task-group escapes relax the rejection check: a ledger entry
         recorded under a *different* ``task_group_key`` leaves the kernel live
@@ -6275,21 +6360,30 @@ def _batch_kernel_candidates(
                 empty when the caller has no group identity.
 
         Returns:
-            ``True`` when the kernel is batch-eligible, else ``False``.
+            ``""``, ``"not_live_in_flight"``, ``"not_live_rejected"`` or
+            ``"not_live_attempts_exhausted"``.
         """
         if kid in in_flight:
-            return False
+            return "not_live_in_flight"
         entry = attempts_by_kid.get(kid) or {}
         recorded_group_key = str(entry.get("task_group_key") or "")
         if current_task_group_key and recorded_group_key and recorded_group_key != current_task_group_key:
-            return True
+            return ""
         recorded_source = str(entry.get("last_source_file") or "")
         same_source = not current_source or not recorded_source or recorded_source == current_source
         if kid in rejected_kernel_ids and same_source and not (current_task_group_key and not recorded_group_key):
-            return False
+            return "not_live_rejected"
         if not _entry_allows_dispatch(entry, current_source):
-            return False
-        return True
+            return "not_live_attempts_exhausted"
+        return ""
+
+    def _is_live(
+        kid: str,
+        current_source: str = "",
+        current_task_group_key: str = "",
+    ) -> bool:
+        """Whether ``kid`` is batch-eligible; see :func:`_liveness_reason`."""
+        return not _liveness_reason(kid, current_source, current_task_group_key)
 
     # Collapse kernels sharing a source function into one dispatch via
     # ``task_groups[]``; ungrouped kernels fall through below.
@@ -6449,8 +6543,9 @@ def _batch_kernel_candidates(
             continue
         if not item.get("source_file"):
             continue
-        if not _is_live(kernel_id, str(item.get("source_file") or "")):
-            skipped[kernel_id] = "not_live"
+        liveness = _liveness_reason(kernel_id, str(item.get("source_file") or ""))
+        if liveness:
+            skipped[kernel_id] = liveness
             continue
         try:
             row_pct = float(item.get("gpu_pct") or 0.0)
@@ -6499,6 +6594,8 @@ def _batch_kernel_candidates(
             len(selected),
             skipped,
         )
+    if skipped_out is not None:
+        skipped_out.update(skipped)
     return selected
 
 
@@ -6616,9 +6713,23 @@ def _stamp_task_group_result(
     *,
     fallback_kernel_id: str = "",
 ) -> HandlerResult:
-    """Attach task-group identity to every single or batched result path."""
+    """Attach the dispatch grouping to every single or batched result path.
+
+    Two groupings arrive here, and only one of them has a ``task_group``. An
+    op-fanout representative carries ``opfanout_collapsed_ids``: the siblings the
+    batch filter merged into it, which no backend will be handed separately. The
+    ledger has to record them for the same reason it records a task_group's
+    members -- ``untried_hot_reusable_kernels`` resolves a member to whichever
+    ledger row covers it, and a sibling that resolves to none owes an attempt
+    that can never happen.
+    """
     if not isinstance(result, dict) or not isinstance(candidate, dict):
         return result
+
+    collapsed = [str(item) for item in (candidate.get("opfanout_collapsed_ids") or []) if str(item)]
+    if collapsed:
+        result = {**result, "opfanout_collapsed_ids": collapsed}
+
     task_group = candidate.get("task_group")
     if not isinstance(task_group, dict):
         return result
@@ -6883,15 +6994,27 @@ async def _run_optimization_single(
     kernel_id = payload.get("kernel_id")
     if not kernel_id:
         return {"status": "failed", "error": "missing 'kernel_id' in payload"}
+    # A guard result is recorded as an attempt, and the attempt ledger keys on
+    # kernel_id plus source_file. Carrying the source through means a rejection
+    # and a later real dispatch share one identity instead of splitting into an
+    # empty-source row nothing can reconcile.
+    guard_source = str(payload.get("source_file") or (payload.get("candidate") or {}).get("source_file") or "")
+
+    def _with_source(guard: HandlerResult) -> HandlerResult:
+        """Stamp the resolved source onto a guard result that omitted it."""
+        if guard_source and not guard.get("source_file"):
+            guard = {**guard, "source_file": guard_source}
+        return guard
+
     guard = _validate_reusable_native_kernel(payload)
     if guard is not None:
-        return guard
+        return _with_source(guard)
     shape_guard = _validate_kernel_shape_and_paths(
         payload,
         session_dir=session_dir,
     )
     if shape_guard is not None:
-        return shape_guard
+        return _with_source(shape_guard)
     root_err = _kernel_agent_root_error()
     if root_err:
         return {"status": "failed", "error_class": "kernel_agent_root_missing", "error": root_err}

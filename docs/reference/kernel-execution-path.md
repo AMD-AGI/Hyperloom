@@ -56,7 +56,7 @@ orchestration-issued REQUEST for either
 `inference_optimizer/protocol/action_surfaces.py`, raised as
 `rule="phase_incompatible"`) — a direct request would skip the lane's entry
 gate, its SharedState accounting and its integrate step. The kinds
-orchestration may request are therefore `trace_analyze`, `run_gemm_tuning`,
+orchestration can request are therefore `trace_analyze`, `run_gemm_tuning`,
 `run_optimization`, `integrate` and `apply_patch`; the LLM sees the two lanes
 only as `run_fusion_done` / `run_collective_done` inbox responses. PolicyGate
 validates the REQUEST payload from orchestration (path-sandbox, phase-action
@@ -85,19 +85,44 @@ if geak_enabled:                      # geak_selected(): order is not exactly `f
     await self._run_geak_kernel_phase(from_phase=from_phase)
     return
 
-# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge.
+# 3. Forge branch — only with KERNEL_OPT_BACKEND_ORDER=forge. Two routes into
+#    one shared tail, chosen by whether GEMM tuning is due.
+if not self._gemm_tuning_required_before_kernel_opt():
+    await self._finish_kernel_entry()
+    return
 result = await run_gemm_tuning_handler({...}, session_dir=session_dir)
-# then the two Coordinator-owned lanes, each behind its own gate; both first
-# resume a pending integration from the previous entry before starting anew:
-await self._maybe_run_forge_fusion_before_kernel_opt()
-await self._maybe_run_collective_before_kernel_opt()
-# then, if candidates remain:
-result = await run_optimization_handler({...}, session_dir=session_dir)
+...                                    # handle result, post the bus response
+await self._finish_kernel_entry()
 ```
 
-GEMM tuning is itself gated by `_gemm_tuning_required_before_kernel_opt()`; when
-it is not required the forge branch reprofiles and goes straight to the fusion
-and collective lanes.
+Both routes end in `_finish_kernel_entry()`, and that is where the rest of the
+phase's own work happens:
+
+```python
+async def _finish_kernel_entry(self) -> None:
+    await self._maybe_reprofile_for_kernel()
+    await self._maybe_run_forge_fusion_before_kernel_opt()
+    await self._maybe_run_collective_before_kernel_opt()
+    if self._kernel_opt_work_remains():
+        await self._run_kernel_opt_entry_batch()
+```
+
+**The source-level dispatch is not downstream of GEMM tuning.** Tuning GEMM
+shape tables and rewriting kernel source are unrelated jobs, so each stage in
+the shared tail consults only its own switch and each skip is a return inside
+its own helper rather than out of the entry hook.
+`INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING=1` therefore leaves the source-level
+dispatch alone.
+
+`_run_kernel_opt_entry_batch()` names no `kernel_id`, leaving the set to
+`_batch_kernel_candidates`' own filter: every candidate that clears the dispatch
+floor and has retries left goes in one batch. Naming one here would put the
+phase back in the business of picking, which is the part that stalls when nobody
+picks. `_kernel_opt_work_remains()` gates it on `auto_kernel_opt_enabled`
+(`--no-auto-kernel-opt`) and a non-empty `untried_hot_reusable_kernels()`. The
+switch covers this dispatch only: `kernel_opt` stays in the phase's allowed
+actions, so orchestration can still request it, and the fusion and collective
+lanes keep their own gates.
 
 Results are synthesized as `kernel_agent → orchestration` response messages with
 `source="kernel_entry_auto"` so orchestration's inbox looks the same as if the
@@ -172,7 +197,7 @@ Collective kernels do *not* ride the per-kernel backend. A trace row whose
 `kernel_contract.kind == "collective"` is routed as follows:
 
 - **Per-kernel path** (`run_optimization` → GEAK / Forge): The row is dropped up
-  front by `_batch_kernel_candidates` via `is_collective_candidate`, and is also
+  front by `_batch_kernel_candidates` using `is_collective_candidate`, and is also
   withheld from `reusable_native_kernel_ids` so orchestration is never offered
   an id whose dispatch would be an empty batch. The FlyDSL rewrite route refuses
   such candidates independently (`collective_unsupported`).
@@ -186,7 +211,7 @@ Collective kernels do *not* ride the per-kernel backend. A trace row whose
 
 The lane is reached on the native/Forge KERNEL entry path; when GEAK owns the
 phase `_on_enter_kernel` returns before it. Under the default
-`KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only via
+`KERNEL_OPT_BACKEND_ORDER=geak` it therefore runs only through
 `HYPERLOOM_COLLECTIVE_ONLY`, which turns the GEAK branch off. Its own gate keys
 on `TP > 1` and exposed-communication share, not on the backend order value.
 
@@ -204,7 +229,7 @@ Shell paths in this section follow the recommended `pip install --target .` layo
 In a source checkout, replace the `hyperloom/` prefix with `src/hyperloom/`.
 
 The kernel tool scripts live under `hyperloom/agents/kernel/tools/` and are
-resolved at runtime via the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
+resolved at runtime through the `HYPERLOOM_KERNEL_AGENT_ROOT` env var (set to
 `<repo>/hyperloom/agents/kernel` by the CLI bootstrap). Install everything using:
 
 ```bash
@@ -225,7 +250,7 @@ Required env vars:
 |---|---|---|
 | `ANTHROPIC_API_KEY` | operator | Anthropic-side key; GEAK and TraceLens both run Claude Code |
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
-| `TRACELENS_ROOT` | `install.sh` (operator may override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
+| `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
 
 Optional:
@@ -235,7 +260,7 @@ Optional:
 | `TRACELENS_INTERNAL_ROOT` | TraceLens internal extension; unset = open-source-only |
 | `KERNEL_OPT_MAX_PARALLEL` | Override the 8-concurrent-kernel default |
 | `INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL` | Override partial-attempt retry cap (default 2) |
-| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 60); wins over the LLM-authored payload value |
+| `KERNEL_OPT_BACKEND_BUDGET_MIN` | Force the per-optimization wall-clock budget in minutes (default 90); wins over the LLM-authored payload value |
 
 Fusion lane:
 
@@ -303,7 +328,7 @@ transparently.
 When `--nodes >= 2`, the optimization sandbox has no GPU. Handlers adapt:
 
 - **Applying patches**: `apply_kernel_patch.py` detects multi-node and fans the
-  patch to every pod via `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
+  patch to every pod using `python3 -m hyperloom.inference_optimizer.multi_node apply-patch`.
   Revert uses `manifest.multinode.host_backup_map` to hit the same pods.
 - **Compiling/benchmarking**: Forge/GEAK backends use
   `python3 -m hyperloom.inference_optimizer.multi_node kernel-bench` instead of

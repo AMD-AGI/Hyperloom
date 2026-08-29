@@ -64,13 +64,31 @@ def _make_intent(payload: dict[str, Any]) -> Intent:
     )
 
 
-def test_policy_denies_integrate_patch_without_specialist_task_id():
+def test_policy_denies_integrate_patch_naming_no_review_subject():
     gate = _make_gate(SharedState())
-    intent = _make_intent({})  # missing specialist_task_id
+    intent = _make_intent({})
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent("orchestration", intent)
     assert exc.value.rule == "integrate_patch_requires_critic_verdict"
-    assert "specialist_task_id" in str(exc.value)
+    assert "no Critic review subject" in str(exc.value)
+
+
+def test_policy_reviews_an_upstream_pr_candidate_under_its_candidate_id():
+    """The pre-screen is reviewed before any specialist exists.
+
+    Its dispatched task carries a candidate id and no specialist task id, so a
+    gate that only knew the latter denied the whole upstream-PR arm at
+    dispatch as if the row had been forged.
+    """
+    s = SharedState()
+    gate = _make_gate(s)
+    intent = _make_intent({"framework_agent_candidate_id": "vllm/vllm#1015"})
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent("orchestration", intent)
+    assert "no Critic verdict" in str(exc.value)
+
+    s.record_specialist_patch_verdict("vllm/vllm#1015", "approve")
+    gate.validate_intent("orchestration", intent)
 
 
 def test_policy_denies_integrate_patch_without_critic_verdict():
@@ -108,15 +126,15 @@ def test_policy_allows_integrate_patch_on_approve():
     s.record_specialist_patch_verdict("t-spec-4", "approve")
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-4"})
-    # Phase check still requires EXPLORE; verify only the critic gate.
-    s.phase = "EXPLORE"
+    # The phase check still applies; verify only the critic gate.
+    s.phase = "FRAMEWORK_AGENT"
     gate.validate_intent("orchestration", intent)
 
 
 def test_policy_allows_integrate_patch_on_advise():
     s = SharedState()
     s.record_specialist_patch_verdict("t-spec-5", "advise")
-    s.phase = "EXPLORE"
+    s.phase = "FRAMEWORK_AGENT"
     gate = _make_gate(s)
     intent = _make_intent({"specialist_task_id": "t-spec-5"})
     gate.validate_intent("orchestration", intent)

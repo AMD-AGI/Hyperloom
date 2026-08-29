@@ -235,7 +235,7 @@ def test_opt_venv_path_never_replaced(tmp_path):
 
 def test_kept_stack_action_survives_rearm(monkeypatch):
     from hyperloom.orchestrator.state.shared_state import SharedState
-    from hyperloom.orchestrator.phases.framework import _maybe_build_runtime_candidate  # noqa: F401
+    from hyperloom.orchestrator.enablement.params import _maybe_build_runtime_candidate  # noqa: F401
 
     # Simulate a coordinator with just enough surface for _maybe_rearm_enablement.
     state = SharedState()

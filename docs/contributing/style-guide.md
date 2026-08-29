@@ -167,7 +167,7 @@ pip install reuse
 reuse lint
 ```
 
-CI enforces this via the **REUSE Compliance** workflow.
+CI enforces this through the **REUSE Compliance** workflow.
 
 ## Commit and pull request hygiene
 

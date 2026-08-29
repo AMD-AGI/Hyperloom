@@ -232,7 +232,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             "trace_input": "/tmp/profile.trace.json.gz",
             "candidates_path": "/tmp/candidates.json",
         }
-        c.shared_state.continue_kernel_after_gemm = False
+        c.shared_state.auto_kernel_opt_enabled = False
         calls: list[dict] = []
         tuned = session_dir / "tuned.csv"
         tuned.write_text("M,N,K,kernelId\n16,512,7168,3\n", encoding="utf-8")
@@ -264,7 +264,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._on_enter_kernel(from_phase="EXPLORE")
+        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
@@ -294,7 +294,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
             "trace_input": "/tmp/profile.trace.json.gz",
             "candidates_path": "/tmp/candidates.json",
         }
-        c.shared_state.continue_kernel_after_gemm = True
+        c.shared_state.auto_kernel_opt_enabled = True
         c.shared_state.untried_hot_reusable_kernels = lambda: ["k001"]  # type: ignore[method-assign]
 
         from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
@@ -316,7 +316,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
         monkeypatch.setattr(kernel_request_handlers, "run_gemm_tuning_handler", fake_gemm)
         monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake_kernel)
 
-        await c._on_enter_kernel(from_phase="EXPLORE")
+        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert kernel_calls
         assert kernel_calls[0]["candidates_path"] == "/tmp/candidates.json"
@@ -415,7 +415,8 @@ async def test_run_optimization_handler_forwards_verification_evidence(
               "kernel_id": "k006",
               "name": "aiter_native_kernel",
               "source_file": "/sgl-workspace/aiter/csrc/kernels/rmsnorm_quant_kernels.cu",
-              "reusable_native_kernel": true
+              "reusable_native_kernel": true,
+              "gpu_pct": 12.5
             }
           ]
         }

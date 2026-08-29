@@ -637,7 +637,13 @@ async def run_tracelens_skill(
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
-    kwargs.update(claude_sdk_env_options(model=resolved_model))
+    kwargs.update(
+        claude_sdk_env_options(
+            model=resolved_model,
+            component="tracelens",
+            operation="analyze_trace",
+        )
+    )
 
     try:
         options = sdk_options_cls(**kwargs)

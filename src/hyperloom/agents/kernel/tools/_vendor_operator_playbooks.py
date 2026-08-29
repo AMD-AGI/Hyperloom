@@ -27,8 +27,11 @@ from __future__ import annotations
 import copy
 import functools
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 _REGISTRY_PATH = Path(__file__).resolve().parent / "vendor_operator_playbooks.json"
 
@@ -49,7 +52,24 @@ def load_vendor_operator_playbooks() -> tuple[dict[str, Any], ...]:
     playbooks = raw.get("playbooks") if isinstance(raw, dict) else None
     if not isinstance(playbooks, list):
         return ()
-    return tuple(entry for entry in playbooks if isinstance(entry, dict) and entry.get("id"))
+    # ``kernel_anchor`` is required, not optional. Every consumer of a match
+    # overrides ``source_file`` with the anchor, so an entry without one has the
+    # override substitute nothing for whatever tier resolved the path and land
+    # the candidate as ``missing_native_source``. Refusing it here keeps that
+    # shape out of the pipeline entirely, rather than asking each consumer to
+    # guard against it -- which is where a guard for it went wrong before.
+    usable: list[dict[str, Any]] = []
+    for entry in playbooks:
+        if not isinstance(entry, dict) or not entry.get("id"):
+            continue
+        if not str(entry.get("kernel_anchor") or "").strip():
+            log.warning(
+                "vendor operator playbook %r declares no kernel_anchor; ignoring it",
+                entry.get("id"),
+            )
+            continue
+        usable.append(entry)
+    return tuple(usable)
 
 
 def _reset_vendor_operator_playbooks_cache() -> None:
