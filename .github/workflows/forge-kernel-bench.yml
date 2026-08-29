@@ -105,22 +105,33 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Every ${{ }} value below reaches the shell through env, never through
+      # string interpolation into the script. matrix.* comes from a secret and
+      # inputs.* from whoever dispatched the run; a name containing $(...) or a
+      # backtick would otherwise execute on a self-hosted runner.
       - name: Trigger + monitor forge run
         env:
           KA_API_BASE: ${{ secrets.KA_API_BASE }}
           KA_API_KEY: ${{ secrets.KA_API_KEY }}
+          KERNEL_NAME: ${{ matrix.name }}
+          BENCHMARK_ID: ${{ matrix.benchmark_id }}
+          FORGE_MODEL: ${{ inputs.model }}
+          MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          AKA_REF: ${{ inputs.aka_ref }}
+          POLL_FLAG: ${{ inputs.wait_for_completion && '--poll' || '--no-poll' }}
         run: |
           {
-            echo "### forge run — ${{ matrix.name }}"
+            echo "### forge run — ${KERNEL_NAME}"
             echo ""
             echo "| kernel | run_id | status | speedup | total_score |"
             echo "|---|---|---|---|---|"
           } >> "$GITHUB_STEP_SUMMARY"
           python3 .github/scripts/forge_ci.py run \
-            --benchmark-id "${{ matrix.benchmark_id }}" \
-            --name "${{ matrix.name }}" \
-            --model "${{ inputs.model }}" \
-            --max-iterations "${{ inputs.max_iterations }}" \
-            --timeout-seconds "${{ inputs.timeout_seconds }}" \
-            --aka-ref "${{ inputs.aka_ref }}" \
-            ${{ inputs.wait_for_completion && '--poll' || '--no-poll' }}
+            --benchmark-id "$BENCHMARK_ID" \
+            --name "$KERNEL_NAME" \
+            --model "$FORGE_MODEL" \
+            --max-iterations "$MAX_ITERATIONS" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --aka-ref "$AKA_REF" \
+            "$POLL_FLAG"
