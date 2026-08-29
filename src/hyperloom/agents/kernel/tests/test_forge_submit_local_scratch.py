@@ -37,9 +37,7 @@ def test_local_scratch_stays_beside_the_archive_off_a_network_mount(
     assert forge_submit._local_scratch_dir(output_dir) == output_dir / "worktree"
 
 
-def test_two_sessions_on_one_kernel_get_separate_local_scratch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_two_sessions_on_one_kernel_get_separate_local_scratch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
     first = forge_submit._local_scratch_dir(_durable_attempt(tmp_path, "session-a", "matmul"))
@@ -50,9 +48,7 @@ def test_two_sessions_on_one_kernel_get_separate_local_scratch(
     assert second == local_root / "session-b" / "matmul" / "worktree"
 
 
-def test_the_sweep_spares_a_session_that_is_still_running(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_the_sweep_spares_a_session_that_is_still_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
     live = _durable_attempt(tmp_path, "session-live", "matmul")
@@ -66,9 +62,7 @@ def test_the_sweep_spares_a_session_that_is_still_running(
     assert local_root / "session-live" in list(local_root.iterdir())
 
 
-def test_the_sweep_removes_a_session_whose_archive_is_gone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_the_sweep_removes_a_session_whose_archive_is_gone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
     dead_scratch = local_root / "session-dead" / "matmul" / "worktree"
@@ -79,9 +73,7 @@ def test_the_sweep_removes_a_session_whose_archive_is_gone(
     assert not (local_root / "session-dead").exists()
 
 
-def test_the_sweep_leaves_unrelated_directories_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_the_sweep_leaves_unrelated_directories_alone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
     local_root.mkdir(parents=True)

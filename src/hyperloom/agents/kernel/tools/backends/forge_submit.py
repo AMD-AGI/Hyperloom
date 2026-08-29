@@ -1416,8 +1416,7 @@ def _runtime_artifact_globs() -> tuple[str, ...]:
     except ImportError:
         suffixes = sorted(_FALLBACK_RUNTIME_FILE_SUFFIXES + _FALLBACK_COMPILED_FILE_SUFFIXES)
         return tuple(
-            [f"{name}/" for name in sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)]
-            + [f"*{suffix}" for suffix in suffixes]
+            [f"{name}/" for name in sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)] + [f"*{suffix}" for suffix in suffixes]
         )
     return runtime_gitignore_globs()
 
