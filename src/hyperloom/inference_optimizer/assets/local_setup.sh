@@ -12,8 +12,9 @@
 # It used to also clone the private KernelForge repo and export $FORGE_PATH,
 # because the forge kernel backend lived in that separate checkout. forge now
 # ships inside this distribution as the `kernelforge` package, so there is
-# nothing to clone; $FORGE_PATH survives only as a hand-set dev override and is
-# passed through below when the caller already exported one.
+# nothing to clone and nothing left to point at: no code reads $FORGE_PATH any
+# more, and it is not on env_safety's forwarding allowlist either. The dev
+# override that replaced it is $KERNELFORGE_PROJECT_ROOT.
 
 set -euo pipefail
 
@@ -65,7 +66,7 @@ Options:
   -h, --help            Show this help
 
 Advanced env overrides:
-  REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV, FORGE_PATH
+  REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV
 EOF
 }
 
@@ -111,16 +112,6 @@ write_export() {
   printf 'export %s=%s\n' "$1" "$(shell_quote "$2")"
 }
 
-validate_forge_path_override() {
-  # $FORGE_PATH is a dev override now, not a checkout this script produces.
-  # Still fail loudly on a bad one: a stale pointer silently shadows the
-  # packaged kernelforge on sys.path inside forge_submit.
-  [ -n "${FORGE_PATH:-}" ] || return 0
-  [ -d "$FORGE_PATH" ] || die "FORGE_PATH is set but does not exist: ${FORGE_PATH}"
-  export FORGE_PATH
-  log "FORGE_PATH: dev override ${FORGE_PATH} (forge itself ships in this distribution)"
-}
-
 write_local_env() {
   if [ "$DRY_RUN" -eq 1 ] || [ "$CHECK_ONLY" -eq 1 ]; then
     log "would write local env: ${LOCAL_SETUP_ENV}"
@@ -141,12 +132,6 @@ write_local_env() {
     # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
     # the $REPO_ROOT/.cache default and mis-classify managed vs override (#722).
     write_export HYPERLOOM_CACHE_DIR "$_open_source_root"
-    # Dev override only: forge ships in this distribution, so an unset
-    # FORGE_PATH is the normal case. Pass through what the caller set so a
-    # developer pointing at a forge working tree keeps that pointer.
-    if [ -n "${FORGE_PATH:-}" ]; then
-      write_export FORGE_PATH "$FORGE_PATH"
-    fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"
   log "wrote ${LOCAL_SETUP_ENV}"
@@ -198,7 +183,6 @@ main() {
     mkdir -p "$HYPERLOOM_DEPS_ROOT" "$HYPERLOOM_RUNTIME_DIR"
   fi
 
-  validate_forge_path_override
   write_local_env
 
   if [ "$PRINT_NEXT_STEPS" -eq 1 ]; then
