@@ -150,7 +150,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         default_mode="research",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
-            "periodically during EXPLORE). Surveys reference launch "
+            "periodically during the optimisation phase). Surveys reference launch "
             "scripts, model config.json architecture features, and "
             "cross-framework / NVIDIA PRs+blogs+MLPerf for proven "
             "optimizations, then writes prioritised research_hints with "
@@ -172,7 +172,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "predicate (e.g. a CUDA-only *_supported() returning False on "
             "ROCm). Seeded with a curated checklist; emits bridge-patch "
             "candidates as gap seeds. Never benchmarks, applies patches, or "
-            "decides KEEP/REVERT — the EXPLORE freeform specialist authors the "
+            "decides KEEP/REVERT — the freeform specialist authors the "
             "actual patch under the normal KEEP gate."
         ),
     ),

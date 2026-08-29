@@ -635,7 +635,7 @@ def _focus_static_recon_specialist(
         "the source path you read, ``why_disabled_here`` explains the False",
         "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
         "sketch — you do NOT write the patch), and ``domain_hint`` is the",
-        "EXPLORE specialist that should author it (``freeform`` keeps the whole",
+        "specialist that should author it (``freeform`` keeps the whole",
         "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
         "is dropped.",
         "",

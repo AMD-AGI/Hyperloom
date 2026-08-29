@@ -1100,7 +1100,7 @@ def phase_cumulative_seconds(
 
 
 def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Return total Explore wall-clock seconds across all macro cycles.
+    """Return total optimisation-phase wall-clock seconds across all macro cycles.
 
     Completed segments are accumulated at every transition out of the
     optimisation phase. If it is still current, append the live segment at
@@ -1499,7 +1499,7 @@ def compute_plateau_kernel(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_kernel → ``(triggered, evidence)``.
 
-    Trigger (OR, weaker than explore's AND): revert_streak
+    Trigger (OR, weaker than the config arm's AND): revert_streak
     >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
 
     Args:
@@ -2970,7 +2970,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# Human-friendly labels for the six coordinator phases.
+# Human-friendly labels for the coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",

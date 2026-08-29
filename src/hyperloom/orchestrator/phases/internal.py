@@ -28,7 +28,7 @@ class InternalTasksPhase(PhaseHandler):
 
         Args:
             reason: Tag distinguishing the enqueue site, recorded on the task.
-            round_id: The EXPLORE round (or 0 for PRELUDE) scoping the
+            round_id: The config-arm round (or 0 for PRELUDE) scoping the
                 idempotency key.
 
         Returns:
@@ -138,7 +138,7 @@ class InternalTasksPhase(PhaseHandler):
             log.exception("research-scout: PRELUDE dispatch failed")
 
     async def _maybe_enqueue_explore_research_scout(self) -> None:
-        """Re-dispatch the scout every K EXPLORE rounds (append-only)."""
+        """Re-dispatch the scout every K config-arm rounds (append-only)."""
         state = self.shared_state
         if not bool(getattr(state, "research_scout_enabled", True)):
             return
@@ -154,7 +154,7 @@ class InternalTasksPhase(PhaseHandler):
                 round_id=round_id,
             )
         except Exception:  # noqa: BLE001 — defensive
-            log.exception("research-scout: EXPLORE re-dispatch failed")
+            log.exception("research-scout: re-dispatch failed")
 
     async def _enqueue_internal_static_recon_task(
         self,
@@ -329,7 +329,7 @@ class InternalTasksPhase(PhaseHandler):
         """Seed static-recon bridge candidates into gaps[] (idempotent, fail-soft).
 
         Reads the specialist's ``recon`` block, validates each
-        ``bridge_candidate``, and upserts one gap per candidate so the EXPLORE
+        ``bridge_candidate``, and upserts one gap per candidate so the config-arm
         freeform specialist later dispatches against it with a precise mandate
         (predicate location + consequence + bridge sketch). Read-only producer:
         no patch is applied here; the normal KEEP gate still governs landing.

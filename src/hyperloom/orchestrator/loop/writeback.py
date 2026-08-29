@@ -90,10 +90,9 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
+# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
 # label rather than under their task kind, because that label is what
-# ``phase_breakdown`` and the action-family table publish. Anything that
-# reconciles a ``framework_agent`` task against the stack has to translate.
+# ``phase_breakdown`` and the action-family table publish.
 _FRAMEWORK_STACK_ACTION = "framework"
 
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
@@ -1391,7 +1390,7 @@ class WritebackCollaborator:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        # integrate_patch / framework_agent report their delta under ``delta_pct``;
+        # integrate_patch reports its delta under ``delta_pct``;
         # fall back to it so a reverted/kept patch shows its REAL measured delta
         # in the journal instead of a null gain.
         gain_pct = to_float(result_dict.get("gain_pct"))

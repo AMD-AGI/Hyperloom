@@ -7,7 +7,7 @@ LLM sub-agent runner for ``delegate{action_name='specialist', ...}``
 (vs the deterministic Python executors of :class:`SubAgentRunner`).
 
 Inv-5.3 single-exit: every exit path synthesises a ``specialist_done``
-payload so the EXPLORE round never blocks; ``status`` carries the original
+payload so the config-arm round never blocks; ``status`` carries the original
 outcome for the audit trail.
 """
 
