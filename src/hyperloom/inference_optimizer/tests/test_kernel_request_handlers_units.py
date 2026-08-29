@@ -183,9 +183,10 @@ class TestForgeGemmHelperCoverage:
 
     def test_forge_gemm_tune_available_probes_the_command_it_will_run(self, monkeypatch):
         # The probe must be the same invocation the tool makes, in the same
-        # interpreter: a `kernel-agents` script on PATH from another venv, or a
-        # bare `forge_gemm_tune` import, both used to pass here and then fail
-        # the run with ModuleNotFoundError / "No such command".
+        # interpreter. Vendoring forge in-tree retires the cross-venv failure
+        # this was written for, but not the other one: an importable
+        # kernelforge.gemm_tune says nothing about whether `gemm-tune` is
+        # registered on the CLI, and that is what the run needs.
         seen: list[list[str]] = []
 
         def _fake_run(cmd, **_kwargs):
@@ -198,12 +199,12 @@ class TestForgeGemmHelperCoverage:
         assert seen[0][0] == sys.executable
 
     def test_forge_gemm_tune_available_false_when_subcommand_missing(self, monkeypatch):
-        # An older kernel_agents imports fine but has no forge-gemm-tune group;
-        # click exits 2 on an unknown command.
+        # A tree whose kernelforge imports fine but never registered the
+        # gemm-tune group; click exits 2 on an unknown command.
         monkeypatch.setattr(
             krh.subprocess,
             "run",
-            lambda cmd, **_k: subprocess.CompletedProcess(cmd, 2, "", "Error: No such command 'forge-gemm-tune'."),
+            lambda cmd, **_k: subprocess.CompletedProcess(cmd, 2, "", "Error: No such command 'gemm-tune'."),
         )
         assert krh._forge_gemm_tune_available() is False
 
@@ -523,16 +524,16 @@ class TestForgeGemmHelperCoverage:
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", spec)
         assert krh._forge_fusion_available() is True
-        # Probing kernel_agents alone would pass on a KernelForge predating the
+        # Probing kernelforge alone would pass on a KernelForge predating the
         # fusion absorption and only fail once the subprocess rejected forge-fuse.
-        assert probed == ["kernel_agents.fusion"]
+        assert probed == ["kernelforge.fusion"]
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", lambda _name: None)
         assert krh._forge_fusion_available() is False
 
     def test_forge_fusion_available_survives_an_unimportable_parent(self, monkeypatch):
         def boom(_name):
-            raise ModuleNotFoundError("kernel_agents")
+            raise ModuleNotFoundError("kernelforge")
 
         monkeypatch.setattr(krh.importlib.util, "find_spec", boom)
         assert krh._forge_fusion_available() is False

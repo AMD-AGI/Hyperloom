@@ -385,7 +385,7 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
 - **Forge: a third autonomous kernel-optimization backend (new track)**:
   0.7's headline is **Forge** (**Kernel-Forge**) — a self-driving kernel-optimization
   backend that joins GEAK and OOB. It runs an autonomous edit→build→bench loop
-  with kernel_kind-aware fellow routing (Triton / HIP / CK / aiter / hipBLASLt / FlyDSL),
+  with kernel_kind-aware kernel backend routing (Triton / HIP / CK / aiter / hipBLASLt / FlyDSL),
   an aiter compiled-kernel closed loop, honest compile-only skips for
   non-rewritable kernels, and its own session-breakdown lane. Forge already
   produces the majority of detected kernels on MI300X runs.
@@ -398,7 +398,7 @@ The first public release of Hyperloom (1.0.0a1) combines features from the follo
 
 - **Knowledge Base: GBrain-backed, 7-tuple canonical identity**: The Recipe KB
   extends its canonical identity from a 5-tuple to a **7-tuple** with config-donor
-  warm-replay, and Forge fellows now read cross-KB knowledge directly from the
+  warm-replay, and Forge kernel backends now read cross-KB knowledge directly from the
   unified **GBrain** (KernelForge + GEAK + PTAO), with KB-usage provenance surfaced
   in the session breakdown.
 

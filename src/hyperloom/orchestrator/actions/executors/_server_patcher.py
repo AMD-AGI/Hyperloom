@@ -321,16 +321,17 @@ def ensure_sglang_patched_for_ck_blockscale(
     faster than the default Triton path), gated by
     ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` (0 = off, so the patch is a no-op when
     the env is unset). The patch is OWNED by KernelForge (shipped under
-    ``<root>/serving_patches/sglang/sglang_<ver>/``); this reuses the same
-    fail-soft / idempotent / atomic machinery as the TraceLens patchers.
+    ``serving_patches/sglang/sglang_<ver>/``, packaged inside the installed
+    ``kernelforge``); this reuses the same fail-soft / idempotent / atomic
+    machinery as the TraceLens patchers.
 
     Returns ``True`` when patched at exit, ``False`` on any fail-soft outcome
     (the caller then leaves ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` to no-op on the
     unpatched tree).
 
     Args:
-        kernelforge_root: KernelForge checkout root; falls back to
-            ``$FORGE_PATH`` when ``None``.
+        kernelforge_root: Explicit ``serving_patches`` parent override; falls
+            back to the packaged tree when ``None``.
 
     Returns:
         True if the SGLang install carries the CK-routing patch at exit, False
@@ -814,9 +815,6 @@ def _resolve_sglang_apply_root(sglang_module: Path) -> tuple[Path, int] | None:
     return None
 
 
-# KernelForge root env var (single canonical var; CI/local both export it).
-_KERNELFORGE_ROOT_ENV_VARS: tuple[str, ...] = ("FORGE_PATH",)
-
 # CK fp8 block-scale routing markers added to ``fp8_utils.py`` by the
 # KernelForge-owned patch; all three must be present to count as patched.
 _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
@@ -826,56 +824,99 @@ _SGLANG_CK_BLOCKSCALE_SENTINELS: tuple[str, ...] = (
 )
 
 
-def _resolve_kernelforge_root(arg: Path | str | None) -> Path | None:
-    """Resolve the KernelForge root from arg → env aliases → None; fail-soft.
+def _resolve_serving_patches_root(arg: Path | str | None) -> Path | None:
+    """Resolve KernelForge's ``serving_patches`` tree; fail-soft.
 
-    Reads ``FORGE_PATH`` (the single canonical KernelForge root var); returns
-    it when it exists on disk, else ``None``.
+    Precedence: an explicit KernelForge root, then whatever
+    :func:`kernelforge.resources.resource_path` resolves -- a
+    ``$KERNELFORGE_PROJECT_ROOT`` tree carrying its own ``serving_patches``,
+    else the copy packaged inside the installed ``kernelforge``. The packaged
+    copy is the normal answer: KernelForge ships in this distribution now, so
+    no environment is a precondition. The old ``$FORGE_PATH`` branch is gone --
+    it pointed at the pre-inlining repository layout, so any value that still
+    satisfied it shadowed the packaged tree with an archived one.
+
+    Every miss on this path is silent by design (an unpatched tree just leaves
+    ``SGLANG_FP8_BLOCKSCALE_CK_MAX_M`` no-opping), so an override that wins is
+    logged at WARNING: patching SGLang from somewhere other than the shipped
+    tree is not something to discover by reading a diff months later. An
+    override that *loses* -- ``arg`` given but holding no ``serving_patches``
+    directory -- is logged too, for the same reason in reverse: the caller named
+    a tree and a different one is about to be applied.
+
+    ``kernelforge`` is imported inside the function on purpose: Hyperloom must
+    stay importable on a host where the forge extra was not installed, and this
+    module is reached from the executor import graph at startup.
 
     Args:
-        arg: Explicit KernelForge root override, or ``None`` to read the env
-            aliases.
+        arg: Explicit KernelForge root override (a checkout root, not the
+            ``serving_patches`` dir itself), or ``None``.
 
     Returns:
-        The resolved KernelForge root directory, or ``None`` when unset or
-        missing on disk.
+        The ``serving_patches`` directory, or ``None`` when nothing resolves to
+        a real directory.
     """
     if arg:
-        root = Path(arg)
-        return root if root.is_dir() else None
-    for var in _KERNELFORGE_ROOT_ENV_VARS:
-        env = os.environ.get(var, "").strip()
-        if not env:
-            continue
-        root = Path(env)
-        if root.is_dir():
-            return root
-    return None
+        candidate = Path(arg) / "serving_patches"
+        if candidate.is_dir():
+            log.warning(
+                "_server_patcher: patching SGLang from an explicit serving_patches tree at %s, "
+                "not the one packaged with kernelforge",
+                candidate,
+            )
+            return candidate
+        # An override that does not resolve falls through to the packaged tree,
+        # which is the right fail-soft behaviour but the wrong silence: the
+        # caller asked for a specific tree and got a different one. A mistyped
+        # root would otherwise look exactly like no override at all.
+        log.warning(
+            "_server_patcher: explicit KernelForge root %s has no serving_patches directory; "
+            "falling back to the packaged tree, so the requested patches are NOT the ones applied",
+            arg,
+        )
+
+    try:
+        from kernelforge.resources import default_project_root, packaged_data_root, resource_path
+
+        resolved = resource_path("serving_patches", default_project_root(), missing_ok=True)
+        packaged_root = packaged_data_root()
+    except ImportError:
+        return None
+    if not resolved.is_dir():
+        return None
+    if resolved.parent != packaged_root:
+        log.warning(
+            "_server_patcher: patching SGLang from %s (KERNELFORGE_PROJECT_ROOT override), "
+            "not the tree packaged with kernelforge at %s",
+            resolved,
+            packaged_root / "serving_patches",
+        )
+    return resolved
 
 
 def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
     """Build the SGLang fp8 block-scale CK-routing patch plan.
 
-    Resolves the KernelForge root and its ``serving_patches/sglang`` tree,
+    Resolves KernelForge's ``serving_patches/sglang`` tree,
     reuses the per-version subdir + ``SUPPORTED_VERSIONS`` manifest gating from
     the TraceLens path, picks the editable-vs-wheel apply root / strip count,
     and assembles the ``fp8_utils.py`` sentinel markers.
 
     Args:
-        arg: KernelForge checkout root, or ``None`` to read the env aliases.
+        arg: Explicit ``serving_patches`` parent override, or ``None`` to use
+            the packaged tree.
 
     Returns:
         _PatchPlan | None: A fully-resolved plan, or ``None`` on any fail-soft
         condition (KernelForge missing, sglang not importable, unsupported
         version, no patches, unexpected install layout).
     """
-    kernelforge_root = _resolve_kernelforge_root(arg)
-    if kernelforge_root is None:
+    serving_patches_root = _resolve_serving_patches_root(arg)
+    if serving_patches_root is None:
         log.info(
-            "_server_patcher: KernelForge root unset/missing "
-            "(FORGE_PATH) — skip SGLang "
-            "fp8 block-scale CK patch (SGLANG_FP8_BLOCKSCALE_CK_MAX_M will "
-            "no-op on the unpatched tree)"
+            "_server_patcher: no KernelForge serving_patches tree resolved from the packaged "
+            "kernelforge — skip SGLang fp8 block-scale CK patch "
+            "(SGLANG_FP8_BLOCKSCALE_CK_MAX_M will no-op on the unpatched tree)"
         )
         return None
 
@@ -890,9 +931,9 @@ def _discover_sglang_ck_plan(arg: Path | str | None) -> _PatchPlan | None:
 
     version = (getattr(sglang, "__version__", "") or "").strip()
 
-    # KernelForge layout: ``<root>/serving_patches/sglang/`` holds the
-    # per-version subdirs plus the SUPPORTED_VERSIONS manifest.
-    patches_root = kernelforge_root / "serving_patches" / "sglang"
+    # KernelForge layout: ``serving_patches/sglang/`` holds the per-version
+    # subdirs plus the SUPPORTED_VERSIONS manifest.
+    patches_root = serving_patches_root / "sglang"
     if not patches_root.is_dir():
         log.warning(
             "_server_patcher: KernelForge SGLang patches root missing (%s); skip CK block-scale patch",

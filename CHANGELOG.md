@@ -7,6 +7,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
+  Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
+  `85b49f2f` (upstream `main`, PR #53 included) into `src/kernelforge/`;
+  Hyperloom is the sole source from here on. The three former top-level
+  packages collapsed into one: `kernel_agents` -> `kernelforge`, `forge_llm` ->
+  `kernelforge.llm` / `kernelforge.agent_backends`, `forge_gemm_tune` ->
+  `kernelforge.gemm_tune`. forge keeps its own CLI (`kernelforge`, invoked as
+  `python -m kernelforge.cli`), and the orchestrator's kernel-agent dispatch
+  path is unchanged, including `KERNEL_OPT_BACKEND_ORDER`, which still selects
+  between the forge and geak backends exactly as before.
+
+  Its knowledge base, examples and serving patches moved inside the package as
+  `kernelforge/data/` and now ship in the wheel, so `resource_path()` resolves
+  them from an installed distribution rather than from a checkout. It raises
+  `FileNotFoundError` on a missing resource instead of returning a path that
+  does not exist, and runtime state that used to be written next to those
+  resources goes to a writable root instead of into `site-packages`.
+
+  Two things in the snapshot did not come across. The `intellikit` kernel
+  backend is removed: nothing in Hyperloom could reach it -- `infer_kernel_backend`
+  has no arm for it and the dispatch path only ever passes triton/flydsl/ck/aiter
+  -- and its author confirms it is no longer needed. Its `languages/asm/`
+  knowledge tree (117 files, a vendored copy of `ROCm/intellikit-asm-skills`
+  plus CDNA4 ISA extracts) went with it, being reachable from no other backend.
+  Eight kernel backends remain: CK, FlyDSL, Triton, Gluon, AITER, HIP,
+  hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
+  it targets the retired repository.
+
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
@@ -49,6 +77,53 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   not the benchmark's.
 
 ### Changed
+
+- **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
+  installs forge, so there is no checkout to point at and nothing to clone:
+  `local_setup.sh` no longer clones the private KernelForge repo (and the
+  quick-start Dockerfile no longer needs an SSH mount for it), and `install.sh`
+  no longer pip-installs forge as a separate distribution from a checkout — it
+  verifies that `kernelforge.cli` and `kernelforge.fusion` import instead.
+  Vendor-playbook resolution, the serving-patch root and the gemm-tune root now
+  read the packaged copy, where they previously failed or skipped.<br/>
+  **No code reads `$FORGE_PATH` any more.** An earlier draft of this entry said
+  it still worked as a deliberate override; that was true of an intermediate
+  revision and is not true of what shipped. Every value it could hold pointed at
+  the pre-inlining repository layout, so honouring it would have shadowed the
+  packaged tree with an archived one. Because `FORGE_` remains on env_safety's
+  dotenv prefix allowlist, a stale setting is still forwarded into the run and
+  then ignored — silently, which is why it is called out here. The dev override
+  that replaces it is **`$KERNELFORGE_PROJECT_ROOT`**: a writable root holding
+  `knowledge_base/`, `serving_patches/` and the other resource trees, taking
+  precedence over the packaged copy when the tree it names exists. It defaults
+  to `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge`.
+
+- **BREAKING: `forge-gemm-tune` is gone as a console script and as a
+  distribution.** The tuner is now the `kernelforge.gemm_tune` subpackage of the
+  Hyperloom wheel, invoked as `kernelforge gemm-tune` (or
+  `python -m kernelforge.cli gemm-tune run`). There is no subtree left to
+  `pip install` on its own, and `FORGE_GEMM_TUNE_ROOT` no longer resolves one.
+  `install.sh` now treats a missing `gemm-tune` subcommand as a fatal incomplete
+  install rather than a warning, because it ships in the same wheel as
+  everything else the script just verified.
+
+- **BREAKING: the `fellow` vocabulary is retired.** "Kernel backend" in prose,
+  `kernel_backend` in code. Concretely: the CLI flag is `--kernel-backend`
+  taking a bare name (`triton`, not `triton-fellow`); the campaign-config key is
+  `kernel_backend`, and a config carrying the retired key **fails loudly at
+  load** rather than migrating silently; the environment variable is
+  `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
+  The CLI flag is the one place where the failure is *not* loud on its own:
+  `forge-loop` is a `TolerantCommand`, so `--fellow triton-fellow` is dropped
+  with a warning and the campaign proceeds on an inferred backend. The seven
+  shipped `run_example.sh` that still passed it are fixed, and the rename guard
+  that should have caught them — its exemption globbed `data/*` rather than
+  `data/*.md`, so it was exempting runnable scripts along with the prose it
+  meant to protect — is narrowed.<br/>
+  `FORGE_DISABLE_COMPILED_FELLOWS` has the same forwarded-then-ignored hazard as
+  `$FORGE_PATH`, and a worse consequence: an operator who had switched compiled
+  kernel backends off would silently get them back. It is not honoured, but it
+  is now detected and warned about once per run.
 
 - **BREAKING: the EXPLORE phase is merged into FRAMEWORK_AGENT.** The chain is
   now `PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`. Configuration
@@ -97,6 +172,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   there is a tagging gap, not a category.
 
 ### Fixed
+
+- **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
+  derived its demand file only when the serving log carried dense tuned-config
+  misses, so a MoE-only model -- or one whose dense tables all hit while
+  `fused_moe` missed -- threw away the dispatch tuple the log had recorded.
+  `fmoe_ck` then skipped itself for want of evidence that was in the log all
+  along. A log with either kind of demand now produces a demand file. (Ported
+  from KernelForge #53.)
+- **Dense GEMM shape selection reads the demand file, not the precision label.**
+  The router was handed a boolean saying a demand file existed and inferred the
+  operator set from the precision label instead; it now receives the parsed
+  report, which names the tables the runtime actually consulted. The file is
+  parsed once and shared with the coverage-gap report. (Ported from
+  KernelForge #53.)
+- **A token-restricted tuner now gets `token_hint` as well as `tokens`.**
+  Setting only `tokens` erased the distinction between "this is the allowed
+  set" and "this is the coverage sweep", which every run has, so paths starting
+  from runtime-observed tokens could not tell the two apart. (Ported from
+  KernelForge #53.)
+
+- **rocprof-compute's Python dependencies were never installed.** `install.sh`
+  claimed they arrived with the KernelForge root install; they were in that
+  project's `profiling` extra, which the install never requested. They now ship
+  as the `forge-profiling` extra and are installed explicitly. The same step was
+  gated on the presence of a KernelForge checkout, which after vendoring would
+  have become a permanent skip — it is unconditional and fail-soft now.
+
+- **`COVERAGE_RELAX_FAIL_UNDER` never did anything.** `tests-coverage.yml` read
+  the variable in two scripts but never mapped `vars.*` into their step
+  environments, so the coverage gate was always strict regardless of the
+  setting. Both steps now map it.
+
+- **Test trees were shipping in the wheel.** setuptools defaults
+  `include-package-data` to true for `pyproject.toml` config, which sweeps every
+  file under a package directory — so `packages.find.exclude` dropped `*.tests`
+  from the package list and the sweep re-added the same files as package data
+  (627 test entries before this change). Explicit `package-data` declarations
+  are now the only source of shipped non-module files.
 
 - **The upstream-PR arm was gated shut at dispatch.** A PR candidate is
   pre-screened by the Critic before any specialist exists, so its task carries
