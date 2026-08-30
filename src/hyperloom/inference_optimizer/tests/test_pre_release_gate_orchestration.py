@@ -115,7 +115,7 @@ def test_poll_reads_root_only_state_json_via_sudo(poll_script: str) -> None:
 
 def test_poll_report_icons_distinguish_skip_from_fail(poll_script: str) -> None:
     assert "verdict_icon" in poll_script
-    assert 'SKIP|PENDING' in poll_script
+    assert "SKIP|PENDING" in poll_script
 
 
 def test_poll_sleeps_in_slices_so_a_cancel_lands_quickly(poll_script: str) -> None:
