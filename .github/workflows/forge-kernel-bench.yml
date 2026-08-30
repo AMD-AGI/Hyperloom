@@ -1,0 +1,137 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+name: forge-kernel-bench
+
+# Forge regression bench (kernel-opt agent effect check)
+# ---------------------------------------------------------------------------
+# Runs the built-in *forge* kernel-opt agent over a fixed set of flydsl2flydsl
+# kernels on the Kernel Arena controller (project1) and reports each run's
+# speedup / score, so a change to ``src/kernelforge`` can be validated
+# end-to-end ("did forge still optimize these kernels, and how well?").
+#
+# Ported from the archived AMD-BRAIN-Internal/KernelForge repo when forge was
+# vendored into Hyperloom. Unlike every other workflow here (CPU-only,
+# GitHub-hosted), this drives real 24h GPU forge runs, so it is manual
+# (workflow_dispatch) and its run job needs a project1 self-hosted runner --
+# the controller API is only reachable inside that network.
+#
+# The kernels are driven entirely by the KA_BENCHMARK_IDS secret: add/remove a
+# benchmark_id there and the matrix fan-out follows (one job == one kernel).
+#
+# ---- Required repo secrets -------------------------------------------------
+#   KA_API_BASE        Controller base URL, e.g. http://project1.tw325.primus-safe.amd.com
+#   KA_API_KEY         SaFE API key (ak-...). Its user MUST own the benchmarks
+#                      (or be system-admin), else POST /v1/runs returns 403.
+#   KA_BENCHMARK_IDS   The flydsl benchmarks to run. JSON array preferred:
+#                        [{"name":"softmax_kernel","benchmark_id":"kb_..."}, ...]
+#                      (also accepts {"name":"kb_..."} object or name=id CSV).
+#
+# ---- Optional repo variable ------------------------------------------------
+#   KA_RUNNER_LABELS   JSON array of runner labels; default ["self-hosted","project1"].
+#
+# ---- forge VERSION under test (TODO) ---------------------------------------
+#   The forge agent installs from the sandbox-mounted shared dir (controller
+#   KA_LOCAL_REPO_DIR=/wekafs/claw) and POST /v1/runs has no per-run version
+#   parameter, so today the runs use whatever forge is published there -- not
+#   this PR's ``src/kernelforge``. Making this workflow test the checked-out
+#   tree needs a deploy step before the matrix (sync the checkout to a CI dir
+#   and have the run install from there). Tracked separately.
+#
+#   Vendoring changed what "publish forge" means: there is no KernelForge repo
+#   to sync any more, so that deploy step will sync this repo instead.
+
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "LLM model for the forge agent"
+        default: claude-opus-4-8
+      max_iterations:
+        description: "Max forge iterations (720 ~= a 24h budget)"
+        default: "720"
+      timeout_seconds:
+        description: "Per-run hard timeout in seconds (86400 = 24h)"
+        default: "86400"
+      wait_for_completion:
+        description: "Poll each run to completion and report score (long!)"
+        type: boolean
+        default: true
+      aka_ref:
+        description: "AgentKernelArena git ref for kernel defs (empty = controller default)"
+        default: ""
+
+# Serialize workflow instances but never cancel an in-flight forge run.
+concurrency:
+  group: forge-kernel-bench
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    name: Resolve kernel matrix
+    # Plain GitHub-hosted: this job only parses a secret into a matrix. The
+    # upstream repo had to pin a self-hosted label here because that org
+    # enforced an IP allow list; Hyperloom's other workflows all run on
+    # ubuntu-latest, so this follows them. ``forge-run`` below keeps its own
+    # label because it needs the project1 network.
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.build.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Build matrix from KA_BENCHMARK_IDS
+        id: build
+        env:
+          KA_BENCHMARK_IDS: ${{ secrets.KA_BENCHMARK_IDS }}
+        run: python3 .github/scripts/forge_ci.py matrix
+
+  forge-run:
+    name: forge ${{ matrix.name }}
+    needs: prepare
+    runs-on: ${{ fromJSON(vars.KA_RUNNER_LABELS || '["self-hosted","project1"]') }}
+    # 24h run + polling margin. Only meaningful when wait_for_completion=true.
+    timeout-minutes: 1560
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # Every ${{ }} value below reaches the shell through env, never through
+      # string interpolation into the script. matrix.* comes from a secret and
+      # inputs.* from whoever dispatched the run; a name containing $(...) or a
+      # backtick would otherwise execute on a self-hosted runner.
+      - name: Trigger + monitor forge run
+        env:
+          KA_API_BASE: ${{ secrets.KA_API_BASE }}
+          KA_API_KEY: ${{ secrets.KA_API_KEY }}
+          KERNEL_NAME: ${{ matrix.name }}
+          BENCHMARK_ID: ${{ matrix.benchmark_id }}
+          FORGE_MODEL: ${{ inputs.model }}
+          MAX_ITERATIONS: ${{ inputs.max_iterations }}
+          TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+          AKA_REF: ${{ inputs.aka_ref }}
+          POLL_FLAG: ${{ inputs.wait_for_completion && '--poll' || '--no-poll' }}
+        run: |
+          {
+            echo "### forge run — ${KERNEL_NAME}"
+            echo ""
+            echo "| kernel | run_id | status | speedup | total_score |"
+            echo "|---|---|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          python3 .github/scripts/forge_ci.py run \
+            --benchmark-id "$BENCHMARK_ID" \
+            --name "$KERNEL_NAME" \
+            --model "$FORGE_MODEL" \
+            --max-iterations "$MAX_ITERATIONS" \
+            --timeout-seconds "$TIMEOUT_SECONDS" \
+            --aka-ref "$AKA_REF" \
+            "$POLL_FLAG"

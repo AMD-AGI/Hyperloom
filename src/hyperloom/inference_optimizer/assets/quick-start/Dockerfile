@@ -13,8 +13,10 @@ RUN --mount=type=ssh mkdir -p -m 700 /root/.ssh \
     && ssh-keyscan -t rsa,ecdsa,ed25519 github.com >> /root/.ssh/known_hosts \
     && git clone git@github.com:AMD-AGI/Hyperloom.git /opt/Hyperloom
 
-RUN --mount=type=ssh export KERNEL_FORGE_REPO="git@github.com:AMD-AGI/KernelForge.git" && \
-    bash /opt/Hyperloom/src/hyperloom/inference_optimizer/assets/local_setup.sh --deps-root /opt --session-dir /workspace/hyperloom
+# Writes /workspace/hyperloom/runtime/local-setup.env.sh, sourced below. No SSH
+# mount: this used to also clone the private KernelForge repo, which now ships
+# inside Hyperloom as the `kernelforge` package.
+RUN bash /opt/Hyperloom/src/hyperloom/inference_optimizer/assets/local_setup.sh --deps-root /opt --session-dir /workspace/hyperloom
 
 COPY *.sh /workspace/hyperloom/
 RUN chmod +x /workspace/hyperloom/*.sh

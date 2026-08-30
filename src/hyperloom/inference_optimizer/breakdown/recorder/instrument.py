@@ -2468,8 +2468,10 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
     # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # forge (Kernel-Forge autonomous loop) locates its repo via $FORGE_PATH.
-    "forge": {"root_env": "FORGE_PATH", "version": "git_short"},
+    # forge (the Kernel-Forge autonomous loop) ships inside this distribution,
+    # so there is no checkout to ``git rev-parse``: its version is Hyperloom's.
+    # The "forge" key stays -- downstream provenance JSON reads it by name.
+    "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
     "inferencex": {"root_env": "INFERENCEX_PATH", "version": "git_short"},
@@ -4375,7 +4377,8 @@ def record_session_validation(
         stack_len: Adopted-stack length this figure was validated at.
         source: The path that promoted it, e.g. ``integrate_patch``.
         measurement_basis: ``e2e_rebench`` when the throughput was measured
-            end to end, ``derived_speedup`` when it was inferred from a
+            end to end, ``e2e_decision_round`` when it is an explore round's own
+            grading measurement, ``derived_speedup`` when it was inferred from a
             micro-benchmark's speedup.
         ts: Author-time stamp; defaults to now.
         producer: Recorder producer label.

@@ -25,7 +25,9 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain_validated float — % over baseline at the last full-stack rebench
+    cumulative_gain_validated float — % over baseline at the last measurement
+                                that promoted (an explore KEEP's decision round,
+                                or a full-stack revalidation)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -722,7 +724,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
+    # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
     # non-transactional integrate_patch window and cleared after stack/current
@@ -890,7 +892,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision
     # run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM
-    # measure time when active else the cold baseline; warmup + stack-rebench exempt.
+    # measure time when active else the cold baseline; the warmup round is exempt.
     explore_overtime_kill_ratio: float = 2.0
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
@@ -944,7 +946,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
+    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
@@ -3916,7 +3918,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
+        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
 
         Returns:
             bool: ``True`` when ``optimization_stack`` is longer than

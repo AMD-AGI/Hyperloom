@@ -416,7 +416,7 @@ class CapabilityEntry(TypedDict, total=False):
     best_gain_pct: float | None
     reason: str  # human readable, e.g. "geak backend only this run"
     # explore-specific:
-    keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
+    keep_unstable_count: int  # Pre-removal sessions only: KEEP'd variants a confirmation round evicted
     winners_history: int  # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split keyed by SpecialistDomain.key;
     # every catalogue domain is seeded not_attempted for presence-free iteration.

@@ -3482,7 +3482,7 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision, stack_rebench, and their grading anchor) are
+            # explore decision and their grading anchor) are
             # measured with a warm prefix cache, keeping them mutually
             # comparable. Carryover is config-dependent (tracks KV-block
             # capacity) and is not a uniform offset.

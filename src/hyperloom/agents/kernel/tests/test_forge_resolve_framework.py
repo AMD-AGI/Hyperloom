@@ -119,10 +119,10 @@ def test_resolve_framework_uses_aiter_source_not_vllm_serving_wrapper():
     assert forge_submit._resolve_framework(candidate, "/repo/vllm/attention.py") == "aiter"
 
 
-def test_fellow_resolution_uses_kernel_kind_for_ck_and_flydsl():
-    assert forge_submit._resolve_fellow("hip_cpp", "aiter_ck") == "ck-fellow"
-    assert forge_submit._resolve_fellow("python", "flydsl") == "flydsl-fellow"
-    assert forge_submit._resolve_fellow("flydsl", "") == "flydsl-fellow"
+def test_kernel_backend_resolution_uses_kernel_kind_for_ck_and_flydsl():
+    assert forge_submit._resolve_kernel_backend("hip_cpp", "aiter_ck") == "ck"
+    assert forge_submit._resolve_kernel_backend("python", "flydsl") == "flydsl"
+    assert forge_submit._resolve_kernel_backend("flydsl", "") == "flydsl"
 
 
 def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):

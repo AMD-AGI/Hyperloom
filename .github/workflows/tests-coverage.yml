@@ -105,6 +105,14 @@ jobs:
       # contention, no PR-diff pollution. A miss (new branch / 7-day eviction /
       # first rollout) simply means pytest-split falls back to count-based
       # splitting for that run; correctness and the 90% gate are unaffected.
+      #
+      # Vendoring KernelForge roughly doubled the suite, and the restored DB
+      # predates every ``src/kernelforge`` test. pytest-split charges an unknown
+      # test the average of the known ones, so the first runs are balanced by a
+      # guess and some shards will run long. This self-heals on the first
+      # push-to-main after the merge, when ``update-durations`` publishes a DB
+      # measured on the combined tree -- it costs wall clock, never correctness,
+      # so it is not worth pre-warming an artifact by hand.
       - name: Restore test durations
         id: durations
         uses: actions/cache/restore@v6
@@ -126,6 +134,12 @@ jobs:
         continue-on-error: true
         env:
           SHARD: ${{ matrix.shard }}
+          # Repo variable, not an ambient env var: the script below has always
+          # read $COVERAGE_RELAX_FAIL_UNDER, but nothing ever mapped `vars.*`
+          # into the step, so the relax switch was inoperative and pytest-cov
+          # enforced fail_under on every shard regardless. Empty when unset,
+          # which is the strict default.
+          COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
         run: |
           set -euo pipefail
           # Base argv + worker/shard counts come from pyproject.toml so all
@@ -725,6 +739,9 @@ jobs:
         # The "Enforce shard results" gate below reds the job for the
         # failed/incomplete case instead.
         if: always() && steps.outcomes.outputs.complete == 'true' && steps.outcomes.outputs.tests_ok == 'true'
+        env:
+          # Same inoperative-switch fix as the shard step above.
+          COVERAGE_RELAX_FAIL_UNDER: ${{ vars.COVERAGE_RELAX_FAIL_UNDER }}
         run: |
           python3 <<'PY'
           import os

@@ -13,3 +13,12 @@ regexes = [
   # generic-api-key rule on the ``key:`` line).
   '''(key|restore-keys):\s*test-durations-''',
 ]
+
+[[allowlists]]
+description = "GEMM tuner script keys -- an aiter script name, not a credential"
+# ``script_key="a8w8_bpreshuffle"`` selects which aiter tuning script to run;
+# the generic-api-key rule sees ``key="<long token>"``. Scoped to the tuner
+# package and to a snake_case literal so it cannot cover a real key elsewhere.
+paths = ['''^src/kernelforge/gemm_tune/tuners/.*\.py$''']
+regexTarget = "line"
+regexes = ['''script_key=(SPLITK_TRIAL_SCRIPT_KEY|"[a-z][a-z0-9_]*")''']

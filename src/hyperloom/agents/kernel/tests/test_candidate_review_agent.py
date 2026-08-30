@@ -1203,7 +1203,7 @@ class TestReviewLeavesSourceJudgmentsAlone:
     describe, and a silent, permanent loss otherwise -- ``kernel_kind`` and
     ``prebuilt_binary`` are what tell ``classify_patchability`` a kernel is
     prebuilt assembly, and ``source_framework`` is read before ``source_file``
-    when the backend picks a fellow.
+    when the backend picks a kernel_backend.
     """
 
     FINDER_KEYS = (

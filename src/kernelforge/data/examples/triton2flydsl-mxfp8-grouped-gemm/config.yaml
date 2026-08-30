@@ -1,0 +1,32 @@
+# Triton-to-FlyDSL rewrite metadata for the SGLang MXFP8 grouped GEMM task.
+
+source_file_path:
+  - mxfp8_grouped_gemm.py
+
+target_kernel_functions:
+  - _mxfp8_grouped_gemm_kernel
+  - _grouped_gemm_mxfp8
+
+op_name: mxfp8_grouped_gemm
+source_entry: _grouped_gemm_mxfp8
+framework: sglang
+flydsl_kernel_name: kernel.py
+
+shapes:
+  - {tokens: 1, hidden: 6144, inter: 384, experts: 128, top_k: 4, dtype: mxfp8}
+  - {tokens: 64, hidden: 6144, inter: 384, experts: 128, top_k: 4, dtype: mxfp8}
+  - {tokens: 16384, hidden: 6144, inter: 384, experts: 128, top_k: 4, dtype: mxfp8}
+
+# The quantized task uses its original relative-error gate. The driver emits the
+# aggregate allclose verdict instead of an SNR value.
+snr_threshold: 30.0
+
+compile_command:
+  - python3 driver.py
+correctness_command:
+  - python3 driver.py
+performance_command:
+  - python3 driver.py --bench-mode --warmup 10 --iters 30
+
+task_type: triton2flydsl
+task_result_template: null

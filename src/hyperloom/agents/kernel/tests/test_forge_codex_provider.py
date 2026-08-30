@@ -18,6 +18,11 @@ from pathlib import Path
 
 import pytest
 
+try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - exercised only on py3.10
+    import tomli as tomllib  # type: ignore[no-redef]
+
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
@@ -80,8 +85,7 @@ def _capture_forge_loop_argv(
         captured["command"] = command
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     forge_submit._run_loop_via_cli(
@@ -93,7 +97,7 @@ def _capture_forge_loop_argv(
         branch="forge/test/provider",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -136,8 +140,7 @@ def _capture_rewrite_argv(
         captured["env"] = kwargs.get("env") or {}
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     forge_submit._run_rewrite_via_cli(
@@ -286,7 +289,7 @@ def test_anthropic_only_leaves_provider_selection_untouched(tmp_path, monkeypatc
 
 
 def test_both_sides_configured_leaves_provider_selection_untouched(tmp_path, monkeypatch):
-    """With an Anthropic credential present, the claude fellow still works."""
+    """With an Anthropic credential present, the claude kernel backend still works."""
     _use_openai_only(monkeypatch)
     _use_anthropic_only(monkeypatch)
 
@@ -305,7 +308,7 @@ def test_openai_only_child_env_does_not_pin_the_claude_cli(monkeypatch):
     forge_submit._reset_knowledge_config_cache()
 
     env: dict[str, str] = {}
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
 
     assert "FORGE_CLAUDE_BIN" not in env
     assert "ANTHROPIC_API_KEY" not in env
@@ -322,24 +325,48 @@ def test_anthropic_only_child_env_still_pins_the_claude_cli(monkeypatch):
     forge_submit._reset_knowledge_config_cache()
 
     env: dict[str, str] = {}
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
 
     assert env["FORGE_CLAUDE_BIN"] == "/usr/local/bin/claude"
 
 
-def test_install_sh_installs_the_codex_extra():
-    """install.sh must install kernel_agents with the codex SDK extra.
+def test_install_sh_installs_the_codex_runtime():
+    """install.sh must install the codex agent runtime, and verify it.
 
     Without it ``FORGE_AGENT_BACKEND=codex`` raises CodexUnavailableError
-    ("Codex Python SDK is not installed; install kernel-agents[codex]"), which
-    the provider fallback then converts into a silent Claude run.
+    ("Codex Python SDK is not installed"), which the provider fallback then
+    converts into a silent Claude run.
+
+    This used to assert on a ``kernelforge[claude,codex]`` install line, from
+    when forge was a separate distribution installed from a checkout. forge now
+    ships in this distribution: the editable path gets ``openai-codex`` through
+    ``[test]`` -> ``[runtime]`` -> ``[llm]``, and the packaged-wheel path pulls
+    the same extras by name. Both then run the same readiness probe.
+
+    The assertion follows the extra rather than the pin. It used to look for the
+    literal ``openai-codex>=0.144`` in install.sh, which only passed because
+    install.sh restated pyproject's specifiers verbatim -- so the test was
+    pinning the duplication instead of catching it, and would have gone green on
+    a stale copy. What must hold is the *chain*: the packaged path names an
+    extra, and that extra reaches openai-codex.
     """
     install_sh = Path(__file__).resolve().parents[3] / "inference_optimizer" / "assets" / "install.sh"
     text = install_sh.read_text(encoding="utf-8")
 
-    assert "[claude,codex]" in text, (
-        "kernel_agents must be installed with both provider extras so either "
-        "credential shape has a working forge fellow"
+    assert "hyperloom-inference_optimizer[llm,forge]" in text, (
+        "the packaged-wheel install path must install the llm+forge extras (the bare wheel ships no third-party deps)"
+    )
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[4].parent / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    extras = pyproject["project"]["optional-dependencies"]
+    assert any(req.startswith("openai-codex") for req in extras["llm"]), (
+        "the llm extra must carry the codex agent runtime; install.sh reaches it "
+        "through [llm,forge] and no longer names it directly"
+    )
+    assert "import openai_codex" in text, (
+        "install.sh must verify the codex runtime imports; a missing one silently "
+        "downgrades an OpenAI-only deployment to a Claude run that dies on 'Not logged in'"
     )
 
 
@@ -350,12 +377,12 @@ def test_forge_loop_cli_accepts_the_provider_flags():
     so a KernelForge upgrade that renames them must fail here, not in a session.
     """
     proc = subprocess.run(
-        [sys.executable, "-m", "kernel_agents.cli", "forge-loop", "--help"],
+        [sys.executable, "-m", "kernelforge.cli", "forge-loop", "--help"],
         capture_output=True,
         text=True,
         timeout=120,
     )
     if proc.returncode != 0:
-        pytest.skip(f"kernel_agents CLI unavailable (rc={proc.returncode})")
+        pytest.skip(f"kernelforge CLI unavailable (rc={proc.returncode})")
     for flag in ("--agent-backend", "--model", "--agent-fallback-provider"):
         assert flag in proc.stdout, flag

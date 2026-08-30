@@ -99,9 +99,9 @@ def _section_mission() -> list[str]:
         '   which next action gives the highest expected_gain / cost_minutes?"',
         "",
         'An optimization is only "real" once it has been validated as part of the',
-        "full optimization_stack. ``explore`` inlines a per-KEEP stack rebench, so",
+        "full optimization_stack. ``explore`` measures each KEEP on that stack, so",
         "cumulative_gain_validated advances automatically — drive the loop until",
-        "``explore`` has produced at least one KEEP that survived the rebench.",
+        "``explore`` has produced at least one KEEP.",
     ]
 
 
@@ -453,9 +453,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: <session-cycle default>, rebench_stable_threshold_pct?: <clamped to keep/2>}}`. "
-            "Variants run serially; each KEEP triggers an inlined stack "
-            "rebench. Variant identity is content-based (args+envs+"
+            "keep_threshold_pct?: <session-cycle default>}}`. "
+            "Variants run serially; a KEEP is graded on its decision "
+            "round. Variant identity is content-based (args+envs+"
             "remove_args+unset_envs+args_mode); only exact duplicates within "
             "the same submitted grid are collapsed, so any prior fingerprint "
             "may be re-proposed. "
@@ -562,7 +562,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
-        "3. **Inlined stack-rebench**: route every grid attempt through",
+        "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
     ]
