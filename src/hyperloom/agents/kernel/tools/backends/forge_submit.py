@@ -1768,6 +1768,14 @@ def _apply_kernel_backend_env(env: dict) -> None:
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
+    # The forge loop spends against the gateway for the whole of its run, and
+    # every agent it drives inherits this env, so without a tag here that spend
+    # arrives naming no component at all. Injecting from this side is what makes
+    # the phase and the action travel: both live in this process only, and the
+    # loop can refine the component it is given without having to restate them.
+    from hyperloom.common.llm_attribution import inject_env
+
+    inject_env(env, component="kernel", operation="forge_loop")
     # Shared KnowledgePlane contract. KernelForge remains responsible for its
     # own local knowledge implementation and remote kernel-experience behavior.
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
