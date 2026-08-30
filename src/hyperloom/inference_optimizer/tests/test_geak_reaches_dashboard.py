@@ -224,6 +224,20 @@ def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path
     assert geak.get("non_attributable_keeps") == 1, geak
     assert geak.get("total_gain_pct") == 0.0, geak
 
+    warnings: list[str] = []
+    parts = assemble_parts(tmp_path, warnings=warnings)
+    collectors.collect_recorded_optimizations(
+        "session",
+        [row for row in parts.get("operations") or [] if isinstance(row, dict)],
+        [row for row in parts.get("measurements") or [] if isinstance(row, dict)],
+        [row for row in parts.get("adoptions") or [] if isinstance(row, dict)],
+        [row for row in parts.get("artifacts") or [] if isinstance(row, dict)],
+        [],
+        [],
+        warnings,
+    )
+    assert any("no attributable throughput pair" in warning for warning in warnings)
+
 
 def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Path) -> None:
     """The tree must not assert a GEAK kernel ran beneath Forge.
@@ -323,6 +337,75 @@ def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
     names, subjects = _route_ops(tmp_path)
     assert "geak" in names, sorted(names)
     assert subjects == {"geak"}, subjects
+
+
+def test_geak_route_level_win_reaches_the_geak_column(tmp_path: Path) -> None:
+    """A validated GEAK win without a per-kernel pair remains attributable."""
+    _record_baseline(tmp_path)
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="gemm_tuning",
+        throughput_before=BASELINE_TPUT,
+        throughput_after=BASELINE_TPUT * 1.032,
+        baseline_tput=BASELINE_TPUT,
+        gain_pct=3.2,
+        macro_cycle=0,
+        accepted_config={"env": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/x/tuned.csv"},
+        provenance="geak_orch_harness_validated",
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert geak.get("total_gain_pct") == 3.2, geak
+
+
+def test_geak_route_level_attempt_requires_a_throughput_pair(tmp_path: Path) -> None:
+    """The route writer must not invent a gain when no measured pair exists."""
+    _record_baseline(tmp_path)
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="kernel_optimization",
+        throughput_before=0.0,
+        throughput_after=0.0,
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 0, geak
+
+
+def test_geak_route_context_does_not_emit_an_off_ledger_adoption(tmp_path: Path) -> None:
+    """The countable e2e attempt, not its route container, owns the adoption."""
+    instrument.record_geak_operation(
+        tmp_path,
+        stage="final_validation",
+        result={
+            "status": "ok",
+            "baseline_throughput_tok_s": BASELINE_TPUT,
+            "final_throughput_tok_s": BASELINE_TPUT * 1.032,
+        },
+        status="succeeded",
+        validated=True,
+        measured_tput=BASELINE_TPUT * 1.032,
+        validation_source="geak_orch_harness",
+        macro_cycle=0,
+    )
+
+    parts = assemble_parts(tmp_path)
+    assert parts.get("adoptions") in (None, [])
+
+
+def test_journey_attributable_win_suppresses_the_route_level_duplicate(tmp_path: Path) -> None:
+    """A journey with its own validated pair must not also get aggregate credit."""
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    phase = KernelPhase.__new__(KernelPhase)
+    with_pair = _journey(tmp_path, [_kernel("k", gain=12.0, before=1000.0, after=1120.0)])
+    assert phase._geak_journey_has_attributable_win({"kernel_journey_path": with_pair}) is True
+
+    no_pair = _kernel_without_throughput_pair("k_env", gain=3.2)
+    path = tmp_path / "kernel_journey_without_pair.json"
+    path.write_text(json.dumps({"kernels": [no_pair]}), encoding="utf-8")
+    assert phase._geak_journey_has_attributable_win({"kernel_journey_path": str(path)}) is False
 
 
 def test_every_journey_replay_call_names_its_route() -> None:

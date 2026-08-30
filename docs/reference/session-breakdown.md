@@ -464,6 +464,12 @@ For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
 - `attempts` — **invocation rows**, not distinct kernels: how many tries the
   lane made. Deliberately a different unit from `keeps`.
 
+GEAK e2e runs do not always create the native
+`kernel-agent/runs/*/optimization_attempts.jsonl` layout. In that case the
+summary falls back to the normalized top-level `geak` section: a real route is
+reported as at least one attempt, and a promoted `geak_e2e` stack entry is
+reported as kept instead of `not_attempted`.
+
 The `specialist` row uses `keeps` / `attempts` differently: see
 `CapabilitySummary` in `schema.py`.
 

@@ -1594,6 +1594,77 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             log.debug("geak v4 final validation recording failed", exc_info=True)
 
+        # The route operation above is diagnostic context and is deliberately
+        # excluded from the canonical optimization-attempt ledger. Record the
+        # validated route-level win separately so env/flag/CSV wins, and
+        # multi-kernel wins that cannot be divided honestly, still reach the
+        # GEAK dashboard bucket. Suppress it only when the kernel journey
+        # already carries a validated throughput pair that the ledger can sum.
+        try:
+            pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
+            if (
+                base > 0
+                and pre_geak > 0
+                and measured > pre_geak
+                and not self._geak_journey_has_attributable_win(result)
+            ):
+                is_gemm = any(
+                    str(key).upper().startswith("AITER_CONFIG_") or str(value).lower().endswith(".csv")
+                    for key, value in dict(parsed_envs or {}).items()
+                )
+                from hyperloom.inference_optimizer.breakdown.recorder import instrument
+
+                instrument.record_geak_e2e_attempt(
+                    self.session_dir,
+                    kind="gemm_tuning" if is_gemm else "kernel_optimization",
+                    throughput_before=pre_geak,
+                    throughput_after=measured,
+                    baseline_tput=base,
+                    gain_pct=(measured - pre_geak) / base * 100.0,
+                    attribution_eligible=True,
+                    macro_cycle=int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+                    accepted_config=result.get("accepted_config"),
+                    provenance=provenance,
+                )
+        except Exception:  # noqa: BLE001
+            log.debug("geak e2e attempt recording failed", exc_info=True)
+
+    @staticmethod
+    def _geak_journey_has_attributable_win(result: dict[str, Any]) -> bool:
+        """Return whether the GEAK journey already records a summable KEEP."""
+        if not isinstance(result, dict):
+            return False
+        try:
+            journey_path = str(result.get("kernel_journey_path") or "")
+            if not journey_path:
+                eval_dir = str(result.get("eval_dir") or "")
+                if eval_dir:
+                    candidate = Path(eval_dir) / "kernel_journey.json"
+                    if candidate.exists():
+                        journey_path = str(candidate)
+            if not journey_path or not Path(journey_path).is_file():
+                return False
+            data = json.loads(Path(journey_path).read_text(encoding="utf-8"))
+            for kernel in data.get("kernels") or []:
+                if not isinstance(kernel, dict):
+                    continue
+                e2e = kernel.get("e2e") if isinstance(kernel.get("e2e"), dict) else {}
+                decision = str(e2e.get("decision") or "").upper()
+                base_tput = e2e.get("base_tput")
+                new_tput = e2e.get("new_tput")
+                if (
+                    e2e.get("validated") is True
+                    and decision in {"KEEP", "ADOPTED"}
+                    and isinstance(base_tput, (int, float))
+                    and isinstance(new_tput, (int, float))
+                    and base_tput > 0
+                    and new_tput > 0
+                ):
+                    return True
+        except Exception:  # noqa: BLE001
+            log.debug("geak journey attributable-win probe failed", exc_info=True)
+        return False
+
     def _record_geak_adopted_kernels(
         self,
         result: dict[str, Any],

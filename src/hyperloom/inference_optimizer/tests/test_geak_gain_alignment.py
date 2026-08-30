@@ -541,7 +541,8 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.current_best["extra_envs"].get("VLLM_ROCM_USE_AITER") == "0"
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.resume_pending_revalidation is False
-    assert any(e.get("action") == "geak_e2e" for e in ss.optimization_stack)
+    geak_entry = next(e for e in ss.optimization_stack if e.get("action") == "geak_e2e")
+    assert geak_entry["lever_kind"] == "kernel"
     assert not ss.geak_pending
 
 

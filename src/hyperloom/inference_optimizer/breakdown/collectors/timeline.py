@@ -363,6 +363,7 @@ def collect_capability_summary(
     geak_invocations: list[dict[str, Any]],
     warnings: list[str],
     forge_invocations: list[dict[str, Any]] | None = None,
+    geak: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize kernel-optimization capability outcomes for the breakdown.
 
@@ -371,6 +372,8 @@ def collect_capability_summary(
         geak_invocations: GEAK backend invocation records.
         warnings: Mutable list that collected warnings are appended to.
         forge_invocations: Forge backend invocation records (own lane).
+        geak: Normalized GEAK section. Used as a route-level fallback when
+            GEAK ran outside the native kernel-agent run directory layout.
 
     Returns:
         A capability-summary dict (per-kernel status, attempt and keep counts).
@@ -475,6 +478,48 @@ def collect_capability_summary(
 
     geak_cap = _from_invocations(geak_invocations)
     forge_cap = _from_invocations(forge_invocations)
+
+    # GEAK e2e owns its own working-tree layout, so a real run does not
+    # necessarily create ``kernel-agent/runs/*/optimization_attempts.jsonl``.
+    # Treat the normalized GEAK result as engagement evidence instead of
+    # reporting ``not_attempted``. A promoted ``geak_e2e`` stack entry is the
+    # route-level KEEP; accepted-kernel count is used when available.
+    geak = geak if isinstance(geak, dict) else {}
+    stack = state.get("optimization_stack") or []
+    promoted = any(
+        isinstance(entry, dict)
+        and (
+            str(entry.get("action") or "").lower() == "geak_e2e" or str(entry.get("source") or "").lower() == "geak_e2e"
+        )
+        for entry in stack
+    )
+    # ``engaged`` can mean only that GEAK was configured. ``status=missing``
+    # has no result or disk recovery evidence and must remain not_attempted.
+    has_route_evidence = promoted or (bool(geak.get("engaged")) and str(geak.get("status") or "").lower() != "missing")
+    if has_route_evidence:
+        attempted_items = geak.get("kernels_attempted")
+        accepted_items = geak.get("accepted_kernels")
+        accepted_heads = geak.get("accepted_heads")
+        attempted_count = len(attempted_items) if isinstance(attempted_items, list) else 0
+        accepted_count = len(accepted_items) if isinstance(accepted_items, list) else 0
+        accepted_head_count = len(accepted_heads) if isinstance(accepted_heads, list) else 0
+        geak_cap["attempts"] = max(
+            int(geak_cap.get("attempts") or 0),
+            attempted_count,
+            accepted_count,
+            accepted_head_count,
+            1,
+        )
+        if promoted:
+            geak_cap["keeps"] = max(
+                int(geak_cap.get("keeps") or 0),
+                accepted_count,
+                accepted_head_count,
+                1,
+            )
+            geak_cap["status"] = "kept"
+        elif geak_cap.get("status") == "not_attempted":
+            geak_cap["status"] = "attempted"
 
     # Legacy capability rows for archived sessions.
     backends = _capability_for_action(state, "backends")

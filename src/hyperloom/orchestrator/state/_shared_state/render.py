@@ -117,7 +117,7 @@ class _RenderMixin:
         )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
-        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
+        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable", "rebench_failed"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
         else:
             geak_pending_tag = ""

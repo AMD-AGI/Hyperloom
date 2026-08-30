@@ -286,6 +286,93 @@ def test_material_check_ignores_untrusted_env_names() -> None:
 
 
 @pytest.mark.asyncio
+async def test_resume_stack_revalidate_promotes_material_geak_candidate(coordinator) -> None:
+    """The legacy source label must not suppress a proven GEAK product."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {
+        "action": "baseline",
+        "tput": 110.0,
+        "extra_server_args": "--incumbent",
+        "extra_envs": {},
+    }
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--candidate", "env": ""},
+        "accepted_kernels": ["replacement_kernel"],
+    }
+
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="material-geak-rebench",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": "candidate-hash"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.current_best["action"] == "geak_e2e"
+    assert st.current_best["tput"] == pytest.approx(120.0)
+    assert any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+    assert st.geak_pending == {}
+
+
+@pytest.mark.asyncio
+async def test_resume_stack_revalidate_rejects_same_config_noise(coordinator) -> None:
+    """A faster remeasure of unchanged config is not a GEAK optimization."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {
+        "action": "explore",
+        "tput": 110.0,
+        "extra_server_args": "--same-config",
+        "extra_envs": {"SGLANG_USE_AITER": "1"},
+    }
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {
+            "flags": "--same-config",
+            "env": "SGLANG_USE_AITER=1",
+        },
+    }
+
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="same-config-geak-rebench",
+    )
+    st.geak_pending = {"status": "awaiting_rebench", "revalidation_task_id": task.task_id}
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 120.0,
+            "best_variant": {"fingerprint": "same-config-hash"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.current_best["action"] == "explore"
+    assert st.current_best["tput"] == pytest.approx(110.0)
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
+    assert st.geak_result["revalidation_status"] == "no_material"
+    assert st.geak_pending == {}
+
+
+@pytest.mark.asyncio
 async def test_rebench_can_be_rebuilt_after_cancel_within_same_cycle(coordinator) -> None:
     """A cancelled rebench must not block a fresh one in the same macro-cycle.
 
@@ -515,6 +602,20 @@ def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
     assert any("close_sequence" in w or "could not" in w.lower() for w in warnings)
     # The dropped candidate must not be presented as awaiting anything.
     assert not any("awaiting" in f.lower() for f in facts)
+
+
+def test_final_report_surfaces_failed_geak_revalidation() -> None:
+    facts, warnings = _render_final(
+        {
+            "status": "rebench_failed",
+            "revalidation_error": "subprocess_nonzero",
+            "self_reported_gain_pct": 3.2,
+        }
+    )
+
+    blob = " ".join(facts + warnings).lower()
+    assert "dropped" in blob
+    assert "subprocess_nonzero" in blob
 
 
 def test_final_report_still_flags_awaiting_geak_revalidation() -> None:
@@ -787,7 +888,7 @@ async def test_geak_revalidation_collision_replays_persisted_succeeded_result(co
 
 
 @pytest.mark.asyncio
-async def test_geak_rebench_failure_clears_pending_when_placeholder_tracked(coordinator) -> None:
+async def test_geak_rebench_failure_preserves_pending_diagnostic_when_placeholder_tracked(coordinator) -> None:
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"
@@ -807,8 +908,49 @@ async def test_geak_rebench_failure_clears_pending_when_placeholder_tracked(coor
         {"status": "failed", "error_class": "subprocess_nonzero", "error": "revalidation failed"},
     )
 
-    assert not st.geak_pending
+    assert st.geak_pending["status"] == "rebench_failed"
+    assert st.geak_pending["revalidation_error_class"] == "subprocess_nonzero"
+    assert st.geak_pending["revalidation_error"] == "revalidation failed"
     assert st.geak_result["revalidation_status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> None:
+    """A diagnostic failure verdict is settled and cannot be revived."""
+    c = coordinator
+    st = c.shared_state
+    st.baseline_tput = 100.0
+    st.current_best = {"action": "baseline", "tput": 100.0, "extra_server_args": ""}
+    st.geak_result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k1"],
+    }
+    task = await c.tasks.create(
+        kind="explore",
+        params=_geak_rebench_params(),
+        idempotency_key=gr.geak_revalidate_idempotency_key(0),
+        task_id="failed-then-late-rebench",
+    )
+    st.geak_pending = {
+        "status": "rebench_failed",
+        "revalidation_task_id": task.task_id,
+        "revalidation_error": "subprocess_nonzero",
+    }
+
+    await c._promote_to_shared_state(
+        task.kind,
+        {
+            "output_throughput": 150.0,
+            "best_variant": {"fingerprint": "abc"},
+            "winners": [],
+        },
+        task=task,
+    )
+
+    assert st.current_best["tput"] == pytest.approx(100.0)
+    assert st.geak_pending["status"] == "rebench_failed"
+    assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
 
 
 @pytest.mark.asyncio

@@ -338,6 +338,12 @@ def build(
     )
     geak_invocations = _pick("geak_invocations", geak_c)
     forge_invocations = _pick("forge_invocations", forge_c)
+    geak = _safe_collect(
+        "geak",
+        lambda: collectors.collect_geak(sd, state, warnings),
+        warnings,
+        default={},
+    )
     capability_summary = _safe_collect(
         "capability_summary",
         lambda: collectors.collect_capability_summary(
@@ -345,6 +351,7 @@ def build(
             geak_invocations,
             warnings,
             forge_invocations,
+            geak,
         ),
         warnings,
     )
@@ -412,6 +419,35 @@ def build(
             state=state,
             warnings=warnings,
         )
+    geak_capability = capability_summary.get("geak") if isinstance(capability_summary, dict) else {}
+    stack = state.get("optimization_stack") or []
+    geak_promoted = any(
+        isinstance(entry, dict)
+        and (
+            str(entry.get("action") or "").lower() == "geak_e2e" or str(entry.get("source") or "").lower() == "geak_e2e"
+        )
+        for entry in stack
+    )
+    geak_has_route_evidence = geak_promoted or (
+        bool(geak.get("engaged")) and str(geak.get("status") or "").lower() != "missing"
+    )
+    if geak_has_route_evidence and isinstance(geak_capability, dict):
+        if geak_capability.get("status") == "not_attempted":
+            warnings.append(
+                "geak consistency: GEAK produced route evidence but capability_summary.geak is not_attempted"
+            )
+        kernel_summary = (
+            ((optimizations.get("summary_by_source") or {}).get("kernel_agent") or {})
+            if isinstance(optimizations, dict)
+            else {}
+        )
+        geak_backend = (kernel_summary.get("by_backend") or {}).get("geak") or {}
+        geak_gain = geak_backend.get("total_gain_pct")
+        if geak_promoted and not (isinstance(geak_gain, (int, float)) and geak_gain > 0):
+            warnings.append(
+                "geak consistency: a promoted geak_e2e stack entry has no positive gain in "
+                "optimizations.summary_by_source.kernel_agent.by_backend.geak"
+            )
     kb_provenance = _pick(
         "kb_provenance",
         _safe_collect(
@@ -578,6 +614,10 @@ def build(
         # v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
         "phase_segments": phase_segments,
         "capability_summary": capability_summary,
+        # GEAK route diagnostics and accepted artifacts. This is independent
+        # from the canonical optimization ledger and remains useful on failed
+        # or incomplete runs that produced no adoption.
+        "geak": geak,
         "kernel_lifecycle": kernel_lifecycle,
         # Collective lane audit trail; survives a campaign the E2E gate rejected,
         # which never reaches ``optimizations``.

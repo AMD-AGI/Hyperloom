@@ -1071,6 +1071,14 @@ def collect_recorded_optimizations(
     non_attributable = [
         attempt for attempt in attempts if attempt.get("adopted") and attempt.get("attribution_eligible") is False
     ]
+    if non_attributable:
+        withheld = [str(attempt.get("attempt_id") or "<unknown>") for attempt in non_attributable]
+        warnings.append(
+            "optimizations: "
+            f"{len(non_attributable)} kept adoption(s) have no attributable "
+            "throughput pair, so their gain was withheld: "
+            f"{sorted(withheld)[:5]}"
+        )
     # `entries` is the GAIN ledger and deliberately holds only attributable keeps, so a backend whose
     # keeps are all non-attributable reads as zero keeps — indistinguishable from an optimizer that
     # produced nothing. That is the same conflation the canonical-stream fix set out to remove, one

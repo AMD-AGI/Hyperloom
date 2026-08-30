@@ -352,6 +352,11 @@ def _deep_merge(
             )
         elif isinstance(previous, list) and isinstance(value, list):
             merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
+        elif key == "started_at" and previous and value:
+            # Partial updates describe one operation. The first fragment owns
+            # its start time; later result/finalization updates must not move
+            # the start forward merely because they were written later.
+            merged[key] = min(str(previous), str(value))
         else:
             if conflicts is not None and previous is not None and value is not None and previous != value:
                 # A field arriving twice with two values. Filling a gap is what

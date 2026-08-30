@@ -556,14 +556,15 @@ def test_parse_isl_osl() -> None:
 
 
 def test_schema_has_optimizations_contract() -> None:
-    # V5 exposes adopted GEAK results through the canonical optimizations section.
+    # V5 exposes adopted GEAK results through the canonical optimizations
+    # section and route diagnostics through the dedicated GEAK section.
     from hyperloom.inference_optimizer.breakdown import schema
 
     assert hasattr(schema, "Optimizations")
     assert "optimizations" in schema.SessionBreakdown.__annotations__
     # ``from __future__ import annotations`` stores the type as a string ref.
     assert "Optimizations" in str(schema.SessionBreakdown.__annotations__["optimizations"])
-    assert "geak" not in schema.SessionBreakdown.__annotations__
+    assert "Geak" in str(schema.SessionBreakdown.__annotations__["geak"])
     # A few representative fields must be part of the declared shape.
     for field in ("entries", "backend_attempts", "summary_by_source", "validation"):
         assert field in schema.Optimizations.__annotations__

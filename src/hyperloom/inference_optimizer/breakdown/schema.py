@@ -2946,6 +2946,7 @@ class SessionBreakdown(TypedDict, total=False):
         phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
         capability_summary (CapabilitySummary): Per-capability roll-up.
+        geak (Geak): GEAK route diagnostics and accepted artifacts.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
@@ -2984,6 +2985,7 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
+    geak: Geak
     kernel_lifecycle: KernelLifecycle
     collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.

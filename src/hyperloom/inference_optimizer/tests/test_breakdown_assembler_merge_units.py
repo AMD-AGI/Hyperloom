@@ -53,6 +53,19 @@ def test_conflicts_are_only_collected_when_the_caller_asks():
     assert asm._deep_merge({"a": 1}, {"a": 2}) == {"a": 2}
 
 
+def test_operation_start_time_keeps_the_earliest_partial_update():
+    conflicts: list[str] = []
+    merged = asm._deep_merge(
+        {"started_at": "2026-08-27T14:00:00+00:00", "status": "running"},
+        {"started_at": "2026-08-27T14:05:00+00:00", "status": "succeeded"},
+        conflicts=conflicts,
+    )
+
+    assert merged["started_at"] == "2026-08-27T14:00:00+00:00"
+    assert merged["status"] == "succeeded"
+    assert "started_at" not in conflicts
+
+
 # ---- _merge_lists ----
 
 

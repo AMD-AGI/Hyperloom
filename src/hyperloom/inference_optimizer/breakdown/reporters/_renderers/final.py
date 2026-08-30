@@ -18,7 +18,7 @@ from ._invocation import render_invocation_block
 
 # ``geak_pending.status`` values meaning the candidate was measured but its
 # revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
+_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable", "rebench_failed"})
 
 
 @register_renderer("final")

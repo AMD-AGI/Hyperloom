@@ -15,6 +15,7 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_KERNEL,
     LEVER_UPSTREAM_PR,
     patch_lever_kind,
     patch_owner_phase,
@@ -102,6 +103,7 @@ _LEVER_BY_TASK_KIND = {
     "conc_sweep": LEVER_CONFIG,
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
+    "geak_e2e": LEVER_KERNEL,
 }
 
 
@@ -916,7 +918,19 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
-                self.shared_state.geak_pending = {}
+                pending = (
+                    dict(self.shared_state.geak_pending)
+                    if isinstance(getattr(self.shared_state, "geak_pending", None), dict)
+                    else {}
+                )
+                pending.update(
+                    {
+                        "status": "rebench_failed",
+                        "revalidation_error_class": geak_result["revalidation_error_class"],
+                        "revalidation_error": geak_result["revalidation_error"],
+                    }
+                )
+                self.shared_state.geak_pending = pending
                 self.shared_state.resume_pending_revalidation = False
                 any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.
