@@ -29,7 +29,8 @@
 #   TARGET_GAIN                    passed to optimize (demo skill); not used to judge PASS
 #   POLL_INTERVAL_S                seconds between polls (default 120)
 #   GLOBAL_TIMEOUT_S               hard cap; unfinished legs -> FAIL
-#                                  (default 50400 = 14h)
+#                                  (default 50400 = 14h; zombie legs with an empty
+#                                  stop_reason wait here rather than a stall check)
 #   MAX_CRASHES / MAX_BOOT_FAILS   tolerance (default 0 / 0)
 #   Optional GitHub commit status (per-leg context pre-release-e2e/<leg>):
 #     GH_STATUS_TOKEN / GH_STATUS_REPO / GH_STATUS_SHA / GH_STATUS_DETAILS_URL
