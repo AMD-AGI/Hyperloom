@@ -82,12 +82,6 @@ from ._grid_runner import (
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._grid_server_args import compose_server_args
-from ._stack_rebench import (
-    DEFAULT_STACK_STABLE_PCT,
-    resolve_stable_threshold_pct,
-    StackRebenchResult,
-    measure_stack_rebench,
-)
 from ._workload_envs import (
     FrameworkScriptMismatchError,
     default_baseline_config,
@@ -3247,15 +3241,15 @@ class IntegratePatchExecutor:
         # is genuinely unchanged with every switch unset, which is exactly what this
         # leg measures. An unswitched patch has no "off" state to fall back to, so
         # it still reverts without spending the leg.
-        # Both the parity leg and the stack rebench below are additional full
-        # benches, so they need the same session bound the first bench got.
-        # Resolved here rather than threaded from the caller because the deadline
-        # is an absolute monotonic timestamp: the budget the first bench spent is
-        # already reflected in it.
-        session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
-
         parity: dict[str, Any] = {"ran": False, "ok": True, "reason": ""}
         if switch_manifest:
+            # The parity leg is an additional full bench, so it needs the same
+            # session bound the first bench got. Resolved here rather than
+            # threaded from the caller because the deadline is an absolute
+            # monotonic timestamp: the budget the first bench spent is already
+            # reflected in it. Only this leg reads it, so it is resolved only
+            # when the leg runs.
+            session_deadline_sec, variant_expected_sec = session_grid_bounds(shared_state)
             parity = await self._switch_off_parity(
                 params=params,
                 output_root=output_root,
@@ -3407,77 +3401,6 @@ class IntegratePatchExecutor:
                     "workspace": str(output_root),
                 },
             )
-
-        if params.get("enable_stack_rebench", True) and base_tput > 0:
-            confirm = await self._confirm_stack_rebench(
-                params=params,
-                output_root=output_root,
-                extra_server_args_applied=extra_server_args_applied,
-                extra_envs_applied=extra_envs_applied,
-                specialist_task_id=specialist_task_id,
-                base_tput=base_tput,
-                session_deadline_sec=session_deadline_sec,
-                variant_expected_sec=variant_expected_sec,
-            )
-            rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
-                confirm["accuracy_pass"],
-                required=acc_required,
-                baseline_accuracy=acc_baseline,
-            )
-            if not confirm["stable"] or rb_acc_block:
-                artifacts_reverted = self._revert_artifacts(applied_artifacts)
-                reverted = self._revert_patches(framework_root, applied)
-                reasons = []
-                if not confirm["stable"]:
-                    reasons.append(
-                        f"stack rebench {confirm['tput']} below stability floor {confirm['stable_floor']:.2f}"
-                    )
-                if confirm["accuracy_pass"] is False:
-                    reasons.append("accuracy regression on rebench")
-                elif rb_acc_block and rb_acc_reason:
-                    reasons.append(rb_acc_reason)
-                rb_revert_status = (
-                    "accuracy_unavailable_reject"
-                    if (rb_acc_block and confirm["accuracy_pass"] is None and confirm["stable"])
-                    else "reverted"
-                )
-                await self._maybe_write_framework_kb_record(
-                    params=params,
-                    done_payload=done_payload,
-                    outcome="reverted_smoke_fail",
-                    tps_delta_pct=float(delta_pct or 0.0),
-                    extra=extra,
-                    accuracy_delta_pct=acc_delta_pct,
-                    config_fingerprint=cfg_fingerprint,
-                )
-                return _with_stash_restore(
-                    framework_root,
-                    stash_state,
-                    stash_note,
-                    {
-                        "status": rb_revert_status,
-                        "specialist_task_id": specialist_task_id,
-                        "patches_applied": [],
-                        "patches_reverted": [str(p) for p in reverted],
-                        "artifacts_reverted": artifacts_reverted,
-                        "config_changes_applied": {},
-                        "output_throughput": new_tput,
-                        "delta_pct": delta_pct,
-                        "accuracy_pass": confirm["accuracy_pass"],
-                        "base_tput": base_tput,
-                        "keep_threshold_pct": keep_threshold_pct,
-                        "reason": "; ".join(reasons) or "stack rebench failed",
-                        "bench_result": bench_result,
-                        "stack_rebench": confirm,
-                        "workspace": str(output_root),
-                    },
-                )
-            confirmed_delta = gain_pct(confirm["tput"], base_tput)
-            if confirmed_delta is not None:
-                new_tput = confirm["tput"]
-                delta_pct = confirmed_delta
-            if confirm["accuracy_pass"] is not None:
-                accuracy_pass = confirm["accuracy_pass"]
 
         await self._maybe_write_framework_kb_record(
             params=params,
@@ -4648,139 +4571,6 @@ class IntegratePatchExecutor:
         except Exception:  # noqa: BLE001
             log.exception("integrate_patch: accuracy gate parse failed; treating as None (gate skipped)")
         return None
-
-    async def _confirm_stack_rebench(
-        self,
-        *,
-        params: dict[str, Any],
-        output_root: Path,
-        extra_server_args_applied: str,
-        extra_envs_applied: dict[str, str],
-        specialist_task_id: str,
-        base_tput: float,
-        session_deadline_sec: float | None = None,
-        variant_expected_sec: float | None = None,
-    ) -> dict[str, Any]:
-        """Re-bench the patched stack once more and re-grade throughput + accuracy.
-
-        Mirrors the explore ledger's post-KEEP confirmation: a patch only KEEPs
-        if a second full-stack run still clears the stability floor and the
-        accuracy gate. Returns ``stable`` / ``tput`` / ``accuracy_pass`` / etc.
-
-        ``session_deadline_sec`` / ``variant_expected_sec`` bound the
-        confirmation round by the session wall-clock, so it cannot outlive the
-        run it is confirming for.
-        """
-        config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
-        resolved_model = resolve_session_model_path(params=params, for_serving=True)
-        resolved_gpu = (
-            str(params.get("gpu_type") or "").strip().lower() or os.environ.get("GPU_TYPE", "").strip().lower()
-        )
-        override_script = sanitize_script_name(params.get("benchmark_script"))
-        override_result_dir = sanitize_result_dir(params.get("result_dir"))
-        base_extra_args = str(params.get("base_extra_args") or "").strip()
-        config_path = materialize_config_with_envs(
-            config_path,
-            output_root,
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            extra_envs=self._framework_run_eval_envs(params),
-            remove_args=params.get("base_remove_args"),
-            unset_envs=params.get("base_unset_envs"),
-            args_mode=str(params.get("base_args_mode") or "append"),
-            out_name="integrate_patch.rebench.yaml",
-        )
-        variant = GridVariant(
-            name=f"integrate-patch-rebench-{specialist_task_id[:8]}",
-            extra_server_args=extra_server_args_applied,
-            extra_envs={**dict(params.get("base_extra_envs") or {}), **extra_envs_applied},
-            remove_args=to_str_list(params.get("base_remove_args")),
-            unset_envs=to_str_list(params.get("base_unset_envs")),
-            args_mode=str(params.get("base_args_mode") or "append"),
-            note=f"integrate_patch_rebench:{specialist_task_id}",
-        )
-        _rt_rb = params.get("runtime_override")
-        if isinstance(_rt_rb, dict) and _rt_rb:
-            variant.runtime_override = dict(_rt_rb)
-        rebench = await measure_stack_rebench(
-            config_path=config_path,
-            base_extra_args=base_extra_args,
-            variant=variant,
-            base_tput=base_tput,
-            stable_threshold_pct=self._rebench_stable_threshold_pct(params),
-            output_slot=output_root / "stack_rebench",
-            variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
-            model_path=resolved_model or None,
-            gpu_type=resolved_gpu or None,
-            benchmark_script=override_script,
-            result_dir=override_result_dir,
-            magpie_python=params.get("magpie_python") or None,
-            base_args_mode=str(params.get("base_args_mode") or "append"),
-            session_deadline_sec=session_deadline_sec,
-            variant_expected_sec=variant_expected_sec,
-        )
-        return self._graded_rebench(rebench, params=params, override_result_dir=override_result_dir)
-
-    def _rebench_stable_threshold_pct(self, params: dict[str, Any]) -> float:
-        """The floor a confirmation rebench's throughput is graded against.
-
-        A confirmation must remain a stability check rather than become a
-        stricter second discovery gate as the per-cycle KEEP threshold decays. An
-        explicit lower per-task floor stays valid, but it cannot exceed half of
-        the threshold that admitted this patch in the first place.
-
-        Args:
-            params: The task parameters, read for the per-task overrides.
-
-        Returns:
-            float: The stability floor as a percentage over the base throughput.
-        """
-        return resolve_stable_threshold_pct(
-            float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)),
-            float(params.get("keep_threshold_pct", self.keep_threshold_pct)),
-        )
-
-    def _graded_rebench(
-        self,
-        rebench: StackRebenchResult,
-        *,
-        params: dict[str, Any],
-        override_result_dir: str | None,
-    ) -> dict[str, Any]:
-        """Grade a finished confirmation round and shape its verdict for the caller.
-
-        Args:
-            rebench: The confirmation round's measurement.
-            params: The task parameters, read for the accuracy baseline and
-                framework.
-            override_result_dir: An explicit ``$RESULT_DIR``, which wins over the
-                round's own workspace when grading accuracy.
-
-        Returns:
-            dict[str, Any]: ``stable`` / ``tput`` / ``workspace`` / ``warnings`` /
-                ``stable_floor`` / ``accuracy_pass``.
-        """
-        # See ``_bench_patch``: lm-eval writes to the grid slot (the parent of
-        # ``rebench.workspace``), so grade from there, honoring ``result_dir``.
-        rebench_eval_root = override_result_dir or (str(Path(rebench.workspace).parent) if rebench.workspace else "")
-        accuracy_pass = (
-            self._grade_accuracy(
-                rebench_eval_root,
-                params.get("accuracy_baseline"),
-                framework=params.get("framework") or os.environ.get("FRAMEWORK") or None,
-            )
-            if rebench.workspace
-            else None
-        )
-        return {
-            "stable": rebench.stable,
-            "tput": rebench.tput,
-            "workspace": rebench.workspace,
-            "warnings": rebench.warnings,
-            "stable_floor": rebench.stable_floor,
-            "accuracy_pass": accuracy_pass,
-        }
 
 
 __all__ = [

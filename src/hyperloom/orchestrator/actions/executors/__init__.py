@@ -13,7 +13,6 @@ from .baseline import (
 )
 from ._grid_base import DEFAULT_KEEP_THRESHOLD_PCT
 from .explore import (
-    DEFAULT_STACK_STABLE_PCT,
     ExploreExecutor,
     explore_executor,
 )
@@ -35,7 +34,6 @@ __all__ = [
     "DEFAULT_CONC_VALUES",
     "DEFAULT_ISL_OSL",
     "DEFAULT_KEEP_THRESHOLD_PCT",
-    "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
     "RecoverExecutor",
     "ReportExecutor",

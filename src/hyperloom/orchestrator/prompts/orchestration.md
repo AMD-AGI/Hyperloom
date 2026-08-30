@@ -349,13 +349,14 @@ on the next tick.
   Re-proposing with the SAME `idempotency_key` (or omitting it while
   the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
-* **Stack rebench is inlined into `explore`.**
-  Every `explore` KEEP triggers a per-KEEP re-bench of the full
-  `optimization_stack`; `cumulative_gain_validated` advances as a
-  side effect. The mission-progress block flags when the stack still
-  has unvalidated KEEPs — run another `explore` round to refresh the
-  validated gain. The legacy `validate_stack` / `backends` / `params`
-  action names are not in any phase's proposable set (use `explore`).
+* **`explore` validates its own KEEPs.**
+  An `explore` KEEP is measured on the full `optimization_stack` and
+  advances `cumulative_gain_validated` as a side effect; there is no
+  separate confirmation round to wait for. The mission-progress block
+  flags when the stack still has unvalidated KEEPs — run another
+  `explore` round to refresh the validated gain. The legacy
+  `validate_stack` / `backends` / `params` action names are not in any
+  phase's proposable set (use `explore`).
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when

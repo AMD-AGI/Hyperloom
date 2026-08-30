@@ -557,7 +557,7 @@ def _print_final_summary(
             f"ts={state.cumulative_gain_validated_ts}){stale}"
         )
     else:
-        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` stack-rebench has succeeded yet")
+        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` KEEP has landed yet")
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")

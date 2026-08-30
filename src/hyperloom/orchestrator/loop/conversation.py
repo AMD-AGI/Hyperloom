@@ -521,8 +521,8 @@ class ConversationCollaborator:
                 if remaining_min <= 5.0 and not self.shared_state.closing_phase:
                     sections.append(
                         "WARNING: < 5 min remaining. Prefer `report` next; new "
-                        "`explore` rounds (which inline the stack rebench) "
-                        "will likely be cut by the deadline."
+                        "`explore` rounds (which bench every variant on the "
+                        "stack) will likely be cut by the deadline."
                     )
 
         # Time budget for Robustness — drives the deadline_imminent alert.

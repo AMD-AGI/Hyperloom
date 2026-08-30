@@ -13,9 +13,6 @@ Per-variant flow:
 2. Render the variant's Magpie YAML, run E2E bench.
 3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
    threshold + accuracy gate when ``is_high_accuracy_risk``).
-4. KEEP triggers an inlined stack rebench; if the rebench tput is below
-   the threshold (default baseline_tput * 1.005) the variant is evicted
-   (``KEEP_UNSTABLE`` → REVERT).
 
 Follows the "one change at a time" rule (single-tenant serving GPU).
 ``provenance`` passes through to the ledger unchanged so the specialist
@@ -83,14 +80,6 @@ from ._grid_runner import (
 from ._grid_server_args import compose_server_args, server_args_env_name
 from ._ray_serving import maybe_serving_lease
 
-# DEFAULT_STACK_STABLE_PCT: post-KEEP confirmation floor request; the shared
-# resolver clamps it to half the KEEP gate. Override via
-# params['rebench_stable_threshold_pct'].
-from ._stack_rebench import (
-    DEFAULT_STACK_STABLE_PCT,
-    measure_stack_rebench,
-    resolve_stable_threshold_pct,
-)
 from ._server_lifecycle import (
     resolve_lifecycle_params,
     teardown_lifecycle_server,
@@ -655,7 +644,7 @@ def _compute_explore_variant_timeout(
 class ExploreExecutor:
     """ActionRunner for the merged ``explore`` action.
 
-    Per-variant KEEP/REVERT gating + inlined per-KEEP stack rebench.
+    Per-variant KEEP/REVERT gating over a running optimization stack.
     """
 
     def __init__(
@@ -665,7 +654,6 @@ class ExploreExecutor:
         session_dir: Path | str | None = None,
         variant_timeout_sec: int = 2400,
         keep_threshold_pct: float = DEFAULT_KEEP_THRESHOLD_PCT,
-        enable_stack_rebench: bool = True,
     ):
         """Initialize the explore executor and its gating thresholds.
 
@@ -678,22 +666,18 @@ class ExploreExecutor:
                 floor. Defaults to ``2400``.
             keep_threshold_pct (float): Minimum gain to KEEP a variant.
                 Defaults to :data:`DEFAULT_KEEP_THRESHOLD_PCT`.
-            enable_stack_rebench (bool): Whether to run the inlined
-                per-KEEP stack rebench. Defaults to ``True``.
         """
         self.default_config_path = Path(default_config_path) if default_config_path else None
         self.session_dir = Path(session_dir) if session_dir else _resolve_session_dir()
         self.variant_timeout_sec = int(variant_timeout_sec)
         self.keep_threshold_pct = float(keep_threshold_pct)
-        self.enable_stack_rebench = bool(enable_stack_rebench)
 
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task.
 
         Resolves the benchmark config and output workspace, builds the
         candidate grid (programmatic seed and/or LLM/specialist variants),
-        benchmarks each variant with per-variant KEEP/REVERT gating, and
-        optionally performs an inlined per-KEEP stack rebench.
+        and benchmarks each variant with per-variant KEEP/REVERT gating.
 
         Args:
             ctx: The action runner context carrying the task and params.
@@ -793,15 +777,6 @@ class ExploreExecutor:
             params.get(
                 "keep_threshold_pct",
                 self.keep_threshold_pct,
-            )
-        )
-        rebench_stable_threshold_pct = resolve_stable_threshold_pct(
-            float(params.get("rebench_stable_threshold_pct", DEFAULT_STACK_STABLE_PCT)), keep_threshold_pct
-        )
-        enable_stack_rebench = bool(
-            params.get(
-                "enable_stack_rebench",
-                self.enable_stack_rebench,
             )
         )
 
@@ -1068,12 +1043,10 @@ class ExploreExecutor:
         # ----- Per-variant serial run loop ---------------------------------
         winners: list[dict[str, Any]] = []
         losers: list[dict[str, Any]] = []
-        keep_unstable: list[dict[str, Any]] = []
         # This round's own ledger writes, kept apart from the ledger it inherited
-        # and merged over it once the loop is done. A variant whose confirmation
-        # round the run reaps has to be rolled back, and a fingerprint may be
-        # re-run across rounds -- so rolling back against a merged dict deletes
-        # the earlier round's measured row along with this round's write.
+        # and merged over it once the loop is done. A fingerprint may be re-run
+        # across rounds, so writing straight into the merged dict would lose the
+        # earlier round's measured row under this round's write.
         round_tested: dict[str, dict[str, Any]] = {}
         round_name_index: dict[str, Any] = {}
         rejected_update: list[dict[str, Any]] = list(search.get("rejected") or [])
@@ -1087,11 +1060,10 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
-        # In-batch KEEP'd entries (for full vs incremental stack recompose).
-        in_batch_keeps: list[dict[str, Any]] = []
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
-        # script / profiler-on falls back to a fresh cold boot for round 2).
+        # script / profiler-on falls back to a cold decision round instead of
+        # one that re-attaches to the warmup's server).
         lifecycle = resolve_lifecycle_params(config_path)
         lifecycle_eligible = bool(lifecycle.get("eligible"))
         lifecycle_framework = str(lifecycle.get("framework") or "")
@@ -1262,14 +1234,15 @@ class ExploreExecutor:
                     )
                 slot = output_root / f"v{idx:02d}_{_safe(gv.name)}"
                 slot.mkdir(parents=True, exist_ok=True)
-                # Round 1 + round 2 share this slot as the lifecycle pid_dir so
-                # round 2 re-attaches to round 1's hot server.
-                round1_lifecycle = (
+                # The warmup and decision rounds share this slot as the
+                # lifecycle pid_dir so the decision round re-attaches to the
+                # server the warmup left hot.
+                variant_lifecycle = (
                     {"cleanup": False, "pid_dir": str(slot), "port": lifecycle_port} if lifecycle_eligible else None
                 )
                 # Ray-managed GPU execution (§12 T1): reuse the round-level Ray
-                # lease (actor) for this variant's warmup + decision + stack-
-                # rebench rounds; they all reuse one persistent server, so no GPU
+                # lease (actor) for this variant's warmup and decision
+                # rounds; they reuse one persistent server, so no GPU
                 # process outlives the lease. ``None`` on the local path keeps the
                 # legacy behaviour. The actor is NOT closed per variant — only its
                 # child server is reaped in the ``finally`` below (raylet-free);
@@ -1295,7 +1268,7 @@ class ExploreExecutor:
                             benchmark_script=override_script,
                             result_dir=override_result_dir,
                             soft_deadline_sec=None,
-                            server_lifecycle=round1_lifecycle,
+                            server_lifecycle=variant_lifecycle,
                             base_args_mode=stack_base_args_mode,
                             serving_lease=variant_lease,
                             session_deadline_sec=session_deadline_sec,
@@ -1374,9 +1347,8 @@ class ExploreExecutor:
                             continue
                     # Decision round: warm (re-attaches to the warmup's hot
                     # server, client-only) when ``use_warm_decision``, otherwise a
-                    # fresh cold boot. cleanup=false keeps it hot for the stack-
-                    # rebench round below. ``soft_deadline_sec`` is the overtime
-                    # kill; round-2 stack-rebench inherits the same deadline.
+                    # fresh cold boot. It is the round the variant is graded on.
+                    # ``soft_deadline_sec`` is the overtime kill.
                     results = await run_grid(
                         base_yaml_path=config_path,
                         base_extra_args=stack_extra_args,
@@ -1388,7 +1360,7 @@ class ExploreExecutor:
                         benchmark_script=override_script,
                         result_dir=override_result_dir,
                         soft_deadline_sec=decision_deadline_sec,
-                        server_lifecycle=round1_lifecycle,
+                        server_lifecycle=variant_lifecycle,
                         base_args_mode=stack_base_args_mode,
                         preclean_before_run=not use_warm_decision,
                         server_already_ready=use_warm_decision,
@@ -1509,9 +1481,8 @@ class ExploreExecutor:
                         )
                         continue
 
-                    # Decision-round gain is the cost gate: only variants that
-                    # clear keep_threshold (and the accuracy gate) earn a warm
-                    # stack-rebench round.
+                    # Decision-round gain is the gate: a variant KEEPs when it
+                    # clears keep_threshold and the accuracy gate.
                     gain = gain_pct(r.output_throughput, running_base_tput)
                     outcome = "FAILED"
                     reason: str = ""
@@ -1594,9 +1565,9 @@ class ExploreExecutor:
                     if gv.name:
                         round_name_index[gv.name] = fp
 
-                    # ---- KEEP path (with warm round-2 rebench) ----
+                    # ---- KEEP path ----
                     if outcome == "KEEP":
-                        # Layer onto the running stack BEFORE rebench. For
+                        # Layer onto the running stack. For
                         # removal variants, next_args/next_envs are the
                         # effective launch config that must persist if the KEEP
                         # survives; gv.extra_* remain only the candidate delta.
@@ -1667,156 +1638,16 @@ class ExploreExecutor:
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
                         }
-                        in_batch_keeps.append(keep_entry)
-
-                        stack_rebench_tput: float | None = None
-                        stack_rebench_workspace: str | None = None
-                        stack_rebench_warnings: list[str] = []
-
-                        if enable_stack_rebench and running_base_tput > 0:
-                            # Round 2: same config as round 1. When eligible,
-                            # reuse round 1's hot server (cleanup=true tears it
-                            # down) so the measurement is warm and baseline-
-                            # comparable; otherwise a fresh cold boot. The
-                            # overtime-kill deadline applies as in the decision
-                            # round.
-                            rebench_envs = dict(gv.extra_envs)
-                            if use_warm_decision:
-                                # Throughput-stability check only; it shares the
-                                # decision round's throughput-only deadline and
-                                # never reads an accuracy score.
-                                rebench_envs["RUN_EVAL"] = "false"
-                            rebench_variant = GridVariant(
-                                name=f"{gv.name}__stack_rebench",
-                                extra_server_args=gv.extra_server_args,
-                                extra_envs=rebench_envs,
-                                note="stack_rebench",
-                                remove_args=list(run_remove_args),
-                                unset_envs=list(run_unset_envs),
-                                args_mode=str(getattr(gv, "args_mode", "append") or "append"),
-                            )
-                            round2_lifecycle = (
-                                {
-                                    "cleanup": True,
-                                    "pid_dir": str(slot),
-                                    "port": lifecycle_port,
-                                }
-                                if lifecycle_eligible
-                                else None
-                            )
-                            rebench = await measure_stack_rebench(
-                                config_path=config_path,
-                                base_extra_args=stack_extra_args,
-                                variant=rebench_variant,
-                                # Floor sits on the anchor round 1 graded against,
-                                # which advances with each in-batch KEEP.
-                                base_tput=running_base_tput,
-                                stable_threshold_pct=rebench_stable_threshold_pct,
-                                output_slot=slot / "stack_rebench",
-                                variant_timeout_sec=timeout_sec,
-                                model_path=resolved_model,
-                                gpu_type=resolved_gpu,
-                                benchmark_script=override_script,
-                                result_dir=override_result_dir,
-                                server_lifecycle=round2_lifecycle,
-                                base_args_mode=stack_base_args_mode,
-                                preclean_before_run=not lifecycle_eligible,
-                                soft_deadline_sec=decision_deadline_sec,
-                                server_already_ready=lifecycle_eligible,
-                                serving_lease=variant_lease,
-                                session_deadline_sec=session_deadline_sec,
-                                variant_expected_sec=decision_expected_sec,
-                            )
-                            # A confirmation the run stopped is not a failed
-                            # confirmation: grading it would evict a variant as
-                            # unstable on the strength of a round that never
-                            # measured it. Undo the stack fold and drop the
-                            # decision-round entry too, so a resume re-measures
-                            # the variant and its confirmation together.
-                            if _stopped_by_the_run(rebench, variant=gv, idx=idx, round_label="stack rebench"):
-                                in_batch_keeps.pop()
-                                round_tested.pop(fp, None)
-                                if gv.name:
-                                    round_name_index.pop(gv.name, None)
-                                break
-                            stack_rebench_tput = rebench.tput
-                            stack_rebench_workspace = rebench.workspace
-                            stack_rebench_warnings = rebench.warnings
-                            stable_floor = rebench.stable_floor
-                            # Rebench missed the stability floor: evict as REVERT.
-                            if not rebench.stable:
-                                log.warning(
-                                    "explore: variant %s KEEP -> KEEP_UNSTABLE "
-                                    "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                    "with running_base_tput=%.2f * (1+%.2f%%))",
-                                    gv.name,
-                                    stack_rebench_tput,
-                                    stable_floor,
-                                    running_base_tput,
-                                    rebench_stable_threshold_pct,
-                                )
-                                round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
-                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                                keep_unstable.append(
-                                    {
-                                        **keep_entry,
-                                        "stack_rebench_tput": stack_rebench_tput,
-                                        "stack_rebench_workspace": stack_rebench_workspace,
-                                        "stack_rebench_warnings": stack_rebench_warnings,
-                                    }
-                                )
-                                rejected_update.append(
-                                    {
-                                        "fingerprint": fp,
-                                        "name": gv.name,
-                                        "extra_server_args": gv.extra_server_args,
-                                        "extra_envs": dict(gv.extra_envs),
-                                        **control_fields,
-                                        "note": gv.note,
-                                        "reason": "stack_unstable",
-                                        "gain_pct": gain,
-                                        "tput": decision_tput,
-                                        "stack_rebench_tput": stack_rebench_tput,
-                                        "round_id": round_id,
-                                        "ts": _now_iso(),
-                                        "provenance": provenance,
-                                    }
-                                )
-                                # Roll the stack back to the prior accumulation.
-                                in_batch_keeps.pop()
-                                continue
-                            else:
-                                # Stable — the warm round-2 tput is the headline;
-                                # recompute gain from it and fold the variant onto
-                                # the stack.
-                                gain = gain_pct(stack_rebench_tput, running_base_tput)
-                                stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
-                                stack_extra_envs = next_envs
-                                stack_remove_args = list(run_remove_args)
-                                stack_unset_envs = list(run_unset_envs)
-                                stack_base_args_mode = "replace" if persist_effective_args else "append"
-                                running_base_tput = stack_rebench_tput
-                                keep_entry["gain_pct"] = gain
-                                keep_entry["tput"] = stack_rebench_tput
-                                keep_entry["stack_rebench_tput"] = stack_rebench_tput
-                                keep_entry["stack_rebench_workspace"] = stack_rebench_workspace
-                                keep_entry["stack_rebench_warnings"] = stack_rebench_warnings
-                                round_tested[fp]["tput"] = stack_rebench_tput
-                                round_tested[fp]["gain_pct"] = gain
-                                round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
-                                round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
-                                round_tested[fp]["stack_rebench_warnings"] = stack_rebench_warnings
-                        else:
-                            # Round 2 disabled — KEEP on the cold round-1
-                            # measurement, advance the running baseline naively.
-                            stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
-                            stack_extra_envs = next_envs
-                            stack_remove_args = list(run_remove_args)
-                            stack_unset_envs = list(run_unset_envs)
-                            stack_base_args_mode = "replace" if persist_effective_args else "append"
-                            running_base_tput = decision_tput or running_base_tput
+                        # The variant KEEPs on the round that graded it. Folding
+                        # it onto the stack advances the anchor the next in-batch
+                        # variant is graded against.
+                        stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
+                        stack_extra_envs = next_envs
+                        stack_remove_args = list(run_remove_args)
+                        stack_unset_envs = list(run_unset_envs)
+                        stack_base_args_mode = "replace" if persist_effective_args else "append"
+                        if decision_tput and decision_tput > 0:
+                            running_base_tput = decision_tput
 
                         winners.append(keep_entry)
                         winners_history_update.append(
@@ -1917,7 +1748,6 @@ class ExploreExecutor:
                 "KEEP",
                 "REVERT",
                 "FAILED",
-                "KEEP_UNSTABLE",
                 "KILLED_OVERTIME",
             ):
                 continue
@@ -1926,8 +1756,6 @@ class ExploreExecutor:
                 metrics["tput"] = te.get("tput")
             if te.get("gain_pct") is not None:
                 metrics["gain_pct"] = te.get("gain_pct")
-            if te.get("stack_rebench_tput") is not None:
-                metrics["stack_rebench_tput"] = te.get("stack_rebench_tput")
             # Rough decode tput salvaged from a killed-overtime variant's
             # partial server.log. Informational only (no ``tput``/gain).
             if te.get("estimated_output_throughput") is not None:
@@ -2007,7 +1835,6 @@ class ExploreExecutor:
             "base_extra_args": base_extra_args,
             "tested": [w["fingerprint"] for w in winners] + [lr["fingerprint"] for lr in losers],
             "round_winners": [w["fingerprint"] for w in winners],
-            "keep_unstable": [k["fingerprint"] for k in keep_unstable],
             "killed_overtime": killed_overtime_fps,
             "skipped_dup": skipped_dup,
             "ts": _now_iso(),
@@ -2044,7 +1871,6 @@ class ExploreExecutor:
             in (
                 "KEEP",
                 "REVERT",
-                "KEEP_UNSTABLE",
                 "KILLED_OVERTIME",
             )
             for t in tested_update.values()
@@ -2076,7 +1902,6 @@ class ExploreExecutor:
             "best_gain_pct": best_gain_pct,
             "winners": winners,
             "losers": losers,
-            "keep_unstable_in_stack": keep_unstable,
             "skipped_dup": skipped_dup,
             # flat per-variant outcomes.
             "per_variant_outcomes": per_variant_outcomes,
@@ -2109,7 +1934,6 @@ explore_executor = ExploreExecutor()
 
 
 __all__ = [
-    "DEFAULT_STACK_STABLE_PCT",
     "ExploreExecutor",
     "explore_executor",
 ]
