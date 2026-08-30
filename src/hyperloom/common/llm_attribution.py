@@ -238,6 +238,60 @@ _RENDERERS: dict[str, Callable[[Sequence[str], Mapping[str, str]], str]] = {
 }
 
 
+def _parse_combined(fields: Sequence[str], value: str) -> dict[str, str]:
+    """Recover ``field=value`` pairs, keeping only the fields declared.
+
+    Unambiguous because :func:`_sanitize` replaces both separators in values, so
+    no value written by this module can contain a ``,`` or an ``=``.
+    """
+    recovered: dict[str, str] = {}
+    for chunk in value.split(","):
+        name, separator, text = chunk.partition("=")
+        if separator and name.strip() in fields and text.strip():
+            recovered[name.strip()] = text.strip()
+    return recovered
+
+
+def _parse_raw(fields: Sequence[str], value: str) -> dict[str, str]:
+    """Recover the single field a prefix-less value carries.
+
+    ``raw`` emits the first field that *has* a value, so a header selecting
+    several of them cannot be reversed: the value alone does not say which one
+    won. Only a single-field header is recovered; the rest yield nothing.
+    """
+    return {fields[0]: value.strip()} if len(fields) == 1 and value.strip() else {}
+
+
+def _parse_json(fields: Sequence[str], value: str) -> dict[str, str]:
+    """Recover the declared fields from a JSON object value."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {key: str(item).strip() for key, item in parsed.items() if key in fields and str(item).strip()}
+
+
+#: Reverse of :data:`_RENDERERS`, for reading a tag a parent already wrote.
+_PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
+    "combined": _parse_combined,
+    "raw": _parse_raw,
+    "json": _parse_json,
+}
+
+#: Fields a child may take from the tag its parent wrote. They describe *where*
+#: a call happens rather than what makes it: ``application`` and ``session``
+#: identify the run, and ``phase`` and ``type`` are ambient state that lives in
+#: this process only -- :data:`_current_phase` is a module global and
+#: :data:`_current_action` a context variable, so a spawned child starts with
+#: both empty and could not restate them if it wanted to. ``component`` and
+#: ``operation`` are deliberately absent: a call site that names itself is
+#: declaring a new producer, and inheriting the parent's purpose would label its
+#: calls with work they are not doing.
+_INHERITED_FIELDS = ("application", "session", "phase", "type")
+
+
 @dataclass(frozen=True)
 class AttributionHeader:
     """One header a gateway preset emits.
@@ -318,6 +372,7 @@ def call_headers(
     operation: str = "",
     phase: str | None = None,
     env: Mapping[str, str] | None = None,
+    base: Mapping[str, str] | None = None,
     **extra: str,
 ) -> dict[str, str]:
     """Render the selected gateway's attribution headers for a request.
@@ -328,6 +383,11 @@ def call_headers(
         phase: Orchestrator phase the call belongs to; ``None`` uses the
             published phase.
         env: Environment mapping supplying the gateway selection and session id.
+        base: Fields to fall back on where this call site knows none, normally
+            those :func:`_inherited_context` recovered from a parent's tag. A
+            field this call site fills always wins, and an explicitly empty
+            ``phase`` suppresses an inherited one the way it suppresses the
+            published one.
         **extra: Additional attribution fields.
 
     Returns:
@@ -345,8 +405,47 @@ def call_headers(
         env=source,
         **extra,
     )
+    if base:
+        inherited = dict(base)
+        if phase is not None and not _sanitize(phase):
+            inherited.pop("phase", None)
+        context = {**inherited, **context}
     rendered = {header.name: _RENDERERS[header.shape](header.fields, context) for header in headers}
     return {name: value for name, value in rendered.items() if value}
+
+
+def _raw_headers(raw: str | None) -> dict[str, str]:
+    """Read a raw ``*_CUSTOM_HEADERS`` setting back into header name and value.
+
+    Deliberately does not expand ``${VAR}``: this reads the same text
+    :func:`_merge_raw` preserves, and materializing a reference here would put
+    the operator's gateway secret somewhere they did not put it. Attribution
+    values never contain one, because :func:`_sanitize` strips ``$``.
+
+    Args:
+        raw: Current value of the setting, possibly unset.
+
+    Returns:
+        Lowercased header name to value; empty when the setting is unset or its
+        encoding is unreadable.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return {}
+        if not isinstance(parsed, dict):
+            return {}
+        return {str(key).strip().lower(): str(value).strip() for key, value in parsed.items()}
+    found: dict[str, str] = {}
+    for line in text.splitlines():
+        name, separator, value = line.partition(":")
+        if separator and name.strip():
+            found[name.strip().lower()] = value.strip()
+    return found
 
 
 def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
@@ -411,6 +510,45 @@ def _merge_targets(env: Mapping[str, str]) -> tuple[str, ...]:
     return tuple(targets)
 
 
+def _inherited_context(
+    env: Mapping[str, str],
+    headers: Sequence[AttributionHeader],
+) -> dict[str, str]:
+    """Recover the ambient attribution fields already present in ``env``.
+
+    A process spawned with a tag carries its parent's ``phase`` and ``type``
+    in that tag and nowhere else, so re-injecting from inside the child would
+    otherwise drop them: both come from in-process state a new interpreter
+    starts empty. Reading them back makes a nested injection refine the tag
+    rather than replace it -- the child names itself and keeps the rest.
+
+    The variables are tried in :func:`_merge_targets` order and the first that
+    yields anything wins, because both carry the tag this module wrote and a
+    deployment that has them disagreeing has a larger problem than field order.
+
+    Args:
+        env: Environment mapping the tag would be merged into.
+        headers: Headers the selected preset emits.
+
+    Returns:
+        Field name to value, restricted to :data:`_INHERITED_FIELDS`; empty when
+        nothing recoverable is present.
+    """
+    for variable in _merge_targets(env):
+        present = _raw_headers(env.get(variable))
+        if not present:
+            continue
+        context: dict[str, str] = {}
+        for header in headers:
+            value = present.get(header.name.lower())
+            if value:
+                context.update(_PARSERS[header.shape](header.fields, value))
+        recovered = {field: value for field, value in context.items() if field in _INHERITED_FIELDS}
+        if recovered:
+            return recovered
+    return {}
+
+
 def inject_env(
     env: MutableMapping[str, str],
     *,
@@ -428,6 +566,10 @@ def inject_env(
     still decided from ``env``, since that is what the child will resolve its
     gateway credentials from.
 
+    A tag already in ``env`` is refined rather than overwritten: this call site
+    names itself, and the ambient fields it cannot know are carried over from
+    whoever wrote that tag. See :func:`_inherited_context` for which those are.
+
     No-op when no gateway is selected, so an unconfigured deployment hands its
     children the same header variables it always did.
 
@@ -441,11 +583,13 @@ def inject_env(
             :data:`os.environ`).
         **extra: Additional attribution fields.
     """
+    configuration = source if source is not None else os.environ
     headers = call_headers(
         component=component,
         operation=operation,
         phase=phase,
-        env=source if source is not None else os.environ,
+        env=configuration,
+        base=_inherited_context(env, _configured_headers(configuration)),
         **extra,
     )
     if not headers:
