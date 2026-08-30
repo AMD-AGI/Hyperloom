@@ -192,6 +192,22 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
         return
     envs = bench.setdefault("envs", {})
     bench["benchmark_script"] = "aiperf_client.sh"
+    # The Magpie benchmark config's flat wall-clock cap (``benchmark.timeout_seconds``,
+    # e.g. 7200s from baseline_vllm.yaml) is one deadline over server boot + warmup +
+    # the measurement window + result export. AgentX runs at the model's native
+    # context (``max_model_len`` lifted from the synthetic 6144 to e.g. 1M), so boot +
+    # warmup alone can consume ~45 min before the window even opens; the flat cap then
+    # SIGKILLs the benchmark before aiperf writes ``inferencex_result.json`` -- a 0-tput
+    # baseline that fails the session. Raise the inner cap to the same AgentX budget the
+    # outer subprocess timeout already uses (``agentx_baseline_timeout_sec``) so the two
+    # layers stay consistent. AgentX-only: this function returned early above when AgentX
+    # is off, so the default (synthetic) cap is untouched. The import is function-local
+    # to avoid a circular dependency (``baseline`` imports this module at load time).
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_baseline_timeout_sec,
+    )
+
+    bench["timeout_seconds"] = agentx_baseline_timeout_sec()
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework

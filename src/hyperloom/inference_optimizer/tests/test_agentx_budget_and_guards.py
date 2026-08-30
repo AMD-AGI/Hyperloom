@@ -303,3 +303,58 @@ def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
     """
     _on(monkeypatch)
     assert _valid(_measurement()) is True
+
+
+# --- inner Magpie timeout follows the AgentX cap ------------------------------
+
+
+def test_agentx_switch_raises_the_inner_magpie_timeout(monkeypatch):
+    """The flat Magpie ``timeout_seconds`` must follow the raised AgentX cap.
+
+    The flat cap covers server boot + warmup + the measurement window + export
+    as one deadline. At the model's native context AgentX's boot+warmup alone
+    overruns the synthetic 7200s default, so the benchmark is SIGKILLed before
+    aiperf writes its result -- a 0-tput baseline that fails the session. The
+    switch lifts the inner cap to the same budget the outer subprocess timeout
+    uses, so the two layers stay consistent.
+    """
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_baseline_timeout_sec,
+    )
+
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == agentx_baseline_timeout_sec()
+    assert bench["timeout_seconds"] > 7200
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+
+
+def test_agentx_switch_leaves_the_inner_timeout_alone_without_agentx(monkeypatch):
+    """The default (synthetic) cap must be untouched when AgentX is off."""
+    _off(monkeypatch)
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == 7200
+    assert "benchmark_script" not in bench
+
+
+def test_agentx_switch_skips_scriptable_inner_timeout(monkeypatch):
+    """A scriptable framework returns early, so its cap is never rewritten."""
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == 7200
