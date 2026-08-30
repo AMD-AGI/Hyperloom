@@ -610,12 +610,14 @@ def _localization_paths_outside_allowlist(
     A localization diff may only write under the source-file allowlist or the
     attempt-local root. Paths are resolved against ``framework_root`` when
     relative. Returns the offending paths (empty when all are in-bounds).
+    Fail closed: with no trusted write root, every non-empty touched path is
+    treated as out of bounds.
     """
     roots = [Path(r).resolve() for r in allow_roots if str(r).strip()]
     if framework_root is not None:
         roots.append(Path(framework_root).resolve())
     if not roots:
-        return []
+        return [str(rel or "").strip() for rel in touched_paths if str(rel or "").strip()]
     outside: list[str] = []
     for rel in touched_paths:
         rel_s = str(rel or "").strip()
