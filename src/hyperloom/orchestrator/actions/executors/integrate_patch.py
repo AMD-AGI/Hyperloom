@@ -4472,6 +4472,13 @@ class IntegratePatchExecutor:
                 # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
                 "ttft_ms": r.ttft_mean_ms,
                 "itl_ms": r.tpot_mean_ms,
+                # Mean end-to-end latency, which this dict did not carry at all.
+                # Under --max-latency-ms that is not a missing nicety: the KEEP
+                # gate fails closed, so a lane reporting no end-to-end latency
+                # has every promotion refused as untimed whatever it measured.
+                # Emitted in the same spelling as its siblings; the promotion
+                # path normalizes it to ``e2el_mean_ms``.
+                "e2el_ms": r.e2el_mean_ms,
                 # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
                 "workspace": str(getattr(r, "workspace", "") or ""),
                 "error": getattr(r, "error", "") or "",

@@ -1865,13 +1865,30 @@ def _restore_latency_budget_from_state(args: Any, state: SharedState) -> None:
     resume that silently dropped it would start keeping configurations the
     original session had refused.
 
+    A tier that is present but unusable falls through to the next rather than
+    ending the resume, matching how :func:`resolve_latency_budget_ms` treats the
+    same tiers. An operator's stale shell variable is a poor reason to refuse to
+    resume a session whose own archived budget is sitting right there, and a
+    non-positive value means "off", which is not a statement about the archive.
+
     Args:
         args: Parsed CLI namespace, updated in place.
         state: Resumed session state.
     """
-    if not (getattr(args, "max_latency_ms", None) or 0.0):
-        env_budget = os.environ.get(LATENCY_BUDGET_ENV, "").strip()
-        args.max_latency_ms = float(env_budget or state.latency_budget_ms or 0.0)
+    if getattr(args, "max_latency_ms", None) or 0.0:
+        return
+    raw = os.environ.get(LATENCY_BUDGET_ENV, "").strip()
+    if raw:
+        try:
+            env_budget = float(raw)
+        except ValueError:
+            print(f"  ignoring unparseable {LATENCY_BUDGET_ENV}={raw!r}; falling back to the archived budget")
+            env_budget = 0.0
+        if math.isfinite(env_budget) and env_budget > 0:
+            args.max_latency_ms = env_budget
+            return
+    archived = state.latency_budget_ms
+    args.max_latency_ms = float(archived) if isinstance(archived, (int, float)) and archived > 0 else 0.0
 
 
 # Terminal stop_reasons that represent a clean, successful optimizer run (exit 0).
@@ -2033,7 +2050,15 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     # the point where they do. Exporting here as well made a resume validate
     # twice -- the first time against an unresolved model it could only warn
     # about.
-    _export_latency_budget(getattr(args, "max_latency_ms", None))
+    #
+    # The budget is fresh-launch only, for the same reason the workload knobs
+    # below are: with no flag this call *clears* the variable, and on a resume
+    # that would wipe the env tier before
+    # ``_restore_latency_budget_from_state`` reads it, leaving the documented
+    # CLI > env > archived-state chain with a dead middle link. The resume
+    # branch exports the resolved budget itself once the state is loaded.
+    if not args.resume_from:
+        _export_latency_budget(getattr(args, "max_latency_ms", None))
     # Project resolved workload knobs into env for the fresh-launch path only.
     # A resume must NOT export here: ``args.tp``/etc. are still unresolved
     # (``None`` -> 1) because the persisted SharedState is loaded later; the

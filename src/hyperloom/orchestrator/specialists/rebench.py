@@ -175,6 +175,12 @@ async def run_specialist_rebench(
         # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
         "ttft_ms": rb.ttft_mean_ms,
         "itl_ms": rb.tpot_mean_ms,
+        # Mean end-to-end latency, which this dict did not carry at all. Under
+        # --max-latency-ms that is not a missing nicety: the KEEP gate fails
+        # closed, so a lane reporting no end-to-end latency has every promotion
+        # refused as untimed whatever it measured. Emitted in the same spelling
+        # as its siblings; the promotion path normalizes it to ``e2el_mean_ms``.
+        "e2el_ms": rb.e2el_mean_ms,
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

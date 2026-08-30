@@ -597,12 +597,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   constraint rather than a target, so it sits outside the `--target-*`
   mutually-exclusive group and combines with them. Enforcement is at
   `_lift_to_current_best`, the single choke point that writes `current_best`, so
-  it holds for explore, kernel, framework, specialist and integrate winners
-  alike rather than only for the lane that happened to be wired first. Explore
-  also applies it a round earlier, which spares an over-budget variant a
-  stack-rebench it cannot survive. Where a rebench supersedes the decision
-  round, the gate grades the rebench's latency, because that is the measurement
-  the headline throughput comes from.<br/>
+  it holds for explore, kernel, specialist and integrate winners alike rather
+  than only for the lane that happened to be wired first. Explore also applies
+  it a round earlier, which keeps an over-budget variant from being folded onto
+  the stack and becoming the anchor the rest of the batch is graded against, and
+  gives the ledger a latency reason for the REVERT rather than a promotion
+  refused later with no round to attribute it to.<br/>
   **Off by default**, which leaves KEEP behaviour exactly as it was. When set,
   the gate **fails closed**: a candidate that reported no end-to-end latency is
   refused, since an unmeasured constraint is not a satisfied one. Operator note:
@@ -613,13 +613,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   that simply found no headroom. A baseline already over budget warns at
   promotion time rather than failing, since it is the reference the run is
   measured against, but it does mean nothing will be kept until a candidate
-  comes in under the ceiling.
-
-## [v1.0.0] - 2026-08-26
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
-[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
-for the user-facing summary.
+  comes in under the ceiling.<br/>
+  Because the gate fails closed, it is only as good as the plumbing that feeds
+  it, so every promoting lane now hands the choke point its measured latency
+  under one canonical set of names. The bench lanes carried no end-to-end
+  latency at all, and report the other two under the GEAK spellings (`ttft_ms` /
+  `itl_ms`) that the breakdown collectors read — so the gate, reading only the
+  canonical name off the top level, saw nothing. Under a budget that is not a
+  cosmetic gap but a lane whose every KEEP is refused for being untimed,
+  whatever it measured. Those dicts now carry end-to-end latency, and the lookup
+  resolves both the spellings in flight and the one layer of nesting the lanes
+  use, so the gate grades the workload rather than the wiring.
+  The report compares the kept configuration against the ceiling instead of
+  asserting it satisfies it, since the exempt baseline can legitimately occupy
+  that slot while over budget. The constraint and its refusals also render into
+  the orchestration prompt as `=== Latency budget (constraint) ===`, which is
+  what the routing guidance already told the model to read. On a resume the
+  documented `CLI > env > archived state` precedence now actually holds: the
+  launch-time export no longer clears the environment tier before the resume
+  path reads it.
 
 ### Removed
 

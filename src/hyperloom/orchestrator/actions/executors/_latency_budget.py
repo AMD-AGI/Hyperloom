@@ -43,7 +43,7 @@ from __future__ import annotations
 import logging
 import math
 import os
-from typing import Any
+from typing import Any, Sequence
 
 log = logging.getLogger(__name__)
 
@@ -95,14 +95,63 @@ def read_session_budget() -> float:
 #: Order is preference order.
 _LATENCY_KEYS: tuple[str, ...] = ("e2el_mean_ms", "mean_e2el_ms", "e2el_ms")
 
+#: The two other per-request latency fields a lift dict carries, with the
+#: spellings each lane reports them under. ``itl_ms`` is the older name for
+#: inter-token latency, which is what ``tpot_mean_ms`` measures.
+_LATENCY_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "ttft_mean_ms": ("ttft_mean_ms", "ttft_ms"),
+    "e2el_mean_ms": _LATENCY_KEYS,
+    "tpot_mean_ms": ("tpot_mean_ms", "tpot_ms", "itl_ms"),
+}
+
+#: Keys under which a lane nests its benchmark payload inside the result it
+#: returns -- today only ``bench_result``, used by the integrate_patch and
+#: framework_agent lanes. Promotion reads the executor's top-level dict, but the
+#: measurement is produced a layer down and only some lanes copy it up, and a
+#: fail-closed gate that cannot see one layer down refuses the lanes that do not
+#: on the strength of their plumbing rather than their latency.
+_NESTED_RESULT_KEYS: tuple[str, ...] = ("bench_result",)
+
+#: How far to descend. One layer is what the lanes actually nest; the cap is here
+#: so a payload that somehow refers to itself cannot spin.
+_MAX_NESTED_DEPTH = 2
+
+
+def _first_number(payload: Any, keys: Sequence[str], *, _depth: int = 0) -> float | None:
+    """First usable number among ``keys``, looking inside nested bench payloads.
+
+    Args:
+        payload: A result, variant or lift payload; non-mappings return ``None``.
+        keys: Candidate field names, in preference order.
+        _depth: Internal recursion guard; callers leave it alone.
+
+    Returns:
+        The value in ms, or ``None`` when no key at any depth holds a usable
+        number.
+    """
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        found = _finite_positive(payload.get(key))
+        if found is not None:
+            return found
+    if _depth >= _MAX_NESTED_DEPTH:
+        return None
+    for nested in _NESTED_RESULT_KEYS:
+        found = _first_number(payload.get(nested), keys, _depth=_depth + 1)
+        if found is not None:
+            return found
+    return None
+
 
 def latency_from_result(result: Any) -> float | None:
     """Pull mean end-to-end latency out of a result or variant payload.
 
     Every promotion path has to answer the same question for the gate, and each
-    reaches the field under a different name. Centralizing the aliases keeps a
-    fail-closed gate from refusing a candidate that did report latency, just not
-    under the spelling the caller happened to check.
+    reaches the field under a different name and at a different depth.
+    Centralizing both keeps a fail-closed gate from refusing a candidate that did
+    report latency, just not where the caller happened to look -- which would
+    make the gate a test of the plumbing rather than of the workload.
 
     Args:
         result: A result, variant or lift payload; non-mappings return ``None``.
@@ -110,13 +159,25 @@ def latency_from_result(result: Any) -> float | None:
     Returns:
         The latency in ms, or ``None`` when no key holds a usable number.
     """
-    if not isinstance(result, dict):
-        return None
-    for key in _LATENCY_KEYS:
-        found = _finite_positive(result.get(key))
-        if found is not None:
-            return found
-    return None
+    return _first_number(result, _LATENCY_KEYS)
+
+
+def latency_fields_from_result(result: Any) -> dict[str, float | None]:
+    """The three per-request latency fields, normalized for a lift dict.
+
+    Lanes hand promotion a result whose latency sits under whichever spelling
+    their harness used, one layer down. This returns the canonical names
+    ``current_best`` is read with, so a consumer of the promoted config does not
+    have to know which lane produced it.
+
+    Args:
+        result: The executor result being promoted.
+
+    Returns:
+        ``ttft_mean_ms``, ``e2el_mean_ms`` and ``tpot_mean_ms``, each a float or
+        ``None`` when the lane reported nothing usable for it.
+    """
+    return {canonical: _first_number(result, aliases) for canonical, aliases in _LATENCY_FIELD_ALIASES.items()}
 
 
 def resolve_latency_budget_ms(
@@ -197,6 +258,7 @@ __all__ = [
     "REASON_OVER_BUDGET",
     "REASON_UNMEASURED",
     "describe_latency_budget",
+    "latency_fields_from_result",
     "latency_from_result",
     "latency_keep_block",
     "read_session_budget",

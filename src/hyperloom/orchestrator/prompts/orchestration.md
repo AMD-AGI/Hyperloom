@@ -362,11 +362,12 @@ on the next tick.
   enforced on every promotion, not just `explore`, and it fails closed:
   a candidate that reported no latency is refused. So under a budget,
   throughput gain alone does not predict a KEEP — propose variants that
-  the benchmark will time, and read `latency_refusals` before concluding
-  that a plateau means the configuration space is exhausted. A refusal
-  list that keeps growing means the SLA is the binding limit, which is a
-  different situation from having run out of headroom and calls for a
-  different next action.
+  the benchmark will time, and read the `=== Latency budget (constraint)
+  ===` block before concluding that a plateau means the configuration
+  space is exhausted. That block appears only when a budget is set, and
+  lists what it has already refused. A refusal list that keeps growing
+  means the SLA is the binding limit, which is a different situation from
+  having run out of headroom and calls for a different next action.
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when

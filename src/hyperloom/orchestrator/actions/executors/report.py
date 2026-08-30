@@ -894,6 +894,11 @@ def _format_latency_budget_section(summary: dict[str, Any]) -> list[str]:
     the second means the configuration space is exhausted. Listing what the
     budget turned down is the only way the report can tell them apart.
 
+    The kept configuration's own latency is compared against the budget rather
+    than asserted to satisfy it. The gate exempts the baseline, so the slot can
+    legitimately hold a figure over budget, and a line reading "within budget"
+    next to a number that is not would be wrong where it is most load bearing.
+
     Args:
         summary: The summary payload built by :func:`_build_summary_dict`.
 
@@ -909,9 +914,28 @@ def _format_latency_budget_section(summary: dict[str, Any]) -> list[str]:
     lines.append(f"- refused winners   : {len(refusals)}")
     cb = summary.get("current_best") or {}
     kept_e2el = cb.get("e2el_mean_ms") if isinstance(cb, dict) else None
-    if isinstance(kept_e2el, (int, float)):
-        lines.append(f"- best config       : `{float(kept_e2el):.1f}` ms, within budget")
+    kept = float(kept_e2el) if isinstance(kept_e2el, (int, float)) else None
+    if kept is None:
+        lines.append("- best config       : latency not measured")
+    elif kept > budget:
+        lines.append(f"- best config       : `{kept:.1f}` ms, **over budget by {kept - budget:.1f} ms**")
+    else:
+        lines.append(f"- best config       : `{kept:.1f}` ms, within budget")
     lines.append("")
+    if kept is not None and kept > budget:
+        # The gate exempts the baseline, since it is the reference the run is
+        # measured against rather than a candidate. So current_best can hold an
+        # over-budget figure, and the honest reading is "nothing has come in
+        # under the SLA yet" -- not "the budget was ignored". Asserting "within
+        # budget" without comparing said the opposite in exactly the place an
+        # operator would look to catch it.
+        lines.append(
+            "An over-budget best configuration means no candidate has yet come in under "
+            "the SLA. The budget does not refuse the baseline, which is the reference the "
+            "run is measured against rather than a candidate, so it can hold this slot "
+            "while every candidate that would have replaced it is refused."
+        )
+        lines.append("")
     if refusals:
         lines.append(
             "These configurations measured faster in throughput but were not kept, "

@@ -935,7 +935,10 @@ internal-only — do not set them by hand:
   kernel subprocess (Python constant `_KERNEL_AGENT_ROOT_ENV`).
 * `HYPERLOOM_MAX_LATENCY_MS`: internal projection of `--max-latency-ms`,
   written by the CLI so the in-process executors and a resume read the
-  validated value rather than re-deriving it from argv. Use the flag.
+  validated value rather than re-deriving it from argv. Use the flag. On a
+  resume that omits the flag the budget is taken from this variable, and from
+  the archived session state when it is unset, unparseable or non-positive —
+  a stale shell value falls through rather than refusing the resume.
 * Any `_INFERENCE_OPTIMIZER_*_INTERNAL_*` symbol: internal toggles for
   the test suite.
 
