@@ -293,7 +293,7 @@ class TestNestedInjectionRefines:
         llm_attribution.set_current_phase("KERNEL_AGENT")
         llm_attribution.inject_env(
             child,
-            component="kernel",
+            component="forge",
             operation="forge_loop",
             source=_env(),
             **parent,
@@ -320,7 +320,7 @@ class TestNestedInjectionRefines:
     def test_child_keeps_the_action_it_was_spawned_under(self) -> None:
         child = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
         with llm_attribution.current_action_scope("kernel_opt"):
-            llm_attribution.inject_env(child, component="kernel", source=_env())
+            llm_attribution.inject_env(child, component="forge", source=_env())
         llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
         assert "type=kernel_opt" in self._tags(child)
 
@@ -329,7 +329,7 @@ class TestNestedInjectionRefines:
         llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
         tags = self._tags(child)
         assert "component=fusion" in tags
-        assert "component=kernel" not in tags
+        assert "component=forge" not in tags
 
     def test_the_parents_purpose_does_not_leak_into_the_child(self) -> None:
         # Inheriting operation= would label the child's calls with work the
@@ -357,7 +357,7 @@ class TestNestedInjectionRefines:
     def test_json_form_is_read_back_without_expanding_its_reference(self) -> None:
         child = {_ANTHROPIC: json.dumps({"Ocp-Apim-Subscription-Key": "${GATEWAY_KEY}"})}
         llm_attribution.set_current_phase("KERNEL_AGENT")
-        llm_attribution.inject_env(child, component="kernel", source=_env())
+        llm_attribution.inject_env(child, component="forge", source=_env())
         llm_attribution.set_current_phase("")
         llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
         decoded = json.loads(child[_ANTHROPIC])

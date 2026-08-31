@@ -26,6 +26,9 @@ from hyperloom.orchestrator.trace.llm_trace import VALID_COMPONENTS
 
 #: Entry points that only tag a call when the caller names a component, so an
 #: untagged call site is spend the gateway cannot attribute to anything.
+#: ``inject_env`` tags a child process rather than one call, but it names a
+#: component the same way and a mislabelled one costs more: it stands for every
+#: call the child goes on to make.
 _TAGGED_ENTRY_POINTS = frozenset(
     {
         "achat_completion",
@@ -37,6 +40,7 @@ _TAGGED_ENTRY_POINTS = frozenset(
         "chat_completion",
         "claude_sdk_env_options",
         "CodexSession",
+        "inject_env",
         "run_codex_turn",
         "stream_chat_completion_text",
     }

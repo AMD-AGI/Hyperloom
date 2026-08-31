@@ -1775,7 +1775,7 @@ def _apply_kernel_backend_env(env: dict) -> None:
     # loop can refine the component it is given without having to restate them.
     from hyperloom.common.llm_attribution import inject_env
 
-    inject_env(env, component="kernel", operation="forge_loop")
+    inject_env(env, component="forge", operation="forge_loop")
     # Shared KnowledgePlane contract. KernelForge remains responsible for its
     # own local knowledge implementation and remote kernel-experience behavior.
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
