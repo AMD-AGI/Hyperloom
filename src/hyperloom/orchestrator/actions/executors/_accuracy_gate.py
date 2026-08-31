@@ -115,14 +115,21 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     the one place to ask what the subprocess was told, reusing the shared
     ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
 
-    This reports what was configured, not what should be: a graded round injects
-    ``RUN_EVAL=true`` on purpose (see :func:`accuracy_gate_applies`), because the
-    value folded in here comes from a base config, reference envs, a variant's
-    own ``extra_envs`` and the process env, none of which the grading executor
-    controls -- a stale config or a variant-supplied ``RUN_EVAL=false`` would
-    otherwise leave no score on disk and fail a good variant closed. The
-    session-level opt-out (``--no-eval``) is the supported way to mean "do not
-    evaluate", and it skips the grading too rather than racing this value.
+    This reports what was configured, not what should be. A graded round still
+    injects ``RUN_EVAL=true`` over a VARIANT's own ``extra_envs`` on purpose
+    (see :func:`accuracy_gate_applies`): a proposal must not be able to switch
+    off the eval its own KEEP is gated on, and a stale variant env would
+    otherwise leave no score on disk and fail a good variant closed.
+
+    The round's own contract is a different statement and is honoured. Read
+    against the config materialized BEFORE variant envs fold in, this value
+    carries only the base YAML ``benchmark.envs``, ``reference_envs`` and the
+    process ``$RUN_EVAL`` -- i.e. the operator/environment saying eval cannot
+    run here at all (no lm-eval in the benchmark venv, say). Forcing it on in
+    that case produces no score either, which REVERTs every variant as
+    ``accuracy_unavailable``, so :func:`accuracy_gate_applies` takes it as an
+    opt-out from the gate as well. The session-level ``--no-eval`` is the
+    coarsest spelling of the same thing.
 
     Lives in this module because every arm that asks the question needs it --
     the baseline, the grid and the env materializer -- and this module imports no
@@ -240,6 +247,25 @@ def _finite_score(score: Any) -> float | None:
         return None
     val = float(score)
     return val if math.isfinite(val) else None
+
+
+def _coerce_accuracy(value: Any, default: float) -> float:
+    """Coerce an accuracy figure to a float, falling back to ``default``.
+
+    Every accuracy figure this module reads goes through here, whichever side it
+    arrives on. The proposed side was already guarded while the state side used
+    a bare ``float()``: a ``state.json`` whose ``baseline_accuracy`` is a
+    non-numeric string (corrupted, or hand-edited) then raised ``ValueError``
+    straight out of the KEEP decision, where the code this replaced had handed
+    the raw attribute to :func:`accuracy_keep_block` and degraded to a
+    throughput-only verdict instead.
+    """
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def accuracy_meets_floor(score: Any, floor: float) -> bool:
@@ -483,10 +509,7 @@ def accuracy_keep_block(
     # accuracy_pass is None: no verdict.
     if not required:
         return False, "", False
-    try:
-        base = float(baseline_accuracy)
-    except (TypeError, ValueError):
-        base = 0.0
+    base = _coerce_accuracy(baseline_accuracy, 0.0)
     if base > 0:
         return (
             True,
@@ -508,7 +531,13 @@ def accuracy_keep_block(
 # EXPLORE now parses and gates unconditionally.
 
 
-def accuracy_gate_applies(*, scriptable: bool, baseline_accuracy: float, eval_disabled: bool) -> bool:
+def accuracy_gate_applies(
+    *,
+    scriptable: bool,
+    baseline_accuracy: float,
+    eval_disabled: bool,
+    run_eval_disabled: bool = False,
+) -> bool:
     """Whether a round is graded on accuracy — and therefore has to evaluate.
 
     One predicate for two decisions that must not diverge: whether to force
@@ -522,18 +551,32 @@ def accuracy_gate_applies(*, scriptable: bool, baseline_accuracy: float, eval_di
     opt-out, and a scriptable framework gates regardless of any baseline, so
     neither can be relied on to skip the gate by itself.
 
+    ``run_eval_disabled`` is the same veto one level down — the round's own
+    materialized contract (base YAML ``benchmark.envs``, ``reference_envs``,
+    process ``$RUN_EVAL``) saying eval is off, read via
+    :func:`materialized_run_eval_disabled`. It must be read BEFORE the variants'
+    own ``extra_envs`` fold in, which is what keeps the two ``RUN_EVAL=false``
+    spellings separable: an environment that cannot evaluate at all (no lm-eval
+    in the benchmark venv) opts the gate out here, while a variant switching its
+    own eval off is still overridden by the forced injection — the whole point of
+    the injection. Grading against an environment that cannot run lm-eval
+    REVERTs every variant as ``accuracy_unavailable``, which is the failure the
+    injection exists to prevent, not to cause.
+
     Args:
         scriptable (bool): Whether the framework's bench script supplies its own
             quality verdict (the only correctness signal it has).
         baseline_accuracy (float): The measured reference; ``<= 0`` means none.
         eval_disabled (bool): Whether the session opted out of eval entirely.
+        run_eval_disabled (bool): Whether the round's materialized benchmark
+            contract has ``RUN_EVAL`` present and falsey.
 
     Returns:
         bool: ``True`` when the round must both run the eval and be graded.
     """
-    if eval_disabled:
+    if eval_disabled or run_eval_disabled:
         return False
-    return bool(scriptable) or float(baseline_accuracy or 0.0) > 0.0
+    return bool(scriptable) or _coerce_accuracy(baseline_accuracy, 0.0) > 0.0
 
 
 def reconcile_baseline_accuracy(proposed: Any, shared_state: Any, *, where: str = "") -> float:
@@ -546,6 +589,14 @@ def reconcile_baseline_accuracy(proposed: Any, shared_state: Any, *, where: str 
     bad number can fail a whole grid, where it used to reach only the handful of
     variants a flag catalogue called risky.
 
+    That the in-tree writers all copy the state is a fact about today's tree, not
+    something this function enforces, so the rule it implements is a narrower
+    one: ``SharedState.baseline_accuracy`` is the only supported channel for a
+    measured reference, and a genuinely re-measured one (after a mid-session
+    framework switch, say) has to be promoted through the baseline writeback to
+    take effect. Passing it in ``params`` alone cannot win, and the log line
+    below says so rather than only saying the value was ignored.
+
     Args:
         proposed (Any): The ``accuracy_baseline`` from task params, if any.
         shared_state (Any): The state holding the measured baseline; may be
@@ -556,18 +607,26 @@ def reconcile_baseline_accuracy(proposed: Any, shared_state: Any, *, where: str 
         float: The measured baseline when there is one, else the proposed value
         (``0.0`` when neither is usable, which skips the gate as documented).
     """
-    try:
-        proposed_value = float(proposed or 0.0)
-    except (TypeError, ValueError):
-        proposed_value = 0.0
-    measured = float(getattr(shared_state, "baseline_accuracy", 0.0) or 0.0) if shared_state is not None else 0.0
+    prefix = f"{where}: " if where else ""
+    proposed_value = _coerce_accuracy(proposed, 0.0)
+    raw_measured = getattr(shared_state, "baseline_accuracy", 0.0) if shared_state is not None else 0.0
+    measured = _coerce_accuracy(raw_measured, -1.0)
+    if measured < 0:
+        log.warning(
+            "%sSharedState.baseline_accuracy=%r is not a number; treating the session as "
+            "having no measured baseline instead of failing the accuracy decision.",
+            prefix,
+            raw_measured,
+        )
+        measured = 0.0
     if measured <= 0:
         return proposed_value
     if proposed_value > 0 and abs(proposed_value - measured) > 1e-6:
         log.warning(
             "%sIgnoring proposed accuracy_baseline=%.6f; using the measured "
-            "SharedState.baseline_accuracy=%.6f instead.",
-            f"{where}: " if where else "",
+            "SharedState.baseline_accuracy=%.6f instead. A re-measured reference only "
+            "takes effect once the baseline writeback promotes it onto the state.",
+            prefix,
             proposed_value,
             measured,
         )

@@ -81,6 +81,85 @@ class TestAccuracyGateApplies:
     def test_a_negative_baseline_is_not_a_reference(self):
         assert ag.accuracy_gate_applies(scriptable=False, baseline_accuracy=-1.0, eval_disabled=False) is False
 
+    @pytest.mark.parametrize(
+        ("scriptable", "baseline_accuracy"),
+        [
+            pytest.param(False, 0.9704, id="baseline_from_an_earlier_phase"),
+            pytest.param(True, 0.0, id="scriptable"),
+            pytest.param(True, 0.9704, id="scriptable_with_baseline"),
+        ],
+    )
+    def test_the_rounds_own_contract_can_also_opt_out(self, scriptable, baseline_accuracy):
+        """A base YAML / reference_envs ``RUN_EVAL=false`` is a real opt-out.
+
+        It says the environment cannot evaluate at all — no lm-eval in the
+        benchmark venv, typically. Forcing ``RUN_EVAL=true`` per variant over it
+        produces no score either, so grading anyway REVERTs every variant as
+        ``accuracy_unavailable``: the exact failure the forced injection exists
+        to prevent.
+        """
+        assert (
+            ag.accuracy_gate_applies(
+                scriptable=scriptable,
+                baseline_accuracy=baseline_accuracy,
+                eval_disabled=False,
+                run_eval_disabled=True,
+            )
+            is False
+        )
+
+    def test_a_variant_supplied_opt_out_is_still_overridden(self):
+        """The two ``RUN_EVAL=false`` spellings must not collapse into one.
+
+        ``run_eval_disabled`` is read from the config materialized BEFORE variant
+        envs fold in, so a proposal switching off the eval its own KEEP is gated
+        on never reaches this predicate — it is overridden by the injection.
+        """
+        assert (
+            ag.accuracy_gate_applies(
+                scriptable=False,
+                baseline_accuracy=0.9704,
+                eval_disabled=False,
+                run_eval_disabled=False,
+            )
+            is True
+        )
+
+
+class TestReconcileBaselineAccuracy:
+    """``SharedState.baseline_accuracy`` is the only supported channel."""
+
+    def test_the_measured_baseline_outranks_a_proposed_one(self, caplog):
+        with caplog.at_level("WARNING"):
+            out = ag.reconcile_baseline_accuracy(0.42, SimpleNamespace(baseline_accuracy=0.9704), where="explore")
+        assert out == pytest.approx(0.9704)
+        assert "Ignoring proposed accuracy_baseline" in caplog.text
+        # The log has to name how a genuinely re-measured reference can win.
+        assert "writeback" in caplog.text
+
+    def test_a_proposed_value_is_used_when_nothing_was_measured(self):
+        assert ag.reconcile_baseline_accuracy(0.42, SimpleNamespace(baseline_accuracy=0.0)) == pytest.approx(0.42)
+
+    @pytest.mark.parametrize("corrupt", ["corrupt", "0.9x", object()])
+    def test_a_non_numeric_state_value_degrades_instead_of_raising(self, corrupt, caplog):
+        """Both sides of the comparison have to survive a bad value.
+
+        The proposed side was guarded and the state side was not, so a resumed
+        session whose ``state.json`` carries a non-numeric ``baseline_accuracy``
+        raised ``ValueError`` straight out of the KEEP decision. The behaviour it
+        replaced passed the raw attribute on and degraded to throughput-only.
+        """
+        with caplog.at_level("WARNING"):
+            out = ag.reconcile_baseline_accuracy(0.42, SimpleNamespace(baseline_accuracy=corrupt))
+        assert out == pytest.approx(0.42)
+        assert "is not a number" in caplog.text
+
+    def test_a_non_numeric_proposed_value_is_ignored(self):
+        assert ag.reconcile_baseline_accuracy("nonsense", SimpleNamespace(baseline_accuracy=0.0)) == 0.0
+
+    def test_a_missing_shared_state_falls_back_to_the_proposal(self):
+        assert ag.reconcile_baseline_accuracy(0.42, None) == pytest.approx(0.42)
+
 
 class TestParseEvalResults:
     def test_returns_error_when_no_results_dir(self, tmp_path):

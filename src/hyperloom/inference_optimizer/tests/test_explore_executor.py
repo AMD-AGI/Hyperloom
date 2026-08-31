@@ -75,14 +75,17 @@ def _force_cold_decision(monkeypatch) -> None:
     )
 
 
-def _write_baseline_yaml(path: Path) -> None:
+def _write_baseline_yaml(path: Path, *, run_eval: str | None = None) -> None:
+    envs: dict[str, object] = {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256}
+    if run_eval is not None:
+        envs["RUN_EVAL"] = run_eval
     cfg = {
         "benchmark": {
             "framework": "sglang",
             "model": "/path/models/Qwen-Qwen3-8B",
             "precision": "bf16",
             "run_mode": "local",
-            "envs": {"TP": 1, "CONC": 8, "ISL": 256, "OSL": 256},
+            "envs": envs,
             "benchmark_script": "sglang_mi300x.sh",
             "timeout_seconds": 600,
             "profiler": {
@@ -121,6 +124,13 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
         )
     )
     return workspace
+
+
+def _fake_eval_result(workspace: Path, *, accuracy: float) -> None:
+    """Drop a GSM8K ``results*.json`` where ``parse_eval_results`` looks for it."""
+    (workspace / "results_gsm8k.json").write_text(
+        json.dumps({"results": {"gsm8k": {"exact_match,strict-match": accuracy}}}),
+    )
 
 
 @pytest.fixture
@@ -582,6 +592,136 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     assert reasons.get("v_risky") == "accuracy_unavailable"
     # Post-baseline accuracy failure reverts the variant but never halts the run.
     assert state.stop_reason == ""
+    # No gated variant produced a verdict, so the round says so. The REVERT is
+    # unchanged; what is added is the ability to tell "the knobs regressed" from
+    # "nothing here could be graded".
+    gate = out["accuracy_gate"]
+    assert gate["enabled"] is True
+    assert gate["verdicts"] == 0
+    assert gate["unavailable"] == ["v_risky"]
+    assert gate["eval_infrastructure_suspected"] is True
+
+
+@pytest.mark.asyncio
+async def test_explore_one_broken_eval_beside_a_scored_sibling_is_not_infrastructure(sub_agent_runner, tmp_path):
+    """A variant that broke its own eval is a different finding from a broken path.
+
+    Per variant the two are indistinguishable, which is why every gated variant
+    stays fail-closed. Across the round they are not: a sibling that scored
+    proves the eval path works, so the miss belongs to the variant.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        scored = "v_scored" in str(slot)
+        # The first variant KEEPs and advances the anchor, so the second needs a
+        # further gain of its own to reach the accuracy gate at all.
+        workspace = _fake_workspace(slot, tput=840.0 if scored else 940.0)
+        # Only the first variant's eval leaves a score behind.
+        if scored:
+            _fake_eval_result(workspace, accuracy=0.79)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-mixed-acc"),
+            "base_tput": 800.0,
+            "accuracy_baseline": 0.80,
+            "grid": [
+                {
+                    "name": "v_scored",
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                },
+                {
+                    "name": "v_unscored",
+                    "extra_args": "--block-size 32",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                },
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-mixed-acc",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    gate = out["accuracy_gate"]
+    assert gate["verdicts"] == 1
+    assert gate["unavailable"] == ["v_unscored"]
+    assert gate["eval_infrastructure_suspected"] is False
+
+
+@pytest.mark.asyncio
+async def test_explore_skips_the_gate_when_the_round_contract_disables_eval(sub_agent_runner, tmp_path):
+    """A base-YAML ``RUN_EVAL=false`` is the environment saying it cannot evaluate.
+
+    Forcing ``RUN_EVAL=true`` per variant over it produces no score either, so a
+    session carrying a baseline accuracy from an earlier phase used to REVERT
+    every variant as ``accuracy_unavailable`` -- the exact failure the forced
+    injection was added to prevent.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base, run_eval="false")
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        _fake_workspace(Path(cmd[out_idx + 1]), tput=840.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-no-run-eval"),
+            "base_tput": 800.0,
+            "accuracy_baseline": 0.80,
+            "grid": [
+                {
+                    "name": "v_risky",
+                    "extra_args": "--kv-cache-dtype fp8",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-no-run-eval",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert out["accuracy_gate"]["enabled"] is False
+    assert {w["name"] for w in out["winners"]} == {"v_risky"}
 
 
 @pytest.mark.asyncio

@@ -54,6 +54,7 @@ from ..stop_attribution import (
 from ._accuracy_gate import (
     accuracy_gate_applies,
     accuracy_passed,
+    materialized_run_eval_disabled,
     parse_eval_results,
     reconcile_baseline_accuracy,
 )
@@ -1100,12 +1101,31 @@ class ExploreExecutor:
         # never going to produce, REVERTing the whole thing as
         # ``accuracy_unavailable`` -- the exact failure the injection was added
         # to remove. Opting out of eval has to opt out of the gate too.
+        #
+        # ``--no-eval`` is not the only way to say that. ``config_path`` has
+        # already been re-materialized above, so its ``RUN_EVAL`` carries the
+        # base YAML, ``reference_envs`` and the process env -- and NOT the
+        # variants' own ``extra_envs``, which fold in per variant inside
+        # run_grid. Reading it here therefore separates the two spellings that
+        # look identical later: an environment that cannot evaluate at all (no
+        # lm-eval in the benchmark venv) opts the gate out, while a variant
+        # switching its own eval off is still overridden below.
         accuracy_gate_enabled = accuracy_gate_applies(
             scriptable=scriptable,
             baseline_accuracy=baseline_accuracy,
             eval_disabled=bool(getattr(ss, "eval_disabled", False)),
+            run_eval_disabled=materialized_run_eval_disabled(config_path),
         )
         force_run_eval = accuracy_gate_enabled
+        # Round-level accuracy-gate observability (see the gate below). A gated
+        # variant with no verdict is REVERTed on its own evidence, which is the
+        # right call when its own config broke the eval and the wrong one when
+        # the eval path is broken for every variant alike -- and per variant the
+        # two are indistinguishable. Counting both outcomes lets the ROUND tell
+        # them apart afterwards: a round where not one gated variant produced a
+        # verdict is a statement about the eval path, not about the knobs.
+        accuracy_verdicts = 0
+        accuracy_unavailable_variants: list[str] = []
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1200,6 +1220,18 @@ class ExploreExecutor:
                 # A warm-decision variant pays for both rounds, so admitting it on
                 # the decision round alone would let it in and then strand it
                 # mid-variant with a discarded warmup and no measurement.
+                #
+                # The forced eval is already inside these figures, so it needs no
+                # separate allowance. ``warmup_expected_sec`` is
+                # ``baseline_runtime_sec``, which the double-run baseline
+                # deliberately reports as the WARMUP round's wall-clock
+                # (``baseline.py`` reassigns ``subprocess_runtime_sec`` to it and
+                # parks the hot round under ``measure_round_runtime_sec``) -- and
+                # the warmup round is the one that ran ``RUN_EVAL=true``. The
+                # injection below rides on that same round, so both sides of the
+                # comparison include one eval. Without the double run there is no
+                # warmup on either side and the single baseline round evaluated
+                # too, so ``decision_expected_sec`` covers it the same way.
                 if decision_expected_sec is not None:
                     fit_required_sec = float(decision_expected_sec) + (
                         float(warmup_expected_sec or 0.0) if use_warm_decision else 0.0
@@ -1550,6 +1582,7 @@ class ExploreExecutor:
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
+                                accuracy_verdicts += 1
                                 # Scriptable maps gate pass→1.0 / fail→0.0, so
                                 # compare against a perfect reference (1.0);
                                 # serving compares vs the measured baseline.
@@ -1559,6 +1592,7 @@ class ExploreExecutor:
                                     float(accuracy_value),
                                 )
                             else:
+                                accuracy_unavailable_variants.append(gv.name)
                                 # No eval result. Both scriptable and serving
                                 # fail closed: a gated variant (scriptable, or a
                                 # serving variant with a baseline) that yields no
@@ -1914,6 +1948,35 @@ class ExploreExecutor:
             if t.get("round_id") == round_id
         )
         status = "succeeded" if produced_measurement or winners else "failed"
+
+        # Round-level accuracy-gate verdict. Every gated variant is still judged
+        # fail-closed on its own evidence -- nothing here relaxes a REVERT. What
+        # it adds is the one distinction a single variant cannot make: a variant
+        # whose own config broke its eval sits beside siblings that scored, while
+        # a broken eval path leaves the whole round without a single verdict. The
+        # second case is a statement about the eval infrastructure, and reading it
+        # as "every knob regressed" is how a run ends at zero KEEP with nobody
+        # able to tell which of the two happened.
+        eval_infrastructure_suspected = bool(accuracy_unavailable_variants) and accuracy_verdicts == 0
+        accuracy_gate_summary = {
+            "enabled": accuracy_gate_enabled,
+            "verdicts": accuracy_verdicts,
+            "unavailable": list(accuracy_unavailable_variants),
+            "eval_infrastructure_suspected": eval_infrastructure_suspected,
+        }
+        if eval_infrastructure_suspected:
+            log.error(
+                "explore: %d gated variant(s) REVERTed as accuracy_unavailable and NOT ONE "
+                "produced an accuracy verdict this round (%s). That is evidence about the "
+                "eval path, not about the knobs: the throughput measurements are in the "
+                "ledger, but no accuracy verdict exists for any variant to KEEP on. Check "
+                "the eval harness (RESULT_DIR placement, lm-eval installed in the benchmark "
+                "venv, whether the served --max-model-len can host the eval) before reading "
+                "this round as a verdict on the configurations it tested.",
+                len(accuracy_unavailable_variants),
+                ", ".join(accuracy_unavailable_variants[:5]),
+            )
+
         # A round that measured nothing because the run stopped it is not the
         # same as one whose variants failed, and it used to be reported as a bare
         # ``failed`` with no error_class at all -- nothing downstream could tell
@@ -1944,6 +2007,7 @@ class ExploreExecutor:
             "per_variant_outcomes": per_variant_outcomes,
             "framework_lever_attributions": lever_attributions,
             "explore_search_update": search_update,
+            "accuracy_gate": accuracy_gate_summary,
             "discovered_flags_update": None,
             "round_id": round_id,
             "workspace": output_root.as_posix(),
