@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import os
-
 import pytest
 
 from hyperloom.orchestrator.kernel.request_handlers import (
