@@ -918,19 +918,11 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
-                pending = (
-                    dict(self.shared_state.geak_pending)
-                    if isinstance(getattr(self.shared_state, "geak_pending", None), dict)
-                    else {}
-                )
-                pending.update(
-                    {
-                        "status": "rebench_failed",
-                        "revalidation_error_class": geak_result["revalidation_error_class"],
-                        "revalidation_error": geak_result["revalidation_error"],
-                    }
-                )
-                self.shared_state.geak_pending = pending
+                # ``geak_pending`` is a live-work slot, not a diagnostic
+                # archive.  Keeping a terminal failure here prevents the
+                # KERNEL -> SWEEP transition forever.  The settled verdict and
+                # its diagnostics survive in ``geak_result`` instead.
+                self.shared_state.geak_pending = {}
                 self.shared_state.resume_pending_revalidation = False
                 any_changed = True
         # Per-action audit (failed attempt) for the in-scope kinds.

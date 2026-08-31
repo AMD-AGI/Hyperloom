@@ -571,7 +571,7 @@ async def test_wall_clock_closing_stops_rebench_and_settles(coordinator) -> None
     assert st.resume_pending_revalidation is False
 
 
-def _render_final(geak_pending: dict) -> tuple[list[str], list[str]]:
+def _render_final(geak_pending: dict, *, geak: dict | None = None) -> tuple[list[str], list[str]]:
     from hyperloom.inference_optimizer.breakdown.reporters._renderers.final import render
 
     section = render(
@@ -582,6 +582,7 @@ def _render_final(geak_pending: dict) -> tuple[list[str], list[str]]:
                 "geak_pending": geak_pending,
             },
             "baseline": {"throughput_tok_s_per_gpu": 100.0},
+            "geak": geak or {},
         }
     )
     return list(section.key_facts), list(section.warnings)
@@ -606,11 +607,12 @@ def test_final_report_surfaces_cancelled_geak_revalidation() -> None:
 
 def test_final_report_surfaces_failed_geak_revalidation() -> None:
     facts, warnings = _render_final(
-        {
-            "status": "rebench_failed",
+        {},
+        geak={
+            "revalidation_status": "failed",
             "revalidation_error": "subprocess_nonzero",
-            "self_reported_gain_pct": 3.2,
-        }
+            "gain_pct": 3.2,
+        },
     )
 
     blob = " ".join(facts + warnings).lower()
@@ -888,7 +890,7 @@ async def test_geak_revalidation_collision_replays_persisted_succeeded_result(co
 
 
 @pytest.mark.asyncio
-async def test_geak_rebench_failure_preserves_pending_diagnostic_when_placeholder_tracked(coordinator) -> None:
+async def test_geak_rebench_failure_releases_pending_and_preserves_result_diagnostic(coordinator) -> None:
     c = coordinator
     st = c.shared_state
     st.kernel_optimizer = "geak"
@@ -908,15 +910,16 @@ async def test_geak_rebench_failure_preserves_pending_diagnostic_when_placeholde
         {"status": "failed", "error_class": "subprocess_nonzero", "error": "revalidation failed"},
     )
 
-    assert st.geak_pending["status"] == "rebench_failed"
-    assert st.geak_pending["revalidation_error_class"] == "subprocess_nonzero"
-    assert st.geak_pending["revalidation_error"] == "revalidation failed"
+    assert not st.geak_pending
     assert st.geak_result["revalidation_status"] == "failed"
+    assert st.geak_result["revalidation_error_class"] == "subprocess_nonzero"
+    assert st.geak_result["revalidation_error"] == "revalidation failed"
+    assert st.resume_pending_revalidation is False
 
 
 @pytest.mark.asyncio
 async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> None:
-    """A diagnostic failure verdict is settled and cannot be revived."""
+    """A terminal result diagnostic rejects late success without occupying pending."""
     c = coordinator
     st = c.shared_state
     st.baseline_tput = 100.0
@@ -925,6 +928,8 @@ async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> Non
         "status": "ok",
         "accepted_config": {"flags": "--foo", "env": ""},
         "accepted_kernels": ["k1"],
+        "revalidation_status": "failed",
+        "revalidation_error": "subprocess_nonzero",
     }
     task = await c.tasks.create(
         kind="explore",
@@ -932,11 +937,7 @@ async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> Non
         idempotency_key=gr.geak_revalidate_idempotency_key(0),
         task_id="failed-then-late-rebench",
     )
-    st.geak_pending = {
-        "status": "rebench_failed",
-        "revalidation_task_id": task.task_id,
-        "revalidation_error": "subprocess_nonzero",
-    }
+    st.geak_pending = {}
 
     await c._promote_to_shared_state(
         task.kind,
@@ -949,7 +950,8 @@ async def test_failed_geak_rebench_slot_rejects_late_success(coordinator) -> Non
     )
 
     assert st.current_best["tput"] == pytest.approx(100.0)
-    assert st.geak_pending["status"] == "rebench_failed"
+    assert not st.geak_pending
+    assert st.geak_result["revalidation_status"] == "failed"
     assert not any(entry.get("action") == "geak_e2e" for entry in st.optimization_stack)
 
 

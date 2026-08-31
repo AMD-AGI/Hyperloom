@@ -115,10 +115,17 @@ class _RenderMixin:
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
+        geak_revalidation_status = (
+            str(self.geak_result.get("revalidation_status") or "")
+            if isinstance(getattr(self, "geak_result", None), dict)
+            else ""
+        )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
-        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable", "rebench_failed"}:
+        elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
+        elif geak_revalidation_status == "failed":
+            geak_pending_tag = " ⚠ geak candidate dropped unvalidated (rebench_failed)"
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry

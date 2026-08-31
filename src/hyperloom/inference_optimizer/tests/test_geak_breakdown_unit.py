@@ -276,6 +276,26 @@ def test_collect_geak_full_success_maps_fields(tmp_path: Path) -> None:
     assert out["eval_dir"] == "runs/geak/eval"
 
 
+def test_collect_geak_preserves_failed_revalidation_diagnostic(tmp_path: Path) -> None:
+    state = {
+        "kernel_optimizer": "geak",
+        "geak_result": {
+            "status": "ok",
+            "baseline_throughput_tok_s": 100.0,
+            "final_throughput_tok_s": 103.2,
+            "revalidation_status": "failed",
+            "revalidation_error_class": "subprocess_nonzero",
+            "revalidation_error": "same-harness rebench exited 1",
+        },
+    }
+
+    out = collect_geak(tmp_path, state, [])
+
+    assert out["revalidation_status"] == "failed"
+    assert out["revalidation_error_class"] == "subprocess_nonzero"
+    assert out["revalidation_error"] == "same-harness rebench exited 1"
+
+
 def test_collect_geak_result_reads_accepted_heads_lane(tmp_path: Path) -> None:
     state = {
         "kernel_optimizer": "geak",

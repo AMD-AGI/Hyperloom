@@ -18,7 +18,7 @@ from ._invocation import render_invocation_block
 
 # ``geak_pending.status`` values meaning the candidate was measured but its
 # revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable", "rebench_failed"})
+_GEAK_DROPPED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
 
 @register_renderer("final")
@@ -50,6 +50,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     revalidation_pending = bool(f.get("revalidation_pending"))
     # Self-reported GEAK candidate excluded from the headline; surfaced as an audit-only note.
     geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
+    geak = breakdown.get("geak") if isinstance(breakdown.get("geak"), dict) else {}
     pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
     # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
     is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
@@ -92,7 +93,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
     geak_pending_status = str(geak_pending.get("status") or "")
-    if geak_pending and geak_pending_status in _GEAK_DROPPED_STATUSES:
+    geak_revalidation_status = str(geak.get("revalidation_status") or "")
+    if geak_pending and geak_pending_status in _GEAK_DROPPED_PENDING_STATUSES:
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         drop_reason = str(geak_pending.get("revalidation_error") or "").strip() or "reason not recorded"
@@ -106,6 +108,21 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "merit, so this session's gain may understate what the optimizer "
             "actually found — the candidate's artefacts are on disk but absent "
             "from current_best / action_path / the validated gain."
+        )
+    elif geak_revalidation_status == "failed":
+        self_gain = geak.get("gain_pct")
+        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        drop_reason = str(geak.get("revalidation_error") or "").strip() or "reason not recorded"
+        facts.append(
+            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
+            f"revalidation (status=rebench_failed, {drop_reason})."
+        )
+        warnings.append(
+            "A measured GEAK e2e candidate was abandoned because its same-harness "
+            f"revalidation failed ({drop_reason}). It was never judged on merit, "
+            "so this session's gain may understate what the optimizer actually "
+            "found — the candidate's artefacts are on disk but absent from "
+            "current_best / action_path / the validated gain."
         )
     elif geak_pending and geak_pending_status == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")

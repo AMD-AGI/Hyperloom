@@ -16,7 +16,7 @@ LEGACY_GEAK_REVALIDATE_PLACEHOLDER = "geak-revalidate"
 
 # ``geak_pending.status`` values that record a closed verdict. A result arriving
 # against one of these is late or orphaned and must not reopen the slot.
-SETTLED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable", "rebench_failed"})
+SETTLED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
 # Fresh keys a single macro-cycle may mint. Each cancelled attempt burns one, so
 # this bounds how often a prune/cancel loop can re-dispatch the same rebench.
