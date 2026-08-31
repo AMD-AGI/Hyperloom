@@ -123,30 +123,23 @@ def _failed_conc_sweep_state(optimize_exit: dict | None) -> SharedState:
     return st
 
 
-def test_failed_conc_sweep_is_terminal_once_optimize_reported_both_arms_dry():
-    """Budget is only worth spending on a cycle that has something to try.
-
-    Relooping after OPTIMIZE reported both arms plateaued just re-enters a phase
-    that already said it is out of moves.
-    """
-    st = _failed_conc_sweep_state(_optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}))
-    target, reason, evidence = ps.compute_next_phase(st)
-    assert target == ps.PHASE_CLOSE
-    assert reason == "conc_sweep_failed"
-    assert evidence["reloop_blocked"] == "both_arms_plateaued"
-    assert "loopback" not in evidence
-
-
 @pytest.mark.parametrize(
     "optimize_exit",
     [
         pytest.param(None, id="no_optimize_exit_recorded"),
-        # Both say "SWEEP sooner", not "the arms are dry".
         pytest.param({"evidence": "skip_to_sweep"}, id="skip_to_sweep"),
         pytest.param({"evidence": "llm_escalation"}, id="llm_escalation"),
+        # THE regression case. ``exit_normal_optimize`` stamps ``plateau: True``
+        # on the routine ``source_dry and config_dry`` end of a cycle, so it is
+        # what an ordinary cycle looks like, not a statement that the arms are
+        # spent -- a new cycle re-seeds both of them. A guard that read this as
+        # "nothing left to try" turned conc_sweep_failed terminal on a normal
+        # cycle and forfeited the rest of the budget, which is the incident this
+        # module's reloop rule exists to prevent.
+        pytest.param({"evidence": "both_arms_plateaued", "plateau": True}, id="both_arms_plateaued"),
     ],
 )
-def test_failed_conc_sweep_still_reloops_when_leverage_was_not_ruled_out(optimize_exit: dict | None):
+def test_a_failed_conc_sweep_reloops_whatever_optimize_recorded(optimize_exit: dict | None):
     row = None if optimize_exit is None else _optimize_exit_row(optimize_exit)
     target, reason, evidence = ps.compute_next_phase(_failed_conc_sweep_state(row))
     assert target == ps.PHASE_FRAMEWORK_AGENT
@@ -154,37 +147,15 @@ def test_failed_conc_sweep_still_reloops_when_leverage_was_not_ruled_out(optimiz
     assert evidence["sweep_exit_reason"] == "conc_sweep_failed"
 
 
-def test_a_plateau_from_an_earlier_cycle_does_not_close_this_one():
-    """The plateau is per-cycle; a stale one must not end a later cycle."""
-    stale = _optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}, cycle=99)
-    target, reason, _ = ps.compute_next_phase(_failed_conc_sweep_state(stale))
-    assert target == ps.PHASE_FRAMEWORK_AGENT
-    assert reason == "cycle_reloop"
+def test_a_plateau_recorded_under_the_no_kernel_label_also_still_reloops():
+    """With KERNEL disabled the same OPTIMIZE exit is recorded relabelled.
 
-
-def test_the_plateau_guard_also_reads_the_no_kernel_relabelling():
-    """With KERNEL disabled the same exit is recorded under a different label.
-
-    Matching only ``optimize_no_more_leverage`` left the guard inert on the
-    ``--no-kernel`` path, which is where a reloop has the least left to try: it
-    re-entered an OPTIMIZE that had just reported both arms dry, with no KERNEL
-    arm to switch to either.
+    Covered separately because the relabelling is where a guard reading this
+    signal was most tempting -- ``--no-kernel`` has no KERNEL arm to switch to
+    -- and equally wrong: the arms still re-seed next cycle.
     """
     row = _optimize_exit_row(
         {"evidence": "both_arms_plateaued", "plateau": True},
-        reason="no_kernel_skipped",
-        extra_evidence={"passed_through_reason": "optimize_no_more_leverage"},
-    )
-    target, reason, evidence = ps.compute_next_phase(_failed_conc_sweep_state(row))
-    assert target == ps.PHASE_CLOSE
-    assert reason == "conc_sweep_failed"
-    assert evidence["reloop_blocked"] == "both_arms_plateaued"
-
-
-def test_a_no_kernel_exit_that_was_not_a_plateau_still_reloops():
-    """Only the plateau flavour closes, whichever label carried it."""
-    row = _optimize_exit_row(
-        {"evidence": "skip_to_sweep"},
         reason="no_kernel_skipped",
         extra_evidence={"passed_through_reason": "optimize_no_more_leverage"},
     )
@@ -206,35 +177,17 @@ def _sweep_exit_row(*, to_phase: str, reason: str, evidence: dict, cycle: int = 
     )
 
 
-def test_a_plateau_restored_from_an_earlier_session_does_not_close_this_cycle():
-    """``cycle=0`` marks both the first macro-cycle and a pre-cyclic resume.
+def test_a_prior_reloop_over_the_same_failure_does_not_cap_the_retry():
+    """A retry cap cannot be recovered from ``phase_history``.
 
-    ``make_history_row`` documents exactly that, so the stamp cannot separate
-    them: a plateau exit restored from an earlier session matched the current
-    cycle 0 and closed the run on a plateau this cycle never reported — throwing
-    away the budget the rest of this change exists to keep. The scan stops at the
-    previous cycle boundary instead. Reached whenever this cycle has no OPTIMIZE
-    exit of its own to find first, e.g. a session resumed straight into SWEEP.
-    """
-    st = _failed_conc_sweep_state(_optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}))
-    st.phase_history = list(st.phase_history) + [
-        _sweep_exit_row(to_phase=ps.PHASE_CLOSE, reason="sweep_done", evidence={"terminal": True}),
-    ]
-    target, reason, evidence = ps.compute_next_phase(st)
-    assert target == ps.PHASE_FRAMEWORK_AGENT
-    assert reason == "cycle_reloop"
-    assert evidence["sweep_exit_reason"] == "conc_sweep_failed"
-
-
-def test_a_second_failed_conc_sweep_stops_being_retried():
-    """The incident's own failure mode was deterministic.
-
-    A corrupted ``--online_quant_config`` killed every conc_sweep launch, so a
-    reloop that carries nothing across cycles re-runs FRAMEWORK_AGENT -> KERNEL
-    -> SWEEP -> conc_sweep and dies identically each cycle until the budget or
-    ``max_cycles`` runs out. ``reset_per_cycle_plateau_state`` clears
-    ``last_conc_sweep``, so the reloop row's ``sweep_exit_reason`` is the durable
-    record of the first attempt.
+    Capping deterministic conc_sweep retries is worth doing -- the incident's
+    failure was deterministic, so every cycle re-reached the same launch failure
+    -- but ``phase_history`` cannot answer "did we already retry". It is capped
+    at ``_PHASE_HISTORY_CAP`` rows, so a long run evicts the reloop row and the
+    cap silently stops applying; and it is restored across sessions, so a
+    resumed run finds the row immediately and closes on its FIRST failure,
+    forfeiting the budget. Wrong in both directions, so the reloop stands
+    unconditionally until a durable counter exists to gate it.
     """
     st = _sweep_state(macro_cycle=1, validated_gain=5.0, gain_at_cycle_start=0.0)
     st.last_sweep = {}
@@ -247,27 +200,9 @@ def test_a_second_failed_conc_sweep_stops_being_retried():
         ),
     ]
     target, reason, evidence = ps.compute_next_phase(st)
-    assert target == ps.PHASE_CLOSE
-    assert reason == "conc_sweep_failed"
-    assert evidence["reloop_blocked"] == "conc_sweep_failed_repeated"
-    assert "loopback" not in evidence
-
-
-def test_a_reloop_over_a_clean_sweep_exit_does_not_cap_the_retry():
-    """Only a previous conc_sweep FAILURE spends the one retry."""
-    st = _sweep_state(macro_cycle=1, validated_gain=5.0, gain_at_cycle_start=0.0)
-    st.last_sweep = {}
-    st.last_conc_sweep = {"status": "failed"}
-    st.phase_history = list(st.phase_history) + [
-        _sweep_exit_row(
-            to_phase=ps.PHASE_FRAMEWORK_AGENT,
-            reason="cycle_reloop",
-            evidence={"loopback": True, "sweep_exit_reason": "sweep_done"},
-        ),
-    ]
-    target, reason, _ = ps.compute_next_phase(st)
     assert target == ps.PHASE_FRAMEWORK_AGENT
     assert reason == "cycle_reloop"
+    assert evidence["sweep_exit_reason"] == "conc_sweep_failed"
 
 
 def test_a_failed_conc_sweep_survives_a_convergence_wind_down():

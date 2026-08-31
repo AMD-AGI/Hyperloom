@@ -2766,108 +2766,6 @@ def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str
     return PHASE_SWEEP
 
 
-def _optimize_declared_no_leverage(state: Any) -> bool:
-    """Whether OPTIMIZE left the current macro-cycle with both arms plateaued.
-
-    Reads the recorded exit rather than re-deriving the plateau predicates:
-    by the time SWEEP exits, KERNEL_AGENT and SWEEP have moved the state the
-    predicates read, so re-running them answers a different question than the
-    one OPTIMIZE actually answered.
-
-    ``optimize_no_more_leverage`` also covers ``skip_to_sweep`` and an LLM
-    escalation, which say the operator wanted SWEEP sooner — not that the arms
-    are dry — so only the ``plateau`` flavour counts.
-
-    With KERNEL disabled the same exit is recorded as ``no_kernel_skipped`` with
-    the real reason under ``evidence.passed_through_reason``, so both labels are
-    read: that path is where a reloop has the least left to try.
-
-    The scan is bounded by the previous cycle boundary, not by the ``cycle``
-    stamp alone. ``make_history_row`` documents ``cycle=0`` for the first
-    macro-cycle AND for a resume from a pre-cyclic session, so at cycle 0 the
-    stamp cannot separate the two: a plateau exit restored from an earlier
-    session's history matched, and closed the run down on a plateau this cycle
-    never reported. A SWEEP exit ends a macro-cycle and the PRELUDE handoff opens
-    the first one, so any OPTIMIZE exit reached before either of those belongs to
-    the cycle being judged. This matters whenever the current cycle has no
-    OPTIMIZE exit of its own to find first — a session resumed straight into
-    SWEEP, most obviously.
-
-    Args:
-        state (Any): Frozen SharedState view.
-
-    Returns:
-        bool: ``True`` when this cycle's OPTIMIZE exit reported both arms
-        plateaued.
-    """
-    cycle = int(getattr(state, "macro_cycle", 0) or 0)
-    for row in reversed(list(getattr(state, "phase_history", None) or [])):
-        if not isinstance(row, dict):
-            continue
-        from_phase = str(row.get("from_phase") or "").strip().upper()
-        # Cycle boundary: a SWEEP exit closes the previous macro-cycle (whether
-        # it relooped or wound down) and the PRELUDE handoff opens the first one.
-        # Anything past it belongs to an earlier cycle or an earlier session.
-        if from_phase in (PHASE_PRELUDE, PHASE_SWEEP):
-            break
-        if int(row.get("cycle", 0) or 0) != cycle:
-            continue
-        if from_phase != PHASE_FRAMEWORK_AGENT:
-            continue
-        evidence = row.get("evidence")
-        evidence = evidence if isinstance(evidence, dict) else {}
-        reason = str(row.get("reason") or "").strip()
-        if reason == "no_kernel_skipped":
-            # With KERNEL disabled the OPTIMIZE exit is relabelled and the real
-            # reason moves into the evidence, so matching only the label left
-            # the whole guard inert on the ``--no-kernel`` path -- exactly where
-            # a reloop has no KERNEL arm left to try either.
-            reason = str(evidence.get("passed_through_reason") or "").strip()
-        if reason != "optimize_no_more_leverage":
-            continue
-        return bool(evidence.get("plateau"))
-    return False
-
-
-def _conc_sweep_failure_already_relooped(state: Any) -> bool:
-    """Whether an earlier macro-cycle already relooped past a failed conc_sweep.
-
-    ``conc_sweep_failed`` no longer short-circuits the reloop, which is what
-    kept a 16h run from forfeiting 9.8h of its budget to a closeout scan. But the
-    failure in that incident was deterministic — a corrupted
-    ``--online_quant_config`` killed every conc_sweep launch — and with nothing
-    carried across cycles the run re-ran FRAMEWORK_AGENT -> KERNEL -> SWEEP ->
-    conc_sweep and died the same way each cycle until the budget or
-    ``max_cycles`` ran out.
-
-    ``reset_per_cycle_plateau_state`` clears ``last_conc_sweep``, so the reloop
-    row's own evidence is the durable record: :func:`compute_next_phase` stamps
-    ``sweep_exit_reason`` onto every ``cycle_reloop`` it opens, for exactly this
-    kind of after-the-fact question. One reloop is the retry that incident
-    argued for; a second identical failure has demonstrated that retrying
-    reproduces it, so the budget is better spent anywhere else.
-
-    Args:
-        state (Any): Frozen SharedState view.
-
-    Returns:
-        bool: ``True`` when a previous cycle already relooped over a
-        ``conc_sweep_failed`` SWEEP exit.
-    """
-    for row in getattr(state, "phase_history", None) or []:
-        if not isinstance(row, dict):
-            continue
-        if str(row.get("from_phase") or "").strip().upper() != PHASE_SWEEP:
-            continue
-        if str(row.get("reason") or "").strip() != "cycle_reloop":
-            continue
-        evidence = row.get("evidence")
-        evidence = evidence if isinstance(evidence, dict) else {}
-        if str(evidence.get("sweep_exit_reason") or "").strip() == "conc_sweep_failed":
-            return True
-    return False
-
-
 def compute_next_phase(
     state: Any,
     *,
@@ -2976,30 +2874,34 @@ def compute_next_phase(
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
             exit_reason, exit_evidence = norm
-            # ``conc_sweep_failed`` is terminal only once the optimization has
-            # nothing left to try. conc_sweep is a closeout concurrency scan,
-            # not the optimization itself, so on its own its failure says
-            # nothing about whether the remaining budget could still find gain;
-            # short-circuiting on it forfeited ~9.8h of a 16h run the one time
-            # it fired. But when OPTIMIZE already reported both arms plateaued,
-            # a fresh cycle would re-enter a phase that just said it is out of
-            # moves, so the wind-down still applies there.
-            if exit_reason == "conc_sweep_failed" and _optimize_declared_no_leverage(state):
-                return (
-                    PHASE_CLOSE,
-                    exit_reason,
-                    {**exit_evidence, "reloop_blocked": "both_arms_plateaued"},
-                )
-            # A second conc_sweep failure after a cycle already relooped over
-            # one. The incident this reloop was added for was deterministic, so
-            # without a cap the run spends every remaining cycle re-reaching the
-            # same launch failure. One retry, then stop.
-            if exit_reason == "conc_sweep_failed" and _conc_sweep_failure_already_relooped(state):
-                return (
-                    PHASE_CLOSE,
-                    exit_reason,
-                    {**exit_evidence, "reloop_blocked": "conc_sweep_failed_repeated"},
-                )
+            # ``conc_sweep_failed`` never short-circuits the reloop. conc_sweep
+            # is a closeout concurrency scan, not the optimization itself, so
+            # its failure says nothing about whether the remaining budget could
+            # still find gain; short-circuiting on it forfeited ~9.8h of a 16h
+            # run the one time it fired, which is the incident this module's
+            # reloop rule exists to prevent.
+            #
+            # Two guards that tried to be smarter about this were removed rather
+            # than repaired, because both read signals that do not carry the
+            # meaning they need:
+            #
+            #   - "OPTIMIZE reported both arms plateaued" cannot mean the arms
+            #     are exhausted. ``exit_normal_optimize`` stamps
+            #     ``plateau: True`` on the routine ``source_dry and config_dry``
+            #     end of a cycle, and a new cycle re-seeds both arms. Gating on
+            #     it reproduced the original incident from a second branch.
+            #   - "a previous cycle already relooped over this failure" cannot
+            #     be recovered from ``phase_history``. It is capped at
+            #     ``_PHASE_HISTORY_CAP`` rows, so a long run evicts the evidence
+            #     and loses the cap; it is also restored across sessions, so a
+            #     resumed run finds it immediately and closes on the FIRST
+            #     failure. Wrong in both directions.
+            #
+            # Capping deterministic conc_sweep retries is still worth doing, but
+            # it needs a durable SharedState counter (incremented on failure,
+            # reset on success) rather than a predicate divined from a capped
+            # log. Tracked separately; not in this change.
+            #
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
             # reloop is blocked (budget, convergence, or max_cycles). A failure
