@@ -162,6 +162,91 @@ pollution after the fact.
 > stale servers before every restart. IR-1 above is the *outer* gate that
 > fires before the optimizer process exists.
 
+#### Prior workload cleanup gate (error recovery)
+
+**Trigger (MUST):** whenever a run fails, is abandoned, or you are about to
+start a **replacement** workload after any error — credential failures,
+optimizer crash, install/preflight failure, user retry/restart, or any recovery
+where you would run `docker run`, `install.sh`, or a new/fresh `optimize`.
+Applies in bare-metal and docker mode, **whether reusing the existing container
+or starting a new one.** Leftover optimizer/serving processes or occupied VRAM
+are the usual cause of misleading 0% validated gain (#1314).
+
+**Exception:** `--resume-from "$SESSION_DIR"` against the **same** session
+immediately after a clean crash (no credential change, user explicitly wants
+resume) may skip — but if the probe finds live or ambiguous leftover workload,
+run it anyway and ask the user.
+
+**Probe on the docker host** (bare-metal: current host). **Never** rely on
+`docker exec` for process or VRAM checks — container PID namespaces hide
+processes in *other* containers; the host namespace is the superset (#1314).
+
+```bash
+export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
+# .env fills gaps only — same pattern as the launch block below.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
+if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+eval "$_dotenv_prev"
+unset _dotenv_prev
+export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
+
+# Prior launch handles from canonical artifacts (no last_launch.env — never written)
+LATEST_PID_FILE="$(ls -t "$RUN_DIR"/run_*.pid 2>/dev/null | head -1 || true)"
+LATEST_LAUNCH_INFO="$(ls -t "$RUN_DIR"/launch_*.json 2>/dev/null | head -1 || true)"
+PRIOR_SESSION=""
+if [ -n "$LATEST_LAUNCH_INFO" ] && command -v jq >/dev/null 2>&1; then
+  PRIOR_SESSION="$(jq -r '.session_dir // empty' "$LATEST_LAUNCH_INFO" 2>/dev/null)"
+fi
+echo "prior_pid_file=${LATEST_PID_FILE:-none}"
+echo "prior_launch_info=${LATEST_LAUNCH_INFO:-none}"
+echo "prior_session=${PRIOR_SESSION:-none}"
+
+# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py)
+pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
+pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
+
+# VRAM — each card must be < 1% of capacity (IR-1); catches unrelated occupiers too
+python3 - <<'PY' 2>/dev/null || true
+from hyperloom.common import rocm_smi
+
+snaps = rocm_smi.gpu_vram_usage()
+if snaps is None:
+    print("gpu_vram=unreadable")
+else:
+    for i, snap in enumerate(snaps):
+        pct = (snap.used_mib / snap.total_mib) if snap.total_mib else 1.0
+        busy = pct > 0.01
+        print(
+            f"gpu{i}_vram_used={snap.used_mib:.1f}/{snap.total_mib:.1f} MiB "
+            f"({pct:.2%}) {'BUSY' if busy else 'idle'}"
+        )
+PY
+
+# Other running containers — exclude the one we will reuse (name is user-set)
+CURRENT_CONTAINER="${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
+docker ps --format '{{.Names}}' 2>/dev/null | grep -v "^${CURRENT_CONTAINER}$" || true
+```
+
+**If anything is found** (non-empty `prior_session`, a live PID in
+`prior_pid_file`, foreign process, any GPU line marked `BUSY` or
+`gpu_vram=unreadable`, or any extra running container), stop and ask the user
+explicitly — e.g. *"The previous run may still be active (session …, PID …,
+GPU VRAM …). Stop it before we continue?"* Wait for yes/no.
+
+- **Yes:** stop in this order: serving PIDs from pgrep, then the optimizer
+  (`kill "$(cat "$LATEST_PID_FILE")"` when the PID file is live, else the pgrep
+  match), then other containers (`docker stop <name>`). Only then continue with
+  `--resume-from "$PRIOR_SESSION"` or a fresh launch as appropriate.
+- **No:** do **not** treat results as clean. Continue only if the user insists;
+  **MUST** add this caveat verbatim to the final report / session summary:
+
+  > **Contaminated baseline warning (#1314):** Prior GPU workload was not
+  > stopped per user choice. Validated gain and benchmark numbers may be
+  > unreliable.
+
+Never kill processes or stop containers without explicit user approval.
+
 ### IR-2 — install.sh MUST succeed before every launch
 
 Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and

@@ -27,60 +27,10 @@ In docker mode:
 
 ### Prior workload cleanup (required)
 
-**Trigger (MUST):** whenever a demo run fails, is abandoned, or you are about to
-start a **replacement** workload after any error — not only LLM credential
-failures (401/403, invalid key, gateway/auth misconfiguration). This also
-covers optimizer crash, install/preflight failure, the user asking to
-retry/restart, or any recovery where you would run `docker run`, `install.sh`,
-or a new/fresh `optimize`. It applies **regardless of whether you reuse the
-existing Docker container or start a new one.** Leftover optimizer or serving
-processes are the usual cause of misleading 0% validated gain (#1314).
-
-**Exception:** `--resume-from "$SESSION_DIR"` against the **same** session
-immediately after a clean crash (no credential change, user explicitly wants
-resume) may skip this gate — but if the probe below finds live or ambiguous
-leftover workload, run it anyway and ask the user.
-
-**Before** any replacement step (`docker run`, `docker exec`, `install.sh`, or
-a new/resumed `optimize`), probe the environment that will launch the workload
-(the current shell, or the target container via `docker exec`):
-
-```bash
-export USER_DATA_PATH="${USER_DATA_PATH:-$(grep '^USER_DATA_PATH=' .env | cut -d= -f2-)}"
-export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
-
-# Prior session handle (if any)
-test -f "$RUN_DIR/last_launch.env" && . "$RUN_DIR/last_launch.env"
-echo "prior_session=${SESSION_DIR:-none} prior_pid_file=${PID_FILE:-none}"
-
-# Leftover Hyperloom optimizer
-pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
-
-# Leftover serving stacks (IR-1 foreign processes)
-pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
-```
-
-In **docker mode**, also probe on the **docker host** (not only inside the
-container):
-
-```bash
-docker ps --format '{{.Names}}' | grep -E '^hyperloom' || true
-```
-
-**If anything is found** (prior `SESSION_DIR`, optimizer PID, `sglang`/`vllm`/
-Magpie process, or an extra `hyperloom*` container), stop and ask the user in
-plain language — for example: *"The previous run may still be active (optimizer
-PID …, session …). Stop it before we continue?"* Wait for explicit yes/no.
-
-- **Yes:** stop in this order: serving processes from the old run, then the
-  optimizer (`kill` the PID from `PID_FILE` or the `pgrep` match), then stale
-  `hyperloom*` containers on the docker host (`docker stop <name>`). Only after
-  cleanup, continue with `--resume-from "$SESSION_DIR"` or a fresh launch as
-  appropriate.
-- **No:** continue, but warn that GPU contention or a stale baseline anchor
-  can depress benchmarks and show 0% validated gain.
-
-Never kill processes or stop containers without the user's explicit approval.
+Before any replacement launch after a failed or abandoned demo run (`docker run`,
+`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
+gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
+skip the user-approval step (#1314).
 
 Suggested Docker images:
 
