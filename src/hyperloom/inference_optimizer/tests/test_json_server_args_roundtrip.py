@@ -201,9 +201,7 @@ class TestRemovalStillWorks:
         worst version of the wholesale decline: the gain gets attributed to a
         configuration nobody can serve.
         """
-        out = strip_benchmark_harness_flags(
-            "--tool-call-parser 'hermes' --no-enable-prefix-caching --max-num-seqs 64"
-        )
+        out = strip_benchmark_harness_flags("--tool-call-parser 'hermes' --no-enable-prefix-caching --max-num-seqs 64")
         assert "--no-enable-prefix-caching" not in out
         assert "--max-num-seqs 64" in out
 
