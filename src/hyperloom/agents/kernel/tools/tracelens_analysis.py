@@ -1773,7 +1773,7 @@ def _defines_traced_triton_kernel(name: str, source_file: str) -> bool:
     if _triton_def_line is None or not source_file or not source_file.endswith(".py"):
         return False
     for keyword in _candidate_keywords(name):
-        if _triton_def_line(source_file, symbol=keyword) is not None:
+        if _triton_def_line(source_file, symbol=keyword, require_name_match=True) is not None:
             return True
     return False
 
