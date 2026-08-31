@@ -16,6 +16,12 @@ during argument parsing before any GPU work starts. Nothing is dropped, ignored,
 or absorbed into a default, so a misspelled flag costs a message and an exit
 code rather than an hour of tuning against a value you did not ask for.
 
+One option lives on `kernelforge` itself rather than on any subcommand:
+
+| Option | Meaning |
+|:--|:--|
+| `--version` | Print the installed KernelForge version and exit. |
+
 ## Core
 
 ```bash
@@ -323,11 +329,22 @@ Search and execution:
 ### gemm-tune plan
 
 Reports which tuners `run` would dispatch, and on which shapes, without tuning
-anything. It takes the same model, target and shape-source options as `run`:
-`--model-path`, `--framework` and `--precision` (all required), plus
-`--quant-type`, `--gpu-type`, `--demand`, `--shapes-manifest`, `--shapes-json`,
-`--untuned-csv`, `--tunableop-input` and `--kernel-signature-log`, each with the
-same default and meaning as above.
+anything. It takes the model, target and shape-source options of `run` and none
+of its search or execution options.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--model-path <dir>` | required | Model directory; must contain `config.json`. |
+| `--framework <name>` | required | `sglang`, `vllm` or `vllm-aiter`. |
+| `--precision <p>` | required | `bf16`, `fp8`, `fp4`, `int8` or `awq`. |
+| `--quant-type <q>` | `auto` | As for `run`. |
+| `--gpu-type <sku>` | `auto` | As for `run`. |
+| `--demand <file>` | `''` | As for `run`; the highest-priority shape source. |
+| `--shapes-manifest <file>` | `''` | As for `run`. |
+| `--shapes-json <file>` | `''` | As for `run`. |
+| `--untuned-csv <file>` | `''` | As for `run`. |
+| `--tunableop-input <file>` | `''` | As for `run`. |
+| `--kernel-signature-log <file>` | `''` | As for `run`. |
 
 ### gemm-tune evidence
 
