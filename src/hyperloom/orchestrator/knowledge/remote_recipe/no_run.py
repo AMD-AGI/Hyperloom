@@ -147,10 +147,15 @@ def project_session(document: Mapping[str, Any]) -> dict[str, Any]:
     baseline_tput = _arm_achieved(baseline_arm)
     optimized_tput = _arm_achieved(optimized_arm)
     captured_tok: float | None = None
-    if baseline_tput is not None and optimized_tput is not None:
-        captured_tok = max(0.0, optimized_tput - baseline_tput)
-    elif gain is not None and baseline_tput is not None:
-        captured_tok = max(0.0, baseline_tput * (gain / 100.0))
+    if baseline_tput is not None and optimized_tput is not None and optimized_tput > baseline_tput:
+        captured_tok = optimized_tput - baseline_tput
+    elif gain is not None and gain > 0 and baseline_tput is not None:
+        # A non-positive arm delta alongside a positive validated gain means the
+        # arms are not two independent measurements, so trust the benchmark
+        # number over the delta rather than scoring the session as zero capture.
+        captured_tok = baseline_tput * (gain / 100.0)
+    elif baseline_tput is not None and optimized_tput is not None:
+        captured_tok = 0.0
     capture: float | None = None
     if captured_tok is not None and baseline_h is not None and baseline_h > 0:
         capture = captured_tok / baseline_h

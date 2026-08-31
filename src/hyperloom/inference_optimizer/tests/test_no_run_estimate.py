@@ -98,6 +98,17 @@ def test_percentile_interpolates() -> None:
     assert percentile([], 50) is None
 
 
+def test_capture_falls_back_to_gain_when_arms_are_identical() -> None:
+    """One trace snapshot can fill both arms; that must not score as zero capture."""
+    row = project_session(_session(gain=30.0, peak=200.0, baseline=100.0, optimized=100.0))
+    assert row["capture"] == pytest.approx(0.3)
+
+
+def test_capture_stays_zero_for_a_genuine_regression() -> None:
+    row = project_session(_session(gain=0.0, peak=200.0, baseline=100.0, optimized=90.0))
+    assert row["capture"] == 0.0
+
+
 def test_project_session_capture_is_fraction_of_baseline_roof_gap() -> None:
     row = project_session(_session(gain=30.0, peak=200.0, baseline=100.0, optimized=130.0))
     # captured 30 tok/s of the original 100 tok/s gap

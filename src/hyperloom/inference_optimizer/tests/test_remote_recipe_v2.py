@@ -343,6 +343,17 @@ def test_publishable_roofline_strips_host_paths_and_keeps_warm_start(tmp_path: P
     assert row["replay_material_available"] is True
 
 
+def test_single_snapshot_publishes_no_optimized_arm(tmp_path: Path) -> None:
+    """One profile is a baseline, not a baseline-and-optimized pair."""
+    state = _state(tmp_path)
+    state.roofline_snapshots = [_roofline_snap()]
+    record = build_publishable_roofline(state)
+    assert record is not None
+    assert record["source"] == "trace"
+    assert record["baseline"]
+    assert "optimized" not in record
+
+
 def test_publishable_roofline_falls_back_to_analytic_ceiling(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.roofline_snapshots = [

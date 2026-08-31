@@ -254,7 +254,10 @@ def build_publishable_roofline(state: Any) -> dict[str, Any] | None:
     cmp = _finite_or_none(peak_src.get("roofline_cmp_ceiling_tok_per_sec"))
     if cmp is not None and cmp > 0:
         record["roofline_cmp_ceiling_tok_per_sec"] = cmp
-    if _roofline_arm_usable(optimized_arm) and source == "trace":
+    # A lone snapshot fills both arms from the same measurement, so publishing
+    # an optimized arm would claim a post-optimization profile that never ran
+    # and hand miners a zero baseline-to-optimized delta.
+    if _roofline_arm_usable(optimized_arm) and source == "trace" and len(snapshots) > 1:
         record["optimized"] = optimized_arm
     for key in _ROOFLINE_PATH_KEYS:
         record.pop(key, None)
