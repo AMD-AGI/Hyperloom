@@ -116,10 +116,10 @@ def test_register_executors_wires_full_set():
     for kind in _REAL_EXECUTORS_FULL:
         assert kind in reg
     assert "target_analysis" in reg
+    # Both arms land their diffs through this one kind; a missing key silently
+    # drops every discovered PR candidate and every authored patch.
     assert "integrate_patch" in reg
-    # Must match the kind the FRAMEWORK phase enqueues; a stale "framework"
-    # key silently drops every discovered PR candidate.
-    assert "framework_agent" in reg
+    assert "framework_agent" not in reg
     assert "framework" not in reg
     assert "roofline" in reg
 

@@ -169,6 +169,118 @@ class TestResolvePatchTargetRoots:
         assert not any("flydsl" in root.lower() for root in allowlist)
 
 
+class TestResolveKernelSearchRoots:
+    def test_drops_roots_that_do_not_exist(self, monkeypatch, tmp_path):
+        """A pinned root that no longer exists must not reach the caller.
+
+        Grepping an absent directory yields no hits, which is indistinguishable
+        from a kernel whose source is genuinely absent -- the exact failure that
+        silently emptied kernel-opt's candidate list.
+        """
+        present = tmp_path / "vllm"
+        present.mkdir()
+        monkeypatch.setattr(
+            fp,
+            "_discover_installed_framework_roots",
+            lambda: (f"{present}/", "/gone/aiter/"),
+        )
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
+        assert fp.resolve_kernel_search_roots() == (f"{present}/",)
+
+    def test_excludes_bare_site_packages_parents(self, monkeypatch, tmp_path):
+        """Only package dirs, never the whole site-packages tree.
+
+        The allowlist reports the parent so an editability check can contain any
+        installed file; grepping it would scan every wheel on the host.
+        """
+        parent = tmp_path / "dist-packages"
+        (parent / "vllm").mkdir(parents=True)
+        monkeypatch.setattr(fp, "_discover_installed_package_roots", lambda: (f"{parent}/",))
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: (f"{parent}/vllm/",))
+        roots = fp.resolve_kernel_search_roots()
+        assert f"{parent}/vllm/" in roots
+        assert f"{parent}/" not in roots
+
+    def test_empty_when_nothing_is_installed(self, monkeypatch):
+        """No searchable root is reported as such, not as a silent success."""
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_scriptable_repo_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_explicit_framework_root", lambda: ())
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ("/gone/vllm/",))
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ("/gone/flydsl/",))
+        assert fp.resolve_kernel_search_roots() == ()
+
+    def test_includes_explicit_framework_checkout(self, monkeypatch, tmp_path):
+        """An editable checkout is invisible to importlib; the env var finds it."""
+        checkout = tmp_path / "my-vllm"
+        checkout.mkdir()
+        monkeypatch.setattr(fp, "_discover_installed_framework_roots", lambda: ())
+        monkeypatch.setenv(fp.GENERIC_FRAMEWORK_ROOT_ENV, str(checkout))
+        assert f"{checkout}/" in fp.resolve_kernel_search_roots()
+
+
+class TestEveryKernelSourcePackageIsDiscoverable:
+    """One package list, reached by all three discovery mechanisms.
+
+    ``sgl_kernel`` holds SGLang's kernel sources and was named by the tool that
+    greps for them but by none of the discovery paths here. Because this
+    resolver imports successfully in every non-standalone run, the tool's own
+    list was never consulted -- so a host with a standalone ``sgl_kernel`` wheel
+    reported it as searched and never searched it. A package present in only
+    some of the three mechanisms is the shape of that bug, so the tests below
+    assert all three derive from the same tuple.
+    """
+
+    def test_sgl_kernel_is_a_framework_source_package(self):
+        assert "sgl_kernel" in fp.FRAMEWORK_SOURCE_PACKAGES
+        assert "aiter_meta" in fp.FRAMEWORK_SOURCE_PACKAGES
+
+    def test_importlib_discovery_covers_every_package(self, monkeypatch, tmp_path):
+        """A standalone wheel is found by spec origin alone."""
+        located = tmp_path / "sgl_kernel"
+        located.mkdir()
+        monkeypatch.setattr(
+            fp,
+            "_find_spec_origin",
+            lambda name: str(located) if name == "sgl_kernel" else None,
+        )
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
+        assert f"{located}/" in fp._discover_installed_framework_roots()
+
+    def test_the_venv_glob_covers_every_package(self, monkeypatch, tmp_path):
+        """A wheel under ``$VIRTUAL_ENV`` that importlib cannot see."""
+        venv = tmp_path / "venv"
+        installed = venv / "lib" / "python3.12" / "site-packages" / "sgl_kernel"
+        installed.mkdir(parents=True)
+        monkeypatch.setenv("VIRTUAL_ENV", str(venv))
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_glob_install_package_roots", lambda: ())
+        assert f"{installed}/" in fp._discover_installed_framework_roots()
+
+    def test_the_install_glob_covers_every_package(self, monkeypatch, tmp_path):
+        """Both ``site-`` and ``dist-`` spellings, under a bare install parent."""
+        for flavour in ("site", "dist"):
+            installed = tmp_path / flavour / "lib" / "python3.12" / f"{flavour}-packages" / "sgl_kernel"
+            installed.mkdir(parents=True)
+            monkeypatch.setattr(fp, "_INSTALL_GLOB_PARENTS", (tmp_path / flavour / "lib",))
+            assert f"{installed}/" in fp._glob_install_package_roots(), flavour
+
+    def test_a_standalone_sgl_kernel_wheel_becomes_a_search_root(self, monkeypatch, tmp_path):
+        """End to end: the only framework on the host is ``sgl_kernel``."""
+        installed = tmp_path / "lib" / "python3.12" / "dist-packages" / "sgl_kernel"
+        installed.mkdir(parents=True)
+        monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        monkeypatch.setattr(fp, "_INSTALL_GLOB_PARENTS", (tmp_path / "lib",))
+        monkeypatch.setattr(fp, "_discover_scriptable_repo_roots", lambda: ())
+        monkeypatch.setattr(fp, "_discover_explicit_framework_root", lambda: ())
+        monkeypatch.setattr(fp, "_DEFAULT_SOURCE_ROOTS", ())
+        monkeypatch.setattr(fp, "resolve_flydsl_source_roots", lambda: ())
+        assert fp.resolve_kernel_search_roots() == (f"{installed}/",)
+
+
 class TestFlydslExtraSourceDirs:
     def test_lists_only_roots_that_exist(self, monkeypatch, tmp_path):
         monkeypatch.setenv("FLYDSL_ROOT", str(tmp_path / "missing"))
@@ -966,3 +1078,34 @@ class TestWarmReplayPatchRootResolution:
         resolution = fp.resolve_warm_replay_kernel_root(patch_paths=[patch])
         assert resolution.root == ""
         assert resolution.reason == "kernel_patch_root_not_in_allowlist"
+
+
+class TestResolveFrameworkTree:
+    def test_prefixed_env_wins(self, monkeypatch, tmp_path):
+        tree = tmp_path / "sglang"
+        tree.mkdir()
+        monkeypatch.setenv("SGLANG_REPO_PATH", str(tree))
+        assert fp.resolve_framework_tree("sglang") == f"{tree}/"
+
+    def test_generic_env_is_used_when_no_prefixed_one(self, monkeypatch, tmp_path):
+        tree = tmp_path / "generic"
+        tree.mkdir()
+        monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+        monkeypatch.delenv("SGLANG_DIR", raising=False)
+        monkeypatch.setenv("FRAMEWORK_REPO_PATH", str(tree))
+        assert fp.resolve_framework_tree("sglang") == f"{tree}/"
+
+    def test_absent_env_falls_to_package_origin(self, monkeypatch, tmp_path):
+        pkg_parent = tmp_path / "site-packages"
+        (pkg_parent / "myfw").mkdir(parents=True)
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: pkg_parent if name == "myfw" else None)
+        assert fp.resolve_framework_tree("myfw") == f"{pkg_parent}/"
+
+    def test_unknown_framework_resolves_to_nothing(self, monkeypatch):
+        monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+        monkeypatch.setattr(fp, "_find_spec_origin", lambda name: None)
+        assert fp.resolve_framework_tree("not-a-framework") == ""
+
+    def test_empty_name_resolves_to_nothing(self):
+        assert fp.resolve_framework_tree("") == ""

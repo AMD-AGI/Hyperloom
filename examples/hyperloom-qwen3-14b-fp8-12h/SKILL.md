@@ -28,8 +28,8 @@ In docker mode:
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
-- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821`
-- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.17-rocm724-mi35x-20260821`
+- `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
+- `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:
@@ -77,8 +77,7 @@ Required optimize CLI flags:
 - `--precision fp8`
 - `--target-gain 50`
 - `--max-hours 12`
-- `--max-minutes-framework-pct 0.01`
-- `--max-minutes-explore-pct 0.42`
+- `--max-minutes-framework-pct 0.43`
 - `--max-minutes-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.

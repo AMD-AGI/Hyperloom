@@ -433,7 +433,7 @@ def _should_use_codex_runner() -> bool:
     An OpenAI-only deployment has no Claude credentials to drive the Claude
     Agent SDK, so the Codex runner is the only one that can execute. The shape
     test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge fellow.
+    disagree with backend selection or the forge kernel_backend.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
@@ -637,7 +637,13 @@ async def run_tracelens_skill(
     kwargs["model"] = resolved_model
     # Roots Bash relative paths at TraceLens; harmless in tests via FakeOptions.
     kwargs["cwd"] = str(tracelens_root)
-    kwargs.update(claude_sdk_env_options(model=resolved_model))
+    kwargs.update(
+        claude_sdk_env_options(
+            model=resolved_model,
+            component="tracelens",
+            operation="analyze_trace",
+        )
+    )
 
     try:
         options = sdk_options_cls(**kwargs)

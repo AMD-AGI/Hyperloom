@@ -56,6 +56,32 @@ def test_logical_operator_priority_and_namespace_normalization():
     assert forge_submit._logical_operator({"name": "direct_triton"}) == "direct_triton"
 
 
+def test_logical_operator_is_stable_across_launch_attribution():
+    """Both shapes of a trace name reduce to one identity.
+
+    A candidate is named after the two rows it occupies, so the same kernel
+    reads ``hipModuleLaunchKernel->_gqa_sparse_fwd_kernel`` in an analysis whose
+    trace paired the launch call with the device row and ``_gqa_sparse_fwd_kernel``
+    in one whose trace did not. One session here produced both, from two profiles
+    of the same configuration. Forge keys its experience store on this name, so
+    letting the launch call through writes two identities for one kernel and the
+    warm-start read of either finds no prior record.
+    """
+    composite = {"name": "hipModuleLaunchKernel->_gqa_sparse_fwd_kernel"}
+    bare = {"name": "_gqa_sparse_fwd_kernel"}
+    assert forge_submit._logical_operator(composite) == forge_submit._logical_operator(bare) == "_gqa_sparse_fwd_kernel"
+    # Graph-launched rows carry a different call and must not fork the identity.
+    assert (
+        forge_submit._logical_operator({"name": "hipGraphLaunch->_gqa_sparse_decode_kernel"})
+        == "_gqa_sparse_decode_kernel"
+    )
+    # A namespaced operation has no launch call to strip and is left alone.
+    assert (
+        forge_submit._logical_operator({"operation": "vllm::unified_attention_with_output"})
+        == "vllm::unified_attention_with_output"
+    )
+
+
 def test_resolve_framework_follows_kernel_sources_across_packages():
     # Cross-package indirection: the traced entry/anchor is a vLLM dispatch, but
     # the real kernel is defined in aiter (kernel_sources). Must resolve 'aiter'
@@ -93,10 +119,10 @@ def test_resolve_framework_uses_aiter_source_not_vllm_serving_wrapper():
     assert forge_submit._resolve_framework(candidate, "/repo/vllm/attention.py") == "aiter"
 
 
-def test_fellow_resolution_uses_kernel_kind_for_ck_and_flydsl():
-    assert forge_submit._resolve_fellow("hip_cpp", "aiter_ck") == "ck-fellow"
-    assert forge_submit._resolve_fellow("python", "flydsl") == "flydsl-fellow"
-    assert forge_submit._resolve_fellow("flydsl", "") == "flydsl-fellow"
+def test_kernel_backend_resolution_uses_kernel_kind_for_ck_and_flydsl():
+    assert forge_submit._resolve_kernel_backend("hip_cpp", "aiter_ck") == "ck"
+    assert forge_submit._resolve_kernel_backend("python", "flydsl") == "flydsl"
+    assert forge_submit._resolve_kernel_backend("flydsl", "") == "flydsl"
 
 
 def test_direct_triton_uses_concrete_symbols_not_logical_operator(tmp_path):

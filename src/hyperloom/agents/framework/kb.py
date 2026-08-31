@@ -612,8 +612,14 @@ def _synthesize_via_llm(
     if not (hasattr(sdk, "query") and hasattr(sdk, "ClaudeAgentOptions")):
         raise RuntimeError("claude_agent_sdk missing required attributes (query / ClaudeAgentOptions)")
 
+    from hyperloom.common.llm_attribution import sdk_env_overlay
+
     prompt = _build_llm_prompt(domain, findings)
-    options = sdk.ClaudeAgentOptions(model=model, system_prompt="")
+    option_kwargs: dict[str, object] = {"model": model, "system_prompt": ""}
+    overlay = sdk_env_overlay(component="framework", operation="synthesize_kb")
+    if overlay:
+        option_kwargs["env"] = overlay
+    options = sdk.ClaudeAgentOptions(**option_kwargs)
     chunks: list[str] = []
     # sdk.query is an async generator; block via asyncio.run().
     import asyncio

@@ -1,10 +1,9 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Cover the retry fix — ``fa phase-discover`` retries before flipping ``framework_agent_phase_done``.
+"""Cover the source arm's enqueue and give-up bookkeeping.
 
-Tests ``_discover_next_framework_batch`` (bumps the failure counter, resets
-on success), ``_enqueue_framework_agent_task`` and
+Tests ``_enqueue_framework_agent_task`` and
 ``_record_framework_agent_phase_done`` (the give-up summary row, whether the
 reason is the retry limit or a clean empty payload) by binding them to a
 minimal Coordinator stub.
@@ -17,7 +16,6 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
-import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
 from hyperloom.orchestrator.framework import client as _fa_client
@@ -81,7 +79,6 @@ class _CoordinatorStub:
     _stamp_framework_progress = Coordinator._stamp_framework_progress
     # Reverse-lookup called on every repo; here it resolves to the session
     # framework, so nothing is tagged (same-framework path).
-    _framework_agent_repo_url_origin_framework = staticmethod(Coordinator._framework_agent_repo_url_origin_framework)
     # Real lane/TTL resolution, so the enqueue tests exercise the production
     # registry lookup instead of a stub that silently yields no lanes.
     _registry_lanes_ttl = DispatcherCollaborator._registry_lanes_ttl
@@ -102,149 +99,6 @@ class _CoordinatorStub:
         return Coordinator._framework_tried_refs(self)  # type: ignore[arg-type]
 
 
-async def _call_discover(stub: _CoordinatorStub) -> bool:
-    return await Coordinator._discover_next_framework_batch(stub)  # type: ignore[arg-type]
-
-
-def test_discover_failure_bumps_counter_without_flipping_phase_done(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A single failure increments the counter, leaves phase_done False, and logs a ``framework_agent_discover_failed`` row."""
-
-    async def _raise(**_: Any) -> dict[str, Any]:
-        raise RuntimeError("simulated timeout")
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _raise)
-    stub = _CoordinatorStub(tmp_path)
-
-    out = asyncio.run(_call_discover(stub))
-
-    assert out is False
-    assert stub.shared_state.framework_agent_discover_failures == 1
-    assert stub.shared_state.framework_agent_phase_done is False
-    failed = _phase_history_event_rows(stub.shared_state.phase_history, "framework_agent_discover_failed")
-    assert len(failed) == 1
-    assert failed[0]["evidence"]["attempt"] == 1
-    assert failed[0]["evidence"]["limit"] == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-    assert failed[0]["ts_unix"] > 0
-
-
-def test_discover_three_consecutive_failures_reach_retry_limit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """After ``DISCOVER_FAILURE_RETRY_LIMIT`` failures the counter reflects the cap; discover never flips phase_done."""
-
-    async def _raise(**_: Any) -> dict[str, Any]:
-        raise RuntimeError("simulated")
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _raise)
-    stub = _CoordinatorStub(tmp_path)
-
-    for _ in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
-        ok = asyncio.run(_call_discover(stub))
-        assert ok is False
-
-    assert stub.shared_state.framework_agent_discover_failures == _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
-    assert stub.shared_state.framework_agent_phase_done is False
-
-
-def test_discover_success_resets_failure_counter(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """A success after N failures resets the counter to 0."""
-
-    call_count = SimpleNamespace(n=0)
-
-    async def _flaky(**_: Any) -> dict[str, Any]:
-        call_count.n += 1
-        if call_count.n <= 2:
-            raise RuntimeError("flaky")
-        return {
-            "batch_id": "b-after-recovery",
-            "candidates": [
-                {"pr_url": "https://example.com/pr/1"},
-            ],
-        }
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _flaky)
-    stub = _CoordinatorStub(tmp_path)
-
-    assert asyncio.run(_call_discover(stub)) is False
-    assert asyncio.run(_call_discover(stub)) is False
-    assert stub.shared_state.framework_agent_discover_failures == 2
-
-    assert asyncio.run(_call_discover(stub)) is True
-    assert stub.shared_state.framework_agent_discover_failures == 0
-    assert len(stub.shared_state.framework_agent_batches) == 1
-
-
-def test_discover_timeout_override_is_passed_through(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    captured: dict[str, Any] = {}
-
-    async def _spy(**kwargs: Any) -> dict[str, Any]:
-        captured.update(kwargs)
-        return {"batch_id": "b", "candidates": []}
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _spy)
-    stub = _CoordinatorStub(tmp_path)
-    stub.framework_agent_discover_timeout_sec = 42.0
-
-    asyncio.run(_call_discover(stub))
-
-    assert captured["timeout_sec"] == 42.0
-
-
-def test_discover_timeout_default_used_when_override_zero(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    captured: dict[str, Any] = {}
-
-    async def _spy(**kwargs: Any) -> dict[str, Any]:
-        captured.update(kwargs)
-        return {"batch_id": "b", "candidates": []}
-
-    monkeypatch.setattr(_fa_client, "phase_discover", _spy)
-    stub = _CoordinatorStub(tmp_path)
-    stub.framework_agent_discover_timeout_sec = 0.0
-
-    asyncio.run(_call_discover(stub))
-
-    assert captured["timeout_sec"] == _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC
-    assert _fa_client.DEFAULT_FA_PHASE_TIMEOUT_SEC == 180.0
-
-
-def test_discover_timeout_is_per_repo_not_divided(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Each repo gets the full timeout: dividing it starved every call once the
-    repo list grew (9 repos -> the 30s floor, below a real ~20s discover)."""
-    seen: list[float] = []
-
-    async def _spy(**kwargs: Any) -> dict[str, Any]:
-        seen.append(kwargs["timeout_sec"])
-        return {"batch_id": "b", "candidates": []}
-
-    repos = [f"https://github.com/o/r{i}.git" for i in range(9)]
-    monkeypatch.setattr(_fa_client, "phase_discover", _spy)
-    stub = _CoordinatorStub(tmp_path)
-    stub._framework_agent_discover_repo_urls = lambda _framework: repos  # type: ignore[method-assign]
-    stub.framework_agent_discover_timeout_sec = 180.0
-
-    asyncio.run(_call_discover(stub))
-
-    assert len(seen) == len(repos)
-    assert seen == [180.0] * len(repos)
-
-
-# Enqueue failure records progress row.
 class _TasksStub:
     """Mimics ``Coordinator.tasks.create_or_return_existing``; raises to simulate an enqueue failure."""
 
@@ -323,13 +177,13 @@ def test_enqueue_sources_lanes_and_lease_ttl_from_the_action_registry(tmp_path: 
     """
     stub = _CoordinatorStub(tmp_path)
     stub.tasks = _TasksStub(fail=False)  # type: ignore[attr-defined]
-    meta = _ACTION_REGISTRY.get("framework_agent")
+    meta = _ACTION_REGISTRY.get("integrate_patch")
     assert meta is not None
 
     asyncio.run(_call_enqueue(stub, {"candidate_id": "pr-ttl", "batch_id": "b1"}))
 
     kwargs = stub.tasks.calls[-1]  # type: ignore[attr-defined]
-    assert kwargs["kind"] == "framework_agent"
+    assert kwargs["kind"] == "integrate_patch"
     assert kwargs["lease_ttl_sec"] == meta.lease_ttl_sec
     assert kwargs["lease_ttl_sec"] > 0
     assert kwargs["requires_lanes"] == list(meta.requires_lanes)
@@ -358,22 +212,3 @@ def test_record_framework_agent_phase_done_appends_history_row(tmp_path: Path):
     assert rows[0]["evidence"]["batches_discovered"] == 2
     assert "ts" in rows[0]
     assert rows[0]["ts_unix"] > 0
-
-
-def test_record_framework_agent_phase_done_records_empty_payload_reason(
-    tmp_path: Path,
-):
-    """The helper records ``discover_empty_payload`` when discover returned a clean empty payload."""
-    stub = _CoordinatorStub(tmp_path)
-
-    Coordinator._record_framework_agent_phase_done(  # type: ignore[arg-type]
-        stub,
-        reason="discover_empty_payload",
-        failure_count=0,
-    )
-
-    rows = _phase_history_event_rows(stub.shared_state.phase_history, "framework_agent_phase_done")
-    assert len(rows) == 1
-    assert rows[0]["reason"] == "discover_empty_payload"
-    assert rows[0]["evidence"]["failure_count"] == 0
-    assert rows[0]["evidence"]["batches_discovered"] == 0

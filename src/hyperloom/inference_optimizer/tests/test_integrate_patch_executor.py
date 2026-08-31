@@ -874,7 +874,6 @@ async def _run_enablement_integrate(
         "specialist_task_id": "t-spec-en",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
     }
     if before_signature is not None:
         params["enablement_before_signature"] = before_signature
@@ -1113,7 +1112,6 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "specialist_task_id": "t-spec-stack",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
         "enablement_base_patches": [str(base_patch)],
     }
     result = await executor(_make_ctx("t-int-stack", params))
@@ -1239,7 +1237,6 @@ async def test_enablement_replays_setup_commands_before_boot(tmp_path: Path, mon
         "specialist_task_id": "t-spec-setup",
         "framework_source_root": str(repo),
         "enablement": True,
-        "enable_stack_rebench": False,
         "enablement_setup_commands": ["pip install -U transformers"],
     }
     result = await executor(_make_ctx("t-int-setup", params))
@@ -1506,7 +1503,6 @@ async def test_executor_rebinds_base_from_live_current_best(tmp_path: Path, monk
         "framework_source_root": str(repo),
         "base_tput": 1083.0,
         "base_extra_args": "",
-        "enable_stack_rebench": False,
     }
     task = Task(
         task_id="t-int-toctou",
@@ -1628,3 +1624,74 @@ async def test_enablement_keep_forwards_captured_effective_config(tmp_path: Path
     )
     assert result["status"] == "kept"
     assert result["enablement_effective_config"] == captured
+
+
+# --------------------------------------------------------------------------- #
+# Structural vetting of an untrusted diff, before it reaches ``git apply``.
+#
+# ``vet_patches`` only runs at authoring time, so an explicit ``params.patches``
+# entry and every fetched ``upstream_pr`` diff reach the executor unvetted. Two
+# gates cover them: patch-root resolution, and ``_stage_apply``'s unified-diff
+# and path checks. The invariant asserted here is the one they jointly hold.
+# --------------------------------------------------------------------------- #
+
+_NOT_A_DIFF = "#!/bin/sh\nrm -rf /\n"
+
+_ESCAPING_PATCH = """\
+diff --git a/../../etc/passwd b/../../etc/passwd
+--- a/../../etc/passwd
++++ b/../../etc/passwd
+@@ -1 +1 @@
+-root:x:0:0
++pwned:x:0:0
+"""
+
+_BARE_ABSOLUTE_PATCH = """\
+--- /etc/passwd
++++ /etc/passwd
+@@ -1 +1 @@
+-root:x:0:0
++pwned:x:0:0
+"""
+
+# Headers resolve to a real file, so patch-root resolution admits it; it carries
+# no hunk, so only the structural gate in _stage_apply can refuse it.
+_RESOLVABLE_BUT_NOT_A_DIFF = "--- a/src.py\n+++ b/src.py\n"
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [_NOT_A_DIFF, _ESCAPING_PATCH, _BARE_ABSOLUTE_PATCH, _RESOLVABLE_BUT_NOT_A_DIFF],
+    ids=["not-a-diff", "dotdot-escape", "bare-absolute-header", "resolvable-but-not-a-diff"],
+)
+@pytest.mark.asyncio
+async def test_executor_refuses_an_unvetted_blob_without_invoking_git(tmp_path: Path, monkeypatch, blob: str):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    _write_specialist_workspace(session_dir, "t-spec-vet", patch_contents=[blob])
+
+    def _explode(*_a, **_k):
+        raise AssertionError("git apply was reached with an unvetted patch")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch._git_apply_collect_feedback",
+        _explode,
+    )
+
+    executor = IntegratePatchExecutor(session_dir=session_dir)
+    result = await executor(
+        _make_ctx(
+            "t-int-vet",
+            {
+                "specialist_task_id": "t-spec-vet",
+                "framework_source_root": str(repo),
+                "apply_only": True,
+            },
+        )
+    )
+
+    assert result["status"] == "apply_failed"
+    assert result["patches_applied"] == []
+    assert (repo / "src.py").read_text().endswith("return 1\n")

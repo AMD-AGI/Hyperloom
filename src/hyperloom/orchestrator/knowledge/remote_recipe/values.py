@@ -16,6 +16,11 @@ from pathlib import Path
 from typing import Any, Collection, Mapping
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_ENABLEMENT,
+    LEVER_SOURCE_PATCH,
+    LEVER_UPSTREAM_PR,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from .models import (
@@ -253,16 +258,39 @@ class _Files:
         self.artifacts = retained
 
 
+#: Lever -> published section. The section names are the phases that used to own
+#: each lever; they are kept because they are on the wire, and they were always
+#: really "configuration" and "source" under a phase's name. Routing on the
+#: lever restores that meaning now that one phase carries both -- otherwise
+#: every entry would land in ``framework`` and ``explore`` would sit empty.
+_SECTION_BY_LEVER = {
+    LEVER_CONFIG: "explore",
+    LEVER_SOURCE_PATCH: "framework",
+    LEVER_UPSTREAM_PR: "framework",
+    LEVER_ENABLEMENT: "framework",
+}
+
+
 def _entry_origin(entry: Mapping[str, Any]) -> str:
     action = str(entry.get("action") or "").strip().lower()
+    lever_section = _SECTION_BY_LEVER.get(patch_lever_kind(entry))
+    if lever_section:
+        return lever_section
+    # Pre-``lever_kind`` rows fall back to the phase that recorded them.
     phase = (
         patch_owner_phase(entry)
         if action.startswith("integrate_patch")
         else str(entry.get("source_phase") or "").strip().upper()
     )
-    if phase == "FRAMEWORK_AGENT" or action == "framework":
+    # Action before phase: both levers run inside FRAMEWORK_AGENT, so the
+    # phase alone would file every config win under ``framework``.
+    if action == "framework":
         return "framework"
-    if phase == "EXPLORE" or action == "explore":
+    if action == "explore":
+        return "explore"
+    if phase == "FRAMEWORK_AGENT":
+        return "framework"
+    if phase == "EXPLORE":
         return "explore"
     if phase in ("KERNEL", "KERNEL_AGENT") or action in (
         "geak_e2e",
@@ -385,9 +413,12 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
     }
 
 
-def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) -> tuple[list[str], list[str]]:
+def _entry_files(
+    entries: list[dict[str, Any]], files: _Files, category: str
+) -> tuple[list[str], list[str], dict[str, str]]:
     patches: list[str] = []
     artifacts: list[str] = []
+    patch_roots: dict[str, str] = {}
     for entry in entries:
         try:
             stack_index = int(entry.get("__stack_index", -1))
@@ -395,6 +426,7 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
             stack_index = -1
         patch_member = 0
         seen_patch_sources: set[str] = set()
+        entry_framework_root = str(entry.get("framework_root") or "").strip()
 
         def add_value(raw: Any, *, kind: str) -> str:
             nonlocal patch_member
@@ -425,6 +457,8 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
             ref = add_value(raw, kind=kind)
             if ref:
                 (patches if kind == "patches" else artifacts).append(ref)
+                if kind == "patches" and entry_framework_root:
+                    patch_roots.setdefault(ref, entry_framework_root)
         for key in _PATH_LIST_KEYS:
             raw_values = entry.get(key) or []
             if isinstance(raw_values, (str, Path)):
@@ -436,7 +470,19 @@ def _entry_files(entries: list[dict[str, Any]], files: _Files, category: str) ->
                 ref = add_value(raw, kind=kind)
                 if ref:
                     (patches if kind == "patches" else artifacts).append(ref)
-    return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts))
+                    if kind == "patches" and entry_framework_root:
+                        patch_roots.setdefault(ref, entry_framework_root)
+    # first-wins, matching the dedupe below: a ref shared by two entries keeps
+    # the root of the one whose position it also keeps.
+    return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts)), patch_roots
+
+
+def _section_value(patches: list[str], artifacts: list[str], patch_roots: dict[str, str]) -> dict[str, Any]:
+    """Assemble one owner section, omitting ``patch_roots`` when nothing recorded one."""
+    value: dict[str, Any] = {"patches": patches, "artifacts": artifacts}
+    if patch_roots:
+        value["patch_roots"] = patch_roots
+    return value
 
 
 def build_explore_value(
@@ -445,11 +491,7 @@ def build_explore_value(
     files: _Files,
 ) -> dict[str, Any]:
     """Build EXPLORE-origin patch and artifact references."""
-    patches, artifacts = _entry_files(entries, files, "explore")
-    return {
-        "patches": patches,
-        "artifacts": artifacts,
-    }
+    return _section_value(*_entry_files(entries, files, "explore"))
 
 
 def build_framework_value(
@@ -458,11 +500,7 @@ def build_framework_value(
     files: _Files,
 ) -> dict[str, Any]:
     """Build FRAMEWORK-origin patch and artifact references."""
-    patches, artifacts = _entry_files(entries, files, "framework")
-    return {
-        "patches": patches,
-        "artifacts": artifacts,
-    }
+    return _section_value(*_entry_files(entries, files, "framework"))
 
 
 def _externalize_record(
@@ -1086,6 +1124,8 @@ def build_remote_knowledge(
         for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
         if isinstance(item, Mapping)
     ]
+    # ``kb_required_owner`` is a recorded phase label; both spellings still map
+    # to their section so a resumed pre-merge session stages correctly.
     owner_names = {
         "EXPLORE": "explore",
         "FRAMEWORK_AGENT": "framework",

@@ -1,0 +1,5 @@
+# sglang versions supported by the M-aware CK block-FP8 GEMM routing patch.
+# One version per line. Blank lines and lines starting with '#' are ignored.
+# A version is listed here only if a verified patch exists under
+# sglang/sglang_<major>_<minor>_<patch>/fp8_blockscale_ck_routing.patch.
+0.5.12

@@ -203,7 +203,7 @@ async def test_ledger_progress_restarts_the_streak(kernel_coordinator):
 async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
     c = kernel_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.kernel_idle_ticks = 9
     st.kernel_progress_fingerprint = "stale"
     st.kernel_idle_since_unix = 1.0

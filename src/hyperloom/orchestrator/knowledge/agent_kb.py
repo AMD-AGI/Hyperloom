@@ -105,6 +105,14 @@ class _ConfigPatchAgentKB:
             return []
         return [str(ref) for ref in patches if isinstance(ref, str) and str(ref).strip()]
 
+    def read_patch_roots(self) -> dict[str, str]:
+        """Return ``{patch_ref: apply_root}``; empty for records predating the field."""
+        prior = self.read()
+        raw = prior.get("patch_roots")
+        if not isinstance(raw, Mapping):
+            return {}
+        return {str(k): str(v) for k, v in raw.items() if str(k).strip() and str(v).strip()}
+
     def stage_patches(
         self,
         patches: Iterable[str | Path],
@@ -224,7 +232,7 @@ class _ConfigPatchAgentKB:
 
 
 class ExploreAgentKB(_ConfigPatchAgentKB):
-    """Read legacy EXPLORE config and stage accepted source overlays."""
+    """Read the configuration section and stage accepted source overlays."""
 
     SECTION = EXPLORE_SECTION
 

@@ -74,11 +74,9 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-# Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``).
-_PATCH_PATH_RE: re.Pattern[str] = re.compile(
-    r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$",
-    re.M,
-)
+#: The one absolute header a legitimate diff carries: the missing side of an
+#: add or delete. Never treated as an escape.
+_DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
 
 
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
@@ -144,12 +142,20 @@ _GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
 )
 
 
-def _safe_patch_path(raw: str) -> str:
+def _normalize_patch_path(raw: str) -> str:
+    """Strip the header decoration ``git apply -p1`` drops, without judging it."""
     value = str(raw or "").strip().split("\t", 1)[0]
     if value in {"", _DEV_NULL}:
         return value
     if value.startswith(("a/", "b/")):
         value = value[2:]
+    return value
+
+
+def _safe_patch_path(raw: str) -> str:
+    value = _normalize_patch_path(raw)
+    if value in {"", _DEV_NULL}:
+        return value
     parsed = PurePosixPath(value)
     if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
         raise ValueError(f"unsafe patch target path: {raw!r}")
@@ -283,6 +289,28 @@ def patch_targets_missing(
     return missing
 
 
+def _collapse_nested_roots(roots: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Keep only the outermost of any nested match, leaving disjoint ones alone.
+
+    An editable install puts a package parent inside its own checkout, so
+    ``/sgl-workspace/sglang`` and ``/sgl-workspace/sglang/python`` both hold a
+    ``python/sglang/...`` target at different strip levels. They are one tree,
+    and the outer root is the one whose strip level matches ``git diff`` output.
+
+    Args:
+        roots: Match candidates from :func:`resolve_patch_apply_root`.
+
+    Returns:
+        Roots with any descendant of another entry removed.
+    """
+    resolved = {root: root.resolve() for root in roots}
+    return tuple(
+        root
+        for root in roots
+        if not any(other != resolved[root] and other in resolved[root].parents for other in resolved.values())
+    )
+
+
 def resolve_patch_apply_root(
     patch_texts: Sequence[str],
     *,
@@ -383,6 +411,8 @@ def resolve_patch_apply_root(
     if not matches:
         return PatchRootResolution(None, "no_matching_root")
     if len(matches) > 1:
+        matches = _collapse_nested_roots(matches)
+    if len(matches) > 1:
         return PatchRootResolution(None, "ambiguous_root", matches)
     return PatchRootResolution(matches[0], matches=matches)
 
@@ -437,8 +467,8 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "surface this combination within its own-domain prompt. A "
             "simple specialist-A + specialist-B concatenation is a grid "
             "combo (explore grid), not a cross-domain change; advise when "
-            "the motivation degenerates so the stack rebench + KEEP "
-            "threshold can adjudicate."
+            "the motivation degenerates so the KEEP threshold can "
+            "adjudicate."
         ),
         failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_motivation_invalid",
@@ -586,6 +616,10 @@ def is_unified_diff(text: str) -> bool:
 def patch_escapes_tree(patch_text: str) -> str | None:
     """Return the first offending path that escapes the tree, else ``None``.
 
+    Reads the same ``---``/``+++`` header pairs the apply path resolves its
+    targets from, so the gate and the applier cannot disagree on which paths a
+    patch touches.
+
     Args:
         patch_text: The unified-diff text to scan.
 
@@ -593,10 +627,13 @@ def patch_escapes_tree(patch_text: str) -> str | None:
         The first absolute or ``..``-containing path, or ``None`` when none
         escape the tree.
     """
-    for hit in _PATCH_PATH_RE.finditer(patch_text or ""):
-        cand = hit.group("path").strip()
-        if cand.startswith("/") or ".." in Path(cand).parts:
-            return cand
+    for old, new in patch_file_targets(patch_text):
+        for raw in (old, new):
+            cand = _normalize_patch_path(raw)
+            if not cand or cand in _DEV_NULL_PATHS:
+                continue
+            if cand.startswith("/") or ".." in PurePosixPath(cand).parts:
+                return cand
     return None
 
 
@@ -606,6 +643,7 @@ GROUND_STALE = "stale"  # valid diff but does not apply to clean base
 GROUND_NOT_DIFF = "not_diff"  # not a unified diff (no hunk header)
 GROUND_PATH_ESCAPE = "path_escape"  # patch path escapes the tree
 GROUND_MISSING_TARGET = "missing_target"  # modify/delete target absent from base
+GROUND_AMBIGUOUS_ROOT = "ambiguous_root"  # patch targets match more than one disjoint tree
 GROUND_UNCHECKED = "unchecked"  # no base available / git unavailable
 
 
@@ -633,6 +671,7 @@ class PatchGroundingResult:
             GROUND_NOT_DIFF,
             GROUND_PATH_ESCAPE,
             GROUND_MISSING_TARGET,
+            GROUND_AMBIGUOUS_ROOT,
         )
 
 
@@ -688,6 +727,8 @@ def ground_patch_text(
         detail = resolution.reason
         if resolution.matches:
             detail += ": " + ", ".join(str(root) for root in resolution.matches)
+        if resolution.reason == "ambiguous_root":
+            return PatchGroundingResult(GROUND_AMBIGUOUS_ROOT, detail)
         return PatchGroundingResult(GROUND_MISSING_TARGET, detail)
     root = resolution.root
     try:
@@ -733,8 +774,18 @@ class PatchSafetyReport:
             out.append(
                 "patch_safety_missing_target:"
                 + ",".join(d.get("detail", d["path"]) for d in missing[:4])
-                + " — author patches against files that exist in the framework "
-                "source tree (inspect it with Glob/Grep first)."
+                + " — the patch names a file that does not exist in any"
+                " allowlisted framework source tree; verify the target path"
+                " with Glob/Grep before authoring the diff."
+            )
+        ambiguous = [d for d in self.dropped if d.get("verdict") == GROUND_AMBIGUOUS_ROOT]
+        if ambiguous:
+            out.append(
+                "patch_safety_ambiguous_root:"
+                + ",".join(d.get("detail", d["path"]) for d in ambiguous[:4])
+                + " — the patch targets match more than one disjoint source"
+                " tree; declare an explicit framework_source_root so the"
+                " correct tree is selected without guessing."
             )
         stale = [p for p, v in self.grounding.items() if v == GROUND_STALE]
         if stale:
@@ -897,8 +948,9 @@ def vet_patches(
             detail = resolution.reason
             if resolution.matches:
                 detail += ": " + ", ".join(str(r) for r in resolution.matches)
-            grounding[path] = GROUND_MISSING_TARGET
-            dropped.append({"path": path, "verdict": GROUND_MISSING_TARGET, "detail": detail})
+            verdict = GROUND_AMBIGUOUS_ROOT if resolution.reason == "ambiguous_root" else GROUND_MISSING_TARGET
+            grounding[path] = verdict
+            dropped.append({"path": path, "verdict": verdict, "detail": detail})
             continue
         res = ground_patch_text(text, base_checkout=None, explicit_root=resolution.root)
         grounding[path] = res.verdict
@@ -917,6 +969,7 @@ __all__ = [
     "CrossDomainRule",
     "FORBIDDEN_PAYLOAD_FIELDS",
     "FORBIDDEN_PROPOSAL_FIELDS",
+    "GROUND_AMBIGUOUS_ROOT",
     "GROUND_APPLIES",
     "GROUND_MISSING_TARGET",
     "GROUND_NOT_DIFF",

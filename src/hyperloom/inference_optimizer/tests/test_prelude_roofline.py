@@ -335,7 +335,7 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert len(coord.sub.tasks_run) == 1
     # The reason carries a profile fingerprint suffix so repeated kernel entries
@@ -365,9 +365,171 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
     monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert fusion_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord: Coordinator, monkeypatch):
+    """The phase dispatches its own kernel_opt on both entry routes.
+
+    The dispatch sat on the GEMM route alone, so skipping GEMM tuning removed
+    the phase's source-level kernel work too -- two unrelated settings, with
+    nothing in the log connecting them. A run then held eight routable
+    candidates, cleared the dispatch floor, and reached SWEEP having optimized
+    nothing, because the only remaining path was an orchestration request that
+    was never made.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+    assert coord._gemm_tuning_required_before_kernel_opt() is False
+
+    dispatched = 0
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    async def _dispatch() -> None:
+        nonlocal dispatched
+        dispatched += 1
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+
+    assert dispatched == 1
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: Coordinator, monkeypatch):
+    """Nothing routable left is the one reason to hand the phase back."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+
+    dispatched = 0
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    async def _dispatch() -> None:
+        nonlocal dispatched
+        dispatched += 1
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+
+    assert dispatched == 0
+
+
+def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
+    """The two writers of ``last_profile_workload`` disagree by construction.
+
+    The roofline path records through ``record_profile_workload(task_params)``
+    and fills ``server_args`` / ``extra_envs``; the kernel-entry path records
+    through ``profile_workload_context()`` and leaves them empty. Comparing the
+    whole dict therefore reported a change on every first KERNEL entry -- a full
+    re-profile plus a second TraceLens pass, with the serving configuration
+    provably unchanged -- and then stopped, because the re-profile it forced had
+    rewritten the record in the other writer's shape.
+    """
+    state = coord.shared_state
+    state.current_best = {
+        "extra_server_args": "--block-size 128 --enable-expert-parallel",
+        "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+    }
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context(
+        {
+            "base_extra_args": "--block-size 128 --enable-expert-parallel",
+            "base_extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
+        }
+    )
+    # The record and a freshly built context differ, exactly as in production.
+    assert state.last_profile_workload != state.profile_workload_context()
+
+    assert coord.phase_kernel._profile_workload_changed() is False
+
+
+def test_a_trace_of_a_different_workload_is_still_stale(coord: Coordinator):
+    """Only the parameterization is forgiven; the workload itself still counts."""
+    state = coord.shared_state
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context()
+    assert coord.phase_kernel._profile_workload_changed() is False
+
+    state.isl = int(state.isl or 0) + 4096
+
+    assert coord.phase_kernel._profile_workload_changed() is True
+
+
+def _recorded_under(state, *, server_args: str, envs: dict) -> None:
+    """Record a profile the way the roofline path does: with the task params."""
+    state.current_best = {"extra_server_args": server_args, "extra_envs": dict(envs)}
+    state.last_profile_status = "succeeded"
+    state.last_profile_workload = state.profile_workload_context(
+        {"base_extra_args": server_args, "base_extra_envs": dict(envs)}
+    )
+
+
+def _reprofiles(coord: Coordinator) -> bool:
+    """Whether the two staleness checks together call for a re-profile."""
+    phase = coord.phase_kernel
+    signature = phase._current_profile_config_signature()
+    return phase._profile_config_changed(signature) or phase._profile_workload_changed()
+
+
+_BASE_ARGS = "--block-size 128 --enable-expert-parallel"
+_BASE_ENVS = {"VLLM_ROCM_USE_AITER": "1"}
+
+
+@pytest.mark.parametrize(
+    ("label", "mutate", "expected"),
+    [
+        ("nothing moved", lambda s: None, False),
+        (
+            "explore added a server arg",
+            lambda s: s.current_best.__setitem__("extra_server_args", _BASE_ARGS + " --max-num-batched-tokens 16384"),
+            True,
+        ),
+        (
+            "explore added an env",
+            lambda s: s.current_best.__setitem__("extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER_MOE": "1"}),
+            True,
+        ),
+        (
+            "an env changed value",
+            lambda s: s.current_best.__setitem__("extra_envs", {**_BASE_ENVS, "VLLM_ROCM_USE_AITER": "0"}),
+            True,
+        ),
+        ("the workload changed", lambda s: setattr(s, "isl", int(s.isl or 0) + 4096), True),
+    ],
+)
+def test_serving_config_changes_still_force_a_reprofile(coord: Coordinator, label, mutate, expected):
+    """Forgiving the parameterization must not forgive a real config change.
+
+    A configuration EXPLORE found and integrated changes which kernels run, so a
+    trace taken before it is genuinely stale. Those changes reach
+    ``_profile_config_changed``, which reads them from ``current_best`` on both
+    sides; only the recording-shape mismatch was taken out of
+    ``_profile_workload_changed``. This pins the boundary between the two.
+    """
+    state = coord.shared_state
+    _recorded_under(state, server_args=_BASE_ARGS, envs=_BASE_ENVS)
+    assert _reprofiles(coord) is False, "the recorded trace starts fresh"
+
+    mutate(state)
+
+    assert _reprofiles(coord) is expected, label
 
 
 @pytest.mark.asyncio

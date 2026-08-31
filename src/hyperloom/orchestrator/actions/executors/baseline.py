@@ -1208,11 +1208,34 @@ def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
 
 
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets."""
+    """Return the framework root whose tree holds the warm-replay patch targets.
+
+    A Recipe records the root each patch was applied into. Records written before
+    that field existed carry none, and only those fall back to probing the
+    patch text against the allowlist.
+    """
     if not params.get("patches"):
         return ""
-    from .integrate_patch import _resolve_framework_root
+    from ...framework.paths import resolve_source_file_allowlist
+    from .integrate_patch import _resolve_framework_root, allowlisted_explicit_root
 
+    recorded = {
+        str(entry.get("framework_root") or "").strip()
+        for entry in params["patches"]
+        if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
+    }
+    if len(recorded) == 1:
+        sole = recorded.pop()
+        allowed = allowlisted_explicit_root(sole, allowlist=resolve_source_file_allowlist())
+        if allowed is not None:
+            return str(allowed)
+        reason = f"recorded apply root {sole!r} is not usable"
+    elif recorded:
+        reason = f"patches record {len(recorded)} apply roots"
+    else:
+        reason = "no recorded apply root"
+
+    log.info("warm replay: %s; resolving from patch targets", reason)
     root = _resolve_framework_root(
         resolve_session_framework_root() or None,
         patch_texts=_patch_texts_from_warm_params(params),
@@ -3392,7 +3415,7 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision, stack_rebench, and their grading anchor) are
+            # explore decision and their grading anchor) are
             # measured with a warm prefix cache, keeping them mutually
             # comparable. Carryover is config-dependent (tracks KV-block
             # capacity) and is not a uniform offset.
@@ -3767,7 +3790,7 @@ class BaselineExecutor:
         """Whether baseline double-run is enabled.
 
         Public CLI/env controls are intentionally unsupported. The session
-        default is on so EXPLORE warm-decision compares hot candidates against a
+        default is on so the warm decision compares hot candidates against a
         hot baseline. Internal callers may pass
         ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
         set the session state directly.

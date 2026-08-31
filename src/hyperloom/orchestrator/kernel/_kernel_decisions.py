@@ -49,6 +49,35 @@ log = logging.getLogger(__name__)
 #: independent reference implementation in the generated driver.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
 
+#: Batch-filter skip reasons that mean no backend ever saw the kernel. Two
+#: readers depend on the same answer -- the dispatcher reports such a skip
+#: instead of falling through to its validation guards, and
+#: :func:`record_kernel_opt` leaves the attempt ledger alone -- so they read one
+#: table.
+#:
+#: ``not_live_in_flight`` is here and its two siblings are not, which is the
+#: whole reason the liveness check reports which of them applies: a kernel held
+#: back because a sibling dispatch is in flight has had no backend look at it,
+#: while ``not_live_rejected`` and ``not_live_attempts_exhausted`` describe a
+#: kernel that spent its attempts. A single ``not_live`` covered all three, so
+#: this exemption could not take the first without also retiring the last two --
+#: which left the in-flight case charging a kernel for a dispatch that never
+#: happened.
+_UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
+    "below_min_gpu_pct",
+    "group_exhausted",
+    "group_in_flight",
+    "group_task_complete",
+    "not_live_in_flight",
+    "opfanout_merged_into",
+)
+
+
+def unattempted_skip_reason(reason: str) -> bool:
+    """Whether ``reason`` means the kernel was never handed to a backend."""
+    return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
+
+
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
 # (set it to an explicit falsey value to opt a single fix out of the umbrella).
@@ -780,7 +809,16 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
                 kernel_id=_kid,
                 dispatched=_dispatched,
                 backends=_backends,
-                skip_reason="" if _dispatched else str(result.get("error_class") or result.get("status") or ""),
+                # ``reason`` first: for an undispatched row it is the only field
+                # that names *which* gate declined -- below the GPU-share floor,
+                # merged into an op-fanout representative, a group already in
+                # flight. ``status`` is "skipped" for all of them, so reading it
+                # first collapses the distinction this lane exists to draw.
+                skip_reason=(
+                    ""
+                    if _dispatched
+                    else str(result.get("reason") or result.get("error_class") or result.get("status") or "")
+                ),
                 orchestration_commit=str(getattr(state, "code_revision", "") or ""),
             )
             instrument.record_kernel_backend_result(sdir, result)
@@ -794,6 +832,16 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     kernel_id = str(result.get("kernel_id") or "")
     if not kernel_id:
         # Metadata-less failure: preserve prior streaming-record KEEP.
+        return
+    # The batch filter dropped this kernel before any backend ran, and it named
+    # the kernel so the report can say which one. Writing a ledger row for it
+    # would spend the one dispatch this kernel gets on a decision nobody made:
+    # the row drops it out of untried_hot_reusable_kernels(), which is what the
+    # KERNEL-entry dispatch and the phase-advance gate both ask, and the summary
+    # reads a row with no decision as IN_FLIGHT and reports it as a failure.
+    if str(result.get("status") or "").lower() == "skipped" and unattempted_skip_reason(
+        str(result.get("reason") or "")
+    ):
         return
     _ensure_kernel_task_state(state)
 
@@ -819,6 +867,11 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
         source_file=source_file,
     )
     task_group_kernel_ids = [str(item) for item in (result.get("task_group_kernel_ids") or []) if str(item)]
+    # Siblings the batch filter merged into this representative. Recorded for the
+    # same reason a task_group's members are: the work queue resolves a member to
+    # whichever ledger row covers it, and one that resolves to none keeps owing an
+    # attempt no dispatch will ever make.
+    opfanout_collapsed_ids = [str(item) for item in (result.get("opfanout_collapsed_ids") or []) if str(item)]
     status = str(result.get("status") or "").lower()
     err_class = str(result.get("error_class") or "")
     # Pure infra failure = backend ladder with no verdict; kept distinct from
@@ -1055,6 +1108,8 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
             )
         )
 
+    if opfanout_collapsed_ids:
+        entry["opfanout_collapsed_ids"] = opfanout_collapsed_ids
     if task_group_id:
         entry["task_group_id"] = task_group_id
         entry["task_group_key"] = task_group_key
@@ -1518,8 +1573,12 @@ def untried_hot_reusable_kernels(
         asked for, so for a kernel that shows up under several ids (k001/k002
         for one CK GEMM) it flip-flops. Matching on it alone makes the entry
         invisible under the *other* id, which is exactly how a rejected kernel
-        gets re-reported as untried forever. Fall back to the group membership
-        the ledger itself records.
+        gets re-reported as untried forever. Fall back to the membership the
+        ledger itself records -- a task_group's members, and the op-fanout
+        siblings the batch filter merged into the row's representative. The
+        latter matters because the merge is reported as an unattempted skip,
+        which writes no row of its own: without it the sibling resolves to no
+        entry at all and stays in this queue for a dispatch that cannot happen.
         """
         for value in attempts.values():
             if not isinstance(value, dict):
@@ -1530,8 +1589,9 @@ def untried_hot_reusable_kernels(
                 str(value.get("task_group_primary_kernel_id") or ""),
             }:
                 return value
-            if member_id in {str(m) for m in (value.get("task_group_kernel_ids") or []) if m}:
-                return value
+            for key in ("task_group_kernel_ids", "opfanout_collapsed_ids"):
+                if member_id in {str(m) for m in (value.get(key) or []) if m}:
+                    return value
         return {}
 
     def _member_is_rejected(member_id: str) -> bool:
@@ -1600,14 +1660,15 @@ def untried_hot_reusable_kernels(
         )
         if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
             continue
+        # Resolve through ``_attempt_for_member`` rather than comparing ids
+        # inline: a row's own id is not the only id it covers. An op-fanout
+        # representative covers the siblings the batch filter merged into it,
+        # and those merges are reported as unattempted skips that write no row
+        # of their own -- so a sibling compared by id alone finds nothing and
+        # keeps owing an attempt no dispatch will make.
         if not group_key and any(
             _matches_current_task(member, group_key, src)
-            and any(
-                isinstance(attempt, dict)
-                and str(attempt.get("current_kernel_id") or attempt.get("kernel_id") or "") == member
-                and int(attempt.get("attempts", 0)) > 0
-                for attempt in attempts.values()
-            )
+            and int((_attempt_for_member(member) or {}).get("attempts", 0)) > 0
             for member in members
         ):
             continue

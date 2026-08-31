@@ -563,7 +563,7 @@ def test_a_rebaselines_hot_pass_needs_only_its_own_wall_clock(tmp_path):
 
     result = _run_double_run_baseline(
         tmp_path,
-        _prelude_shared_state(usable_sec=1200.0, phase="EXPLORE"),
+        _prelude_shared_state(usable_sec=1200.0, phase="FRAMEWORK_AGENT"),
         clock=clock,
         boot_sec=350.0,
         benchmark_sec=550.0,
@@ -584,7 +584,7 @@ def test_a_rebaseline_that_cannot_cover_its_hot_pass_keeps_the_cold_warmup(tmp_p
 
     result = _run_double_run_baseline(
         tmp_path,
-        _prelude_shared_state(usable_sec=400.0, phase="EXPLORE"),
+        _prelude_shared_state(usable_sec=400.0, phase="FRAMEWORK_AGENT"),
         clock=clock,
         boot_sec=350.0,
         benchmark_sec=550.0,
@@ -901,7 +901,7 @@ class TestARoundThatCannotFinishIsNotIgnited:
             cold_round_sec=_COLD_ROUND_SEC,
             cold_post_ready_sec=_COLD_POST_READY_SEC,
             hot_round_sec=_HOT_ROUND_SEC,
-            phase="EXPLORE",
+            phase="FRAMEWORK_AGENT",
         )
 
         assert calls, "the round that validates the stack was refused for lack of a successor"
@@ -920,7 +920,7 @@ class TestARoundThatCannotFinishIsNotIgnited:
             cold_round_sec=_COLD_ROUND_SEC,
             cold_post_ready_sec=_COLD_POST_READY_SEC,
             hot_round_sec=_HOT_ROUND_SEC,
-            phase="EXPLORE",
+            phase="FRAMEWORK_AGENT",
         )
 
         assert calls == [], "GPU time was spent on a round the session cannot finish"

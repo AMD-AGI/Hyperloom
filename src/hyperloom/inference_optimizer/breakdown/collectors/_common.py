@@ -22,13 +22,22 @@ from ...session.paths import is_path_within
 
 
 # Shared helpers
-def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
+def _load_json_safe(
+    path: Path | None,
+    warnings: list[str],
+    *,
+    require_dict: bool = False,
+) -> Any | None:
     """Parse a JSON file, recording any failure instead of raising.
 
     Args:
         path (Path | None): File to read, or ``None``.
         warnings (list[str]): Shared warnings list; a parse/read failure is
             appended here (mutated in place).
+        require_dict (bool): When True, a top-level non-object is treated as
+            a parse failure (recorded in ``warnings``, returns ``None``).
+            Defaults to False so existing callers that accept any JSON value
+            keep their behaviour.
 
     Returns:
         Any | None: The decoded JSON value, or ``None`` if ``path`` is
@@ -38,7 +47,12 @@ def _load_json_safe(path: Path | None, warnings: list[str]) -> Any | None:
         return None
     if not path.exists():
         return None
-    return read_json(path, default=None, on_error=lambda exc: warnings.append(f"failed to parse {path}: {exc!r}"))
+    return read_json(
+        path,
+        default=None,
+        require_dict=require_dict,
+        on_error=lambda exc: warnings.append(f"failed to parse {path}: {exc!r}"),
+    )
 
 
 def _load_jsonl_safe(path: Path | None, warnings: list[str]) -> list[dict[str, Any]]:

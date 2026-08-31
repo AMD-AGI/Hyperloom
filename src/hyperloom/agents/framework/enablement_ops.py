@@ -403,6 +403,32 @@ _LADDER_KIND_TO_RUNG: tuple[str, ...] = (
 )
 
 
+# Hard-won operational heuristics, distilled from repeated enablement rounds.
+# Unlike the patch invariants (hard rules) and ladder rungs (methodology),
+# these are judgment calls the specialist should weigh before reaching for a
+# fix — read before you start.
+ENABLEMENT_HEURISTICS: tuple[str, ...] = (
+    "`--enforce-eager` / `--disable-cuda-graph` (or any equivalent force-eager "
+    "flag) is a DANGEROUS lever. Disabling graph capture papers over many "
+    "unrelated failures, but it also silently changes the runtime path and can "
+    "cause the baseline itself to regress or behave abnormally (different "
+    "latency/throughput profile, masked kernel issues) relative to the graphed "
+    "path. Treat it as a measure of LAST RESORT with a narrow, limited scope — "
+    "reach for it only when the combo genuinely cannot boot AT ALL with graph "
+    "capture enabled — never as a default, a convenience shortcut, or a way to "
+    "quietly make an eval pass.",
+    "SEARCH FOR THE OFFICIAL LAUNCH COMMAND BEFORE AUTHORING FROM SCRATCH. You "
+    "can read the current framework (e.g. sglang / vllm), the model "
+    "architecture, and the GPU type from the task context — use WebSearch (or "
+    "mcp__pr_monitor__*) to find the framework's or model vendor's own "
+    "recommended serve command for that (model, backend, GPU) combination "
+    "(official docs, model card, launch scripts, GitHub examples/issues). Mine "
+    "it for the right flags, env vars, dtype, and parallelism settings instead "
+    "of guessing blind. This is an important step that keeps you from "
+    "reinventing the wheel behind closed doors.",
+)
+
+
 def build_enablement_ladder_book(signature: FailureSignature | None = None) -> str:
     """Render the advisory enablement methodology (the "ladder book").
 
@@ -438,6 +464,10 @@ def build_enablement_ladder_book(signature: FailureSignature | None = None) -> s
     lines.append("TARGETED BUILD (request a compiled / from-source component when a patch cannot deliver it):")
     for g in ENABLEMENT_BUILD_REQUEST_GUIDANCE:
         lines.append(f"  - {g}")
+    lines.append("")
+    lines.append("HEURISTICS (judgment calls worth weighing before you reach for a fix):")
+    for h in ENABLEMENT_HEURISTICS:
+        lines.append(f"  - {h}")
     return "\n".join(lines)
 
 
@@ -568,6 +598,7 @@ def build_mandate(
 
 __all__ = [
     "ENABLEMENT_BUILD_REQUEST_GUIDANCE",
+    "ENABLEMENT_HEURISTICS",
     "ENABLEMENT_INTENT_TERMS",
     "ENABLEMENT_PATCH_INVARIANTS",
     "ENABLEMENT_PROGRESS_GUIDANCE",
