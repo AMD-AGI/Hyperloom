@@ -1467,20 +1467,20 @@ def _apply_warm_patches(
         params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order)
         params["_warm_patch_snapshot_manifest"] = snapshot_manifest
         if before_mutation is not None and not bool(before_mutation(_warm_tree_records(trees, tree_order))):
-                return {
-                    "required": required_timeline,
-                    "status": "failed",
-                    "patches": [],
-                    "applied": [],
-                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                    "failure": "pending_state_persist_failed",
-                    "pre_sha": primary["pre_sha"],
-                    "target_repo": primary["root"],
-                    "snapshot_manifest": snapshot_manifest,
-                    "trees": _warm_tree_records(trees, tree_order),
-                    "rollback": {"ok": True, "errors": []},
-                    "rolled_back": True,
-                }
+            return {
+                "required": required_timeline,
+                "status": "failed",
+                "patches": [],
+                "applied": [],
+                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                "failure": "pending_state_persist_failed",
+                "pre_sha": primary["pre_sha"],
+                "target_repo": primary["root"],
+                "snapshot_manifest": snapshot_manifest,
+                "trees": _warm_tree_records(trees, tree_order),
+                "rollback": {"ok": True, "errors": []},
+                "rolled_back": True,
+            }
     failed_ref = ""
     failure = ""
 

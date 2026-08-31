@@ -76,8 +76,10 @@ def test_no_draft_makes_staging_a_noop(monkeypatch) -> None:
     monkeypatch.delenv("KB_DRAFT_DIR", raising=False)
     monkeypatch.delenv("KB_WARM_START_DIR", raising=False)
 
-    assert PatchKB.open().stage_patches([], stack_index=0) == []
-    assert ConfigKB.open().stage({"extra_server_args": "--x"}) is False
+    staged_refs = PatchKB.open().stage_patches([], stack_index=0)
+    config_staged = ConfigKB.open().stage({"extra_server_args": "--x"})
+    assert staged_refs == []
+    assert config_staged is False
 
 
 # -- config column ----------------------------------------------------------

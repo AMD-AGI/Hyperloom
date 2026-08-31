@@ -1301,9 +1301,7 @@ def test_kernel_plan_blocks_when_a_recorded_root_is_gone(tmp_path):
 def test_kernel_plan_blocks_when_an_item_records_no_root(tmp_path):
     """A record that cannot name its checkout is broken, not something to search for."""
     coord = _make_coord(tmp_path)
-    coord.shared_state.warm_kernel_kb_plan = [
-        {"column": "fusion", "patch_path": str(tmp_path / "fusion.patch")}
-    ]
+    coord.shared_state.warm_kernel_kb_plan = [{"column": "fusion", "patch_path": str(tmp_path / "fusion.patch")}]
 
     outcome = coord.phase_prelude._warm_replay_kernel_root_block_reason(coord.shared_state)
 
@@ -2287,7 +2285,11 @@ def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
         {
             "warm_patch_trees": [
                 {"root": "/sglang", "pre_sha": "abc", "snapshot_manifest": {"repo_path": "/sglang"}},
-                {"root": "/workspace/tuning", "pre_sha": "def", "snapshot_manifest": {"repo_path": "/workspace/tuning"}},
+                {
+                    "root": "/workspace/tuning",
+                    "pre_sha": "def",
+                    "snapshot_manifest": {"repo_path": "/workspace/tuning"},
+                },
             ],
         },
         _StubTask(params={}),

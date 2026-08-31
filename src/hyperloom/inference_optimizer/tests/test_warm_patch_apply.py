@@ -139,10 +139,7 @@ def _git_repo(root, rel_path, body):
 
 def _one_line_diff(rel_path, before, after):
     return (
-        f"diff --git a/{rel_path} b/{rel_path}\n"
-        f"--- a/{rel_path}\n"
-        f"+++ b/{rel_path}\n"
-        f"@@ -1 +1 @@\n-{before}\n+{after}\n"
+        f"diff --git a/{rel_path} b/{rel_path}\n--- a/{rel_path}\n+++ b/{rel_path}\n@@ -1 +1 @@\n-{before}\n+{after}\n"
     )
 
 

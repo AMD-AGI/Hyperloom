@@ -463,9 +463,7 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
     bundle = _build(_state(tmp_path), tmp_path / "files-kernel-roots")
 
     kernel = bundle.knowledge["value"]["kernel"]
-    roots = [
-        item["host_origin"]["apply_root"] for column in ("fusion", "rewrite") for item in kernel[column]["items"]
-    ]
+    roots = [item["host_origin"]["apply_root"] for column in ("fusion", "rewrite") for item in kernel[column]["items"]]
 
     assert roots, "fusion and rewrite each publish an item"
     assert all(root == str(tmp_path) for root in roots)
