@@ -20,6 +20,7 @@ FORGE_E2E_PATHS = (
     ".github/workflows/forge-e2e.yml",
     ".github/scripts/forge-ci-e2e-dispatch.sh",
     ".github/scripts/forge_e2e_gate.py",
+    ".github/scripts/forge_e2e_report.py",
 )
 
 

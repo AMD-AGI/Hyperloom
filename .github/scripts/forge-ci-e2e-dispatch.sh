@@ -26,6 +26,7 @@ fi
 
 API_PREFIX="${CI_E2E_API_PREFIX:-/api/v1}"
 API="${E2E_API_BASE%/}${API_PREFIX}/orchestration/workloads"
+LOG_API="${E2E_API_BASE%/}${API_PREFIX}/workloads"
 
 sanitize_repo_url() {
   # API-visible workload params must never contain the GitHub token.
@@ -92,11 +93,46 @@ gh_report_on() {
   [ -n "${GH_STATUS_TOKEN:-}" ] && [ -n "${GH_STATUS_REPO:-}" ] && [[ "${PR_NUMBER:-}" =~ ^[0-9]+$ ]]
 }
 
+fetch_forge_result() {
+  local payload result attempt
+  # Log ingestion can trail the terminal workload phase briefly. The report is
+  # best-effort and must never turn a successful GPU run red.
+  for attempt in 1 2 3 4 5 6; do
+    payload="$(curl -fsS "${tls[@]}" \
+      "$LOG_API/$UID_/logs?keywords=__FORGE_RESULT__&tail=50&since=2h" \
+      "${auth[@]}" 2>/dev/null || true)"
+    result="$(printf '%s' "$payload" | python3 .github/scripts/forge_e2e_report.py extract 2>/dev/null || true)"
+    if [ -n "$result" ]; then
+      printf '%s' "$result"
+      return 0
+    fi
+    [ "$attempt" -lt 6 ] && sleep 5
+  done
+  return 1
+}
+
 report_upsert() { # result
   gh_report_on || return 0
-  local result="$1" body cid details=""
-  [ -n "${GH_STATUS_DETAILS_URL:-}" ] && details="[Actions run](${GH_STATUS_DETAILS_URL})"
-  body="${REPORT_MARKER}
+  local result="$1" body cid detail_file forge_result_file
+  detail_file="$(mktemp)"
+  forge_result_file="$(mktemp)"
+  printf '%s' "${detail:-}" > "$detail_file"
+  printf '%s' "${forge_result:-}" > "$forge_result_file"
+  if ! body="$(python3 .github/scripts/forge_e2e_report.py render \
+      --result-label "$result" \
+      --detail-file "$detail_file" \
+      --forge-result-file "$forge_result_file" \
+      --max-hours "$MAX_HOURS" \
+      --max-iters "$MAX_ITERS" \
+      --gpus "$GPUS" \
+      --workspace "$WORKSPACE" \
+      --head-ref "$HEAD_REF" \
+      --head-sha "$HEAD_SHA" \
+      --session-id "$UID_" \
+      --details-url "${GH_STATUS_DETAILS_URL:-}" \
+      --error "${err:-}" 2>/dev/null)"; then
+    echo "[forge-ci-e2e] WARN: rich report rendering failed; posting the minimal report" >&2
+    body="${REPORT_MARKER}
 ## Hyperloom Forge E2E — ${result}
 
 | item | value |
@@ -106,9 +142,9 @@ report_upsert() { # result
 | resources | ${GPUS}× GPU |
 | PR branch | \`${HEAD_REF}\` |
 | commit | \`${HEAD_SHA}\` |
-| session_id | \`${UID_}\` |
-
-${details}"
+| session_id | \`${UID_}\` |"
+  fi
+  rm -f "$detail_file" "$forge_result_file"
   cid="$(curl -sS -H "Authorization: Bearer ${GH_STATUS_TOKEN}" -H "Accept: application/vnd.github+json" \
     "${GH_API}/repos/${GH_STATUS_REPO}/issues/${PR_NUMBER}/comments?per_page=100" 2>/dev/null \
     | jq -r --arg m "$REPORT_MARKER" '[.[]|select(.body|contains($m))|.id][0] // empty' 2>/dev/null || true)"
@@ -189,6 +225,7 @@ while [ "$i" -lt "$POLL_MAX" ]; do
     Succeeded)
       summary "✅ **PASS** — forge-loop smoke completed. session_id=\`$UID_\` job=\`$jobref\`"
       post_status "success" "PASS — uid=${UID_}; job=${jobref}; sha=${HEAD_SHA:0:12}"
+      forge_result="$(fetch_forge_result || true)"
       report_upsert "✅ Succeeded"
       exit 0 ;;
     Failed)

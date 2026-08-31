@@ -41,6 +41,7 @@ def test_forge_e2e_contract_changes_trigger() -> None:
         ".github/workflows/forge-e2e.yml",
         ".github/scripts/forge-ci-e2e-dispatch.sh",
         ".github/scripts/forge_e2e_gate.py",
+        ".github/scripts/forge_e2e_report.py",
         "examples/triton-softmax-forge-loop/run_example.sh",
     ):
         assert gate.requires_forge_e2e([path]), path
@@ -80,6 +81,8 @@ def test_workflow_dispatches_the_kernelforge_smoke_contract() -> None:
     assert "CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}" in workflow
     assert "secrets.KERNEL_OPT_WORKSPACE" not in workflow
     assert ".github/scripts/forge-ci-e2e-dispatch.sh" in workflow
+    assert ".github/scripts/forge_e2e_report.py" in dispatcher
+    assert "__FORGE_RESULT__" in dispatcher
 
 
 def test_workflow_gates_all_pr_backed_retries_but_not_manual_runs() -> None:
