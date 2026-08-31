@@ -1056,12 +1056,34 @@ def materialize_config_with_envs(
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         if delay_iters < 0:
             delay_iters = 0
+        # Clamp the delay to when steady state actually arrives. Continuous
+        # batching reaches steady state once the first cohort of concurrent
+        # requests has retired -- one MEAN request lifetime of decode
+        # iterations. The 3x multiplier above is 6x that, and every one of
+        # those iterations must be served without interruption before the
+        # profiler records its first event: at the 1024/1024 defaults it is
+        # 6080 iterations, ~7 minutes of healthy traffic at a 67 ms TPOT. A
+        # worker death or a 500-storm anywhere inside that window yields a
+        # zero-byte trace and no diagnostic, because nothing was ever
+        # recorded. One request lifetime is enough for the steady-state
+        # splitter and cuts the exposure window ~6x.
+        steady_delay = math.ceil(safe_osl * (1.0 + r_val) / 2.0)
+        if delay_iters > steady_delay:
+            log.info(
+                "profile delay_iterations %d exceeds the steady-state arrival "
+                "point of %d iterations; clamping so the capture does not "
+                "depend on %dx the required uninterrupted decode window.",
+                delay_iters,
+                steady_delay,
+                max(1, delay_iters // max(1, steady_delay)),
+            )
+            delay_iters = steady_delay
         # The iteration-based delay assumes the client streams a predictable
         # number of decode steps before steady state. The AgentX client instead
         # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
-        # an iteration delay computed from the placeholder OSL (6080 steps at the
-        # 1024/1024 defaults) is never reached inside that window and the trace
-        # comes back empty. Hand the delay to the client and keep only the
+        # an iteration delay computed from the placeholder OSL (1024 steps at the
+        # 1024/1024 defaults, post-clamp) is never reached inside that window and
+        # the trace comes back empty. Hand the delay to the client and keep only the
         # capture bound, which is what stops the worker accumulating events in
         # host RAM until the OOM killer arrives.
         if agentx_enabled():
