@@ -103,8 +103,7 @@ PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "
 # Derived from the wall so it scales with it; a fixed constant falls below the
 # wall/attempts ratio as soon as either grows.
 PER_ATTEMPT_CAP_SEC = int(
-    os.environ.get("FORGE_PREPARE_ATTEMPT_CAP")
-    or max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
+    os.environ.get("FORGE_PREPARE_ATTEMPT_CAP") or max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
 )
 # Smallest budget worth spending on a RETRY. Measured over 25 recorded attempts:
 # successful ones ran 350-896s, and every retry that started with less than that
@@ -1789,10 +1788,7 @@ async def prepare_task(
         if _driver_digest() != digest_before:
             return True
         driver_posix = driver_path.as_posix()
-        return any(
-            entry.startswith(("tool: Write ", "tool: Edit ")) and driver_posix in entry
-            for entry in progress
-        )
+        return any(entry.startswith(("tool: Write ", "tool: Edit ")) and driver_posix in entry for entry in progress)
 
     def _audit_driver(relative: str) -> None:
         if audit_dir is None or not driver_path.is_file():
@@ -2124,11 +2120,7 @@ async def prepare_task(
                 break
             attempts += 1
             is_last_attempt = attempts >= PREPARE_MAX_ATTEMPTS
-            attempt_timeout = (
-                remaining
-                if is_last_attempt
-                else min(remaining, float(PER_ATTEMPT_CAP_SEC))
-            )
+            attempt_timeout = remaining if is_last_attempt else min(remaining, float(PER_ATTEMPT_CAP_SEC))
             # Each attempt authors against the reference bundle; the preceding
             # attempt's verdict retired it (see _reset_scaffold).
             _open_scaffold()

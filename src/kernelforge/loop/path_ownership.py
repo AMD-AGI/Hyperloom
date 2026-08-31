@@ -97,6 +97,4 @@ def runtime_gitignore_globs() -> tuple[str, ...]:
     """
     directories = sorted(RUNTIME_DIRECTORY_NAMES) + list(RUNTIME_DIRECTORY_GLOBS)
     suffixes = sorted(RUNTIME_FILE_SUFFIXES | COMPILED_FILE_SUFFIXES)
-    return tuple(f"{name}/" for name in directories) + tuple(
-        f"*{suffix}" for suffix in suffixes
-    )
+    return tuple(f"{name}/" for name in directories) + tuple(f"*{suffix}" for suffix in suffixes)
