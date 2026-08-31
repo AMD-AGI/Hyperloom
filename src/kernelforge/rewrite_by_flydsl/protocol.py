@@ -8,8 +8,9 @@ consumer queries before committing to an integration, the rule turning a logical
 operator identity into a legal Python builder symbol, the environment a
 measurement driver is invoked with, and the apply-back manifest and validator.
 
-It imports nothing from the rest of the package, so the contract can be read
-without pulling in agent, GPU, or git machinery.
+It imports only from :mod:`kernelforge.loop.path_ownership`, which itself
+imports nothing but stdlib, so the contract can be read without pulling in
+agent, GPU, or git machinery.
 """
 
 from __future__ import annotations

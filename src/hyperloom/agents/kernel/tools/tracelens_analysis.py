@@ -62,8 +62,10 @@ except ImportError:
 
 try:
     from _task_group_contract import native_operation_key as _native_operation_key
+    from _task_group_contract import _strip_dispatch_decoration as _strip_dispatch_decoration_impl
 except ImportError:
     _native_operation_key = None
+    _strip_dispatch_decoration_impl = None
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
@@ -2377,35 +2379,22 @@ _TYPE_BLOCKLIST = {
 def _normalize_profiler_op_name(name: str) -> str:
     """Strip graph-capture / synthetic wrappers from a TraceLens op symbol.
 
-    Peels off, in order: a leading ``<launcher>->`` capture wrapper, a leading
-    C++ return-type token, a trailing ``(... Op)`` annotation, and a trailing
-    ``.kd`` HSA code-object suffix. Already-clean names pass through unchanged.
+    Delegates to :func:`_task_group_contract._strip_dispatch_decoration` when
+    available. The result is guaranteed non-empty: if stripping empties the
+    string the original (stripped) name is returned.
 
     Args:
         name: The raw TraceLens op symbol to normalize.
 
     Returns:
-        The normalized op symbol with capture wrappers, leading return-type
-        tokens, trailing op annotations and ``.kd`` suffixes removed.
+        The normalized op symbol, never an empty string when ``name`` is not.
     """
-    s = (name or "").strip()
-    if not s:
+    original = (name or "").strip()
+    if not original:
         return ""
-    # Leading graph-launch capture wrapper: ``hipGraphLaunch->`` / ``cudaGraphLaunch->``.
-    s = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", s).strip()
-    # Leading C++ return-type token before the symbol (only relevant when there
-    # is no ``::`` namespace to slice on later).
-    s = re.sub(
-        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
-        "",
-        s,
-    ).strip()
-    # Trailing display annotation such as ``(Synthetic Op)``.
-    s = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", s).strip()
-    # Trailing ``.kd`` HSA code-object suffix.
-    if s.endswith(".kd"):
-        s = s[:-3].strip()
-    return s or (name or "").strip()
+    if _strip_dispatch_decoration_impl is not None:
+        return _strip_dispatch_decoration_impl(original) or original
+    return original
 
 
 def _candidate_keywords(name: str) -> list[str]:

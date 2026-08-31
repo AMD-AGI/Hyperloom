@@ -894,15 +894,23 @@ def _prepare_worktree_nogit(
     # narrow set; only the index may drop what a package is imported through.
     from kernelforge.loop.path_ownership import (  # noqa: PLC0415
         COPY_FILTER_DIRECTORY_NAMES,
+        RUNTIME_DIRECTORY_GLOBS,
         RUNTIME_DIRECTORY_NAMES,
         RUNTIME_FILE_SUFFIXES,
     )
+    import fnmatch as _fnmatch  # noqa: PLC0415
 
     skipped_dirs = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
     runtime_suffixes = tuple(RUNTIME_FILE_SUFFIXES)
+    dir_globs = RUNTIME_DIRECTORY_GLOBS
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
-        return [n for n in names if n in skipped_dirs or n.endswith((".egg-info", *runtime_suffixes))]
+        return [
+            n for n in names
+            if n in skipped_dirs
+            or n.endswith(runtime_suffixes)
+            or any(_fnmatch.fnmatchcase(n, g) for g in dir_globs)
+        ]
 
     try:
         if copy_subtrees is None:

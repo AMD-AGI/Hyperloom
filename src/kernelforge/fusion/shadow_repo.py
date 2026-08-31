@@ -100,9 +100,9 @@ class ShadowRepo:
     def reset_to_base(self) -> bool:
         """Put the framework tree back as the campaign found it.
 
-        ``clean`` takes no pathspec because the exclude is a whitelist: it will
-        not touch an ignored path, so the neighbouring wheels are out of reach
-        while a module the author added beside the source is not.
+        ``clean`` takes no pathspec because the exclude file lists only cache
+        directories safe to leave behind; artefacts that affect measurement
+        (compiled extensions, build output) are tracked and restored by reset.
         """
         for args in (("reset", "--hard", "-q", self.base_commit), ("clean", "-fdq")):
             result = _git(self.root, *args, env=self.env)

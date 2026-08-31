@@ -1777,23 +1777,22 @@ async def prepare_task(
             return ""
 
     def _detect_driver_edited(digest_before: str, progress: list[str]) -> bool:
-        """True when the agent wrote the driver during this attempt.
+        """True when the agent changed the driver's content during this attempt.
 
-        The digest answers it unless a rollback already restored the file, so
-        fall back to the progress log, which records each tool call as it
-        happens and therefore survives the rollback.
+        The driver is not in the protected set, so the backend never rolls it
+        back on session teardown. The digest is therefore always authoritative:
+        a digest change means the agent wrote new content; no change means it
+        did not, regardless of what tool calls appeared in the progress log.
 
         Args:
             digest_before: Driver digest captured before the agent ran.
-            progress: The session's progress log.
+            progress: Unused. Retained so callers need not change their
+                signature when a rollback path is added later.
 
         Returns:
-            True when either the digest moved or the log names the driver.
+            ``True`` when the driver's sha256 differs from ``digest_before``.
         """
-        if _driver_digest() != digest_before:
-            return True
-        driver_posix = driver_path.as_posix()
-        return any(entry.startswith(("tool: Write ", "tool: Edit ")) and driver_posix in entry for entry in progress)
+        return _driver_digest() != digest_before
 
     def _audit_driver(relative: str) -> None:
         if audit_dir is None or not driver_path.is_file():
