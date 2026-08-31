@@ -18,7 +18,7 @@ import hashlib
 import keyword
 import re
 from kernelforge.loop.path_ownership import (
-    PRODUCER_OWNED_PATH_PATTERNS,
+    PRODUCER_OWNED_PATH_PATTERNS,  # noqa: F401 - re-exported for backward compat
     is_producer_owned_path,
 )
 
