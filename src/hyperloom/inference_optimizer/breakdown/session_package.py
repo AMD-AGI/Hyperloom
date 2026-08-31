@@ -77,6 +77,7 @@ PACKAGE_GLOBS: tuple[str, ...] = (
     "reports/kernel_roofline.json",
     "reports/conc_sweep_summary.json",
     "reports/sbd_v6/*.json",
+    "reports/sbd_v6/timeline/*.json",
     "reports/trace/*.jsonl",
     # ── target analysis ───────────────────────────────────────────────
     "target_analysis/target_baseline.json",

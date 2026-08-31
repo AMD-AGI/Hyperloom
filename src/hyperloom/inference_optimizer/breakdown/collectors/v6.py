@@ -2098,12 +2098,19 @@ def collect_v6_outcome(
 ) -> dict[str, Any]:
     """Project V5 result sections into the V6 ``outcome`` shape."""
     stop_reason = str(session.get("stop_reason") or "").strip()
+    outcome_status = _outcome_status(stop_reason)
+    for event in reversed(timeline):
+        if not isinstance(event, dict) or str(event.get("type") or "") not in {"install", "model_gate"}:
+            continue
+        if str(event.get("status") or "").strip().lower() == "failed":
+            outcome_status = "failed"
+        break
     validation = optimizations.get("validation")
     if not isinstance(validation, dict):
         validation = {}
     return {
         "stop_reason": stop_reason,
-        "status": _outcome_status(stop_reason),
+        "status": outcome_status,
         "stage_reached": _stage_reached(state, stop_reason, timeline),
         "baseline": {
             "throughput_tok_s_per_gpu": baseline.get("throughput_tok_s_per_gpu"),

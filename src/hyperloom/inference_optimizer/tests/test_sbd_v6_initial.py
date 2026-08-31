@@ -266,6 +266,7 @@ def test_preflight_hard_failure_creates_session_and_final_sbd(tmp_path, monkeypa
     assert (session_dir / "manifest.json").is_file()
     breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
     assert [(event["type"], event["status"]) for event in breakdown["timeline"]] == [("install", "failed")]
+    assert breakdown["outcome"]["status"] == "failed"
 
 
 def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatch):
@@ -305,6 +306,8 @@ def test_unwrapped_preflight_failure_is_persisted_as_failed(tmp_path, monkeypatc
     assert failure["step_id"] == "unhandled_preflight"
     assert failure["error_class"] == "RuntimeError"
     assert failure["message"] == "runtime path resolution failed"
+    breakdown = json.loads((session_dir / "session_breakdown.json").read_text(encoding="utf-8"))
+    assert breakdown["outcome"]["status"] == "failed"
 
 
 def test_busy_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
@@ -314,6 +317,9 @@ def test_busy_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypat
 
     workspace = tmp_path / "sessions"
     resume_dir = workspace / "Qwen-Test" / "active-session"
+    model = tmp_path / "Qwen-Test"
+    _seed_state(resume_dir, monkeypatch, model)
+    _write_json(resume_dir / "manifest.json", {"schema_version": 4, "session_id": "sbd-v6-test"})
     original_install = {
         "type": "install",
         "kind": "install",
@@ -366,6 +372,117 @@ def test_busy_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypat
     assert install is not None
     assert install["status"] == "failed"
     assert install["ext"]["run_kind"] == "resume"
+
+
+def test_resume_preflight_failure_overrides_completed_outcome(tmp_path, monkeypatch):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "Qwen-Test" / "completed-session"
+    model = tmp_path / "Qwen-Test"
+    _seed_state(resume_dir, monkeypatch, model)
+    state = SharedState.load_or_init(resume_dir)
+    state.phase = "CLOSE"
+    state.stop_reason = "target_reached"
+    state.save(resume_dir)
+    _write_json(resume_dir / "manifest.json", {"schema_version": 4, "session_id": "sbd-v6-test"})
+    write_timeline_event(
+        resume_dir,
+        {
+            "type": "install",
+            "kind": "install",
+            "status": "succeeded",
+            "start_time": "2026-08-27T01:00:00+00:00",
+            "end_time": "2026-08-27T01:01:00+00:00",
+            "ext": {"run_kind": "fresh", "steps": []},
+        },
+    )
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    def fail_preflight(args):
+        preflight._begin_install_event(args)
+        raise RuntimeError("resume preflight failed")
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
+
+    with pytest.raises(RuntimeError, match="resume preflight failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    breakdown = json.loads((resume_dir / "session_breakdown.json").read_text(encoding="utf-8"))
+    assert breakdown["outcome"]["stop_reason"] == "target_reached"
+    assert breakdown["outcome"]["status"] == "failed"
+    assert breakdown["timeline"][-1]["type"] == "install"
+    assert breakdown["timeline"][-1]["status"] == "failed"
+
+
+@pytest.mark.parametrize("invalid_artifact", ["missing", "manifest", "state"])
+def test_invalid_resume_preflight_failure_does_not_mutate_requested_directory(
+    tmp_path,
+    monkeypatch,
+    invalid_artifact,
+):
+    import hyperloom.inference_optimizer.cli as optimizer_cli
+    from hyperloom.inference_optimizer.cli import preflight
+    from hyperloom.inference_optimizer.session.paths import ENV_CURRENT_SESSION_DIR
+
+    workspace = tmp_path / "sessions"
+    resume_dir = workspace / "not-a-session"
+    _write_json(resume_dir / "session_breakdown.json", {"sentinel": "unchanged"})
+    if invalid_artifact != "missing":
+        manifest = resume_dir / "manifest.json"
+        state = resume_dir / "state.json"
+        manifest.write_text(
+            "{invalid" if invalid_artifact == "manifest" else json.dumps({"session_id": "not-a-session"}),
+            encoding="utf-8",
+        )
+        state.write_text(
+            "{invalid" if invalid_artifact == "state" else json.dumps({"session_id": "not-a-session"}),
+            encoding="utf-8",
+        )
+    before = {
+        path.relative_to(resume_dir).as_posix(): path.read_bytes() for path in resume_dir.rglob("*") if path.is_file()
+    }
+    monkeypatch.setenv("USER_DATA_PATH", str(workspace))
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    monkeypatch.delenv(ENV_CURRENT_SESSION_DIR, raising=False)
+    monkeypatch.setattr(
+        optimizer_cli,
+        "clean_stale_aiter_locks",
+        lambda: {"dir": "", "deleted": 0, "skipped_fresh": 0, "errors": 0},
+    )
+
+    def fail_preflight(args):
+        preflight._begin_install_event(args)
+        raise RuntimeError("invalid resume preflight failed")
+
+    monkeypatch.setattr(optimizer_cli, "_preflight", fail_preflight)
+    args = optimizer_cli._build_parser().parse_args(["optimize", "--resume-from", str(resume_dir)])
+
+    with pytest.raises(RuntimeError, match="invalid resume preflight failed"):
+        asyncio.run(optimizer_cli._run_optimize(args))
+
+    after = {
+        path.relative_to(resume_dir).as_posix(): path.read_bytes() for path in resume_dir.rglob("*") if path.is_file()
+    }
+    assert after == before
+    assert not (resume_dir / "runtime").exists()
+    assert not (resume_dir / "reports").exists()
+    failed_session = Path(os.environ[ENV_CURRENT_SESSION_DIR])
+    assert failed_session != resume_dir
+    assert "failed-attempt" in failed_session.parent.name
+    install = read_timeline_event(failed_session, "install")
+    assert install is not None
+    assert install["status"] == "failed"
 
 
 def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch):

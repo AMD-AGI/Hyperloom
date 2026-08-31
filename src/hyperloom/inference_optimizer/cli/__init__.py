@@ -1837,6 +1837,22 @@ def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
     return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
 
 
+def _is_valid_resume_session_dir(candidate: Path) -> bool:
+    """Return whether ``candidate`` is an initialized, readable session."""
+    if not (candidate / "manifest.json").is_file() or not (candidate / "state.json").is_file():
+        return False
+    try:
+        manifest = load_manifest(candidate)
+        state = SharedState.load_or_init(candidate)
+    except Exception:  # noqa: BLE001 — invalid resume input must fall back without masking preflight
+        return False
+    if not isinstance(manifest, Mapping):
+        return False
+    manifest_session_id = str(manifest.get("session_id") or "").strip()
+    state_session_id = str(state.session_id or "").strip()
+    return bool(manifest_session_id and state_session_id and manifest_session_id == state_session_id)
+
+
 def _preflight_failure_session_dir(args: argparse.Namespace) -> Path:
     """Return a safe session directory for a pre-session install failure."""
     resume_from = str(getattr(args, "resume_from", "") or "").strip()
@@ -1847,10 +1863,10 @@ def _preflight_failure_session_dir(args: argparse.Namespace) -> Path:
         except (OSError, ValueError):
             pass
         else:
-            if candidate.is_dir():
+            if candidate.is_dir() and _is_valid_resume_session_dir(candidate):
                 return candidate
 
-    return _new_preflight_failure_session_dir(args)
+    return _new_preflight_failure_session_dir(args, failed_attempt=bool(resume_from))
 
 
 def _new_preflight_failure_session_dir(
