@@ -11,9 +11,15 @@ Regression suite for the ATOM GLM-5.2-MXFP4 incident: a valid
 The damage was a POSIX ``shlex.split`` + space-join inside
 :func:`remove_server_args`, reached unconditionally because
 :func:`compose_server_args` and the ``current_best`` lift both always call
-:func:`strip_benchmark_harness_flags`. These tests assert on ``json.loads``
-rather than on exact strings so any join point that stops re-quoting fails here
-regardless of which normalization shape it produces.
+:func:`strip_benchmark_harness_flags`.
+
+Two assertion styles, deliberately split by what each test is about. Tests that
+a JSON VALUE survives a hop go through ``json.loads``, so any join point that
+stops re-quoting fails here regardless of which normalization shape it produces.
+Tests that a REMOVAL did the right thing compare the whole string for equality:
+asserting the removed flag is absent also passes on ``""``, and on output with
+the flag's leftover operands stranded as bare argv words — two silent-deletion
+bugs shipped past exactly that assertion shape before it was tightened here.
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import json
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import _grid_server_args
 from hyperloom.orchestrator.actions.executors._grid_server_args import (
     compact_json_server_args,
     compose_server_args,
@@ -29,7 +36,22 @@ from hyperloom.orchestrator.actions.executors._grid_server_args import (
     merge_server_args,
     remove_server_args,
     strip_benchmark_harness_flags,
+    validate_server_args_shell_safe,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_undeliverable_warning_cache():
+    """The undeliverable-token warning is reported once per process.
+
+    That dedupe is what stops it printing on every compose of every variant, and
+    it makes the warning order-dependent across tests in one process: whichever
+    test first composes a ``--tool-call-parser`` payload consumes the WARNING and
+    the next one sees only a DEBUG line.
+    """
+    _grid_server_args._UNSAFE_TRANSPORT_WARNED.clear()
+    yield
+    _grid_server_args._UNSAFE_TRANSPORT_WARNED.clear()
 
 
 # The exact value from the incident. The wildcard barewords (``*.mlp.gate``,
@@ -40,6 +62,11 @@ _ATOM_QUANT_JSON = (
 )
 
 _ATOM_ARGS = f"--online_quant_config '{_ATOM_QUANT_JSON}'"
+
+# The one shape the unquoted EXTRA_*_ARGS transport can carry, so the exact form
+# every hop below is expected to hand on. Derived rather than transcribed: a
+# hand-copied compaction would drift the moment the serializer's separators do.
+_ATOM_COMPACT_ARGS = f"--online_quant_config {json.dumps(json.loads(_ATOM_QUANT_JSON), separators=(',', ':'))}"
 
 _VLLM_ARGS = '--compilation-config \'{"cudagraph_mode": "FULL"}\''
 
@@ -143,29 +170,33 @@ class TestAtomValueContent:
 
 
 class TestRemovalStillWorks:
-    """Preserving quotes must not cost the removal semantics."""
+    """Preserving quotes must not cost the removal semantics.
+
+    Every assertion here is a whole-string equality. ``"--flag" not in out`` was
+    the shape these tests used, and it is satisfied by ``out == ""`` and by an
+    output whose surviving flags lost their operands, so it hid both silent
+    deletions this suite exists to catch.
+    """
 
     def test_removes_json_valued_flag_by_name(self):
         out = remove_server_args(
             compact_json_server_args(f"--max-num-seqs 64 {_ATOM_ARGS}", "atom"),
             ["--online_quant_config"],
         )
-        assert "--online_quant_config" not in out
-        assert "--max-num-seqs 64" in out
+        assert out == "--max-num-seqs 64"
 
     def test_removes_json_valued_flag_by_exact_pair(self):
         compacted = compact_json_server_args(f"--max-num-seqs 64 {_ATOM_ARGS}", "atom")
         spec = compacted.split("--online_quant_config", 1)[1].strip()
         out = remove_server_args(compacted, [f"--online_quant_config {spec}"])
-        assert "--online_quant_config" not in out
-        assert "--max-num-seqs 64" in out
+        assert out == "--max-num-seqs 64"
 
     def test_removes_plain_flag_next_to_a_json_neighbour(self):
         out = remove_server_args(
             compact_json_server_args(f"--max-num-seqs 64 {_ATOM_ARGS}", "atom"),
             ["--max-num-seqs"],
         )
-        assert "--max-num-seqs" not in out
+        assert out == _ATOM_COMPACT_ARGS
         _json_value_of(out, "--online_quant_config")
 
     def test_an_undeliverable_token_does_not_cancel_the_removal(self, caplog):
@@ -179,9 +210,8 @@ class TestRemovalStillWorks:
         args = "--tool-call-parser 'my parser' --max-num-seqs 64"
         with caplog.at_level("WARNING"):
             out = remove_server_args(args, ["--max-num-seqs"])
-        assert "--max-num-seqs" not in out
         # The token it cannot carry is passed through byte for byte.
-        assert "--tool-call-parser 'my parser'" in out
+        assert out == "--tool-call-parser 'my parser'"
         assert "cannot represent" in caplog.text
 
     def test_a_quoted_value_without_whitespace_also_still_removes(self):
@@ -191,8 +221,7 @@ class TestRemovalStillWorks:
         every removal on the string it appeared in.
         """
         out = remove_server_args("--tool-call-parser 'hermes' --max-num-seqs 64", ["--max-num-seqs"])
-        assert "--max-num-seqs" not in out
-        assert "--tool-call-parser 'hermes'" in out
+        assert out == "--tool-call-parser 'hermes'"
 
     def test_harness_flag_is_stripped_even_beside_a_quoted_operand(self):
         """``strip_benchmark_harness_flags`` rides on the same call.
@@ -202,8 +231,7 @@ class TestRemovalStillWorks:
         configuration nobody can serve.
         """
         out = strip_benchmark_harness_flags("--tool-call-parser 'hermes' --no-enable-prefix-caching --max-num-seqs 64")
-        assert "--no-enable-prefix-caching" not in out
-        assert "--max-num-seqs 64" in out
+        assert out == "--tool-call-parser 'hermes' --max-num-seqs 64"
 
     def test_removing_a_flag_consumes_its_whole_whitespace_bearing_value(self):
         """Removing the flag must not leave fragments of its value behind.
@@ -221,7 +249,50 @@ class TestRemovalStillWorks:
     def test_unbalanced_quotes_still_get_the_removal_applied(self):
         """``shlex`` cannot tokenize this at all; the removal is still attempted."""
         out = remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
-        assert "--max-num-seqs" not in out
+        assert out == "--foo 'unclosed"
+
+
+class TestUndeliverableTokenReport:
+    """What the warning says, and how often it says it."""
+
+    def test_it_names_the_option_and_withholds_the_value(self, caplog):
+        """A value can be a credential; so can a removal spec.
+
+        The docstring already refused to echo the args string for that reason,
+        while the format string interpolated the removal specs — authored through
+        the same LLM / operator path and arriving by the same call.
+        """
+        with caplog.at_level("WARNING"):
+            remove_server_args(
+                "--api-key 'sk-secret value' --max-num-seqs 64",
+                ["--max-num-seqs 64"],
+            )
+        assert "--api-key" in caplog.text
+        assert "sk-secret value" not in caplog.text
+        assert "--max-num-seqs 64" not in caplog.text
+
+    def test_it_reports_once_per_option_set_not_once_per_compose(self, caplog):
+        """``compose_server_args`` reaches this sink for every variant of every round.
+
+        An unconditional warning here printed the same multi-line block hundreds
+        of times in one session, for an args string that was merely carrying a
+        legitimate quoted operand.
+        """
+        args = "--tool-call-parser 'my parser' --max-num-seqs 64"
+        with caplog.at_level("WARNING"):
+            for _ in range(20):
+                compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
+        assert caplog.text.count("cannot represent") == 1
+
+    def test_an_untokenizable_input_still_names_something(self, caplog):
+        """The ``<unparseable>`` sentinel owns no option, and must not report none.
+
+        It is reported in place of the string itself, so it is not one of the
+        tokens the owner walk can attribute.
+        """
+        with caplog.at_level("WARNING"):
+            remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
+        assert "<unparseable>" in caplog.text
 
 
 class TestValueSpanStopsAtShortOptions:
@@ -253,19 +324,49 @@ class TestValueSpanStopsAtShortOptions:
 
 
 class TestExactPairRemoval:
-    def test_a_pair_spec_matches_a_flag_with_trailing_positionals(self):
+    def test_a_pair_spec_matches_a_flag_with_trailing_operands(self):
         """``--foo bar`` names one operand, not "everything after --foo".
 
         Comparing the spec against the whole span made the spec a no-op as soon
-        as another positional word followed.
+        as another operand followed. Matching only the first operand and deleting
+        two tokens traded that for a worse outcome — see the class below.
         """
-        assert remove_server_args("--foo bar baz", ["--foo bar"]) == "baz"
+        assert remove_server_args("--foo bar baz", ["--foo bar"]) == ""
 
     def test_a_pair_spec_matches_mid_string(self):
-        assert remove_server_args("--a 1 --foo bar baz --b 2", ["--foo bar"]) == "--a 1 baz --b 2"
+        assert remove_server_args("--a 1 --foo bar baz --b 2", ["--foo bar"]) == "--a 1 --b 2"
 
     def test_a_pair_spec_leaves_a_different_value_alone(self):
         assert remove_server_args("--foo qux --b 2", ["--foo bar"]) == "--foo qux --b 2"
+
+    def test_a_pair_spec_takes_the_whole_multi_value_span(self):
+        """A flag's operand list goes as a unit, or the leftovers become argv words.
+
+        ``--cuda-graph-bs 1 2 4`` with a ``--cuda-graph-bs 1`` spec used to come
+        back as ``2 4 --tp 8``: ``validate_server_args_shell_safe`` then rejected
+        the launch outright ("must be argv-like flags"), and the paths that skip
+        that validator handed ``2`` and ``4`` to the server as positionals.
+        """
+        out = remove_server_args("--cuda-graph-bs 1 2 4 --tp 8", ["--cuda-graph-bs 1"])
+        assert out == "--tp 8"
+
+    @pytest.mark.parametrize(
+        ("args", "removes"),
+        [
+            ("--cuda-graph-bs 1 2 4 --tp 8", ["--cuda-graph-bs 1"]),
+            ("--cuda-graph-bs 1 2 4 --tp 8", ["--cuda-graph-bs"]),
+            ("--foo bar baz --tp 8", ["--foo bar"]),
+            ('--a {"k":"v with space"} --tp 8', ["--a"]),
+            ("--a 1 --foo bar baz --b 2", ["--foo bar"]),
+        ],
+    )
+    def test_no_removal_leaves_a_bare_positional_behind(self, args, removes):
+        """The sink-side validator is the property, asserted directly.
+
+        Every removal shape has to produce something still launchable, because
+        this is the string that reaches ``EXTRA_*_ARGS``.
+        """
+        validate_server_args_shell_safe(remove_server_args(args, removes))
 
     def test_json_neighbour_survives_an_untokenizable_sibling(self):
         """One undeliverable sibling must not corrupt a JSON value beside it.

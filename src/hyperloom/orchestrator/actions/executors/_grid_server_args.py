@@ -103,13 +103,23 @@ def merge_server_args(*parts: str | None) -> str:
 def _tokenize_for_removal(text: str) -> tuple[list[str], list[str]]:
     """Tokenize for removal matching, keeping every quote byte.
 
-    ``shlex`` in non-POSIX mode preserves quote bytes, so ``" ".join`` of the
-    result reproduces ``text`` byte for byte — including the compacted JSON
-    whose inner double quotes a POSIX split drops and
-    :func:`_repair_unquoted_json` cannot re-quote once any bareword falls
-    outside :data:`_JSON_BAREWORD` (atom's ``*expert*`` wildcards). Removal can
-    therefore always proceed; refusing it wholesale is what let a
-    benchmark-harness flag reach a served config.
+    ``shlex`` in non-POSIX mode preserves quote bytes, so each token comes back
+    carrying the quoting its author wrote — including the compacted JSON whose
+    inner double quotes a POSIX split drops and :func:`_repair_unquoted_json`
+    cannot re-quote once any bareword falls outside :data:`_JSON_BAREWORD`
+    (atom's ``*expert*`` wildcards). Per-token fidelity is what makes removal
+    safe to attempt: whatever is retained is handed back with its own bytes, so
+    dropping one flag never rewrites another's value. Refusing the removal
+    wholesale instead is what let a benchmark-harness flag reach a served
+    config.
+
+    This is NOT a byte-for-byte round trip of ``text``, and no caller may treat
+    it as one. Three things change: :func:`_reserialize_json_blobs` runs first
+    and rewrites every parseable JSON blob to its compact form, ``" ".join`` of
+    the result normalizes the separators between tokens (``--a  b`` comes back
+    as ``--a b``), and the ``ValueError`` fallback below is a plain whitespace
+    split that keeps no quoting at all. The removal argument rests on the
+    per-token property above, not on reproducing the input.
 
     Returns:
         tuple[list[str], list[str]]: ``(tokens, unsafe)`` — the tokens, and the
@@ -168,14 +178,83 @@ def _value_span_end(tokens: list[str], flag_index: int) -> int:
     return end
 
 
+# Option sets already reported as undeliverable, so the warning below fires once
+# per distinct set per process. ``remove_server_args`` is reached by every
+# compose of every variant of every cycle, so a single legitimate quoted operand
+# (``--tool-call-parser 'my parser'``) used to print a multi-line WARNING
+# hundreds of times across one session.
+_UNSAFE_TRANSPORT_WARNED: set[str] = set()
+
+# Bounds the cache above. A session composes a bounded number of distinct arg
+# strings, but nothing enforces that, so the cache resets rather than growing.
+_UNSAFE_TRANSPORT_WARNED_CAP = 256
+
+
+def _unsafe_token_owners(tokens: list[str], unsafe: list[str]) -> list[str]:
+    """Option names the undeliverable tokens belong to.
+
+    Reported instead of the tokens themselves. An operand can carry a
+    credential — the reason :func:`remove_server_args` does not echo the args
+    string — and so can a removal spec, which is written by the same LLM /
+    operator path and reaches this module the same way. An option name is not a
+    secret and is the part an operator needs in order to find the value.
+    """
+    unsafe_set = set(unsafe)
+    owners: list[str] = []
+    matched: set[str] = set()
+    current = "<positional>"
+    for token in tokens:
+        if _is_flag_token(token):
+            current = token.partition("=")[0]
+        if token in unsafe_set:
+            owners.append(current)
+            matched.add(token)
+    # An untokenizable input is reported as the ``<unparseable>`` sentinel
+    # rather than by echoing the string, so it is not one of the tokens and owns
+    # no option: carry it through as its own label instead of dropping it and
+    # naming nothing at all.
+    owners.extend(unsafe_set - matched)
+    return sorted(set(owners))
+
+
+def _warn_undeliverable_tokens(tokens: list[str], unsafe: list[str], remove_count: int) -> None:
+    """Report undeliverable tokens once per distinct option set per process."""
+    owners = _unsafe_token_owners(tokens, unsafe)
+    key = "|".join(owners)
+    if key in _UNSAFE_TRANSPORT_WARNED:
+        log.debug(
+            "Server args still carry %d token(s) the unquoted EXTRA_*_ARGS transport "
+            "cannot represent, under %s; already reported this process.",
+            len(unsafe),
+            key,
+        )
+        return
+    if len(_UNSAFE_TRANSPORT_WARNED) >= _UNSAFE_TRANSPORT_WARNED_CAP:
+        _UNSAFE_TRANSPORT_WARNED.clear()
+    _UNSAFE_TRANSPORT_WARNED.add(key)
+    log.warning(
+        "Server args carry %d token(s) the unquoted EXTRA_*_ARGS transport cannot "
+        "represent, under %s; applying the %d removal spec(s) to the rest and passing "
+        "those tokens through verbatim. The value reaches the server with its "
+        "quote/whitespace bytes intact, which is almost certainly not what was "
+        "intended. Values and removal specs are withheld because both are "
+        "author-supplied and can carry credentials. Reported once per option set.",
+        len(unsafe),
+        key,
+        remove_count,
+    )
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
     ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
     its following value when one is present; ``"--foo=bar"`` removes that exact
-    token shape; ``"--foo bar"`` removes the exact flag/value pair. Both
-    ``--long`` and ``-short`` option names count as flags, so a removal never
-    mistakes ``-tp 8`` for the value of the flag before it.
+    token shape; ``"--foo bar"`` removes ``--foo`` when ``bar`` is its first (or
+    only) operand, and takes the whole operand list with it — a flag's operands
+    are removed as a unit, never split, or the leftovers become bare argv words.
+    Both ``--long`` and ``-short`` option names count as flags, so a removal
+    never mistakes ``-tp 8`` for the value of the flag before it.
 
     An input that cannot be tokenized is handled best-effort rather than left
     untouched: this is the sink every compose reaches, so declining silently
@@ -185,7 +264,10 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     tokenized by :func:`_tokenize_for_removal`, whose non-POSIX split keeps
     every quote byte, so a retained neighbour is never silently stripped of its
     quotes and the removal still happens. A token the unquoted transport cannot
-    carry is logged and passed through rather than abandoning the whole removal
+    carry is passed through rather than abandoning the whole removal, and is
+    reported once per distinct option set per process (see
+    :func:`_warn_undeliverable_tokens`; this is a per-compose sink, so an
+    unconditional warning repeated itself for a whole session)
     — this is a launch-path sink (``_workload_envs`` writes the result straight
     into ``EXTRA_*_ARGS``) and ``strip_benchmark_harness_flags`` rides on it, so
     a skipped removal serves a benchmark-only flag and misattributes the gain.
@@ -198,15 +280,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if not tokens:
         return args
     if unsafe:
-        log.warning(
-            "Server args carry %d token(s) the unquoted EXTRA_*_ARGS transport cannot "
-            "represent (%s); applying %s to the rest and passing those through verbatim. "
-            "The value reaches the server with its quote/whitespace bytes intact, which "
-            "is almost certainly not what was intended.",
-            len(unsafe),
-            "; ".join(sorted(set(unsafe))[:3]),
-            removes,
-        )
+        _warn_undeliverable_tokens(tokens, unsafe, len(removes))
 
     remove_flags: set[str] = set()
     remove_pairs: set[tuple[str, str | None]] = set()
@@ -256,14 +330,17 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         if tok in remove_flags:
             i = end
             continue
-        if span_value and (tok, span_value) in remove_pairs:
+        # A ``--foo bar`` spec names one operand, so it matches both a
+        # single-operand span and the FIRST operand of a multi-value one
+        # (``--cuda-graph-bs 1 2 4``): comparing only against the whole span
+        # made the spec a no-op the moment another word followed. Either way the
+        # whole span goes. An operand list belongs to its flag, so deleting the
+        # flag and its first value alone left ``2 4`` behind as bare argv words
+        # — which validate_server_args_shell_safe rejects outright ("must be
+        # argv-like flags"), aborting the launch, and which the paths that skip
+        # that validator hand to the server as positional arguments.
+        if span_value and ((tok, span_value) in remove_pairs or (tok, tokens[i + 1]) in remove_pairs):
             i = end
-            continue
-        # A ``--foo bar`` spec names one operand, so it still matches when the
-        # flag is followed by further positional words: consuming the whole span
-        # here would have made that spec a no-op on ``--foo bar baz``.
-        if end > i + 1 and (tok, tokens[i + 1]) in remove_pairs:
-            i += 2
             continue
         out.append(tok)
         i += 1
