@@ -740,36 +740,69 @@ def _local_scratch_dir(output_dir: Path) -> Path:
     The local tree mirrors ``<session_id>/<attempt>`` from the durable side.
     The attempt name alone is the kernel's, so two sessions optimizing one
     kernel would claim one path and the second would be refused for a collision
-    with the first; carrying the session as well is also what lets the sweep
-    below recognise a live tree.
+    with the first. Carrying the session id also scopes the owner marker that
+    lets the sweep identify live trees regardless of durable-root differences.
     """
     if not _is_on_network_fs(output_dir):
         return output_dir / "worktree"
     root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
     local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
-    local_root.mkdir(parents=True, exist_ok=True)
-    _sweep_orphaned_scratch(local_root, output_dir)
-    return local_root / output_dir.parent.name / output_dir.name / "worktree"
+    session_dir = local_root / output_dir.parent.name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _write_scratch_owner(session_dir)
+    _sweep_orphaned_scratch(local_root, output_dir.parent.name)
+    return session_dir / output_dir.name / "worktree"
 
 
-def _sweep_orphaned_scratch(local_root: Path, current_output_dir: Path) -> None:
-    """Delete local scratch whose durable session directory is already gone.
+def _scratch_owner_file(session_dir: Path) -> Path:
+    return session_dir / ".owner"
 
-    A SIGKILL skips the normal teardown, and each abandoned tree holds the whole
-    framework copy, so without this the local root grows by GB per crash.
 
-    Liveness is decided per session, against the durable sessions root that
-    ``current_output_dir`` sits under. Anything not shaped like this function's
-    own output is left alone rather than assumed dead.
+def _write_scratch_owner(session_dir: Path) -> None:
+    """Record pid and start-time so the sweep can tell live from dead sessions."""
+    pid = os.getpid()
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            starttime = fh.read().split()[21]
+    except OSError:
+        starttime = "0"
+    _scratch_owner_file(session_dir).write_text(f"{pid}:{starttime}", encoding="ascii")
+
+
+def _scratch_owner_alive(session_dir: Path) -> bool:
+    """True when the process that created this scratch session is still running."""
+    try:
+        text = _scratch_owner_file(session_dir).read_text(encoding="ascii").strip()
+        pid_str, starttime = text.split(":", 1)
+        pid = int(pid_str)
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except (ProcessLookupError, PermissionError):
+        return False
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            current_starttime = fh.read().split()[21]
+        return current_starttime == starttime
+    except OSError:
+        return True
+
+
+def _sweep_orphaned_scratch(local_root: Path, current_session: str) -> None:
+    """Delete local scratch whose owning process is no longer running.
+
+    A SIGKILL skips normal teardown, leaving a full framework copy on disk.
+    Liveness is decided by the process that wrote the owner marker; sessions
+    without a marker or with a dead owner are removed. Anything not shaped like
+    this function's own output is left alone.
     """
-    sessions_root = current_output_dir.parent.parent
-    current_session = current_output_dir.parent.name
     for child in local_root.iterdir():
         if not child.is_dir() or child.name == current_session:
             continue
         if not any(child.glob("*/worktree")):
             continue
-        if not (sessions_root / child.name).exists():
+        if not _scratch_owner_alive(child):
             shutil.rmtree(child, ignore_errors=True)
             log.info("forge: swept orphaned scratch session %s", child)
 

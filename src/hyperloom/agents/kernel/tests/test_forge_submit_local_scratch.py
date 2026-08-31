@@ -52,6 +52,8 @@ def test_two_sessions_on_one_kernel_get_separate_local_scratch(monkeypatch: pyte
 def test_the_sweep_spares_a_session_that_is_still_running(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
+    # _local_scratch_dir creates the session dir and writes an owner file for
+    # the current process, which is alive by definition.
     live = _durable_attempt(tmp_path, "session-live", "matmul")
     live_scratch = forge_submit._local_scratch_dir(live)
     live_scratch.mkdir(parents=True)
@@ -63,15 +65,31 @@ def test_the_sweep_spares_a_session_that_is_still_running(monkeypatch: pytest.Mo
     assert local_root / "session-live" in list(local_root.iterdir())
 
 
-def test_the_sweep_removes_a_session_whose_archive_is_gone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_the_sweep_removes_a_session_with_no_owner_marker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
+    # A session whose owner file is absent is treated as dead (e.g. SIGKILL
+    # before _write_scratch_owner completed, or left from an old code version).
     dead_scratch = local_root / "session-dead" / "matmul" / "worktree"
     dead_scratch.mkdir(parents=True)
 
     forge_submit._local_scratch_dir(_durable_attempt(tmp_path, "session-new", "softmax"))
 
     assert not (local_root / "session-dead").exists()
+
+
+def test_the_sweep_removes_a_session_with_a_dead_pid(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _on_network_fs(monkeypatch, True)
+    local_root = _local_root(monkeypatch, tmp_path)
+    dead_dir = local_root / "session-dead"
+    dead_scratch = dead_dir / "matmul" / "worktree"
+    dead_scratch.mkdir(parents=True)
+    # PID 2^22 - 1 is the highest possible Linux pid and is virtually never live.
+    forge_submit._scratch_owner_file(dead_dir).write_text("4194303:0", encoding="ascii")
+
+    forge_submit._local_scratch_dir(_durable_attempt(tmp_path, "session-new", "softmax"))
+
+    assert not dead_dir.exists()
 
 
 def test_the_sweep_leaves_unrelated_directories_alone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
