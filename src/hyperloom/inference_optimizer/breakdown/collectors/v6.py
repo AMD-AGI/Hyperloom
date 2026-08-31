@@ -7,6 +7,7 @@ from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
 
+from ..agent_ownership import LEVER_KINDS
 from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
@@ -1340,7 +1341,7 @@ def _source_attempt(
     lever_kind = str(_first(outputs.get("lever_kind"), inputs.get("lever_kind")) or "").strip().lower()
     if not lever_kind:
         lever_kind = "upstream_pr" if patch_source == "upstream_pr" else "source_patch" if patch_source else ""
-    if lever_kind not in {"config", "source_patch", "upstream_pr", "enablement"}:
+    if lever_kind not in LEVER_KINDS:
         lever_kind = ""
     if not route:
         if reauthor_attempt and reauthor_attempt > 0:
