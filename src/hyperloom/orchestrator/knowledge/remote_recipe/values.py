@@ -280,6 +280,7 @@ def _entry_origin(entry: Mapping[str, Any]) -> str:
         "geak_e2e",
         "gemm_tuning",
         "fusion",
+        "collective",
         "integrate",
         "kernel_opt",
     ):

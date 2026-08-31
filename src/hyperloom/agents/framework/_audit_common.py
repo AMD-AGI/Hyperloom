@@ -9,16 +9,7 @@ module, so it must stay importable without pulling the agent runtime in.
 
 from __future__ import annotations
 
-import logging
-import re
 from dataclasses import dataclass, field
-
-
-log = logging.getLogger(__name__)
-
-
-_DEF_RE = re.compile(r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)")
-_CLASS_RE = re.compile(r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)")
 
 
 @dataclass
