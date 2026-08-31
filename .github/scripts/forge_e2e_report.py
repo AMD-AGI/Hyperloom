@@ -137,6 +137,9 @@ def render_report(
     ]
 
     if forge_result:
+        checkpoint = forge_result.get("checkpoint")
+        if not isinstance(checkpoint, dict):
+            checkpoint = {}
         baseline = _number(forge_result.get("pristine_baseline_ms", forge_result.get("baseline_ms")), 4)
         best = _number(forge_result.get("best_ms"), 4)
         speedup = _number(forge_result.get("mean_case_speedup", forge_result.get("total_speedup")), 6)
@@ -146,8 +149,8 @@ def render_report(
             percent = (float(speedup) - 1.0) * 100.0
             rows.append(("speedup", f"**{speedup}x** ({percent:+.2f}%)"))
 
-        passed = forge_result.get("validation_passed")
-        snr = _number(forge_result.get("snr_db"), 1)
+        passed = forge_result.get("validation_passed", checkpoint.get("validation_passed"))
+        snr = _number(forge_result.get("snr_db", checkpoint.get("snr_db")), 1)
         if isinstance(passed, bool) or snr is not None:
             verdict = "PASS" if passed is True else "FAIL" if passed is False else "unknown"
             rows.append(("validation", f"{verdict}{f' (SNR {snr} dB)' if snr is not None else ''}"))
