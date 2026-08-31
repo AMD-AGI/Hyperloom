@@ -193,6 +193,83 @@ def test_a_no_kernel_exit_that_was_not_a_plateau_still_reloops():
     assert reason == "cycle_reloop"
 
 
+def _sweep_exit_row(*, to_phase: str, reason: str, evidence: dict, cycle: int = 0) -> dict:
+    now = datetime.now(timezone.utc)
+    return ps.make_history_row(
+        from_phase=ps.PHASE_SWEEP,
+        to_phase=to_phase,
+        reason=reason,
+        evidence=evidence,
+        ts=now.isoformat(),
+        ts_unix=now.timestamp(),
+        cycle=cycle,
+    )
+
+
+def test_a_plateau_restored_from_an_earlier_session_does_not_close_this_cycle():
+    """``cycle=0`` marks both the first macro-cycle and a pre-cyclic resume.
+
+    ``make_history_row`` documents exactly that, so the stamp cannot separate
+    them: a plateau exit restored from an earlier session matched the current
+    cycle 0 and closed the run on a plateau this cycle never reported — throwing
+    away the budget the rest of this change exists to keep. The scan stops at the
+    previous cycle boundary instead. Reached whenever this cycle has no OPTIMIZE
+    exit of its own to find first, e.g. a session resumed straight into SWEEP.
+    """
+    st = _failed_conc_sweep_state(_optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}))
+    st.phase_history = list(st.phase_history) + [
+        _sweep_exit_row(to_phase=ps.PHASE_CLOSE, reason="sweep_done", evidence={"terminal": True}),
+    ]
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_FRAMEWORK_AGENT
+    assert reason == "cycle_reloop"
+    assert evidence["sweep_exit_reason"] == "conc_sweep_failed"
+
+
+def test_a_second_failed_conc_sweep_stops_being_retried():
+    """The incident's own failure mode was deterministic.
+
+    A corrupted ``--online_quant_config`` killed every conc_sweep launch, so a
+    reloop that carries nothing across cycles re-runs FRAMEWORK_AGENT -> KERNEL
+    -> SWEEP -> conc_sweep and dies identically each cycle until the budget or
+    ``max_cycles`` runs out. ``reset_per_cycle_plateau_state`` clears
+    ``last_conc_sweep``, so the reloop row's ``sweep_exit_reason`` is the durable
+    record of the first attempt.
+    """
+    st = _sweep_state(macro_cycle=1, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    st.phase_history = list(st.phase_history) + [
+        _sweep_exit_row(
+            to_phase=ps.PHASE_FRAMEWORK_AGENT,
+            reason="cycle_reloop",
+            evidence={"loopback": True, "sweep_exit_reason": "conc_sweep_failed"},
+        ),
+    ]
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_failed"
+    assert evidence["reloop_blocked"] == "conc_sweep_failed_repeated"
+    assert "loopback" not in evidence
+
+
+def test_a_reloop_over_a_clean_sweep_exit_does_not_cap_the_retry():
+    """Only a previous conc_sweep FAILURE spends the one retry."""
+    st = _sweep_state(macro_cycle=1, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    st.phase_history = list(st.phase_history) + [
+        _sweep_exit_row(
+            to_phase=ps.PHASE_FRAMEWORK_AGENT,
+            reason="cycle_reloop",
+            evidence={"loopback": True, "sweep_exit_reason": "sweep_done"},
+        ),
+    ]
+    target, reason, _ = ps.compute_next_phase(st)
+    assert target == ps.PHASE_FRAMEWORK_AGENT
+    assert reason == "cycle_reloop"
+
+
 def test_a_failed_conc_sweep_survives_a_convergence_wind_down():
     """Convergence says why no cycle followed, not how this one ended.
 

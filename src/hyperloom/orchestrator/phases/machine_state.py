@@ -2782,6 +2782,17 @@ def _optimize_declared_no_leverage(state: Any) -> bool:
     the real reason under ``evidence.passed_through_reason``, so both labels are
     read: that path is where a reloop has the least left to try.
 
+    The scan is bounded by the previous cycle boundary, not by the ``cycle``
+    stamp alone. ``make_history_row`` documents ``cycle=0`` for the first
+    macro-cycle AND for a resume from a pre-cyclic session, so at cycle 0 the
+    stamp cannot separate the two: a plateau exit restored from an earlier
+    session's history matched, and closed the run down on a plateau this cycle
+    never reported. A SWEEP exit ends a macro-cycle and the PRELUDE handoff opens
+    the first one, so any OPTIMIZE exit reached before either of those belongs to
+    the cycle being judged. This matters whenever the current cycle has no
+    OPTIMIZE exit of its own to find first — a session resumed straight into
+    SWEEP, most obviously.
+
     Args:
         state (Any): Frozen SharedState view.
 
@@ -2791,9 +2802,17 @@ def _optimize_declared_no_leverage(state: Any) -> bool:
     """
     cycle = int(getattr(state, "macro_cycle", 0) or 0)
     for row in reversed(list(getattr(state, "phase_history", None) or [])):
-        if not isinstance(row, dict) or int(row.get("cycle", 0) or 0) != cycle:
+        if not isinstance(row, dict):
             continue
-        if str(row.get("from_phase") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
+        from_phase = str(row.get("from_phase") or "").strip().upper()
+        # Cycle boundary: a SWEEP exit closes the previous macro-cycle (whether
+        # it relooped or wound down) and the PRELUDE handoff opens the first one.
+        # Anything past it belongs to an earlier cycle or an earlier session.
+        if from_phase in (PHASE_PRELUDE, PHASE_SWEEP):
+            break
+        if int(row.get("cycle", 0) or 0) != cycle:
+            continue
+        if from_phase != PHASE_FRAMEWORK_AGENT:
             continue
         evidence = row.get("evidence")
         evidence = evidence if isinstance(evidence, dict) else {}
@@ -2807,6 +2826,45 @@ def _optimize_declared_no_leverage(state: Any) -> bool:
         if reason != "optimize_no_more_leverage":
             continue
         return bool(evidence.get("plateau"))
+    return False
+
+
+def _conc_sweep_failure_already_relooped(state: Any) -> bool:
+    """Whether an earlier macro-cycle already relooped past a failed conc_sweep.
+
+    ``conc_sweep_failed`` no longer short-circuits the reloop, which is what
+    kept a 16h run from forfeiting 9.8h of its budget to a closeout scan. But the
+    failure in that incident was deterministic — a corrupted
+    ``--online_quant_config`` killed every conc_sweep launch — and with nothing
+    carried across cycles the run re-ran FRAMEWORK_AGENT -> KERNEL -> SWEEP ->
+    conc_sweep and died the same way each cycle until the budget or
+    ``max_cycles`` ran out.
+
+    ``reset_per_cycle_plateau_state`` clears ``last_conc_sweep``, so the reloop
+    row's own evidence is the durable record: :func:`compute_next_phase` stamps
+    ``sweep_exit_reason`` onto every ``cycle_reloop`` it opens, for exactly this
+    kind of after-the-fact question. One reloop is the retry that incident
+    argued for; a second identical failure has demonstrated that retrying
+    reproduces it, so the budget is better spent anywhere else.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        bool: ``True`` when a previous cycle already relooped over a
+        ``conc_sweep_failed`` SWEEP exit.
+    """
+    for row in getattr(state, "phase_history", None) or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("from_phase") or "").strip().upper() != PHASE_SWEEP:
+            continue
+        if str(row.get("reason") or "").strip() != "cycle_reloop":
+            continue
+        evidence = row.get("evidence")
+        evidence = evidence if isinstance(evidence, dict) else {}
+        if str(evidence.get("sweep_exit_reason") or "").strip() == "conc_sweep_failed":
+            return True
     return False
 
 
@@ -2931,6 +2989,16 @@ def compute_next_phase(
                     PHASE_CLOSE,
                     exit_reason,
                     {**exit_evidence, "reloop_blocked": "both_arms_plateaued"},
+                )
+            # A second conc_sweep failure after a cycle already relooped over
+            # one. The incident this reloop was added for was deterministic, so
+            # without a cap the run spends every remaining cycle re-reaching the
+            # same launch failure. One retry, then stop.
+            if exit_reason == "conc_sweep_failed" and _conc_sweep_failure_already_relooped(state):
+                return (
+                    PHASE_CLOSE,
+                    exit_reason,
+                    {**exit_evidence, "reloop_blocked": "conc_sweep_failed_repeated"},
                 )
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
