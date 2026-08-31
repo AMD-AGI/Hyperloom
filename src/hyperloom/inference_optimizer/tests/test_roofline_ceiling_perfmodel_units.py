@@ -336,6 +336,7 @@ def _state(tmp_path: Path, benchmark: dict, **attrs):
     """A run state whose baseline provenance points at a materialized yaml."""
     import yaml
 
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = tmp_path / "baseline.yaml"
     cfg.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
     from types import SimpleNamespace
@@ -447,7 +448,12 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     (tmp_path / "quant").mkdir()
     (tmp_path / "prequant").mkdir()
     (tmp_path / "dtype").mkdir()
+    (tmp_path / "quant_vs_prequant").mkdir()
+    (tmp_path / "prequant_vs_dtype").mkdir()
     (tmp_path / "fallback").mkdir()
+    (tmp_path / "meta_eq_2").mkdir()
+    (tmp_path / "meta_eq_0").mkdir()
+    (tmp_path / "act_floor").mkdir()
 
     quant_state = _state(
         tmp_path / "quant",
@@ -459,6 +465,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert quant.quantization == "fp8"
     assert quant.weight_dtype_bytes == 1.0
     assert quant.activation_dtype_bytes == 2.0
+    assert quant.compute_precision_tag == "fp8"
 
     prequant_state = _state(
         tmp_path / "prequant",
@@ -468,6 +475,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     prequant = rc.resolve_runtime_dtype(prequant_state, meta_fp8)
     assert prequant.source == "quantization_config"
     assert prequant.weight_dtype_bytes == 1.0
+    assert prequant.compute_precision_tag == "fp8"
 
     dtype_state = _state(
         tmp_path / "dtype",
@@ -479,6 +487,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert dtype.quantization == "none"
     assert dtype.weight_dtype_bytes == 4.0
     assert dtype.activation_dtype_bytes == 4.0
+    assert dtype.compute_precision_tag == "fp32"
 
     # 1-vs-2: server_args_quantization must beat quantization_config when both present.
     # A pre-quantized meta (weight_dtype_bytes=0.5 fp4) + recognised --quantization fp8
@@ -492,6 +501,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     quant_vs_prequant = rc.resolve_runtime_dtype(quant_vs_prequant_state, meta_fp4)
     assert quant_vs_prequant.source == "server_args_quantization"
     assert quant_vs_prequant.weight_dtype_bytes == 1.0
+    assert quant_vs_prequant.compute_precision_tag == "fp8"
 
     # 2-vs-3: quantization_config must beat server_args_dtype when both present.
     # A pre-quantized fp8 meta + --dtype float32 → branch 2 must win over branch 3.
@@ -503,6 +513,7 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     prequant_vs_dtype = rc.resolve_runtime_dtype(prequant_vs_dtype_state, meta_fp8)
     assert prequant_vs_dtype.source == "quantization_config"
     assert prequant_vs_dtype.weight_dtype_bytes == 1.0
+    assert prequant_vs_dtype.compute_precision_tag == "fp8"
 
     fallback_state = _state(tmp_path / "fallback", _serving_benchmark(tmp_path / "m"), precision="fp8")
     fallback = rc.resolve_runtime_dtype(fallback_state, meta_fp32)
@@ -510,6 +521,36 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert fallback.quantization == "none"
     assert fallback.weight_dtype_bytes == 2.0
     assert fallback.activation_dtype_bytes == 2.0
+    assert fallback.compute_precision_tag == "bf16"
+
+    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take
+    # quantization_config (which a `<= 2.0` widening would incorrectly do).
+    meta_eq_2 = rc.resolve_runtime_dtype(
+        _state(tmp_path / "meta_eq_2", _serving_benchmark(tmp_path / "m")),
+        _dense_meta(weight_dtype_bytes=2.0),
+    )
+    assert meta_eq_2.source == "config_torch_dtype"
+    assert meta_eq_2.weight_dtype_bytes == 2.0
+
+    # Lower edge: unknown (0.0) must not take quantization_config either.
+    meta_eq_0 = rc.resolve_runtime_dtype(
+        _state(tmp_path / "meta_eq_0", _serving_benchmark(tmp_path / "m")),
+        _dense_meta(weight_dtype_bytes=0.0),
+    )
+    assert meta_eq_0.source == "config_torch_dtype"
+    assert meta_eq_0.weight_dtype_bytes == 2.0
+
+    # bf16 activation floor: --dtype fp8 is 1B, but activations stay >= 2.0.
+    act_floor = rc.resolve_runtime_dtype(
+        _state(
+            tmp_path / "act_floor",
+            _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype fp8"),
+        ),
+        meta_fp32,
+    )
+    assert act_floor.source == "server_args_dtype"
+    assert act_floor.weight_dtype_bytes == 1.0
+    assert act_floor.activation_dtype_bytes == 2.0
 
 
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
