@@ -25,31 +25,56 @@ In docker mode:
   the container environment.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
-### Stale container after credential retry
+### Credential retry cleanup (required)
 
-A wrong LLM API key or auth failure often means fixing `.env` and starting a
-**replacement** long-running container. The first container may still be running
-and holding GPU memory.
+**Trigger (MUST):** whenever an LLM credential fails (401/403, invalid key,
+preflight auth error) and the user supplies a corrected key — **regardless of
+whether you reuse the existing Docker container or start a new one.** Agents
+often continue inside the same long-running container instead of `docker run`
+again; leftover optimizer or serving processes are the usual cause of misleading
+0% validated gain (#1314).
 
-Before `docker run` for the replacement, on the **docker host** (not inside a
+**Before** any replacement step (`docker run`, `docker exec`, `install.sh`, or
+a new/resumed `optimize`), probe the environment that will launch the workload
+(the current shell, or the target container via `docker exec`):
+
+```bash
+export USER_DATA_PATH="${USER_DATA_PATH:-$(grep '^USER_DATA_PATH=' .env | cut -d= -f2-)}"
+export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
+
+# Prior session handle (if any)
+test -f "$RUN_DIR/last_launch.env" && . "$RUN_DIR/last_launch.env"
+echo "prior_session=${SESSION_DIR:-none} prior_pid_file=${PID_FILE:-none}"
+
+# Leftover Hyperloom optimizer
+pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
+
+# Leftover serving stacks (IR-1 foreign processes)
+pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
+```
+
+In **docker mode**, also probe on the **docker host** (not only inside the
 container):
 
 ```bash
 docker ps --format '{{.Names}}' | grep -E '^hyperloom' || true
 ```
 
-When any names are printed, ask the user in plain language whether to stop
-those unused containers — for example: *"An earlier Hyperloom Docker container
-(`hyperloom-local`) is still running. Stop it before we start the new one?"*
-Wait for an explicit yes or no.
+**If anything is found** (prior `SESSION_DIR`, optimizer PID, `sglang`/`vllm`/
+Magpie process, or an extra `hyperloom*` container), stop and ask the user in
+plain language — for example: *"The previous run may still be active (optimizer
+PID …, session …). Stop it before we continue with the corrected API key?"*
+Wait for explicit yes/no.
 
-- **Yes:** stop each listed name with `docker stop <name>`. When reusing
-  `${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}`, stopping the old instance is
-  required before `docker run --name ...` can succeed.
-- **No:** continue, but warn that GPU contention from the leftover container
-  can depress benchmarks and produce a misleading 0% validated gain.
+- **Yes:** stop in this order: serving processes from the old run, then the
+  optimizer (`kill` the PID from `PID_FILE` or the `pgrep` match), then stale
+  `hyperloom*` containers on the docker host (`docker stop <name>`). Only after
+  cleanup, continue with `--resume-from "$SESSION_DIR"` or a fresh launch as
+  appropriate.
+- **No:** continue, but warn that GPU contention or a stale baseline anchor
+  can depress benchmarks and show 0% validated gain.
 
-Never stop a container without the user's explicit approval.
+Never kill processes or stop containers without the user's explicit approval.
 
 Suggested Docker images:
 
