@@ -12,8 +12,8 @@ import logging as _logging
 import math
 import os
 from pathlib import Path
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from typing import Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
@@ -28,9 +28,7 @@ from ..loop.coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 from .base import PhaseHandler
-
-if TYPE_CHECKING:
-    from ..framework.paths import WarmReplayRootResolution
+from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
 
@@ -401,6 +399,12 @@ class PreludePhase(PhaseHandler):
                         "target_path",
                     }
                 }
+                # The checkout this item was applied into. Replay places the
+                # patch there and nowhere else, so an item that records none is
+                # not replayable and says so rather than being searched for.
+                host_origin = row.get(HOST_ORIGIN_KEY)
+                if isinstance(host_origin, Mapping):
+                    entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
                 patch_ref = str(row.get("patch") or "").strip()
                 if patch_ref:
                     patch_local = kb.prior_file(patch_ref)
@@ -463,26 +467,30 @@ class PreludePhase(PhaseHandler):
 
         patch_path = Path(str(entry.get("patch_path") or "").strip())
         try:
-            from ..framework.paths import resolve_warm_replay_kernel_root
             from ..specialists.patch_safety import parse_patch_targets
 
             parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
-            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
-            root_value = str(resolution.root or "").rstrip("/")
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
+        # The recorded root is the only answer. Searching an allowlist for a
+        # tree the diff happens to fit would replay against code the gain was
+        # never measured on, and a record naming no root is simply broken.
+        root_value = str(entry.get("apply_root") or "").strip().rstrip("/")
         if not root_value:
-            detail = resolution.reason
-            if resolution.allowlist:
-                detail = f"{detail}; allowlist={list(resolution.allowlist)!r}"
-            return reject(detail, code=resolution.reason)
+            return reject(
+                "kernel item records no apply root",
+                code="kernel_apply_root_missing",
+            )
         try:
             root = Path(root_value).resolve(strict=False)
             root_is_dir = root.is_dir()
         except (OSError, RuntimeError) as exc:
-            return reject(f"active framework root cannot be resolved: {type(exc).__name__}: {exc}")
+            return reject(f"recorded kernel apply root cannot be resolved: {type(exc).__name__}: {exc}")
         if not root_is_dir:
-            return reject(f"active framework root is invalid: {root}")
+            return reject(
+                f"recorded kernel apply root is not present on this host: {root}",
+                code="kernel_apply_root_absent",
+            )
 
         resolved: list[str] = []
         for target in parsed.all:
@@ -753,16 +761,17 @@ class PreludePhase(PhaseHandler):
     def _warm_replay_root_skip_outcome(
         *,
         reason: str,
-        resolution: "WarmReplayRootResolution",
         root_kind: str,
+        roots: Sequence[str] = (),
         rollback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record why warm replay stopped, with the roots it was allowed to use.
+        """Record why warm replay stopped, naming the roots the record asked for.
 
         Args:
             reason: The resolution failure to surface in SBD.
-            resolution: The failed resolution, for its source and allowlist.
             root_kind: ``framework`` or ``kernel``; names the reported keys.
+            roots: The recorded roots that could not be used, for a reader
+                diagnosing a record produced on another image.
             rollback: Outcome of undoing patches already applied, when any were.
 
         Returns:
@@ -771,8 +780,8 @@ class PreludePhase(PhaseHandler):
         outcome: dict[str, Any] = {
             "status": ("skipped" if rollback is None or rollback.get("ok") else "rollback_failed"),
             "reason": reason,
-            f"{root_kind}_patch_root_source": str(resolution.source or ""),
-            f"{root_kind}_patch_root_allowlist": list(resolution.allowlist or ()),
+            f"{root_kind}_patch_root_source": "recorded",
+            f"{root_kind}_patch_recorded_roots": list(roots),
         }
         if rollback is not None:
             outcome["rollback"] = rollback
@@ -782,30 +791,33 @@ class PreludePhase(PhaseHandler):
         self,
         state: Any,
     ) -> dict[str, Any] | None:
-        """Skip combined warm replay when a kernel patch root cannot be resolved."""
-        from ..framework.paths import _warm_replay_kernel_patch_roots, resolve_warm_replay_kernel_root
+        """Skip combined warm replay when a kernel item's recorded root is unusable.
 
-        allowlist = _warm_replay_kernel_patch_roots()
+        A persisted plan may be restored on resume under a different image, so
+        every recorded root is re-checked here rather than trusted from when the
+        plan was built.
+        """
         for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
             if not isinstance(entry, dict):
                 continue
+            # gemm is parameter-shaped: it re-points env vars at downloaded files
+            # and never patches a checkout, so it has no root to resolve.
             if entry.get("column") == "gemm":
                 continue
-            patch_raw = str(entry.get("patch_path") or "").strip()
-            if not patch_raw:
+            if not str(entry.get("patch_path") or "").strip():
                 continue
-            # A persisted plan may be restored on resume under a different
-            # environment, and inline patch material may also have changed
-            # since the reason was recorded. Re-resolve every patch and only
-            # allow the combined replay when a safe root is explicit.
-            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry], precomputed_allowlist=allowlist)
-            if resolution.root:
-                continue
-            return self._warm_replay_root_skip_outcome(
-                reason=resolution.reason,
-                resolution=resolution,
-                root_kind="kernel",
-            )
+            root = str(entry.get("apply_root") or "").strip()
+            if not root:
+                return self._warm_replay_root_skip_outcome(
+                    reason="kernel_apply_root_missing",
+                    root_kind="kernel",
+                )
+            if not Path(root).is_dir():
+                return self._warm_replay_root_skip_outcome(
+                    reason="kernel_apply_root_absent",
+                    root_kind="kernel",
+                    roots=[root],
+                )
         return None
 
     def _set_warm_kernel_outcome(
@@ -1241,24 +1253,27 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
-            if sdk_replay.get("patches"):
-                from ..framework.paths import resolve_warm_replay_framework_root
-
-                # Each overlay names its own checkout, so this only has to answer
-                # for the ones that do not: the applier reads the recorded root
-                # off the entry it is placing.
-                unrooted = [
-                    entry
-                    for entry in (sdk_replay.get("patches") or [])
-                    if not str((entry or {}).get("framework_root") or "").strip()
-                ]
-                framework_resolution = resolve_warm_replay_framework_root(patch_entries=unrooted) if unrooted else None
-                if framework_resolution is not None and not framework_resolution.root:
+            if patch_entries := list(sdk_replay.get("patches") or []):
+                # Every overlay names the checkout it was measured on. One that
+                # does not is a broken record, not a case to search a tree for:
+                # any tree found that way is one this gain was never measured
+                # against. The whole replay is skipped, never part of it.
+                recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
+                if not all(recorded):
                     state.warm_replay_attempted = True
                     state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason=framework_resolution.reason,
-                        resolution=framework_resolution,
+                        reason="framework_apply_root_missing",
                         root_kind="framework",
+                        roots=[root for root in recorded if root],
+                    )
+                    state.save(self.session_dir)
+                    return None
+                if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
+                    state.warm_replay_attempted = True
+                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
+                        reason="framework_apply_root_absent",
+                        root_kind="framework",
+                        roots=absent,
                     )
                     state.save(self.session_dir)
                     return None
@@ -1431,10 +1446,12 @@ class PreludePhase(PhaseHandler):
             wsc_patches = []
             required_patch_timeline = False
         if wsc_patches:
-            from ..framework.paths import resolve_warm_replay_framework_root
-
-            framework_resolution = resolve_warm_replay_framework_root(patch_entries=list(wsc_patches))
-            if not framework_resolution.root:
+            # Re-checked here because a persisted plan may be resumed under a
+            # different image, and because the kernel half is already applied by
+            # now: a root that has since gone means unwinding that too.
+            recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
+            unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
+            if not all(recorded_roots) or unusable:
                 rollback = (
                     self._revert_warm_kernel_patches(
                         kernel_applied,
@@ -1455,9 +1472,9 @@ class PreludePhase(PhaseHandler):
                         state.set_stop_reason("warm_replay_rollback_failed")
                 state.warm_replay_attempted = True
                 state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                    reason=framework_resolution.reason,
-                    resolution=framework_resolution,
+                    reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
                     root_kind="framework",
+                    roots=unusable or [root for root in recorded_roots if root],
                     rollback=rollback,
                 )
                 state.save(self.session_dir)

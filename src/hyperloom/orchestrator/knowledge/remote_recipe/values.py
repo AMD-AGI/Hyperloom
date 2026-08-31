@@ -37,6 +37,7 @@ from .models import (
     validate_relative_path,
 )
 from .sanitize import (
+    HOST_ORIGIN_KEY,
     sanitize_publish_env_mapping,
     sanitize_publish_server_args,
     sanitize_shared_knowledge,
@@ -97,6 +98,46 @@ def _patch_declared_targets(path: Any) -> tuple[str, ...]:
         return parse_patch_targets(text).all
     except ValueError as exc:
         raise RemoteRecipeValidationError(str(exc)) from exc
+
+
+def _kernel_apply_root(patch_source: Any, target_file: Any, declared: Any = None) -> str:
+    """Return the directory a kernel patch's declared paths are relative to.
+
+    The absolute target and the patch's own relative path for it pin the root
+    between them: the root is what remains of the target once its declared tail
+    is removed. This is the inverse of what replay does when it places the
+    patch, so recording it here is what lets replay skip searching for a tree
+    the diff merely happens to fit.
+
+    Args:
+        patch_source: The patch file, read for its declared targets when
+            ``declared`` is not supplied.
+        target_file: An absolute path the patch was applied to.
+        declared: The patch's declared relative targets, when already parsed.
+
+    Returns:
+        The absolute root, or ``""`` when the target does not end with any
+        declared path -- which means the two do not describe the same apply.
+    """
+    target = Path(str(target_file or ""))
+    if not target.is_absolute():
+        return ""
+    targets = tuple(declared) if declared is not None else _patch_declared_targets(patch_source)
+    for relative in targets:
+        parts = Path(str(relative)).parts
+        if parts and len(parts) < len(target.parts) and target.parts[-len(parts) :] == parts:
+            return str(Path(*target.parts[: -len(parts)]))
+    return ""
+
+
+def _kernel_host_origin(apply_root: str) -> dict[str, Any]:
+    """Wrap a kernel apply root in the one subtree that may carry host paths.
+
+    ``sanitize_shared_knowledge`` strips absolute paths everywhere else, so this
+    key is what makes the root survive publication.
+    """
+    root = str(apply_root or "").strip()
+    return {HOST_ORIGIN_KEY: {"apply_root": root}} if root.startswith("/") else {}
 
 
 def _positive_int(value: Any) -> int | None:
@@ -483,7 +524,16 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
     patch_ref = files.add(patch_source, category="kernel/fusion", kind="patches")
     if not patch_ref:
         raise RemoteRecipeValidationError(f"accepted kernel/fusion patch cannot be materialized: {patch_source!r}")
-    _patch_declared_targets(patch_source)
+    declared = _patch_declared_targets(patch_source)
+    # Recorded now or never: replay has no way back to the checkout this was
+    # measured on, and a record that cannot name it cannot be replayed.
+    apply_root = str(result.get("kernel_repo") or "").strip() or _kernel_apply_root(
+        patch_source,
+        stack_rows[-1].get("target_file") or result.get("source_file") or result.get("target_file"),
+        declared,
+    )
+    if not apply_root.startswith("/"):
+        raise RemoteRecipeValidationError("accepted kernel/fusion cannot name the checkout it was applied into")
     integrated_for_publish = dict(integrated)
     for key in (
         "target_file",
@@ -506,8 +556,11 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         "e2e": e2e_record,
         "phase": str(stack_rows[-1].get("phase") or "KERNEL_AGENT"),
         "patch": patch_ref,
+        **_kernel_host_origin(apply_root),
     }
     # Remove duplicate local-path aliases after establishing canonical refs.
+    # ``kernel_repo`` goes too: the apply root's one home is host_origin, and
+    # left here the sanitizer would strip it and leave the field silently empty.
     for key in (
         "patch_path",
         "target_file",
@@ -515,6 +568,7 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         "source_file",
         "source_files",
         "artifact_files",
+        "kernel_repo",
     ):
         record.pop(key, None)
     return {"items": [record]}
@@ -597,7 +651,19 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "accepted kernel/rewrite patch cannot be materialized: "
                 f"integration_id={integration_id!r} patch={patch_source!r}"
             )
-        _patch_declared_targets(patch_source)
+        declared = _patch_declared_targets(patch_source)
+        # Recorded now or never: replay has no way back to the checkout this was
+        # measured on, and a record that cannot name it cannot be replayed.
+        apply_root = str(raw.get("last_deploy_repo_root") or "").strip() or _kernel_apply_root(
+            patch_source,
+            entry.get("target_file"),
+            declared,
+        )
+        if not apply_root.startswith("/"):
+            raise RemoteRecipeValidationError(
+                "accepted kernel/rewrite cannot name the checkout it was applied into: "
+                f"integration_id={integration_id!r}"
+            )
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
@@ -627,6 +693,7 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
                 "optimized_throughput": optimized_throughput,
                 "experience_document": experience,
                 "patch": patch,
+                **_kernel_host_origin(apply_root),
             }
         )
     return {"items": rows}

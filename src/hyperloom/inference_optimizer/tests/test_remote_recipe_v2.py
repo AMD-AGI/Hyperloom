@@ -454,6 +454,37 @@ def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
     assert fusion["patch"].startswith("kernel/fusion/patches/")
 
 
+def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path) -> None:
+    """Replay places a kernel patch only into its recorded root, so it must be published.
+
+    The root is an absolute host path, which survives publication solely
+    because it sits under the sanitizer's host-origin exemption.
+    """
+    bundle = _build(_state(tmp_path), tmp_path / "files-kernel-roots")
+
+    kernel = bundle.knowledge["value"]["kernel"]
+    roots = [
+        item["host_origin"]["apply_root"] for column in ("fusion", "rewrite") for item in kernel[column]["items"]
+    ]
+
+    assert roots, "fusion and rewrite each publish an item"
+    assert all(root == str(tmp_path) for root in roots)
+
+
+def test_kernel_fusion_that_cannot_name_its_checkout_fails_closed(tmp_path: Path) -> None:
+    """Publishing it unrooted would produce a record replay can only skip."""
+    state = _state(tmp_path)
+    state.last_fusion.pop("kernel_repo", None)
+    state.last_fusion["source_file"] = "source.cu"
+    state.last_fusion["target_file"] = "source.cu"
+    for row in state.optimization_stack:
+        if str(row.get("action") or "").lower() == "fusion":
+            row["target_file"] = "source.cu"
+
+    with pytest.raises(RemoteRecipeValidationError, match="checkout it was applied into"):
+        _build(state, tmp_path / "files-fusion-unrooted")
+
+
 def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
     state = _state(tmp_path)
     patch = Path(state.optimization_stack[4]["patch_path"])

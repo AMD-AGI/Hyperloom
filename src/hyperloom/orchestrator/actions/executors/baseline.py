@@ -34,7 +34,6 @@ from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_pr
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
@@ -1211,51 +1210,6 @@ def _verify_three_way_clean(
         if set(marker_lines) - set(prior.get("markers") or []):
             return False, f"new_conflict_marker:{rel}"
     return True, ""
-
-
-def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
-    """Collect readable diff text from warm-replay patch payloads."""
-    patch_texts: list[str] = []
-    for patch in params.get("patches") or []:
-        if not isinstance(patch, dict):
-            continue
-        content = str(patch.get("patch_content") or "")
-        patch_ref = str(patch.get("patch_ref") or "")
-        if not content and patch_ref:
-            try:
-                content = Path(patch_ref).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                content = ""
-        if content:
-            patch_texts.append(content)
-    return patch_texts
-
-
-def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets.
-
-    This answers only for the overlays recording no root of their own -- those
-    written before the field existed -- by probing their patch text against the
-    allowlist. An overlay that records a root is placed into it by the apply
-    loop, which needs no answer from here: the record names the tree the gain
-    was measured on, so probing for another tree the diff happens to fit would
-    replay against code it was never measured against.
-
-    Returns:
-        The fallback root, or ``""`` when every overlay records its own.
-    """
-    entries = [entry for entry in (params.get("patches") or []) if isinstance(entry, dict)]
-    if not entries:
-        return ""
-    if all(str(entry.get("framework_root") or "").strip() for entry in entries):
-        return ""
-    from .integrate_patch import _resolve_framework_root
-
-    root = _resolve_framework_root(
-        resolve_session_framework_root() or None,
-        patch_texts=_patch_texts_from_warm_params(params),
-    )
-    return str(root or "")
 
 
 def _revert_warm_patch_state(
@@ -3095,11 +3049,11 @@ class BaselineExecutor:
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
         # Warm patches are prepared after config/runtime preflight, immediately
-        # before the single final benchmark.
-        # Explore/Framework Recipe patches target the framework checkout, not
-        # the InferenceX benchmark harness. The Session's explicitly selected
-        # root is the sole authority, matching Kernel Recipe replay.
-        patch_target = _resolve_recipe_patch_target(params)
+        # before the single final benchmark. Each overlay names the checkout it
+        # was recorded against and the apply loop places it there, so nothing is
+        # resolved for the set: a tree found by probing is one the gain was
+        # never measured on.
+        patch_target = ""
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""

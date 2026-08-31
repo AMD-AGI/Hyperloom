@@ -14,7 +14,6 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BaselineExecutor,
     _apply_warm_patches,
     _create_patch_snapshot,
-    _resolve_recipe_patch_target,
     _restore_patch_snapshot,
     _revert_patches,
     _revert_warm_patch_state,
@@ -111,27 +110,15 @@ def test_no_patches_returns_empty(output_dir):
     assert result == []
 
 
-def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
-    output_dir,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.baseline.resolve_session_framework_root",
-        lambda: "",
-    )
+def test_required_recipe_patch_fails_when_no_overlay_records_a_root(output_dir):
+    """Nothing is probed for, so an overlay naming no checkout has nowhere to go."""
     params = {
         "required_patch_timeline": True,
         "patches": [{"patch_file": "framework/p.patch", "patch_content": VALID_PATCH}],
     }
 
-    target = _resolve_recipe_patch_target(params)
-    result = _apply_warm_patches(params, target, output_dir)
+    result = _apply_warm_patches(params, "", output_dir)
 
-    assert target == ""
     assert result["status"] == "failed"
     assert result["failure"] == "missing_target_repo"
 
@@ -294,41 +281,33 @@ def test_an_absent_recorded_root_fails_the_whole_replay(tmp_path, output_dir):
     assert (sglang / "python" / "sglang" / "layer.py").read_text() == "original\n"
 
 
-def test_resolver_answers_nothing_when_every_overlay_records_its_own_root(tmp_path, monkeypatch):
-    """The apply loop reads the root off the entry, so no probe is owed."""
+def test_no_root_is_ever_probed_for(tmp_path, output_dir, monkeypatch):
+    """A tree found by probing is one the gain was never measured on.
+
+    The allowlist search is gone, so an overlay that records no checkout fails
+    rather than being placed on whatever tree its diff happens to fit.
+    """
 
     def _fail(*_args, **_kwargs):
-        raise AssertionError("a recorded apply root must not be probed for")
+        raise AssertionError("warm replay must not probe for an apply root")
 
     monkeypatch.setattr(
         "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
         _fail,
     )
+    _git_repo(tmp_path / "sglang", "vllm/fp8.py", "# fp8 module\noriginal = True\n")
 
-    target = _resolve_recipe_patch_target(
+    result = _apply_warm_patches(
         {
-            "patches": [
-                {"patch_file": "patch/overlays/000000/00-a.patch", "framework_root": str(tmp_path / "sglang")},
-                {"patch_file": "patch/overlays/000001/00-b.patch", "framework_root": str(tmp_path / "tuning")},
-            ],
-        }
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "patch/overlays/000000/00-a.patch", "patch_content": VALID_PATCH}],
+        },
+        "",
+        output_dir,
     )
 
-    assert target == ""
-
-
-def test_resolver_probes_only_for_overlays_recording_no_root(tmp_path, monkeypatch):
-    """A record written before the field existed still resolves the legacy way."""
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
-        lambda *_args, **_kwargs: tmp_path / "probed",
-    )
-
-    target = _resolve_recipe_patch_target(
-        {"patches": [{"patch_file": "patch/overlays/000000/00-a.patch", "patch_content": VALID_PATCH}]}
-    )
-
-    assert target == str(tmp_path / "probed")
+    assert result["status"] == "failed"
+    assert result["failure"] == "missing_target_repo"
 
 
 def test_empty_target_repo_returns_empty(output_dir):
