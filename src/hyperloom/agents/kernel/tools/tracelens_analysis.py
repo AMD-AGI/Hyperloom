@@ -2377,18 +2377,7 @@ _TYPE_BLOCKLIST = {
 
 
 def _normalize_profiler_op_name(name: str) -> str:
-    """Strip graph-capture / synthetic wrappers from a TraceLens op symbol.
-
-    Delegates to :func:`_task_group_contract._strip_dispatch_decoration` when
-    available. The result is guaranteed non-empty: if stripping empties the
-    string the original (stripped) name is returned.
-
-    Args:
-        name: The raw TraceLens op symbol to normalize.
-
-    Returns:
-        The normalized op symbol, never an empty string when ``name`` is not.
-    """
+    """Strip graph-capture / synthetic wrappers; return the original if stripping empties it."""
     original = (name or "").strip()
     if not original:
         return ""
@@ -2659,9 +2648,6 @@ def _longest_literal_prefix_len(path: Path, name: str) -> int:
     target = _strip_template_args(_normalize_profiler_op_name(name)).lower()
     if "::" in target:
         target = target.split("::")[-1]
-    # Binary search on prefix length: the prefix-in-text relation is monotone
-    # (if length L is present, every length < L is also present), so bisect
-    # finds the longest match in O(log n) probes instead of O(n).
     lo, hi = 6, len(target)
     if hi < lo or target[:lo] not in low:
         return 0
@@ -2677,11 +2663,7 @@ def _longest_literal_prefix_len(path: Path, name: str) -> int:
 
 
 def _prefer_composing_file(name: str, hits: list[Path]) -> list[Path]:
-    """Rank the file that spells out most of a runtime-assembled name first.
-
-    Returns an empty list when no hit contains even the minimum prefix (6 chars)
-    of the kernel name, preventing a low-confidence path from being claimed.
-    """
+    """Rank by literal prefix length; return ``[]`` when no hit scores above zero."""
     scored = sorted(
         _rank_paths(hits),
         key=lambda h: -_longest_literal_prefix_len(h, name),

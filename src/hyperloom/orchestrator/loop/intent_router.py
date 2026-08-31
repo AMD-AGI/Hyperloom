@@ -52,6 +52,7 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -77,9 +78,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.UPDATE_STATE: "_handle_update_state",
 }
 
-
-# Half the robustness stall threshold, so one dropped beat cannot trip it.
-from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC  # noqa: E402
 
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:

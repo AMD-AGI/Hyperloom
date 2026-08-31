@@ -192,8 +192,7 @@ def legacy_operator_identity_keys(
             ]
         )
     )
-    # v2 keys used normalize_operation_key before it acquired _strip_dispatch_decoration;
-    # reproduce that shape via _strip_template_arguments so warm-start can match them.
+    # Reproduce v2 key shape (pre-decoration-strip) so warm-start can still match historical records.
     operation_key = native_operation_key(operation) if kind == "native" else _strip_template_arguments(str(operation or "").strip())
     function_keys = {
         (native_operation_key(function_name) if kind == "native" else str(function_name or "")),

@@ -786,17 +786,11 @@ def _scratch_owner_alive(session_dir: Path) -> bool:
             current_starttime = fh.read().split()[21]
         return current_starttime == starttime
     except OSError:
-        return True
+        return True  # unreadable stat: assume live to avoid deleting a running tree
 
 
 def _sweep_orphaned_scratch(local_root: Path, current_session: str) -> None:
-    """Delete local scratch whose owning process is no longer running.
-
-    A SIGKILL skips normal teardown, leaving a full framework copy on disk.
-    Liveness is decided by the process that wrote the owner marker; sessions
-    without a marker or with a dead owner are removed. Anything not shaped like
-    this function's own output is left alone.
-    """
+    """Delete local scratch whose owning process is no longer running."""
     for child in local_root.iterdir():
         if not child.is_dir() or child.name == current_session:
             continue

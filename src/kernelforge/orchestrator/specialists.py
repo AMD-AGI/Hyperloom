@@ -766,11 +766,7 @@ class SpecialistAgent:
             load_sandbox(candidate.server_env())
         except ProbeSandboxError as error:
             return self._no_probe(assignment, str(error))
-        # The sentinel is campaign-scoped. Only create it for a probe that was
-        # actually offered: an offered probe means a benchmark will run, and the
-        # DeviceBenchmarkLock a lane creates would otherwise be the only maker.
-        # Creating it before load_sandbox would leave an orphaned sentinel on a
-        # refused probe with no code to unlink it.
+        # Create after load_sandbox: a refused probe must not leave an orphaned sentinel.
         try:
             candidate.device_lock.parent.mkdir(parents=True, exist_ok=True)
             candidate.device_lock.touch(exist_ok=True)

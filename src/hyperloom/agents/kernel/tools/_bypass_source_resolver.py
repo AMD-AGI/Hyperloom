@@ -354,14 +354,7 @@ def triton_def_line(py_path: str, *, func: str = "", symbol: str = "", require_n
 
     Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
     name matches the normalized device ``symbol`` (exact then substring); (3) the
-    sole ``@triton.jit`` def in the file when unambiguous and ``require_name_match``
-    is ``False``. Returns ``None`` when the file is unreadable/unparseable or no
-    confident match is found.
-
-    Args:
-        require_name_match: When ``True`` the single-def fallback (step 3) is
-            suppressed. Pass ``True`` when the caller needs to confirm that the
-            file actually defines the named kernel, not just any Triton kernel.
+    sole ``@triton.jit`` def when unambiguous and ``require_name_match`` is ``False``.
     """
     try:
         tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))

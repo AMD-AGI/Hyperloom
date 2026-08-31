@@ -10,11 +10,9 @@ delta. *producer* is forge's own bookkeeping, which must never reach a patch.
 staged: a compile during a turn adds entries and the guard reads them as the
 turn creating files.
 
-Runtime splits by consumer. A git-index exclusion and a copy-filter exclusion
-are different demands. Compiled artefacts must stay in the index so a git
-revert can restore them — a stale binary influences measurement even after a
-source revert — but must be excluded from copies because a scratch copy shadows
-the installed package and imports directly from it.
+Runtime splits by consumer: compiled artefacts stay in the git index (so
+a revert restores them) but are excluded from copies (a scratch copy shadows
+the installed package and imports from it directly).
 """
 
 from __future__ import annotations
@@ -53,10 +51,7 @@ RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
     }
 )
 
-#: Directory basenames excluded from copies but kept in the git index.
-#:
-#: A revert must be able to remove these; excluding them from the index would
-#: leave stale build output that influences measurement after a source revert.
+#: Excluded from copies but tracked in the git index so a revert can remove stale build output.
 COPY_FILTER_DIRECTORY_NAMES: frozenset[str] = frozenset({"build"})
 
 #: Directory patterns that only a glob can express.
@@ -92,15 +87,10 @@ def is_producer_owned_path(path: str) -> bool:
 
 
 def runtime_gitignore_globs() -> tuple[str, ...]:
-    """Gitignore patterns for artefacts that are safe to leave after a revert.
+    """Gitignore patterns for cache artefacts safe to leave after a revert.
 
-    Written into a repository's exclude file before a baseline ``git add``.
-    Compiled artefacts (.so, build/) are intentionally excluded from this list:
-    they must stay tracked so ``git revert`` can restore them and so a stale
-    binary from a rolled-back iteration does not corrupt the next measurement.
-
-    Returns:
-        Directory and suffix patterns in gitignore syntax.
+    Compiled artefacts (.so, build/) are excluded so they stay tracked and
+    a revert can restore them.
     """
     directories = sorted(RUNTIME_DIRECTORY_NAMES) + list(RUNTIME_DIRECTORY_GLOBS)
     suffixes = sorted(RUNTIME_FILE_SUFFIXES)

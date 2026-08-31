@@ -407,24 +407,8 @@ def _global_aiter_jit_dirs() -> list[Path]:
     return [c for c in candidates if c.is_dir()]
 
 
-def _global_aiter_jit_dir() -> Path | None:
-    """Return the first available global JIT directory, or ``None``."""
-    dirs = _global_aiter_jit_dirs()
-    return dirs[0] if dirs else None
-
-
 def _seed_flydsl_cache(target: Path) -> None:
-    """Warm *target* with precompiled FlyDSL artefacts from the global cache.
-
-    Each hash directory in the source cache is symlinked into the shard.
-    Content-addressing ensures that a compilation of new source code produces
-    a new hash key, so FlyDSL never writes into an existing hash dir: the
-    symlink acts as a read-only view of the precompiled artefacts and new
-    entries land beside it in the shard's own directory.
-
-    Args:
-        target: Cache directory this process will compile into.
-    """
+    """Symlink precompiled FlyDSL artefacts from the global cache into *target*."""
     target.mkdir(parents=True, exist_ok=True)
     source = next(
         (d / "flydsl_cache" for d in _global_aiter_jit_dirs() if (d / "flydsl_cache").is_dir()),
@@ -470,8 +454,6 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
     fresh content-keyed shard dir and compile normally).
     """
     stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "src": "", "errors": 0}
-    # Search all global dirs for .so files; the user cache (~/.aiter/jit) may
-    # hold compiled modules that the read-only site-packages tree cannot store.
     global_dirs = _global_aiter_jit_dirs()
     global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (global_dirs[0] if global_dirs else None)
     if global_dir is None:

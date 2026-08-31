@@ -112,10 +112,7 @@ PER_ATTEMPT_CAP_SEC = int(
 # better than not trying — but handing the scraps to a retry only converts the
 # tail of the wall into tokens and a misleading "FAILED after 2 attempts".
 PREPARE_MIN_RETRY_SEC = int(os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350")
-# Seconds reserved at the tail of every attempt for the salvage preflight.
-# Subtracting this from attempt_timeout ensures preflight_deadline_unix is still
-# in the future when salvage runs, so _deadline_timeout returns more than its
-# 1s floor. The value covers one correctness check on a warm cache.
+# Wall seconds reserved per attempt for the salvage preflight after a timeout.
 _SALVAGE_RESERVE_SEC: float = float(os.environ.get("FORGE_SALVAGE_RESERVE", "120") or "120")
 
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
@@ -1776,22 +1773,7 @@ async def prepare_task(
         except OSError:
             return ""
 
-    def _detect_driver_edited(digest_before: str, progress: list[str]) -> bool:
-        """True when the agent changed the driver's content during this attempt.
-
-        The driver is not in the protected set, so the backend never rolls it
-        back on session teardown. The digest is therefore always authoritative:
-        a digest change means the agent wrote new content; no change means it
-        did not, regardless of what tool calls appeared in the progress log.
-
-        Args:
-            digest_before: Driver digest captured before the agent ran.
-            progress: Unused. Retained so callers need not change their
-                signature when a rollback path is added later.
-
-        Returns:
-            ``True`` when the driver's sha256 differs from ``digest_before``.
-        """
+    def _detect_driver_edited(digest_before: str) -> bool:
         return _driver_digest() != digest_before
 
     def _audit_driver(relative: str) -> None:
@@ -2166,7 +2148,7 @@ async def prepare_task(
             except asyncio.TimeoutError:
                 _audit_driver(f"{attempt_dir}/driver_at_timeout.py")
                 elapsed_s = round(time.monotonic() - agent_started, 3)
-                driver_edited = _detect_driver_edited(digest_before, progress_log)
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2235,7 +2217,7 @@ async def prepare_task(
                 break
             except Exception as exc:  # noqa: BLE001
                 _audit_driver(f"{attempt_dir}/driver_at_exception.py")
-                driver_edited = _detect_driver_edited(digest_before, progress_log)
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2263,7 +2245,7 @@ async def prepare_task(
                     "\n".join(progress_log),
                 )
                 _audit_driver(f"{attempt_dir}/driver_after.py")
-                driver_edited = _detect_driver_edited(digest_before, progress_log)
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
