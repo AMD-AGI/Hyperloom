@@ -25,14 +25,21 @@ In docker mode:
   the container environment.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
-### Credential retry cleanup (required)
+### Prior workload cleanup (required)
 
-**Trigger (MUST):** whenever an LLM credential fails (401/403, invalid key,
-preflight auth error) and the user supplies a corrected key — **regardless of
-whether you reuse the existing Docker container or start a new one.** Agents
-often continue inside the same long-running container instead of `docker run`
-again; leftover optimizer or serving processes are the usual cause of misleading
-0% validated gain (#1314).
+**Trigger (MUST):** whenever a demo run fails, is abandoned, or you are about to
+start a **replacement** workload after any error — not only LLM credential
+failures (401/403, invalid key, gateway/auth misconfiguration). This also
+covers optimizer crash, install/preflight failure, the user asking to
+retry/restart, or any recovery where you would run `docker run`, `install.sh`,
+or a new/fresh `optimize`. It applies **regardless of whether you reuse the
+existing Docker container or start a new one.** Leftover optimizer or serving
+processes are the usual cause of misleading 0% validated gain (#1314).
+
+**Exception:** `--resume-from "$SESSION_DIR"` against the **same** session
+immediately after a clean crash (no credential change, user explicitly wants
+resume) may skip this gate — but if the probe below finds live or ambiguous
+leftover workload, run it anyway and ask the user.
 
 **Before** any replacement step (`docker run`, `docker exec`, `install.sh`, or
 a new/resumed `optimize`), probe the environment that will launch the workload
@@ -63,8 +70,7 @@ docker ps --format '{{.Names}}' | grep -E '^hyperloom' || true
 **If anything is found** (prior `SESSION_DIR`, optimizer PID, `sglang`/`vllm`/
 Magpie process, or an extra `hyperloom*` container), stop and ask the user in
 plain language — for example: *"The previous run may still be active (optimizer
-PID …, session …). Stop it before we continue with the corrected API key?"*
-Wait for explicit yes/no.
+PID …, session …). Stop it before we continue?"* Wait for explicit yes/no.
 
 - **Yes:** stop in this order: serving processes from the old run, then the
   optimizer (`kill` the PID from `PID_FILE` or the `pgrep` match), then stale
