@@ -1,4 +1,4 @@
-"""Regression tests for local scratch placement, sweeping and the copy filter."""
+"""Regression tests for local scratch placement, sweeping and the scratch filters."""
 
 from __future__ import annotations
 
@@ -99,7 +99,7 @@ def test_the_scratch_copy_keeps_what_a_package_is_imported_through(
     (pkg / "jit" / "core.py").write_text("x = 1\n", encoding="utf-8")
     (pkg / "jit" / "extension.so").write_bytes(b"\x7fELF")
     (pkg / "dist" / "shard.py").write_text("y = 2\n", encoding="utf-8")
-    (pkg / "__pycache__" / "stale.pyc").write_bytes(b"\x00")
+    (pkg / "stale.pyc").write_bytes(b"\x00")
 
     prepared = forge_submit._prepare_worktree_nogit(
         str(pkg / "__init__.py"),
@@ -114,6 +114,7 @@ def test_the_scratch_copy_keeps_what_a_package_is_imported_through(
     assert (copied / "jit" / "extension.so").is_file()
     assert (copied / "dist" / "shard.py").is_file()
     assert not (copied / "__pycache__").exists()
+    assert not (copied / "stale.pyc").exists()
 
 
 def test_the_scratch_exclude_covers_what_the_copy_had_to_keep(tmp_path: Path) -> None:
@@ -126,4 +127,3 @@ def test_the_scratch_exclude_covers_what_the_copy_had_to_keep(tmp_path: Path) ->
 
     written = (workspace / ".git" / "info" / "exclude").read_text(encoding="utf-8").split()
     assert "*.so" in written
-    assert "__pycache__/" in written
