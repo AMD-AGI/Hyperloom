@@ -16,10 +16,7 @@ from pathlib import Path
 from typing import Any, Collection, Mapping
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    LEVER_CONFIG,
-    LEVER_ENABLEMENT,
-    LEVER_SOURCE_PATCH,
-    LEVER_UPSTREAM_PR,
+    SECTION_BY_LEVER,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -258,22 +255,9 @@ class _Files:
         self.artifacts = retained
 
 
-#: Lever -> published section. The section names are the phases that used to own
-#: each lever; they are kept because they are on the wire, and they were always
-#: really "configuration" and "source" under a phase's name. Routing on the
-#: lever restores that meaning now that one phase carries both -- otherwise
-#: every entry would land in ``framework`` and ``explore`` would sit empty.
-_SECTION_BY_LEVER = {
-    LEVER_CONFIG: "explore",
-    LEVER_SOURCE_PATCH: "framework",
-    LEVER_UPSTREAM_PR: "framework",
-    LEVER_ENABLEMENT: "framework",
-}
-
-
 def _entry_origin(entry: Mapping[str, Any]) -> str:
     action = str(entry.get("action") or "").strip().lower()
-    lever_section = _SECTION_BY_LEVER.get(patch_lever_kind(entry))
+    lever_section = SECTION_BY_LEVER.get(patch_lever_kind(entry))
     if lever_section:
         return lever_section
     # Pre-``lever_kind`` rows fall back to the phase that recorded them.

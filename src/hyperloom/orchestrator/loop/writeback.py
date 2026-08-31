@@ -15,10 +15,9 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
-    LEVER_ENABLEMENT,
     LEVER_KERNEL,
-    LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
+    owner_from_lever,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -114,21 +113,19 @@ _LEVER_BY_TASK_KIND = {
 }
 
 
-#: Lever -> the section that owns the KEEP it produced. Mirrors the routing the
-#: publisher applies to the entry's own content, so a KEEP cannot stage into one
-#: section while its content is filed under another.
-_KEEP_OWNER_BY_LEVER = {
-    LEVER_CONFIG: "EXPLORE",
-    LEVER_SOURCE_PATCH: "FRAMEWORK_AGENT",
-    LEVER_UPSTREAM_PR: "FRAMEWORK_AGENT",
-    LEVER_ENABLEMENT: "FRAMEWORK_AGENT",
-}
+def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    """Name the lever a settled KEEP moved, reading the delivery first.
+
+    What came back outranks what was asked for: a mandate that goes out naming
+    one lever routinely returns another, and the result carries the applier's
+    own markers.
+    """
+    return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
 def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Name the section a KEEP stages into, preferring the lever it moved."""
-    lever = patch_lever_kind(task_params) or patch_lever_kind(result)
-    by_lever = _KEEP_OWNER_BY_LEVER.get(lever, "")
+    by_lever = owner_from_lever(_lever_for_keep(task_params, result))
     if by_lever:
         return by_lever
     return str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
@@ -4116,7 +4113,7 @@ class WritebackCollaborator:
             }
             # The mandate's stamp and the deliverable's markers together;
             # the result wins on a collision.
-            lever_kind = patch_lever_kind({**task_params, **result})
+            lever_kind = _lever_for_keep(task_params, result)
             if lever_kind:
                 lift["lever_kind"] = lever_kind
             if source_phase:
