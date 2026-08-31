@@ -542,8 +542,24 @@ def test_promote_from_candidate_writes_measured_headline(tmp_path: Path) -> None
     assert ss.cumulative_gain_validated == pytest.approx(expected_pct)
     assert ss.resume_pending_revalidation is False
     geak_entry = next(e for e in ss.optimization_stack if e.get("action") == "geak_e2e")
-    assert geak_entry["lever_kind"] == "kernel"
+    # A flags/env win with no proven overlay moved the CONFIG lever. Stamping
+    # ``kernel`` from the task kind alone would put ``lever_buckets`` in direct
+    # conflict with ``_geak_contribution``, which reads the same entry.
+    assert geak_entry["lever_kind"] == "config"
     assert not ss.geak_pending
+
+
+def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -> None:
+    """The lever follows the overlay proof, not the task kind."""
+    base = 2844.209
+    coord = _coord(tmp_path, baseline=base, best_tput=3042.941)
+    result = _ok_result(final=3236.489)
+    result["accepted_kernels"] = ["fused_moe"]
+    coord.shared_state.geak_result = result
+    coord._promote_geak_from_candidate(result, measured_tput=3270.0, overlay_loaded=True)
+
+    entry = next(e for e in coord.shared_state.optimization_stack if e.get("action") == "geak_e2e")
+    assert entry["lever_kind"] == "kernel"
 
 
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:

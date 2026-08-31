@@ -1893,6 +1893,7 @@ def record_geak_e2e_attempt(
     accepted_config: Mapping[str, Any] | None = None,
     provenance: str = "",
     occurrence: Any = None,
+    result: Mapping[str, Any] | None = None,
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
     """Record one validated GEAK route-level win as a countable attempt.
@@ -1902,6 +1903,12 @@ def record_geak_e2e_attempt(
     companion record carries the validated before/after pair on an attempt kind
     the ledger counts, so the GEAK dashboard bucket receives the gain without
     relying on per-kernel attribution.
+
+    Args:
+        result: GEAK's ``result.json`` payload, read only for the artifact
+            paths (report, eval dir, journey, patch) attached to the adoption.
+            Without them the ledger's keep names a gain with nothing on disk
+            to audit it against.
     """
     if not session_dir:
         trace_skip(reason="no session_dir", section="operations")
@@ -1916,13 +1923,19 @@ def record_geak_e2e_attempt(
         cycle = int(macro_cycle) if macro_cycle is not None else 0
         now = _now_iso_safe()
         route_id = _kernel_route_operation_id(session_dir, "geak", macro_cycle=macro_cycle)
+        recorded_occurrence = occurrence if occurrence is not None else f"{before}->{after}"
+        # The measured pair is part of the identity: one macro cycle can promote
+        # twice (a rebench that beats an earlier promotion), and keying on the
+        # cycle alone would merge the second win onto the first and lose its
+        # gain. Re-writing the SAME pair still collapses, which is what keeps
+        # the writer idempotent.
         operation_id = _stable_id(
             "op",
             "geak_e2e_attempt",
             _session_key(session_dir),
             f"macro_cycle:{cycle}",
+            recorded_occurrence,
         )
-        recorded_occurrence = occurrence if occurrence is not None else f"{before}->{after}"
         subject = {
             "subject_id": _kernel_route_subject_id(session_dir, "geak", route_operation_id=route_id),
             "subject_type": "kernel_optimizer_route",
@@ -1954,6 +1967,9 @@ def record_geak_e2e_attempt(
                 **_measurement_metadata("geak_e2e_orchestrator", harness="geak_e2e"),
             )
             measurement_refs.append(measurement_id)
+        artifact_refs = (
+            _geak_result_artifacts(session_dir, operation_id, result, producer) if isinstance(result, Mapping) else []
+        )
         record_operation(
             session_dir,
             operation_id=operation_id,
@@ -1978,6 +1994,7 @@ def record_geak_e2e_attempt(
                 "accepted_config": dict(accepted_config or {}),
             },
             measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
             ended_at=now,
         )
         adoption_id = _stable_id("adoption", operation_id, "geak_e2e")
@@ -1992,6 +2009,7 @@ def record_geak_e2e_attempt(
             subject=subject,
             transitioned_at=now,
             measurement_ids=measurement_refs,
+            artifact_ids=artifact_refs,
             kind=attempt_kind,
             gain_pct=to_float(gain_pct),
             throughput_before=before,

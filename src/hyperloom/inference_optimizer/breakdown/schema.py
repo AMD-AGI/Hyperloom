@@ -1022,6 +1022,12 @@ class Geak(TypedDict, total=False):
     error_class: str | None
     error: str | None
     returncode: int | None
+    # Same-harness adjudication, kept on the result because it is terminal
+    # state: ``geak_pending`` is cleared when the verdict lands, and the final
+    # report still has to say why a measured candidate was dropped.
+    revalidation_status: str | None
+    revalidation_error_class: str | None
+    revalidation_error: str | None
     recovered_from_disk: bool
     handoff: dict[str, Any] | None
     exp_root: str | None

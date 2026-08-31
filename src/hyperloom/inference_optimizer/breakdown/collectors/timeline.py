@@ -358,6 +358,36 @@ def _stronger_verdict(current: str, candidate: str) -> str:
     return current
 
 
+def geak_route_evidence(state: dict[str, Any] | None, geak: dict[str, Any] | None) -> tuple[bool, bool]:
+    """Answer whether GEAK's route ran, and whether it was promoted.
+
+    One definition with two readers: the capability-summary fallback below and
+    the exporter's consistency warnings. They are only meaningful while they
+    agree, so they must not each carry their own copy of the predicate.
+
+    Args:
+        state: Session state mapping, read for ``optimization_stack``.
+        geak: Normalized GEAK section.
+
+    Returns:
+        tuple[bool, bool]: ``(promoted, has_route_evidence)`` -- whether a
+        ``geak_e2e`` entry reached the optimization stack, and whether the route
+        ran at all. ``engaged`` alone can mean only that GEAK was configured, so
+        ``status=missing`` (no result, no disk recovery) is not evidence.
+    """
+    state = state if isinstance(state, dict) else {}
+    geak = geak if isinstance(geak, dict) else {}
+    promoted = any(
+        isinstance(entry, dict)
+        and (
+            str(entry.get("action") or "").lower() == "geak_e2e" or str(entry.get("source") or "").lower() == "geak_e2e"
+        )
+        for entry in state.get("optimization_stack") or []
+    )
+    has_route_evidence = promoted or (bool(geak.get("engaged")) and str(geak.get("status") or "").lower() != "missing")
+    return promoted, has_route_evidence
+
+
 def collect_capability_summary(
     state: dict[str, Any],
     geak_invocations: list[dict[str, Any]],
@@ -485,17 +515,7 @@ def collect_capability_summary(
     # reporting ``not_attempted``. A promoted ``geak_e2e`` stack entry is the
     # route-level KEEP; accepted-kernel count is used when available.
     geak = geak if isinstance(geak, dict) else {}
-    stack = state.get("optimization_stack") or []
-    promoted = any(
-        isinstance(entry, dict)
-        and (
-            str(entry.get("action") or "").lower() == "geak_e2e" or str(entry.get("source") or "").lower() == "geak_e2e"
-        )
-        for entry in stack
-    )
-    # ``engaged`` can mean only that GEAK was configured. ``status=missing``
-    # has no result or disk recovery evidence and must remain not_attempted.
-    has_route_evidence = promoted or (bool(geak.get("engaged")) and str(geak.get("status") or "").lower() != "missing")
+    promoted, has_route_evidence = geak_route_evidence(state, geak)
     if has_route_evidence:
         attempted_items = geak.get("kernels_attempted")
         accepted_items = geak.get("accepted_kernels")
@@ -511,13 +531,15 @@ def collect_capability_summary(
             1,
         )
         if promoted:
-            geak_cap["keeps"] = max(
-                int(geak_cap.get("keeps") or 0),
-                accepted_count,
-                accepted_head_count,
-                1,
-            )
-            geak_cap["status"] = "kept"
+            # ONE promotion is ONE keep, whatever it carried. Counting a keep
+            # per accepted kernel would contradict the canonical ledger, which
+            # books exactly one adoption for the route-level win.
+            geak_cap["keeps"] = max(int(geak_cap.get("keeps") or 0), 1)
+            # A revert is decided evidence from the native invocation rows; this
+            # fallback exists for the case where those rows are MISSING, so it
+            # must not overwrite a verdict they did record.
+            if str(geak_cap.get("status") or "") != "reverted":
+                geak_cap["status"] = "kept"
         elif geak_cap.get("status") == "not_attempted":
             geak_cap["status"] = "attempted"
 

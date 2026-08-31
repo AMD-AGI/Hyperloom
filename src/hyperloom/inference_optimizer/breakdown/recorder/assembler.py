@@ -352,10 +352,15 @@ def _deep_merge(
             )
         elif isinstance(previous, list) and isinstance(value, list):
             merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
-        elif key == "started_at" and previous and value:
+        elif key == "started_at" and previous and value and "." not in path:
             # Partial updates describe one operation. The first fragment owns
             # its start time; later result/finalization updates must not move
             # the start forward merely because they were written later.
+            #
+            # Only at the entity root (``path`` is the bare stable id, or empty
+            # for a direct call): a substep / gate / extension nested below has
+            # its own start time, and quietly keeping the smaller of two would
+            # stamp one sub-entity with another's clock and swallow the conflict.
             merged[key] = min(str(previous), str(value))
         else:
             if conflicts is not None and previous is not None and value is not None and previous != value:

@@ -20,6 +20,11 @@ from ._invocation import render_invocation_block
 # revalidation never landed, so the win was abandoned rather than judged.
 _GEAK_DROPPED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
 
+# ``geak_result.revalidation_status`` values with the same meaning, but settled:
+# the rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
+# are deliberately absent — those ARE verdicts, so the candidate was judged.
+_GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
+
 
 @register_renderer("final")
 def render(breakdown: dict[str, Any]) -> RenderedSection:
@@ -109,21 +114,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "actually found — the candidate's artefacts are on disk but absent "
             "from current_best / action_path / the validated gain."
         )
-    elif geak_revalidation_status == "failed":
-        self_gain = geak.get("gain_pct")
-        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
-        drop_reason = str(geak.get("revalidation_error") or "").strip() or "reason not recorded"
-        facts.append(
-            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
-            f"revalidation (status=rebench_failed, {drop_reason})."
-        )
-        warnings.append(
-            "A measured GEAK e2e candidate was abandoned because its same-harness "
-            f"revalidation failed ({drop_reason}). It was never judged on merit, "
-            "so this session's gain may understate what the optimizer actually "
-            "found — the candidate's artefacts are on disk but absent from "
-            "current_best / action_path / the validated gain."
-        )
     elif geak_pending and geak_pending_status == "awaiting_rebench":
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
@@ -138,6 +128,25 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "kept out of current_best / action_path / the validated gain. Its "
             "self-reported number is audit-only and must not be presented as the "
             "headline result."
+        )
+    # Last: a settled ``failed`` on ``geak_result`` outlives the pending slot it
+    # was recorded from, so a LIVE candidate in a later macro-cycle must win over
+    # a terminal status left behind by an earlier one. ``render.py`` orders the
+    # same three cases the same way.
+    elif geak_revalidation_status in _GEAK_DROPPED_RESULT_STATUSES:
+        self_gain = geak.get("gain_pct")
+        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        drop_reason = str(geak.get("revalidation_error") or "").strip() or "reason not recorded"
+        facts.append(
+            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
+            f"revalidation (status=rebench_{geak_revalidation_status}, {drop_reason})."
+        )
+        warnings.append(
+            "A measured GEAK e2e candidate was abandoned because its same-harness "
+            f"revalidation failed ({drop_reason}). It was never judged on merit, "
+            "so this session's gain may understate what the optimizer actually "
+            "found — the candidate's artefacts are on disk but absent from "
+            "current_best / action_path / the validated gain."
         )
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))

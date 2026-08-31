@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -357,6 +359,32 @@ def test_geak_route_level_win_reaches_the_geak_column(tmp_path: Path) -> None:
     geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
     assert geak.get("keeps") == 1, geak
     assert geak.get("total_gain_pct") == 3.2, geak
+
+
+def test_two_promotions_in_one_macro_cycle_are_two_attempts(tmp_path: Path) -> None:
+    """The attempt id keyed only by macro cycle merged re-promotions.
+
+    GEAK can promote twice inside one macro cycle (an env win, then an overlay
+    win on top of it). With the id derived from ``macro_cycle`` alone both rows
+    collapsed onto one stable id, and ``_deep_merge`` kept the last writer — the
+    first promotion's gain vanished from the ledger.
+    """
+    _record_baseline(tmp_path)
+    for before, after in ((BASELINE_TPUT, BASELINE_TPUT * 1.02), (BASELINE_TPUT * 1.02, BASELINE_TPUT * 1.05)):
+        instrument.record_geak_e2e_attempt(
+            tmp_path,
+            kind="kernel_optimization",
+            throughput_before=before,
+            throughput_after=after,
+            baseline_tput=BASELINE_TPUT,
+            gain_pct=(after - before) / BASELINE_TPUT * 100.0,
+            macro_cycle=0,
+            provenance="geak_orch_harness_validated",
+        )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 2, geak
+    assert geak.get("total_gain_pct") == pytest.approx(5.0), geak
 
 
 def test_geak_route_level_attempt_requires_a_throughput_pair(tmp_path: Path) -> None:

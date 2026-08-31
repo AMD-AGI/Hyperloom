@@ -338,11 +338,14 @@ def build(
     )
     geak_invocations = _pick("geak_invocations", geak_c)
     forge_invocations = _pick("forge_invocations", forge_c)
-    geak = _safe_collect(
+    geak = _pick(
         "geak",
-        lambda: collectors.collect_geak(sd, state, warnings),
-        warnings,
-        default={},
+        _safe_collect(
+            "geak",
+            lambda: collectors.collect_geak(sd, state, warnings),
+            warnings,
+            default={},
+        ),
     )
     capability_summary = _safe_collect(
         "capability_summary",
@@ -420,17 +423,10 @@ def build(
             warnings=warnings,
         )
     geak_capability = capability_summary.get("geak") if isinstance(capability_summary, dict) else {}
-    stack = state.get("optimization_stack") or []
-    geak_promoted = any(
-        isinstance(entry, dict)
-        and (
-            str(entry.get("action") or "").lower() == "geak_e2e" or str(entry.get("source") or "").lower() == "geak_e2e"
-        )
-        for entry in stack
-    )
-    geak_has_route_evidence = geak_promoted or (
-        bool(geak.get("engaged")) and str(geak.get("status") or "").lower() != "missing"
-    )
+    # Same predicate the capability-summary fallback ran on. A private copy here
+    # would go quiet exactly when the two computations had drifted apart, which
+    # is the disagreement these warnings exist to catch.
+    geak_promoted, geak_has_route_evidence = collectors.geak_route_evidence(state, geak)
     if geak_has_route_evidence and isinstance(geak_capability, dict):
         if geak_capability.get("status") == "not_attempted":
             warnings.append(

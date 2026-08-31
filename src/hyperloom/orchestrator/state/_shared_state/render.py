@@ -124,8 +124,10 @@ class _RenderMixin:
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
         elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
-        elif geak_revalidation_status == "failed":
-            geak_pending_tag = " ⚠ geak candidate dropped unvalidated (rebench_failed)"
+        elif geak_revalidation_status in {"failed", "fallback_failed"}:
+            # A fallback rebench that also failed is the same unjudged drop; only
+            # ``no_material`` / ``no_promote`` are verdicts and stay silent here.
+            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry

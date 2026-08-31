@@ -15,7 +15,6 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
-    LEVER_KERNEL,
     LEVER_UPSTREAM_PR,
     patch_lever_kind,
     patch_owner_phase,
@@ -97,13 +96,17 @@ _FRAMEWORK_STACK_ACTION = "framework"
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
 #: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
 #: evidence and a missing one is a real gap rather than something to guess at.
+#: ``geak_e2e`` is absent for the same reason: it promotes on a proven kernel
+#: overlay OR on a config/env-only win, and only the promoting site knows which.
+#: It stamps ``lever_kind`` on the winner from the same overlay proof
+#: ``_geak_stack_entry_extra`` uses, so guessing ``kernel`` here would let the
+#: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
-    "geak_e2e": LEVER_KERNEL,
 }
 
 

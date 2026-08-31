@@ -267,7 +267,9 @@ def test_promoted_geak_route_marks_capability_kept() -> None:
     cap = collectors.collect_capability_summary(state, [], [], geak=geak)
 
     assert cap["geak"]["attempts"] == 2
-    assert cap["geak"]["keeps"] == 2
+    # ONE promotion is ONE keep. The canonical ledger books a single adoption
+    # for the route-level win, and the two counters must not disagree.
+    assert cap["geak"]["keeps"] == 1
     assert cap["geak"]["status"] == "kept"
 
 
