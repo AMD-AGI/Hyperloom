@@ -374,6 +374,69 @@ class TestNestedInjectionRefines:
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         assert "phase=" not in self._tags(env)
 
+    def test_the_self_describing_tag_outranks_a_bare_trace_id(self) -> None:
+        # x-litellm-trace-id carries a bare value, so an operator's own tracing
+        # header is indistinguishable from ours; letting it win would make their
+        # trace id the run's session and misjoin every reconciliation.
+        env = {
+            _ANTHROPIC: (
+                "x-litellm-tags: application=hyperloom,session=real-run\nx-litellm-trace-id: operator-trace"
+            )
+        }
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "session=real-run" in self._tags(env)
+        assert "operator-trace" not in self._tags(env)
+
+    def test_an_explicitly_empty_field_suppresses_an_inherited_one(self) -> None:
+        child = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        with llm_attribution.current_action_scope("kernel_opt"):
+            llm_attribution.inject_env(child, component="forge", source=_env())
+        assert "type=kernel_opt" in self._tags(child)
+
+        # Overriding an inherited field is not the same as saying there is none.
+        llm_attribution.inject_env(child, component="fusion", type="", source={_ATTR: "litellm"})
+        assert "type=" not in self._tags(child)
+
+
+class TestSelfInjectionDoesNotAccumulate:
+    """Writing the tag into our own environment must not pin ambient state.
+
+    ``forge_fusion`` injects into ``os.environ`` itself so the CLI it spawns
+    later inherits the tag. That tag then outlives every scope in this process,
+    so reading our own ``phase``/``type`` back out of it would label unrelated
+    later calls with the first action the process happened to run.
+    """
+
+    def _tags(self, env: dict[str, str]) -> str:
+        return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
+
+    def test_a_stale_action_does_not_survive_its_scope(self) -> None:
+        own = dict(_env())
+        with llm_attribution.current_action_scope("kernel_opt"):
+            llm_attribution.inject_env(own, component="forge", source=own)
+        assert "type=kernel_opt" in self._tags(own)
+
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "type=" not in self._tags(own)
+
+    def test_a_stale_phase_does_not_survive_the_transition(self) -> None:
+        own = dict(_env())
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "phase=KERNEL_AGENT" in self._tags(own)
+
+        llm_attribution.set_current_phase("VALIDATE")
+        llm_attribution.inject_env(own, component="forge", source=own)
+        tags = self._tags(own)
+        assert "phase=VALIDATE" in tags
+        assert "KERNEL_AGENT" not in tags
+
+    def test_the_run_identity_still_survives(self) -> None:
+        # session identifies the run, not this process's state, so it is kept.
+        own = dict(_env())
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "session=claw-abc" in self._tags(own)
+
 
 class TestSdkEnvOverlay:
     """claude_agent_sdk merges options.env over the inherited environment."""

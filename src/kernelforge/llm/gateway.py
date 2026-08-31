@@ -12,6 +12,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 __all__ = [
     "LlmGateway",
@@ -199,22 +200,57 @@ def resolve_anthropic_gateway() -> LlmGateway:
     )
 
 
-def _resolve_openai_gateway_headers() -> dict[str, str]:
+def _same_host(first: str, second: str) -> bool:
+    """Whether two base URLs address the same host and port.
+
+    Args:
+        first: A base URL, possibly empty.
+        second: The base URL to compare against, possibly empty.
+
+    Returns:
+        True only when both parse and their authorities match; an unparseable
+        or absent URL is never treated as a match.
+    """
+    if not first or not second:
+        return False
+    try:
+        left, right = urlsplit(first), urlsplit(second)
+    except ValueError:
+        return False
+    return bool(left.netloc) and left.netloc.lower() == right.netloc.lower()
+
+
+def _resolve_openai_gateway_headers(base_url: str) -> dict[str, str]:
     """Headers for the OpenAI-compatible line.
 
-    ``OPENAI_CUSTOM_HEADERS`` wins when set. When it is absent, fall back to
-    ``ANTHROPIC_CUSTOM_HEADERS`` so a single-gateway deployment that injects
-    spend tags (and APIM subscription keys) on the Anthropic side still reaches
-    OpenAI-protocol callers such as fusion discovery. Hyperloom's
-    ``resolve_openai_client_config`` applies the same rule when the OpenAI base
-    URL is derived from ``ANTHROPIC_BASE_URL``; KernelForge always requires an
-    explicit ``OPENAI_BASE_URL``, so the read-side fallback applies whenever
-    the OpenAI header slot was left empty rather than intentionally cleared.
+    ``OPENAI_CUSTOM_HEADERS`` wins when set. When it is empty, the Anthropic
+    headers are reused only if both lines address the same host, which is the
+    single-gateway shape a Hyperloom claw sandbox runs: one proxy serving both
+    protocols, with the LiteLLM spend tag and the APIM subscription key written
+    to the Anthropic side alone.
+
+    The host check is what keeps that from becoming a credential leak. These
+    headers routinely carry a gateway secret, so reusing them across hosts would
+    hand it to a machine the operator never pointed at -- and an ``Authorization``
+    among them would also displace this line's own bearer. Hyperloom's
+    ``resolve_openai_client_config`` reaches the same place from the other
+    direction: it borrows only when the OpenAI base URL was *derived* from
+    ``ANTHROPIC_BASE_URL``, which is same-host by construction. KernelForge
+    always requires an explicit ``OPENAI_BASE_URL``, so it has to compare the
+    hosts it was given rather than infer the relationship.
+
+    Args:
+        base_url: The OpenAI-compatible base URL already resolved for this line.
+
+    Returns:
+        Header name to value; empty when neither line supplies usable headers.
     """
     headers = parse_custom_headers(os.environ.get("OPENAI_CUSTOM_HEADERS"))
-    if not headers:
-        headers = parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS"))
-    return headers
+    if headers:
+        return headers
+    if not _same_host(base_url, os.environ.get("ANTHROPIC_BASE_URL", "").strip()):
+        return {}
+    return parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS"))
 
 
 def resolve_openai_gateway() -> LlmGateway:
@@ -226,11 +262,11 @@ def resolve_openai_gateway() -> LlmGateway:
     speak the OpenAI-compatible protocol — fusion discovery and the Codex backend
     — and that is the only line this function looks at for endpoint and credential.
 
-    Endpoint and credential never cross lines. Custom headers may: when
-    ``OPENAI_CUSTOM_HEADERS`` is unset, :func:`_resolve_openai_gateway_headers`
-    reuses ``ANTHROPIC_CUSTOM_HEADERS`` so LiteLLM spend tags injected there
-    (typical in Hyperloom claw sandboxes) also reach OpenAI-protocol call sites
-    on the same gateway.
+    Endpoint and credential never cross lines. Custom headers may, but only
+    within one host: when ``OPENAI_CUSTOM_HEADERS`` is unset and both lines
+    point at the same gateway, :func:`_resolve_openai_gateway_headers` reuses
+    ``ANTHROPIC_CUSTOM_HEADERS`` so LiteLLM spend tags injected there (typical in
+    Hyperloom claw sandboxes) also reach OpenAI-protocol call sites.
 
     The base URL is used exactly as configured: rewriting it would guess at a
     layout the operator already knows, and hide their typos behind ours.
@@ -246,5 +282,5 @@ def resolve_openai_gateway() -> LlmGateway:
     return LlmGateway(
         base_url=base_url,
         key_env="OPENAI_API_KEY",
-        headers=_resolve_openai_gateway_headers(),
+        headers=_resolve_openai_gateway_headers(base_url),
     )

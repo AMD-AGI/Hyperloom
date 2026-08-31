@@ -41,7 +41,7 @@ import json
 import logging
 import os
 import re
-import traceback
+import sys
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
@@ -977,13 +977,19 @@ def _first_caller_outside_this_module() -> str:
     name ``chat_completion`` rather than whoever called it -- which is the one
     thing the message needs to get right to be actionable.
 
+    Walks the live frames rather than building a formatted traceback: this runs
+    on the request path of every untagged call, and only the first one at each
+    site produces any output, so materializing the whole stack to then discard
+    it would charge every later call for a line it will not print.
+
     Returns:
         ``path:line`` of the nearest frame outside this file.
     """
-    stack = traceback.extract_stack()
-    for frame in reversed(stack):
-        if os.path.abspath(frame.filename) != _THIS_FILE:
-            return f"{frame.filename}:{frame.lineno}"
+    frame = sys._getframe(1)
+    while frame is not None:
+        if os.path.abspath(frame.f_code.co_filename) != _THIS_FILE:
+            return f"{frame.f_code.co_filename}:{frame.f_lineno}"
+        frame = frame.f_back
     return "an unknown call site"
 
 

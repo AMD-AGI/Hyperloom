@@ -281,15 +281,21 @@ _PARSERS: dict[str, Callable[[Sequence[str], str], dict[str, str]]] = {
 }
 
 #: Fields a child may take from the tag its parent wrote. They describe *where*
-#: a call happens rather than what makes it: ``application`` and ``session``
-#: identify the run, and ``phase`` and ``type`` are ambient state that lives in
-#: this process only -- :data:`_current_phase` is a module global and
-#: :data:`_current_action` a context variable, so a spawned child starts with
-#: both empty and could not restate them if it wanted to. ``component`` and
-#: ``operation`` are deliberately absent: a call site that names itself is
+#: a call happens rather than what makes it: ``session`` identifies the run, and
+#: ``phase`` and ``type`` are ambient state that lives in one process only --
+#: :data:`_current_phase` is a module global and :data:`_current_action` a
+#: context variable, so a spawned child starts with both empty and could not
+#: restate them if it wanted to. ``application`` is absent because this module
+#: always supplies it, so an inherited copy could never be reached. ``component``
+#: and ``operation`` are absent by intent: a call site that names itself is
 #: declaring a new producer, and inheriting the parent's purpose would label its
 #: calls with work they are not doing.
-_INHERITED_FIELDS = ("application", "session", "phase", "type")
+_INHERITED_FIELDS = ("session", "phase", "type")
+
+#: The inherited fields describing the *running process* rather than the run's
+#: identity. Only a genuinely different process may take these; see
+#: :func:`inject_env` for why re-reading them into their own writer is unsound.
+_AMBIENT_FIELDS = ("phase", "type")
 
 
 @dataclass(frozen=True)
@@ -385,9 +391,9 @@ def call_headers(
         env: Environment mapping supplying the gateway selection and session id.
         base: Fields to fall back on where this call site knows none, normally
             those :func:`_inherited_context` recovered from a parent's tag. A
-            field this call site fills always wins, and an explicitly empty
-            ``phase`` suppresses an inherited one the way it suppresses the
-            published one.
+            field this call site fills always wins, and passing one as empty
+            suppresses the inherited copy -- for ``phase`` the way it suppresses
+            the published one, and for anything in ``extra`` the same way.
         **extra: Additional attribution fields.
 
     Returns:
@@ -409,6 +415,13 @@ def call_headers(
         inherited = dict(base)
         if phase is not None and not _sanitize(phase):
             inherited.pop("phase", None)
+        # An explicitly empty field suppresses an inherited one the way an empty
+        # ``phase`` does. Without it a call site could override an inherited
+        # value but never state that it has none, which is the difference
+        # between correcting a stale label and removing it.
+        for name, value in extra.items():
+            if not _sanitize(value):
+                inherited.pop(name, None)
         context = {**inherited, **context}
     rendered = {header.name: _RENDERERS[header.shape](header.fields, context) for header in headers}
     return {name: value for name, value in rendered.items() if value}
@@ -526,6 +539,14 @@ def _inherited_context(
     yields anything wins, because both carry the tag this module wrote and a
     deployment that has them disagreeing has a larger problem than field order.
 
+    Within one variable the headers do not get equal say. A ``raw`` header
+    carries a bare value, so reading it back is a guess that it was written by
+    this module: an operator who sets ``x-litellm-trace-id`` for their own
+    tracing is indistinguishable from our own copy, and taking it would make
+    their trace id the run's ``session`` and misjoin every reconciliation. So a
+    field already recovered from a self-describing header is never overwritten
+    by a guessed one.
+
     Args:
         env: Environment mapping the tag would be merged into.
         headers: Headers the selected preset emits.
@@ -539,10 +560,12 @@ def _inherited_context(
         if not present:
             continue
         context: dict[str, str] = {}
-        for header in headers:
+        for header in sorted(headers, key=lambda item: item.shape == "raw"):
             value = present.get(header.name.lower())
-            if value:
-                context.update(_PARSERS[header.shape](header.fields, value))
+            if not value:
+                continue
+            for name, recovered_value in _PARSERS[header.shape](header.fields, value).items():
+                context.setdefault(name, recovered_value)
         recovered = {field: value for field, value in context.items() if field in _INHERITED_FIELDS}
         if recovered:
             return recovered
@@ -584,12 +607,22 @@ def inject_env(
         **extra: Additional attribution fields.
     """
     configuration = source if source is not None else os.environ
+    inherited = _inherited_context(env, _configured_headers(configuration))
+    if env is configuration:
+        # Injecting into this process's own environment -- as forge_fusion does,
+        # so the CLI it spawns later inherits the tag -- leaves that tag in place
+        # for the life of the process. Reading our own ``phase``/``type`` back
+        # out of it would pin the first action this process ran onto every call
+        # that follows, long after its scope exited, which is precisely the
+        # mislabelling the tag exists to prevent. The live values are
+        # authoritative here because this process is the one publishing them.
+        inherited = {name: value for name, value in inherited.items() if name not in _AMBIENT_FIELDS}
     headers = call_headers(
         component=component,
         operation=operation,
         phase=phase,
         env=configuration,
-        base=_inherited_context(env, _configured_headers(configuration)),
+        base=inherited,
         **extra,
     )
     if not headers:

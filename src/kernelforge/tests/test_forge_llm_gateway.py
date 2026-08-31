@@ -86,12 +86,14 @@ def test_base_url_is_used_exactly_as_configured(clean_env, configured):
     assert resolve_openai_gateway().base_url == configured
 
 
-def test_the_anthropic_line_is_never_borrowed(clean_env):
+def test_the_anthropic_endpoint_and_credential_are_never_borrowed(clean_env):
     """A fully configured Anthropic line does not make this one usable.
 
     The two lines are different protocols on different routes and belong to
     different consumers; substituting one produces a failure nobody can trace
-    back to a variable. Claude reads ANTHROPIC_* itself.
+    back to a variable. Claude reads ANTHROPIC_* itself. Headers are the one
+    exception, and only within a single host -- see
+    :func:`_resolve_openai_gateway_headers`.
     """
     clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
     clean_env.setenv("ANTHROPIC_AUTH_TOKEN", "bearer")
@@ -224,31 +226,55 @@ def test_anthropic_line_ignores_the_openai_one(clean_env):
     assert resolve_anthropic_gateway() == LlmGateway()
 
 
-def test_openai_headers_win_and_anthropic_fills_when_empty(clean_env):
+def test_openai_headers_win_and_the_same_gateway_fills_when_empty(clean_env):
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
-    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: not-mine")
-    assert resolve_openai_gateway().headers == {"Ocp-Apim-Subscription-Key": "not-mine"}
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
+    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub")
+    assert resolve_openai_gateway().headers == {"Ocp-Apim-Subscription-Key": "sub"}
 
-    clean_env.setenv("OPENAI_CUSTOM_HEADERS", "user: mine\nOcp-Apim-Subscription-Key: sub")
+    clean_env.setenv("OPENAI_CUSTOM_HEADERS", "user: mine\nOcp-Apim-Subscription-Key: own")
     assert resolve_openai_gateway().headers == {
         "user": "mine",
-        "Ocp-Apim-Subscription-Key": "sub",
+        "Ocp-Apim-Subscription-Key": "own",
     }
+
+
+def test_a_different_host_never_receives_the_anthropic_headers(clean_env):
+    """The headers carry a gateway secret, so they stop at that gateway.
+
+    Reusing them across hosts would hand the operator's subscription key to a
+    machine they never pointed at, and an ``Authorization`` among them would
+    displace this line's own bearer on every call.
+    """
+    clean_env.setenv("OPENAI_BASE_URL", "https://other.example/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
+    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: not-mine")
+    assert resolve_openai_gateway().headers == {}
+
+
+def test_an_unknown_anthropic_host_is_not_assumed_to_match(clean_env):
+    clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.delenv("ANTHROPIC_BASE_URL", raising=False)
+    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: not-mine")
+    assert resolve_openai_gateway().headers == {}
 
 
 def test_openai_line_inherits_litellm_tags_from_anthropic(clean_env):
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
     clean_env.setenv(
         "ANTHROPIC_CUSTOM_HEADERS",
         "Ocp-Apim-Subscription-Key: sub\n"
-        "x-litellm-tags: application=hyperloom,session=sess-1,component=kernel,operation=forge_loop\n"
+        "x-litellm-tags: application=hyperloom,session=sess-1,component=forge,operation=forge_loop\n"
         "x-litellm-trace-id: sess-1",
     )
     assert resolve_openai_gateway().headers == {
         "Ocp-Apim-Subscription-Key": "sub",
-        "x-litellm-tags": "application=hyperloom,session=sess-1,component=kernel,operation=forge_loop",
+        "x-litellm-tags": "application=hyperloom,session=sess-1,component=forge,operation=forge_loop",
         "x-litellm-trace-id": "sess-1",
     }
 

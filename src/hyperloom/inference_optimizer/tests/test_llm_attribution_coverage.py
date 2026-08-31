@@ -46,7 +46,28 @@ _TAGGED_ENTRY_POINTS = frozenset(
     }
 )
 
+#: Backends that carry their label on a dataclass field instead of passing it at
+#: the call site, so the call-site scan below cannot see it.
+_COMPONENT_FIELD = "attribution_component"
+
 _SRC_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _iter_production_trees() -> Iterator[tuple[Path, ast.AST]]:
+    """Yield the parsed tree of every production file under the source root.
+
+    Yields:
+        The path relative to the source root and its parsed module. Tests are
+        skipped: they name components to exercise them, not to spend.
+    """
+    for path in sorted(_SRC_ROOT.rglob("*.py")):
+        relative = path.relative_to(_SRC_ROOT)
+        if any(part in {"tests", "test"} for part in relative.parts):
+            continue
+        try:
+            yield relative, ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files to fix
+            continue
 
 
 def _iter_tagged_calls() -> Iterator[tuple[Path, ast.Call, str]]:
@@ -57,14 +78,7 @@ def _iter_tagged_calls() -> Iterator[tuple[Path, ast.Call, str]]:
         was called by. Tests are skipped: they call these entry points to
         exercise them, not to spend against the gateway.
     """
-    for path in sorted(_SRC_ROOT.rglob("*.py")):
-        relative = path.relative_to(_SRC_ROOT)
-        if any(part in {"tests", "test"} for part in relative.parts):
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files to fix
-            continue
+    for relative, tree in _iter_production_trees():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -128,3 +142,46 @@ def test_component_labels_come_from_the_closed_vocabulary() -> None:
                 offenders.append(f"{relative}:{node.lineno}: {name}(component={keyword.value.value!r})")
     assert not offenders, "LLM call sites naming an unknown component:\n" + "\n".join(offenders)
     assert checked >= 15, f"only {checked} literal components found; the scan is no longer finding them"
+
+
+def _iter_component_field_labels() -> Iterator[tuple[Path, int, str]]:
+    """Yield every literal value production code gives ``attribution_component``.
+
+    One backend class serves several roles, so it takes its label as a field
+    rather than hardcoding one. That moves the label off the call site and out
+    of reach of :func:`_iter_tagged_calls`, which only sees keywords passed to
+    an entry point -- so the vocabulary has to be checked where it is now set:
+    the field's default, and the keyword each role overrides it with.
+
+    Yields:
+        The path relative to the source root, the line, and the literal value.
+    """
+    for relative, tree in _iter_production_trees():
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AnnAssign):
+                named = getattr(node.target, "id", "") == _COMPONENT_FIELD
+            elif isinstance(node, ast.keyword):
+                named = node.arg == _COMPONENT_FIELD
+            else:
+                continue
+            if named and isinstance(node.value, ast.Constant):
+                yield relative, node.lineno, node.value.value
+
+
+def test_backend_component_fields_come_from_the_closed_vocabulary() -> None:
+    """A label carried on a field is as binding as one passed at the call site.
+
+    It is in fact worse to get wrong: the field's default stands for every role
+    that does not override it, so one unknown value silently reassigns the spend
+    of a whole family of backends.
+    """
+    offenders: list[str] = []
+    checked = 0
+    for relative, lineno, value in _iter_component_field_labels():
+        checked += 1
+        if value not in VALID_COMPONENTS:
+            offenders.append(f"{relative}:{lineno}: {_COMPONENT_FIELD}={value!r}")
+    assert not offenders, f"{_COMPONENT_FIELD} set to an unknown component:\n" + "\n".join(offenders)
+    # The default plus at least one role that overrides it; fewer means the
+    # field was renamed and this guard is watching nothing.
+    assert checked >= 2, f"only {checked} {_COMPONENT_FIELD} literals found; the scan is no longer finding them"
