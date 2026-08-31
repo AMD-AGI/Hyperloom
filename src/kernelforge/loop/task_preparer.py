@@ -100,12 +100,12 @@ log = logging.getLogger(__name__)
 # ~3600s budget), so a larger value never overruns the outer budget.
 PREPARE_MAX_ATTEMPTS = int(os.environ.get("FORGE_PREPARE_MAX_ATTEMPTS", "3") or "3")
 PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "3000")
-# Per-attempt cap is derived from the wall and attempt count so it scales with
-# both, rather than being a fixed constant that falls below the wall/attempts
-# ratio when either grows.  The env override still wins so operators can tune
-# without changing the formula.
-_derived_cap = max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
-PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", str(_derived_cap)) or str(_derived_cap))
+# Derived from the wall so it scales with it; a fixed constant falls below the
+# wall/attempts ratio as soon as either grows.
+PER_ATTEMPT_CAP_SEC = int(
+    os.environ.get("FORGE_PREPARE_ATTEMPT_CAP")
+    or max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
+)
 # Smallest budget worth spending on a RETRY. Measured over 25 recorded attempts:
 # successful ones ran 350-896s, and every retry that started with less than that
 # floor (150s, 298s, 300s, 325s) burned its whole budget without writing a byte.
@@ -1772,27 +1772,27 @@ async def prepare_task(
         except OSError:
             return ""
 
-    def _detect_driver_edited(
-        digest_before: str, log: list[str]
-    ) -> bool:
-        """True when the agent wrote the driver in this attempt.
+    def _detect_driver_edited(digest_before: str, progress: list[str]) -> bool:
+        """True when the agent wrote the driver during this attempt.
 
-        Checks the content digest first; when a rollback has already restored
-        the file, also scans the progress log for a Write or Edit call whose
-        path matches the driver, since the log is written before any rollback
-        and is the authoritative evidence of what the agent did.
+        The digest answers it unless a rollback already restored the file, so
+        fall back to the progress log, which records each tool call as it
+        happens and therefore survives the rollback.
+
+        Args:
+            digest_before: Driver digest captured before the agent ran.
+            progress: The session's progress log.
+
+        Returns:
+            True when either the digest moved or the log names the driver.
         """
         if _driver_digest() != digest_before:
             return True
         driver_posix = driver_path.as_posix()
-        driver_name = driver_path.name
-        for entry in log:
-            if not (entry.startswith("tool: Write ") or entry.startswith("tool: Edit ")):
-                continue
-            payload = entry.split(" ", 2)[2] if entry.count(" ") >= 2 else ""
-            if driver_posix in payload or driver_name in payload:
-                return True
-        return False
+        return any(
+            entry.startswith(("tool: Write ", "tool: Edit ")) and driver_posix in entry
+            for entry in progress
+        )
 
     def _audit_driver(relative: str) -> None:
         if audit_dir is None or not driver_path.is_file():
