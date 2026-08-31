@@ -17,10 +17,7 @@ from __future__ import annotations
 import hashlib
 import keyword
 import re
-from kernelforge.loop.path_ownership import (
-    PRODUCER_OWNED_PATH_PATTERNS,  # noqa: F401 - re-exported for backward compat
-    is_producer_owned_path,
-)
+from kernelforge.loop.path_ownership import ATTEMPT_ROOT_DIR, is_producer_owned_path
 
 REWRITE_PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
@@ -65,9 +62,6 @@ ENV_SOURCE_KERNEL = "KERNELFORGE_REWRITE_SOURCE_KERNEL"
 ENV_CANDIDATE_KERNEL = "KERNELFORGE_REWRITE_CANDIDATE_KERNEL"
 ENV_BUILDER_SYMBOL = "KERNELFORGE_REWRITE_BUILDER_SYMBOL"
 ENV_LOGICAL_OP = "KERNELFORGE_REWRITE_LOGICAL_OP"
-
-# Root of the producer's attempt-scoped scratch inside a caller's workspace.
-ATTEMPT_ROOT_DIR = ".forge_rewrite"
 
 # A readable slug stays short enough to keep the generated symbol legible; the
 # digest, not the readable part, is what makes it unique.

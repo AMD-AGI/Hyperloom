@@ -3,24 +3,12 @@
 
 """Authoritative registry of path ownership inside a Forge workspace.
 
-Every file or directory in a workspace belongs to one of three owners:
-
-framework
-    Package sources the agent is optimizing.  Protected by the workspace guard;
-    restored verbatim on rollback.  Must never appear in a published patch as
-    anything other than the intended source-level delta.
-
-producer
-    Forge's own bookkeeping: experiment logs, measurement drivers, candidate
-    artefacts.  These are the working outputs of a forge run and must not
-    propagate into a framework patch (``git add -u`` already excludes them, but
-    ``is_producer_owned_path`` is the explicit gate in the apply-back path).
-
-runtime
-    Machine-generated caches and compiled binaries that the framework regenerates
-    from source on import.  Never staged, never conflict-checked; including them
-    in a git index inflates it by gigabytes and causes spurious integrity
-    violations when a compile during the turn creates new entries.
+Every path belongs to one of three owners. *framework* is the package source
+under optimization: the workspace guard protects it and a patch carries its
+delta. *producer* is forge's own bookkeeping, which must never reach a patch.
+*runtime* is machine-generated cache and compiled output, which must never be
+staged: a compile during a turn adds entries and the guard reads them as the
+turn creating files.
 """
 
 from __future__ import annotations
@@ -28,38 +16,50 @@ from __future__ import annotations
 import fnmatch
 from pathlib import PurePosixPath
 
+#: Attempt-scoped scratch root the rewrite producer creates in a workspace.
+ATTEMPT_ROOT_DIR = ".forge_rewrite"
 
-# ---------------------------------------------------------------------------
-# Producer-owned: forge bookkeeping that must not reach a framework patch.
-# ---------------------------------------------------------------------------
-
-#: Basename patterns marking forge bookkeeping paths.
-#: Each pattern is matched against *every component* of a repo-relative path
-#: so a deeply nested file whose ancestor matches is also considered producer-
-#: owned.  See :func:`is_producer_owned_path`.
+#: Path components marking forge bookkeeping.
 PRODUCER_PATH_PATTERNS: tuple[str, ...] = (
     "forge_experiments",
-    ".forge_rewrite",
+    ATTEMPT_ROOT_DIR,
     ".forge_driver_*",
     "optimization_report.md",
     "optimized_versions",
 )
 
-#: Legacy name kept for callers that imported from ``rewrite_by_flydsl.protocol``.
-PRODUCER_OWNED_PATH_PATTERNS = PRODUCER_PATH_PATTERNS
+#: Directory basenames holding machine-generated artefacts.
+RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
+    {
+        "__pycache__",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        "build",
+        "flydsl_cache",
+        "jit",
+        "jit_cache",
+    }
+)
+
+#: Directory patterns that only a glob can express.
+RUNTIME_DIRECTORY_GLOBS: tuple[str, ...] = ("*.egg-info",)
+
+#: Suffixes that are always build output.
+RUNTIME_FILE_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo", ".so"})
 
 
 def is_producer_owned_path(path: str) -> bool:
-    """True when a repository-relative *path* holds forge bookkeeping.
+    """True when a repository-relative path holds forge bookkeeping.
 
-    Matching is per path component so a framework file whose name merely starts
-    with a producer prefix stays framework-owned.
+    Matching is per path component, so a framework file whose name merely
+    starts with a producer prefix stays framework-owned.
 
     Args:
-        path: Repository-relative POSIX path string.
+        path: Repository-relative POSIX path.
 
     Returns:
-        True if any path component matches a producer pattern.
+        True when any component matches a producer pattern.
     """
     for part in PurePosixPath(str(path).strip()).parts:
         if any(fnmatch.fnmatchcase(part, pattern) for pattern in PRODUCER_PATH_PATTERNS):
@@ -67,36 +67,16 @@ def is_producer_owned_path(path: str) -> bool:
     return False
 
 
-# ---------------------------------------------------------------------------
-# Runtime-owned: machine-generated caches and compiled binaries.
-# ---------------------------------------------------------------------------
-
-#: Directory basenames that hold machine-generated artefacts.
-#: Used by the staging transaction (external_artifacts) to avoid hashing or
-#: copying build caches, and as the source for :func:`runtime_gitignore_globs`.
-RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
-    {
-        "__pycache__",
-        "flydsl_cache",
-        "jit_cache",
-        "jit",
-        "build",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-    }
-)
-
-#: File suffixes that are always runtime artefacts (bytecode, compiled objects).
-RUNTIME_FILE_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo", ".so"})
-
-
 def runtime_gitignore_globs() -> tuple[str, ...]:
-    """Return gitignore-style glob patterns covering all runtime artefacts.
+    """Gitignore patterns covering every runtime artefact.
 
-    Suitable for writing into ``.git/info/exclude`` before a baseline ``git add``
-    so that compiled binaries and caches are never hashed or committed.
+    Written into a repository's exclude file before a baseline ``git add`` so
+    compiled output is never hashed.
+
+    Returns:
+        Directory and suffix patterns in gitignore syntax.
     """
-    dir_globs = tuple(f"{name}/" for name in sorted(RUNTIME_DIRECTORY_NAMES))
-    ext_globs = tuple(f"*{suffix}" for suffix in sorted(RUNTIME_FILE_SUFFIXES))
-    return dir_globs + ext_globs
+    directories = sorted(RUNTIME_DIRECTORY_NAMES) + list(RUNTIME_DIRECTORY_GLOBS)
+    return tuple(f"{name}/" for name in directories) + tuple(
+        f"*{suffix}" for suffix in sorted(RUNTIME_FILE_SUFFIXES)
+    )

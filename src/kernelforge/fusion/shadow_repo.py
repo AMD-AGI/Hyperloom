@@ -44,7 +44,7 @@ SHADOW_BRANCH = "forge-fusion"
 # will not descend into an excluded directory, so re-admitting the directory
 # itself is what makes this work. Artifact patterns come last to apply inside it.
 _EXCLUDE_HEADER = "/*\n"
-_EXCLUDE_ARTIFACTS = "\n".join(runtime_gitignore_globs()) + "\n*.egg-info/\n"
+_EXCLUDE_ARTIFACTS = "".join(f"{glob}\n" for glob in runtime_gitignore_globs())
 
 
 def _git(repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC) -> subprocess.CompletedProcess:
