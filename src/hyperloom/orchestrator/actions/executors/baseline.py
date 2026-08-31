@@ -313,7 +313,10 @@ def _attach_baseline_launch_evidence(
             raw = parsed.get("benchmark")
             benchmark = raw if isinstance(raw, dict) else {}
     except (OSError, yaml.YAMLError):
-        pass
+        log.debug(
+            "baseline_executor: failed to read launch-evidence config; using empty declared config",
+            exc_info=True,
+        )
 
     args_env = server_args_env_name(framework)
     envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
@@ -323,7 +326,11 @@ def _attach_baseline_launch_evidence(
     try:
         recipe_digest = f"sha256:{hashlib.sha256(config_path.read_bytes()).hexdigest()}"
     except OSError:
-        pass
+        log.debug(
+            "baseline_executor: failed to compute launch-evidence recipe digest for %s",
+            config_path,
+            exc_info=True,
+        )
 
     observed_flags = ""
     observed_server_identity: dict[str, Any] = {}

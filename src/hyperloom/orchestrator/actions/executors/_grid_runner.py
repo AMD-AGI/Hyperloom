@@ -2873,7 +2873,11 @@ def _attach_grid_launch_evidence(
             if config_path.is_file():
                 recipe_digest = f"sha256:{hashlib.sha256(config_path.read_bytes()).hexdigest()}"
         except OSError:
-            pass
+            log.debug(
+                "grid_runner: failed to compute launch-evidence recipe digest for %s",
+                config_path,
+                exc_info=True,
+            )
         observed_flags = ""
         observed_server_identity: dict[str, Any] = {}
         if actual_log:
