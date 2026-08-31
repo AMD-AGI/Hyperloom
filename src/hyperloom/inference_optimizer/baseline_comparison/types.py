@@ -12,7 +12,7 @@ on-disk JSON shape is pinned by ``BaselineSummary.to_dict``.
 on-disk JSON to render the "External baseline (advisory)" section in
 ``final.md``. The matched measured points are additionally derived into
 ``competitor_target.json`` (``research_hints.write_competitor_target``), which
-feeds the EXPLORE gap advisory.
+feeds the gap advisory.
 """
 
 from __future__ import annotations

@@ -339,7 +339,7 @@ def test_the_codes_carry_no_blank_entry():
 
 
 # ---- advisory_rules_govern -------------------------------------------------
-@pytest.mark.parametrize("action_name", ["specialist", "explore", "framework_agent"])
+@pytest.mark.parametrize("action_name", ["specialist", "explore"])
 def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
     """``proposal_set[*]`` reaches review as a specialist proposal or the explore
     grid it is materialised into; the framework candidate is the one the

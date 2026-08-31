@@ -157,7 +157,6 @@ def run_rewrite(
     applyback_import_modules: list[str] | tuple[str, ...] = (),
     max_applyback_attempts: int = 2,
     rewrite_kb_enabled: bool = True,
-    ignored_cli_options: list[str] | None = None,
 ) -> dict:
     """Run the full rewrite pipeline; return (and sentinel-print) the result dict."""
     Path(experiments_dir).mkdir(parents=True, exist_ok=True)
@@ -199,7 +198,7 @@ def run_rewrite(
             failure_detail=reason,
             temporary_paths=temporary_paths,
         )
-        payload = report.emit_result(result, result_json, ignored_cli_options=ignored_cli_options)
+        payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
         return result.to_dict()
 
@@ -395,7 +394,7 @@ def run_rewrite(
             failure_detail=port.error_tail,
             temporary_paths=temporary_paths,
         )
-        payload = report.emit_result(result, result_json, ignored_cli_options=ignored_cli_options)
+        payload = report.emit_result(result, result_json)
         print(f"{report.SENTINEL}{payload}{report.SENTINEL}", flush=True)
         return result.to_dict()
     print(f"  [forge-rewrite] PORT OK (attempt {port.attempts}, SNR={port.snr_db})", flush=True)
@@ -484,7 +483,7 @@ def run_rewrite(
         temporary_paths=temporary_paths,
     )
     if result_json:
-        report.emit_result(interim, result_json, ignored_cli_options=ignored_cli_options)
+        report.emit_result(interim, result_json)
     sp0 = interim.speedup
     print(
         f"  [forge-rewrite] interim (port only): flydsl={flydsl_baseline_ms} ms "
@@ -581,7 +580,7 @@ def run_rewrite(
         },
         temporary_paths=temporary_paths,
     )
-    payload = report.emit_result(result, result_json, ignored_cli_options=ignored_cli_options)
+    payload = report.emit_result(result, result_json)
     sp = result.speedup
     print(
         f"  [forge-rewrite] DONE: flydsl_best={result.flydsl_best_ms} ms "

@@ -67,3 +67,25 @@ def test_callbacks_have_no_required_parameter_click_never_supplies():
             if p.default is p.empty and pname not in supplied:
                 unfilled.append(f"{name}: {pname}")
     assert not unfilled, "callback parameters click cannot fill: " + ", ".join(unfilled)
+
+
+def test_no_command_absorbs_an_undeclared_option():
+    """An option no command declares must cost an exit code, never a default.
+
+    ``forge-loop`` and ``forge-rewrite-by-flydsl`` used to be exempt: they
+    dropped unknown options with a warning so a consumer in a separate
+    repository could ship ahead of the installed producer. Vendoring put
+    producer and consumer in one tree, and what the tolerance actually absorbed
+    was typos -- seven shipped examples kept passing the retired spelling of
+    ``--kernel-backend`` and ran an inferred backend, exiting 0 every time (see
+    ``test_rename_completeness``). This pins the exemption shut for every
+    command, including ones added later.
+    """
+    tolerant: list[str] = []
+    for name, cmd in _walk(main):
+        settings = cmd.context_settings or {}
+        if settings.get("ignore_unknown_options") or settings.get("allow_extra_args"):
+            tolerant.append(name)
+        elif getattr(cmd, "ignore_unknown_options", False) or getattr(cmd, "allow_extra_args", False):
+            tolerant.append(name)
+    assert not tolerant, "commands that swallow undeclared options: " + ", ".join(tolerant)

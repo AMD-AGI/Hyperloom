@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
+
 #: Historical collector-only schema retained for archived-reader identification.
 SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
@@ -927,7 +929,6 @@ class ParamSearchLedger(TypedDict, total=False):
         accepted (list[ParamSearchEntry]): Variants that were accepted.
         rejected (list[ParamSearchEntry]): Variants that were rejected.
         top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
-        winner_history (list[dict[str, Any]]): History of winning variants.
         no_promote_streak (int): Consecutive evaluations without a promotion.
     """
 
@@ -936,7 +937,6 @@ class ParamSearchLedger(TypedDict, total=False):
     accepted: list[ParamSearchEntry]
     rejected: list[ParamSearchEntry]
     top_by_gain: list[ParamSearchEntry]
-    winner_history: list[dict[str, Any]]
     no_promote_streak: int
 
 
@@ -948,14 +948,12 @@ class ParamSearch(TypedDict, total=False):
         backends (ParamSearchLedger): Ledger for the backend-tuning family.
         synergy_attempted (list[str]): Synergy combinations that were attempted.
         discovered_flags (dict[str, Any]): Flags discovered during search.
-        backend_winners_history (list[dict[str, Any]]): History of backend winners.
     """
 
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
     discovered_flags: dict[str, Any]
-    backend_winners_history: list[dict[str, Any]]
 
 
 # Sweep
@@ -1068,6 +1066,8 @@ class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
     Attributes:
+        iteration_id (str): Stable session-unique identity for this persisted
+            review pass, including resume-time reuse of ``iter``.
         iter (int): Iteration index.
         ts (str): ISO UTC timestamp of the review.
         topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
@@ -1078,8 +1078,13 @@ class CriticIteration(TypedDict, total=False):
         judge_bundle_path (str): Path to the judge bundle.
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
+        phase (str): Coordinator phase captured with the critic request.
+        macro_cycle (int): Coordinator macro cycle captured with the request.
+        framework_reviews (list[dict[str, Any]]): Durable normalized V6
+            Framework review rows.
     """
 
+    iteration_id: str
     iter: int
     ts: str
     topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
@@ -1089,6 +1094,9 @@ class CriticIteration(TypedDict, total=False):
     judge_bundle_path: str
     emit_path: str
     review_path: str
+    phase: str
+    macro_cycle: int
+    framework_reviews: list[dict[str, Any]]
 
 
 class RobustnessSignal(TypedDict, total=False):
@@ -2929,6 +2937,101 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
+class V6MetadataVersions(TypedDict, total=False):
+    """Version identifiers projected into V6 metadata."""
+
+    schema_version: str
+    hyperloom: str
+    framework: str | None
+    framework_version: str | None
+    tools: dict[str, str | None]
+
+
+class V6MetadataSession(TypedDict, total=False):
+    """Session identity and lifecycle fields exposed by V6 metadata."""
+
+    session_id: str
+    claw_session_id: str | None
+    sandbox_user_id: str | None
+    created_at_utc: str
+    start_ts: str
+    ended_at_utc: str
+    host: str
+    session_dir: str
+    user_data_path: str
+    code_revision: str
+    pid: int
+    max_minutes: int
+    elapsed_minutes: float
+    tick_count: int
+    recovery: dict[str, Any]
+
+
+class V6TaskConfig(TypedDict, total=False):
+    """Launch-time workload and model architecture projected into V6."""
+
+    model_name: str
+    model_path: str
+    framework_name: str
+    framework_version: str
+    gpu_type: str
+    tp: int | None
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    precision: str
+    max_model_len: int | None
+    objective: dict[str, Any]
+    launch_env: dict[str, str]
+    launch_server_args: str
+    architecture: dict[str, Any]
+
+
+class V6Metadata(TypedDict, total=False):
+    """V6 task identity, configuration, versions, and trace entrypoint."""
+
+    exported_at_utc: str
+    versions: V6MetadataVersions
+    session: V6MetadataSession
+    task_config: V6TaskConfig
+    langfuse: dict[str, Any]
+    warnings: list[str]
+
+
+class V6Outcome(TypedDict, total=False):
+    """V6 session result projection for downstream consumers."""
+
+    stop_reason: str
+    status: Literal["completed", "failed", "aborted"]
+    stage_reached: str
+    baseline: dict[str, Any]
+    final: dict[str, Any]
+    validation: dict[str, Any]
+
+
+class V6TimelineEvent(TypedDict, total=False):
+    """One ordered V6 business-stage event; CLOSE is intentionally excluded."""
+
+    type: str
+    kind: str
+    status: str
+    start_time: str
+    end_time: str
+    ext: dict[str, Any]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline."""
+
+    status: Literal["succeeded", "failed", "degraded"]
+    start_time: str
+    end_time: str
+    close_sequence_done: bool
+    steps: list[dict[str, Any]]
+    robustness: dict[str, Any]
+    artifacts: dict[str, Any]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -3026,6 +3129,10 @@ class SessionBreakdown(TypedDict, total=False):
     versions: dict[str, KernelToolMetadata]
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
+    metadata: V6Metadata
+    outcome: V6Outcome
+    timeline: list[V6TimelineEvent]
+    close: V6Close
 
     warnings: list[str]
     source_files: SourceFiles
@@ -3036,6 +3143,7 @@ __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
+    "SCHEMA_VERSION_V6",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -3130,6 +3238,13 @@ __all__ = [
     "TokenUsageAttribution",
     "TokenUsageBucket",
     "TokenUsageTimelineEntry",
+    "V6Metadata",
+    "V6MetadataSession",
+    "V6MetadataVersions",
+    "V6Close",
+    "V6Outcome",
+    "V6TaskConfig",
+    "V6TimelineEvent",
     "Workload",
     "WorkloadObjective",
 ]

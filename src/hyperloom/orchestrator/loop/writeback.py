@@ -15,7 +15,9 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_KERNEL,
     LEVER_UPSTREAM_PR,
+    owner_from_lever,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -87,10 +89,9 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
+# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
 # label rather than under their task kind, because that label is what
-# ``phase_breakdown`` and the action-family table publish. Anything that
-# reconciles a ``framework_agent`` task against the stack has to translate.
+# ``phase_breakdown`` and the action-family table publish.
 _FRAMEWORK_STACK_ACTION = "framework"
 
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
@@ -105,9 +106,33 @@ _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
+    "gemm_tuning": LEVER_KERNEL,
+    "collective": LEVER_KERNEL,
+    "fusion": LEVER_KERNEL,
+    "integrate": LEVER_KERNEL,
+    # Reachable when a session recorded before the action was retired is
+    # resumed and its orphaned KEEPs are reconciled against the stack.
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
+
+
+def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    """Name the lever a settled KEEP moved, reading the delivery first.
+
+    What came back outranks what was asked for: a mandate that goes out naming
+    one lever routinely returns another, and the result carries the applier's
+    own markers.
+    """
+    return patch_lever_kind(result) or patch_lever_kind(task_params)
+
+
+def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    """Name the section a KEEP stages into, preferring the lever it moved."""
+    by_lever = owner_from_lever(_lever_for_keep(task_params, result))
+    if by_lever:
+        return by_lever
+    return str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
 
 
 def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
@@ -1370,7 +1395,7 @@ class WritebackCollaborator:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        # integrate_patch / framework_agent report their delta under ``delta_pct``;
+        # integrate_patch reports its delta under ``delta_pct``;
         # fall back to it so a reverted/kept patch shows its REAL measured delta
         # in the journal instead of a null gain.
         gain_pct = to_float(result_dict.get("gain_pct"))
@@ -2253,6 +2278,7 @@ class WritebackCollaborator:
         task: Task,
         done_payload: dict[str, Any],
         source: str,
+        run_error: str = "",
     ) -> None:
         """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
 
@@ -2261,8 +2287,11 @@ class WritebackCollaborator:
             done_payload: The specialist's done payload (proposal_set, domain,
                 summary, etc.).
             source: The emitting agent string (``specialist:<task_id>``).
+            run_error: Dispatch failure text when the specialist produced no
+                usable payload.
         """
-        domain = str(done_payload.get("domain") or "").strip()
+        task_params = task.params or {}
+        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
@@ -2272,6 +2301,7 @@ class WritebackCollaborator:
             task=task,
             done_payload=done_payload,
             source=source,
+            run_error=run_error,
         )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
@@ -2281,8 +2311,8 @@ class WritebackCollaborator:
                     gap={
                         "domain": domain,
                         "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                        "gap_symptom": (task.params or {}).get("gap_symptom"),
-                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "gap_symptom": task_params.get("gap_symptom"),
+                        "gap_evidence": task_params.get("gap_evidence"),
                         "summary": done_payload.get("summary", ""),
                     },
                     proposals=proposals,
@@ -2329,12 +2359,14 @@ class WritebackCollaborator:
                 {
                     "task_id": task.task_id,
                     "domain": domain,
-                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+                    "gap_canonical_id": str(
+                        done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
+                    ),
                     "empty": is_empty,
                     "proposals_total": len(proposals),
                     "confidence": done_payload.get("confidence"),
                     "summary": str(done_payload.get("summary") or "")[:480],
-                    "reason": str(done_payload.get("reason") or "")[:480],
+                    "reason": str(run_error or done_payload.get("reason") or "")[:480],
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -4089,7 +4121,7 @@ class WritebackCollaborator:
             }
             # The mandate's stamp and the deliverable's markers together;
             # the result wins on a collision.
-            lever_kind = patch_lever_kind({**task_params, **result})
+            lever_kind = _lever_for_keep(task_params, result)
             if lever_kind:
                 lift["lever_kind"] = lever_kind
             if source_phase:
@@ -4175,7 +4207,7 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+            owner = _keep_owner_section(task_params, result)
             if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
                 self._enqueue_agent_keep_outbox(
                     owner=owner,

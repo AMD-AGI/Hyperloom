@@ -35,6 +35,13 @@ In docker mode:
   framework must come from the image. Do **not** use `--skip-base-check`.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
+### Prior workload cleanup (required)
+
+Before any replacement launch after a failed or abandoned demo run (`docker run`,
+`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
+gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
+skip the user-approval step (#1314).
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
@@ -139,18 +146,16 @@ resolved values in the launch plan before starting the optimizer.
 - Phase budget percentages default to:
   - `PHASE_BUDGET_PRELUDE_PCT=0.03`: startup, preflight, baseline setup, and
     initial orchestration.
-  - `PHASE_BUDGET_FRAMEWORK_PCT=0.20`: framework-agent work, including source
-    patching or framework-side exploration.
-  - `PHASE_BUDGET_FRAMEWORK_PCT=0.55`: the OPTIMIZE phase — serving-parameter exploration and
-    benchmark validation.
-  - `PHASE_BUDGET_KERNEL_PCT=0.28`: kernel-agent TraceLens/GEAK/native-kernel
+  - `PHASE_BUDGET_FRAMEWORK_PCT=0.40`: the optimisation phase — serving-parameter
+    search and source/upstream landing, with benchmark validation.
+  - `PHASE_BUDGET_KERNEL_PCT=0.50`: kernel-agent TraceLens/GEAK/native-kernel
     optimization work.
-  - `PHASE_BUDGET_SWEEP_PCT=0.12`: concurrency sweep and final throughput
+  - `PHASE_BUDGET_SWEEP_PCT=0.05`: concurrency sweep and final throughput
     validation around the best candidate.
   - `PHASE_BUDGET_CLOSE_PCT=0.02`: final report, state closeout, and summary
     generation.
-- Phase toggles default to enabled: kernel enabled, explore enabled, framework
-  agent enabled, roofline enabled, and concurrency sweep enabled.
+- Phase toggles default to enabled: kernel, framework agent, framework local
+  exploration, roofline, and concurrency sweep.
 
 Collect these optional advanced values:
 
@@ -321,7 +326,6 @@ OPT_FLAGS=(
 [ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
 [ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
-[ "${NO_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)

@@ -16,7 +16,7 @@ GEMM-tuning spans, which only the live emitter's ``flush_session`` backfills.
 Mapping (trace -> phase span -> agent span -> generation)::
 
     Trace                 = one session
-      phase span          = PRELUDE / EXPLORE / KERNEL_AGENT / SWEEP / ...
+      phase span          = PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...
         agent span        = component (orchestration / kernel_agent /
                             specialist / critic / geak / forge /
                             proposal_scorer / ...)

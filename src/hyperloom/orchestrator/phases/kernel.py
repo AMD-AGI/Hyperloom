@@ -53,12 +53,6 @@ log = _logging.getLogger(__name__)
 # on a developer box that happens to have the real checkout mounted.
 _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 
-# Idempotency key of the same-harness GEAK rebench enqueued by
-# ``_enqueue_internal_stack_rebench``. Doubles as the placeholder that reserves
-# ``geak_pending`` before the task row exists, so the phase guard already sees a
-# pending revalidation while the enqueue is in flight.
-_GEAK_REVALIDATE_IDEMPOTENCY_KEY = "geak-revalidate"
-
 # How much of the route-level lift must survive the share the per-kernel ledger
 # already claims before the residual is worth recording as its own attempt.
 # 0.1% is measurement noise, and a noise-sized keep in the gain ledger reads as
@@ -451,7 +445,7 @@ class KernelPhase(PhaseHandler):
             return
         if geak_enabled:
             # GEAK owns the whole KERNEL_AGENT phase: one in-process e2e run
-            # seeded with the EXPLORE best config, then hand straight to SWEEP.
+            # seeded with the best config so far, then hand straight to SWEEP.
             await self._run_geak_kernel_phase(from_phase=from_phase)
             return
         if not self._gemm_tuning_required_before_kernel_opt():
@@ -726,7 +720,7 @@ class KernelPhase(PhaseHandler):
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run).
 
-        Builds a handoff from the EXPLORE best config, runs the GEAK
+        Builds a handoff from the best config so far, runs the GEAK
         runner out-of-process (it owns all Claude-SDK / Workflow detail),
         records the optimized launch/bench scripts + throughput into state, then
         signals SWEEP via the ``skip_to_sweep`` escalate hint.

@@ -88,6 +88,10 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
+  "metadata":           { /* additive V6 metadata and launch configuration */ },
+  "outcome":            { /* additive V6 terminal result */ },
+  "timeline":           [ /* additive V6 ordered stage events */ ],
+  "close":              { /* additive V6 close-stage result */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
@@ -117,6 +121,13 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 The `session` (SessionMeta) section also carries `user_data_path` and a
 `recovery` sub-object in addition to the fields documented in §3.
+
+The additive V6 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"` while
+the existing top-level V5 contract remains unchanged. Startup source events are
+stored in execution order under `reports/sbd_v6/timeline/`; writer failures are
+reported through `metadata.warnings` rather than being indistinguishable from a
+stage that never ran.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session

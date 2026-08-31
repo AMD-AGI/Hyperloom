@@ -80,14 +80,37 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    # AWS access-key id and compact JWT. Same two shapes the specialist
+    # transcript redactor already matches; kept here so a command that
+    # carries either form is masked whether it went through an assignment
+    # or not.
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
+    # Shell commands quote the value (``PASSWORD="x"``), and a command that has
+    # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
+    # The opening quote is matched separately and re-emitted so the mask keeps
+    # the quoting intact; folding it into the value class instead would end the
+    # match on the first quote and leave the secret readable.
+    #
+    # ``TOKEN`` is a suffix of the identifier (optional ``_`` + digits so
+    # ``HF_TOKEN_2`` still matches), not a substring. A negative lookahead
+    # for IZER / TOKENS still left ``tokenized_requests`` and
+    # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
+    # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
+    # worse than leaving the knob readable. ``API_KEY`` / ``SECRET`` /
+    # ``PASSWORD`` / ``CREDENTIAL`` still allow trailing name characters, so
+    # ``AWS_SECRET_ACCESS_KEY`` is unchanged. A backslash is only excluded
+    # from the value when it precedes a quote, so a JSON-escaped closer is
+    # left in place (the quoting stays balanced) while ``PASSWORD=C:\foo``
+    # is still masked whole.
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)"
-            r"[A-Z0-9_]*\s*[=:]\s*)"
-            r"[^\s,;'\"]+"
+            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"\s*[=:]\s*)"
+            r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
-        r"\1[REDACTED]",
+        r"\1\2[REDACTED]",
     ),
 )
 
