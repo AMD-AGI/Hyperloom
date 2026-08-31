@@ -779,8 +779,10 @@ def _scratch_owner_alive(session_dir: Path) -> bool:
         return False
     try:
         os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    except ProcessLookupError:
         return False
+    except PermissionError:
+        return True  # EPERM proves the pid exists, owned by another uid
     try:
         with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
             current_starttime = fh.read().split()[21]
@@ -924,7 +926,14 @@ def _prepare_worktree_nogit(
 
     def _scaffold(cmds: list[list[str]]) -> bool:
         for cmd in cmds:
-            proc = _run_git(cmd, timeout=60)
+            # 120s, not less: the baseline ``git add -A`` hashes every copied
+            # extension module, and a framework package carries GBs of them.
+            try:
+                proc = _run_git(cmd, timeout=120)
+            except subprocess.TimeoutExpired:
+                log.warning("forge: non-git scaffold git step timed out: %s", cmd)
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                return False
             if proc.returncode != 0:
                 log.warning(
                     "forge: non-git scaffold git init step failed: %s -> %s",

@@ -62,10 +62,12 @@ except ImportError:
 
 try:
     from _task_group_contract import native_operation_key as _native_operation_key
-    from _task_group_contract import _strip_dispatch_decoration as _strip_dispatch_decoration_impl
 except ImportError:
     _native_operation_key = None
-    _strip_dispatch_decoration_impl = None
+
+# Unguarded like the other sibling imports below: a fallback here would silently
+# turn name normalization into the identity and mis-key every kernel lookup.
+from _task_group_contract import _strip_dispatch_decoration
 
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
@@ -2381,9 +2383,7 @@ def _normalize_profiler_op_name(name: str) -> str:
     original = (name or "").strip()
     if not original:
         return ""
-    if _strip_dispatch_decoration_impl is not None:
-        return _strip_dispatch_decoration_impl(original) or original
-    return original
+    return _strip_dispatch_decoration(original) or original
 
 
 def _candidate_keywords(name: str) -> list[str]:

@@ -92,6 +92,24 @@ def test_the_sweep_removes_a_session_with_a_dead_pid(monkeypatch: pytest.MonkeyP
     assert not dead_dir.exists()
 
 
+def test_the_sweep_spares_a_session_owned_by_another_user(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """EPERM from os.kill proves the pid exists; it must not be read as dead."""
+    _on_network_fs(monkeypatch, True)
+    local_root = _local_root(monkeypatch, tmp_path)
+    foreign = local_root / "session-foreign"
+    (foreign / "matmul" / "worktree").mkdir(parents=True)
+    forge_submit._scratch_owner_file(foreign).write_text("4242:0", encoding="ascii")
+
+    def _kill(_pid: int, _sig: int) -> None:
+        raise PermissionError
+
+    monkeypatch.setattr(forge_submit.os, "kill", _kill)
+
+    forge_submit._local_scratch_dir(_durable_attempt(tmp_path, "session-new", "softmax"))
+
+    assert foreign.is_dir()
+
+
 def test_the_sweep_leaves_unrelated_directories_alone(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _on_network_fs(monkeypatch, True)
     local_root = _local_root(monkeypatch, tmp_path)
