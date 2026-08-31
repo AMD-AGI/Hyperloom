@@ -10,6 +10,7 @@ sites depend on.
 
 from __future__ import annotations
 
+import socket
 from pathlib import Path
 
 from hyperloom.common import platform_probe as platform_probe_mod
@@ -212,6 +213,8 @@ def _make_plat():
 
 def test_platform_fingerprint_gpu_block_degrades_stack_survives(monkeypatch):
     """GPU block error must not corrupt the stack block (per-block independence)."""
+    # platform_fingerprint takes no injectable `root`; these error tiers are
+    # unreachable through a fake sysfs tree, so we monkeypatch module globals.
     monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
 
     def _gpu_boom():
@@ -245,3 +248,34 @@ def test_platform_fingerprint_stack_block_degrades_gpu_survives(monkeypatch):
     # table lookup ran rather than producing the error sentinel.
     assert got["gpu"] != {"status": "error"}
     assert "gfx_arch" in got["gpu"]
+
+
+def test_platform_fingerprint_ok_record_shape_and_multi_node_none(monkeypatch):
+    """All-healthy ok record: gpu sub-dict keys, host, and None-vs-False multi_node."""
+    # Same justification as the degrade cases: no injectable root on this entry.
+    fake_stack = {"rocm": "6.0.0", "driver": "amdgpu"}
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
+    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", lambda: 8)
+    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", lambda _env: fake_stack)
+    monkeypatch.setattr(platform_probe_mod, "read_kernel_file", lambda *_a, **_k: None)
+    monkeypatch.delenv("HYPERLOOM_GFX_ARCH", raising=False)
+    monkeypatch.delenv("GFX_ARCH", raising=False)
+    monkeypatch.delenv("GPU_TYPE", raising=False)
+
+    got = platform_fingerprint(gpu_type="mi300x")
+    assert got["status"] == "ok"
+    assert got["host"] == socket.gethostname()
+    assert got["cpu"] == "AMD EPYC"
+    # Default multi_node is None (unset), not an unearned False.
+    assert got["multi_node_session"] is None
+    assert got["gpu"]["host_count"] == 8
+    assert got["gpu"]["gfx_arch"] == "gfx942"
+    assert got["gpu"]["amdgpu_driver"] == "unknown"
+    assert got["stack"] == fake_stack
+
+    got_false = platform_fingerprint(gpu_type="mi300x", multi_node=False)
+    assert got_false["multi_node_session"] is False
+
+    # gpu_type unset + probe=False → gfx_arch falls back to "unknown".
+    got_unknown = platform_fingerprint()
+    assert got_unknown["gpu"]["gfx_arch"] == "unknown"
