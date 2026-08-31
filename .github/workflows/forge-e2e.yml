@@ -20,15 +20,6 @@ on:
         description: "Exact commit SHA to run (defaults to the resolved head_ref)"
         required: false
 
-concurrency:
-  group: >-
-    forge-e2e-${{
-      (github.event_name == 'issue_comment' && !contains(github.event.comment.body, '/retest'))
-      && format('noop-comment-{0}', github.event.comment.id)
-      || (github.event.pull_request.number || github.event.issue.number || github.ref)
-    }}
-  cancel-in-progress: true
-
 permissions:
   contents: read
   statuses: write
@@ -46,7 +37,9 @@ jobs:
         github.event.comment.author_association == 'MEMBER' ||
         github.event.comment.author_association == 'COLLABORATOR')) ||
       (github.event_name == 'pull_request' &&
-       (github.event.action != 'labeled' || github.event.label.name == 'retest') &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'retest' ||
+        github.event.label.name == 'skip-e2e-test') &&
        (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
     # API/file filtering does not need the scarce private-network polling runner.
     runs-on: ubuntu-latest
@@ -194,6 +187,11 @@ jobs:
     if: >-
       needs.resolve.outputs.head_sha != '' &&
       (needs.resolve.outputs.opted_out == 'true' || needs.resolve.outputs.path_skipped == 'true')
+    # Concurrency starts only after resolve has authenticated and parsed the
+    # event. A no-op comment therefore cannot cancel an in-flight GPU job.
+    concurrency:
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
       - name: Close out the Forge E2E status
@@ -219,6 +217,9 @@ jobs:
   e2e:
     needs: resolve
     if: needs.resolve.outputs.run == 'true'
+    concurrency:
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      cancel-in-progress: true
     runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
     timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
     steps:

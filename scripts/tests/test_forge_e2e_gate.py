@@ -96,6 +96,28 @@ def test_workflow_gates_all_pr_backed_retries_but_not_manual_runs() -> None:
     assert 'description="skipped: no Forge-related files changed"' in workflow
 
 
+def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:
+    workflow = (_ROOT / ".github" / "workflows" / "forge-e2e.yml").read_text(encoding="utf-8")
+    workflow_header, jobs = workflow.split("jobs:", 1)
+
+    # Workflow-level concurrency is evaluated before resolve.if and could let
+    # an untrusted or malformed comment cancel an expensive GPU run.
+    assert "concurrency:" not in workflow_header
+    assert "github.event.comment.author_association == 'OWNER'" in jobs
+    assert "github.event.comment.author_association == 'MEMBER'" in jobs
+    assert "github.event.comment.author_association == 'COLLABORATOR'" in jobs
+
+    group = "forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}"
+    assert workflow.count(group) == 2
+    assert workflow.count("cancel-in-progress: true") == 2
+
+    # Adding the opt-out label must reach skipped-status so it can enter the
+    # same resolved concurrency group and cancel an already running workload.
+    labeled_clause = workflow.split("(github.event.action != 'labeled'", 1)[1].split(") &&", 1)[0]
+    assert "github.event.label.name == 'retest'" in labeled_clause
+    assert "github.event.label.name == 'skip-e2e-test'" in labeled_clause
+
+
 def test_legacy_template_entry_point_runs_the_vendored_example() -> None:
     wrapper = (_ROOT / "examples" / "triton-softmax-forge-loop" / "run_example.sh").read_text(encoding="utf-8")
 
