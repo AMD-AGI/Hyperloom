@@ -42,21 +42,6 @@ log = _logging.getLogger(__name__)
 _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
 
 
-def _merge_current_recipe_configs(
-    explore: Mapping[str, Any],
-    framework: Mapping[str, Any],
-    kernel: Mapping[str, Any] | None = None,
-) -> tuple[str, dict[str, str]]:
-    """Merge owner config snapshots, failing on overlapping differences."""
-    owners: list[tuple[str, Mapping[str, Any]]] = [
-        ("explore", explore),
-        ("framework", framework),
-    ]
-    if kernel is not None:
-        owners.append(("kernel", kernel))
-    return _merge_named_current_recipe_configs(owners)
-
-
 def _merge_named_current_recipe_configs(
     owners: list[tuple[str, Mapping[str, Any]]],
 ) -> tuple[str, dict[str, str]]:
@@ -112,6 +97,33 @@ def _merge_named_current_recipe_configs(
                 raise ValueError(f"current Recipe env conflict for {key}: {envs[key]!r} != {value!r} ({owner})")
             envs[key] = value
     return " ".join(token for key in order for token in pairs[key]), envs
+
+
+def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarise how the overlays this replay is about to apply were captured.
+
+    Recorded on the outcome so a reader can tell an overlay set that reproduces
+    its session from one that never could: a capture that could not account for
+    every path, or a KEEP whose gain partly landed outside the framework root,
+    is a known gap rather than a clean replay.
+    """
+
+    def _count(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    rows = [row for row in (sdk_replay.get("provenance") or []) if isinstance(row, Mapping)]
+    overlays = len(sdk_replay.get("patches") or [])
+    if not overlays and not rows:
+        return {}
+    return {
+        "overlays": overlays,
+        "realized": sum(1 for row in rows if row.get("realized")),
+        "incomplete": sum(1 for row in rows if row.get("complete") is False),
+        "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
+    }
 
 
 def _warm_kernel_keep_threshold_pct(state: Any) -> float:
@@ -1093,35 +1105,18 @@ class PreludePhase(PhaseHandler):
         return bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
 
     def _read_current_recipe_replay(self) -> dict[str, Any]:
-        """Load current replay data exclusively through section SDK readers."""
-        from ..knowledge.agent_kb import (
-            ExploreAgentKB,
-            FrameworkAgentKB,
-            KernelAgentKB,
-            RecipeReplayKB,
-        )
+        """Load current replay data exclusively through the column facades."""
+        from ..knowledge.agent_kb import ConfigKB, KernelAgentKB, PatchKB
 
-        explore = ExploreAgentKB.open()
-        framework = FrameworkAgentKB.open()
+        config_kb = ConfigKB.open()
+        patch_kb = PatchKB.open()
         kernel = KernelAgentKB.open()
-        replay = RecipeReplayKB.open()
-        if not all((explore.active, framework.active, kernel.active, replay.active)):
-            raise ValueError("current Recipe SDK readers are unavailable")
+        if not all((config_kb.active, patch_kb.active, kernel.active)):
+            raise ValueError("current Recipe column facades are unavailable")
 
-        config = replay.read_config()
-        if config:
-            args = str(config.get("extra_server_args") or "")
-            envs = dict(config.get("extra_envs") or {})
-        else:
-            # Existing schema-v1 records stored config under owner sections.
-            args, envs = _merge_current_recipe_configs(
-                explore.read_config(),
-                framework.read_config(),
-            )
-            config = {
-                "extra_server_args": args,
-                "extra_envs": envs,
-            }
+        config = config_kb.read()
+        args = str(config.get("extra_server_args") or "")
+        envs = dict(config.get("extra_envs") or {})
         kernel_config = self._preview_current_kernel_config(kernel)
         combined_args, combined_envs = _merge_named_current_recipe_configs(
             [
@@ -1129,47 +1124,29 @@ class PreludePhase(PhaseHandler):
                 ("kernel", kernel_config),
             ]
         )
-        owner_kbs = {"explore": explore, "framework": framework}
-        owner_ref_lists = {owner: kb.read_patches() for owner, kb in owner_kbs.items()}
-        owner_patch_roots = {owner: kb.read_patch_roots() for owner, kb in owner_kbs.items()}
-        timeline = replay.read_patch_timeline()
-        all_owner_refs = [ref for refs in owner_ref_lists.values() for ref in refs]
+        # The column records its overlays in replay order, so the recorded
+        # order is the order they are applied in.
+        timeline = patch_kb.read_patches()
         if len(timeline) != len(set(timeline)):
-            raise ValueError("current Recipe patch_timeline contains duplicate refs")
-        if len(all_owner_refs) != len(set(all_owner_refs)):
-            raise ValueError("current Recipe owner patch lists contain duplicate refs")
-        timeline_refs = set(timeline)
-        section_refs = set(all_owner_refs)
-        if timeline_refs != section_refs:
-            missing = sorted(section_refs - timeline_refs)
-            extra = sorted(timeline_refs - section_refs)
-            raise ValueError(
-                f"current Recipe patch_timeline must exactly equal owner refs; missing={missing!r} extra={extra!r}"
-            )
-        owner_refs = {owner: set(refs) for owner, refs in owner_ref_lists.items()}
+            raise ValueError("current Recipe patch refs contain a duplicate")
         patches: list[dict[str, Any]] = []
         for index, ref in enumerate(timeline):
-            owner = Path(ref).parts[0] if Path(ref).parts else ""
-            kb = owner_kbs.get(owner)
-            if kb is None:
-                raise ValueError(f"current Recipe timeline has unsupported owner: {ref!r}")
-            if ref not in owner_refs[owner]:
-                raise ValueError(f"current Recipe timeline ref is absent from value.{owner}: {ref!r}")
-            source = kb.prior_file(ref)
+            source = patch_kb.prior_file(ref)
             if source is None:
-                raise ValueError(f"current Recipe timeline artifact is unavailable: {ref!r}")
-            recorded_root = str(owner_patch_roots.get(owner, {}).get(ref) or "").strip()
-            patch_entry: dict[str, Any] = {
-                "patch_file": ref,
-                "patch_ref": str(source),
-                "patch_content": "",
-                "measured_gain_pct": 1e-6,
-                "required": True,
-                "timeline_index": index,
-            }
-            if recorded_root:
-                patch_entry["framework_root"] = recorded_root
-            patches.append(patch_entry)
+                raise ValueError(f"current Recipe patch artifact is unavailable: {ref!r}")
+            # No recorded apply root: the capturing host's path means nothing
+            # here, so the root is resolved locally by
+            # ``resolve_warm_replay_framework_root``.
+            patches.append(
+                {
+                    "patch_file": ref,
+                    "patch_ref": str(source),
+                    "patch_content": "",
+                    "measured_gain_pct": 1e-6,
+                    "required": True,
+                    "timeline_index": index,
+                }
+            )
         return {
             "extra_server_args": args,
             "extra_envs": envs,
@@ -1179,6 +1156,7 @@ class PreludePhase(PhaseHandler):
             "timeline": timeline,
             "patches": patches,
             "kernel_kb": kernel,
+            "provenance": patch_kb.read_provenance(),
         }
 
     async def _maybe_enqueue_warm_replay(
@@ -1634,6 +1612,7 @@ class PreludePhase(PhaseHandler):
             "replay_task_id": task.task_id,
             "kernel_count": len(kernel_pending),
             "recipe_suppressed": recipe_suppressed,
+            **({"overlay_provenance": summary} if (summary := _overlay_provenance_summary(sdk_replay)) else {}),
             **donor_metadata,
         }
         state.warm_replay_pending = {

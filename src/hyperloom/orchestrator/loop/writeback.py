@@ -71,7 +71,7 @@ from ..actions.executors._accuracy_gate import (
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
 )
-from ..knowledge.agent_kb import ExploreAgentKB, FrameworkAgentKB
+from ..knowledge.agent_kb import PatchKB
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -379,35 +379,38 @@ class WritebackCollaborator:
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
+        provenance: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Stage one KEEP into its owner section.
+        """Stage one KEEP into the patch column.
 
-        Returns ``False`` when patch staging must be retried. Final config is
-        published once from durable ``current_best`` at CLOSE.
+        Returns ``False`` when staging must be retried. The overlay bytes are
+        captured now rather than at CLOSE because the worktree they were
+        harvested from does not outlive the round. Config and kernel are
+        published once from the settled stack at CLOSE.
         """
-        normalized = str(owner or "").strip().upper()
-        facade = (
-            ExploreAgentKB.open()
-            if normalized == "EXPLORE"
-            else FrameworkAgentKB.open()
-            if normalized == "FRAMEWORK_AGENT"
-            else None
-        )
-        if facade is None or not facade.active:
+        if not str(owner or "").strip():
+            return False
+        patch_kb = PatchKB.open()
+        if not patch_kb.active:
             return False
         sources, missing = self._keep_patch_sources(result, task)
         if include_patches and missing:
             log.warning(
-                "%s kb: KEEP at stack index %d references missing patch members: %s",
-                normalized,
+                "patch kb: KEEP at stack index %d references missing patch members: %s",
                 stack_index,
                 missing,
             )
             return False
-        if include_patches and sources:
-            refs = facade.stage_patches(sources, stack_index=stack_index)
+        if not include_patches:
+            return True
+        if sources:
+            refs = patch_kb.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
+        # How the overlay was captured travels with it, so a later session can
+        # tell a complete capture from one that could not account for every path.
+        if provenance and not patch_kb.stage_provenance(stack_index=stack_index, **dict(provenance)):
+            return False
         return True
 
     def _enqueue_agent_keep_outbox(
@@ -431,6 +434,13 @@ class WritebackCollaborator:
         if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
             return
         sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
+        # The realized diff is what the tree ended up holding, so it replaces the
+        # delivered patch rather than joining it -- staging both would apply the
+        # same change twice. It is chosen here, not at drain, because drain only
+        # ever sees the row.
+        realized = Path(str(result.get("source_realized_patch") or "").strip() or ".")
+        if include_patches and realized.is_file():
+            sources, missing = [realized], []
         row = {
             "id": f"{normalized}:{int(stack_index)}",
             "owner": normalized,
@@ -438,6 +448,12 @@ class WritebackCollaborator:
             "include_patches": bool(include_patches),
             "patch_sources": [str(path) for path in sources],
             "missing_patch_sources": missing,
+            "provenance": {
+                "base_sha": str(result.get("base_sha") or ""),
+                "complete": bool(result.get("source_snapshot_complete", True)),
+                "artifacts_outside_root": int(result.get("source_artifacts_outside_root") or 0),
+                "realized": bool(include_patches and realized.is_file()),
+            },
         }
         outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
@@ -503,6 +519,7 @@ class WritebackCollaborator:
                 result={"patches": list(row.get("patch_sources") or [])},
                 task=task,
                 include_patches=bool(row.get("include_patches")),
+                provenance=row.get("provenance"),
             ):
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained

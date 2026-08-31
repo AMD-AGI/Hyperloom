@@ -43,7 +43,7 @@ def test_each_backend_reads_back_its_own_sub_column(tmp_path: Path) -> None:
                 "rewrite": {"items": [{"patch": "kernel/rewrite/a.diff"}]},
                 "gemm": {"items": ["tuned"]},
             },
-            "explore": {"extra_server_args": "--page-size 32"},
+            "config": {"extra_server_args": "--page-size 32"},
         },
     )
     kb = _kb(tmp_path)
@@ -54,7 +54,7 @@ def test_each_backend_reads_back_its_own_sub_column(tmp_path: Path) -> None:
 
 
 def test_a_record_without_the_kernel_column_reads_as_a_cold_start(tmp_path: Path) -> None:
-    _warm_record(tmp_path, {"explore": {"extra_server_args": "--page-size 32"}})
+    _warm_record(tmp_path, {"config": {"extra_server_args": "--page-size 32"}})
     kb = _kb(tmp_path)
 
     assert kb.read_gemm() == {}

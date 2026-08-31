@@ -67,8 +67,8 @@ remote write.
 Remote mode does not construct a `RecipeKB` dispatcher. It selects a current
 Recipe View, performs bounded seven-tuple identity search when an exact record
 is unavailable, and downloads the selected session's verified file manifest.
-PRELUDE replays the combined config, ordered Explore/Framework overlays, and
-Kernel section in one validation task. Runtime legacy amendments are no-ops,
+PRELUDE replays the Config column, the ordered Patch column overlays, and the
+Kernel column in one validation task. Runtime legacy amendments are no-ops,
 and CLOSE calls the KB Store final-session writer once. No local `recipe.json`,
 history, or attempt data is created. A KB Store transport failure is logged and
 remains non-fatal; invalid or missing startup configuration fails before the

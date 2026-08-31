@@ -365,6 +365,53 @@ def _git_commit_kept(
     return False, cp.stderr.strip()
 
 
+def harvest_realized_diff(
+    framework_root: Path,
+    rel_paths: list[str],
+    dest_path: Path,
+) -> str:
+    """Render what a KEEP actually landed as one canonical ``-p1`` diff.
+
+    The patch a specialist delivered is what it *asked* for; this is what the
+    tree ended up holding, which differs whenever the apply resolved at another
+    strip level or the KEEP created a file the diff never named. Publishing the
+    realized form is what lets a later session replay the change without having
+    to re-derive the strip level.
+
+    Read from the KEEP's own commit rather than the working tree: by this point
+    :func:`_git_commit_kept` has already committed exactly these paths, so the
+    commit *is* the realized change and nothing has to touch the index of a
+    checkout other work is still using.
+
+    Args:
+        framework_root: The git checkout the KEEP was committed in.
+        rel_paths: Repo-relative paths the KEEP touched.
+        dest_path: Where to write the diff; written only when non-empty.
+
+    Returns:
+        The path written, or ``""`` when there is nothing to harvest, the commit
+        has no parent to diff against, or git could not be run.
+    """
+    paths = [path for path in (str(raw or "").strip() for raw in rel_paths) if path]
+    if not paths:
+        return ""
+    cp = _run_git_cp(
+        ["-C", str(framework_root), "diff", "HEAD^", "HEAD", "--", *paths],
+        timeout=120.0,
+    )
+    if cp is None or cp.returncode != 0:
+        return ""
+    text = cp.stdout or ""
+    if not text.strip():
+        return ""
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        dest_path.write_text(text, encoding="utf-8")
+    except OSError:
+        return ""
+    return str(dest_path)
+
+
 __all__ = [
     "_commit_strip_level",
     "_create_patch_snapshot",
@@ -373,4 +420,5 @@ __all__ = [
     "_patch_touched_paths_from_text",
     "_patch_touched_paths_split",
     "_restore_patch_snapshot",
+    "harvest_realized_diff",
 ]

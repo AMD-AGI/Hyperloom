@@ -24,7 +24,11 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
 )
 from .models import (
+    CONFIG_SECTION,
+    KERNEL_SECTION,
     MAX_FILE_BYTES,
+    PATCH_SECTION,
+    RECIPE_SECTIONS,
     Artifact,
     KnowledgeBundle,
     RecipeScope,
@@ -66,7 +70,7 @@ _SOURCE_METADATA_KEYS = (
     "target_files",
 )
 _IGNORED_ACTIONS = {"replay_warm_recipe", "profile", "roofline", "conc_sweep", "sweep"}
-_OVERLAY_REF_RE = re.compile(r"^(explore|framework)/overlays/(\d{6})/(\d+)-([^/]+)\.patch$")
+_OVERLAY_REF_RE = re.compile(r"^patch/overlays/(\d{6})/(\d+)-([^/]+)\.patch$")
 _OVERLAY_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -258,72 +262,48 @@ class _Files:
         self.artifacts = retained
 
 
-#: Lever -> published section. The section names are the phases that used to own
-#: each lever; they are kept because they are on the wire, and they were always
-#: really "configuration" and "source" under a phase's name. Routing on the
-#: lever restores that meaning now that one phase carries both -- otherwise
-#: every entry would land in ``framework`` and ``explore`` would sit empty.
-_SECTION_BY_LEVER = {
-    LEVER_CONFIG: "explore",
-    LEVER_SOURCE_PATCH: "framework",
-    LEVER_UPSTREAM_PR: "framework",
-    LEVER_ENABLEMENT: "framework",
-}
+#: Levers that never belong to the kernel column. They are consulted before the
+#: phase because config and source work can both be dispatched from inside the
+#: kernel phase, so the phase alone does not say which column owns an entry.
+_NON_KERNEL_LEVERS = frozenset(
+    {
+        LEVER_CONFIG,
+        LEVER_ENABLEMENT,
+        LEVER_SOURCE_PATCH,
+        LEVER_UPSTREAM_PR,
+    }
+)
+_KERNEL_ACTIONS = frozenset(
+    {
+        "fusion",
+        "geak_e2e",
+        "gemm_tuning",
+        "integrate",
+        "kernel_opt",
+    }
+)
 
 
-def _entry_origin(entry: Mapping[str, Any]) -> str:
+def _is_kernel_entry(entry: Mapping[str, Any]) -> bool:
+    """Whether a stack entry belongs to the kernel column.
+
+    Kernel work is published from its own sub-columns, so the same entry must
+    not also land in the config layer and be replayed twice.
+    """
+    if patch_lever_kind(entry) in _NON_KERNEL_LEVERS:
+        return False
     action = str(entry.get("action") or "").strip().lower()
-    lever_section = _SECTION_BY_LEVER.get(patch_lever_kind(entry))
-    if lever_section:
-        return lever_section
+    if action in ("explore", "framework"):
+        return False
     # Pre-``lever_kind`` rows fall back to the phase that recorded them.
     phase = (
         patch_owner_phase(entry)
         if action.startswith("integrate_patch")
         else str(entry.get("source_phase") or "").strip().upper()
     )
-    # Action before phase: both levers run inside FRAMEWORK_AGENT, so the
-    # phase alone would file every config win under ``framework``.
-    if action == "framework":
-        return "framework"
-    if action == "explore":
-        return "explore"
-    if phase == "FRAMEWORK_AGENT":
-        return "framework"
-    if phase == "EXPLORE":
-        return "explore"
-    if phase in ("KERNEL", "KERNEL_AGENT") or action in (
-        "geak_e2e",
-        "gemm_tuning",
-        "fusion",
-        "integrate",
-        "kernel_opt",
-    ):
-        return "kernel"
-    return ""
-
-
-def _config_from(entries: list[dict[str, Any]]) -> dict[str, Any]:
-    if not entries:
-        return {"extra_server_args": "", "extra_envs": {}}
-    source: Mapping[str, Any] = entries[-1]
-    args = str(
-        source.get("effective_extra_server_args")
-        or source.get("extra_server_args")
-        or source.get("candidate_extra_server_args")
-        or ""
-    ).strip()
-    envs: dict[str, Any] = {}
-    for entry in entries:
-        for key in entry.get("unset_envs") or []:
-            envs.pop(str(key), None)
-        envs.update(_mapping(entry.get("extra_envs")))
-    if not envs:
-        envs = _mapping(source.get("extra_envs"))
-    return {
-        "extra_server_args": sanitize_publish_server_args(args),
-        "extra_envs": sanitize_publish_env_mapping(envs),
-    }
+    if phase in ("EXPLORE", "FRAMEWORK_AGENT"):
+        return False
+    return phase in ("KERNEL", "KERNEL_AGENT") or action in _KERNEL_ACTIONS
 
 
 def _apply_recipe_delta(
@@ -388,7 +368,7 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
             or entry.get("baseline_enablement")
             or entry.get("attribution_eligible") is False
             or entry.get("recipe_publishable") is False
-            or _entry_origin(entry) == "kernel"
+            or _is_kernel_entry(entry)
         ):
             continue
         delta = _mapping(entry.get("recipe_delta"))
@@ -411,96 +391,6 @@ def build_publishable_recipe_config(state: Any) -> dict[str, Any]:
         "extra_server_args": sanitize_publish_server_args(str(config.get("extra_server_args") or "")),
         "extra_envs": sanitize_publish_env_mapping(_mapping(config.get("extra_envs"))),
     }
-
-
-def _entry_files(
-    entries: list[dict[str, Any]], files: _Files, category: str
-) -> tuple[list[str], list[str], dict[str, str]]:
-    patches: list[str] = []
-    artifacts: list[str] = []
-    patch_roots: dict[str, str] = {}
-    for entry in entries:
-        try:
-            stack_index = int(entry.get("__stack_index", -1))
-        except (TypeError, ValueError):
-            stack_index = -1
-        patch_member = 0
-        seen_patch_sources: set[str] = set()
-        entry_framework_root = str(entry.get("framework_root") or "").strip()
-
-        def add_value(raw: Any, *, kind: str) -> str:
-            nonlocal patch_member
-            if kind != "patches" or stack_index < 0:
-                return files.add(raw, category=category, kind=kind)
-            source = Path(str(raw or ""))
-            if not source.is_file():
-                return ""
-            source_key = str(source.resolve())
-            if source_key in seen_patch_sources:
-                return ""
-            seen_patch_sources.add(source_key)
-            stem = source.name
-            for suffix in (".patch", ".diff"):
-                if stem.lower().endswith(suffix):
-                    stem = stem[: -len(suffix)]
-                    break
-            safe_name = _OVERLAY_NAME_RE.sub("-", stem).strip("._-") or "patch"
-            rel = f"{category}/overlays/{stack_index:06d}/{patch_member:02d}-{safe_name}.patch"
-            patch_member += 1
-            return files.adopt(source, rel)
-
-        for key in _PATH_KEYS:
-            raw = entry.get(key)
-            if not raw:
-                continue
-            kind = "patches" if "patch" in key else "artifacts"
-            ref = add_value(raw, kind=kind)
-            if ref:
-                (patches if kind == "patches" else artifacts).append(ref)
-                if kind == "patches" and entry_framework_root:
-                    patch_roots.setdefault(ref, entry_framework_root)
-        for key in _PATH_LIST_KEYS:
-            raw_values = entry.get(key) or []
-            if isinstance(raw_values, (str, Path)):
-                raw_values = [raw_values]
-            if not isinstance(raw_values, (list, tuple, set)):
-                continue
-            kind = "patches" if "patch" in key else "artifacts"
-            for raw in raw_values:
-                ref = add_value(raw, kind=kind)
-                if ref:
-                    (patches if kind == "patches" else artifacts).append(ref)
-                    if kind == "patches" and entry_framework_root:
-                        patch_roots.setdefault(ref, entry_framework_root)
-    # first-wins, matching the dedupe below: a ref shared by two entries keeps
-    # the root of the one whose position it also keeps.
-    return list(dict.fromkeys(patches)), list(dict.fromkeys(artifacts)), patch_roots
-
-
-def _section_value(patches: list[str], artifacts: list[str], patch_roots: dict[str, str]) -> dict[str, Any]:
-    """Assemble one owner section, omitting ``patch_roots`` when nothing recorded one."""
-    value: dict[str, Any] = {"patches": patches, "artifacts": artifacts}
-    if patch_roots:
-        value["patch_roots"] = patch_roots
-    return value
-
-
-def build_explore_value(
-    state: Any,
-    entries: list[dict[str, Any]],
-    files: _Files,
-) -> dict[str, Any]:
-    """Build EXPLORE-origin patch and artifact references."""
-    return _section_value(*_entry_files(entries, files, "explore"))
-
-
-def build_framework_value(
-    state: Any,
-    entries: list[dict[str, Any]],
-    files: _Files,
-) -> dict[str, Any]:
-    """Build FRAMEWORK-origin patch and artifact references."""
-    return _section_value(*_entry_files(entries, files, "framework"))
 
 
 def _externalize_record(
@@ -828,21 +718,12 @@ def _adopt_replayed_prior(
     )
     if replay_index < 0:
         raise RemoteRecipeValidationError("replayed prior overlays have no replay_warm_recipe stack entry")
-    prior_timeline = prior_value.get("patch_timeline")
-    candidates: list[tuple[str, str]] = []
-    if isinstance(prior_timeline, list):
-        for row in prior_timeline:
-            ref = str(row or "")
-            owner = ref.split("/", 1)[0].lower()
-            if owner in {"explore", "framework"} and ref in replayed_refs:
-                candidates.append((owner, ref))
-    if not candidates:
-        for owner in ("explore", "framework"):
-            for ref in _mapping(prior_value.get(owner)).get("patches") or []:
-                if str(ref) in replayed_refs:
-                    candidates.append((owner, str(ref)))
-    candidate_refs = {ref for _owner, ref in candidates}
-    missing_metadata = replayed_refs - candidate_refs
+    # The prior column already lists its overlays in replay order, so the order
+    # they are re-adopted in is the order they were replayed in.
+    candidates = [
+        str(ref) for ref in (_mapping(prior_value.get(PATCH_SECTION)).get("patches") or []) if str(ref) in replayed_refs
+    ]
+    missing_metadata = replayed_refs - set(candidates)
     if missing_metadata:
         raise RemoteRecipeValidationError(
             f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
@@ -854,7 +735,7 @@ def _adopt_replayed_prior(
     if files_root.is_symlink():
         raise RemoteRecipeValidationError("replayed prior files root must not be a symlink")
     resolved_root = files_root.resolve()
-    for owner, old_ref in candidates:
+    for old_ref in candidates:
         if old_ref in seen:
             continue
         seen.add(old_ref)
@@ -880,43 +761,22 @@ def _adopt_replayed_prior(
                 f"cannot read successfully replayed prior overlay {old_ref!r}: {exc}"
             ) from exc
         match = _OVERLAY_REF_RE.match(old_ref)
-        old_name = match.group(4) if match else source.stem
+        old_name = match.group(3) if match else source.stem
         safe_name = _OVERLAY_NAME_RE.sub("-", old_name).strip("._-") or "patch"
-        new_ref = f"{owner}/overlays/{replay_index:06d}/{member_index:02d}-{safe_name}.patch"
+        new_ref = f"{PATCH_SECTION}/overlays/{replay_index:06d}/{member_index:02d}-{safe_name}.patch"
         try:
             files.adopt(source, new_ref)
         except (OSError, ValueError) as exc:
             raise RemoteRecipeValidationError(
                 f"cannot adopt successfully replayed prior overlay {old_ref!r}: {exc}"
             ) from exc
-        node = _mapping(value.get(owner))
+        node = _mapping(value.get(PATCH_SECTION))
         refs = [str(ref) for ref in (node.get("patches") or []) if str(ref)]
         if new_ref not in refs:
             refs.append(new_ref)
-        node["patches"] = refs
-        value[owner] = node
+        node["patches"] = sorted(refs)
+        value[PATCH_SECTION] = node
         member_index += 1
-
-
-def _patch_timeline(value: Mapping[str, Any]) -> list[str]:
-    """Build the global replay order from section overlay refs."""
-    rows: list[tuple[int, int, str, str]] = []
-    seen: set[str] = set()
-    for owner in ("explore", "framework"):
-        node = _mapping(value.get(owner))
-        for raw_ref in node.get("patches") or []:
-            ref = str(raw_ref or "")
-            match = _OVERLAY_REF_RE.match(ref)
-            if match is None or match.group(1) != owner:
-                raise RemoteRecipeValidationError(f"value.{owner}.patches contains an invalid overlay ref: {ref!r}")
-            if ref in seen:
-                raise RemoteRecipeValidationError(f"owner patch refs contain a duplicate: {ref!r}")
-            seen.add(ref)
-            stack_index = int(match.group(2))
-            member_index = int(match.group(3))
-            rows.append((stack_index, member_index, owner, ref))
-    rows.sort()
-    return [ref for _stack_index, _member_index, _owner, ref in rows]
 
 
 def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:
@@ -1016,6 +876,28 @@ def _adopt_prior_kernel(
     value["kernel"] = kernel
 
 
+def _validate_patch_column(value: Mapping[str, Any]) -> None:
+    """Fail closed on an overlay ref the replay order cannot be derived from.
+
+    The refs carry the stack and member index the column is ordered by, so a
+    malformed one would silently reorder or drop an overlay on replay.
+    """
+    refs = _mapping(value.get(PATCH_SECTION)).get("patches") or []
+    seen: set[str] = set()
+    for raw_ref in refs:
+        ref = str(raw_ref or "")
+        if _OVERLAY_REF_RE.match(ref) is None:
+            raise RemoteRecipeValidationError(f"value.{PATCH_SECTION}.patches contains an invalid overlay ref: {ref!r}")
+        if ref in seen:
+            raise RemoteRecipeValidationError(f"value.{PATCH_SECTION}.patches contains a duplicate: {ref!r}")
+        seen.add(ref)
+
+
+def _is_ref_list(value: Any) -> bool:
+    """Whether ``value`` is a flat list of refs, so two producers can be unioned."""
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
 def merge_staged_sections(
     value: dict[str, Any],
     sections: Any,
@@ -1024,7 +906,14 @@ def merge_staged_sections(
     only: Collection[str] | None = None,
     required: Collection[str] | None = None,
 ) -> list[str]:
-    """Merge staged patch and artifact refs into their owner sections."""
+    """Merge each staged column into ``value``, adopting the files it names.
+
+    A column owns its own shape, so the staged knowledge map is carried across
+    whole rather than reduced to a known set of keys. Only ref *lists* are
+    unioned with what ``value`` already holds, because those are the one place
+    two producers legitimately contribute to the same column: an adopted prior
+    overlay and a freshly staged one.
+    """
     merged: list[str] = []
     required_names = set(required or ())
     for name in sections.sections():
@@ -1047,19 +936,7 @@ def merge_staged_sections(
                 if source.is_file() and not source.is_symlink()
             ]
             staged_paths = {rel for _, rel in staged_files}
-            staged_refs = (
-                {
-                    str(ref)
-                    for key in ("patches", "artifacts")
-                    for ref in (staged.knowledge.get(key) or [])
-                    if str(ref).strip()
-                }
-                if name in required_names
-                else extract_knowledge_artifact_refs(
-                    staged.knowledge,
-                    staged_paths,
-                )
-            )
+            staged_refs = extract_knowledge_artifact_refs(staged.knowledge, staged_paths)
             missing = staged_refs - staged_paths
             orphaned = staged_paths - staged_refs
             if missing or orphaned:
@@ -1070,17 +947,13 @@ def merge_staged_sections(
                 files.validate_adoption(source, rel)
             for source, rel in staged_files:
                 files.adopt(source, rel)
-            current = value.get(name)
-            combined = {
-                "patches": (list(current.get("patches") or []) if isinstance(current, Mapping) else []),
-                "artifacts": (list(current.get("artifacts") or []) if isinstance(current, Mapping) else []),
-            }
-            # Owner sections contain patch/artifact refs only.
-            for ref_key in ("patches", "artifacts"):
-                before = list(current.get(ref_key) or []) if isinstance(current, Mapping) else []
-                after = list(staged.knowledge.get(ref_key) or [])
-                if before or after:
-                    combined[ref_key] = list(dict.fromkeys(str(ref) for ref in [*before, *after] if str(ref)))
+            current = value.get(name) if isinstance(value.get(name), Mapping) else {}
+            combined = dict(staged.knowledge)
+            for ref_key, before in current.items():
+                after = combined.get(ref_key, [])
+                if not _is_ref_list(before) or not _is_ref_list(after):
+                    continue
+                combined[ref_key] = list(dict.fromkeys(str(ref) for ref in [*before, *after] if str(ref)))
             value[name] = combined
             merged.append(name)
         except Exception as exc:
@@ -1097,7 +970,16 @@ def build_remote_knowledge(
     *,
     sections: Any = None,
 ) -> KnowledgeBundle:
-    """Construct the final opaque knowledge document and temporary files tree."""
+    """Construct the final opaque knowledge document and temporary files tree.
+
+    Every column is staged through its own facade and then merged, so this owns
+    the assembly rule and none of the columns' shapes. ``config`` and ``kernel``
+    are published here from the settled stack; ``patch`` was staged member by
+    member as each KEEP landed, because its bytes do not outlive the worktree
+    they came from.
+    """
+    if sections is None:
+        raise RemoteRecipeValidationError("a Recipe can only be built from a staged draft")
     scope = RecipeScope.from_state(state)
     pending_sections = list(getattr(state, "kb_stage_outbox", []) or [])
     blocking_sections = [
@@ -1124,12 +1006,6 @@ def build_remote_knowledge(
         for index, item in enumerate(getattr(state, "optimization_stack", []) or [])
         if isinstance(item, Mapping)
     ]
-    # ``kb_required_owner`` is a recorded phase label; both spellings still map
-    # to their section so a resumed pre-merge session stages correctly.
-    owner_names = {
-        "EXPLORE": "explore",
-        "FRAMEWORK_AGENT": "framework",
-    }
     dropped_entries: set[tuple[str, int]] = set()
     for row in dropped_sections:
         try:
@@ -1137,69 +1013,44 @@ def build_remote_knowledge(
         except (TypeError, ValueError):
             continue
         dropped_entries.add((str(row.get("owner") or "").upper(), stack_index))
-    required_patch_owners = {
-        owner_names[owner]
-        for item in stack
-        if (owner := str(item.get("kb_required_owner") or "").upper()) in owner_names
+    # ``config`` and ``kernel`` are staged unconditionally just below, so only
+    # ``patch`` is conditional: a KEEP that harvested overlays demands it, and a
+    # record published without them would replay a weaker stack than measured.
+    required_columns = {CONFIG_SECTION, KERNEL_SECTION}
+    if any(
+        (owner := str(item.get("kb_required_owner") or "").strip().upper())
         and (owner, int(item["__stack_index"])) not in dropped_entries
-    }
-    explore_entries = [item for item in stack if _entry_origin(item) == "explore"]
-    framework_entries = [item for item in stack if _entry_origin(item) == "framework"]
+        for item in stack
+    ):
+        required_columns.add(PATCH_SECTION)
     current_best = _mapping(getattr(state, "current_best", {}))
     optimized_throughput = _number(current_best.get("tput"))
     validated_gain = _number(getattr(state, "cumulative_gain_validated", 0.0))
     gains = list(getattr(state, "gain_per_stack_entry", []) or [])
     worked = _experience(state, "what_worked") or _worked_from_stack(stack, gains)
-    if sections is None:
-        # Legacy callers without section staging retain their stack-derived
-        # owner snapshots; remote current records use value.config below.
-        explore_value = build_explore_value(state, explore_entries, files)
-        framework_value = build_framework_value(state, framework_entries, files)
-        explore_value.update(_config_from(explore_entries))
-        framework_value.update(_config_from(framework_entries))
-    else:
-        explore_value = {"patches": [], "artifacts": []}
-        framework_value = {"patches": [], "artifacts": []}
-    kernel_value = (
-        {
-            "gemm": {"optimizations": []},
-            "fusion": {"items": []},
-            "rewrite": {"items": []},
-        }
-        if scope.kernel_optimizer == "geak"
-        else {
-            "gemm": build_kernel_gemm_value(state, files),
-            "fusion": build_kernel_fusion_value(state, files),
-            "rewrite": build_kernel_rewrite_value(state, files),
-        }
+
+    from ..agent_kb import ConfigKB, KernelAgentKB
+
+    ConfigKB(sections).stage(build_publishable_recipe_config(state))
+    KernelAgentKB(sections).stage_from_state(state, kernel_optimizer=scope.kernel_optimizer)
+
+    value: dict[str, Any] = {name: {} for name in RECIPE_SECTIONS}
+    staged_sections = merge_staged_sections(
+        value,
+        sections,
+        files,
+        only=RECIPE_SECTIONS,
+        required=required_columns,
     )
-    value = {
-        "config": build_publishable_recipe_config(state),
-        "explore": explore_value,
-        "framework": framework_value,
-        "kernel": kernel_value,
-    }
-    if sections is not None:
-        _adopt_replayed_prior(state, sections, value, files, stack)
-        if scope.kernel_optimizer == "forge":
-            _adopt_prior_kernel(state, sections, value, files)
-    staged_sections = (
-        merge_staged_sections(
-            value,
-            sections,
-            files,
-            only=("explore", "framework"),
-            required=required_patch_owners,
-        )
-        if sections is not None
-        else []
-    )
-    missing_required_owners = required_patch_owners - set(staged_sections)
-    if missing_required_owners:
-        raise RemoteRecipeValidationError(
-            f"required staged owner sections are missing: {sorted(missing_required_owners)!r}"
-        )
-    value["patch_timeline"] = _patch_timeline(value)
+    missing_columns = required_columns - set(staged_sections)
+    if missing_columns:
+        raise RemoteRecipeValidationError(f"required staged columns are missing: {sorted(missing_columns)!r}")
+    # Carrying the prior record forward runs last: it unions rows and refs into
+    # the assembled columns, so it must see what staging already contributed.
+    _adopt_replayed_prior(state, sections, value, files, stack)
+    if scope.kernel_optimizer == "forge":
+        _adopt_prior_kernel(state, sections, value, files)
+    _validate_patch_column(value)
     knowledge = sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -1239,25 +1090,13 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
     value = _mapping(knowledge.get("value"))
     if not value:
         return False
-    config = _mapping(value.get("config"))
+    config = _mapping(value.get(CONFIG_SECTION))
     if str(config.get("extra_server_args") or "").strip() or _mapping(config.get("extra_envs")):
         return True
-    # Legacy records stored config under owner sections.
-    for section_name in ("explore", "framework"):
-        section = _mapping(value.get(section_name))
-        if not section:
-            continue
-        if str(section.get("extra_server_args") or "").strip():
-            return True
-        envs = section.get("extra_envs")
-        if isinstance(envs, Mapping) and envs:
-            return True
-        for material in ("patches", "artifacts"):
-            items = section.get(material)
-            if isinstance(items, list) and items:
-                return True
-    timeline = value.get("patch_timeline")
-    if isinstance(timeline, list) and timeline:
+    # ``provenance`` is deliberately not consulted: it describes the overlays
+    # rather than being replayable itself.
+    patches = _mapping(value.get(PATCH_SECTION)).get("patches")
+    if isinstance(patches, list) and patches:
         return True
 
     def _nonempty(raw: Any) -> bool:
@@ -1267,7 +1106,7 @@ def has_replay_material(document: Mapping[str, Any]) -> bool:
             return any(_nonempty(item) for item in raw)
         return bool(raw)
 
-    return _nonempty(value.get("kernel"))
+    return _nonempty(value.get(KERNEL_SECTION))
 
 
 def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -1285,13 +1124,13 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(raw_value, Mapping):
         raise RemoteRecipeValidationError("current Recipe is missing value")
     value = dict(raw_value)
-    for section in ("explore", "framework", "kernel"):
+    for section in RECIPE_SECTIONS:
         if not isinstance(value.get(section), Mapping):
             raise RemoteRecipeValidationError(f"current Recipe is missing value.{section}")
-    raw_timeline = value.get("patch_timeline")
-    if not isinstance(raw_timeline, list) or not all(isinstance(ref, str) for ref in raw_timeline):
-        raise RemoteRecipeValidationError("current Recipe value.patch_timeline must be a flat string list")
-    for ref in raw_timeline:
+    raw_patches = _mapping(value.get(PATCH_SECTION)).get("patches") or []
+    if not isinstance(raw_patches, list) or not all(isinstance(ref, str) for ref in raw_patches):
+        raise RemoteRecipeValidationError(f"current Recipe value.{PATCH_SECTION}.patches must be a flat string list")
+    for ref in raw_patches:
         validate_relative_path(ref)
     session_id = str(document.get("session_id") or "")
     validated_gain = _number(knowledge.get("validated_e2e_gain"))
@@ -1329,8 +1168,6 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
 __all__ = [
     "CURRENT_KNOWLEDGE_SCHEMA_VERSION",
     "RECORD_KIND_HYPERLOOM_RECIPE",
-    "build_explore_value",
-    "build_framework_value",
     "build_kernel_fusion_value",
     "build_kernel_gemm_value",
     "build_kernel_rewrite_value",

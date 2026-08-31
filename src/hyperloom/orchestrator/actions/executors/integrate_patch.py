@@ -3476,9 +3476,11 @@ class IntegratePatchExecutor:
         source_base_sha = ""
         source_snapshot_complete = False
         source_import_root_val = ""
+        source_realized_patch = ""
+        source_artifacts_outside_root = 0
         try:
             from ...source_snapshot import MANIFEST_NAME, snapshot_source_layer
-            from ._patch_snapshot import _patch_touched_paths_split
+            from ._patch_snapshot import _patch_touched_paths_split, harvest_realized_diff
 
             if framework_root is not None:
                 _cp = _run_git_cp(["-C", str(framework_root), "rev-parse", "HEAD"], timeout=30.0)
@@ -3490,13 +3492,25 @@ class IntegratePatchExecutor:
                 rel_paths = upserted_patch + deleted_patch
                 # An artifact installed into a sibling tree is not addressable by
                 # a rel path under this root, so it belongs to no snapshot here.
-                rel_paths += [
+                # The count travels so a KEEP whose gain lives outside the tree
+                # reads as a known gap rather than as a clean capture.
+                inside_root = [
                     str(a["rel_target"])
                     for a in (applied_artifacts or [])
                     if isinstance(a, dict)
                     and a.get("rel_target")
                     and Path(str(a.get("root") or framework_root)).resolve() == framework_root.resolve()
                 ]
+                source_artifacts_outside_root = len(
+                    [
+                        a
+                        for a in (applied_artifacts or [])
+                        if isinstance(a, dict)
+                        and a.get("rel_target")
+                        and Path(str(a.get("root") or framework_root)).resolve() != framework_root.resolve()
+                    ]
+                )
+                rel_paths += inside_root
                 from ...framework.adapters import get_adapter
 
                 source_import_root_val = get_adapter(str(params.get("framework") or "")).source_import_root(
@@ -3528,6 +3542,11 @@ class IntegratePatchExecutor:
                         if isinstance(item, dict) and item.get("rel")
                     ]
                     source_snapshot_complete = bool(snap.get("complete"))
+                    source_realized_patch = harvest_realized_diff(
+                        framework_root,
+                        rel_paths,
+                        Path(source_snapshot_dir) / "realized.patch",
+                    )
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 
@@ -3564,6 +3583,8 @@ class IntegratePatchExecutor:
                 "source_manifest": source_manifest_path,
                 "source_snapshot_complete": source_snapshot_complete,
                 "source_import_root": source_import_root_val,
+                "source_realized_patch": source_realized_patch,
+                "source_artifacts_outside_root": source_artifacts_outside_root,
                 "target_files": source_target_files,
                 "framework_root": str(framework_root or ""),
                 "base_sha": source_base_sha,

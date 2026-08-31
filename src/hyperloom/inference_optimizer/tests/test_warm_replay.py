@@ -201,8 +201,8 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
 ):
     warm_dir = tmp_path / "runtime" / "remote_recipe"
     refs = [
-        "framework/overlays/000001/00-framework.patch",
-        "explore/overlays/000002/00-explore.patch",
+        "patch/overlays/000001/00-framework.patch",
+        "patch/overlays/000002/00-explore.patch",
     ]
     targets = ["src/framework_fix.py", "src/explore_fix.py"]
     for ref, target in zip(refs, targets, strict=True):
@@ -223,17 +223,21 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
                 "knowledge_schema_version": 1,
                 "record_kind": "hyperloom_recipe",
                 "value": {
-                    "explore": {
-                        "extra_server_args": "--explore --shared",
-                        "extra_envs": {"EXPLORE": "1", "SHARED": "same"},
-                        "patches": [refs[1]],
+                    "config": {
+                        "extra_server_args": "--explore --shared --framework",
+                        "extra_envs": {
+                            "EXPLORE": "1",
+                            "SHARED": "same",
+                            "FRAMEWORK": "1",
+                        },
                     },
-                    "framework": {
-                        "extra_server_args": "--framework",
-                        "extra_envs": {"FRAMEWORK": "1", "SHARED": "same"},
-                        "patches": [refs[0]],
+                    "patch": {
+                        "patches": refs,
+                        "provenance": [
+                            {"stack_index": 1, "realized": True, "complete": True},
+                            {"stack_index": 2, "realized": False, "complete": False, "artifacts_outside_root": 3},
+                        ],
                     },
-                    "patch_timeline": refs,
                     "kernel": {
                         "gemm": {
                             "optimizations": [
@@ -299,29 +303,34 @@ async def test_current_recipe_replay_uses_sdk_sections_and_global_order(
     }
     assert [patch["patch_file"] for patch in task.params["patches"]] == refs
     assert task.params["required_patch_timeline"] is True
+    # How the overlays were captured travels with the outcome, so a reader can
+    # tell a clean replay from one with a known gap.
+    assert coord.shared_state.warm_replay_outcome["overlay_provenance"] == {
+        "overlays": 2,
+        "realized": 1,
+        "incomplete": 1,
+        "artifacts_outside_root": 3,
+    }
 
 
-def _patch_current_sdk_readers(
+def _patch_current_column_readers(
     monkeypatch,
     tmp_path,
     *,
-    timeline,
-    explore_refs,
-    framework_refs,
-    explore_config=None,
-    framework_config=None,
+    patch_refs,
+    config=None,
+    provenance=None,
     gemm=None,
 ):
+    """Stand in for the three column facades a current-Recipe replay reads."""
     from hyperloom.orchestrator.knowledge.agent_kb import (
-        ExploreAgentKB,
-        FrameworkAgentKB,
+        ConfigKB,
         KernelAgentKB,
-        RecipeReplayKB,
+        PatchKB,
     )
 
-    refs = set(timeline) | set(explore_refs) | set(framework_refs)
     paths = {}
-    for index, ref in enumerate(refs):
+    for index, ref in enumerate(dict.fromkeys(patch_refs)):
         path = tmp_path / f"member-{index}.patch"
         path.write_text("patch", encoding="utf-8")
         paths[ref] = path
@@ -333,21 +342,24 @@ def _patch_current_sdk_readers(
                 path.write_text("{}", encoding="utf-8")
                 paths[ref] = path
 
-    class _Owner:
+    class _Config:
         active = True
 
-        def __init__(self, config, refs):
-            self.config = config
-            self.refs = refs
+        def read(self):
+            source = config or {}
+            return {
+                "extra_server_args": str(source.get("extra_server_args") or ""),
+                "extra_envs": {str(k): str(v) for k, v in (source.get("extra_envs") or {}).items()},
+            }
 
-        def read_config(self):
-            return dict(self.config or {})
+    class _Patch:
+        active = True
 
         def read_patches(self):
-            return list(self.refs)
+            return list(patch_refs)
 
-        def read_patch_roots(self):
-            return {}
+        def read_provenance(self):
+            return list(provenance or [])
 
         def prior_file(self, ref):
             return paths.get(ref)
@@ -367,47 +379,9 @@ def _patch_current_sdk_readers(
         def prior_file(self, ref):
             return paths.get(ref)
 
-    class _Replay:
-        active = True
-
-        def read_config(self):
-            configs = [explore_config or {}, framework_config or {}]
-            return {
-                "extra_server_args": " ".join(
-                    str(config.get("extra_server_args") or "").strip()
-                    for config in configs
-                    if str(config.get("extra_server_args") or "").strip()
-                ),
-                "extra_envs": {
-                    str(key): str(value)
-                    for config in configs
-                    for key, value in (config.get("extra_envs") or {}).items()
-                },
-            }
-
-        def read_patch_timeline(self):
-            return list(timeline)
-
-    monkeypatch.setattr(
-        ExploreAgentKB,
-        "open",
-        classmethod(lambda cls: _Owner(explore_config or {}, explore_refs)),
-    )
-    monkeypatch.setattr(
-        FrameworkAgentKB,
-        "open",
-        classmethod(lambda cls: _Owner(framework_config or {}, framework_refs)),
-    )
-    monkeypatch.setattr(
-        KernelAgentKB,
-        "open",
-        classmethod(lambda cls: _Kernel()),
-    )
-    monkeypatch.setattr(
-        RecipeReplayKB,
-        "open",
-        classmethod(lambda cls: _Replay()),
-    )
+    monkeypatch.setattr(ConfigKB, "open", classmethod(lambda cls: _Config()))
+    monkeypatch.setattr(PatchKB, "open", classmethod(lambda cls: _Patch()))
+    monkeypatch.setattr(KernelAgentKB, "open", classmethod(lambda cls: _Kernel()))
 
 
 @pytest.mark.asyncio
@@ -415,13 +389,11 @@ async def test_current_recipe_skips_undersized_context_for_target_workload(
     tmp_path,
     monkeypatch,
 ):
-    _patch_current_sdk_readers(
+    _patch_current_column_readers(
         monkeypatch,
         tmp_path,
-        timeline=[],
-        explore_refs=[],
-        framework_refs=[],
-        explore_config={"extra_server_args": "--context-length 6144"},
+        patch_refs=[],
+        config={"extra_server_args": "--context-length 6144"},
     )
     coord = _make_coord(
         tmp_path,
@@ -499,12 +471,10 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
     tmp_path,
     monkeypatch,
 ):
-    _patch_current_sdk_readers(
+    _patch_current_column_readers(
         monkeypatch,
         tmp_path,
-        timeline=["explore/p.patch"],
-        explore_refs=["explore/p.patch"],
-        framework_refs=[],
+        patch_refs=["patch/overlays/000000/00-p.patch"],
     )
     monkeypatch.setattr(
         "hyperloom.orchestrator.framework.paths.resolve_session_framework_root",
@@ -539,38 +509,39 @@ async def test_current_recipe_patch_skips_without_active_framework_root(
     assert coord.shared_state.warm_replay_outcome["framework_patch_root_allowlist"]
 
 
-@pytest.mark.parametrize(
-    ("timeline", "explore_refs", "framework_refs", "match"),
-    [
-        (["explore/a.patch", "explore/a.patch"], ["explore/a.patch"], [], "duplicate"),
-        (["explore/a.patch"], ["explore/a.patch", "explore/a.patch"], [], "duplicate"),
-        (["explore/a.patch"], ["explore/a.patch"], ["framework/b.patch"], "exactly equal"),
-        (
-            ["explore/a.patch", "framework/b.patch"],
-            ["explore/a.patch"],
-            [],
-            "exactly equal",
-        ),
-    ],
-)
-def test_current_recipe_timeline_requires_exact_unique_owner_ref_set(
-    tmp_path,
-    monkeypatch,
-    timeline,
-    explore_refs,
-    framework_refs,
-    match,
-):
-    _patch_current_sdk_readers(
-        monkeypatch,
-        tmp_path,
-        timeline=timeline,
-        explore_refs=explore_refs,
-        framework_refs=framework_refs,
-    )
+def test_current_recipe_patch_refs_must_be_unique(tmp_path, monkeypatch):
+    """One ref applied twice would replay the same overlay twice."""
+    ref = "patch/overlays/000000/00-a.patch"
+    _patch_current_column_readers(monkeypatch, tmp_path, patch_refs=[ref, ref])
     coord = _make_coord(tmp_path)
 
-    with pytest.raises(ValueError, match=match):
+    with pytest.raises(ValueError, match="duplicate"):
+        coord.phase_prelude._read_current_recipe_replay()
+
+
+def test_current_recipe_fails_when_a_patch_artifact_is_unavailable(tmp_path, monkeypatch):
+    _patch_current_column_readers(monkeypatch, tmp_path, patch_refs=[])
+    coord = _make_coord(tmp_path)
+    from hyperloom.orchestrator.knowledge.agent_kb import PatchKB
+
+    monkeypatch.setattr(
+        PatchKB,
+        "open",
+        classmethod(
+            lambda cls: type(
+                "_Missing",
+                (),
+                {
+                    "active": True,
+                    "read_patches": lambda self: ["patch/overlays/000000/00-gone.patch"],
+                    "read_provenance": lambda self: [],
+                    "prior_file": lambda self, ref: None,
+                },
+            )()
+        ),
+    )
+
+    with pytest.raises(ValueError, match="artifact is unavailable"):
         coord.phase_prelude._read_current_recipe_replay()
 
 
@@ -579,13 +550,11 @@ async def test_current_kernel_conflict_fails_before_preparation(
     tmp_path,
     monkeypatch,
 ):
-    _patch_current_sdk_readers(
+    _patch_current_column_readers(
         monkeypatch,
         tmp_path,
-        timeline=[],
-        explore_refs=[],
-        framework_refs=[],
-        explore_config={"extra_envs": {"SHARED": "recipe"}},
+        patch_refs=[],
+        config={"extra_envs": {"SHARED": "recipe"}},
         gemm={
             "optimizations": [
                 {
@@ -2140,7 +2109,7 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
             "combined_keep_threshold_pct": 1.0,
             "patches": [
                 {
-                    "patch_file": "explore/overlays/000000/00-p.patch",
+                    "patch_file": "patch/overlays/000000/00-p.patch",
                     "patch_content": patch_content,
                 }
             ],
@@ -2165,7 +2134,7 @@ def test_combined_keep_retains_validated_framework_root_without_reapply(
             },
             "warm_patches_applied": [
                 {
-                    "patch_file": "explore/overlays/000000/00-p.patch",
+                    "patch_file": "patch/overlays/000000/00-p.patch",
                     "status": "applied",
                 }
             ],
@@ -2611,35 +2580,55 @@ def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_pa
     assert ledger["validation"]["unscored_keep_count"] == 0
 
 
-# ---- Phase 4: recipe carries apply root -----------------------------------
-def test_agent_kb_read_patch_roots_with_recorded_root(tmp_path):
-    from hyperloom.orchestrator.knowledge.agent_kb import _ConfigPatchAgentKB
+# ---- the apply root is resolved locally, never read off the record ---------
+def test_current_recipe_patches_carry_no_recorded_apply_root(tmp_path, monkeypatch):
+    """The capturing host's path is meaningless here, so it is not published."""
+    _patch_current_column_readers(
+        monkeypatch,
+        tmp_path,
+        patch_refs=["patch/overlays/000000/00-p.patch"],
+    )
+    coord = _make_coord(tmp_path)
 
-    root = str(tmp_path / "sglang_root")
-    ref = "framework/overlays/000000/00-p.patch"
+    replay = coord.phase_prelude._read_current_recipe_replay()
 
-    class _FakeKB(_ConfigPatchAgentKB):
-        SECTION = "framework"
-
-        def read(self):
-            return {
-                "patches": [ref],
-                "patch_roots": {ref: root},
-            }
-
-    kb = _FakeKB(None)
-    assert kb.read_patch_roots() == {ref: root}
-    assert kb.read_patches() == [ref]
+    assert [patch["patch_file"] for patch in replay["patches"]] == ["patch/overlays/000000/00-p.patch"]
+    assert all("framework_root" not in patch for patch in replay["patches"])
 
 
-def test_read_patch_roots_returns_empty_for_legacy_records():
-    from hyperloom.orchestrator.knowledge.agent_kb import _ConfigPatchAgentKB
+def test_overlay_provenance_summary_counts_known_gaps():
+    """A capture that missed paths, or landed gain outside the root, is a gap."""
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
 
-    class _LegacyKB(_ConfigPatchAgentKB):
-        SECTION = "framework"
+    summary = _overlay_provenance_summary(
+        {
+            "patches": [{"patch_file": "patch/overlays/000000/00-a.patch"}],
+            "provenance": [
+                {"stack_index": 0, "realized": True, "complete": True, "artifacts_outside_root": 0},
+                {"stack_index": 1, "realized": False, "complete": False, "artifacts_outside_root": 2},
+            ],
+        }
+    )
 
-        def read(self):
-            return {"patches": ["framework/overlays/000000/00-x.patch"]}
+    assert summary == {
+        "overlays": 1,
+        "realized": 1,
+        "incomplete": 1,
+        "artifacts_outside_root": 2,
+    }
 
-    kb = _LegacyKB(None)
-    assert kb.read_patch_roots() == {}
+
+def test_overlay_provenance_summary_is_absent_for_a_config_only_replay():
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
+
+    assert _overlay_provenance_summary({"patches": [], "provenance": []}) == {}
+
+
+def test_overlay_provenance_summary_tolerates_unusable_counts():
+    from hyperloom.orchestrator.phases.prelude import _overlay_provenance_summary
+
+    summary = _overlay_provenance_summary(
+        {"patches": [], "provenance": [{"stack_index": 0, "artifacts_outside_root": "nope"}]}
+    )
+
+    assert summary["artifacts_outside_root"] == 0

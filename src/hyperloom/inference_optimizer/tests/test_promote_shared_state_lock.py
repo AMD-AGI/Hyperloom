@@ -522,18 +522,13 @@ async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_phase", "section"),
-    [("EXPLORE", "explore"), ("FRAMEWORK_AGENT", "framework")],
-)
-async def test_integrate_keep_stages_patch_for_proposal_owner(
-    session_dir, tmp_path, monkeypatch, source_phase, section
-):
+@pytest.mark.parametrize("source_phase", ["EXPLORE", "FRAMEWORK_AGENT"])
+async def test_integrate_keep_stages_patch_for_proposal_owner(session_dir, tmp_path, monkeypatch, source_phase):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    patch = tmp_path / f"{section}.diff"
-    patch.write_bytes(f"{section} bytes".encode())
+    patch = tmp_path / f"{source_phase.lower()}.diff"
+    patch.write_bytes(f"{source_phase} bytes".encode())
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 100.0
 
@@ -542,21 +537,21 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(
         {
             "status": "kept",
             "output_throughput": 120.0,
-            "specialist_task_id": f"spec-{section}",
+            "specialist_task_id": f"spec-{source_phase.lower()}",
             "source_phase": source_phase,
             "patches_applied": [str(patch)],
         },
         task=_task(
             "integrate_patch",
             params={
-                "specialist_task_id": f"spec-{section}",
+                "specialist_task_id": f"spec-{source_phase.lower()}",
                 "source_phase": source_phase,
             },
         ),
     )
 
-    staged = KnowledgeSections(draft).staged(section)
-    ref = f"{section}/overlays/000000/00-{section}.patch"
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = f"patch/overlays/000000/00-{source_phase.lower()}.patch"
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
 
@@ -745,10 +740,86 @@ async def test_framework_agent_keep_stages_returned_raw_patch(session_dir, tmp_p
         ),
     )
 
-    staged = KnowledgeSections(draft).staged("framework")
-    ref = "framework/overlays/000000/00-pr-7.patch"
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-pr-7.patch"
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+    assert staged.knowledge["provenance"] == [
+        {
+            "stack_index": 0,
+            "base_sha": "",
+            "complete": True,
+            "artifacts_outside_root": 0,
+            "realized": False,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path, monkeypatch):
+    """The realized diff is what landed, so publishing both would apply it twice."""
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    delivered = tmp_path / "delivered.patch"
+    delivered.write_bytes(b"as delivered")
+    realized = tmp_path / "snapshot" / "realized.patch"
+    realized.parent.mkdir()
+    realized.write_bytes(b"as landed")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-realized",
+            "patches_applied": [str(delivered)],
+            "source_realized_patch": str(realized),
+            "base_sha": "abc123",
+            "source_snapshot_complete": True,
+            "source_artifacts_outside_root": 2,
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-realized.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == b"as landed"
+    row = staged.knowledge["provenance"][0]
+    assert row["realized"] is True
+    assert row["base_sha"] == "abc123"
+    assert row["artifacts_outside_root"] == 2
+
+
+@pytest.mark.asyncio
+async def test_delivered_patch_is_the_fallback_when_no_realized_diff(session_dir, tmp_path, monkeypatch):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    delivered = tmp_path / "delivered.patch"
+    delivered.write_bytes(b"as delivered")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-fallback",
+            "patches_applied": [str(delivered)],
+            # A non-git tree harvests no realized diff.
+            "source_realized_patch": "",
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    assert staged.knowledge["patches"] == ["patch/overlays/000000/00-delivered.patch"]
+    assert staged.knowledge["provenance"][0]["realized"] is False
 
 
 @pytest.mark.asyncio
