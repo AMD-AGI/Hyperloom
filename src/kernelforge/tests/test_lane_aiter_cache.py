@@ -282,7 +282,7 @@ async def test_a_session_outside_a_lane_keeps_the_process_environment(tmp_path):
 
 async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
     """The overlay reaches the provider option the SDK spawns the CLI with."""
-    del tmp_path
+    workspace = _lane_dir(tmp_path, "claude-env")
     captured: dict = {}
     backend = ClaudeBackend.__new__(ClaudeBackend)
     backend.runtime = AgentRuntimeConfig(provider="claude", model="fake-model")
@@ -299,7 +299,7 @@ async def test_claude_hands_the_session_environment_to_its_cli(tmp_path):
         AgentRunSpec(
             system_prompt="implementer",
             user_prompt="tune it",
-            cwd=str(Path.cwd()),
+            cwd=str(workspace),
             env={"AITER_JIT_DIR": "/lane/1/jit"},
         )
     )
