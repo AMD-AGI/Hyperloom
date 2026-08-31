@@ -34,7 +34,11 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
-from hyperloom.common.provenance import detect_gfx_arch
+from hyperloom.common.provenance import (
+    RESOLVED_FRAMEWORK_ENV,
+    RESOLVED_FRAMEWORK_PYTHON_ENV,
+    detect_gfx_arch,
+)
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -951,6 +955,26 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    # Publish the interpreter this scan resolved to, so consumers that would
+    # otherwise re-derive it from installer-written host state read the probed
+    # answer instead. ``$VLLM_VENV_ROOT`` leads the candidate list above, but
+    # only this scan establishes whether the tree it names still holds the
+    # framework -- the variable itself is never cleared.
+    #
+    # The framework goes with it: this scan answers for one framework only, and
+    # ``sglang`` is the default, so an unlabelled interpreter would be read as
+    # the vLLM answer on every SGLang session and report "unknown" for a vLLM
+    # this process can see.
+    #
+    # Only a refuted build is withheld -- it is provably the wrong one. A
+    # ROCm-probe timeout is not: ``_resolve_framework_build`` has already
+    # located the distribution under the candidate (``_framework_importable``
+    # answers with ``find_spec``) before probing the build at all, and the check
+    # below keeps serving with it after a warning. Reading a version wants the
+    # ``dist-info`` metadata, which does not require the package to import.
+    if found and probe.verdict is not False:
+        os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
+        os.environ[RESOLVED_FRAMEWORK_ENV] = framework
     evidence = _rocm_evidence(framework)
     if found and probe.verdict is True:
         print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
