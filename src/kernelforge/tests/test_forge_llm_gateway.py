@@ -99,10 +99,15 @@ def test_the_anthropic_line_is_never_borrowed(clean_env):
     clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub")
     assert not resolve_openai_gateway().is_complete()
 
-    # Its own pair is what turns the line on, and the Anthropic headers stay out.
+    # Its own pair is what turns the line on; Anthropic headers fill in when the
+    # OpenAI header slot was left empty (single-gateway / tag-injection setups).
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
-    assert resolve_openai_gateway() == LlmGateway("https://gw.example/llm-proxy/v1", "OPENAI_API_KEY", {})
+    assert resolve_openai_gateway() == LlmGateway(
+        "https://gw.example/llm-proxy/v1",
+        "OPENAI_API_KEY",
+        {"Ocp-Apim-Subscription-Key": "sub"},
+    )
 
 
 def test_retired_keys_are_not_credentials(clean_env):
@@ -219,16 +224,32 @@ def test_anthropic_line_ignores_the_openai_one(clean_env):
     assert resolve_anthropic_gateway() == LlmGateway()
 
 
-def test_headers_come_from_this_line_only(clean_env):
+def test_openai_headers_win_and_anthropic_fills_when_empty(clean_env):
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
     clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: not-mine")
-    assert resolve_openai_gateway().headers == {}
+    assert resolve_openai_gateway().headers == {"Ocp-Apim-Subscription-Key": "not-mine"}
 
     clean_env.setenv("OPENAI_CUSTOM_HEADERS", "user: mine\nOcp-Apim-Subscription-Key: sub")
     assert resolve_openai_gateway().headers == {
         "user": "mine",
         "Ocp-Apim-Subscription-Key": "sub",
+    }
+
+
+def test_openai_line_inherits_litellm_tags_from_anthropic(clean_env):
+    clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "Ocp-Apim-Subscription-Key: sub\n"
+        "x-litellm-tags: application=hyperloom,session=sess-1,component=kernel,operation=forge_loop\n"
+        "x-litellm-trace-id: sess-1",
+    )
+    assert resolve_openai_gateway().headers == {
+        "Ocp-Apim-Subscription-Key": "sub",
+        "x-litellm-tags": "application=hyperloom,session=sess-1,component=kernel,operation=forge_loop",
+        "x-litellm-trace-id": "sess-1",
     }
 
 
