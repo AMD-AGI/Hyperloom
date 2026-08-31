@@ -480,6 +480,30 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
     assert dtype.weight_dtype_bytes == 4.0
     assert dtype.activation_dtype_bytes == 4.0
 
+    # 1-vs-2: server_args_quantization must beat quantization_config when both present.
+    # A pre-quantized meta (weight_dtype_bytes=0.5 fp4) + recognised --quantization fp8
+    # → branch 1 must win even though branch 2 would also fire.
+    quant_vs_prequant_state = _state(
+        tmp_path / "quant_vs_prequant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8"),
+        precision="fp4",
+    )
+    meta_fp4 = _dense_meta(weight_dtype_bytes=0.5)
+    quant_vs_prequant = rc.resolve_runtime_dtype(quant_vs_prequant_state, meta_fp4)
+    assert quant_vs_prequant.source == "server_args_quantization"
+    assert quant_vs_prequant.weight_dtype_bytes == 1.0
+
+    # 2-vs-3: quantization_config must beat server_args_dtype when both present.
+    # A pre-quantized fp8 meta + --dtype float32 → branch 2 must win over branch 3.
+    prequant_vs_dtype_state = _state(
+        tmp_path / "prequant_vs_dtype",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
+        precision="fp4",
+    )
+    prequant_vs_dtype = rc.resolve_runtime_dtype(prequant_vs_dtype_state, meta_fp8)
+    assert prequant_vs_dtype.source == "quantization_config"
+    assert prequant_vs_dtype.weight_dtype_bytes == 1.0
+
     fallback_state = _state(tmp_path / "fallback", _serving_benchmark(tmp_path / "m"), precision="fp8")
     fallback = rc.resolve_runtime_dtype(fallback_state, meta_fp32)
     assert fallback.source == "config_torch_dtype"
@@ -489,11 +513,15 @@ def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path)
 
 
 def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
+    # Patch vendor to a *different* positive value (500.0) so swapping the
+    # operands of `achievable or vendor` would change the result.  With vendor==0
+    # both orderings yield 100.0 and the precedence isn't pinned.
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
-    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
 
     active = 1_000_000_000
     weight = 9_000_000_000
+    # achievable (100.0) must win over vendor (500.0).
     expected = (100.0 * 1e12 * 2) / (2.0 * active / 2.0)
     got = rc.compute_compute_bound_ceiling_tok_per_sec(
         gpu_type="mi300x",
@@ -505,6 +533,7 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     )
     assert got == pytest.approx(expected)
 
+    # active→total-weight fallback (active_weight_bytes=0 falls back to weight_bytes).
     fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
         gpu_type="mi300x",
         num_gpus=2,
@@ -516,7 +545,22 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
     assert fallback == pytest.approx((100.0 * 1e12 * 2) / (2.0 * weight / 2.0))
     assert fallback > 0.0
 
+    # Vendor-peak fallback: achievable absent (0.0), vendor-peak covers it.
     monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 200.0)
+    vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=1,
+        precision_tag="bf16",
+        active_weight_bytes=active,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert vendor_fallback == pytest.approx((200.0 * 1e12) / (2.0 * active / 2.0))
+    assert vendor_fallback > 0.0
+
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
     assert (
         rc.compute_compute_bound_ceiling_tok_per_sec(
             gpu_type="unknown-gpu",
