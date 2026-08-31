@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
+from hyperloom.orchestrator.loop.coordinator_helpers import _observed_sglang_server_identity_from_log
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -97,7 +100,7 @@ def test_measurement_identity_invalidates_when_current_best_config_changes(tmp_p
             "extra_server_args": "--block-size 32",
             "extra_envs": {"A": "1"},
             "optimization_stack": [],
-        }
+        },
     )
     writer = _writeback(tmp_path, state)
     writer._stamp_current_best_measurement()
@@ -193,5 +196,187 @@ async def test_handoff_uses_only_matching_current_best_measurement(
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
     assert handoff["same_config_reference_status"] == "verified"
+    assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
     assert handoff["baseline_env_spec"]["launch_identity"] == handoff["same_config_reference_identity"]
+
+
+@pytest.mark.asyncio
+async def test_handoff_marks_declared_only_identity_without_faking_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _verified_current_best(tmp_path)
+    measurement = state.current_best["measurement"]
+    measurement["resolved_server_launch_flags"] = ""
+    measurement["launch_evidence"] = {
+        "schema_version": 1,
+        "framework": "sglang",
+        "requested_server_args": "--mem-fraction-static 0.8",
+        "requested_server_env": {"TP": "1"},
+        "recipe_digest": "sha256:declared",
+        "actual_server_log_path": "",
+        "observed_server_launch_flags": "",
+    }
+    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    def _stop_after_handoff(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _stop_after_handoff,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["same_config_reference_status"] == "verified"
+    assert handoff["same_config_reference_verification_status"] == "verified_declared_only"
+    assert handoff["same_config_reference_observed_identity"] == ""
+    assert handoff["measurement_evidence"]["requested_server_args"] == "--mem-fraction-static 0.8"
+
+
+@pytest.mark.asyncio
+async def test_handoff_does_not_verify_matching_identity_without_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _verified_current_best(tmp_path)
+    measurement = state.current_best["measurement"]
+    measurement["resolved_server_launch_flags"] = ""
+    measurement.pop("launch_evidence", None)
+    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    def _stop_after_handoff(_name: str) -> Path:
+        raise RuntimeError("stop after handoff write")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        _stop_after_handoff,
+    )
+
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["same_config_reference_status"] == "unverified"
+    assert handoff["same_config_reference_verification_status"] == "unverified"
+    assert handoff["orchestrator_best_tput_same_config"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_handoff_exposes_archived_sglang_observed_identity_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    state = _verified_current_best(tmp_path)
+    measurement = state.current_best["measurement"]
+    measurement["resolved_server_launch_flags"] = ""
+    measurement["launch_evidence"] = {
+        "schema_version": 1,
+        "framework": "sglang",
+        "requested_server_args": "--mem-fraction-static 0.8",
+        "requested_server_env": {"TP": "8"},
+        "recipe_digest": "sha256:declared",
+        "observed_server_identity": {
+            "context_length": 8192,
+            "mem_fraction_static": 0.8,
+            "model_path": "/models/qwen",
+            "tp_size": 8,
+        },
+    }
+    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
+    )
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    expected = measurement["launch_evidence"]["observed_server_identity"]
+    assert handoff["same_config_reference_verification_status"] == "verified_observed"
+    assert handoff["same_config_observed_identity"] == expected
+    assert handoff["observed_server_identity"] == expected
+
+
+def test_sglang_server_args_fallback_records_declared_resolved_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeServerArgs:
+        @classmethod
+        def add_cli_args(cls, parser):
+            parser.add_argument("--model-path")
+            parser.add_argument("--mem-fraction-static", type=float, default=0.9)
+            parser.add_argument("--context-length", type=int, default=4096)
+
+        def __init__(self, **kwargs):
+            self.model_path = kwargs["model_path"]
+            self.mem_fraction_static = kwargs["mem_fraction_static"]
+            self.context_length = kwargs["context_length"]
+
+    sglang = ModuleType("sglang")
+    srt = ModuleType("sglang.srt")
+    server_args = ModuleType("sglang.srt.server_args")
+    server_args.ServerArgs = FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args)
+
+    resolved = WritebackCollaborator._resolved_sglang_server_config(
+        {
+            "framework": "sglang",
+            "model_path": "/models/qwen",
+            "requested_server_args": "--mem-fraction-static 0.8 --context-length 8192",
+        }
+    )
+
+    assert resolved["model_path"] == "/models/qwen"
+    assert resolved["mem_fraction_static"] == pytest.approx(0.8)
+    assert resolved["context_length"] == 8192
+
+
+def test_archived_sglang_server_args_log_yields_stable_observed_identity(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "INFO server_args=ServerArgs(model_path='/models/qwen', tp_size=8, "
+        "mem_fraction_static=0.8, context_length=8192, kv_cache_dtype='fp8', "
+        "attention_backend='aiter', prefill_attention_backend='fa3', "
+        "decode_attention_backend='triton', disable_radix_cache=True, "
+        "trust_remote_code=False)\n",
+        encoding="utf-8",
+    )
+
+    identity = _observed_sglang_server_identity_from_log(str(log))
+
+    assert identity == {
+        "attention_backend": "aiter",
+        "context_length": 8192,
+        "decode_attention_backend": "triton",
+        "disable_radix_cache": True,
+        "kv_cache_dtype": "fp8",
+        "mem_fraction_static": 0.8,
+        "model_path": "/models/qwen",
+        "prefill_attention_backend": "fa3",
+        "tp_size": 8,
+        "trust_remote_code": False,
+    }
+
+
+def test_archived_sglang_server_args_rejects_executable_log_values(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text("server_args=ServerArgs(model_path=__import__('os').getcwd())\n", encoding="utf-8")
+
+    assert _observed_sglang_server_identity_from_log(str(log)) == {}

@@ -9,6 +9,7 @@ dependency).
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import logging
@@ -1739,6 +1740,134 @@ def _launch_argv_from_log(path: str, marker: str) -> str:
     except OSError:
         return ""
     return ""
+
+
+_SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")
+_SGLANG_SERVER_ARGS_MAX_CHARS = 512 * 1024
+_SGLANG_SERVER_ARGS_MAX_LINES = 256
+_SGLANG_SERVER_ARGS_MAX_FIELDS = 2048
+_SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
+    {
+        "model_path",
+        "tokenizer_path",
+        "served_model_name",
+        "tp_size",
+        "dp_size",
+        "mem_fraction_static",
+        "context_length",
+        "chunked_prefill_size",
+        "quantization",
+        "dtype",
+        "kv_cache_dtype",
+        "attention_backend",
+        "prefill_attention_backend",
+        "decode_attention_backend",
+        "disable_radix_cache",
+        "trust_remote_code",
+    }
+)
+
+
+def _extract_balanced_server_args(text: str) -> str:
+    """Return the balanced ``ServerArgs(...)`` text from a bounded log snippet."""
+    match = _SGLANG_SERVER_ARGS_LOG_RE.search(text)
+    if match is None:
+        return ""
+    start = match.end() - 1
+    depth = 0
+    quote = ""
+    escaped = False
+    for index, char in enumerate(text[start:], start):
+        if quote:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = ""
+            continue
+        if char in ("'", '"'):
+            quote = char
+        elif char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + 1 : index]
+    return ""
+
+
+def _safe_server_args_value(node: ast.AST) -> Any:
+    """Evaluate and bound literal ServerArgs values without executing log content."""
+    return _bounded_server_args_value(ast.literal_eval(node))
+
+
+def _bounded_server_args_value(value: Any, *, depth: int = 0) -> Any:
+    """Return a JSON-safe bounded ServerArgs value."""
+    if depth > 4:
+        raise ValueError("ServerArgs value nesting exceeds cap")
+    if isinstance(value, str):
+        if len(value) > 4096:
+            raise ValueError("ServerArgs string exceeds cap")
+        return value
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, (list, tuple)):
+        if len(value) > 64:
+            raise ValueError("ServerArgs list exceeds cap")
+        return [_bounded_server_args_value(item, depth=depth + 1) for item in value]
+    if isinstance(value, dict):
+        if len(value) > 64 or not all(isinstance(key, str) for key in value):
+            raise ValueError("ServerArgs dict exceeds cap")
+        return {key: _bounded_server_args_value(item, depth=depth + 1) for key, item in sorted(value.items())}
+    raise ValueError("ServerArgs value is not JSON-safe")
+
+
+def _observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
+    """Parse a capped archived SGLang ``server_args=ServerArgs(...)`` record.
+
+    Uses Python AST literal handling only; no log expression is executed.
+    Values are returned in sorted-key order, giving GEAK a stable map to
+    compare against its own parsed ``ServerArgs`` object.
+    """
+    chunks: list[str] = []
+    remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
+                line = fh.readline()
+                if not line:
+                    break
+                if len(line) > remaining:
+                    line = line[:remaining]
+                remaining -= len(line)
+                if remaining < 0:
+                    break
+                if chunks or _SGLANG_SERVER_ARGS_LOG_RE.search(line):
+                    chunks.append(line)
+                    parsed = _extract_balanced_server_args("".join(chunks))
+                    if parsed:
+                        break
+    except OSError:
+        return {}
+    text = "".join(chunks)
+    content = _extract_balanced_server_args(text)
+    if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
+        return {}
+    try:
+        call = ast.parse(f"_ServerArgs({content})", mode="eval").body
+        if not isinstance(call, ast.Call) or len(call.keywords) > _SGLANG_SERVER_ARGS_MAX_FIELDS:
+            return {}
+        values: dict[str, Any] = {}
+        for keyword in call.keywords:
+            if keyword.arg is None:
+                return {}
+            if keyword.arg not in _SGLANG_OBSERVED_IDENTITY_FIELDS:
+                continue
+            values[keyword.arg] = _safe_server_args_value(keyword.value)
+    except (SyntaxError, ValueError, TypeError):
+        return {}
+    return {key: values[key] for key in sorted(values)}
 
 
 def _scrape_resolved_launch_flags(session_dir: Any, backend: str, target_tput: float = 0.0) -> str:

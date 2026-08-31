@@ -749,14 +749,48 @@ class KernelPhase(PhaseHandler):
             state_measurement
             if isinstance(state_measurement, Mapping) and state_measurement
             else (
-                cb.get("measurement")
-                if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping)
-                else {}
+                cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
             )
         )
         expected_identity = str(env_spec.get("launch_identity") or "")
-        measured_identity = str(measurement.get("launch_identity") or "")
-        reference_verified = bool(expected_identity and expected_identity == measured_identity)
+        measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        identity_matches = bool(expected_identity and expected_identity == measured_identity)
+        launch_evidence = measurement.get("launch_evidence")
+        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
+        observed_flags = str(
+            measurement.get("resolved_server_launch_flags") or launch_evidence.get("observed_server_launch_flags") or ""
+        ).strip()
+        observed_server_identity = measurement.get("observed_server_identity") or launch_evidence.get(
+            "observed_server_identity"
+        )
+        observed_server_identity = (
+            {str(key): value for key, value in sorted(observed_server_identity.items())}
+            if isinstance(observed_server_identity, Mapping)
+            else {}
+        )
+        if identity_matches and (observed_flags or observed_server_identity):
+            reference_verification_status = "verified_observed"
+        elif identity_matches and (
+            launch_evidence.get("requested_server_args") is not None
+            or launch_evidence.get("requested_server_env") is not None
+            or launch_evidence.get("recipe_digest")
+        ):
+            reference_verification_status = "verified_declared_only"
+        else:
+            reference_verification_status = "unverified"
+        reference_verified = reference_verification_status != "unverified"
+        observed_identity = str(measurement.get("observed_launch_identity") or "")
+        if not observed_identity and identity_matches and observed_flags:
+            observed_payload = json.dumps(
+                {
+                    "declared_launch_identity": measured_identity,
+                    "observed_server_launch_flags": observed_flags,
+                    "observed_server_identity": observed_server_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
         same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
             "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
@@ -804,6 +838,17 @@ class KernelPhase(PhaseHandler):
             "same_config_reference_identity": measured_identity,
             "same_config_expected_identity": expected_identity,
             "same_config_reference_workspace": str(measurement.get("benchmark_workspace") or ""),
+            # Additive identity semantics. Keep the legacy status above for
+            # existing GEAK consumers that only understand verified/unverified.
+            "same_config_reference_verification_status": reference_verification_status,
+            "same_config_reference_declared_identity": measured_identity,
+            "same_config_reference_observed_identity": observed_identity,
+            # GEAK compares this map with its parsed ServerArgs. Keep the
+            # hash alias above for consumers that only understand strings.
+            "same_config_observed_identity": observed_server_identity,
+            "observed_server_identity": observed_server_identity,
+            "measurement_evidence": launch_evidence,
+            "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
             "mem_fraction": float(

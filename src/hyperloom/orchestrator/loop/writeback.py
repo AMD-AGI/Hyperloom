@@ -4,9 +4,11 @@
 """Coordinator main loop and runtime protocol manager."""
 
 from __future__ import annotations
+import argparse
 import hashlib
 import json
 import os
+import shlex
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -54,6 +56,7 @@ from .coordinator_helpers import (
     _geak_sweep_measured_tput,
     _LAUNCH_ARGV_MARKERS,
     _launch_argv_from_log,
+    _observed_sglang_server_identity_from_log,
     _normalize_geak_overlay_dir,
 )
 from ..policy.gate import (
@@ -4429,11 +4432,26 @@ class WritebackCollaborator:
         existing = str(measurement.get("resolved_server_launch_flags") or "").strip()
         if existing:
             return existing
-        framework = str(os.environ.get("FRAMEWORK", "") or "sglang").strip().lower()
+        evidence = measurement.get("launch_evidence")
+        if isinstance(evidence, Mapping):
+            observed = str(evidence.get("observed_server_launch_flags") or "").strip()
+            if observed:
+                return observed
+        framework = (
+            str(
+                (evidence.get("framework") if isinstance(evidence, Mapping) else "")
+                or os.environ.get("FRAMEWORK", "")
+                or "sglang"
+            )
+            .strip()
+            .lower()
+        )
         marker = _LAUNCH_ARGV_MARKERS.get(framework)
         if not marker:
             return ""
         paths = [str(measurement.get("server_log_path") or "").strip()]
+        if isinstance(evidence, Mapping):
+            paths.append(str(evidence.get("actual_server_log_path") or "").strip())
         for key in ("benchmark_workspace", "workspace"):
             workspace = str(measurement.get(key) or "").strip()
             if workspace:
@@ -4445,14 +4463,135 @@ class WritebackCollaborator:
                 return flags
         return ""
 
+    @staticmethod
+    def _resolved_sglang_server_config(launch_evidence: Mapping[str, Any]) -> dict[str, Any]:
+        """Resolve selected SGLang ``ServerArgs`` fields from declared args.
+
+        A captured command line is preferred evidence. This fallback makes the
+        declaration inspectable when a reused ready server did not emit a fresh
+        CLI line; it is intentionally not treated as observed launch evidence.
+        """
+        if str(launch_evidence.get("framework") or "").strip().lower() != "sglang":
+            return {}
+        raw_args = str(
+            launch_evidence.get("requested_server_args") or launch_evidence.get("requested_server_flags") or ""
+        ).strip()
+        model_path = str(launch_evidence.get("model_path") or "").strip()
+        try:
+            from sglang.srt.server_args import ServerArgs
+
+            parser = argparse.ArgumentParser(add_help=False)
+            ServerArgs.add_cli_args(parser)
+            tokens = shlex.split(raw_args)
+            if model_path and not any(token == "--model-path" or token.startswith("--model-path=") for token in tokens):
+                tokens = ["--model-path", model_path, *tokens]
+            namespace, _unknown = parser.parse_known_args(tokens)
+            resolved = ServerArgs(**vars(namespace))
+        except Exception:  # noqa: BLE001 - version-dependent optional evidence
+            return {}
+        fields = (
+            "model_path",
+            "tokenizer_path",
+            "host",
+            "port",
+            "tp_size",
+            "dp_size",
+            "pp_size",
+            "mem_fraction_static",
+            "context_length",
+            "max_total_tokens",
+            "max_running_requests",
+            "attention_backend",
+            "quantization",
+            "dtype",
+            "disable_cuda_graph",
+            "enable_dp_attention",
+            "enable_ep_moe",
+            "chunked_prefill_size",
+            "schedule_policy",
+        )
+        out: dict[str, Any] = {}
+        for field_name in fields:
+            value = getattr(resolved, field_name, None)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                out[field_name] = value
+        return out
+
+    @staticmethod
+    def _measurement_observed_server_identity(measurement: Mapping[str, Any]) -> dict[str, Any]:
+        """Return archived SGLang ``ServerArgs`` evidence from this measurement only."""
+        evidence = measurement.get("launch_evidence")
+        if isinstance(evidence, Mapping):
+            identity = evidence.get("observed_server_identity")
+            if isinstance(identity, Mapping):
+                return {str(key): value for key, value in sorted(identity.items())}
+        if str((evidence or {}).get("framework") if isinstance(evidence, Mapping) else "").lower() != "sglang":
+            return {}
+        for path in (
+            str(measurement.get("server_log_path") or ""),
+            str((evidence or {}).get("actual_server_log_path") if isinstance(evidence, Mapping) else ""),
+        ):
+            if path:
+                identity = _observed_sglang_server_identity_from_log(path)
+                if identity:
+                    return identity
+        return {}
+
+    @staticmethod
+    def _observed_launch_identity(
+        declared_identity: str,
+        observed_flags: str,
+        observed_server_identity: Mapping[str, Any] | None = None,
+    ) -> str:
+        """Hash actual captured launch data under the declared identity."""
+        if not declared_identity or (not observed_flags and not observed_server_identity):
+            return ""
+        payload = json.dumps(
+            {
+                "declared_launch_identity": declared_identity,
+                "observed_server_launch_flags": observed_flags,
+                "observed_server_identity": dict(observed_server_identity or {}),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return f"sha256:{hashlib.sha256(payload).hexdigest()}"
+
+    @staticmethod
+    def _identity_verification_status(
+        *,
+        expected_identity: str,
+        measurement: Mapping[str, Any],
+    ) -> str:
+        """Classify whether identity rests on observed or declared evidence."""
+        declared_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        if not expected_identity or declared_identity != expected_identity:
+            return "unverified"
+        evidence = measurement.get("launch_evidence")
+        observed = str(measurement.get("resolved_server_launch_flags") or "").strip()
+        if not observed and isinstance(evidence, Mapping):
+            observed = str(evidence.get("observed_server_launch_flags") or "").strip()
+        observed_server_identity = WritebackCollaborator._measurement_observed_server_identity(measurement)
+        if observed or observed_server_identity:
+            return "verified_observed"
+        if isinstance(evidence, Mapping) and (
+            evidence.get("requested_server_args") is not None
+            or evidence.get("requested_server_env") is not None
+            or evidence.get("recipe_digest")
+        ):
+            return "verified_declared_only"
+        return "unverified"
+
     def _stamp_current_best_measurement(self, evidence: Mapping[str, Any] | None = None) -> None:
         """Attach the exact promoted config identity to ``current_best``."""
         cb = self.shared_state.current_best
         if not isinstance(cb, dict):
             return
         evidence = evidence if isinstance(evidence, Mapping) else {}
+        launch_evidence = evidence.get("stack_rebench_launch_evidence") or evidence.get("launch_evidence") or {}
+        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
         measurement = {
-            "schema_version": 1,
+            "schema_version": 2,
             "tput": float(cb.get("tput") or 0.0),
             "benchmark_workspace": str(
                 evidence.get("stack_rebench_workspace")
@@ -4464,13 +4603,36 @@ class WritebackCollaborator:
             "server_log_path": str(
                 evidence.get("stack_rebench_server_log_path")
                 or evidence.get("server_log_path")
+                or launch_evidence.get("actual_server_log_path")
                 or ""
+            ),
+            "launch_evidence": launch_evidence,
+            "launch_evidence_path": str(
+                evidence.get("stack_rebench_launch_evidence_path") or evidence.get("launch_evidence_path") or ""
             ),
         }
         measurement["resolved_server_launch_flags"] = self._measurement_launch_flags(measurement)
+        observed_server_identity = self._measurement_observed_server_identity(measurement)
+        if observed_server_identity:
+            launch_evidence["observed_server_identity"] = observed_server_identity
+        measurement["observed_server_identity"] = observed_server_identity
+        measurement["resolved_server_config"] = observed_server_identity or self._resolved_sglang_server_config(
+            launch_evidence
+        )
         cb["measurement"] = measurement
         self.shared_state.current_best_measurement = measurement
-        measurement["launch_identity"] = str(self.build_env_spec()["launch_identity"])
+        declared_identity = str(self.build_env_spec()["launch_identity"])
+        measurement["launch_identity"] = declared_identity  # Legacy alias.
+        measurement["declared_launch_identity"] = declared_identity
+        measurement["observed_launch_identity"] = self._observed_launch_identity(
+            declared_identity,
+            measurement["resolved_server_launch_flags"],
+            observed_server_identity,
+        )
+        measurement["identity_verification_status"] = self._identity_verification_status(
+            expected_identity=declared_identity,
+            measurement=measurement,
+        )
 
     def _current_best_launch_config(self) -> dict[str, Any]:
         """The launch config ``current_best`` was measured on.
@@ -4582,6 +4744,18 @@ class WritebackCollaborator:
             ),
             # Backward-compatible alias for existing GEAK v2 consumers.
             "launch_recipe": str(getattr(self.shared_state, "baseline_config_path", "") or ""),
+            # Additive evidence record. Consumers can distinguish a captured
+            # launch from a declaration resolved without a new CLI line.
+            "measurement_evidence": dict(measurement.get("launch_evidence") or {}),
+            "measurement_identity": {
+                "declared_launch_identity": str(
+                    measurement.get("declared_launch_identity") or measurement.get("launch_identity") or ""
+                ),
+                "observed_launch_identity": str(measurement.get("observed_launch_identity") or ""),
+                "verification_status": str(measurement.get("identity_verification_status") or "unverified"),
+                "observed_server_identity": dict(measurement.get("observed_server_identity") or {}),
+                "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
+            },
         }
         env_spec["launch_identity"] = self._handoff_launch_identity(env_spec)
         return env_spec
