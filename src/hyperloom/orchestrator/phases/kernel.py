@@ -1583,6 +1583,9 @@ class KernelPhase(PhaseHandler):
         )
 
         base = float(self.shared_state.baseline_tput or 0.0)
+        # Where the session stood before GEAK ran: the anchor both the journey
+        # rejection and the route-level residual measure from.
+        pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
         self._record_geak_adopted_kernels(
             result,
             measured_tput=measured,
@@ -1597,11 +1600,10 @@ class KernelPhase(PhaseHandler):
             # the final validation proves no overlay was loaded, withdraw those
             # provisional per-kernel adoptions.  The validated win still lands
             # below as one route-level config attempt.
-            pre_geak_tput = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
             self._reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
-                current_best_tput=pre_geak_tput,
+                current_best_tput=pre_geak,
                 provenance=provenance,
                 rejection_reason="overlay_not_proven_loaded",
             )
@@ -1639,14 +1641,18 @@ class KernelPhase(PhaseHandler):
         # kernel was attributable would drop every other percentage point the
         # route measured.
         try:
-            pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
             # A journey KEEP is attributable only when the final measurement
             # proved that its overlay was loaded.  Otherwise the same-harness
             # route attempt owns the complete measured delta.
-            claimed_ratio = self._geak_journey_attributed_ratio(result) if overlay_loaded is True else 1.0
+            claimed_delta = self._geak_journey_attributed_delta(result) if overlay_loaded is True else 0.0
             # Anchor the route attempt where the per-kernel ledger stops, so
-            # the two records partition the measured lift instead of overlapping.
-            residual_before = pre_geak * claimed_ratio
+            # the two records partition the measured lift instead of
+            # overlapping. Both records divide by the same session baseline, so
+            # holding back the ledger's ABSOLUTE tok/s makes the two
+            # ``(after - started_from) / baseline`` terms telescope to exactly
+            # the measured route lift, leaving nothing for
+            # ``unattributed_gain_pct`` to absorb.
+            residual_before = pre_geak + claimed_delta
             if base > 0 and pre_geak > 0 and measured > residual_before * _GEAK_RESIDUAL_MIN_RATIO:
                 # Only an ``AITER_CONFIG_*`` env names a GEMM tuning table. Any
                 # other csv-valued env (a profile dump, a shape list) says
@@ -1673,73 +1679,105 @@ class KernelPhase(PhaseHandler):
             log.debug("geak e2e attempt recording failed", exc_info=True)
 
     @staticmethod
-    def _geak_journey_attributed_ratio(result: dict[str, Any]) -> float:
-        """Return the speedup ratio the per-kernel ledger already claims.
+    def _geak_journey_path(result: dict[str, Any]) -> str:
+        """Resolve the journey file for a GEAK result.
 
-        Each journey KEEP that carries its own validated ``(base_tput,
-        new_tput)`` pair is summed into the GEAK column by
-        ``record_kernel_e2e``. Stacked kernels compose multiplicatively, so the
-        product of their ratios is the share of the route-level lift that is
-        already spoken for. The route-level attempt is anchored above that
-        share, which is what keeps the two records from claiming the same
-        percentage points twice.
+        Three readers need it on the promote path, and each rediscovering the
+        ``kernel_journey_path`` / ``eval_dir`` fallback is three chances to
+        disagree about which file they read.
 
         Args:
             result: GEAK's ``result.json`` payload.
 
         Returns:
-            float: The already-claimed ratio, ``1.0`` when the journey holds no
-            attributable KEEP (nothing is claimed, so the route owns it all).
+            str: The journey path, or ``""`` when there is no readable file.
         """
         if not isinstance(result, dict):
-            return 1.0
-        ratio = 1.0
-        try:
-            journey_path = str(result.get("kernel_journey_path") or "")
-            if not journey_path:
-                eval_dir = str(result.get("eval_dir") or "")
-                if eval_dir:
-                    candidate = Path(eval_dir) / "kernel_journey.json"
-                    if candidate.exists():
-                        journey_path = str(candidate)
-            if not journey_path or not Path(journey_path).is_file():
-                return 1.0
-            data = json.loads(Path(journey_path).read_text(encoding="utf-8"))
-            for kernel in data.get("kernels") or []:
-                if not isinstance(kernel, dict):
-                    continue
-                e2e = kernel.get("e2e") if isinstance(kernel.get("e2e"), dict) else {}
-                decision = str(e2e.get("decision") or "").upper()
-                base_tput = e2e.get("base_tput")
-                new_tput = e2e.get("new_tput")
-                if (
-                    e2e.get("validated") is True
-                    and decision in {"KEEP", "ADOPTED"}
-                    and isinstance(base_tput, (int, float))
-                    and isinstance(new_tput, (int, float))
-                    and base_tput > 0
-                    and new_tput > 0
-                ):
-                    # A regression is never "claimed gain": clamp at 1.0 so a
-                    # slower KEEP cannot inflate the route-level residual.
-                    ratio *= max(1.0, float(new_tput) / float(base_tput))
-        except Exception:  # noqa: BLE001
-            log.debug("geak journey attributable-win probe failed", exc_info=True)
-            return 1.0
-        return ratio
+            return ""
+        path = str(result.get("kernel_journey_path") or "")
+        if not path:
+            eval_dir = str(result.get("eval_dir") or "")
+            if eval_dir:
+                path = str(Path(eval_dir) / "kernel_journey.json")
+        return path if path and Path(path).is_file() else ""
 
     @classmethod
-    def _geak_journey_has_attributable_win(cls, result: dict[str, Any]) -> bool:
-        """Return whether the GEAK journey already records a summable KEEP.
+    def _load_geak_journey(cls, result: dict[str, Any]) -> dict[str, Any]:
+        """Read the journey file, or return ``{}`` when it is unusable.
 
         Args:
             result: GEAK's ``result.json`` payload.
 
         Returns:
-            bool: ``True`` when at least one journey KEEP carries a validated
-            throughput pair the per-kernel ledger can sum.
+            dict[str, Any]: The parsed journey; empty on any failure, which
+            every caller must read as "the journey says nothing".
         """
-        return cls._geak_journey_attributed_ratio(result) > 1.0
+        path = cls._geak_journey_path(result)
+        if not path:
+            return {}
+        try:
+            data = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            log.debug("geak journey read failed", exc_info=True)
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    @classmethod
+    def _geak_journey_kernels(cls, result: dict[str, Any]) -> list[dict[str, Any]]:
+        """Return the journey's kernel records, or ``[]`` when unreadable.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+
+        Returns:
+            list[dict[str, Any]]: The ``kernels`` array; empty on any failure.
+        """
+        journey = cls._load_geak_journey(result)
+        return [kernel for kernel in journey.get("kernels") or [] if isinstance(kernel, dict)]
+
+    @classmethod
+    def _geak_journey_attributed_delta(cls, result: dict[str, Any]) -> float:
+        """Return the tok/s the per-kernel ledger already credits.
+
+        A journey KEEP with a validated ``(base_tput, new_tput)`` pair is
+        credited by ``collect_recorded_optimizations`` as
+        ``(new_tput - base_tput) / session_baseline``: an ABSOLUTE tok/s delta
+        over the one session denominator. So the share to hold back from the
+        route-level attempt is that same absolute delta, summed.
+
+        It is deliberately not a speedup RATIO. GEAK measures its journey on
+        its own harness at its own working point, so ``base_tput`` is not the
+        session's ``current_best`` (see ``record_kernel_e2e``: the executor's
+        percentage is "measured against whatever baseline it happened to hold
+        at the time"). Scaling ``current_best`` by ``new/base`` would withhold
+        a number no record ever claimed, and the difference would silently
+        reappear as ``validation.unattributed_gain_pct``.
+
+        Args:
+            result: GEAK's ``result.json`` payload.
+
+        Returns:
+            float: The already-claimed tok/s, ``0.0`` when the journey holds no
+            attributable KEEP (nothing is claimed, so the route owns it all).
+        """
+        delta = 0.0
+        for kernel in cls._geak_journey_kernels(result):
+            e2e = kernel.get("e2e") if isinstance(kernel.get("e2e"), dict) else {}
+            decision = str(e2e.get("decision") or "").upper()
+            base_tput = e2e.get("base_tput")
+            new_tput = e2e.get("new_tput")
+            if (
+                e2e.get("validated") is True
+                and decision in {"KEEP", "ADOPTED"}
+                and isinstance(base_tput, (int, float))
+                and isinstance(new_tput, (int, float))
+                and base_tput > 0
+                and new_tput > 0
+            ):
+                # A regression is never "claimed gain": clamp at 0 so a slower
+                # KEEP cannot inflate the route-level residual.
+                delta += max(0.0, float(new_tput) - float(base_tput))
+        return delta
 
     def _record_geak_adopted_kernels(
         self,
@@ -1864,20 +1902,8 @@ class KernelPhase(PhaseHandler):
         optimizer's kernels into ``kernel_journey``. Best-effort: a missing/partial
         file never breaks the phase.
         """
-        if not isinstance(result, dict):
-            return
-        kj_path = str(result.get("kernel_journey_path") or "")
-        if not kj_path:
-            eval_dir = str(result.get("eval_dir") or "")
-            if eval_dir:
-                kj_path = str(Path(eval_dir) / "kernel_journey.json")
-        if not kj_path or not Path(kj_path).is_file():
-            return
-        try:
-            journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        if not isinstance(journey, dict):
+        journey = self._load_geak_journey(result)
+        if not journey:
             return
 
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -1971,27 +1997,12 @@ class KernelPhase(PhaseHandler):
     ) -> None:
         """Replace provisional GEAK e2e KEEPs after a failed final rebench."""
 
-        if not isinstance(result, dict):
-            return
-        kj_path = str(result.get("kernel_journey_path") or "")
-        if not kj_path:
-            eval_dir = str(result.get("eval_dir") or "")
-            if eval_dir:
-                kj_path = str(Path(eval_dir) / "kernel_journey.json")
-        if not kj_path or not Path(kj_path).is_file():
-            return
-        try:
-            journey = json.loads(Path(kj_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return
-        if not isinstance(journey, dict):
-            return
-
         from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
-        for kernel in journey.get("kernels") or []:
-            if not isinstance(kernel, dict):
-                continue
+        # Named on the class, not through ``self``: Coordinator does not
+        # delegate this method, so callers bind it with a Coordinator as
+        # ``self`` and an attribute lookup there would not find the helper.
+        for kernel in KernelPhase._geak_journey_kernels(result):
             kernel_id = str(kernel.get("kernel_id") or "")
             e2e = kernel.get("e2e")
             if not kernel_id or not isinstance(e2e, dict):

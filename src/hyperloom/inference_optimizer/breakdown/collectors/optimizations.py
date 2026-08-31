@@ -1072,12 +1072,15 @@ def collect_recorded_optimizations(
         attempt for attempt in attempts if attempt.get("adopted") and attempt.get("attribution_eligible") is False
     ]
     if non_attributable:
-        withheld = [str(attempt.get("attempt_id") or "<unknown>") for attempt in non_attributable]
+        withheld = sorted(str(attempt.get("attempt_id") or "<unknown>") for attempt in non_attributable)
+        # Name the cut explicitly: a bare 5-element list reads as the complete
+        # set, so someone chasing the sixth withheld adoption never learns it
+        # exists.
+        shown = f"{withheld[:5]}" + (f" (first 5 of {len(withheld)})" if len(withheld) > 5 else "")
         warnings.append(
             "optimizations: "
             f"{len(non_attributable)} kept adoption(s) have no attributable "
-            "throughput pair, so their gain was withheld: "
-            f"{sorted(withheld)[:5]}"
+            f"throughput pair, so their gain was withheld: {shown}"
         )
     # `entries` is the GAIN ledger and deliberately holds only attributable keeps, so a backend whose
     # keeps are all non-attributable reads as zero keeps — indistinguishable from an optimizer that

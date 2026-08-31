@@ -618,10 +618,9 @@ def _e2e_attempt_pair(session_dir: Path) -> tuple[float, float] | None:
 def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) -> None:
     """The residual, not the whole route delta, is what the attempt records.
 
-    Two stacked KEEPs with validated pairs (1.05 and 1.02) are already summed
-    into the GEAK column by ``record_kernel_e2e``. Stacked speedups compose
-    multiplicatively, so 1.071 of the route lift is spoken for; recording the
-    attempt from the pre-GEAK tput would credit that 7.1% a second time.
+    Two KEEPs with validated pairs (+50 and +20 tok/s) are already summed into
+    the GEAK column by ``record_kernel_e2e``; recording the attempt from the
+    pre-GEAK tput would credit those 70 tok/s a second time.
     """
     base = 2844.209
     pre_geak = 3042.941
@@ -635,10 +634,19 @@ def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) 
 
     from hyperloom.orchestrator.phases.kernel import KernelPhase
 
-    assert KernelPhase._geak_journey_attributed_ratio(result) == pytest.approx(1.05 * 1.02)
+    claimed = KernelPhase._geak_journey_attributed_delta(result)
+    assert claimed == pytest.approx(50.0 + 20.0)
     before, after = _e2e_attempt_pair(tmp_path)
-    assert before == pytest.approx(pre_geak * 1.05 * 1.02)
+    assert before == pytest.approx(pre_geak + claimed)
     assert after == pytest.approx(measured)
+
+    # The point of holding back an ABSOLUTE tok/s rather than a speedup ratio:
+    # both records divide by the same session baseline, so the per-kernel
+    # credits and the route credit telescope to exactly the measured route
+    # lift, leaving nothing for ``unattributed_gain_pct`` to absorb.
+    ledger_pct = claimed / base * 100.0
+    route_pct = (after - before) / base * 100.0
+    assert ledger_pct + route_pct == pytest.approx((measured - pre_geak) / base * 100.0)
 
 
 def test_route_attempt_survives_when_only_the_config_remainder_is_left(tmp_path: Path) -> None:
@@ -655,7 +663,7 @@ def test_route_attempt_survives_when_only_the_config_remainder_is_left(tmp_path:
     coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
 
     before, after = _e2e_attempt_pair(tmp_path)
-    assert before == pytest.approx(3000.0 * 1.05)
+    assert before == pytest.approx(3000.0 + 50.0)
     assert after == pytest.approx(3400.0)
 
 
@@ -665,8 +673,8 @@ def test_noise_sized_residual_is_not_recorded_as_an_attempt(tmp_path: Path) -> N
     result = _ok_result(final=3236.489)
     result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
 
-    # 3151.5 is the claimed share; the promotion measured barely above it.
-    coord._promote_geak_from_candidate(result, measured_tput=3000.0 * 1.05 * 1.0005, overlay_loaded=True)
+    # 3050.0 is the claimed share; the promotion measured barely above it.
+    coord._promote_geak_from_candidate(result, measured_tput=3050.0 * 1.0005, overlay_loaded=True)
 
     assert _e2e_attempt_pair(tmp_path) is None
 
@@ -675,7 +683,7 @@ def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> 
     """Without overlay proof the per-kernel ledger claims nothing.
 
     ``_reject_geak_kernel_journey`` refuses to credit KEEPs whose overlay was
-    not proven loaded, so subtracting their ratio here would erase gain no
+    not proven loaded, so holding back their delta here would erase gain no
     other record holds.
     """
     coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)

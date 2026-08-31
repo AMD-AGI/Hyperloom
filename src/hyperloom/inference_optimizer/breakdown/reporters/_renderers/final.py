@@ -99,6 +99,8 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
         )
     geak_pending_status = str(geak_pending.get("status") or "")
     geak_revalidation_status = str(geak.get("revalidation_status") or "")
+    # ``action_path`` entries are ``action`` or ``action:variant``.
+    geak_in_final_stack = any(str(step).split(":", 1)[0] == "geak_e2e" for step in action_path)
     if geak_pending and geak_pending_status in _GEAK_DROPPED_PENDING_STATUSES:
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
@@ -133,7 +135,13 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     # was recorded from, so a LIVE candidate in a later macro-cycle must win over
     # a terminal status left behind by an earlier one. ``render.py`` orders the
     # same three cases the same way.
-    elif geak_revalidation_status in _GEAK_DROPPED_RESULT_STATUSES:
+    #
+    # ``not geak_in_final_stack`` is the same guard one step further: a 2b
+    # rebench that failed stamps ``failed``, and nothing clears it when the 2a
+    # GEAK-harness fallback then promotes the candidate for real. The claim
+    # here is that the candidate is ABSENT from the final stack, so read that
+    # off the stack rather than trusting a status no writer retracts.
+    elif geak_revalidation_status in _GEAK_DROPPED_RESULT_STATUSES and not geak_in_final_stack:
         self_gain = geak.get("gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         drop_reason = str(geak.get("revalidation_error") or "").strip() or "reason not recorded"

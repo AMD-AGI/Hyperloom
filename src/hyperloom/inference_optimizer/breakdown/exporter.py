@@ -439,7 +439,11 @@ def build(
         )
         geak_backend = (kernel_summary.get("by_backend") or {}).get("geak") or {}
         geak_gain = geak_backend.get("total_gain_pct")
-        if geak_promoted and not (isinstance(geak_gain, (int, float)) and geak_gain > 0):
+        # A keep the ledger deliberately declined to sum already explains the
+        # zero, and says so in its own warning. Firing here too would report a
+        # gap in the accounting where the accounting is working as designed.
+        geak_withheld = int(geak_backend.get("non_attributable_keeps") or 0) > 0
+        if geak_promoted and not geak_withheld and not (isinstance(geak_gain, (int, float)) and geak_gain > 0):
             warnings.append(
                 "geak consistency: a promoted geak_e2e stack entry has no positive gain in "
                 "optimizations.summary_by_source.kernel_agent.by_backend.geak"

@@ -530,16 +530,17 @@ def collect_capability_summary(
             accepted_head_count,
             1,
         )
-        if promoted:
+        # A revert is decided evidence from the native invocation rows; this
+        # fallback exists for the case where those rows are MISSING, so it must
+        # not overwrite a verdict they did record — and that means the keep
+        # COUNT too. Bumping ``keeps`` while leaving ``status="reverted"``
+        # emits a row that says the win was both kept and rolled back.
+        if promoted and str(geak_cap.get("status") or "") != "reverted":
             # ONE promotion is ONE keep, whatever it carried. Counting a keep
             # per accepted kernel would contradict the canonical ledger, which
             # books exactly one adoption for the route-level win.
             geak_cap["keeps"] = max(int(geak_cap.get("keeps") or 0), 1)
-            # A revert is decided evidence from the native invocation rows; this
-            # fallback exists for the case where those rows are MISSING, so it
-            # must not overwrite a verdict they did record.
-            if str(geak_cap.get("status") or "") != "reverted":
-                geak_cap["status"] = "kept"
+            geak_cap["status"] = "kept"
         elif geak_cap.get("status") == "not_attempted":
             geak_cap["status"] = "attempted"
 

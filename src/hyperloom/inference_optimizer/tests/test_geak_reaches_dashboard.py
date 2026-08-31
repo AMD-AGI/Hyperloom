@@ -448,18 +448,22 @@ def test_geak_route_context_does_not_emit_an_off_ledger_adoption(tmp_path: Path)
     assert parts.get("adoptions") in (None, [])
 
 
-def test_journey_attributable_win_suppresses_the_route_level_duplicate(tmp_path: Path) -> None:
-    """A journey with its own validated pair must not also get aggregate credit."""
+def test_only_a_validated_pair_is_withheld_from_the_route_attempt(tmp_path: Path) -> None:
+    """The route residual holds back exactly what the per-kernel ledger sums.
+
+    A KEEP with a validated ``(base,new)`` pair is credited per-kernel, so its
+    tok/s must not reach the route attempt too. A KEEP without one is credited
+    nowhere else, so withholding it would erase the gain entirely.
+    """
     from hyperloom.orchestrator.phases.kernel import KernelPhase
 
-    phase = KernelPhase.__new__(KernelPhase)
     with_pair = _journey(tmp_path, [_kernel("k", gain=12.0, before=1000.0, after=1120.0)])
-    assert phase._geak_journey_has_attributable_win({"kernel_journey_path": with_pair}) is True
+    assert KernelPhase._geak_journey_attributed_delta({"kernel_journey_path": with_pair}) == pytest.approx(120.0)
 
     no_pair = _kernel_without_throughput_pair("k_env", gain=3.2)
     path = tmp_path / "kernel_journey_without_pair.json"
     path.write_text(json.dumps({"kernels": [no_pair]}), encoding="utf-8")
-    assert phase._geak_journey_has_attributable_win({"kernel_journey_path": str(path)}) is False
+    assert KernelPhase._geak_journey_attributed_delta({"kernel_journey_path": str(path)}) == pytest.approx(0.0)
 
 
 def test_every_journey_replay_call_names_its_route() -> None:
