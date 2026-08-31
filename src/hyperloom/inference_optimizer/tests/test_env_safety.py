@@ -187,3 +187,14 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     assert "sensitive-value" not in redacted
     assert "sensitive-token" not in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_secret_values_masks_quoted_assignments():
+    """A quoted value is the common shape: shells quote it, json.dumps escapes it."""
+    double = common_env_safety.redact_secret_values('export MYAPP_PASSWORD="hunter2"')
+    single = common_env_safety.redact_secret_values("export MYAPP_PASSWORD='hunter2'")
+    escaped = common_env_safety.redact_secret_values('{"command": "export MYAPP_PASSWORD=\\"hunter2\\""}')
+
+    assert double == 'export MYAPP_PASSWORD="[REDACTED]"'
+    assert single == "export MYAPP_PASSWORD='[REDACTED]'"
+    assert "hunter2" not in escaped

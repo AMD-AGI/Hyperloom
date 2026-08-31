@@ -80,14 +80,19 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    # Shell commands quote the value (``PASSWORD="x"``), and a command that has
+    # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
+    # The opening quote is matched separately and re-emitted so the mask keeps
+    # the quoting intact; folding it into the value class instead would end the
+    # match on the first quote and leave the secret readable.
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
             r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)"
             r"[A-Z0-9_]*\s*[=:]\s*)"
-            r"[^\s,;'\"]+"
+            r"(\\?[\"'])?[^\s,;'\"]+"
         ),
-        r"\1[REDACTED]",
+        r"\1\2[REDACTED]",
     ),
 )
 

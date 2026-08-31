@@ -160,6 +160,13 @@ def test_build_client_from_env_none_when_scheme_is_not_http(monkeypatch):
     assert build_gbrain_page_client_from_env() is None
 
 
+def test_build_client_from_env_none_when_url_is_unparseable(monkeypatch):
+    """An unterminated IPv6 literal raises ValueError from under the scheme check."""
+    monkeypatch.setenv("GBRAIN_BASE_URL", "http://[::1")
+    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
+    assert build_gbrain_page_client_from_env() is None
+
+
 # --- discovery source ---------------------------------------------------
 
 from hyperloom.agents.framework import sources  # noqa: E402

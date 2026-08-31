@@ -315,6 +315,11 @@ def test_summarize_tool_input_redacts_bearer_and_assignment():
     assert "sk-live-abcdef" not in assigned
     assert "[REDACTED]" in assigned
 
+    # Quoting the value is the common shell shape, so it must mask too.
+    quoted = pu._summarize_tool_input({"command": 'export MYAPP_PASSWORD="hunter2" && ./run.sh'})
+    assert "hunter2" not in quoted
+    assert "[REDACTED]" in quoted
+
 
 def test_summarize_tool_input_redacts_before_clipping():
     """A secret near the clip boundary is masked on the full string first."""
