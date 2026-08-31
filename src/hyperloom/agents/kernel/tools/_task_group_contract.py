@@ -14,7 +14,7 @@ from typing import Any
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
 CASE_SELECTOR_KEY = "CASE_ID"
-OPERATOR_IDENTITY_VERSION = 2
+OPERATOR_IDENTITY_VERSION = 3
 
 
 def _strip_dispatch_decoration(operation: str) -> str:
@@ -37,9 +37,8 @@ def _strip_dispatch_decoration(operation: str) -> str:
     return value
 
 
-def normalize_operation_key(operation: str) -> str:
-    """Remove launch decoration and balanced C++ template arguments."""
-    value = _strip_dispatch_decoration(operation)
+def _strip_template_arguments(value: str) -> str:
+    """Remove balanced C++ template arguments from an already-clean symbol."""
     if "<" not in value:
         return value
     normalized: list[str] = []
@@ -54,6 +53,11 @@ def normalize_operation_key(operation: str) -> str:
             normalized.append(character)
     result = "".join(normalized).strip()
     return result or value
+
+
+def normalize_operation_key(operation: str) -> str:
+    """Remove launch decoration and balanced C++ template arguments."""
+    return _strip_template_arguments(_strip_dispatch_decoration(operation))
 
 
 def logical_operator_name(candidate: dict[str, Any] | None) -> str:
@@ -188,7 +192,9 @@ def legacy_operator_identity_keys(
             ]
         )
     )
-    operation_key = native_operation_key(operation) if kind == "native" else normalize_operation_key(operation)
+    # v2 keys used normalize_operation_key before it acquired _strip_dispatch_decoration;
+    # reproduce that shape via _strip_template_arguments so warm-start can match them.
+    operation_key = native_operation_key(operation) if kind == "native" else _strip_template_arguments(str(operation or "").strip())
     function_keys = {
         (native_operation_key(function_name) if kind == "native" else str(function_name or "")),
         operation_key,
