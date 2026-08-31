@@ -25,6 +25,13 @@ In docker mode:
   the container environment.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
+### Prior workload cleanup (required)
+
+Before any replacement launch after a failed or abandoned demo run (`docker run`,
+`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
+gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
+skip the user-approval step (#1314).
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
