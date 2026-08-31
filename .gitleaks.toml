@@ -22,3 +22,19 @@ description = "GEMM tuner script keys -- an aiter script name, not a credential"
 paths = ['''^src/kernelforge/gemm_tune/tuners/.*\.py$''']
 regexTarget = "line"
 regexes = ['''script_key=(SPLITK_TRIAL_SCRIPT_KEY|"[a-z][a-z0-9_]*")''']
+
+[[allowlists]]
+description = "Redaction test fixtures -- the credentials a test asserts are removed"
+# test_summarize_tool_input_redacts_bearer_and_assignment feeds these to
+# _summarize_tool_input and asserts they come back redacted, so they have to be
+# literals in the source for the test to mean anything.
+#
+# Matched on content alone rather than scoped by path: `paths` and `regexes` in
+# one allowlist are OR'd, so naming the file would exempt the whole file and let
+# a real credential committed there pass. These are the two fake strings and
+# nothing else.
+regexTarget = "line"
+regexes = [
+  '''Authorization: Bearer secret-token-value''',
+  '''OPENAI_API_KEY=sk-live-abcdef''',
+]
