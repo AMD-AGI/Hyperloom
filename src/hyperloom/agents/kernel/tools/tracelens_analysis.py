@@ -2670,19 +2670,35 @@ def _longest_literal_prefix_len(path: Path, name: str) -> int:
     target = _strip_template_args(_normalize_profiler_op_name(name)).lower()
     if "::" in target:
         target = target.split("::")[-1]
-    # Longest first: the answer is the first prefix that is present.
-    for size in range(len(target), 5, -1):
-        if target[:size] in low:
-            return size
-    return 0
+    # Binary search on prefix length: the prefix-in-text relation is monotone
+    # (if length L is present, every length < L is also present), so bisect
+    # finds the longest match in O(log n) probes instead of O(n).
+    lo, hi = 6, len(target)
+    if hi < lo or target[:lo] not in low:
+        return 0
+    result = lo
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if target[:mid] in low:
+            result = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return result
 
 
 def _prefer_composing_file(name: str, hits: list[Path]) -> list[Path]:
-    """Rank the file that spells out most of a runtime-assembled name first."""
+    """Rank the file that spells out most of a runtime-assembled name first.
+
+    Returns an empty list when no hit contains even the minimum prefix (6 chars)
+    of the kernel name, preventing a low-confidence path from being claimed.
+    """
     scored = sorted(
         _rank_paths(hits),
         key=lambda h: -_longest_literal_prefix_len(h, name),
     )
+    if not scored or _longest_literal_prefix_len(scored[0], name) == 0:
+        return []
     return scored
 
 
@@ -2702,21 +2718,21 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
         ``True`` when the file defines the symbol; ``False`` on read errors or
         when it only mentions it.
     """
-    kw = re.escape(keyword)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
     # \b cannot anchor between "_" and a letter, so a bare \bkw\b never matches
     # def _kw. Search the underscore spelling too.
-    candidates = [kw] if kw.startswith("_") else [kw, "_" + kw]
+    kw = re.escape(keyword)
+    candidates = [kw] if keyword.startswith("_") else [kw, r"_" + kw]
     patterns: list[str] = []
     for sym in candidates:
         patterns.extend(
             [
-                r"def\s+" + re.escape(sym) + r"\b",  # Python / @triton.jit
-                r"\b" + re.escape(sym) + r"\s*=",  # module-level assignment
-                r"__global__[^\n;{]*" + re.escape(sym) + r"\b",  # CUDA/HIP
+                r"\bdef\s+" + sym + r"\b",  # Python / @triton.jit
+                r"\b" + sym + r"\s*=",  # module-level assignment
+                r"__global__[^\n;{]*" + sym + r"\b",  # CUDA/HIP
             ]
         )
     return any(re.search(p, text) for p in patterns)
@@ -2733,7 +2749,7 @@ def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
         The ranked paths, preferring files that define ``keyword``.
     """
     definers = [h for h in hits if _file_defines_symbol(h, keyword)]
-    return _rank_paths(definers) if definers else _rank_paths(hits)
+    return _rank_paths(definers, keyword=keyword) if definers else _rank_paths(hits, keyword=keyword)
 
 
 # Bare HIP/CUDA launch APIs. TraceLens emits these as standalone rows when it
@@ -2822,7 +2838,9 @@ def locate_source_via_grep(name: str) -> str:
         for root in kernel_search_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            return str(_prefer_composing_file(name, hits)[0])
+            ranked = _prefer_composing_file(name, hits)
+            if ranked:
+                return str(ranked[0])
     return ""
 
 
