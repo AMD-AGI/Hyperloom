@@ -225,12 +225,6 @@ def _resolve_agent(
     if name.startswith("integrate_patch") or name == "integrate":
         return patch_author(result)
 
-    # A mandate asking for a source patch routinely comes back holding server
-    # args, so what the specialist delivered names its owner and what it was
-    # asked for does not.
-    if name == "specialist":
-        return agent_from_lever(patch_lever_kind(result)) or "explore"
-
     direct = _AGENT_BY_ACTION.get(name)
     if direct:
         return direct
@@ -4239,6 +4233,8 @@ _AGENT_BY_OPERATION_KIND = {
     "kernel_optimizer_selection": "kernel_agent",
     "strategy_selection": "kernel_agent",
     "gemm_tuning": "kernel_agent",
+    # A specialist round is discovery, not an attempt: it carries no gain and
+    # no adoption, so this names the agent whose activity it was.
     "specialist": "explore",
     "critic": "critic",
     "kb_write": "critic",
