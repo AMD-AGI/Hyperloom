@@ -1110,13 +1110,24 @@ class ExploreExecutor:
         # look identical later: an environment that cannot evaluate at all (no
         # lm-eval in the benchmark venv) opts the gate out, while a variant
         # switching its own eval off is still overridden below.
+        #
+        # ``materialized_run_eval_disabled`` is fail-closed and stays fail-closed
+        # for this caller: an unreadable/corrupt materialized config reports
+        # "not disabled", which here leaves the gate ON. The corrupt-config case
+        # therefore keeps grading rather than silently dropping the accuracy
+        # gate, which is the direction that cannot ship a regression.
         accuracy_gate_enabled = accuracy_gate_applies(
             scriptable=scriptable,
             baseline_accuracy=baseline_accuracy,
             eval_disabled=bool(getattr(ss, "eval_disabled", False)),
             run_eval_disabled=materialized_run_eval_disabled(config_path),
         )
-        force_run_eval = accuracy_gate_enabled
+        # RUN_EVAL only buys something where the gate reads an lm-eval score. A
+        # scriptable framework's gate compares the bench script's own quality
+        # figure against a fixed 1.0 reference (see the reference selection
+        # below), so forcing the eval on there paid for an extra eval pass per
+        # variant and fed it to nothing.
+        force_run_eval = accuracy_gate_enabled and not scriptable
         # Round-level accuracy-gate observability (see the gate below). A gated
         # variant with no verdict is REVERTed on its own evidence, which is the
         # right call when its own config broke the eval and the wrong one when

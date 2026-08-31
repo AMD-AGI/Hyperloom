@@ -3203,13 +3203,10 @@ class IntegratePatchExecutor:
         acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
         # Measured wins over proposed here too: this value is what the KEEP gate
         # grades against, so an LLM-supplied figure must not outrank it.
-        acc_baseline = (
-            reconcile_baseline_accuracy(
-                params.get("accuracy_baseline"),
-                extra.get("shared_state") or extra.get("state"),
-                where="integrate_patch",
-            )
-            or None
+        acc_baseline = reconcile_baseline_accuracy(
+            params.get("accuracy_baseline"),
+            extra.get("shared_state") or extra.get("state"),
+            where="integrate_patch",
         )
         acc_block, acc_reason, acc_degraded = accuracy_keep_block(
             accuracy_pass,
