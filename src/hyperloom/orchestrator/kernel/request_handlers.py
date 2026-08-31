@@ -5902,29 +5902,20 @@ def _optimization_budget_minutes(payload: dict) -> float:
 def _rewrite_route_budget_floor_minutes() -> float:
     """Minutes the FlyDSL rewrite route needs, or 0 when it is not opted into.
 
-    The route needs 75 minutes: an hour for the producer plus a quarter reserved
-    for apply-back. The shipped default was 60 when this was written, so opting
-    in with ``HYPERLOOM_FORGE_REWRITE_BY_FLYDSL`` bought nothing -- every
-    eligible candidate was declined ``budget_insufficient`` and silently fell
-    back to forge-loop, which is how two full sessions ran believing the route
-    was engaged. The default is now 90 and clears the gate on its own, so this
-    floor no longer binds there; it stays because the number it defends against
-    is the route's own, and a budget tuned down for some other reason must not
-    quietly switch the route off again.
-
-    Applying it only when the operator opted in leaves every other run's budget
-    untouched.
+    Below its own minimum the route declines every candidate as
+    ``budget_insufficient`` and falls back to forge-loop without saying so, so a
+    budget tuned down for an unrelated reason would switch the route off
+    silently. Raising the floor only for a run that opted in leaves every other
+    run's budget untouched.
 
     Returns:
         float: The floor in minutes, or ``0.0`` when the route is disabled.
     """
-    try:
-        from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import (
-            MIN_BUDGET_SEC,
-            rewrite_enabled,
-        )
-    except ImportError:
-        return 0.0
+    from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import (
+        MIN_BUDGET_SEC,
+        rewrite_enabled,
+    )
+
     return MIN_BUDGET_SEC / 60.0 if rewrite_enabled() else 0.0
 
 

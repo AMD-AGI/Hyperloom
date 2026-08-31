@@ -10,7 +10,7 @@ import os
 # Mounts that can be revoked mid-run: a process whose cwd lives on one sees
 # relative-path writes fail with ENOENT after a flap, so callers place anything
 # they must keep writing to on local disk instead.
-NETWORK_FS_TYPES: frozenset[str] = frozenset(
+_NETWORK_FS_TYPES: frozenset[str] = frozenset(
     {
         "nfs",
         "nfs4",
@@ -30,18 +30,12 @@ NETWORK_FS_TYPES: frozenset[str] = frozenset(
 )
 
 
-def path_fstype(path: str) -> str:
+def _path_fstype(path: str) -> str:
     """Return the filesystem type backing ``path`` per ``/proc/mounts``.
 
-    Picks the longest mountpoint that is a prefix of the resolved path.
-    Returns ``""`` when it cannot be determined (non-Linux, unreadable
-    ``/proc/mounts``, …), which callers treat as "assume local".
-
-    Args:
-        path: Filesystem path whose backing mount type is resolved.
-
-    Returns:
-        The filesystem type string, or ``""`` on failure.
+    Picks the longest mountpoint that is a prefix of the resolved path, and
+    ``""`` when it cannot be determined (non-Linux, unreadable
+    ``/proc/mounts``), which reads as "assume local".
     """
     try:
         rp = os.path.realpath(path)
@@ -72,12 +66,5 @@ def path_fstype(path: str) -> str:
 
 
 def is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem.
-
-    Args:
-        path: Filesystem path to classify.
-
-    Returns:
-        True when ``path`` lives on a known network filesystem type.
-    """
-    return path_fstype(path).lower() in NETWORK_FS_TYPES
+    """True when ``path`` is backed by a revocable network filesystem."""
+    return _path_fstype(path).lower() in _NETWORK_FS_TYPES

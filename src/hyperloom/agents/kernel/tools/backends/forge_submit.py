@@ -717,15 +717,12 @@ def _pkg_sys_path_root(source_file: str) -> str:
 def _is_on_network_fs(path: Path) -> bool:
     """True when ``path`` or its nearest existing ancestor is on a network FS.
 
-    Imported inside the call rather than at module scope: this file also runs as
-    a standalone script on nodes with no ``hyperloom`` on the path, which is the
-    invariant ``test_forge_submit_stays_import_light`` pins. A module-level
-    ``try/except ImportError`` still reads as a module-level import to it.
+    Imported inside the call: this file also runs as a standalone script on
+    nodes with no ``hyperloom`` on the path, the invariant
+    ``test_forge_submit_stays_import_light`` pins.
     """
-    try:
-        from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
-    except ImportError:
-        return False
+    from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
+
     probe = path
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
@@ -797,10 +794,7 @@ def _prepare_worktree_nogit(
        one top-level package subtree (e.g. ``vllm/``), NEVER the entire
        ``dist-packages``/``site-packages`` directory (which would copy every
        installed package — torch, vllm, ... — 5-15 GB per submit, risking
-       ENOSPC). Ignores ``.git`` and the runtime-artefact names the producer's
-       registry lists, which deliberately exclude any name a package is
-       imported through -- ``aiter/jit`` and ``aiter/dist`` are sources, and
-       the copy shadows the install, so dropping them leaves nothing to import.
+       ENOSPC). Ignores ``.git`` and the producer's runtime-artefact names.
     3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
        bytecode caches + ``git add -A`` + initial commit so Forge's
        ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
@@ -863,11 +857,8 @@ def _prepare_worktree_nogit(
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
-    # Imported inside the call for the reason ``_is_on_network_fs`` states: this
-    # file also runs standalone, where the wheel carrying the producer is absent.
-    # A scratch copy is placed ahead of site-packages and shadows the install, so
-    # the narrow set is the only one it may drop -- the compiled suffixes the
-    # index skips have to survive the copy.
+    # In-call for the reason ``_is_on_network_fs`` states. The copy takes the
+    # narrow set; only the index may drop what a package is imported through.
     from kernelforge.loop.path_ownership import (  # noqa: PLC0415
         RUNTIME_DIRECTORY_NAMES,
         RUNTIME_FILE_SUFFIXES,
