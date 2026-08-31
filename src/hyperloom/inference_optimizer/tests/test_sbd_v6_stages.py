@@ -519,7 +519,7 @@ def test_kernel_is_succeeded_when_a_rebench_concluded_even_against_the_candidate
 def test_kernel_lanes_stay_empty_when_only_one_produced_candidates(tmp_path):
     state = _kernel_state() | {
         "last_fusion": {
-            "run_id": "fus-1",
+            "fusion_run_id": "fus-1",
             "status": "ok",
             "kept": True,
             "best_pattern": "rmsnorm_add",
@@ -527,7 +527,11 @@ def test_kernel_lanes_stay_empty_when_only_one_produced_candidates(tmp_path):
             "micro_decision": "candidate",
             "ts": "2026-08-27T01:20:00+00:00",
         },
-        "last_fusion_integrate": {"decision": "KEEP", "reason": "gain above threshold"},
+        "last_fusion_integrate": {
+            "fusion_run_id": "fus-1",
+            "decision": "KEEP",
+            "reason": "gain above threshold",
+        },
     }
 
     event = _event(collect_v6_timeline(tmp_path, [], state=state), "kernel")
@@ -815,6 +819,116 @@ def test_only_the_adopted_backend_attempt_carries_the_kernels_e2e_outcome(tmp_pa
     }
 
 
+def _forge_result() -> dict:
+    """A KernelForge result as ``run_attempt`` + ``build_verification`` write it.
+
+    The attempt rows carry no verdict and no gates — the backend records how
+    the run went and nothing else — and ``optimized_path`` is the attempt's
+    stdout log, not the rewrite. The verdict, the gates and the source
+    artifact are computed once for the kernel and sit beside ``attempts``.
+    """
+    return {
+        "kernel_id": "rmsnorm",
+        "run_id": "run-1",
+        "attempts": [
+            {
+                "attempt_id": "a-good",
+                "backend": "forge",
+                "status": "completed",
+                "optimized_path": "optimized/a-good_stdout.log",
+                "created_at": "2026-08-27T01:10:00+00:00",
+                "elapsed_s": 42.0,
+            },
+            {
+                "attempt_id": "a-bad",
+                "backend": "claude",
+                "status": "failed",
+                "error_type": "compile_error",
+                "error": "no kernel emitted",
+                "optimized_path": "optimized/a-bad_stdout.log",
+                "created_at": "2026-08-27T01:12:00+00:00",
+            },
+        ],
+        "verification": {
+            "compile_passed": True,
+            "correctness_passed": True,
+            "correctness_source": "forge_rewrite_reference",
+            "micro_speedup": 1.2,
+            "best_attempt_id": "a-good",
+            "best_backend": "forge",
+            "best_artifact_path": "kernels/rmsnorm.py",
+            "artifact_valid": True,
+        },
+        "proposal": {"decision": "KEEP", "reasons": ["kernel artifact ready"]},
+    }
+
+
+def test_a_recorded_forge_run_reaches_v6_with_its_verdict_on_the_winner(tmp_path):
+    """recorder -> assembler -> V6, on the shape a real backend writes.
+
+    Hand-built journey fixtures put ``decision`` / ``compile_passed`` /
+    ``best_artifact_path`` straight onto the attempt, which no producer does.
+    Read off the attempt alone, a successful adopted rewrite came out as
+    ``micro_decision: SKIPPED`` with null gates and an artifact pointing at the
+    backend's stdout log. This drives the real chain instead.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import assembler, record_kernel_backend_result
+
+    record_kernel_backend_result(tmp_path, _forge_result())
+    kernel_journey = assembler.assemble_parts(tmp_path).get("kernel_journey")
+
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(tmp_path, warnings, state=_kernel_state(), kernel_journey=kernel_journey)
+
+    rewrites = {row["rewrite_id"]: row for row in _event(timeline, "kernel")["ext"]["kernel_rewrites"]}
+    winner = rewrites["a-good"]
+    assert winner["micro_decision"] == "KEEP"
+    assert winner["execution_status"] == "succeeded"
+    assert winner["verification"] == {
+        "compile_passed": True,
+        "correctness_passed": True,
+        "correctness_source": "forge_rewrite_reference",
+        "micro_speedup": 1.2,
+    }
+    # The rewritten source, not the attempt's stdout log.
+    assert winner["artifact"]["artifact_path"] == "kernels/rmsnorm.py"
+
+    loser = rewrites["a-bad"]
+    # A failed attempt with no verdict of its own is a failure, not a skip.
+    assert loser["micro_decision"] == "FAILED"
+    assert loser["outcome"] == "FAILED"
+    # The winner's gates and artifact are the winner's.
+    assert loser["verification"]["compile_passed"] is None
+    assert loser["verification"]["correctness_passed"] is None
+    assert loser["artifact"]["artifact_path"] == "optimized/a-bad_stdout.log"
+    assert warnings == []
+
+
+def test_the_kernel_verdict_stays_unstamped_when_nothing_was_adopted(tmp_path):
+    """No ``best_attempt_id`` means no attempt was adopted.
+
+    ``_best_attempt_id``'s speedup fallback would still name one, which would
+    hand a kernel-wide REVERT to whichever row sorted first.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder import assembler, record_kernel_backend_result
+
+    result = _forge_result()
+    result["verification"] |= {
+        "compile_passed": False,
+        "correctness_passed": False,
+        "best_attempt_id": "",
+        "best_artifact_path": "",
+    }
+    result["proposal"] = {"decision": "REVERT", "reasons": ["compile failed"]}
+    result["attempts"][0]["status"] = "failed"
+    record_kernel_backend_result(tmp_path, result)
+
+    attempts = assembler.assemble_parts(tmp_path)["kernel_journey"]["kernels"][0]["backend_attempts"]
+    assert {row["attempt_id"]: row["decision"] for row in attempts} == {"a-good": "FAILED", "a-bad": "FAILED"}
+    assert {row["attempt_id"]: row["compile_passed"] for row in attempts} == {"a-good": None, "a-bad": None}
+    assert {row["attempt_id"]: row["best_artifact_path"] for row in attempts} == {"a-good": "", "a-bad": ""}
+
+
 def test_a_losing_backend_attempt_does_not_claim_the_kernels_rebench(tmp_path):
     """Every attempt on a kernel shares its ``kernel_id``.
 
@@ -1000,6 +1114,159 @@ def test_kernel_warns_when_the_session_scoped_geak_record_spans_several_visits(t
     events = _events(timeline, "kernel")
     assert [len(event["ext"]["geak_runs"]) for event in events] == [1, 0]
     assert any("session-scoped across 2 kernel visits" in warning for warning in warnings)
+
+
+_GEAK_OK = {"engaged": True, "status": "ok", "gain_pct": 8.0, "final_throughput_tok_s": 120.0}
+
+
+def test_a_geak_run_the_rebench_reverted_does_not_report_keep(tmp_path):
+    """The runner's ``status`` is GEAK's claim, not the session's verdict.
+
+    Reading ``ok`` as ``KEEP`` puts an adopted GEAK run next to the final
+    rebench that rejected it — two contradictory records of the same event.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        geak=_GEAK_OK,
+        optimizations={
+            "attempts": [
+                _kernel_attempt("geak-rb", 0, backend="geak", producer="geak", decision="REVERT", local_gain_pct=-4.5)
+            ]
+        },
+    )
+
+    run = _event(timeline, "kernel")["ext"]["geak_runs"][0]
+    assert run["final_rebench_attempt_ids"] == ["geak-rb"]
+    assert run["outcome"] == "REVERT"
+
+
+def test_a_geak_run_the_rebench_kept_reports_keep(tmp_path):
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        geak=_GEAK_OK,
+        optimizations={"attempts": [_kernel_attempt("geak-rb", 0, backend="geak", producer="geak")]},
+    )
+
+    run = _event(timeline, "kernel")["ext"]["geak_runs"][0]
+    assert run["final_rebench_attempt_ids"] == ["geak-rb"]
+    assert run["outcome"] == "KEEP"
+
+
+@pytest.mark.parametrize(
+    ("revalidation_status", "outcome"),
+    [("no_promote", "REVERT"), ("no_material", "REVERT"), ("fallback_failed", "FAILED")],
+)
+def test_a_closed_out_geak_candidate_reports_the_writeback_verdict(tmp_path, revalidation_status, outcome):
+    """The verdict is stamped on ``geak_result``, not on the run record."""
+    state = _kernel_state() | {"geak_result": {"status": "ok", "revalidation_status": revalidation_status}}
+    timeline = collect_v6_timeline(tmp_path, [], state=state, geak=_GEAK_OK)
+
+    assert _event(timeline, "kernel")["ext"]["geak_runs"][0]["outcome"] == outcome
+
+
+def test_an_unadjudicated_geak_run_is_pending_rather_than_kept(tmp_path):
+    """Nothing measured it. That is not a rejection, and not an adoption."""
+    timeline = collect_v6_timeline(tmp_path, [], state=_kernel_state(), geak=_GEAK_OK)
+
+    run = _event(timeline, "kernel")["ext"]["geak_runs"][0]
+    assert run["final_rebench_attempt_ids"] == []
+    assert run["outcome"] == "NEEDS_REVIEW"
+
+
+def _fusion_state(**integrate) -> dict:
+    return _kernel_state() | {
+        "last_fusion": {
+            "fusion_run_id": "fus-new",
+            "status": "ok",
+            "kept": True,
+            "micro_decision": "candidate",
+            "patch": "fusion/new.patch",
+            "ts": "2026-08-27T01:20:00+00:00",
+        },
+        "last_fusion_integrate": integrate,
+    }
+
+
+def test_a_fusion_run_does_not_inherit_the_previous_rounds_integrate_verdict(tmp_path):
+    """``last_fusion`` is rewritten every run; ``last_fusion_integrate`` is not.
+
+    A fusion that is not kept never reaches integrate, and one missing its
+    patch or target file returns before it, so the verdict left in state can
+    belong to an earlier round.
+    """
+    warnings: list[str] = []
+    state = _fusion_state(fusion_run_id="fus-old", decision="KEEP", reason="old run passed")
+    timeline = collect_v6_timeline(tmp_path, warnings, state=state)
+
+    run = _event(timeline, "kernel")["ext"]["fusion_runs"][0]
+    assert run["run_id"] == "fus-new"
+    assert run["outcome"] == "NEEDS_REVIEW"
+    assert run["reason"] != "old run passed"
+    assert any("does not name this fusion run" in warning for warning in warnings)
+
+
+def test_a_fusion_run_reports_the_verdict_that_names_it(tmp_path):
+    warnings: list[str] = []
+    state = _fusion_state(fusion_run_id="fus-new", decision="KEEP", reason="gain above threshold")
+    run = _event(collect_v6_timeline(tmp_path, warnings, state=state), "kernel")["ext"]["fusion_runs"][0]
+
+    assert run["outcome"] == "KEEP"
+    assert run["reason"] == "gain above threshold"
+    assert warnings == []
+
+
+def test_a_pre_id_fusion_pairs_on_the_patch_the_verdict_names(tmp_path):
+    """Sessions recorded before ``fusion_run_id`` existed still pair."""
+    state = _fusion_state(decision="KEEP", patch_path="fusion/new.patch")
+    state["last_fusion"].pop("fusion_run_id")
+    timeline = collect_v6_timeline(tmp_path, [], state=state)
+
+    assert _event(timeline, "kernel")["ext"]["fusion_runs"][0]["outcome"] == "KEEP"
+
+
+def test_a_micro_kept_fusion_with_no_integrate_verdict_is_not_a_final_keep(tmp_path):
+    """KernelForge keeping a fusion is a microbenchmark result.
+
+    Adoption is the e2e re-baseline's call, and it never ran here.
+    """
+    run = _event(collect_v6_timeline(tmp_path, [], state=_fusion_state()), "kernel")["ext"]["fusion_runs"][0]
+    assert run["micro_decision"] == "candidate"
+    assert run["outcome"] == "NEEDS_REVIEW"
+
+
+def test_a_collective_campaign_pending_integration_is_not_a_final_keep(tmp_path):
+    """The campaign row is written when the microbenchmark decides.
+
+    Its integration fields are merged on later, so a KEPT campaign that never
+    reached the gate — or crashed between the two writes — sits in state
+    reading ``KEEP`` with no ``integration_decision``.
+    """
+    collective = {
+        "attempts": [
+            {
+                "collective_attempt_id": "coll-1",
+                "kernel_id": "all_reduce",
+                "status": "ok",
+                "decision": "KEEP",
+                "kept": True,
+                "kernel_speedup": 1.3,
+                "ts": "2026-08-27T01:20:00+00:00",
+            }
+        ]
+    }
+    timeline = collect_v6_timeline(tmp_path, [], state=_kernel_state(), collective=collective)
+
+    run = _event(timeline, "kernel")["ext"]["collective_runs"][0]
+    assert run["micro_decision"] == "candidate"
+    assert run["outcome"] == "NEEDS_REVIEW"
+
+    collective["attempts"][0]["integration_decision"] = "REVERT"
+    timeline = collect_v6_timeline(tmp_path, [], state=_kernel_state(), collective=collective)
+    assert _event(timeline, "kernel")["ext"]["collective_runs"][0]["outcome"] == "REVERT"
 
 
 def test_kernel_without_a_visit_or_evidence_produces_no_event(tmp_path):

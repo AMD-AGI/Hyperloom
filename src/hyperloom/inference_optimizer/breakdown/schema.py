@@ -758,10 +758,19 @@ class KernelBackendAttempt(TypedDict, total=False):
         model (str | None): Model used by the backend, or None.
         ts (str): ISO UTC timestamp of the attempt.
         status (str): Attempt status.
-        decision (str): KEEP / PARTIAL / REVERT / FAILED.
+        decision (str): KEEP / PARTIAL / REVERT / NEEDS_REVIEW / FAILED. The
+            kernel-level verdict on the adopted attempt, the attempt's own
+            otherwise.
         micro_speedup (float | None): Micro-benchmark speedup, or None.
         compile_passed (bool | None): Whether compilation passed, or None.
         correctness_passed (bool | None): Whether correctness passed, or None.
+        correctness_source (str | None): What the correctness verdict was read
+            from (``forge_rewrite_reference`` / ``report_scan`` /
+            ``cli_override`` / ...), or None when nothing recorded one.
+        best_artifact_path (str): The rewritten source the kernel was carried
+            to integrate with. Written on the adopted attempt only; ``""``
+            elsewhere. Distinct from ``optimized_files``, which is the
+            attempt's own output (a stdout log for a real backend run).
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
         error_class (str | None): Failure classification (pre-dispatch markers).
@@ -785,6 +794,8 @@ class KernelBackendAttempt(TypedDict, total=False):
     micro_speedup: float | None
     compile_passed: bool | None
     correctness_passed: bool | None
+    correctness_source: str | None
+    best_artifact_path: str
     optimized_files: list[str]
     error: str | None
     error_class: str | None

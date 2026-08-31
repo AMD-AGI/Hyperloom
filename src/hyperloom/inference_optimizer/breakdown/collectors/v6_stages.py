@@ -90,6 +90,20 @@ _ROLLUP_TO_OUTCOME = {
 }
 _OUTCOME_VALUES = frozenset({"KEEP", "REVERT", "FAILED", "NEEDS_REVIEW", "SKIPPED"})
 _MICRO_DECISIONS = frozenset({"KEEP", "REVERT", "PARTIAL", "FAILED", "SKIPPED"})
+# ``make_proposal`` emits a fifth verdict for a rewrite that cleared the gates
+# it could measure and left the rest unproven. ``micro_decision`` has no such
+# member; ``PARTIAL`` is the one that means the same thing here, and reading it
+# as an unknown spelling would file a measured near-miss as a skip.
+_MICRO_DECISION_ALIASES = {"NEEDS_REVIEW": "PARTIAL", "REVIEW": "PARTIAL"}
+# ``revalidation_status`` is stamped on ``geak_result`` only by the verdicts
+# that close a candidate out. A promotion writes a ``geak_e2e`` stack entry and
+# a rebench attempt instead, so the absence of this field is not a KEEP.
+_GEAK_REVALIDATION_OUTCOMES = {
+    "no_promote": "REVERT",
+    "no_material": "REVERT",
+    "failed": "FAILED",
+    "fallback_failed": "FAILED",
+}
 # The run-level lanes spell the same field in their own lowercase vocabulary.
 _CANDIDATE_DECISIONS = frozenset({"candidate", "no_improvement", "failed", "skipped"})
 _STOP_REASONS_SWEEP = frozenset({"sweep_failed", "sweep_unusable", "sweep_timeout"})
@@ -182,7 +196,7 @@ def _candidate_decision(raw: Any, *, where: str, warnings: list[str], default: s
 
 def _micro_decision(raw: Any, *, where: str, warnings: list[str], default: str = "SKIPPED") -> str:
     """Resolve a candidate-level decision onto the ``micro_decision`` enum."""
-    decision = _upper(raw)
+    decision = _MICRO_DECISION_ALIASES.get(_upper(raw), _upper(raw))
     if not decision:
         return default
     if decision in _MICRO_DECISIONS:
@@ -678,8 +692,9 @@ def _adopted_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
     ``verification.best_attempt_id`` then ``best_backend`` then the highest
     micro speedup. The hints are consumed there and do not survive onto the
     journey entry, so the same order is re-derived from what does survive —
-    ``best_artifact_path``, which is only ever written onto the adopted row,
-    then the speedup ordering V5 falls back to.
+    ``best_artifact_path``, which the recorder writes onto the adopted row and
+    no other, then the speedup ordering V5 falls back to. A session recorded
+    before that stamp existed has neither, and lands on the speedup ordering.
 
     Returns:
         The adopted attempt, or ``None`` when there is nothing to adopt.
@@ -709,10 +724,15 @@ def _kernel_rewrite(
 
     ``adopted`` says whether this is the attempt the kernel's ``e2e`` verdict
     was reached on. Only that one may carry kernel-level facts: the E2E
-    ``outcome``, the kernel's best micro speedup, and — via
-    :func:`_lane_identity_keys` — the kernel's identity when final rebenches are
-    linked. A losing attempt that inherited them would read as having been
-    integrated and validated, when the run rejected it.
+    ``outcome``, the kernel's best micro speedup, the integrated patch, and —
+    via :func:`_lane_identity_keys` — the kernel's identity when final
+    rebenches are linked. A losing attempt that inherited them would read as
+    having been integrated and validated, when the run rejected it.
+
+    The verdict and the verification gates are read off the attempt row, where
+    the recorder folds the kernel-level ``proposal`` / ``verification`` onto
+    the adopted attempt. A backend writes none of them itself, so a row that
+    carries them carries them because it won.
     """
     e2e = _mapping(entry.get("e2e"))
     dispatch = _mapping(entry.get("dispatch"))
@@ -726,6 +746,13 @@ def _kernel_rewrite(
         # The kernel-level best speedup describes whichever attempt achieved
         # it, so it is only a fallback for the attempt that did.
         micro_speedup = _to_float(_first(attempt.get("micro_speedup"), entry.get("micro_speedup")))
+        # The integrated patch is likewise the adopted attempt's; it is what
+        # the kernel was carried to integrate with.
+        artifact_path = _first(
+            _text(attempt.get("best_artifact_path")),
+            e2e.get("patch_path"),
+            optimized_files[0] if optimized_files else None,
+        )
     else:
         # This attempt never reached a final rebench, so it has no end-to-end
         # result of its own. Its own decision is still reported as
@@ -733,6 +760,9 @@ def _kernel_rewrite(
         outcome = "FAILED" if execution_status == "failed" or decision == "FAILED" else "SKIPPED"
         reason = "not the adopted backend attempt for this kernel"
         micro_speedup = _to_float(attempt.get("micro_speedup"))
+        # Its own output only. The kernel's integrated patch belongs to the
+        # attempt that produced it.
+        artifact_path = optimized_files[0] if optimized_files else None
     return {
         "rewrite_id": str(_first(attempt.get("attempt_id"), entry.get("kernel_id")) or ""),
         # Backend attempts are keyed by run, not by orchestrator task.
@@ -748,16 +778,15 @@ def _kernel_rewrite(
         "verification": {
             "compile_passed": _optional_bool(attempt.get("compile_passed")),
             "correctness_passed": _optional_bool(attempt.get("correctness_passed")),
-            # Which reference the correctness check ran against is decided
-            # inside the backend and never surfaces on the attempt record.
-            "correctness_source": None,
+            "correctness_source": _text(attempt.get("correctness_source")),
             "micro_speedup": micro_speedup,
         },
         "artifact": {
-            "artifact_path": _first(
-                optimized_files[0] if optimized_files else None,
-                e2e.get("patch_path"),
-            ),
+            # The rewritten source, where the run resolved one. An attempt's
+            # ``optimized_files`` is its own output path, which for a real
+            # backend run is the stdout log rather than the rewrite, so it is
+            # the last resort and not the first.
+            "artifact_path": artifact_path,
             # Snapshots are materialized by integrate, which records them on
             # its own patch manifest rather than back onto the rewrite.
             "snapshot_dir": None,
@@ -771,19 +800,78 @@ def _kernel_rewrite(
     }
 
 
+def _fusion_paired(result: dict[str, Any], integrate: dict[str, Any]) -> bool:
+    """Report whether an integrate verdict adjudicates *this* fusion run.
+
+    The two live in separate last-write-wins state fields. ``last_fusion`` is
+    rewritten by every fusion run; ``last_fusion_integrate`` only by a run that
+    reached integration — which a fusion that was not kept never does, and one
+    missing its patch or target file returns before. So the verdict sitting in
+    state may belong to an earlier round, and reading it as this run's would
+    report a new candidate as adopted on the strength of an old measurement.
+
+    ``fusion_run_id`` is stamped on both by the phase handler and is the
+    authoritative pairing. Sessions recorded before it existed are paired on
+    the patch the verdict names, which is the artifact integrate was handed.
+    """
+    if not result or not integrate:
+        return False
+    run_id = _lower(result.get("fusion_run_id"))
+    verdict_run_id = _lower(integrate.get("fusion_run_id"))
+    if run_id or verdict_run_id:
+        return bool(run_id) and run_id == verdict_run_id
+    patch = _lower(result.get("patch"))
+    return bool(patch) and patch == _lower(integrate.get("patch_path"))
+
+
 def _fusion_run(result: dict[str, Any], integrate: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     """Project ``state.last_fusion`` (+ its integrate verdict) into one row.
 
     Only the last fusion survives in state — the field is overwritten per run,
     so a session that fused more than once reports its final attempt. There is
     no per-run fusion ledger to read instead.
+
+    The integrate verdict is used only when :func:`_fusion_paired` confirms it
+    belongs to this run. A fusion is a *micro* KEEP the moment KernelForge
+    keeps it, and that is not adoption: the e2e re-baseline decides. So an
+    unpaired or absent verdict can never produce ``outcome: KEEP`` — a kept
+    candidate that was never adjudicated reports ``NEEDS_REVIEW``.
     """
+    paired = _fusion_paired(result, integrate)
+    if integrate and not paired:
+        warnings.append(
+            "v6.timeline.kernel: last_fusion_integrate does not name this fusion run; "
+            "its verdict is not reported against it"
+        )
+        integrate = {}
     kept = _optional_bool(result.get("kept"))
     compile_pass_flag = _text(result.get("compile_pass_flag"))
     serving_speedup = _to_float(result.get("serving_speedup"))
     kernel_speedup = _to_float(result.get("kernel_speedup"))
+    micro_decision = _candidate_decision(
+        result.get("micro_decision"),
+        where="fusion_runs",
+        warnings=warnings,
+        default="failed" if result.get("error") else "skipped",
+    )
+    if integrate:
+        outcome = _lane_outcome(integrate.get("decision"), where="fusion_runs", warnings=warnings)
+    elif micro_decision == "candidate":
+        # Kept by the microbenchmark and never adjudicated end to end. The run
+        # ended before integrate, or integrate had nothing to apply.
+        outcome = "NEEDS_REVIEW"
+    elif micro_decision == "failed":
+        outcome = "FAILED"
+    elif micro_decision == "no_improvement":
+        # Nothing was proposed for adoption, which is a settled negative.
+        outcome = "REVERT"
+    else:
+        outcome = "SKIPPED"
     return {
-        "run_id": str(_first(result.get("run_id"), result.get("experiment_id"), "forge_fusion") or "forge_fusion"),
+        "run_id": str(
+            _first(result.get("fusion_run_id"), result.get("run_id"), result.get("experiment_id"), "forge_fusion")
+            or "forge_fusion"
+        ),
         "task_id": _text(_first(result.get("task_id"), "kernel_entry_fusion")),
         # forge-fusion reports success as ``ok``; the field's enum does not
         # have that word.
@@ -800,19 +888,9 @@ def _fusion_run(result: dict[str, Any], integrate: dict[str, Any], warnings: lis
         ),
         "patch_path": _text(_first(result.get("patch"), integrate.get("patch_path"))),
         # forge-fusion emits the V6 vocabulary verbatim; anything else is drift.
-        "micro_decision": _candidate_decision(
-            result.get("micro_decision"),
-            where="fusion_runs",
-            warnings=warnings,
-            default="failed" if result.get("error") else "skipped",
-        ),
+        "micro_decision": micro_decision,
         "final_rebench_attempt_ids": [],
-        "outcome": _lane_outcome(
-            integrate.get("decision"),
-            result.get("decision"),
-            where="fusion_runs",
-            warnings=warnings,
-        ),
+        "outcome": outcome,
         "reason": _text(_first(integrate.get("reason"), result.get("verdict"))),
         "failure": _failure(
             _first(result.get("error_class"), integrate.get("error_class")),
@@ -877,9 +955,31 @@ def _gemm_tuning_run(run: dict[str, Any], warnings: list[str]) -> dict[str, Any]
 
 
 def _collective_run(attempt: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
-    """Project one ``collective.attempts[]`` campaign."""
+    """Project one ``collective.attempts[]`` campaign.
+
+    The campaign row is persisted when the microbenchmark verdict lands, and
+    the integration fields are merged onto it later — so a campaign that was
+    kept but never integrated (the run ended, or integration crashed between
+    the two writes) sits in state carrying ``decision: KEEP`` and no
+    ``integration_decision``. Only the e2e gate adopts, so that row reports
+    ``NEEDS_REVIEW``: a candidate awaiting a verdict, not an adopted one.
+    """
     status = _lower(attempt.get("status"))
     kept = _optional_bool(attempt.get("kept"))
+    micro_decision = (
+        "candidate" if kept else ("failed" if attempt.get("error") else "no_improvement" if status else "skipped")
+    )
+    if _text(attempt.get("integration_decision")):
+        outcome = _lane_outcome(attempt.get("integration_decision"), where="collective_runs", warnings=warnings)
+    elif micro_decision == "candidate":
+        outcome = "NEEDS_REVIEW"
+    elif micro_decision == "failed":
+        outcome = "FAILED"
+    elif micro_decision == "no_improvement":
+        # The campaign proposed nothing for integration; nothing is pending.
+        outcome = "REVERT"
+    else:
+        outcome = "SKIPPED"
     return {
         "run_id": str(_first(attempt.get("collective_attempt_id"), attempt.get("experiment_id"), "") or ""),
         "task_id": None,
@@ -891,18 +991,11 @@ def _collective_run(attempt: dict[str, Any], warnings: list[str]) -> dict[str, A
         "status": _lane_status(attempt.get("status"), where="collective_runs", warnings=warnings),
         "kernel_speedup": _to_float(attempt.get("kernel_speedup")),
         "patch_path": _text(attempt.get("patch_path")),
-        "micro_decision": (
-            "candidate" if kept else ("failed" if attempt.get("error") else "no_improvement" if status else "skipped")
-        ),
+        "micro_decision": micro_decision,
         "final_rebench_attempt_ids": [],
         # The E2E gate is the verdict that decides adoption; the
         # microbenchmark ``decision`` only decides whether it runs.
-        "outcome": _lane_outcome(
-            attempt.get("integration_decision"),
-            attempt.get("decision"),
-            where="collective_runs",
-            warnings=warnings,
-        ),
+        "outcome": outcome,
         "reason": _text(_first(attempt.get("integration_error"), attempt.get("error"))),
         "failure": _failure(
             _first(attempt.get("error_class"), attempt.get("integration_error_class")),
@@ -912,15 +1005,33 @@ def _collective_run(attempt: dict[str, Any], warnings: list[str]) -> dict[str, A
     }
 
 
-def _geak_run(geak: dict[str, Any]) -> dict[str, Any]:
+def _geak_run(geak: dict[str, Any], revalidation_status: str = "") -> dict[str, Any]:
     """Project the session's GEAK whole-pipeline run.
 
     ``collect_geak`` folds the run into one session-scoped record, so this is
     at most one row regardless of how many macro cycles entered KERNEL.
+
+    ``status`` says only that the GEAK runner finished; it is the claim, not
+    the verdict. What settles a GEAK candidate is the orchestrator's own
+    rebench, which either promotes it — leaving a linked final-rebench attempt
+    — or closes it out by stamping ``revalidation_status`` on ``geak_result``
+    with ``no_promote`` / ``no_material`` / a failure. So ``outcome`` starts
+    from that stamp, and :func:`_settle_pending_outcomes` settles it once the
+    window's rebench attempts are linked. A finished runner nobody adjudicated
+    is ``NEEDS_REVIEW``, never ``KEEP``.
     """
     handoff = _mapping(geak.get("handoff"))
     accepted = _mapping(geak.get("accepted_config"))
     status = _lower(geak.get("status"))
+    revalidated = _GEAK_REVALIDATION_OUTCOMES.get(_lower(revalidation_status))
+    if revalidated:
+        outcome = revalidated
+    elif status in _OK_STATUSES:
+        outcome = "NEEDS_REVIEW"
+    elif not status or status in _SKIPPED_STATUSES:
+        outcome = "SKIPPED"
+    else:
+        outcome = "FAILED"
     return {
         "run_id": str(_first(geak.get("exp_root"), geak.get("report_path"), "geak") or "geak"),
         "task_id": _text(handoff.get("task_id")),
@@ -945,8 +1056,8 @@ def _geak_run(geak: dict[str, Any]) -> dict[str, Any]:
             ]
         ),
         "final_rebench_attempt_ids": [],
-        "outcome": "KEEP" if status in _OK_STATUSES else ("FAILED" if status else "SKIPPED"),
-        "reason": _text(geak.get("likely_cause")),
+        "outcome": outcome,
+        "reason": _text(_first(geak.get("likely_cause"), _text(revalidation_status))),
         "failure": _failure(geak.get("error_class"), geak.get("error")),
         "artifacts": {
             "handoff_path": _text(handoff.get("path")),
@@ -1248,7 +1359,10 @@ def project_kernel_events(
                 "v6.timeline.kernel: the GEAK record is session-scoped across "
                 f"{len(windows)} kernel visits; attached to the first"
             )
-        lanes_by_window[0]["geak_runs"].append(_geak_run(geak))
+        # The verdict on a GEAK candidate is written back onto ``geak_result``
+        # rather than onto the run record ``collect_geak`` projects.
+        revalidation_status = str(_mapping(state.get("geak_result")).get("revalidation_status") or "")
+        lanes_by_window[0]["geak_runs"].append(_geak_run(geak, revalidation_status))
 
     # The kernel each rebench says it was validating, where the producer
     # recorded one. ``source_id`` on the projected row falls back to the
@@ -1398,6 +1512,37 @@ def _link_rebench_attempts(
             )
 
 
+def _settle_pending_outcomes(lanes: dict[str, list[Any]]) -> None:
+    """Let a linked final rebench settle a candidate still awaiting a verdict.
+
+    A candidate reports ``NEEDS_REVIEW`` when it was produced but nothing
+    adjudicated it — a GEAK run the runner finished, a fusion kept by its
+    microbenchmark, a collective campaign whose integration never wrote back.
+    Where the window holds a final rebench that names such a candidate, that
+    measurement *is* the adjudication and outranks the pending state.
+
+    Only pending rows are touched. A candidate that already carries an
+    explicit e2e verdict keeps it: two verdicts disagreeing is a fact worth
+    seeing, not one to paper over by preferring whichever ran last.
+    """
+    by_id = {attempt["attempt_id"]: attempt for attempt in lanes["attempts"] if attempt.get("attempt_id")}
+    for lane_name, _ in _LANE_SOURCE_KINDS:
+        for row in lanes[lane_name]:
+            if row.get("outcome") != "NEEDS_REVIEW":
+                continue
+            linked = [by_id[aid] for aid in row.get("final_rebench_attempt_ids") or [] if aid in by_id]
+            # A skipped or faulted rebench measured nothing, so it decided
+            # nothing; the candidate stays pending.
+            measured = [attempt for attempt in linked if attempt["status"] == "succeeded"]
+            if not measured:
+                continue
+            decisions = {_upper(attempt.get("decision")) for attempt in measured}
+            if "KEEP" in decisions:
+                row["outcome"] = "KEEP"
+            elif decisions == {"REVERT"}:
+                row["outcome"] = "REVERT"
+
+
 def _kernel_event(
     state: dict[str, Any],
     collective: dict[str, Any],
@@ -1413,6 +1558,9 @@ def _kernel_event(
     # link is made here rather than in the lane projectors because only now is
     # the window's attempt set known.
     _link_rebench_attempts(lanes, adopted_rewrites, subject_ids, warnings)
+    # A candidate left pending by its own producer is settled by the rebench
+    # that measured it, now that the links exist.
+    _settle_pending_outcomes(lanes)
 
     exit_row = _mapping(window.get("exit_row"))
     evidence = _mapping(exit_row.get("evidence"))
