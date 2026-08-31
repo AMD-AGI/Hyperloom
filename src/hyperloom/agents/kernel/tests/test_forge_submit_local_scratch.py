@@ -135,8 +135,8 @@ def test_the_scratch_copy_keeps_what_a_package_is_imported_through(
     assert not (copied / "stale.pyc").exists()
 
 
-def test_the_scratch_exclude_covers_what_the_copy_had_to_keep(tmp_path: Path) -> None:
-    """The wider answer belongs to the index: copied always, hashed never."""
+def test_the_scratch_exclude_omits_compiled_artefacts(tmp_path: Path) -> None:
+    """Compiled artefacts stay in the index so git-revert can restore them."""
     workspace = tmp_path / "scratch"
     workspace.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
@@ -144,4 +144,6 @@ def test_the_scratch_exclude_covers_what_the_copy_had_to_keep(tmp_path: Path) ->
     forge_submit._exclude_runtime_artifacts(workspace)
 
     written = (workspace / ".git" / "info" / "exclude").read_text(encoding="utf-8").split()
-    assert "*.so" in written
+    assert "*.so" not in written
+    assert "build/" not in written
+    assert "__pycache__/" in written

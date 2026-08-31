@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from kernelforge.loop.path_ownership import (
     COMPILED_FILE_SUFFIXES,
+    COPY_FILTER_DIRECTORY_NAMES,
     RUNTIME_DIRECTORY_GLOBS,
     RUNTIME_DIRECTORY_NAMES,
     RUNTIME_FILE_SUFFIXES,
@@ -29,17 +30,26 @@ def test_copy_filter_keeps_extension_modules():
     assert ".so" not in RUNTIME_FILE_SUFFIXES
 
 
-def test_index_filter_covers_extension_modules():
-    assert "*.so" in runtime_gitignore_globs()
+def test_copy_filter_excludes_build_directories():
+    assert "build" in COPY_FILTER_DIRECTORY_NAMES
 
 
-def test_index_filter_is_a_superset_of_the_copy_filter():
+def test_index_filter_does_not_cover_compiled_artefacts():
+    # .so and build/ must stay in the index so git-revert can restore them.
+    globs = runtime_gitignore_globs()
+    for suffix in COMPILED_FILE_SUFFIXES:
+        assert f"*{suffix}" not in globs
+    for name in COPY_FILTER_DIRECTORY_NAMES:
+        assert f"{name}/" not in globs
+
+
+def test_index_filter_covers_cache_directories_and_bytecode():
     globs = runtime_gitignore_globs()
     for name in RUNTIME_DIRECTORY_NAMES:
         assert f"{name}/" in globs
     for glob in RUNTIME_DIRECTORY_GLOBS:
         assert f"{glob}/" in globs
-    for suffix in RUNTIME_FILE_SUFFIXES | COMPILED_FILE_SUFFIXES:
+    for suffix in RUNTIME_FILE_SUFFIXES:
         assert f"*{suffix}" in globs
 
 

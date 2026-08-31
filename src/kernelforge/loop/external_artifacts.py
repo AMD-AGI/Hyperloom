@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from kernelforge.loop.path_ownership import (
+    COPY_FILTER_DIRECTORY_NAMES,
     RUNTIME_DIRECTORY_NAMES,
     RUNTIME_FILE_SUFFIXES,
 )
@@ -23,7 +24,7 @@ from kernelforge.loop.path_ownership import (
 # rewrites on every compile -- observed: 3 payload files against 693 cache files
 # / 382 MB. Staging those costs two copies and three hashes per attempt, and a
 # compile mid-attempt makes publish() reject a driver that was fine.
-_IGNORED_DIRECTORY_NAMES = RUNTIME_DIRECTORY_NAMES | {".git"}
+_IGNORED_DIRECTORY_NAMES = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
 _IGNORED_FILE_SUFFIXES = RUNTIME_FILE_SUFFIXES
 
 

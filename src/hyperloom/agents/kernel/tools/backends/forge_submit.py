@@ -893,11 +893,12 @@ def _prepare_worktree_nogit(
     # In-call for the reason ``_is_on_network_fs`` states. The copy takes the
     # narrow set; only the index may drop what a package is imported through.
     from kernelforge.loop.path_ownership import (  # noqa: PLC0415
+        COPY_FILTER_DIRECTORY_NAMES,
         RUNTIME_DIRECTORY_NAMES,
         RUNTIME_FILE_SUFFIXES,
     )
 
-    skipped_dirs = RUNTIME_DIRECTORY_NAMES | {".git"}
+    skipped_dirs = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
     runtime_suffixes = tuple(RUNTIME_FILE_SUFFIXES)
 
     def _ignore(directory: str, names: list[str]) -> list[str]:

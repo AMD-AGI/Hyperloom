@@ -10,10 +10,11 @@ delta. *producer* is forge's own bookkeeping, which must never reach a patch.
 staged: a compile during a turn adds entries and the guard reads them as the
 turn creating files.
 
-Runtime splits again by consumer. Keeping a path out of a git index and keeping
-it out of a copy are different demands, and the wider answer is fatal to the
-narrower one: a scratch copy shadows the installed package, so a name dropped
-there has to be one no package imports from.
+Runtime splits by consumer. A git-index exclusion and a copy-filter exclusion
+are different demands. Compiled artefacts must stay in the index so a git
+revert can restore them — a stale binary influences measurement even after a
+source revert — but must be excluded from copies because a scratch copy shadows
+the installed package and imports directly from it.
 """
 
 from __future__ import annotations
@@ -35,23 +36,28 @@ PRODUCER_PATH_PATTERNS: tuple[str, ...] = (
     ".forge_driver_*",
 )
 
-#: Directory basenames holding machine-generated artefacts, at any depth.
+#: Directory basenames excluded from both copies and the git index.
 #:
-#: A name here is dropped from a copy as well as from an index, so it must never
-#: be one a package also uses for source. ``aiter`` alone rules out ``jit`` and
-#: ``dist``: ``aiter/jit`` holds ``core.py`` and the extension modules
-#: ``import aiter`` loads, and ``aiter/dist`` holds its distributed sources.
+#: A name here must never be one a package imports from. ``aiter`` alone rules
+#: out ``jit`` and ``dist``: ``aiter/jit`` holds ``core.py`` and the extension
+#: modules ``import aiter`` loads, and ``aiter/dist`` holds its distributed
+#: sources.
 RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
     {
         "__pycache__",
         ".mypy_cache",
         ".pytest_cache",
         ".ruff_cache",
-        "build",
         "flydsl_cache",
         "jit_cache",
     }
 )
+
+#: Directory basenames excluded from copies but kept in the git index.
+#:
+#: A revert must be able to remove these; excluding them from the index would
+#: leave stale build output that influences measurement after a source revert.
+COPY_FILTER_DIRECTORY_NAMES: frozenset[str] = frozenset({"build"})
 
 #: Directory patterns that only a glob can express.
 RUNTIME_DIRECTORY_GLOBS: tuple[str, ...] = ("*.egg-info",)
@@ -86,15 +92,16 @@ def is_producer_owned_path(path: str) -> bool:
 
 
 def runtime_gitignore_globs() -> tuple[str, ...]:
-    """Gitignore patterns covering every runtime artefact.
+    """Gitignore patterns for artefacts that are safe to leave after a revert.
 
-    Written into a repository's exclude file before a baseline ``git add`` so
-    compiled output is never hashed. Wider than what a copy filter may use: it
-    also covers the extension modules a copy has to keep.
+    Written into a repository's exclude file before a baseline ``git add``.
+    Compiled artefacts (.so, build/) are intentionally excluded from this list:
+    they must stay tracked so ``git revert`` can restore them and so a stale
+    binary from a rolled-back iteration does not corrupt the next measurement.
 
     Returns:
         Directory and suffix patterns in gitignore syntax.
     """
     directories = sorted(RUNTIME_DIRECTORY_NAMES) + list(RUNTIME_DIRECTORY_GLOBS)
-    suffixes = sorted(RUNTIME_FILE_SUFFIXES | COMPILED_FILE_SUFFIXES)
+    suffixes = sorted(RUNTIME_FILE_SUFFIXES)
     return tuple(f"{name}/" for name in directories) + tuple(f"*{suffix}" for suffix in suffixes)
