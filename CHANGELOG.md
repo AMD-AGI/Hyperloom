@@ -35,6 +35,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
   it targets the retired repository.
 
+- **`scripts/partition_mode_sweep.py` measures which compute-partition mode a
+  workload wants.** Sets each mode on one card in turn, runs the same benchmark
+  on every partition that mode creates, sums the throughput, and restores the
+  card's entry mode on the way out — including after a failure or a Ctrl-C.
+  Modes whose partitions provably cannot hold the configured streams are skipped
+  with the arithmetic shown rather than run into an out-of-memory failure.<br/>
+  The fan-out is the substance of it. A benchmark that loads one partition and
+  ignores the rest measures a fraction of the card, which reports `CPX` as eight
+  times worse than it is; every figure here is the sum over a mode's partitions
+  with all of them loaded together, and a mode is reported only when every one of
+  its partitions returned a measurement. Partitions are selected by matching CU
+  count within the swept card's PCI bus, never by device index: `amd-smi` orders
+  by PCI address while HSA/HIP enumerates whole cards first, so on an 8-card
+  MI355X node with card 0 in `CPX` the two tools disagree about which devices the
+  partitions are — 0-7 against 7-14.<br/>
+  This is where the privileged `amd-smi set` lives, and the only place it does.
+  A card-wide mutation that evicts every GPU context is reasonable between
+  benchmarks in a script an operator ran on purpose, and unreasonable inside an
+  optimization loop that also runs agent-authored code, so `optimize` continues
+  to only read the mode. Together the two halves are a boundary: the sweep
+  chooses the shape, the session asserts it.<br/>
+  Because that set evicts work, the check standing in front of it fails closed:
+  an `amd-smi` process listing in a shape the parser does not model is a refusal,
+  not an empty one, since the only wrong answer that destroys anything is reading
+  a busy node as free. It is scoped to the card being swept, so a neighbour's
+  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
+  of the guard on the target card. Every exit from a started sweep runs the
+  restore and the report, including on an error the script does not model — which
+  exits `4`, keeps the modes already measured, and still yields `3` if the card
+  could not be put back.
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
@@ -78,6 +108,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING: `forge-loop` and `forge-rewrite-by-flydsl` now reject an undeclared
+  option instead of dropping it.** These two were the only tolerant entry points
+  in the forge CLI: an option they did not declare was discarded, named on
+  stderr, and recorded as `ignored_cli_options` on the result document, and the
+  run proceeded on the defaults. The exemption existed because a consumer in a
+  *separate repository* drove them and could ship ahead of the installed
+  producer; vendoring put producer and consumer in one tree and one wheel, so
+  that skew can no longer occur. What the tolerance still absorbed was typos and
+  renames — silently. Seven shipped examples kept passing a `--fellow` flag after
+  the `fellow` -> `kernel_backend` rename and ran an inferred backend instead of
+  the intended one, exiting 0 the whole time; contrast the fusion wrapper's
+  `--llm-model` -> `--model` rename, which `forge-fuse` rejected outright and
+  which was therefore found and fixed. Both commands now behave like every other
+  forge subcommand — click's own error, exit 2, before any GPU work starts, with
+  a "Did you mean" suggestion. `kernelforge/cli_forward_compat.py` and the
+  `ignored_cli_options` result field are removed; nothing in Hyperloom read that
+  field. The retired `--max-iters`, previously accepted and ignored, is now
+  rejected too.
+
 - **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
   installs forge, so there is no checkout to point at and nothing to clone:
   `local_setup.sh` no longer clones the private KernelForge repo (and the
@@ -113,9 +162,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `kernel_backend`, and a config carrying the retired key **fails loudly at
   load** rather than migrating silently; the environment variable is
   `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
-  The CLI flag is the one place where the failure is *not* loud on its own:
-  `forge-loop` is a `TolerantCommand`, so `--fellow triton-fellow` is dropped
-  with a warning and the campaign proceeds on an inferred backend. The seven
+  The CLI flag was the one place where the failure was *not* loud on its own:
+  `forge-loop` still tolerated unknown options at the time, so `--fellow
+  triton-fellow` was dropped with a warning and the campaign proceeded on an
+  inferred backend. That tolerance is removed in this same release (see above),
+  so the flag now fails like the config key does. The seven
   shipped `run_example.sh` that still passed it are fixed, and the rename guard
   that should have caught them — its exemption globbed `data/*` rather than
   `data/*.md`, so it was exempting runnable scripts along with the prose it
@@ -397,6 +448,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wrapper's own input JSON is unchanged.
 
 ### Fixed
+
+- **The recorded framework version now comes from the interpreter preflight
+  resolved, not from whatever the orchestrator's own process happens to have.**
+  `--framework-env isolated` is the default for vLLM, whose ROCm wheel pins its
+  own torch, so the framework is installed where `importlib.metadata` in this
+  process cannot see it — and `detect_stack_fingerprint` probed this process
+  first, recording `unknown` on the default bare-metal vLLM path, or the version
+  of a shared install the run never served with when one happened to be present.
+  `_resolve_framework_build` already walks the candidate interpreters and imports
+  the framework to find the right one, but `_check_serving_framework` only
+  printed the winner; it is now published as `$HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON`
+  (paired with `$HYPERLOOM_RESOLVED_FRAMEWORK`, since the scan answers for one
+  framework and `sglang` is the default) and the fingerprint reads its
+  `site-packages`. The installer-written `$VLLM_VENV_ROOT` is no longer read by
+  the fingerprint directly: it is only ever written, never cleared, so on its own
+  it cannot say whether the tree it names still holds vLLM. It still leads
+  preflight's candidate list and is probed there, which is what the recorded
+  version now follows. A prefix that yields no `site-packages` — a system Python keeps its
+  packages in `dist-packages` — is treated as a failed derivation and falls back
+  to this process, not as an authoritative "not installed".<br/>
+  **Operator note**: the framework check returns before publishing when
+  `$HYPERLOOM_SKIP_FRAMEWORK_CHECK` is set, when `$BENCHMARK_BASE_URL` points at
+  a remote server, on external multi-node, and for scriptable frameworks (xDiT,
+  custom) that own their entrypoint — serving is not local on those paths, so
+  the fingerprint falls back to this process rather than reading a venv root
+  that describes some other host.
 
 - **Shell and loader hijack names are rejected from the `extra_envs` argument to
   `materialize_config_with_envs` before the config is persisted.** The predicate
