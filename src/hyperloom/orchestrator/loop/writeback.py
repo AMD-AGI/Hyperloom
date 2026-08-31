@@ -97,11 +97,15 @@ _FRAMEWORK_STACK_ACTION = "framework"
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
 #: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
 #: evidence and a missing one is a real gap rather than something to guess at.
+#: ``geak_e2e`` is absent for the same reason: it promotes on a proven kernel
+#: overlay OR on a config/env-only win, and only the promoting site knows which.
+#: It stamps ``lever_kind`` on the winner from the same overlay proof
+#: ``_geak_stack_entry_extra`` uses, so guessing ``kernel`` here would let the
+#: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
-    "geak_e2e": LEVER_KERNEL,
     "gemm_tuning": LEVER_KERNEL,
     "collective": LEVER_KERNEL,
     "fusion": LEVER_KERNEL,
@@ -942,6 +946,10 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
+                # ``geak_pending`` is a live-work slot, not a diagnostic
+                # archive.  Keeping a terminal failure here prevents the
+                # KERNEL -> SWEEP transition forever.  The settled verdict and
+                # its diagnostics survive in ``geak_result`` instead.
                 self.shared_state.geak_pending = {}
                 self.shared_state.resume_pending_revalidation = False
                 any_changed = True

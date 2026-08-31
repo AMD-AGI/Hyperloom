@@ -35,6 +35,7 @@ authoritative.
 | `final`              | `current_best` throughput, validated cumulative gain, action path, extra args/envs.                      |
 | `phase_timeline`     | Chronological list of every action attempt + kernel_opt + integrate event.                               |
 | `capability_summary` | One row per live capability: geak / forge / explore / sweep / specialist, plus legacy rows kept for archived sessions. |
+| `geak`               | GEAK route diagnostics, normalized result, accepted artifacts, and recovery evidence when the route ran outside the native kernel-agent layout. |
 | `optimizations`      | Canonical adopted-optimization API, projected from author-time recorder streams. **Read `available` first**: `false` means the records are missing, not that nothing was adopted. `attempts[]` holds every attempt, `entries[]` the adopted ledger, `validation` the reconciliation. |
 | `kernel_lifecycle`   | 5 stages: `detected` / `recommended` / `optimized` / `adopted` / `rejected`.                             |
 | `collective`         | Collective-lane campaigns: `only_mode` / `attempts[]` / `last`. Adoption is decided by `integration_decision` (E2E gate), not `decision` (microbenchmark). |

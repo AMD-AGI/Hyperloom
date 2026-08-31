@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from hyperloom.inference_optimizer.breakdown import collectors
 from hyperloom.inference_optimizer.breakdown.recorder import assemble_parts, instrument
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -190,6 +192,32 @@ def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
     assert not geak.get("keeps")
 
 
+def test_config_only_promotion_revokes_journey_kernel_and_credits_final_route(tmp_path: Path) -> None:
+    """A kernel absent from the final rebench cannot keep its internal gain."""
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k_not_loaded"],
+        "kernel_journey_path": _journey(
+            tmp_path,
+            [_kernel("k_not_loaded", gain=10.0, before=1000.0, after=1100.0)],
+        ),
+    }
+    coord._record_geak_kernel_journey(result)
+
+    coord._promote_geak_from_candidate(
+        result,
+        measured_tput=1050.0,
+        overlay_loaded=False,
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert geak.get("total_gain_pct") == pytest.approx(5.0), geak
+
+
 def _kernel_without_throughput_pair(kid: str, *, gain: float) -> dict:
     """The shape every real campaign artifact has today.
 
@@ -223,6 +251,20 @@ def test_keep_without_a_throughput_pair_is_visible_but_not_summed(tmp_path: Path
     assert geak.get("keeps") == 1, geak
     assert geak.get("non_attributable_keeps") == 1, geak
     assert geak.get("total_gain_pct") == 0.0, geak
+
+    warnings: list[str] = []
+    parts = assemble_parts(tmp_path, warnings=warnings)
+    collectors.collect_recorded_optimizations(
+        "session",
+        [row for row in parts.get("operations") or [] if isinstance(row, dict)],
+        [row for row in parts.get("measurements") or [] if isinstance(row, dict)],
+        [row for row in parts.get("adoptions") or [] if isinstance(row, dict)],
+        [row for row in parts.get("artifacts") or [] if isinstance(row, dict)],
+        [],
+        [],
+        warnings,
+    )
+    assert any("no attributable throughput pair" in warning for warning in warnings)
 
 
 def test_replayed_geak_kernel_is_not_parented_under_the_forge_route(tmp_path: Path) -> None:
@@ -323,6 +365,133 @@ def test_the_geak_route_subject_names_geak(tmp_path: Path) -> None:
     names, subjects = _route_ops(tmp_path)
     assert "geak" in names, sorted(names)
     assert subjects == {"geak"}, subjects
+
+
+def test_geak_route_level_win_reaches_the_geak_column(tmp_path: Path) -> None:
+    """A validated GEAK win without a per-kernel pair remains attributable."""
+    _record_baseline(tmp_path)
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="gemm_tuning",
+        throughput_before=BASELINE_TPUT,
+        throughput_after=BASELINE_TPUT * 1.032,
+        baseline_tput=BASELINE_TPUT,
+        gain_pct=3.2,
+        macro_cycle=0,
+        accepted_config={"env": "AITER_CONFIG_GEMM_A8W8_BLOCKSCALE=/x/tuned.csv"},
+        provenance="geak_orch_harness_validated",
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert geak.get("total_gain_pct") == 3.2, geak
+
+
+def test_geak_route_residual_anchor_is_not_a_validated_measurement(tmp_path: Path) -> None:
+    """The route's synthetic start is accounting evidence, not a sample."""
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="kernel_optimization",
+        throughput_before=1070.0,
+        throughput_after=1120.0,
+        baseline_tput=BASELINE_TPUT,
+        gain_pct=5.0,
+        macro_cycle=0,
+        provenance="geak_orch_harness_validated",
+    )
+
+    measurements = {
+        str(row.get("name") or ""): row
+        for row in assemble_parts(tmp_path).get("measurements") or []
+        if isinstance(row, dict)
+    }
+    anchor = measurements["baseline_throughput"]
+    assert anchor["status"] == "derived"
+    assert anchor["dimensions"] == {
+        "role": "baseline",
+        "derived": True,
+        "derivation": "geak_route_residual_anchor",
+    }
+    assert measurements["final_throughput"]["status"] == "validated"
+
+
+def test_two_promotions_in_one_macro_cycle_are_two_attempts(tmp_path: Path) -> None:
+    """The attempt id keyed only by macro cycle merged re-promotions.
+
+    GEAK can promote twice inside one macro cycle (an env win, then an overlay
+    win on top of it). With the id derived from ``macro_cycle`` alone both rows
+    collapsed onto one stable id, and ``_deep_merge`` kept the last writer — the
+    first promotion's gain vanished from the ledger.
+    """
+    _record_baseline(tmp_path)
+    for before, after in ((BASELINE_TPUT, BASELINE_TPUT * 1.02), (BASELINE_TPUT * 1.02, BASELINE_TPUT * 1.05)):
+        instrument.record_geak_e2e_attempt(
+            tmp_path,
+            kind="kernel_optimization",
+            throughput_before=before,
+            throughput_after=after,
+            baseline_tput=BASELINE_TPUT,
+            gain_pct=(after - before) / BASELINE_TPUT * 100.0,
+            macro_cycle=0,
+            provenance="geak_orch_harness_validated",
+        )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 2, geak
+    assert geak.get("total_gain_pct") == pytest.approx(5.0), geak
+
+
+def test_geak_route_level_attempt_requires_a_throughput_pair(tmp_path: Path) -> None:
+    """The route writer must not invent a gain when no measured pair exists."""
+    _record_baseline(tmp_path)
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="kernel_optimization",
+        throughput_before=0.0,
+        throughput_after=0.0,
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 0, geak
+
+
+def test_geak_route_context_does_not_emit_an_off_ledger_adoption(tmp_path: Path) -> None:
+    """The countable e2e attempt, not its route container, owns the adoption."""
+    instrument.record_geak_operation(
+        tmp_path,
+        stage="final_validation",
+        result={
+            "status": "ok",
+            "baseline_throughput_tok_s": BASELINE_TPUT,
+            "final_throughput_tok_s": BASELINE_TPUT * 1.032,
+        },
+        status="succeeded",
+        validated=True,
+        measured_tput=BASELINE_TPUT * 1.032,
+        validation_source="geak_orch_harness",
+        macro_cycle=0,
+    )
+
+    parts = assemble_parts(tmp_path)
+    assert parts.get("adoptions") in (None, [])
+
+
+def test_only_a_validated_pair_is_withheld_from_the_route_attempt(tmp_path: Path) -> None:
+    """The route residual holds back exactly what the per-kernel ledger sums.
+
+    A KEEP with a validated ``(base,new)`` pair is credited per-kernel, so its
+    tok/s must not reach the route attempt too. A KEEP without one is credited
+    nowhere else, so withholding it would erase the gain entirely.
+    """
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    with_pair = _journey(tmp_path, [_kernel("k", gain=12.0, before=1000.0, after=1120.0)])
+    assert KernelPhase._geak_journey_attributed_delta({"kernel_journey_path": with_pair}) == pytest.approx(120.0)
+
+    no_pair = _kernel_without_throughput_pair("k_env", gain=3.2)
+    path = tmp_path / "kernel_journey_without_pair.json"
+    path.write_text(json.dumps({"kernels": [no_pair]}), encoding="utf-8")
+    assert KernelPhase._geak_journey_attributed_delta({"kernel_journey_path": str(path)}) == pytest.approx(0.0)
 
 
 def test_every_journey_replay_call_names_its_route() -> None:

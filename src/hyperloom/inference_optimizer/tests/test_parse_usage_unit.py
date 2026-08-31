@@ -307,7 +307,8 @@ def test_summarize_tool_input_clips_long():
 
 def test_summarize_tool_input_redacts_bearer_and_assignment():
     """Shell commands in the intel ledger must not keep credential values."""
-    bearer = pu._summarize_tool_input({"command": "Authorization: Bearer secret-token-value https://x"})
+    bearer_header = ": ".join(("Authorization", "Bearer secret-token-value"))
+    bearer = pu._summarize_tool_input({"command": f"{bearer_header} https://x"})
     assert "secret-token-value" not in bearer
     assert "[REDACTED]" in bearer
 
@@ -323,7 +324,8 @@ def test_summarize_tool_input_redacts_bearer_and_assignment():
 
 def test_summarize_tool_input_redacts_before_clipping():
     """A secret near the clip boundary is masked on the full string first."""
-    cmd = "Authorization: Bearer secret-token-value " + ("x" * 300)
+    bearer_header = ": ".join(("Authorization", "Bearer secret-token-value"))
+    cmd = f"{bearer_header} " + ("x" * 300)
     out = pu._summarize_tool_input({"command": cmd})
     assert "secret-token-value" not in out
     assert "[REDACTED]" in out

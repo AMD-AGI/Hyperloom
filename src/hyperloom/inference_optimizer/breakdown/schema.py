@@ -1020,6 +1020,12 @@ class Geak(TypedDict, total=False):
     error_class: str | None
     error: str | None
     returncode: int | None
+    # Same-harness adjudication, kept on the result because it is terminal
+    # state: ``geak_pending`` is cleared when the verdict lands, and the final
+    # report still has to say why a measured candidate was dropped.
+    revalidation_status: str | None
+    revalidation_error_class: str | None
+    revalidation_error: str | None
     recovered_from_disk: bool
     handoff: dict[str, Any] | None
     exp_root: str | None
@@ -3049,6 +3055,7 @@ class SessionBreakdown(TypedDict, total=False):
         phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
         capability_summary (CapabilitySummary): Per-capability roll-up.
+        geak (Geak): GEAK route diagnostics and accepted artifacts.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
@@ -3087,6 +3094,7 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
+    geak: Geak
     kernel_lifecycle: KernelLifecycle
     collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.

@@ -1846,41 +1846,176 @@ def record_geak_operation(
         error=value.get("error") or value.get("error_class"),
         **timing_fields,
     )
-    adoption_id = _stable_id("adoption", route_id, "final_validation")
-    if validated or stage in {"final_validation", "final_validation_failed"}:
+    # A route is execution context, not an optimization attempt. Its final
+    # validation belongs in the gates/measurements above; a KEEP adoption is
+    # emitted by ``record_geak_e2e_attempt`` (aggregate route win) or
+    # ``record_kernel_e2e`` (an attributable per-kernel win). Attaching an
+    # adoption here creates an orphan from the optimization ledger because
+    # ``kernel_optimizer_run`` is intentionally not an attempt kind.
+
+
+def record_geak_e2e_attempt(
+    session_dir: Path | str | None,
+    *,
+    kind: str,
+    throughput_before: float,
+    throughput_after: float,
+    baseline_tput: float | None = None,
+    gain_pct: float | None = None,
+    attribution_eligible: bool = True,
+    macro_cycle: int | None = None,
+    accepted_config: Mapping[str, Any] | None = None,
+    provenance: str = "",
+    occurrence: Any = None,
+    result: Mapping[str, Any] | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Record one validated GEAK route-level win as a countable attempt.
+
+    ``record_geak_operation`` describes the GEAK route, but route operations
+    are intentionally excluded from the canonical optimization ledger.  This
+    companion record carries the validated before/after pair on an attempt kind
+    the ledger counts, so the GEAK dashboard bucket receives the gain without
+    relying on per-kernel attribution.
+
+    Args:
+        result: GEAK's ``result.json`` payload, read only for the artifact
+            paths (report, eval dir, journey, patch) attached to the adoption.
+            Without them the ledger's keep names a gain with nothing on disk
+            to audit it against.
+    """
+    if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
+        return
+    before = to_float(throughput_before)
+    after = to_float(throughput_after)
+    if not (before and after and before > 0 and after > 0):
+        trace_skip(reason="no throughput pair to attribute", section="operations")
+        return
+    try:
+        attempt_kind = kind if kind in {"kernel_optimization", "gemm_tuning"} else "kernel_optimization"
+        cycle = int(macro_cycle) if macro_cycle is not None else 0
+        now = _now_iso_safe()
+        route_id = _kernel_route_operation_id(session_dir, "geak", macro_cycle=macro_cycle)
+        recorded_occurrence = occurrence if occurrence is not None else f"{before}->{after}"
+        # The measured pair is part of the identity: one macro cycle can promote
+        # twice (a rebench that beats an earlier promotion), and keying on the
+        # cycle alone would merge the second win onto the first and lose its
+        # gain. Re-writing the SAME pair still collapses, which is what keeps
+        # the writer idempotent.
+        operation_id = _stable_id(
+            "op",
+            "geak_e2e_attempt",
+            _session_key(session_dir),
+            f"macro_cycle:{cycle}",
+            recorded_occurrence,
+        )
+        subject = {
+            "subject_id": _kernel_route_subject_id(session_dir, "geak", route_operation_id=route_id),
+            "subject_type": "kernel_optimizer_route",
+            "role": "selected",
+            "name": "geak",
+        }
+        measurement_refs: list[str] = []
+        for name, numeric in (("baseline_throughput", before), ("final_throughput", after)):
+            is_accounting_anchor = name == "baseline_throughput"
+            measurement_id = _stable_id(
+                "measurement",
+                operation_id,
+                name,
+                _measurement_occurrence(recorded_occurrence, value=numeric),
+            )
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                subject=subject,
+                kind="throughput",
+                name=name,
+                value=numeric,
+                unit="tok/s",
+                # ``before`` is the residual ledger anchor, not a throughput
+                # sample taken by the GEAK harness.  It can be synthesized as
+                # ``pre_geak + claimed_kernel_delta`` so calling it validated
+                # would put a fictitious measurement on the canonical stream.
+                status="derived" if is_accounting_anchor else "validated",
+                measured_at=now,
+                metric_basis="output",
+                dimensions={
+                    "role": "baseline" if is_accounting_anchor else "final",
+                    **(
+                        {
+                            "derived": True,
+                            "derivation": "geak_route_residual_anchor",
+                        }
+                        if is_accounting_anchor
+                        else {}
+                    ),
+                },
+                **_measurement_metadata("geak_e2e_orchestrator", harness="geak_e2e"),
+            )
+            measurement_refs.append(measurement_id)
+        artifact_refs = (
+            _geak_result_artifacts(session_dir, operation_id, result, producer) if isinstance(result, Mapping) else []
+        )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind=attempt_kind,
+            name="geak_e2e",
+            phase="KERNEL_AGENT",
+            macro_cycle=cycle,
+            scope="run",
+            strategy_group="kernel_optimizer",
+            strategy="geak",
+            executor_class="llm_tool",
+            status="succeeded",
+            parent_operation_id=route_id,
+            root_operation_id=route_id,
+            subject=subject,
+            outputs={
+                "decision": "KEEP",
+                "validated": True,
+                "source": "geak_e2e",
+                "baseline_tput": to_float(baseline_tput),
+                "accepted_config": dict(accepted_config or {}),
+            },
+            measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
+            ended_at=now,
+        )
+        adoption_id = _stable_id("adoption", operation_id, "geak_e2e")
         _record_adoption_transition(
             session_dir,
             adoption_id=adoption_id,
             producer=producer,
-            operation_id=route_id,
-            adopted=validated,
-            reason=validation_source
-            or ("orchestrator_final_validation_passed" if validated else "orchestrator_final_validation_failed"),
+            operation_id=operation_id,
+            adopted=True,
+            attribution_eligible=bool(attribution_eligible),
+            reason=provenance or "geak_e2e_validated",
+            subject=subject,
             transitioned_at=now,
             measurement_ids=measurement_refs,
             artifact_ids=artifact_refs,
-            kind="kernel_optimizer",
-            configuration=dict(value.get("accepted_config") or {}),
+            kind=attempt_kind,
+            gain_pct=to_float(gain_pct),
+            throughput_before=before,
+            throughput_after=after,
+            configuration=dict(accepted_config or {}),
             validation_basis="e2e_validation",
-            metadata={"validation_tier": "orchestrator_final"},
+            metadata={"validation_tier": "geak_e2e_orchestrator"},
         )
-    else:
-        # A stage that has not reached final validation has nothing to adopt
-        # yet. Traced because "not yet" and "never arrived" produce the same
-        # absence downstream.
-        trace_skip(
-            reason=f"stage {stage!r} has not reached final validation",
-            section="adoptions",
-            entity=adoption_id,
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
             producer=producer,
+            adoption_refs=[adoption_id],
         )
-        return
-    record_operation(
-        session_dir,
-        operation_id=route_id,
-        producer=producer,
-        adoption_refs=[adoption_id],
-    )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("record_geak_e2e_attempt failed", exc_info=True)
+        trace_skip(reason="writer raised", section="operations", error=exc)
 
 
 def _record_geak_internal_ref(
@@ -4491,6 +4626,7 @@ __all__ = [
     "record_kernel_strategy_selection",
     "record_native_kernel_run_start",
     "record_native_kernel_run_result",
+    "record_geak_e2e_attempt",
     "record_geak_operation",
     "record_gemm_tuning_operation",
     "record_phase_event",

@@ -79,6 +79,7 @@ from .timeline import (
     collect_phase_timeline as collect_phase_timeline,
     _capability_for_action as _capability_for_action,
     collect_capability_summary as collect_capability_summary,
+    geak_route_evidence as geak_route_evidence,
     _specialist_capability_row as _specialist_capability_row,
     _empty_by_specialist_capability as _empty_by_specialist_capability,
     _SPECIALIST_DOMAIN_KEYS as _SPECIALIST_DOMAIN_KEYS,
@@ -219,5 +220,6 @@ __all__ = [
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",
+    "geak_route_evidence",
     "session_elapsed_minutes",
 ]

@@ -81,6 +81,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "final":              { /* §6  Final state — SaFE contract core */ },
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
   "capability_summary": { /* §8  Capability cards */ },
+  "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
@@ -474,6 +475,12 @@ For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
 - `reverts` — kernels integrate rejected (end-to-end regression).
 - `attempts` — **invocation rows**, not distinct kernels: how many tries the
   lane made. Deliberately a different unit from `keeps`.
+
+GEAK e2e runs do not always create the native
+`kernel-agent/runs/*/optimization_attempts.jsonl` layout. In that case the
+summary falls back to the normalized top-level `geak` section: a real route is
+reported as at least one attempt, and a promoted `geak_e2e` stack entry is
+reported as kept instead of `not_attempted`.
 
 The `specialist` row uses `keeps` / `attempts` differently: see
 `CapabilitySummary` in `schema.py`.
