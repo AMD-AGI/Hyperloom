@@ -36,6 +36,7 @@ RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
         ".pytest_cache",
         ".ruff_cache",
         "build",
+        "dist",
         "flydsl_cache",
         "jit",
         "jit_cache",
