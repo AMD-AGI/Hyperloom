@@ -684,12 +684,9 @@ KERNEL_INLINE_STEP_STALE_SECONDS: float = 450.0
 def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
     """Report whether an inline kernel request is executing right now.
 
-    ``integrate`` / ``run_optimization`` are awaited directly in the intent
-    router and never become task-registry rows, so the idle guard's registry
-    probe reports an empty in-flight set while one is mid-flight. A nine-minute
-    ``integrate`` re-baseline therefore accrued a full idle streak and wound
-    KERNEL down to SWEEP four seconds after it completed, stranding every
-    remaining candidate.
+    Reads the stamp ``SharedState.kernel_inline_step_seen_unix`` carries, which
+    the idle guard has no other way to see. One older than
+    :data:`KERNEL_INLINE_STEP_STALE_SECONDS` is a leftover, not a live step.
 
     Args:
         state: Frozen SharedState view.

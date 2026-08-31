@@ -1027,14 +1027,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # is in flight so a 30-minute build never accrues idle time.
     kernel_idle_since_unix: float = 0.0
     # Unix time an inline kernel request (``integrate``, ``run_optimization``,
-    # ...) last reported itself running. Those requests are awaited straight in
-    # the intent router and never become a row in the task registry, so the idle
-    # guard's in-flight probe -- which reads that registry -- cannot see them: a
-    # nine-minute ``integrate`` re-baseline looked exactly like a dead phase and
-    # wound KERNEL down four seconds after it finished. Refreshed by the same
-    # heartbeat that keeps the bus timestamp moving, so a value left behind by a
-    # process that died mid-step goes stale on its own rather than disabling the
-    # guard for the next run.
+    # ...) last reported itself running. Those are awaited straight in the intent
+    # router and never become a row in the task registry, so the KERNEL idle
+    # guard's in-flight probe cannot see them and reads a long one as a dead
+    # phase. A timestamp rather than a flag, so one left behind by a process that
+    # died mid-step goes stale instead of muting the guard for the next run.
     kernel_inline_step_seen_unix: float = 0.0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.

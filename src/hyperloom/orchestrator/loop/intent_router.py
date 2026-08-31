@@ -787,10 +787,8 @@ class IntentRouter:
             started (float): ``time.monotonic()`` at the step's start.
         """
 
-        # The same blind spot costs the KERNEL idle guard its in-flight signal:
-        # it probes the task registry, so an inline step reads as a dead phase.
-        # Stamped here rather than once at the start so a stamp left behind by a
-        # process that died mid-step expires instead of muting the guard.
+        # Re-stamped per beat rather than once at the start, so a stamp that
+        # outlives its process expires instead of muting the KERNEL idle guard.
         def _mark_running() -> None:
             self.shared_state.kernel_inline_step_seen_unix = time.time()
 
