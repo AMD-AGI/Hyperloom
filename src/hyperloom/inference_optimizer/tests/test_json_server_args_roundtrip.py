@@ -168,17 +168,62 @@ class TestRemovalStillWorks:
         assert "--max-num-seqs" not in out
         _json_value_of(out, "--online_quant_config")
 
-    def test_whitespace_bearing_value_is_left_untouched(self):
-        """Inputs the quote-preserving tokenizer declines are returned verbatim.
+    def test_an_undeliverable_token_does_not_cancel_the_removal(self, caplog):
+        """The removal still happens, and the odd token is reported not swallowed.
 
-        ``--tool-call-parser 'my parser'`` cannot survive Magpie's unquoted
-        ``EXTRA_*_ARGS`` expansion whatever this function does, so there is
-        nothing to buy by POSIX-splitting it -- and doing so strips the inner
-        quotes off every JSON blob sharing the string. Declining matches every
-        other caller of ``tokenize_server_args_preserving_json``.
+        Declining wholesale meant one quoted operand anywhere in the string
+        silenced every removal on it. This is a launch-path sink, so the flag
+        that should have been dropped got served and benchmarked instead, and
+        nothing was logged to say so.
         """
         args = "--tool-call-parser 'my parser' --max-num-seqs 64"
-        assert remove_server_args(args, ["--max-num-seqs"]) == args
+        with caplog.at_level("WARNING"):
+            out = remove_server_args(args, ["--max-num-seqs"])
+        assert "--max-num-seqs" not in out
+        # The token it cannot carry is passed through byte for byte.
+        assert "--tool-call-parser 'my parser'" in out
+        assert "cannot represent" in caplog.text
+
+    def test_a_quoted_value_without_whitespace_also_still_removes(self):
+        """The decline fired on any edge quote, not just a whitespace-bearing one.
+
+        ``'hermes'`` is a single token and perfectly launchable, yet it disabled
+        every removal on the string it appeared in.
+        """
+        out = remove_server_args("--tool-call-parser 'hermes' --max-num-seqs 64", ["--max-num-seqs"])
+        assert "--max-num-seqs" not in out
+        assert "--tool-call-parser 'hermes'" in out
+
+    def test_harness_flag_is_stripped_even_beside_a_quoted_operand(self):
+        """``strip_benchmark_harness_flags`` rides on the same call.
+
+        A serving-ineligible benchmark flag reaching a served config is the
+        worst version of the wholesale decline: the gain gets attributed to a
+        configuration nobody can serve.
+        """
+        out = strip_benchmark_harness_flags(
+            "--tool-call-parser 'hermes' --no-enable-prefix-caching --max-num-seqs 64"
+        )
+        assert "--no-enable-prefix-caching" not in out
+        assert "--max-num-seqs 64" in out
+
+    def test_removing_a_flag_consumes_its_whole_whitespace_bearing_value(self):
+        """Removing the flag must not leave fragments of its value behind.
+
+        The value survives ``shlex`` as one token here, but a JSON value with
+        whitespace becomes several; consuming only the first would leave the
+        rest as bare argv words the server reads as positional garbage.
+        """
+        out = remove_server_args(
+            '--a {"k":"v with space"} --max-num-seqs 64',
+            ["--a"],
+        )
+        assert out == "--max-num-seqs 64"
+
+    def test_unbalanced_quotes_still_get_the_removal_applied(self):
+        """``shlex`` cannot tokenize this at all; the removal is still attempted."""
+        out = remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
+        assert "--max-num-seqs" not in out
 
     def test_json_neighbour_survives_an_untokenizable_sibling(self):
         """One undeliverable sibling must not corrupt a JSON value beside it.

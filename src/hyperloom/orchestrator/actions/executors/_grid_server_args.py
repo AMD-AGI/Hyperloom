@@ -100,29 +100,49 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _tokenize_for_removal(text: str) -> list[str] | None:
-    """Tokenize for removal matching, or decline when quotes cannot be kept.
+def _tokenize_for_removal(text: str) -> tuple[list[str], list[str]]:
+    """Tokenize for removal matching, keeping every quote byte.
 
-    A POSIX ``shlex.split`` strips the inner double quotes of a compacted
-    JSON-valued flag and the space-join below cannot put them back, so a value
-    that :func:`_repair_unquoted_json` also cannot re-quote (any bareword
-    outside :data:`_JSON_BAREWORD`, e.g. the ``*expert*`` wildcards in atom's
-    ``--online_quant_config``) would reach the server irreparably broken.
-
-    There is deliberately no POSIX fallback. An input the quote-preserving
-    tokenizer declines carries a token the unquoted ``EXTRA_*_ARGS`` transport
-    cannot represent at all, so splitting it anyway would corrupt every JSON
-    blob sharing the string in order to strip a flag off a string that was
-    already unlaunchable. Every other caller of
-    :func:`tokenize_server_args_preserving_json` fails closed on ``None`` for
-    the same reason.
+    ``shlex`` in non-POSIX mode preserves quote bytes, so ``" ".join`` of the
+    result reproduces ``text`` byte for byte — including the compacted JSON
+    whose inner double quotes a POSIX split drops and
+    :func:`_repair_unquoted_json` cannot re-quote once any bareword falls
+    outside :data:`_JSON_BAREWORD` (atom's ``*expert*`` wildcards). Removal can
+    therefore always proceed; refusing it wholesale is what let a
+    benchmark-harness flag reach a served config.
 
     Returns:
-        list[str] | None: The tokens, or ``None`` when ``text`` cannot be
-        tokenized without dropping quote bytes (caller leaves it untouched).
+        tuple[list[str], list[str]]: ``(tokens, unsafe)`` — the tokens, and the
+        subset the unquoted transport cannot carry, for the caller to report.
+        ``unsafe`` is a diagnostic only: those tokens are passed through
+        verbatim, since they are already malformed on the way in and dropping
+        the removal does not make them launchable.
     """
-    parsed = tokenize_server_args_preserving_json(text)
-    return None if parsed is None else parsed[1]
+    normalized = _reserialize_json_blobs(str(text or "").strip())
+    if not normalized:
+        return [], []
+    try:
+        tokens = shlex.split(normalized, posix=False)
+    except ValueError:
+        # Unbalanced quotes: shlex cannot tokenize at all. A whitespace split
+        # still rejoins byte-for-byte (modulo whitespace runs), so the removal
+        # proceeds on a best-effort basis rather than being abandoned.
+        return normalized.split(), [normalized]
+    return tokens, _transport_unsafe_tokens(tokens)
+
+
+def _value_span_end(tokens: list[str], flag_index: int) -> int:
+    """Index just past the value fragments belonging to the flag at ``flag_index``.
+
+    A JSON value carrying whitespace survives ``shlex`` as several tokens, so a
+    flag's value is every following token up to the next ``--flag``. Consuming
+    the whole span is what keeps a removal from leaving a dangling fragment
+    behind.
+    """
+    end = flag_index + 1
+    while end < len(tokens) and not tokens[end].startswith("--"):
+        end += 1
+    return end
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
@@ -134,24 +154,37 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     unparseable inputs are left untouched rather than guessed.
 
     JSON-valued flags survive verbatim: both sides of the comparison are
-    tokenized by :func:`_tokenize_for_removal`, so a retained neighbour is never
-    silently stripped of its quotes. A string carrying a token the unquoted
-    transport cannot represent is returned unchanged rather than split lossily,
-    which trades an unstripped flag for an intact JSON value.
+    tokenized by :func:`_tokenize_for_removal`, whose non-POSIX split keeps
+    every quote byte, so a retained neighbour is never silently stripped of its
+    quotes and the removal still happens. A token the unquoted transport cannot
+    carry is logged and passed through rather than abandoning the whole removal
+    — this is a launch-path sink (``_workload_envs`` writes the result straight
+    into ``EXTRA_*_ARGS``) and ``strip_benchmark_harness_flags`` rides on it, so
+    a skipped removal serves a benchmark-only flag and misattributes the gain.
     """
     args = str(server_args or "").strip()
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
-    tokens = _tokenize_for_removal(args)
-    if tokens is None:
+    tokens, unsafe = _tokenize_for_removal(args)
+    if not tokens:
         return args
+    if unsafe:
+        log.warning(
+            "Server args carry %d token(s) the unquoted EXTRA_*_ARGS transport cannot "
+            "represent (%s); applying %s to the rest and passing those through verbatim. "
+            "The value reaches the server with its quote/whitespace bytes intact, which "
+            "is almost certainly not what was intended.",
+            len(unsafe),
+            "; ".join(sorted(set(unsafe))[:3]),
+            removes,
+        )
 
     remove_flags: set[str] = set()
     remove_pairs: set[tuple[str, str | None]] = set()
     for spec in removes:
-        spec_tokens = _tokenize_for_removal(spec)
-        if spec_tokens is None:
+        spec_tokens, _ = _tokenize_for_removal(spec)
+        if not spec_tokens:
             spec_tokens = spec.split()
         i = 0
         while i < len(spec_tokens):
@@ -164,8 +197,9 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
                 remove_pairs.add((flag, value))
                 i += 1
             elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
-                remove_pairs.add((tok, spec_tokens[i + 1]))
-                i += 2
+                end = _value_span_end(spec_tokens, i)
+                remove_pairs.add((tok, " ".join(spec_tokens[i + 1 : end])))
+                i = end
             else:
                 remove_flags.add(tok)
                 i += 1
@@ -174,19 +208,25 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
-        if flag and "=" in tok:
-            _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, value) in remove_pairs:
+        if not tok.startswith("--"):
+            out.append(tok)
+            i += 1
+            continue
+        if "=" in tok:
+            flag, _, value = tok.partition("=")
+            if flag in remove_flags or (flag, value) in remove_pairs:
                 i += 1
                 continue
-        if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
-            value = tokens[i + 1]
-            if flag in remove_flags or (flag, value) in remove_pairs:
-                i += 2
-                continue
-        if flag and flag in remove_flags:
+            out.append(tok)
             i += 1
+            continue
+        # The value is every following token up to the next flag: a JSON blob
+        # with whitespace survives shlex as several tokens, and removing only
+        # the first would leave the rest behind as bare argv words.
+        end = _value_span_end(tokens, i)
+        value = " ".join(tokens[i + 1 : end])
+        if tok in remove_flags or (value and (tok, value) in remove_pairs):
+            i = end
             continue
         out.append(tok)
         i += 1
@@ -426,36 +466,55 @@ def tokenize_server_args_preserving_json(
         tokens = shlex.split(normalized, posix=False)
     except ValueError:
         return None
-    for token in tokens:
-        # A balanced JSON value must remain one token. Non-zero depth at a token
-        # boundary means an embedded whitespace split it.
-        depth = 0
-        in_string = False
-        escaped = False
-        for char in token:
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-                elif char == '"':
-                    in_string = False
-            elif char == '"':
-                in_string = True
-            elif char in "{[":
-                depth += 1
-            elif char in "}]":
-                depth -= 1
-        if depth != 0:
-            return None
-        if any(ch.isspace() for ch in token):
-            return None
-        # ``shlex.split(..., posix=False)`` can fracture a quoted operand with
-        # whitespace into edge-quoted pieces (``"my`` / ``parser"``). Reject
-        # any such edge, not only a token carrying both wrappers.
-        if token.startswith(("'", '"')) or token.endswith(("'", '"')):
-            return None
+    if _transport_unsafe_tokens(tokens):
+        return None
     return normalized, tokens
+
+
+def _json_token_depth(token: str) -> int:
+    """Net ``{[``/``]}`` nesting depth of ``token``, ignoring braces in strings.
+
+    A balanced JSON value must survive as one token, so a non-zero depth at a
+    token boundary means embedded whitespace split it.
+    """
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in token:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            depth -= 1
+    return depth
+
+
+def _transport_unsafe_tokens(tokens: list[str]) -> list[str]:
+    """Tokens the unquoted ``EXTRA_*_ARGS`` transport cannot carry verbatim.
+
+    Magpie expands the env through a shell wrapper without quoting it, so the
+    shell word-splits on whitespace but performs no quote removal: a token with
+    embedded whitespace loses its boundary, and a quote byte at either edge
+    reaches the server as part of the value.
+    """
+    unsafe: list[str] = []
+    for token in tokens:
+        if (
+            any(ch.isspace() for ch in token)
+            or _json_token_depth(token) != 0
+            or token.startswith(("'", '"'))
+            or token.endswith(("'", '"'))
+        ):
+            unsafe.append(token)
+    return unsafe
 
 
 def dedup_vllm_server_args(
