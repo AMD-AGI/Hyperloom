@@ -14,26 +14,17 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from kernelforge.loop.path_ownership import (
+    RUNTIME_DIRECTORY_NAMES,
+    RUNTIME_FILE_SUFFIXES,
+)
 
-_IGNORED_DIRECTORY_NAMES = {
-    ".git",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    "__pycache__",
-    # Machine-generated kernel caches. A real external driver bundle is a handful
-    # of source files sitting next to an aiter JIT cache that the driver itself
-    # writes to every time it compiles a kernel — observed: 3 payload files vs 693
-    # cache files / 382 MB. Staging them costs two full copies and three hashes of
-    # the whole tree per attempt, and worse, a compile during the attempt mutates
-    # the cache under us, so publish() rejects the run with "external artifact
-    # directory changed outside the staging transaction" and throws away a driver
-    # that was fine. These are build output: never staged, never conflict-checked.
-    "flydsl_cache",
-    "jit_cache",
-    "build",
-}
-_IGNORED_FILE_SUFFIXES = {".pyc", ".pyo"}
+# The staging transaction must never copy or hash machine-generated artefacts:
+# a compile during the attempt mutates the cache, causing publish() to reject
+# an otherwise-valid driver for "external artifact directory changed outside the
+# staging transaction".  These names come from the shared manifest.
+_IGNORED_DIRECTORY_NAMES = RUNTIME_DIRECTORY_NAMES | {".git"}
+_IGNORED_FILE_SUFFIXES = RUNTIME_FILE_SUFFIXES
 
 
 def _extra_ignored_directory_names() -> set[str]:

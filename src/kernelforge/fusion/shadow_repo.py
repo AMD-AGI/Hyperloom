@@ -28,7 +28,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from kernelforge.llm.git import git
+from kernelforge.loop.path_ownership import runtime_gitignore_globs
 
 log = logging.getLogger("forge_fusion")
 
@@ -42,14 +44,7 @@ SHADOW_BRANCH = "forge-fusion"
 # will not descend into an excluded directory, so re-admitting the directory
 # itself is what makes this work. Artifact patterns come last to apply inside it.
 _EXCLUDE_HEADER = "/*\n"
-_EXCLUDE_ARTIFACTS = """\
-__pycache__/
-*.pyc
-*.pyo
-*.so
-*.egg-info/
-.pytest_cache/
-"""
+_EXCLUDE_ARTIFACTS = "\n".join(runtime_gitignore_globs()) + "\n*.egg-info/\n"
 
 
 def _git(repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC) -> subprocess.CompletedProcess:
