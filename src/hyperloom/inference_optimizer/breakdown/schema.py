@@ -1064,6 +1064,8 @@ class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
     Attributes:
+        iteration_id (str): Stable session-unique identity for this persisted
+            review pass, including resume-time reuse of ``iter``.
         iter (int): Iteration index.
         ts (str): ISO UTC timestamp of the review.
         topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
@@ -1074,8 +1076,11 @@ class CriticIteration(TypedDict, total=False):
         judge_bundle_path (str): Path to the judge bundle.
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
+        framework_reviews (list[dict[str, Any]]): Durable normalized V6
+            Framework review rows.
     """
 
+    iteration_id: str
     iter: int
     ts: str
     topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
@@ -1085,6 +1090,7 @@ class CriticIteration(TypedDict, total=False):
     judge_bundle_path: str
     emit_path: str
     review_path: str
+    framework_reviews: list[dict[str, Any]]
 
 
 class RobustnessSignal(TypedDict, total=False):

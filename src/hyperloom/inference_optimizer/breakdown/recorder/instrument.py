@@ -42,6 +42,7 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -3750,6 +3751,8 @@ def record_critic_iteration(
     session_dir: Path | str | None,
     *,
     iter_n: int,
+    request: dict[str, Any] | None = None,
+    judge_bundle: dict[str, Any] | None = None,
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
@@ -3758,9 +3761,10 @@ def record_critic_iteration(
 ) -> None:
     """Record one ``critic_robustness.critic_iterations`` item.
 
-    Recorded per-iteration (idempotent on ``iter_n``) so the critic backend's
-    workdir pruning never erases history; payload mirrors
-    ``collectors.collect_critic_robustness``.
+    Recorded per-iteration under a session-unique identity so workdir pruning
+    and resume-time turn-index reuse never erase history; payload mirrors
+    ``collectors.collect_critic_robustness`` and retains normalized Framework
+    review rows for the V6 timeline.
 
     ``kb_priors`` (when provided) carries the per-iteration KB integration
     trace: whether the historical priors were used, the request, the response,
@@ -3770,7 +3774,9 @@ def record_critic_iteration(
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
-        iter_n (int): the critic iteration number (idempotency key).
+        iter_n (int): the process-local critic iteration number.
+        request (dict[str, Any] | None): the critic request payload.
+        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
         review (dict[str, Any] | None): the critic review payload.
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
@@ -3786,6 +3792,14 @@ def record_critic_iteration(
         review = review if isinstance(review, dict) else {}
         emit = emit if isinstance(emit, dict) else {}
         wd = Path(workdir) if workdir else None
+        request = request if isinstance(request, dict) else read_json(wd / "request.json", default={}) if wd else {}
+        judge_bundle = (
+            judge_bundle
+            if isinstance(judge_bundle, dict)
+            else read_json(wd / "judge_bundle.json", default={})
+            if wd
+            else {}
+        )
         payload = {
             "iter": int(iter_n),
             "ts": str(emit.get("ts") or review.get("ts") or ""),
@@ -3798,14 +3812,35 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
+        framework_reviews = normalize_framework_reviews(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            review_path=_rel(wd / "review.json", session_dir).replace("\\", "/") if wd else None,
+        )
+        if framework_reviews:
+            payload["framework_reviews"] = framework_reviews
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
+        iteration_id = _stable_id(
+            "critic-iteration",
+            iter_n,
+            payload.get("ts"),
+            [row.get("proposal_msg_id") for row in framework_reviews],
+            payload.get("topic"),
+            request,
+            judge_bundle,
+            review,
+            emit,
+        )
+        payload["iteration_id"] = iteration_id
         _recorder(session_dir, producer).record_item(
             "critic_iterations",
             payload,
-            key=str(iter_n),
+            key=iteration_id,
         )
-        operation_id = _stable_id("op", "critic", iter_n)
+        operation_id = _stable_id("op", iteration_id)
         artifact_refs: list[str] = []
         for name in ("request_path", "judge_bundle_path", "emit_path", "review_path"):
             path = payload.get(name)
@@ -3864,7 +3899,7 @@ def record_critic_iteration(
             write_key = (
                 write.get("write_id") or write.get("point_id") or write.get("edge_id") or write.get("kind") or index
             )
-            write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
+            write_operation_id = _stable_id("op", "kb-write", iteration_id, write_key)
             result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}
             write_status = _operation_status(result_payload.get("status") or write.get("status") or "succeeded")
             record_operation(

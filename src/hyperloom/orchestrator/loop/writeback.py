@@ -2244,6 +2244,7 @@ class WritebackCollaborator:
         task: Task,
         done_payload: dict[str, Any],
         source: str,
+        run_error: str = "",
     ) -> None:
         """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
 
@@ -2252,8 +2253,11 @@ class WritebackCollaborator:
             done_payload: The specialist's done payload (proposal_set, domain,
                 summary, etc.).
             source: The emitting agent string (``specialist:<task_id>``).
+            run_error: Dispatch failure text when the specialist produced no
+                usable payload.
         """
-        domain = str(done_payload.get("domain") or "").strip()
+        task_params = task.params or {}
+        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
@@ -2263,6 +2267,7 @@ class WritebackCollaborator:
             task=task,
             done_payload=done_payload,
             source=source,
+            run_error=run_error,
         )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
@@ -2272,8 +2277,8 @@ class WritebackCollaborator:
                     gap={
                         "domain": domain,
                         "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                        "gap_symptom": (task.params or {}).get("gap_symptom"),
-                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "gap_symptom": task_params.get("gap_symptom"),
+                        "gap_evidence": task_params.get("gap_evidence"),
                         "summary": done_payload.get("summary", ""),
                     },
                     proposals=proposals,
@@ -2320,12 +2325,14 @@ class WritebackCollaborator:
                 {
                     "task_id": task.task_id,
                     "domain": domain,
-                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+                    "gap_canonical_id": str(
+                        done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
+                    ),
                     "empty": is_empty,
                     "proposals_total": len(proposals),
                     "confidence": done_payload.get("confidence"),
                     "summary": str(done_payload.get("summary") or "")[:480],
-                    "reason": str(done_payload.get("reason") or "")[:480],
+                    "reason": str(run_error or done_payload.get("reason") or "")[:480],
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )

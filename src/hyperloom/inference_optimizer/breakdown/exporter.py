@@ -568,6 +568,9 @@ def build(
             v6_warnings,
             state=state,
             recorded_operations=recorded_operations,
+            critic_iterations=(
+                critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
+            ),
         ),
         v6_warnings,
         default=[],

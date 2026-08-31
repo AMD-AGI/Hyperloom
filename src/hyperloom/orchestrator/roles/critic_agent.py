@@ -867,6 +867,8 @@ class CriticAgentBackend:
             instrument.record_critic_iteration(
                 self.session_dir,
                 iter_n=turn_idx,
+                request=request,
+                judge_bundle=judge_bundle,
                 review=review,
                 emit=emit,
                 workdir=workdir,

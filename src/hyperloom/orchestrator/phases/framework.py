@@ -149,7 +149,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return
             self._record_framework_agent_phase_done(
                 reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
+                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
             )
             state.framework_agent_phase_done = True
             state.save(self.session_dir)
@@ -366,6 +366,7 @@ class FrameworkPhase(CoordinatorCollaborator):
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,
             "framework_batch_id": batch_id,
+            "reauthor_attempt": int(reauthor_attempt),
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "notes": notes,
@@ -1439,6 +1440,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 evidence={
                     "event": "framework_agent_phase_done",
                     "failure_count": int(failure_count),
+                    "empty_count": int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
                     "outcome_class": outcome_class,
@@ -2151,6 +2153,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "accuracy_pass": res.get("accuracy_pass"),
                 "specialist_task_id": spec_tid,
                 "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
             },
         )
         if not recorded:
@@ -2250,7 +2253,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             rationale=run_error[:500],
             provenance="dispatch_failed",
             gain_pct=0.0,
-            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            extra={
+                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": params.get("reauthor_attempt"),
+            },
         )
         if not recorded:
             return
@@ -2365,7 +2371,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             rationale=reason,
             provenance="authored_empty",
             gain_pct=0.0,
-            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            extra={
+                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": params.get("reauthor_attempt"),
+            },
         )
         if not recorded:
             return
