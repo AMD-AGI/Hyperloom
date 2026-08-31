@@ -25,12 +25,14 @@ from pathlib import PurePosixPath
 ATTEMPT_ROOT_DIR = ".forge_rewrite"
 
 #: Path components marking forge bookkeeping.
+#:
+#: The apply-back gate turns a match into a refused patch, so a pattern earns
+#: its place only by naming state that exists. The loop's report and candidates
+#: live under ``forge_experiments``, which the first entry already covers.
 PRODUCER_PATH_PATTERNS: tuple[str, ...] = (
     "forge_experiments",
     ATTEMPT_ROOT_DIR,
     ".forge_driver_*",
-    "optimization_report.md",
-    "optimized_versions",
 )
 
 #: Directory basenames holding machine-generated artefacts, at any depth.
