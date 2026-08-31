@@ -1109,3 +1109,45 @@ class TestResolveFrameworkTree:
 
     def test_empty_name_resolves_to_nothing(self):
         assert fp.resolve_framework_tree("") == ""
+
+
+def _sglang_checkout(root: Path) -> Path:
+    """A checkout whose layout is not in the static allowlist."""
+    import subprocess as sp
+
+    target = root / "python" / "sglang"
+    target.mkdir(parents=True)
+    (target / "layer.py").write_text("original\n", encoding="utf-8")
+    sp.run(["git", "init", str(root)], capture_output=True)
+    return root
+
+
+def _overlay_entries(tmp_path: Path) -> list[dict[str, str]]:
+    diff = (
+        "diff --git a/python/sglang/layer.py b/python/sglang/layer.py\n"
+        "--- a/python/sglang/layer.py\n"
+        "+++ b/python/sglang/layer.py\n"
+        "@@ -1 +1 @@\n-original\n+patched\n"
+    )
+    patch = tmp_path / "realized.patch"
+    patch.write_text(diff, encoding="utf-8")
+    return [{"patch_file": "patch/overlays/000000/00-realized.patch", "patch_ref": str(patch)}]
+
+
+def test_an_off_allowlist_layout_is_unresolvable_without_a_recorded_root(tmp_path, monkeypatch):
+    """This resolver only serves overlays that name no checkout, so it can still miss.
+
+    The recorded root is what covers the layouts it cannot reach; it is read off
+    the overlay entry by the applier rather than searched for here.
+    """
+    from hyperloom.orchestrator.framework import paths as fp
+
+    monkeypatch.delenv("FRAMEWORK", raising=False)
+    monkeypatch.delenv("FRAMEWORK_REPO_PATH", raising=False)
+    monkeypatch.delenv("SGLANG_REPO_PATH", raising=False)
+    _sglang_checkout(tmp_path / "sglang")
+
+    resolution = fp.resolve_warm_replay_framework_root(patch_entries=_overlay_entries(tmp_path))
+
+    assert not resolution.root
+    assert resolution.reason == "framework_patch_root_not_in_allowlist"

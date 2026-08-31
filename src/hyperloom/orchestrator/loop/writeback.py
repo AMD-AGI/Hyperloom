@@ -371,6 +371,26 @@ class WritebackCollaborator:
             resolved.append(canonical)
         return resolved, missing
 
+    @staticmethod
+    def _provenance_with_apply_roots(
+        provenance: Mapping[str, Any],
+        refs: list[str],
+    ) -> dict[str, Any]:
+        """Turn this KEEP's single apply root into a per-ref answer.
+
+        One KEEP lands in one checkout, so every ref it staged shares that root;
+        recording it per ref is what lets a Recipe whose KEEPs came from
+        different trees stay replayable without anything reconciling them.
+        """
+        row = {key: value for key, value in provenance.items() if key != "host_origin"}
+        origin = dict(provenance.get("host_origin") or {})
+        apply_root = str(origin.pop("apply_root", "") or "").strip()
+        if apply_root and refs:
+            origin["apply_roots"] = {str(ref): apply_root for ref in refs if str(ref).strip()}
+        if origin:
+            row["host_origin"] = origin
+        return row
+
     def _stage_agent_keep(
         self,
         *,
@@ -403,13 +423,18 @@ class WritebackCollaborator:
             return False
         if not include_patches:
             return True
+        refs: list[str] = []
         if sources:
             refs = patch_kb.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
         # How the overlay was captured travels with it, so a later session can
-        # tell a complete capture from one that could not account for every path.
-        if provenance and not patch_kb.stage_provenance(stack_index=stack_index, **dict(provenance)):
+        # tell a complete capture from one that could not account for every path,
+        # and can apply each overlay to the checkout it was taken from.
+        if provenance and not patch_kb.stage_provenance(
+            stack_index=stack_index,
+            **self._provenance_with_apply_roots(provenance, refs),
+        ):
             return False
         return True
 
@@ -453,6 +478,15 @@ class WritebackCollaborator:
                 "complete": bool(result.get("source_snapshot_complete", True)),
                 "artifacts_outside_root": int(result.get("source_artifacts_outside_root") or 0),
                 "realized": bool(include_patches and realized.is_file()),
+                # Where this KEEP came from on this host. ``apply_root`` becomes
+                # a per-ref answer once the refs exist; the rest is for reading a
+                # record back that would not replay.
+                "host_origin": {
+                    "apply_root": str(result.get("framework_root") or ""),
+                    "snapshot": str(result.get("source_snapshot") or ""),
+                    "manifest": str(result.get("source_manifest") or ""),
+                    "sources": [str(path) for path in sources],
+                },
             },
         }
         outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])

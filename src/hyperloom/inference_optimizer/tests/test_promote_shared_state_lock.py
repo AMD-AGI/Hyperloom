@@ -744,15 +744,14 @@ async def test_framework_agent_keep_stages_returned_raw_patch(session_dir, tmp_p
     ref = "patch/overlays/000000/00-pr-7.patch"
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
-    assert staged.knowledge["provenance"] == [
-        {
-            "stack_index": 0,
-            "base_sha": "",
-            "complete": True,
-            "artifacts_outside_root": 0,
-            "realized": False,
-        }
-    ]
+    row = staged.knowledge["provenance"][0]
+    assert row["stack_index"] == 0
+    assert row["base_sha"] == ""
+    assert row["complete"] is True
+    assert row["artifacts_outside_root"] == 0
+    assert row["realized"] is False
+    # No snapshot ran, so the delivered patch is the only absolute origin known.
+    assert row["host_origin"] == {"sources": [str(patch)]}
 
 
 @pytest.mark.asyncio
@@ -780,6 +779,8 @@ async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path,
             "base_sha": "abc123",
             "source_snapshot_complete": True,
             "source_artifacts_outside_root": 2,
+            "framework_root": "/sglang",
+            "source_snapshot": str(realized.parent),
         },
         task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
     )
@@ -792,6 +793,11 @@ async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path,
     assert row["realized"] is True
     assert row["base_sha"] == "abc123"
     assert row["artifacts_outside_root"] == 2
+    # Where the KEEP came from has to survive the handoff, not just the result,
+    # and it lands on the ref so overlays from two trees stay distinguishable.
+    assert row["host_origin"]["apply_roots"] == {ref: "/sglang"}
+    assert row["host_origin"]["snapshot"] == str(realized.parent)
+    assert row["host_origin"]["sources"] == [str(realized)]
 
 
 @pytest.mark.asyncio

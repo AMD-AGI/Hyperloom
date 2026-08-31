@@ -2215,6 +2215,92 @@ def test_checkout_promotion_failure_rejects_keep_and_rolls_kernel(tmp_path, monk
     assert kernel_rollbacks == [[{"manifest_path": "/tmp/m"}]]
 
 
+def test_every_patched_tree_is_promoted(tmp_path):
+    """A replay spanning two checkouts has to promote both, not just the first."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    sglang = tmp_path / "sglang"
+    tuning = tmp_path / "tuning"
+    sglang.mkdir()
+    tuning.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
+                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(tuning)}},
+            ],
+        },
+        task,
+    )
+
+    assert ok is True
+    assert promotion["target_repos"] == [str(sglang), str(tuning)]
+
+
+def test_one_tree_failing_validation_rejects_the_whole_promotion(tmp_path):
+    """The gain came from the whole set, so a half-promoted replay is not a win."""
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    sglang = tmp_path / "sglang"
+    tuning = tmp_path / "tuning"
+    sglang.mkdir()
+    tuning.mkdir()
+    task = _StubTask(
+        params={
+            "required_patch_timeline": True,
+            "patches": [{"patch_file": "p.patch", "framework_root": str(sglang)}],
+        }
+    )
+
+    ok, promotion = coord.phase_prelude._resolve_promoted_recipe_checkout(
+        {
+            "warm_patch_trees": [
+                {"root": str(sglang), "pre_sha": "abc", "snapshot_manifest": {"repo_path": str(sglang)}},
+                # Snapshot taken against a different tree than the one patched.
+                {"root": str(tuning), "pre_sha": "def", "snapshot_manifest": {"repo_path": str(sglang)}},
+            ],
+        },
+        task,
+    )
+
+    assert ok is False
+    assert promotion["failure"] == "validated_recipe_checkout_manifest_mismatch"
+
+
+def test_rollback_restores_every_tree_the_replay_patched(tmp_path, monkeypatch):
+    """Leaving one tree patched would bank a mutation from a rejected replay."""
+    import hyperloom.orchestrator.actions.executors.baseline as baseline_module
+
+    reverted: list[str] = []
+    monkeypatch.setattr(
+        baseline_module,
+        "_revert_patches",
+        lambda root, *_args: reverted.append(root) or {"ok": True, "errors": []},
+    )
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.phase_prelude._revert_warm_kernel_patches = (  # type: ignore[method-assign]
+        lambda applied, snapshots=None: {"ok": True, "errors": []}
+    )
+
+    outcome = coord.phase_prelude._rollback_combined_warm(
+        {
+            "warm_patch_trees": [
+                {"root": "/sglang", "pre_sha": "abc", "snapshot_manifest": {"repo_path": "/sglang"}},
+                {"root": "/workspace/tuning", "pre_sha": "def", "snapshot_manifest": {"repo_path": "/workspace/tuning"}},
+            ],
+        },
+        _StubTask(params={}),
+    )
+
+    assert reverted == ["/sglang", "/workspace/tuning"]
+    assert outcome["ok"] is True
+
+
 def test_checkout_promotion_failure_retains_pending_when_rollback_fails(tmp_path):
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.baseline_tput = 600.0
@@ -2580,9 +2666,45 @@ def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_pa
     assert ledger["validation"]["unscored_keep_count"] == 0
 
 
-# ---- the apply root is resolved locally, never read off the record ---------
-def test_current_recipe_patches_carry_no_recorded_apply_root(tmp_path, monkeypatch):
-    """The capturing host's path is meaningless here, so it is not published."""
+# ---- each overlay is placed against the checkout it was taken from ---------
+def test_each_overlay_carries_the_checkout_it_was_applied_into(tmp_path, monkeypatch):
+    """Two KEEPs from two trees must each replay against their own tree.
+
+    A session can KEEP a framework patch and, separately, a snapshot whose gain
+    was in a data file under a different root. Resolving one root for the set
+    would place one of them against a tree it was never measured on, so the root
+    travels per overlay ref.
+    """
+    refs = [
+        "patch/overlays/000001/00-sglang.patch",
+        "patch/overlays/000001/01-sglang.patch",
+        "patch/overlays/000004/00-tuned-csv.patch",
+    ]
+    _patch_current_column_readers(
+        monkeypatch,
+        tmp_path,
+        patch_refs=refs,
+        provenance=[
+            {
+                "stack_index": 1,
+                "host_origin": {"apply_roots": {refs[0]: "/sglang", refs[1]: "/sglang/python/sglang"}},
+            },
+            {"stack_index": 4, "host_origin": {"apply_roots": {refs[2]: "/workspace/tuning"}}},
+        ],
+    )
+    coord = _make_coord(tmp_path)
+
+    replay = coord.phase_prelude._read_current_recipe_replay()
+
+    assert [patch["framework_root"] for patch in replay["patches"]] == [
+        "/sglang",
+        "/sglang/python/sglang",
+        "/workspace/tuning",
+    ]
+
+
+def test_an_overlay_with_no_recorded_root_is_left_for_local_resolution(tmp_path, monkeypatch):
+    """A legacy record carries no root, so the field stays absent rather than guessed."""
     _patch_current_column_readers(
         monkeypatch,
         tmp_path,
@@ -2592,7 +2714,6 @@ def test_current_recipe_patches_carry_no_recorded_apply_root(tmp_path, monkeypat
 
     replay = coord.phase_prelude._read_current_recipe_replay()
 
-    assert [patch["patch_file"] for patch in replay["patches"]] == ["patch/overlays/000000/00-p.patch"]
     assert all("framework_root" not in patch for patch in replay["patches"])
 
 

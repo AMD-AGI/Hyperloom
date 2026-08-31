@@ -46,6 +46,7 @@ from .remote_recipe.models import (
     PATCH_SECTION,
     RECIPE_SECTIONS,
 )
+from .remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = logging.getLogger(__name__)
 
@@ -376,6 +377,7 @@ class PatchKB(_ColumnKB):
         complete: bool = True,
         artifacts_outside_root: int = 0,
         realized: bool = True,
+        host_origin: Mapping[str, Any] | None = None,
     ) -> bool:
         """Record how the overlay at ``stack_index`` was captured.
 
@@ -397,6 +399,11 @@ class PatchKB(_ColumnKB):
                 record.
             realized: True when the overlay is the diff the KEEP actually landed;
                 False when it fell back to the patch as delivered.
+            host_origin: Absolute paths on the producing host. ``apply_roots``
+                maps each overlay ref to the checkout it was applied into, which
+                is what a later session replays against; the rest records where
+                the patch, snapshot and manifest were written, for reading a
+                record back that would not replay.
         """
         if self._sections is None:
             return False
@@ -411,6 +418,8 @@ class PatchKB(_ColumnKB):
             "artifacts_outside_root": max(0, int(artifacts_outside_root or 0)),
             "realized": bool(realized),
         }
+        if origin := _host_origin(host_origin):
+            row[HOST_ORIGIN_KEY] = origin
         document, _ = self._staged()
         rows = [
             dict(existing)
@@ -507,6 +516,38 @@ class KernelAgentKB(_ColumnKB):
             "rewrite": build_kernel_rewrite_value(state, sink),
         }
         return self._publish(document, members=sink.members)
+
+
+def _host_origin(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Keep only the absolute paths of a host-origin record.
+
+    ``apply_roots`` maps each overlay ref to the checkout it was applied into, so
+    a Recipe whose overlays came from more than one tree stays replayable: the
+    ref carries its own answer and nothing has to reconcile them.
+
+    A relative value is dropped. Anywhere but ``apply_roots`` that would be a
+    session-local artifact ref, which the column's own ``patches`` list already
+    carries, and recording it twice would invite a reader to treat this subtree
+    as replay material rather than as provenance.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    origin: dict[str, Any] = {}
+    for key in ("snapshot", "manifest"):
+        value = str(raw.get(key) or "").strip()
+        if value.startswith("/"):
+            origin[key] = value
+    sources = [str(path).strip() for path in (raw.get("sources") or []) if str(path or "").strip().startswith("/")]
+    if sources:
+        origin["sources"] = sources
+    apply_roots = {
+        str(ref).strip(): str(root).strip()
+        for ref, root in (raw.get("apply_roots") or {}).items()
+        if str(ref or "").strip() and str(root or "").strip().startswith("/")
+    }
+    if apply_roots:
+        origin["apply_roots"] = apply_roots
+    return origin
 
 
 def _stack_index(value: Any) -> int:

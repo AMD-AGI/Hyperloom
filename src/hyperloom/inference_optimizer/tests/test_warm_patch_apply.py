@@ -18,6 +18,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     _restore_patch_snapshot,
     _revert_patches,
     _revert_warm_patch_state,
+    _revert_warm_patch_trees,
 )
 
 
@@ -133,6 +134,201 @@ def test_required_recipe_patch_fails_when_active_framework_root_is_missing(
     assert target == ""
     assert result["status"] == "failed"
     assert result["failure"] == "missing_target_repo"
+
+
+def _git_repo(root, rel_path, body):
+    """A committed one-file git checkout, standing in for a recorded apply root."""
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(root), capture_output=True, check=True)
+    for key, value in (("user.email", "t@t.com"), ("user.name", "T"), ("core.autocrlf", "false")):
+        subprocess.run(["git", "config", key, value], cwd=str(root), capture_output=True, check=True)
+    target = root / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body, encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(root), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=str(root), capture_output=True, check=True)
+    return root
+
+
+def _one_line_diff(rel_path, before, after):
+    return (
+        f"diff --git a/{rel_path} b/{rel_path}\n"
+        f"--- a/{rel_path}\n"
+        f"+++ b/{rel_path}\n"
+        f"@@ -1 +1 @@\n-{before}\n+{after}\n"
+    )
+
+
+def test_overlays_from_two_trees_each_apply_into_their_own(tmp_path, output_dir):
+    """A framework patch and a data-file overlay replay against their own checkouts.
+
+    Resolving one root for the set would place one of them on a tree it was
+    never measured against, so each entry carries the root it was recorded with.
+    """
+    sglang = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
+    tuning = _git_repo(tmp_path / "tuning", "shapes.csv", "1,2,3\n")
+    params = {
+        "required_patch_timeline": True,
+        "patches": [
+            {
+                "patch_file": "patch/overlays/000001/00-sglang.patch",
+                "patch_content": _one_line_diff("python/sglang/layer.py", "original", "patched"),
+                "framework_root": str(sglang),
+            },
+            {
+                "patch_file": "patch/overlays/000004/00-tuned-csv.patch",
+                "patch_content": _one_line_diff("shapes.csv", "1,2,3", "4,5,6"),
+                "framework_root": str(tuning),
+            },
+        ],
+    }
+
+    result = _apply_warm_patches(params, "", output_dir)
+
+    assert result["status"] == "prepared"
+    assert (sglang / "python" / "sglang" / "layer.py").read_text() == "patched\n"
+    assert (tuning / "shapes.csv").read_text() == "4,5,6\n"
+    # Each tree carries its own restore material, since one tree's snapshot
+    # cannot restore another.
+    assert [tree["root"] for tree in result["trees"]] == [str(sglang), str(tuning)]
+    assert all(tree["snapshot_manifest"] for tree in result["trees"])
+
+
+def test_one_overlay_failing_restores_every_tree_already_patched(tmp_path, output_dir):
+    """The gain came from the whole set, so a partial application is not a smaller win."""
+    sglang = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
+    tuning = _git_repo(tmp_path / "tuning", "shapes.csv", "1,2,3\n")
+    params = {
+        "required_patch_timeline": True,
+        "patches": [
+            {
+                "patch_file": "patch/overlays/000001/00-sglang.patch",
+                "patch_content": _one_line_diff("python/sglang/layer.py", "original", "patched"),
+                "framework_root": str(sglang),
+            },
+            {
+                "patch_file": "patch/overlays/000004/00-tuned-csv.patch",
+                # Pre-image the second tree does not hold, so this cannot apply.
+                "patch_content": _one_line_diff("shapes.csv", "9,9,9", "4,5,6"),
+                "framework_root": str(tuning),
+            },
+        ],
+    }
+
+    result = _apply_warm_patches(params, "", output_dir)
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "git_apply_failed"
+    assert result["rolled_back"] is True
+    assert (sglang / "python" / "sglang" / "layer.py").read_text() == "original\n"
+    assert (tuning / "shapes.csv").read_text() == "1,2,3\n"
+
+
+def test_two_roots_in_one_checkout_collapse_to_that_checkout(tmp_path, output_dir):
+    """A recorded /sglang and /sglang/python/sglang are one tree, not two.
+
+    A git diff names paths from the work-tree root and ``git apply`` resolves
+    them there, silently ignoring any that fall outside the directory it runs
+    in. Applying the narrower root on its own would therefore report success
+    having written nothing.
+    """
+    outer = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
+    inner = outer / "python" / "sglang"
+    (inner / "backend.py").write_text("backend\n", encoding="utf-8")
+    subprocess.run(["git", "add", "."], cwd=str(outer), capture_output=True, check=True)
+    subprocess.run(["git", "commit", "-m", "backend"], cwd=str(outer), capture_output=True, check=True)
+    params = {
+        "required_patch_timeline": True,
+        "patches": [
+            {
+                "patch_file": "patch/overlays/000001/00-outer.patch",
+                "patch_content": _one_line_diff("python/sglang/layer.py", "original", "patched"),
+                "framework_root": str(outer),
+            },
+            {
+                "patch_file": "patch/overlays/000001/01-inner.patch",
+                "patch_content": _one_line_diff("python/sglang/backend.py", "backend", "tuned"),
+                "framework_root": str(inner),
+            },
+        ],
+    }
+
+    result = _apply_warm_patches(params, "", output_dir)
+
+    assert result["status"] == "prepared"
+    assert [tree["root"] for tree in result["trees"]] == [str(outer)]
+    assert (inner / "layer.py").read_text() == "patched\n"
+    assert (inner / "backend.py").read_text() == "tuned\n"
+
+    restore = _revert_warm_patch_trees(result["trees"])
+
+    assert restore["ok"] is True, restore["errors"]
+    assert (inner / "layer.py").read_text() == "original\n"
+    assert (inner / "backend.py").read_text() == "backend\n"
+
+
+def test_an_absent_recorded_root_fails_the_whole_replay(tmp_path, output_dir):
+    """Another host's layout is not this one's, and no other tree stands in for it."""
+    sglang = _git_repo(tmp_path / "sglang", "python/sglang/layer.py", "original\n")
+    params = {
+        "required_patch_timeline": True,
+        "patches": [
+            {
+                "patch_file": "patch/overlays/000001/00-sglang.patch",
+                "patch_content": _one_line_diff("python/sglang/layer.py", "original", "patched"),
+                "framework_root": str(sglang),
+            },
+            {
+                "patch_file": "patch/overlays/000004/00-elsewhere.patch",
+                "patch_content": _one_line_diff("shapes.csv", "1,2,3", "4,5,6"),
+                "framework_root": str(tmp_path / "never-checked-out"),
+            },
+        ],
+    }
+
+    result = _apply_warm_patches(params, "", output_dir)
+
+    assert result["status"] == "failed"
+    assert result["failure"] == "apply_root_absent"
+    # Refused before anything was written, so there is nothing to unwind.
+    assert (sglang / "python" / "sglang" / "layer.py").read_text() == "original\n"
+
+
+def test_resolver_answers_nothing_when_every_overlay_records_its_own_root(tmp_path, monkeypatch):
+    """The apply loop reads the root off the entry, so no probe is owed."""
+
+    def _fail(*_args, **_kwargs):
+        raise AssertionError("a recorded apply root must not be probed for")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        _fail,
+    )
+
+    target = _resolve_recipe_patch_target(
+        {
+            "patches": [
+                {"patch_file": "patch/overlays/000000/00-a.patch", "framework_root": str(tmp_path / "sglang")},
+                {"patch_file": "patch/overlays/000001/00-b.patch", "framework_root": str(tmp_path / "tuning")},
+            ],
+        }
+    )
+
+    assert target == ""
+
+
+def test_resolver_probes_only_for_overlays_recording_no_root(tmp_path, monkeypatch):
+    """A record written before the field existed still resolves the legacy way."""
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.actions.executors.integrate_patch._resolve_framework_root",
+        lambda *_args, **_kwargs: tmp_path / "probed",
+    )
+
+    target = _resolve_recipe_patch_target(
+        {"patches": [{"patch_file": "patch/overlays/000000/00-a.patch", "patch_content": VALID_PATCH}]}
+    )
+
+    assert target == str(tmp_path / "probed")
 
 
 def test_empty_target_repo_returns_empty(output_dir):

@@ -575,6 +575,41 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     assert "secret" not in rewrite["note"]
 
 
+def test_host_origin_is_the_one_subtree_that_keeps_absolute_paths() -> None:
+    """A KEEP that cannot name its checkout cannot be replayed on another layout."""
+    sanitized = sanitize_shared_knowledge(
+        {
+            "value": {
+                "patch": {
+                    "patches": ["patch/overlays/000000/00-fix.patch"],
+                    "provenance": [
+                        {
+                            "stack_index": 0,
+                            "host_origin": {
+                                "framework_root": "/sglang",
+                                "snapshot": "/session/optimization_stack/src/spec-1",
+                                "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
+                                "patches": ["/session/optimization_stack/src/spec-1/realized.patch"],
+                                "HF_TOKEN": "secret",
+                            },
+                        }
+                    ],
+                },
+                "kernel": {"gemm": {"workspace": "/workspace/session"}},
+            }
+        }
+    )
+
+    origin = sanitized["value"]["patch"]["provenance"][0]["host_origin"]
+    assert origin["framework_root"] == "/sglang"
+    assert origin["snapshot"] == "/session/optimization_stack/src/spec-1"
+    assert origin["patches"] == ["/session/optimization_stack/src/spec-1/realized.patch"]
+    # The exemption is about absolute paths only.
+    assert "HF_TOKEN" not in origin
+    # Everywhere else a host path is still a leak.
+    assert sanitized["value"]["kernel"]["gemm"] == {}
+
+
 def test_empty_phase_sections_do_not_copy_cumulative_current_best(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.optimization_stack = [row for row in state.optimization_stack if row.get("source_phase") == "EXPLORE"]

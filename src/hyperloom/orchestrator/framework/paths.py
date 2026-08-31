@@ -828,7 +828,12 @@ def resolve_warm_replay_framework_root(
     patch_paths: Sequence[Path] | None = None,
     patch_entries: Iterable[Any] | None = None,
 ) -> WarmReplayRootResolution:
-    """Resolve the framework patch root for warm replay (env first, then allowlist)."""
+    """Resolve the framework patch root for warm replay (env first, then allowlist).
+
+    Only for overlays that name no checkout of their own. One that does is placed
+    against it by the applier, which is what keeps a Recipe whose KEEPs came from
+    different trees replayable.
+    """
     return _resolve_warm_replay_patch_root(
         patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
         allowlist=_warm_replay_framework_patch_roots(),

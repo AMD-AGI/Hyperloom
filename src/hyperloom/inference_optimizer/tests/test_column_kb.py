@@ -601,3 +601,61 @@ def test_close_fails_when_a_replayed_prior_overlay_is_absent_from_prior_knowledg
             tmp_path / "files",
             sections=KnowledgeSections(tmp_path / "draft", warm_start_dir=warm),
         )
+
+
+def test_provenance_records_a_checkout_per_overlay_ref(tmp_path: Path) -> None:
+    """Overlays cut from different trees each keep their own checkout.
+
+    One answer for the set would place an overlay against a tree it was never
+    measured on, so the ref is what the root hangs off.
+    """
+    sections = KnowledgeSections(tmp_path / "draft")
+
+    assert PatchKB(sections).stage_provenance(
+        stack_index=0,
+        host_origin={
+            "apply_roots": {
+                "patch/overlays/000000/00-sglang.patch": "/sglang",
+                "patch/overlays/000000/01-tuned-csv.patch": "/workspace/tuning",
+            },
+            "snapshot": "/session/optimization_stack/src/spec-1",
+            "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
+            "sources": ["/session/optimization_stack/src/spec-1/realized.patch"],
+        },
+    )
+
+    assert sections.staged("patch").knowledge["provenance"][0]["host_origin"] == {
+        "apply_roots": {
+            "patch/overlays/000000/00-sglang.patch": "/sglang",
+            "patch/overlays/000000/01-tuned-csv.patch": "/workspace/tuning",
+        },
+        "snapshot": "/session/optimization_stack/src/spec-1",
+        "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
+        "sources": ["/session/optimization_stack/src/spec-1/realized.patch"],
+    }
+
+
+def test_provenance_keeps_only_absolute_origins(tmp_path: Path) -> None:
+    """A relative value would be an artifact ref, which ``patches`` already carries."""
+    sections = KnowledgeSections(tmp_path / "draft")
+
+    PatchKB(sections).stage_provenance(
+        stack_index=0,
+        host_origin={
+            "apply_roots": {"patch/overlays/000000/00-fix.patch": "relative/tree"},
+            "snapshot": "relative/dir",
+            "sources": ["patch/overlays/000000/00-fix.patch", "/abs/realized.patch"],
+        },
+    )
+
+    assert sections.staged("patch").knowledge["provenance"][0]["host_origin"] == {
+        "sources": ["/abs/realized.patch"],
+    }
+
+
+def test_provenance_omits_host_origin_when_nothing_absolute_is_known(tmp_path: Path) -> None:
+    sections = KnowledgeSections(tmp_path / "draft")
+
+    PatchKB(sections).stage_provenance(stack_index=0, host_origin={"apply_roots": {}})
+
+    assert "host_origin" not in sections.staged("patch").knowledge["provenance"][0]
