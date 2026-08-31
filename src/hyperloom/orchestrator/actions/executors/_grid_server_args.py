@@ -194,18 +194,20 @@ def _unsafe_token_owners(tokens: list[str], unsafe: list[str]) -> list[str]:
     string — and so can a removal spec, which is written by the same LLM /
     operator path and reaches this module the same way. An option name is not a
     secret and is the part an operator needs in order to find the value.
+
+    A token with no owner is dropped rather than reported as itself. ``unsafe``
+    is always a subset of ``tokens``, so this cannot happen today; falling back
+    to the token would put the value in the log the moment it could, which is
+    the one thing this function exists to prevent.
     """
     unsafe_set = set(unsafe)
     owners: list[str] = []
-    matched: set[str] = set()
     current = "<positional>"
     for token in tokens:
         if _is_flag_token(token):
             current = token.partition("=")[0]
         if token in unsafe_set:
             owners.append(current)
-            matched.add(token)
-    owners.extend(unsafe_set - matched)
     return sorted(set(owners))
 
 
@@ -235,6 +237,19 @@ def _warn_undeliverable_tokens(tokens: list[str], unsafe: list[str], remove_coun
         len(unsafe),
         names,
         remove_count,
+    )
+
+
+def _warn_operand_list_widened(flag: str, operand_count: int) -> None:
+    """Report a removal that took more operands than the spec named."""
+    log.warning(
+        "Removal spec names one operand of %s but the served args give it "
+        "%d; removing the whole operand list, since a flag's operands "
+        "cannot be split without leaving bare argv words. Attribute any "
+        "resulting gain or regression to all of them, not just the one "
+        "named.",
+        flag,
+        operand_count,
     )
 
 
@@ -278,8 +293,8 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
 
     ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
     its following operands when any are present; ``"--foo=bar"`` removes that
-    exact token shape; ``"--foo bar"`` removes ``--foo`` when ``bar`` is its
-    first (or only) operand.
+    token shape, plus any operand that follows it; ``"--foo bar"`` removes
+    ``--foo`` when ``bar`` is its first (or only) operand.
 
     SEMANTIC NOTE — a pair spec removes the WHOLE operand list, not just the
     operand it names: ``remove_args: ["--cuda-graph-bs 1"]`` against
@@ -344,14 +359,21 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         if not _is_flag_token(word):
             i += 1
             continue
-        if "=" in word:
-            flag, _, value = word.partition("=")
-            if flag in remove_flags or (flag, _logical_value(value)) in remove_pairs:
-                drop(i, i + 1)
-            i += 1
-            continue
         end = _span_end(words, i)
         operands = words[i + 1 : end]
+        if "=" in word:
+            # ``--flag=v`` still owns any operand that follows it. argparse reads
+            # the extras as positionals rather than as the flag's list, so this
+            # shape is malformed at the source -- but dropping only the
+            # ``--flag=v`` word left them behind as bare argv words, which is the
+            # one outcome this function promises never to produce.
+            flag, _, value = word.partition("=")
+            if flag in remove_flags or (flag, _logical_value(value)) in remove_pairs:
+                if operands:
+                    _warn_operand_list_widened(flag, len(operands) + 1)
+                drop(i, end)
+            i = end
+            continue
         if word in remove_flags:
             drop(i, end)
             i = end
@@ -361,15 +383,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             first = (word, _logical_value(operands[0]))
             if whole in remove_pairs or first in remove_pairs:
                 if len(operands) > 1 and whole not in remove_pairs:
-                    log.warning(
-                        "Removal spec names one operand of %s but the served args give it "
-                        "%d; removing the whole operand list, since a flag's operands "
-                        "cannot be split without leaving bare argv words. Attribute any "
-                        "resulting gain or regression to all of them, not just the one "
-                        "named.",
-                        word,
-                        len(operands),
-                    )
+                    _warn_operand_list_widened(word, len(operands))
                 drop(i, end)
                 i = end
                 continue

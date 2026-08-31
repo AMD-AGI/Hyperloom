@@ -403,6 +403,40 @@ class TestExactPairRemoval:
         assert _json_value_of(composed, "--online_quant_config") == json.loads(_ATOM_QUANT_JSON)
 
 
+class TestEqualsJoinedOperands:
+    """``--flag=value`` owns what follows it, like every other option name.
+
+    The span was computed for the space-separated form only, so a removal on the
+    equals form dropped that one word and left anything after it stranded as
+    bare argv words -- the outcome the whole operands-as-a-unit rule exists to
+    prevent, reached through the spelling the rule did not look at.
+    """
+
+    @pytest.mark.parametrize("spec", ["--block-size", "--block-size=16", "--block-size 16"])
+    def test_every_spelling_removes_the_equals_form(self, spec):
+        assert remove_server_args("--block-size=16 --tp 8", [spec]) == "--tp 8"
+
+    def test_a_different_value_is_left_alone(self):
+        args = "--block-size=16 --tp 8"
+        assert remove_server_args(args, ["--block-size=32"]) == args
+
+    def test_trailing_operands_go_with_the_flag(self):
+        """argparse reads these as positionals, so they are the flag's or nobody's."""
+        out = remove_server_args("--cuda-graph-bs=1 2 4 --tp 8", ["--cuda-graph-bs"])
+        assert out == "--tp 8"
+        validate_server_args_shell_safe(out)
+
+    def test_a_neighbouring_removal_leaves_the_equals_form_verbatim(self):
+        assert remove_server_args("--cuda-graph-bs=1 2 4 --tp 8", ["--tp"]) == "--cuda-graph-bs=1 2 4"
+
+    def test_widening_past_the_named_operand_is_reported(self, caplog):
+        """Same attribution warning the space-separated form already emits."""
+        with caplog.at_level("WARNING"):
+            remove_server_args("--cuda-graph-bs=1 2 4 --tp 8", ["--cuda-graph-bs=1"])
+        assert "--cuda-graph-bs" in caplog.text
+        assert "give it 3" in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Mechanical coverage of remove_server_args.
 #
@@ -428,6 +462,7 @@ _SHAPES: tuple[tuple[str, str], ...] = (
     ("--parser2", "'my parser'"),  # quoted operand with whitespace
     ("--half", "'unclosed"),  # single edge quote, untokenizable for shlex
     ("--tmpl", '{"t":"a  b"}'),  # double space inside a JSON string value
+    ("--eqlist=1", "2 4"),  # equals-joined operand, then more operands
 )
 
 _NOISE = "--max-num-seqs 64"
