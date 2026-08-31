@@ -562,6 +562,132 @@ def test_promote_with_a_proven_overlay_stamps_the_kernel_lever(tmp_path: Path) -
     assert entry["lever_kind"] == "kernel"
 
 
+def _journey_with_validated_keeps(tmp_path: Path, ratios: list[float]) -> str:
+    """Write a journey whose KEEPs each carry a validated ``(base,new)`` pair.
+
+    Those are exactly the rows ``record_kernel_e2e`` sums into the GEAK column,
+    so they are the share the route-level attempt must NOT claim again.
+    """
+    path = tmp_path / "kernel_journey.json"
+    path.write_text(
+        json.dumps(
+            {
+                "kernels": [
+                    {
+                        "kernel_id": f"k{i}",
+                        "e2e": {
+                            "kernel_id": f"k{i}",
+                            "integrated": True,
+                            "validated": True,
+                            "decision": "KEEP",
+                            "base_tput": 1000.0,
+                            "new_tput": 1000.0 * r,
+                            "e2e_gain_pct": (r - 1.0) * 100.0,
+                        },
+                    }
+                    for i, r in enumerate(ratios)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return str(path)
+
+
+def _e2e_attempt_pair(session_dir: Path) -> tuple[float, float] | None:
+    """Return the ``(before, after)`` the route-level attempt recorded."""
+    parts = assemble_parts(session_dir)
+    ops = {
+        r.get("operation_id"): r
+        for r in parts.get("operations") or []
+        if isinstance(r, dict)
+        and r.get("name") == "geak_e2e"
+        and r.get("kind") in {"kernel_optimization", "gemm_tuning"}
+    }
+    if not ops:
+        return None
+    by_name = {
+        (m.get("name"), m.get("operation_id")): m.get("value")
+        for m in parts.get("measurements") or []
+        if isinstance(m, dict)
+    }
+    op_id = next(iter(ops))
+    return float(by_name[("baseline_throughput", op_id)]), float(by_name[("final_throughput", op_id)])
+
+
+def test_route_attempt_starts_where_the_per_kernel_ledger_stops(tmp_path: Path) -> None:
+    """The residual, not the whole route delta, is what the attempt records.
+
+    Two stacked KEEPs with validated pairs (1.05 and 1.02) are already summed
+    into the GEAK column by ``record_kernel_e2e``. Stacked speedups compose
+    multiplicatively, so 1.071 of the route lift is spoken for; recording the
+    attempt from the pre-GEAK tput would credit that 7.1% a second time.
+    """
+    base = 2844.209
+    pre_geak = 3042.941
+    measured = 3400.0
+    coord = _coord(tmp_path, baseline=base, best_tput=pre_geak)
+    result = _ok_result(final=3236.489)
+    result["accepted_kernels"] = ["k0", "k1"]
+    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05, 1.02])
+
+    coord._promote_geak_from_candidate(result, measured_tput=measured, overlay_loaded=True)
+
+    from hyperloom.orchestrator.phases.kernel import KernelPhase
+
+    assert KernelPhase._geak_journey_attributed_ratio(result) == pytest.approx(1.05 * 1.02)
+    before, after = _e2e_attempt_pair(tmp_path)
+    assert before == pytest.approx(pre_geak * 1.05 * 1.02)
+    assert after == pytest.approx(measured)
+
+
+def test_route_attempt_survives_when_only_the_config_remainder_is_left(tmp_path: Path) -> None:
+    """A journey KEEP must not suppress the whole attempt.
+
+    The predicate this replaced was boolean: any attributable KEEP dropped the
+    route row entirely, so an env/flag win measured in the same promotion never
+    reached the ledger at all.
+    """
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
+    result = _ok_result(final=3236.489)
+    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
+
+    coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=True)
+
+    before, after = _e2e_attempt_pair(tmp_path)
+    assert before == pytest.approx(3000.0 * 1.05)
+    assert after == pytest.approx(3400.0)
+
+
+def test_noise_sized_residual_is_not_recorded_as_an_attempt(tmp_path: Path) -> None:
+    """A keep worth 0.05% is measurement noise, not an optimization."""
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
+    result = _ok_result(final=3236.489)
+    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
+
+    # 3151.5 is the claimed share; the promotion measured barely above it.
+    coord._promote_geak_from_candidate(result, measured_tput=3000.0 * 1.05 * 1.0005, overlay_loaded=True)
+
+    assert _e2e_attempt_pair(tmp_path) is None
+
+
+def test_unproven_overlay_leaves_the_full_delta_to_the_route(tmp_path: Path) -> None:
+    """Without overlay proof the per-kernel ledger claims nothing.
+
+    ``_reject_geak_kernel_journey`` refuses to credit KEEPs whose overlay was
+    not proven loaded, so subtracting their ratio here would erase gain no
+    other record holds.
+    """
+    coord = _coord(tmp_path, baseline=2844.209, best_tput=3000.0)
+    result = _ok_result(final=3236.489)
+    result["kernel_journey_path"] = _journey_with_validated_keeps(tmp_path, [1.05])
+
+    coord._promote_geak_from_candidate(result, measured_tput=3400.0, overlay_loaded=False)
+
+    before, _ = _e2e_attempt_pair(tmp_path)
+    assert before == pytest.approx(3000.0)
+
+
 def test_report_shows_pending_candidate_excluded_from_headline() -> None:
     """A pending GEAK candidate renders as an audit note + warning and is
     NOT presented as a validated headline gain."""
