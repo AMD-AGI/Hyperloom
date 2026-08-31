@@ -756,6 +756,16 @@ class SpecialistAgent:
             # straight under the configured root, where an earlier ledger would
             # be reported as this session's.
             ledger_path.unlink(missing_ok=True)
+            # The sentinel is campaign-scoped, but the only thing that used to
+            # create it was ``DeviceBenchmarkLock``, which a campaign reaches at
+            # fan-out -- after the analysis round. A probe opens the file
+            # without creating it, on purpose, so every probe of every
+            # analysis-phase specialist was refused for a sentinel that nothing
+            # had made yet, and the round planned against zero measurements.
+            # Created here for the same reason the lane path creates it: what
+            # serializes probe against lane is the shared path, not the maker.
+            candidate.device_lock.parent.mkdir(parents=True, exist_ok=True)
+            candidate.device_lock.touch(exist_ok=True)
         except OSError as error:
             return self._no_probe(assignment, f"the scratch root could not be prepared: {error}")
         # The server validates its own environment and would refuse a session it
