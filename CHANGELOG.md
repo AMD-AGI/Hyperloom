@@ -35,6 +35,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
   it targets the retired repository.
 
+- **`scripts/partition_mode_sweep.py` measures which compute-partition mode a
+  workload wants.** Sets each mode on one card in turn, runs the same benchmark
+  on every partition that mode creates, sums the throughput, and restores the
+  card's entry mode on the way out — including after a failure or a Ctrl-C.
+  Modes whose partitions provably cannot hold the configured streams are skipped
+  with the arithmetic shown rather than run into an out-of-memory failure.<br/>
+  The fan-out is the substance of it. A benchmark that loads one partition and
+  ignores the rest measures a fraction of the card, which reports `CPX` as eight
+  times worse than it is; every figure here is the sum over a mode's partitions
+  with all of them loaded together, and a mode is reported only when every one of
+  its partitions returned a measurement. Partitions are selected by matching CU
+  count within the swept card's PCI bus, never by device index: `amd-smi` orders
+  by PCI address while HSA/HIP enumerates whole cards first, so on an 8-card
+  MI355X node with card 0 in `CPX` the two tools disagree about which devices the
+  partitions are — 0-7 against 7-14.<br/>
+  This is where the privileged `amd-smi set` lives, and the only place it does.
+  A card-wide mutation that evicts every GPU context is reasonable between
+  benchmarks in a script an operator ran on purpose, and unreasonable inside an
+  optimization loop that also runs agent-authored code, so `optimize` continues
+  to only read the mode. Together the two halves are a boundary: the sweep
+  chooses the shape, the session asserts it.<br/>
+  Because that set evicts work, the check standing in front of it fails closed:
+  an `amd-smi` process listing in a shape the parser does not model is a refusal,
+  not an empty one, since the only wrong answer that destroys anything is reading
+  a busy node as free. It is scoped to the card being swept, so a neighbour's
+  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
+  of the guard on the target card. Every exit from a started sweep runs the
+  restore and the report, including on an error the script does not model — which
+  exits `4`, keeps the modes already measured, and still yields `3` if the card
+  could not be put back.
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
