@@ -2945,9 +2945,17 @@ def compute_next_phase(
             # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
             if blocked in ("global_converged", "max_cycles"):
+                # A failed closeout stays the stop_reason. Convergence explains
+                # why no further cycle opened, not how this one ended, so
+                # reporting it alone turned a run whose conc_sweep failed into a
+                # clean convergence -- and ``reset_per_cycle_plateau_state``
+                # clears ``last_conc_sweep``, so the failure is not recoverable
+                # from state afterwards either. ``reloop_blocked`` still carries
+                # the convergence in the evidence.
+                terminal_reason = exit_reason if exit_reason == "conc_sweep_failed" else "global_converged"
                 return (
                     PHASE_CLOSE,
-                    "global_converged",
+                    terminal_reason,
                     {
                         **exit_evidence,
                         **reloop_ev,

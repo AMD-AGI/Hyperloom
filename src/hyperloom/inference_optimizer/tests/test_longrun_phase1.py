@@ -153,6 +153,32 @@ def test_a_plateau_from_an_earlier_cycle_does_not_close_this_one():
     assert reason == "cycle_reloop"
 
 
+def test_a_failed_conc_sweep_survives_a_convergence_wind_down():
+    """Convergence says why no cycle followed, not how this one ended.
+
+    Reporting ``global_converged`` alone turned a run whose closeout scan failed
+    into a clean convergence, and ``reset_per_cycle_plateau_state`` clears
+    ``last_conc_sweep``, so the failure was not recoverable from state either.
+    """
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=5.0, no_gain_streak=2)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_failed"
+    assert evidence["reloop_blocked"] == "global_converged"
+    assert evidence["terminal"] is True
+
+
+def test_a_clean_sweep_still_winds_down_as_global_converged():
+    """The convergence label is only displaced by a failure, not replaced."""
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=5.0, no_gain_streak=2)
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_CLOSE
+    assert reason == "global_converged"
+    assert evidence["terminal"] is True
+
+
 def test_sweep_closes_when_globally_converged():
     # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
