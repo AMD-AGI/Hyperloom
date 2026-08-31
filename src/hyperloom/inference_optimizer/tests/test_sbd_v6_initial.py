@@ -6,7 +6,9 @@ import argparse
 import asyncio
 import json
 import os
+import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -1018,11 +1020,11 @@ def test_framework_timeline_merges_legacy_framework_and_explore(tmp_path):
     assert event["start_time"] == "2026-08-27T01:00:00+00:00"
     assert event["end_time"] == "2026-08-27T01:20:00+00:00"
     assert "summary" not in event
-    assert event["ext"]["policy"]["stack_rebench_enabled"] is None
+    assert "stack_rebench_enabled" not in event["ext"]["policy"]
     assert event["ext"]["config_arm"]["rounds"][0]["workload_signature"] == "qwen-tp8-c64"
     assert event["ext"]["config_arm"]["rounds"][0]["input_stack"]["extra_server_args"] == "--base-flag"
     variant = event["ext"]["config_arm"]["rounds"][0]["variants"][0]
-    assert variant["stack_rebench"] == {"ran": True, "tput": 104.0, "stable": True}
+    assert "stack_rebench" not in variant
     attempt = event["ext"]["source_arm"]["attempts"][0]
     assert attempt["patch_source"] == "upstream_pr"
     assert attempt["lever_kind"] == "upstream_pr"
@@ -1101,6 +1103,10 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "cycle": 2,
                 "completed_at": "2026-08-27T02:08:00+00:00",
                 "proposal_set": [{"patches_written": ["patches/pr-9.patch"]}],
+                "task_kind": "framework_authoring",
+                "framework_agent_authoring": True,
+                "framework_agent_candidate_id": "https://example.test/pr/9",
+                "reauthor_attempt": 1,
             },
         ],
         "framework_agent_batches": [
@@ -1129,6 +1135,7 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "post_tput": 104.0,
                 "specialist_task_id": "author-task-1",
                 "integrate_task_id": "integrate-task-1",
+                "reauthor_attempt": 1,
                 "cycle": 2,
                 "ts": "2026-08-27T02:15:00+00:00",
             }
@@ -1147,6 +1154,7 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "status": "kept",
                 "framework_agent_authoring": True,
                 "specialist_task_id": "author-task-1",
+                "reauthor_attempt": 1,
                 "base_tput": 100.0,
                 "output_throughput": 104.0,
                 "delta_pct": 4.0,
@@ -1227,6 +1235,8 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
     ]
     authoring = event["ext"]["source_arm"]["authoring_runs"][0]
     assert authoring["candidate_id"] == "https://example.test/pr/9"
+    assert authoring["kind"] == "reauthor"
+    assert authoring["reauthor_attempt"] == 1
     assert authoring["patch_refs"] == ["patches/pr-9.patch"]
     attempt = event["ext"]["source_arm"]["attempts"][0]
     assert attempt["patch_source"] == "specialist_authored"
@@ -1237,7 +1247,6 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
         "accuracy_passed": True,
         "keep_threshold_pct": 1.0,
         "switch_off_parity_passed": True,
-        "stack_rebench_passed": True,
     }
     review = event["ext"]["critic_reviews"][0]
     assert review["arm"] == "source"
@@ -1364,6 +1373,7 @@ def test_framework_timeline_ignores_kernel_specialist_without_framework_evidence
             "kind": "specialist",
             "name": "specialist round kernel-specialist",
             "phase": "EXPLORE",
+            "agent": "explore",
             "source": "specialist_recorder_hook",
             "macro_cycle": 4,
             "status": "succeeded",
@@ -1690,7 +1700,7 @@ def test_framework_timeline_marks_exhausted_discovery_retries_failed(tmp_path):
     assert event["status"] == "failed"
     assert event["ext"]["failure"] == {
         "failed_task_id": None,
-        "error_class": None,
+        "error_class": "candidate_discovery_failed",
         "error": "TimeoutError('last')",
     }
 
@@ -1964,3 +1974,181 @@ def test_framework_timeline_does_not_copy_final_progress_into_earlier_retry(tmp_
     assert attempts[1]["before_tput"] == 100.0
     assert attempts[1]["after_tput"] == 120.0
     assert attempts[1]["local_gain_pct"] == 20.0
+
+
+def test_failed_discovery_uses_task_params_and_actual_terminal_reason(tmp_path):
+    from hyperloom.orchestrator.phases.explore import ExplorePhase
+
+    phase = object.__new__(ExplorePhase)
+    phase.shared_state = SimpleNamespace(phase="KERNEL_AGENT")
+    task = SimpleNamespace(
+        task_id="discovery-task",
+        params={
+            "source_phase": "FRAMEWORK_AGENT",
+            "domain": "candidate_discovery_specialist",
+            "task_kind": "candidate_discovery",
+            "candidate_discovery": True,
+            "gap_canonical_id": "gap.framework.candidate_discovery.sglang",
+        },
+    )
+    entry = phase._build_specialist_round_entry(
+        task=task,
+        done_payload={},
+        source="specialist:discovery-task",
+        run_error="TimeoutError('upstream unavailable')",
+    )
+    state = {
+        "phase": "FRAMEWORK_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "cycle": 0,
+                "ts": "2026-08-28T00:00:00+00:00",
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "FRAMEWORK_AGENT",
+                "cycle": 0,
+                "reason": "no_candidates_and_discovery_exhausted",
+                "evidence": {
+                    "event": "framework_agent_phase_done",
+                    "failure_count": 1,
+                    "retry_limit": 3,
+                },
+                "ts": "2026-08-28T00:05:00+00:00",
+            },
+        ],
+        "specialist_rounds": [entry],
+    }
+
+    event = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])[0]
+
+    assert entry["domain"] == "candidate_discovery_specialist"
+    assert entry["task_kind"] == "candidate_discovery"
+    assert entry["candidate_discovery"] is True
+    assert entry["status"] == "failed"
+    assert entry["run_error"] == "TimeoutError('upstream unavailable')"
+    assert event["ext"]["source_arm"]["candidate_discovery_runs"] == [
+        {
+            "task_id": "discovery-task",
+            "status": "failed",
+            "batch_id": None,
+            "gap_canonical_id": "gap.framework.candidate_discovery.sglang",
+            "reason": "TimeoutError('upstream unavailable')",
+            "candidates": [],
+        }
+    ]
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"] == {
+        "failed_task_id": "discovery-task",
+        "error_class": "candidate_discovery_failed",
+        "error": "TimeoutError('upstream unavailable')",
+    }
+
+
+def test_framework_critic_reviews_survive_pruning_and_reused_iteration_number(tmp_path):
+    from hyperloom.inference_optimizer.breakdown.recorder import instrument
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import assemble_parts
+
+    state = {
+        "session_id": "durable-critic",
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "phase_history": [
+            {
+                "from_phase": "PRELUDE",
+                "to_phase": "FRAMEWORK_AGENT",
+                "cycle": 0,
+                "ts": "2026-08-28T01:00:00+00:00",
+            },
+            {
+                "from_phase": "FRAMEWORK_AGENT",
+                "to_phase": "KERNEL_AGENT",
+                "cycle": 0,
+                "ts": "2026-08-28T01:10:00+00:00",
+            },
+        ],
+    }
+    _write_json(tmp_path / "state.json", state)
+    _write_json(tmp_path / "manifest.json", {"session_id": "durable-critic"})
+    workdir = tmp_path / "critic-workdir" / "000000"
+
+    for index in (1, 2):
+        proposal_id = f"proposal-{index}"
+        timestamp = f"2026-08-28T01:0{index}:00+00:00"
+        request = {"context": {"phase": "FRAMEWORK_AGENT", "macro_cycle": 0}}
+        judge_bundle = {
+            "phase": "FRAMEWORK_AGENT",
+            "proposals": [
+                {
+                    "msg_id": proposal_id,
+                    "action_name": "integrate_patch",
+                    "payload": {"framework_agent_candidate_id": f"candidate-{index}"},
+                }
+            ],
+        }
+        review = {
+            "ts": timestamp,
+            "review_verdicts": [
+                {
+                    "target_proposal_msg_id": proposal_id,
+                    "verdict": "approve",
+                    "reasoning": f"review {index}",
+                }
+            ],
+        }
+        emit = {
+            "ts": timestamp,
+            "intent_envelope": {
+                "intents": [
+                    {
+                        "intent_type": "review_verdict",
+                        "payload": {
+                            "target_proposal_msg_id": proposal_id,
+                            "verdict": "approve",
+                        },
+                    }
+                ]
+            },
+        }
+        for name, payload in (
+            ("request", request),
+            ("judge_bundle", judge_bundle),
+            ("review", review),
+            ("emit", emit),
+        ):
+            _write_json(workdir / f"{name}.json", payload)
+        instrument.record_critic_iteration(
+            tmp_path,
+            iter_n=0,
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            workdir=workdir,
+        )
+
+    assembled = assemble_parts(tmp_path)
+    critic_iterations = assembled["critic_robustness"]["critic_iterations"]
+    assert len(critic_iterations) == 2
+    assert len({row["iteration_id"] for row in critic_iterations}) == 2
+
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=state,
+        recorded_operations=assembled.get("operations", []),
+        critic_iterations=critic_iterations,
+    )
+    assert [row["proposal_msg_id"] for row in timeline[0]["ext"]["critic_reviews"]] == [
+        "proposal-1",
+        "proposal-2",
+    ]
+
+    shutil.rmtree(tmp_path / "critic-workdir")
+    breakdown = exporter.build(tmp_path)
+    reviews = breakdown["timeline"][0]["ext"]["critic_reviews"]
+    assert [row["proposal_msg_id"] for row in reviews] == ["proposal-1", "proposal-2"]
+    assert all("\\" not in row["review_path"] for row in reviews)

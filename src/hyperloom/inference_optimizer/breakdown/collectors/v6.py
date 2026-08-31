@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.jsonio import read_json, read_jsonl
 
+from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 
 
@@ -45,7 +45,6 @@ _AUTHORING_TASK_KINDS = frozenset(
         "framework_local_explore",
     }
 )
-_MACRO_CYCLE_RE = re.compile(r"(?:^|\s)macro_cycle\s*=\s*(-?\d+)(?=\s|$)")
 
 
 def _tool_versions(versions: Any) -> dict[str, str | None]:
@@ -255,11 +254,6 @@ def _row_timestamp(row: dict[str, Any]) -> str:
     )
 
 
-def _prompt_macro_cycle(value: Any) -> int | None:
-    match = _MACRO_CYCLE_RE.search(str(value or ""))
-    return _optional_int(match.group(1)) if match else None
-
-
 def _timestamp_number(value: Any) -> float | None:
     text = str(value or "").strip()
     if not text:
@@ -306,28 +300,35 @@ def _specialist_payloads(row: dict[str, Any]) -> tuple[dict[str, Any], ...]:
 def _is_framework_specialist(row: dict[str, Any], *, allow_legacy: bool) -> bool:
     declared_phase = _declared_source_phase(row)
     phase = declared_phase or str(row.get("phase") or "").strip().upper()
-    if not declared_phase and str(row.get("source") or "").strip().lower() == "specialist_recorder_hook":
+    legacy_recorder_hook = (
+        not declared_phase and str(row.get("source") or "").strip().lower() == "specialist_recorder_hook"
+    )
+    if legacy_recorder_hook:
         phase = ""
     if phase:
         return phase in _FRAMEWORK_PHASES
 
     agent = str(row.get("agent") or "").strip().lower()
-    if agent in {"framework_agent", "explore"}:
-        return True
-    if agent in {"enablement", "kernel", "kernel_agent", "prelude", "internal"}:
-        return False
+    if not legacy_recorder_hook:
+        if agent in {"framework_agent", "explore"}:
+            return True
+        if agent in {"enablement", "kernel", "kernel_agent", "prelude", "internal"}:
+            return False
 
     payloads = _specialist_payloads(row)
     if any(_optional_bool(payload.get("enablement")) is True for payload in payloads):
         return False
     if any(
         _optional_bool(payload.get("framework_agent_authoring")) is True
+        or _optional_bool(payload.get("candidate_discovery")) is True
         or bool(payload.get("framework_agent_candidate_id"))
         or bool(payload.get("framework_batch_id"))
-        or str(payload.get("task_kind") or "").strip().lower() in _AUTHORING_TASK_KINDS
+        or str(payload.get("task_kind") or "").strip().lower() in {*_AUTHORING_TASK_KINDS, "candidate_discovery"}
         for payload in payloads
     ):
         return True
+    if legacy_recorder_hook:
+        return False
     return allow_legacy
 
 
@@ -536,15 +537,6 @@ def _framework_policy(
     evidence: dict[str, Any],
 ) -> dict[str, Any]:
     overrides = _mapping(state.get("plateau_overrides"))
-    stack_rebench_enabled = _optional_bool(
-        _operation_value(
-            operations,
-            ("outputs", "stack_rebench_enabled"),
-            ("outputs", "enable_stack_rebench"),
-            ("inputs", "stack_rebench_enabled"),
-            ("inputs", "enable_stack_rebench"),
-        )
-    )
     return {
         "keep_threshold_pct": _optional_float(
             _first(
@@ -557,14 +549,6 @@ def _framework_policy(
                 evidence.get("keep_threshold_pct"),
             )
         ),
-        "stack_stable_threshold_pct": _optional_float(
-            _operation_value(
-                operations,
-                ("outputs", "stack_stable_threshold_pct"),
-                ("inputs", "stack_stable_threshold_pct"),
-            )
-        ),
-        "stack_rebench_enabled": stack_rebench_enabled,
         "variant_timeout_sec": _optional_int(
             _first(
                 _operation_value(
@@ -742,17 +726,11 @@ def _config_variant(raw: dict[str, Any], source_index: dict[str, dict[str, Any]]
     name = str(_first(combined.get("name"), combined.get("variant_name")) or "")
     fingerprint = str(combined.get("fingerprint") or "")
     source = source_index.get(fingerprint) or source_index.get(name) or {}
-    outcome = str(combined.get("outcome") or "").strip().upper()
-    stack_tput = _optional_float(combined.get("stack_rebench_tput"))
-    stack_ran = _optional_bool(combined.get("stack_rebench_ran"))
-    if stack_ran is None and (stack_tput is not None or combined.get("stack_rebench_workspace")):
-        stack_ran = True
-    stack_stable = _optional_bool(combined.get("stack_rebench_stable"))
-    if stack_stable is None and stack_ran:
-        if outcome == "KEEP_UNSTABLE":
-            stack_stable = False
-        elif outcome == "KEEP":
-            stack_stable = True
+    raw_outcome = str(combined.get("outcome") or "").strip().upper()
+    outcome = "REVERT" if raw_outcome == "KEEP_UNSTABLE" else raw_outcome
+    stage = _first(combined.get("stage"), None)
+    if str(stage or "").strip().lower() == "stack_rebench":
+        stage = None
     return {
         "name": name,
         "fingerprint": fingerprint,
@@ -784,21 +762,15 @@ def _config_variant(raw: dict[str, Any], source_index: dict[str, dict[str, Any]]
             "value": _optional_float(combined.get("accuracy")),
             "passed": _optional_bool(_first(combined.get("accuracy_pass"), combined.get("accuracy_passed"))),
         },
-        "stack_rebench": {
-            "ran": stack_ran,
-            "tput": stack_tput,
-            "stable": stack_stable,
-        },
         "outcome": outcome,
         "reason": _first(combined.get("reason"), None),
-        "stage": _first(combined.get("stage"), None),
+        "stage": stage,
         "failure": {
             "error_class": _first(combined.get("error_class"), None),
             "error_excerpt": _first(combined.get("error_excerpt"), combined.get("error"), None),
         },
         "artifacts": {
             "workspace": _first(combined.get("workspace"), combined.get("single_workspace"), None),
-            "stack_rebench_workspace": _first(combined.get("stack_rebench_workspace"), None),
             "server_log_path": _first(combined.get("server_log_path"), None),
             "raw_result_path": _first(combined.get("raw_result_path"), None),
         },
@@ -1170,7 +1142,7 @@ def _candidate_discovery_runs(
             row,
         )
 
-    failed_markers = 0
+    failed_markers = sum(_specialist_status(row) == "failed" for row in discovery_rows)
     terminal_retry_rows: list[dict[str, Any]] = []
     for row in _dict_rows(window.get("rows")):
         evidence = _mapping(row.get("evidence"))
@@ -1201,7 +1173,12 @@ def _candidate_discovery_runs(
                 },
                 row,
             )
-        elif event == "framework_agent_phase_done" and reason == "discover_retries_exhausted":
+        elif event == "framework_agent_phase_done" and reason in {
+            "discover_retries_exhausted",
+            "no_candidates_and_discovery_exhausted",
+        }:
+            if _optional_int(evidence.get("failure_count")) in {None, 0}:
+                continue
             terminal_retry_rows.append(row)
 
     if failed_markers == 0:
@@ -1310,17 +1287,24 @@ def _authoring_runs(
         if not task_id or task_id in used_tasks:
             continue
         candidate_id = str(progress.get("candidate_id") or candidate_map.get(task_id) or "")
+        reauthor_attempt = _optional_int(progress.get("reauthor_attempt"))
         runs.append(
             {
                 "task_id": task_id,
                 "candidate_id": candidate_id,
-                "kind": "local_authoring" if candidate_id.startswith("local_explore:") else "candidate_authoring",
+                "kind": (
+                    "reauthor"
+                    if reauthor_attempt is not None and reauthor_attempt > 0
+                    else "local_authoring"
+                    if candidate_id.startswith("local_explore:")
+                    else "candidate_authoring"
+                ),
                 "status": "failed"
                 if str(progress.get("status") or "").lower() in {"dispatch_failed", "author_failed", "recovery_failed"}
                 else "empty"
                 if str(progress.get("provenance") or "").lower() == "authored_empty"
                 else "succeeded",
-                "reauthor_attempt": _optional_int(progress.get("reauthor_attempt")),
+                "reauthor_attempt": reauthor_attempt,
                 "specialist_domain": str(progress.get("domain") or ""),
                 "gap_canonical_id": _first(progress.get("gap_canonical_id"), None),
                 "patch_refs": _patch_refs(progress),
@@ -1436,7 +1420,6 @@ def _source_attempt(
         elif patch_source == "specialist_authored":
             route = "author_via_specialist"
     parity = _mapping(outputs.get("switch_off_parity"))
-    stack_rebench = _mapping(outputs.get("stack_rebench"))
     files = _string_list(_first(outputs.get("target_files"), candidate.get("changed_files"), []))
     applied_artifacts = _dict_rows(outputs.get("artifacts_applied"))
     if not files:
@@ -1474,7 +1457,6 @@ def _source_attempt(
             "accuracy_passed": _optional_bool(outputs.get("accuracy_pass")),
             "keep_threshold_pct": _optional_float(outputs.get("keep_threshold_pct")),
             "switch_off_parity_passed": _optional_bool(_first(parity.get("ok"), parity.get("passed"))),
-            "stack_rebench_passed": _optional_bool(_first(stack_rebench.get("stable"), stack_rebench.get("ok"))),
         },
         "framework_levers": _dict_rows(outputs.get("framework_levers")),
         "config_delta": {
@@ -1660,160 +1642,83 @@ def _critic_review_rows(
     operations: list[dict[str, Any]],
     window: dict[str, Any],
     window_count: int,
+    critic_iterations: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    root = session_dir / "critic-workdir"
-    if not root.is_dir():
-        return []
     proposal_cycles, candidate_cycles = _critic_cycle_indexes(session_dir, warnings, state, operations)
     rows: list[dict[str, Any]] = []
-    for workdir in sorted(root.iterdir(), key=lambda path: path.name):
-        if not workdir.is_dir():
-            continue
-        loaded: dict[str, dict[str, Any]] = {}
-        failed = False
-        for name in ("request", "judge_bundle", "review", "emit"):
-            path = workdir / f"{name}.json"
-            if not path.is_file():
-                loaded[name] = {}
-                continue
-            try:
-                loaded[name] = read_json(path, require_dict=True, strict=True)
-            except Exception as exc:
-                warnings.append(f"timeline.framework_agent.critic: failed to parse {path}: {exc!r}")
-                failed = True
-                break
-        if failed:
-            continue
-        request = loaded["request"]
-        judge = loaded["judge_bundle"]
-        review = loaded["review"]
-        emit = loaded["emit"]
-        review_phase = (
-            str(
-                _first(
-                    judge.get("phase"),
-                    _nested(request, "context", "phase"),
-                    _nested(judge, "merged_context", "phase"),
-                )
-                or ""
-            )
-            .strip()
-            .upper()
-        )
-        if review_phase and review_phase not in _FRAMEWORK_PHASES:
-            continue
-        proposals = {
-            str(proposal.get("msg_id") or ""): proposal
-            for proposal in _dict_rows(judge.get("proposals"))
-            if proposal.get("msg_id")
+    seen: set[tuple[str, ...]] = set()
+
+    def _append_review(row: dict[str, Any]) -> None:
+        proposal_id = str(row.get("proposal_msg_id") or "")
+        candidate_id = str(row.get("candidate_id") or "")
+        cycle_row = {
+            "cycle": _first(
+                row.get("macro_cycle"),
+                row.get("cycle"),
+                proposal_cycles.get(proposal_id),
+                candidate_cycles.get(candidate_id),
+            ),
+            "ts": row.get("ts"),
         }
-        effective = {}
-        envelope = _mapping(emit.get("intent_envelope"))
-        for intent in _dict_rows(envelope.get("intents")):
-            if str(intent.get("intent_type") or "") != "review_verdict":
-                continue
-            payload = _mapping(intent.get("payload"))
-            target = str(payload.get("target_proposal_msg_id") or "")
-            if target:
-                effective[target] = payload
-        for verdict_row in _dict_rows(review.get("review_verdicts")):
-            proposal_id = str(verdict_row.get("target_proposal_msg_id") or "")
-            proposal = proposals.get(proposal_id, {})
-            payload = _mapping(proposal.get("payload"))
-            params = _mapping(payload.get("params"))
-            candidate = _mapping(_first(payload.get("candidate"), params.get("candidate")))
-            action = str(
-                _first(proposal.get("action_name"), payload.get("action_name"), payload.get("kind")) or ""
-            ).lower()
-            candidate_id = str(
-                _first(
-                    payload.get("framework_agent_candidate_id"),
-                    params.get("framework_agent_candidate_id"),
-                    _candidate_id(candidate),
-                )
-                or ""
+        if not _row_in_window(cycle_row, window, window_count):
+            return
+        projected = {field: row.get(field) for field in FRAMEWORK_REVIEW_FIELDS}
+        if projected.get("review_path"):
+            projected["review_path"] = str(projected["review_path"]).replace("\\", "/")
+        identity = tuple(
+            str(projected.get(field) or "")
+            for field in (
+                "proposal_msg_id",
+                "candidate_id",
+                "variant_name",
+                "arm",
+                "target_action",
+                "verdict",
+                "effective_verdict",
+                "ts",
             )
-            if action in {"params", "backends", "explore"}:
-                arm = "config"
-                target_action = "explore"
-            elif action in {"framework_agent", "integrate", "integrate_patch"}:
-                arm = "source"
-                target_action = "integrate_patch"
-            elif action == "specialist":
-                task_kind = str(params.get("task_kind") or "").strip().lower()
-                source_marker = bool(
-                    candidate_id
-                    or _optional_bool(params.get("framework_agent_authoring")) is True
-                    or _optional_bool(params.get("candidate_discovery")) is True
-                    or task_kind in _AUTHORING_TASK_KINDS
-                    or bool(_patch_refs(params))
-                )
-                arm = "source" if source_marker else "config"
-                target_action = "specialist"
-            else:
+        )
+        if identity in seen:
+            return
+        seen.add(identity)
+        rows.append(projected)
+
+    for iteration in critic_iterations:
+        for durable_row in _dict_rows(iteration.get("framework_reviews")):
+            durable_row.setdefault("ts", iteration.get("ts"))
+            durable_row.setdefault("review_path", iteration.get("review_path"))
+            durable_row.setdefault("phase", iteration.get("phase"))
+            durable_row.setdefault("macro_cycle", _first(iteration.get("macro_cycle"), iteration.get("cycle")))
+            _append_review(durable_row)
+
+    root = session_dir / "critic-workdir"
+    if root.is_dir():
+        for workdir in sorted(root.iterdir(), key=lambda path: path.name):
+            if not workdir.is_dir():
                 continue
-            cycle_row = {
-                "cycle": _first(
-                    payload.get("cycle"),
-                    payload.get("macro_cycle"),
-                    params.get("cycle"),
-                    params.get("macro_cycle"),
-                    proposal.get("cycle"),
-                    proposal.get("macro_cycle"),
-                    proposal_cycles.get(proposal_id),
-                    candidate_cycles.get(candidate_id),
-                    _nested(request, "context", "macro_cycle"),
-                    _nested(request, "context", "cycle"),
-                    _prompt_macro_cycle(request.get("raw_prompt")),
-                    _nested(judge, "merged_context", "macro_cycle"),
-                    _nested(judge, "merged_context", "cycle"),
-                ),
-                "ts": _first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")),
-            }
-            if not _row_in_window(cycle_row, window, window_count):
+            loaded: dict[str, dict[str, Any]] = {}
+            failed = False
+            for name in ("request", "judge_bundle", "review", "emit"):
+                path = workdir / f"{name}.json"
+                if not path.is_file():
+                    loaded[name] = {}
+                    continue
+                try:
+                    loaded[name] = read_json(path, require_dict=True, strict=True)
+                except Exception as exc:
+                    warnings.append(f"timeline.framework_agent.critic: failed to parse {path}: {exc!r}")
+                    failed = True
+                    break
+            if failed:
                 continue
-            effective_row = _mapping(effective.get(proposal_id))
-            risks = [
-                {
-                    "severity": str(risk.get("severity") or ""),
-                    "risk": str(_first(risk.get("risk"), risk.get("summary"), risk.get("reason")) or ""),
-                }
-                for risk in _dict_rows(verdict_row.get("risks"))
-            ]
-            followup_task_ids = _string_list(
-                _first(effective_row.get("followup_task_ids"), verdict_row.get("followup_task_ids"), [])
-            )
-            rows.append(
-                {
-                    "proposal_msg_id": proposal_id,
-                    "candidate_id": candidate_id or None,
-                    "variant_name": _first(payload.get("variant_name"), params.get("variant_name"), None),
-                    "arm": arm,
-                    "target_action": target_action,
-                    "source": "critic"
-                    if str(verdict_row.get("source") or "critic") == "critic"
-                    else "critic_unavailable",
-                    "verdict": str(verdict_row.get("verdict") or ""),
-                    "effective_verdict": str(
-                        _first(
-                            effective_row.get("verdict"),
-                            verdict_row.get("effective_verdict"),
-                            verdict_row.get("verdict"),
-                        )
-                        or ""
-                    ),
-                    "reasoning": str(verdict_row.get("reasoning") or ""),
-                    "confidence": _first(verdict_row.get("confidence"), None),
-                    "failure_reason_code": _first(verdict_row.get("failure_reason_code"), None),
-                    "required_evidence": _string_list(verdict_row.get("required_evidence")),
-                    "risks": risks,
-                    "advice_text": _first(verdict_row.get("advice_text"), effective_row.get("advice_text"), None),
-                    "alternative_action": _first(verdict_row.get("alternative_action"), None),
-                    "followup_task_ids": followup_task_ids,
-                    "ts": str(_first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")) or ""),
-                    "review_path": (workdir / "review.json").relative_to(session_dir).as_posix(),
-                }
-            )
+            for review_row in normalize_framework_reviews(
+                request=loaded["request"],
+                judge_bundle=loaded["judge_bundle"],
+                review=loaded["review"],
+                emit=loaded["emit"],
+                review_path=(workdir / "review.json").relative_to(session_dir).as_posix(),
+            ):
+                _append_review(review_row)
     rows.sort(key=lambda row: row.get("ts") or "")
     return rows
 
@@ -1910,7 +1815,10 @@ def _framework_exit(
     }
 
 
-def _framework_failure(window: dict[str, Any]) -> dict[str, Any]:
+def _framework_failure(
+    window: dict[str, Any],
+    specialist_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
     exit_row = _mapping(window.get("exit_row"))
     evidence = _mapping(exit_row.get("evidence"))
     reason = str(exit_row.get("reason") or "").lower()
@@ -1928,7 +1836,8 @@ def _framework_failure(window: dict[str, Any]) -> dict[str, Any]:
             row
             for row in reversed(rows)
             if _nested(row, "evidence", "event") == "framework_agent_phase_done"
-            and str(row.get("reason") or "") == "discover_retries_exhausted"
+            and str(row.get("reason") or "") in {"discover_retries_exhausted", "no_candidates_and_discovery_exhausted"}
+            and _optional_int(_nested(row, "evidence", "failure_count")) not in {None, 0}
         ),
         None,
     )
@@ -1936,19 +1845,34 @@ def _framework_failure(window: dict[str, Any]) -> dict[str, Any]:
         return {"failed_task_id": None, "error_class": None, "error": None}
 
     failed_discovery = next(
+        (
+            row
+            for row in reversed(specialist_rows)
+            if _specialist_role(row, {}, set()) == "discovery" and _specialist_status(row) == "failed"
+        ),
+        None,
+    ) or next(
         (row for row in reversed(rows) if _nested(row, "evidence", "event") == "framework_agent_discover_failed"),
         terminal_discovery_failure,
     )
     failure_evidence = _mapping(failed_discovery.get("evidence"))
     return {
         "failed_task_id": _first(
+            failed_discovery.get("task_id"),
             failure_evidence.get("failed_task_id"),
             failure_evidence.get("task_id"),
             None,
         ),
-        "error_class": _first(failure_evidence.get("error_class"), None),
+        "error_class": _first(
+            failed_discovery.get("error_class"),
+            failure_evidence.get("error_class"),
+            "candidate_discovery_failed",
+        ),
         "error": _first(
+            failed_discovery.get("error"),
+            failed_discovery.get("run_error"),
             failure_evidence.get("error"),
+            failed_discovery.get("reason"),
             terminal_discovery_failure.get("reason"),
             None,
         ),
@@ -1959,6 +1883,7 @@ def _framework_event(
     session_dir: Path,
     state: dict[str, Any],
     recorded_operations: list[dict[str, Any]],
+    critic_iterations: list[dict[str, Any]],
     warnings: list[str],
     window: dict[str, Any],
     window_count: int,
@@ -2011,9 +1936,10 @@ def _framework_event(
         recorded_operations,
         window,
         window_count,
+        critic_iterations,
     )
     exit_details = _framework_exit(window, config_arm, source_arm)
-    failure = _framework_failure(window)
+    failure = _framework_failure(window, specialist_rows)
     has_work = bool(
         config_arm["specialist_runs"]
         or config_arm["rounds"]
@@ -2054,11 +1980,13 @@ def collect_v6_timeline(
     *,
     state: dict[str, Any] | None = None,
     recorded_operations: list[dict[str, Any]] | None = None,
+    critic_iterations: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Load durable events and project framework work without mutating V5 state."""
     timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
+    critic_iterations = [row for row in critic_iterations or [] if isinstance(row, dict)]
     windows = _framework_windows(state, operations)
     for window in windows:
         timeline.append(
@@ -2066,6 +1994,7 @@ def collect_v6_timeline(
                 session_dir,
                 state,
                 operations,
+                critic_iterations,
                 warnings,
                 window,
                 len(windows),
