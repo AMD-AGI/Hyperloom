@@ -1693,3 +1693,14 @@ def test_site_stats_record_caps_shape_sigs_and_callers_while_tallies_grow(probe_
     assert "overflow-shape" not in stats.shape_sigs
     assert "overflow-caller" not in stats.callers
     assert stats.last_s == 99.0
+    assert stats.first_s == 1.0
+
+
+def test_site_stats_record_skips_empty_shape_and_caller(probe_module):
+    """Falsy shape_sig/caller must not occupy a cap slot."""
+    stats = probe_module._SiteStats()
+    stats.record(elapsed=0.1, nbytes=10, shape_sig="", caller="", at_s=1.0)
+    assert stats.count == 1
+    assert "" not in stats.shape_sigs
+    assert "" not in stats.callers
+    assert stats.first_s == 1.0
