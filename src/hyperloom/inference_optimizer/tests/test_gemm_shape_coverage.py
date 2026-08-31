@@ -25,6 +25,7 @@ from hyperloom.orchestrator.kernel.gemm_shape_coverage import (
     parse_aiter_consulted_tables,
     parse_aiter_fused_moe_dispatches,
     parse_aiter_shape_lookups,
+    parse_aiter_shape_lookups_for_tables,
     resolve_fmoe_candidate_csv,
     tuned_config_coverage,
     tuned_csv_shapes,
@@ -156,6 +157,19 @@ class TestServerLogParsing:
 
     def test_parses_hit_with_dispatch_kwargs_between_k_and_padded_m(self):
         missed, hit = parse_aiter_shape_lookups(self.HIT_WITH_KWARGS)
+        assert missed == set()
+        assert hit == {(16384, 4608, 8192)}
+
+    def test_scopes_hits_to_the_table_that_served_them(self):
+        assert parse_aiter_consulted_tables(self.HIT_WITH_KWARGS) == {"/shared_nfs/x/merged_tuned_dense_bf16.csv"}
+        missed, hit = parse_aiter_shape_lookups_for_tables(self.HIT_WITH_KWARGS, ["candidate.csv"])
+        assert missed == set()
+        assert hit == set()
+
+        missed, hit = parse_aiter_shape_lookups_for_tables(
+            self.HIT_WITH_KWARGS,
+            ["merged_tuned_dense_bf16.csv"],
+        )
         assert missed == set()
         assert hit == {(16384, 4608, 8192)}
 
@@ -454,6 +468,33 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
         assert report is not None
         assert report["artifact_applied"] is True
         assert report["coverage_pct"] == 100.0
+
+    def test_previous_candidate_hit_does_not_cover_current_candidate(self, tmp_path):
+        """A stacked table's hit is not evidence that this candidate applied."""
+        phase = self._phase(tmp_path)
+        run_log = tmp_path / "runs" / "integrate" / "integrate-gemm_tune_aiter_dense" / "server.log"
+        previous_hit = (
+            "[aiter] shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' "
+            "found padded_M: 8192, N:4608, K:8192 is tuned on cu_num = 256 "
+            "in /x/previous.csv,"
+        )
+        current_miss = (
+            "[aiter] shape is M:33, N:777, K:888, not found tuned config in /x/current.csv, will use default config!"
+        )
+        run_log.write_text("\n".join([previous_hit, current_miss]), encoding="utf-8")
+        current = tmp_path / "current.csv"
+        current.write_text(
+            f"{self.HEADER}\ngfx950,256,999,777,888,ck,0,0,1.0,name,1,1,0\n",
+            encoding="utf-8",
+        )
+
+        report = self._call(phase, current)
+
+        assert report is not None
+        assert report["artifact_applied"] is False
+        assert report["coverage_pct"] == 0.0
+        assert report["runtime_lookup_hit"] == 0
+        assert report["runtime_lookup_miss"] == 1
 
     def test_unexpected_failure_is_undetermined(self, tmp_path):
         """The wrapper swallows anything the body throws (it can block a KEEP)."""

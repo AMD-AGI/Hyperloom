@@ -2220,6 +2220,7 @@ class KernelPhase(PhaseHandler):
         from ..kernel.gemm_shape_coverage import (
             parse_aiter_consulted_tables,
             parse_aiter_shape_lookups,
+            parse_aiter_shape_lookups_for_tables,
             tuned_config_coverage,
             tuned_csv_shapes,
         )
@@ -2251,10 +2252,19 @@ class KernelPhase(PhaseHandler):
                 csv_paths,
             )
 
-        missed, hit = parse_aiter_shape_lookups(log_text)
-        requested = missed | hit
-        if not requested:
+        all_missed, all_hit = parse_aiter_shape_lookups(log_text)
+        all_requested = all_missed | all_hit
+        if not all_requested:
             return None
+        wanted = {Path(path).name for path in csv_paths}
+        missed, hit = parse_aiter_shape_lookups_for_tables(log_text, wanted)
+        requested = missed | hit
+        scoped_to_candidate = bool(requested)
+        if not scoped_to_candidate:
+            # Preserve the existing artifact-not-consulted diagnostic when the
+            # server performed lookups, but none against this candidate's table.
+            missed, hit = all_missed, set()
+            requested = all_requested
         tuned: set[tuple[int, int, int]] = set()
         for path in csv_paths:
             tuned |= tuned_csv_shapes(path)
@@ -2268,7 +2278,6 @@ class KernelPhase(PhaseHandler):
         report["artifact_applied"] = bool(report.get("covered"))
         consulted = parse_aiter_consulted_tables(log_text)
         report["consulted_tables"] = sorted(consulted)[:8]
-        wanted = {Path(path).name for path in csv_paths}
         if consulted and not (wanted & {Path(name).name for name in consulted}):
             # The runtime resolved a different quantisation variant's table, so
             # the tuner targeted a kernel this server never dispatches to.

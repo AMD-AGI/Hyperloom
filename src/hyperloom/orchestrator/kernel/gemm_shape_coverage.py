@@ -51,6 +51,12 @@ _AITER_SHAPE_MISS_RE = re.compile(
 _AITER_SHAPE_HIT_RE = re.compile(
     r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+), N:\d+, K:\d+ is tuned",
 )
+# The table-qualified form is used only when attributing hits to one candidate.
+# Keep the shape-only pattern above tolerant of logs truncated after ``is tuned``.
+_AITER_SHAPE_HIT_TABLE_RE = re.compile(
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+), "
+    r"N:\d+, K:\d+ is tuned[^\n]*? in (\S+?)\s*,",
+)
 
 Shape = tuple[int, int, int]
 FmoeDispatchKey = tuple[str, ...]
@@ -253,6 +259,31 @@ def parse_aiter_shape_lookups(log_text: str) -> tuple[set[Shape], set[Shape]]:
     """Return the ``(missed, hit)`` GEMM shapes aiter reported in a server log."""
     missed = {(int(m), int(n), int(k)) for m, n, k, _table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
     hit = {(int(m), int(n), int(k)) for m, n, k, _padded in _AITER_SHAPE_HIT_RE.findall(log_text or "")}
+    return missed, hit
+
+
+def parse_aiter_shape_lookups_for_tables(
+    log_text: str,
+    table_names: Iterable[str | Path],
+) -> tuple[set[Shape], set[Shape]]:
+    """Return lookups attributed to the named tuned-config tables.
+
+    A GEMM validation run can carry previously KEEP'd tables alongside the
+    candidate under test. Shape-only hit parsing cannot distinguish those
+    tables, so an earlier candidate's hits would otherwise make a completely
+    unused current candidate look applied.
+    """
+    wanted = {Path(name).name for name in table_names if str(name).strip()}
+    missed = {
+        (int(m), int(n), int(k))
+        for m, n, k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
+    hit = {
+        (int(m), int(n), int(k))
+        for m, n, k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")
+        if Path(table).name in wanted
+    }
     return missed, hit
 
 
@@ -562,7 +593,9 @@ def parse_aiter_consulted_tables(log_text: str) -> set[str]:
     all -- a different failure from a CSV that is consulted but has no matching
     row, and one worth naming separately.
     """
-    return {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    missed = {table for _m, _n, _k, table in _AITER_SHAPE_MISS_RE.findall(log_text or "")}
+    hit = {table for _m, _n, _k, _padded, table in _AITER_SHAPE_HIT_TABLE_RE.findall(log_text or "")}
+    return missed | hit
 
 
 def tuned_csv_shapes(path: str | Path) -> set[Shape]:
