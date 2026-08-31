@@ -78,12 +78,38 @@ def test_gemm_tuning_script_disables_the_eval(tmp_path: Path) -> None:
 
 
 # -- _optimization_budget_minutes / wrapper timeout -----------------------
-def test_optimization_budget_uses_payload_budget_minutes() -> None:
+def test_optimization_budget_uses_payload_budget_minutes(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", raising=False)
     assert krh._optimization_budget_minutes({"backend_order": "forge", "budget_minutes": 20}) == 20.0
 
 
-def test_optimization_budget_defaults_when_unset() -> None:
+def test_optimization_budget_defaults_when_unset(monkeypatch) -> None:
+    monkeypatch.delenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", raising=False)
     assert krh._optimization_budget_minutes({}) == krh._DEFAULT_BACKEND_BUDGET_MINUTES
+
+
+def test_rewrite_route_opt_in_lifts_the_budget_to_its_own_minimum(monkeypatch) -> None:
+    """Opting into the rewrite route has to buy a budget the route accepts.
+
+    A budget under the route's 75-minute minimum declines every eligible
+    candidate for ``budget_insufficient`` and falls back to forge-loop, so the
+    opt-in buys nothing. The shipped default clears the gate on its own now, so
+    the case that matters is a budget tuned down for some other reason.
+    """
+    from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import MIN_BUDGET_SEC
+
+    monkeypatch.delenv("KERNEL_OPT_BACKEND_BUDGET_MIN", raising=False)
+    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", "1")
+
+    assert krh._optimization_budget_minutes({}) * 60 >= MIN_BUDGET_SEC
+    # A payload asking for less cannot drag it back under the minimum.
+    assert krh._optimization_budget_minutes({"budget_minutes": 20}) * 60 >= MIN_BUDGET_SEC
+
+
+def test_rewrite_route_floor_never_lowers_an_operator_budget(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_FORGE_REWRITE_BY_FLYDSL", "1")
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_BUDGET_MIN", "180")
+    assert krh._optimization_budget_minutes({}) == 180.0
 
 
 def test_optimization_wrapper_timeout_adds_grace() -> None:

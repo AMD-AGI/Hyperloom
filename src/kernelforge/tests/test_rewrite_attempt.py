@@ -92,9 +92,10 @@ def test_exporting_the_import_path_twice_adds_one_entry(tmp_path, monkeypatch):
 
 
 def test_the_attempt_root_is_a_producer_owned_path(tmp_path):
+    from kernelforge.loop import path_ownership
     from kernelforge.rewrite_by_flydsl import protocol
 
     attempt = create_attempt_workspace(tmp_path)
 
-    assert attempt_module.ATTEMPT_ROOT_DIR in protocol.PRODUCER_OWNED_PATH_PATTERNS
+    assert attempt_module.ATTEMPT_ROOT_DIR in path_ownership.PRODUCER_PATH_PATTERNS
     assert protocol.is_producer_owned_path(f"{attempt.relative_root}/kernel.py") is True

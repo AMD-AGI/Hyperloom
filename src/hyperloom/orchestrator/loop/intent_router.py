@@ -51,6 +51,7 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -75,10 +76,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
 }
-
-
-# Half the robustness stall threshold, so one dropped beat cannot trip it.
-_KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:
@@ -785,9 +782,15 @@ class IntentRouter:
             started (float): ``time.monotonic()`` at the step's start.
         """
 
+        # Re-stamped per beat rather than once at the start, so a stamp that
+        # outlives its process expires instead of muting the KERNEL idle guard.
+        def _mark_running() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = time.time()
+
         async def _beat() -> None:
             while True:
                 await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                _mark_running()
                 await self.bus.append_and_seq(
                     Message.new(
                         "orchestration",
@@ -801,6 +804,7 @@ class IntentRouter:
                     )
                 )
 
+        _mark_running()
         task = asyncio.create_task(_beat())
         try:
             yield
@@ -808,6 +812,7 @@ class IntentRouter:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
         """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.

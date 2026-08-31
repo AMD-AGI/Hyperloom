@@ -669,6 +669,41 @@ def _kernel_idle_min_seconds() -> float:
 
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
+
+#: How often the intent router refreshes the inline-step liveness stamp.
+KERNEL_HEARTBEAT_SEC: float = 150.0
+
+#: How stale ``kernel_inline_step_seen_unix`` may be and still mean "running".
+#: Three heartbeat intervals absorb a late beat under load; a stamp orphaned by a
+#: process that died mid-step expires shortly after rather than muting the guard.
+KERNEL_INLINE_STEP_STALE_SECONDS: float = 3.0 * KERNEL_HEARTBEAT_SEC
+
+
+def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
+    """Report whether an inline kernel request is executing right now.
+
+    Reads the stamp ``SharedState.kernel_inline_step_seen_unix`` carries, which
+    the idle guard has no other way to see. One older than
+    :data:`KERNEL_INLINE_STEP_STALE_SECONDS` is a leftover, not a live step.
+
+    Args:
+        state: Frozen SharedState view.
+        now_unix: Override for the current time.
+
+    Returns:
+        ``True`` when an inline kernel step reported itself recently enough.
+    """
+    seen = getattr(state, "kernel_inline_step_seen_unix", 0.0)
+    try:
+        seen = float(seen or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if seen <= 0.0:
+        return False
+    now = float(now_unix if now_unix is not None else _now_unix(state))
+    return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
+
+
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 

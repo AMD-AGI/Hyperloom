@@ -130,6 +130,19 @@ def test_triton_def_line_single_unambiguous(repo_dir):
     assert resolver.triton_def_line(str(py)) == 3
 
 
+def test_triton_def_line_require_name_match_skips_single_def_fallback(repo_dir):
+    """require_name_match=True must not claim a file for an unrelated symbol."""
+    py = repo_dir / "helper.py"
+    py.write_text(
+        "import triton\n@triton.jit\ndef _helper_kernel(x):\n    return x\n",
+        encoding="utf-8",
+    )
+    # Without require_name_match the single-def fallback fires.
+    assert resolver.triton_def_line(str(py), symbol="_absent_kernel") == 3
+    # With require_name_match it must return None for an unrelated symbol.
+    assert resolver.triton_def_line(str(py), symbol="_absent_kernel", require_name_match=True) is None
+
+
 # --- kernel-name demangling ---------------------------------------------------
 
 
