@@ -1590,6 +1590,21 @@ class KernelPhase(PhaseHandler):
             provenance=provenance,
             overlay_loaded=overlay_loaded,
         )
+        if overlay_loaded is not True:
+            # The journey is replayed before the main-flow rebench and can
+            # therefore contain GEAK-internal KEEPs for kernels that were not
+            # present in the configuration that produced ``measured``.  Once
+            # the final validation proves no overlay was loaded, withdraw those
+            # provisional per-kernel adoptions.  The validated win still lands
+            # below as one route-level config attempt.
+            pre_geak_tput = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
+            self._reject_geak_kernel_journey(
+                result,
+                measured_tput=measured,
+                current_best_tput=pre_geak_tput,
+                provenance=provenance,
+                rejection_reason="overlay_not_proven_loaded",
+            )
         if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
@@ -1625,7 +1640,10 @@ class KernelPhase(PhaseHandler):
         # route measured.
         try:
             pre_geak = float(cb_tput) if isinstance(cb_tput, (int, float)) and cb_tput > 0 else base
-            claimed_ratio = self._geak_journey_attributed_ratio(result)
+            # A journey KEEP is attributable only when the final measurement
+            # proved that its overlay was loaded.  Otherwise the same-harness
+            # route attempt owns the complete measured delta.
+            claimed_ratio = self._geak_journey_attributed_ratio(result) if overlay_loaded is True else 1.0
             # Anchor the route attempt where the per-kernel ledger stops, so
             # the two records partition the measured lift instead of overlapping.
             residual_before = pre_geak * claimed_ratio

@@ -192,6 +192,32 @@ def test_reverted_geak_kernel_is_not_credited(tmp_path: Path) -> None:
     assert not geak.get("keeps")
 
 
+def test_config_only_promotion_revokes_journey_kernel_and_credits_final_route(tmp_path: Path) -> None:
+    """A kernel absent from the final rebench cannot keep its internal gain."""
+    coord = _coord(tmp_path)
+    _record_baseline(tmp_path)
+    result = {
+        "status": "ok",
+        "accepted_config": {"flags": "--foo", "env": ""},
+        "accepted_kernels": ["k_not_loaded"],
+        "kernel_journey_path": _journey(
+            tmp_path,
+            [_kernel("k_not_loaded", gain=10.0, before=1000.0, after=1100.0)],
+        ),
+    }
+    coord._record_geak_kernel_journey(result)
+
+    coord._promote_geak_from_candidate(
+        result,
+        measured_tput=1050.0,
+        overlay_loaded=False,
+    )
+
+    geak = (_column(tmp_path).get("by_backend") or {}).get("geak") or {}
+    assert geak.get("keeps") == 1, geak
+    assert geak.get("total_gain_pct") == pytest.approx(5.0), geak
+
+
 def _kernel_without_throughput_pair(kid: str, *, gain: float) -> dict:
     """The shape every real campaign artifact has today.
 
