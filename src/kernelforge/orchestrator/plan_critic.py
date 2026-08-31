@@ -15,6 +15,7 @@ from kernelforge.agent_backends import (
     AgentBackend,
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
 )
 from kernelforge.orchestrator.agent_response import (
     AgentResponseIncompleteError,
@@ -530,7 +531,7 @@ class PlanCriticAgent:
                     ),
                     usage=usage,
                 ),
-                timeout=budget_sec,
+                timeout=watchdog_timeout_sec(budget_sec),
             )
         except Exception as error:  # noqa: BLE001 - provider boundary
             return self._fail_open(error, started_at=started_at)
@@ -656,7 +657,7 @@ class PlanCriticAgent:
                     ),
                     usage=usage,
                 ),
-                timeout=self._repair_budget(),
+                timeout=watchdog_timeout_sec(self._repair_budget()),
             )
             repaired = validated_agent_text(
                 result,

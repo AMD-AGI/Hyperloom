@@ -32,6 +32,7 @@ from pathlib import Path
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
@@ -354,7 +355,7 @@ async def _run_agent(
     )
     result = await asyncio.wait_for(
         backend.run(run_spec),
-        timeout=timeout_sec,
+        timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
 

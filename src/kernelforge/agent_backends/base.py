@@ -275,6 +275,31 @@ class AgentRunSpec:
         )
 
 
+#: Minimum extra time an outer watchdog must add on top of ``AgentRunSpec.timeout_sec``.
+#: The backend bounds its session by that budget and ends the turn gracefully when it
+#: fires, leaving the agent's outputs on disk so a salvage path can accept them.
+#: An outer ``asyncio.wait_for`` at exactly the same value races the backend's own
+#: deadline and, when it wins, delivers a ``CancelledError`` that destroys the outputs
+#: the backend was about to preserve.  The watchdog must fire only after the backend has
+#: clearly failed to return despite its own deadline.
+AGENT_WATCHDOG_GRACE_SEC: int = 300
+
+
+def watchdog_timeout_sec(session_timeout: float | int) -> float:
+    """Return the outer-watchdog budget for a session bounded by ``session_timeout``.
+
+    The result is strictly greater than ``session_timeout`` so the backend's own
+    graceful-deadline path always fires first.
+
+    Args:
+        session_timeout: The value passed to ``AgentRunSpec.timeout_sec``.
+
+    Returns:
+        Outer ``asyncio.wait_for`` timeout in seconds.
+    """
+    return float(session_timeout) + AGENT_WATCHDOG_GRACE_SEC
+
+
 @dataclass
 class AgentRunResult:
     """Normalize one backend session result for the Forge loop."""

@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
     AgentRunSpec,
     AgentToolPolicy,
     StdioMcpServer,
+    watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.llm.process_reaping import ReapReport, reap_processes_under
@@ -630,7 +631,7 @@ class SpecialistAgent:
                     ),
                     usage=usage,
                 ),
-                timeout=self.timeout_sec,
+                timeout=watchdog_timeout_sec(self.timeout_sec),
             )
             if is_api_failure(result):
                 detail = (

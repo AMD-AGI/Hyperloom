@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from kernelforge.agent_backends import AgentRunSpec
+from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
@@ -305,7 +305,7 @@ def make_supervisor_fn(
                         ),
                         usage=usage,
                     ),
-                    timeout=remaining,
+                    timeout=watchdog_timeout_sec(remaining),
                 )
                 if is_api_failure(result):
                     detail = (
