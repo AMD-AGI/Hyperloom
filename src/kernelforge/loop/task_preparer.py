@@ -1767,6 +1767,28 @@ async def prepare_task(
         except OSError:
             return ""
 
+    def _detect_driver_edited(
+        digest_before: str, log: list[str]
+    ) -> bool:
+        """True when the agent wrote the driver in this attempt.
+
+        Checks the content digest first; when a rollback has already restored
+        the file, also scans the progress log for a Write or Edit call whose
+        path matches the driver, since the log is written before any rollback
+        and is the authoritative evidence of what the agent did.
+        """
+        if _driver_digest() != digest_before:
+            return True
+        driver_posix = driver_path.as_posix()
+        driver_name = driver_path.name
+        for entry in log:
+            if not (entry.startswith("tool: Write ") or entry.startswith("tool: Edit ")):
+                continue
+            payload = entry.split(" ", 2)[2] if entry.count(" ") >= 2 else ""
+            if driver_posix in payload or driver_name in payload:
+                return True
+        return False
+
     def _audit_driver(relative: str) -> None:
         if audit_dir is None or not driver_path.is_file():
             return
@@ -2137,7 +2159,7 @@ async def prepare_task(
             except asyncio.TimeoutError:
                 _audit_driver(f"{attempt_dir}/driver_at_timeout.py")
                 elapsed_s = round(time.monotonic() - agent_started, 3)
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before, progress_log)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2206,7 +2228,7 @@ async def prepare_task(
                 break
             except Exception as exc:  # noqa: BLE001
                 _audit_driver(f"{attempt_dir}/driver_at_exception.py")
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before, progress_log)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2234,7 +2256,7 @@ async def prepare_task(
                     "\n".join(progress_log),
                 )
                 _audit_driver(f"{attempt_dir}/driver_after.py")
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before, progress_log)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
