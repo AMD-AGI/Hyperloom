@@ -2766,6 +2766,38 @@ def _post_prelude_target(*, optimize_enabled: bool, kernel_enabled: bool) -> str
     return PHASE_SWEEP
 
 
+def _optimize_declared_no_leverage(state: Any) -> bool:
+    """Whether OPTIMIZE left the current macro-cycle with both arms plateaued.
+
+    Reads the recorded exit rather than re-deriving the plateau predicates:
+    by the time SWEEP exits, KERNEL_AGENT and SWEEP have moved the state the
+    predicates read, so re-running them answers a different question than the
+    one OPTIMIZE actually answered.
+
+    ``optimize_no_more_leverage`` also covers ``skip_to_sweep`` and an LLM
+    escalation, which say the operator wanted SWEEP sooner — not that the arms
+    are dry — so only the ``plateau`` flavour counts.
+
+    Args:
+        state (Any): Frozen SharedState view.
+
+    Returns:
+        bool: ``True`` when this cycle's OPTIMIZE exit reported both arms
+        plateaued.
+    """
+    cycle = int(getattr(state, "macro_cycle", 0) or 0)
+    for row in reversed(list(getattr(state, "phase_history", None) or [])):
+        if not isinstance(row, dict) or int(row.get("cycle", 0) or 0) != cycle:
+            continue
+        if str(row.get("from_phase") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
+            continue
+        if str(row.get("reason") or "").strip() != "optimize_no_more_leverage":
+            continue
+        evidence = row.get("evidence")
+        return isinstance(evidence, dict) and bool(evidence.get("plateau"))
+    return False
+
+
 def compute_next_phase(
     state: Any,
     *,
@@ -2874,17 +2906,25 @@ def compute_next_phase(
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
             exit_reason, exit_evidence = norm
+            # ``conc_sweep_failed`` is terminal only once the optimization has
+            # nothing left to try. conc_sweep is a closeout concurrency scan,
+            # not the optimization itself, so on its own its failure says
+            # nothing about whether the remaining budget could still find gain;
+            # short-circuiting on it forfeited ~9.8h of a 16h run the one time
+            # it fired. But when OPTIMIZE already reported both arms plateaued,
+            # a fresh cycle would re-enter a phase that just said it is out of
+            # moves, so the wind-down still applies there.
+            if exit_reason == "conc_sweep_failed" and _optimize_declared_no_leverage(state):
+                return (
+                    PHASE_CLOSE,
+                    exit_reason,
+                    {**exit_evidence, "reloop_blocked": "both_arms_plateaued"},
+                )
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
-            # reloop is blocked (budget, convergence, or max_cycles).
-            #
-            # ``conc_sweep_failed`` is deliberately not short-circuited to CLOSE
-            # ahead of this. conc_sweep is a closeout concurrency scan, not the
-            # optimization itself, so its failure carries no evidence about
-            # whether the remaining budget could still find gain; treating it as
-            # terminal forfeited ~9.8h of a 16h run the one time it fired. It
-            # still becomes the stop_reason when reloop is blocked below, so the
-            # honest outcome survives without the budget being thrown away too.
+            # reloop is blocked (budget, convergence, or max_cycles). A failure
+            # that reaches here still becomes the stop_reason when reloop is
+            # blocked below, so the honest outcome survives either way.
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and optimize_enabled:
                 reloop_target = PHASE_FRAMEWORK_AGENT

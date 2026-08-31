@@ -92,6 +92,67 @@ def test_failed_conc_sweep_stays_the_stop_reason_when_reloop_is_blocked():
     assert "loopback" not in evidence
 
 
+def _optimize_exit_row(evidence: dict, *, cycle: int = 0) -> dict:
+    now = datetime.now(timezone.utc)
+    return ps.make_history_row(
+        from_phase=ps.PHASE_FRAMEWORK_AGENT,
+        to_phase=ps.PHASE_KERNEL_AGENT,
+        reason="optimize_no_more_leverage",
+        evidence=evidence,
+        ts=now.isoformat(),
+        ts_unix=now.timestamp(),
+        cycle=cycle,
+    )
+
+
+def _failed_conc_sweep_state(optimize_exit: dict | None) -> SharedState:
+    st = _sweep_state(macro_cycle=0, validated_gain=5.0, gain_at_cycle_start=0.0)
+    st.last_sweep = {}
+    st.last_conc_sweep = {"status": "failed"}
+    if optimize_exit is not None:
+        st.phase_history = list(st.phase_history or []) + [optimize_exit]
+    return st
+
+
+def test_failed_conc_sweep_is_terminal_once_optimize_reported_both_arms_dry():
+    """Budget is only worth spending on a cycle that has something to try.
+
+    Relooping after OPTIMIZE reported both arms plateaued just re-enters a phase
+    that already said it is out of moves.
+    """
+    st = _failed_conc_sweep_state(_optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}))
+    target, reason, evidence = ps.compute_next_phase(st)
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_failed"
+    assert evidence["reloop_blocked"] == "both_arms_plateaued"
+    assert "loopback" not in evidence
+
+
+@pytest.mark.parametrize(
+    "optimize_exit",
+    [
+        pytest.param(None, id="no_optimize_exit_recorded"),
+        # Both say "SWEEP sooner", not "the arms are dry".
+        pytest.param({"evidence": "skip_to_sweep"}, id="skip_to_sweep"),
+        pytest.param({"evidence": "llm_escalation"}, id="llm_escalation"),
+    ],
+)
+def test_failed_conc_sweep_still_reloops_when_leverage_was_not_ruled_out(optimize_exit: dict | None):
+    row = None if optimize_exit is None else _optimize_exit_row(optimize_exit)
+    target, reason, evidence = ps.compute_next_phase(_failed_conc_sweep_state(row))
+    assert target == ps.PHASE_FRAMEWORK_AGENT
+    assert reason == "cycle_reloop"
+    assert evidence["sweep_exit_reason"] == "conc_sweep_failed"
+
+
+def test_a_plateau_from_an_earlier_cycle_does_not_close_this_one():
+    """The plateau is per-cycle; a stale one must not end a later cycle."""
+    stale = _optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}, cycle=99)
+    target, reason, _ = ps.compute_next_phase(_failed_conc_sweep_state(stale))
+    assert target == ps.PHASE_FRAMEWORK_AGENT
+    assert reason == "cycle_reloop"
+
+
 def test_sweep_closes_when_globally_converged():
     # No gain this cycle + streak at 2 → effective 3 ≥ threshold.
     st = _sweep_state(
