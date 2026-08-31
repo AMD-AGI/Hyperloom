@@ -79,8 +79,12 @@ def test_baseline_reports_failure_when_no_attempt_produced_throughput(tmp_path):
         baseline={
             "throughput_tok_s_per_gpu": 0.0,
             "attempts_history": [
-                {"status": "failed", "ts": "2026-08-27T01:00:00+00:00", "error_class": "ServerLaunchError",
-                 "error_excerpt": "port already bound"},
+                {
+                    "status": "failed",
+                    "ts": "2026-08-27T01:00:00+00:00",
+                    "error_class": "ServerLaunchError",
+                    "error_excerpt": "port already bound",
+                },
             ],
         },
         phase_timeline=[{"action": "baseline", "ts": "2026-08-27T01:00:00+00:00", "status": "failed"}],
@@ -184,6 +188,51 @@ def test_sweep_without_any_evidence_produces_no_event(tmp_path):
     assert _event(timeline, "sweep") is None
 
 
+def test_sweep_that_died_before_its_first_grid_point_is_failed_not_skipped(tmp_path):
+    """A sweep can fail with an empty point list, and did not 'not happen'.
+
+    Deriving status from ``all_variants`` alone reported ``skipped`` on the
+    same event that carried ``stop_reason: sweep_failed``.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state={
+            "stop_reason": "sweep_failed",
+            "sweep_attempts": [
+                {
+                    "task_id": "t-sweep",
+                    "status": "failed",
+                    "error": "server never became ready",
+                    "ts": "2026-08-27T03:00:00+00:00",
+                }
+            ],
+        },
+        sweep={"all_variants": []},
+    )
+
+    event = _event(timeline, "sweep")
+    assert event["status"] == "failed"
+    assert event["ext"]["failure"]["stop_reason"] == "sweep_failed"
+    assert event["ext"]["failure"]["failed_task_id"] == "t-sweep"
+    assert event["ext"]["failure"]["message"] == "server never became ready"
+    assert event["ext"]["sweep"]["all_variants"] == []
+
+
+def test_sweep_with_measured_points_and_a_failed_attempt_is_degraded(tmp_path):
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state={
+            "stop_reason": "sweep_failed",
+            "sweep_attempts": [{"task_id": "t-sweep-2", "status": "failed", "ts": "2026-08-27T03:10:00+00:00"}],
+        },
+        sweep={"all_variants": [{"variant_name": "c8", "conc": 8, "status": "ok", "output_throughput": 90.0}]},
+    )
+
+    assert _event(timeline, "sweep")["status"] == "degraded"
+
+
 # ---------------------------------------------------------------------------
 # conc_sweep
 # ---------------------------------------------------------------------------
@@ -195,16 +244,37 @@ def _conc_sweep_section() -> dict:
         "total_budget_sec": 600,
         "baseline": {
             "extra_server_args": "",
-            "points": [{"conc": 8, "status": "ok", "output_throughput": 90.0}],
+            "points": [
+                {"conc": 8, "status": "ok", "output_throughput": 90.0},
+                {"conc": 16, "status": "ok", "output_throughput": 120.0},
+            ],
         },
         "optimized": {
             "extra_server_args": "--enable-torch-compile",
-            "points": [{"conc": 8, "status": "ok", "output_throughput": 99.0}],
+            "points": [
+                {"conc": 8, "status": "ok", "output_throughput": 99.0},
+                {"conc": 16, "status": "failed", "output_throughput": None, "error": "server OOM at conc=16"},
+            ],
         },
+        # ``conc_pair_comparison`` stamps both arm statuses on every row, and
+        # ``None`` where an arm has no point at that concurrency at all.
         "comparison": [
-            {"conc": 8, "baseline_tput": 90.0, "optimized_tput": 99.0, "speedup": 1.1},
-            {"conc": 16, "baseline_tput": 120.0, "optimized_tput": None, "speedup": None,
-             "optimized_status": "failed"},
+            {
+                "conc": 8,
+                "baseline_tput": 90.0,
+                "optimized_tput": 99.0,
+                "speedup": 1.1,
+                "baseline_status": "ok",
+                "optimized_status": "ok",
+            },
+            {
+                "conc": 16,
+                "baseline_tput": 120.0,
+                "optimized_tput": None,
+                "speedup": None,
+                "baseline_status": "ok",
+                "optimized_status": "failed",
+            },
         ],
         "summary": {"best_conc": 8, "best_speedup": 1.1},
         "workspace": "runs/conc_sweep",
@@ -233,9 +303,11 @@ def test_conc_sweep_renames_the_comparison_columns_and_keeps_the_arms(tmp_path):
         "speedup": 1.1,
         "error": None,
     }
-    # An unpaired point says which arm failed; the arm's own row says why.
+    # An unpaired point names the arm that broke and quotes that arm's own
+    # error. Reporting the first of the two statuses would have said
+    # "succeeded" here, since it is the baseline arm that came through.
     assert event["ext"]["comparison"][1]["speedup"] is None
-    assert event["ext"]["comparison"][1]["error"] == "failed"
+    assert event["ext"]["comparison"][1]["error"] == "optimized: server OOM at conc=16"
     # "" is the baseline arm's defining value, not a missing one.
     assert event["ext"]["arms"]["baseline"]["extra_server_args"] == ""
     assert event["ext"]["arms"]["optimized"]["extra_server_args"] == "--enable-torch-compile"
@@ -265,10 +337,19 @@ def _kernel_state(cycles: tuple[int, ...] = (0,)) -> dict:
         hour = 1 + cycle
         history.extend(
             [
-                {"from_phase": "BASELINE", "to_phase": "KERNEL_AGENT", "cycle": cycle,
-                 "ts": f"2026-08-27T0{hour}:00:00+00:00"},
-                {"from_phase": "KERNEL_AGENT", "to_phase": "SWEEP", "cycle": cycle,
-                 "ts": f"2026-08-27T0{hour}:50:00+00:00", "reason": "kernel_no_more_leverage"},
+                {
+                    "from_phase": "BASELINE",
+                    "to_phase": "KERNEL_AGENT",
+                    "cycle": cycle,
+                    "ts": f"2026-08-27T0{hour}:00:00+00:00",
+                },
+                {
+                    "from_phase": "KERNEL_AGENT",
+                    "to_phase": "SWEEP",
+                    "cycle": cycle,
+                    "ts": f"2026-08-27T0{hour}:50:00+00:00",
+                    "reason": "kernel_no_more_leverage",
+                },
             ]
         )
     return {"phase": "SWEEP", "macro_cycle": cycles[-1], "phase_history": history, "kernel_optimizer": "forge"}
@@ -324,6 +405,116 @@ def test_kernel_projects_one_event_per_visit_and_keeps_attempts_on_their_cycle(t
     assert events[0]["ext"]["entry"]["input_throughput"] == 100.0
 
 
+def test_kernel_ignores_an_integrate_patch_the_framework_agent_owns(tmp_path):
+    """``integrate_patch`` lands every patch source, so its kind proves nothing.
+
+    Filtering the ledger on kind alone files a Framework Agent enablement patch
+    under the Kernel timeline. Ownership lives on ``agent`` / ``phase``, which
+    ``_attempt_agent`` has already resolved through ``patch_author``.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-kernel", 0, agent="kernel_agent", phase="KERNEL_AGENT"),
+                _kernel_attempt(
+                    "att-framework",
+                    0,
+                    kind="integrate_patch",
+                    agent="framework_agent",
+                    phase="FRAMEWORK_AGENT",
+                    kernel_id=None,
+                ),
+            ]
+        },
+    )
+
+    ext = _event(timeline, "kernel")["ext"]
+    assert [attempt["attempt_id"] for attempt in ext["attempts"]] == ["att-kernel"]
+
+
+def test_a_framework_owned_integrate_patch_alone_does_not_conjure_a_kernel_visit(tmp_path):
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state={"phase": "CLOSE", "phase_history": []},
+        optimizations={
+            "attempts": [
+                {
+                    "attempt_id": "att-framework",
+                    "kind": "integrate_patch",
+                    "agent": "framework_agent",
+                    "phase": "FRAMEWORK_AGENT",
+                    "macro_cycle": 0,
+                    "status": "succeeded",
+                    "decision": "KEEP",
+                }
+            ]
+        },
+    )
+
+    assert _events(timeline, "kernel") == []
+
+
+def test_kernel_falls_back_to_kind_for_a_row_recorded_before_ownership_existed(tmp_path):
+    """Old recordings carry no ``agent``/``phase``; a kernel-only kind still counts.
+
+    ``integrate_patch`` is deliberately not in that fallback set — it is the
+    one kind more than one agent produces.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-legacy-kernel", 0),
+                {"attempt_id": "att-legacy-patch", "kind": "integrate_patch", "macro_cycle": 0, "status": "succeeded"},
+            ]
+        },
+    )
+
+    ext = _event(timeline, "kernel")["ext"]
+    assert [attempt["attempt_id"] for attempt in ext["attempts"]] == ["att-legacy-kernel"]
+
+
+def test_kernel_is_failed_when_every_final_rebench_faulted(tmp_path):
+    """A visit whose rebenches all errored measured nothing.
+
+    Counting attempts as evidence of success reported ``succeeded`` for a visit
+    where no candidate was ever weighed.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-1", 0, status="failed", decision="FAILED", throughput_after=None),
+                _kernel_attempt("att-2", 0, status="error", decision="FAILED", throughput_after=None),
+            ]
+        },
+    )
+
+    event = _event(timeline, "kernel")
+    assert event["status"] == "failed"
+    assert [attempt["status"] for attempt in event["ext"]["attempts"]] == ["failed", "failed"]
+
+
+def test_kernel_is_succeeded_when_a_rebench_concluded_even_against_the_candidate(tmp_path):
+    """A REVERT is a verdict. The visit worked; the candidate did not."""
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={"attempts": [_kernel_attempt("att-1", 0, decision="REVERT", local_gain_pct=0.4)]},
+    )
+
+    assert _event(timeline, "kernel")["status"] == "succeeded"
+
+
 def test_kernel_lanes_stay_empty_when_only_one_produced_candidates(tmp_path):
     state = _kernel_state() | {
         "last_fusion": {
@@ -372,9 +563,16 @@ def test_kernel_links_each_lane_row_to_the_rebench_that_validated_it(tmp_path):
                     "kernel_id": "rmsnorm",
                     "name": "rmsnorm",
                     "backend_attempts": [
-                        {"attempt_id": "bk-1", "backend": "triton", "status": "ok", "decision": "candidate",
-                         "compile_passed": True, "correctness_passed": True, "micro_speedup": 1.4,
-                         "ts": "2026-08-27T01:10:00+00:00"}
+                        {
+                            "attempt_id": "bk-1",
+                            "backend": "triton",
+                            "status": "ok",
+                            "decision": "candidate",
+                            "compile_passed": True,
+                            "correctness_passed": True,
+                            "micro_speedup": 1.4,
+                            "ts": "2026-08-27T01:10:00+00:00",
+                        }
                     ],
                     "e2e": {"decision": "KEEP", "target_file": "layers/rmsnorm.py"},
                 }
@@ -397,6 +595,102 @@ def test_kernel_links_each_lane_row_to_the_rebench_that_validated_it(tmp_path):
         "correctness_source": None,
         "micro_speedup": 1.4,
     }
+
+
+def _journey_kernel(kernel_id: str, ts: str) -> dict:
+    return {
+        "kernel_id": kernel_id,
+        "name": kernel_id,
+        "backend_attempts": [
+            {
+                "attempt_id": f"bk-{kernel_id}",
+                "backend": "triton",
+                "status": "ok",
+                "decision": "candidate",
+                "micro_speedup": 1.3,
+                "ts": ts,
+            }
+        ],
+        "e2e": {"decision": "KEEP", "target_file": f"layers/{kernel_id}.py"},
+    }
+
+
+def test_two_rewrites_in_one_visit_each_link_only_to_their_own_rebench(tmp_path):
+    """Grouping by ``source_kind`` alone gave every rewrite every attempt.
+
+    With one row per lane the cross-product is invisible; with two it claims
+    each candidate was validated by a rebench of the other one.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-rmsnorm", 0, kernel_id="rmsnorm"),
+                _kernel_attempt("att-softmax", 0, kernel_id="softmax"),
+            ]
+        },
+        kernel_journey={
+            "kernels": [
+                _journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00"),
+                _journey_kernel("softmax", "2026-08-27T01:20:00+00:00"),
+            ]
+        },
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert {row["kernel_id"]: row["final_rebench_attempt_ids"] for row in rewrites} == {
+        "rmsnorm": ["att-rmsnorm"],
+        "softmax": ["att-softmax"],
+    }
+
+
+def test_an_unidentifiable_rebench_is_left_unlinked_and_warned_about(tmp_path):
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-rmsnorm", 0, kernel_id="rmsnorm"),
+                # Names a kernel neither recorded rewrite claims.
+                _kernel_attempt("att-orphan", 0, kernel_id="layernorm"),
+            ]
+        },
+        kernel_journey={
+            "kernels": [
+                _journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00"),
+                _journey_kernel("softmax", "2026-08-27T01:20:00+00:00"),
+            ]
+        },
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert {row["kernel_id"]: row["final_rebench_attempt_ids"] for row in rewrites} == {
+        "rmsnorm": ["att-rmsnorm"],
+        "softmax": [],
+    }
+    # The attempt still appears in the ledger; only the candidate edge is
+    # withheld, because guessing which of the two it belongs to would read as
+    # a candidate having been validated when it was not.
+    assert "att-orphan" in [attempt["attempt_id"] for attempt in _event(timeline, "kernel")["ext"]["attempts"]]
+    assert any("match none of the 2 recorded candidates" in warning for warning in warnings)
+
+
+def test_a_lone_candidate_still_absorbs_a_rebench_it_cannot_be_matched_to(tmp_path):
+    """One row in the lane makes the kind grouping unambiguous again."""
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={"attempts": [_kernel_attempt("att-1", 0, kernel_id="layernorm")]},
+        kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert rewrites[0]["final_rebench_attempt_ids"] == ["att-1"]
 
 
 def test_kernel_failure_is_read_off_the_phase_exit_evidence(tmp_path):
@@ -461,18 +755,24 @@ def _close_state(steps: list[dict], **overrides) -> dict:
     return {
         "phase": "CLOSE",
         "phase_history": [
-            {"from_phase": "SWEEP", "to_phase": "CLOSE", "ts": "2026-08-27T05:00:00+00:00",
-             "evidence": {"close_steps": steps}},
+            {
+                "from_phase": "SWEEP",
+                "to_phase": "CLOSE",
+                "ts": "2026-08-27T05:00:00+00:00",
+                "evidence": {"close_steps": steps},
+            },
         ],
     } | overrides
 
 
 def test_close_is_degraded_while_the_breakdown_predates_the_rest_of_the_sequence(tmp_path):
-    """Pins the known CLOSE write-ordering limitation.
+    """The step-2 snapshot describes the close-out only as far as itself.
 
-    ``session_breakdown`` is step 2, so the four steps after it are never on
-    disk and ``close_sequence_done`` is always false. If the write order is
-    ever fixed this test goes red, which is the point.
+    ``session_breakdown`` is step 2, so at the moment it runs the four steps
+    after it do not exist yet and ``close_sequence_done`` is false. Reporting
+    ``degraded`` for that is correct — the record really is incomplete. The
+    sequencer's final ``patch_breakdown_close`` is what supersedes it; see
+    ``test_close_patch_*``.
     """
     state = _close_state(
         [
@@ -511,6 +811,67 @@ def test_close_is_succeeded_only_when_every_step_settled_and_the_sequence_finish
     assert collect_v6_close(tmp_path, state, {}, [])["status"] == "succeeded"
 
 
+def test_close_succeeds_even_though_sequencer_started_never_leaves_running(tmp_path):
+    """``sequencer_started`` is a marker, not a unit of work.
+
+    The sequencer records it once on entry and never revisits it, so treating
+    ``running`` as unsettled made ``succeeded`` unreachable no matter how
+    cleanly the session closed.
+    """
+    state = _close_state(
+        [
+            {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
+            {"step": "fact_finalize", "status": "done", "ts": "2026-08-27T05:00:10+00:00"},
+            {"step": "report", "status": "done", "ts": "2026-08-27T05:00:30+00:00"},
+            {"step": "session_breakdown", "status": "done", "ts": "2026-08-27T05:00:45+00:00"},
+            {"step": "artifact_package", "status": "skipped", "ts": "2026-08-27T05:00:55+00:00"},
+            {"step": "ndjson_drain", "status": "skipped", "ts": "2026-08-27T05:01:00+00:00"},
+            {"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"},
+        ],
+        close_sequence_done=True,
+    )
+    warnings: list[str] = []
+
+    close = collect_v6_close(tmp_path, state, {}, warnings)
+
+    assert close["status"] == "succeeded"
+    # ``fact_finalize`` is emitted by the sequencer but was missing from the V6
+    # field design's enum. It is a known step, not drift.
+    assert "fact_finalize" in [step["step"] for step in close["steps"]]
+    assert warnings == []
+
+
+def test_close_still_waits_on_a_step_that_really_is_running(tmp_path):
+    state = _close_state(
+        [
+            {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
+            {"step": "report", "status": "running", "ts": "2026-08-27T05:00:30+00:00"},
+            {"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"},
+        ],
+        close_sequence_done=True,
+    )
+
+    assert collect_v6_close(tmp_path, state, {}, [])["status"] == "degraded"
+
+
+def test_close_passes_through_an_unknown_step_and_warns(tmp_path):
+    state = _close_state(
+        [
+            {"step": "teleport_to_s3", "status": "done", "ts": "2026-08-27T05:00:30+00:00"},
+            {"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"},
+        ],
+        close_sequence_done=True,
+    )
+    warnings: list[str] = []
+
+    close = collect_v6_close(tmp_path, state, {}, warnings)
+
+    # Dropping it would lose a step the producer really recorded.
+    assert [step["step"] for step in close["steps"]] == ["teleport_to_s3", "done"]
+    assert close["status"] == "succeeded"
+    assert any("teleport_to_s3" in warning for warning in warnings)
+
+
 def test_close_reports_degraded_when_a_step_failed(tmp_path):
     state = _close_state(
         [
@@ -542,10 +903,16 @@ def test_close_falls_back_to_the_phase_entry_when_no_step_was_recorded(tmp_path)
 def test_close_collects_steps_split_across_phase_history_rows(tmp_path):
     state = {
         "phase_history": [
-            {"to_phase": "CLOSE", "ts": "2026-08-27T05:00:00+00:00",
-             "evidence": {"close_steps": [{"step": "report", "status": "done", "ts": "2026-08-27T05:00:30+00:00"}]}},
-            {"to_phase": "CLOSE", "ts": "2026-08-27T05:01:00+00:00",
-             "evidence": {"close_steps": [{"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"}]}},
+            {
+                "to_phase": "CLOSE",
+                "ts": "2026-08-27T05:00:00+00:00",
+                "evidence": {"close_steps": [{"step": "report", "status": "done", "ts": "2026-08-27T05:00:30+00:00"}]},
+            },
+            {
+                "to_phase": "CLOSE",
+                "ts": "2026-08-27T05:01:00+00:00",
+                "evidence": {"close_steps": [{"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"}]},
+            },
         ],
         "close_sequence_done": True,
     }
@@ -558,8 +925,9 @@ def test_close_collects_steps_split_across_phase_history_rows(tmp_path):
 def test_close_surfaces_robustness_escalation_and_its_signals(tmp_path):
     state = _close_state([{"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"}])
     state["stop_reason"] = "robustness_escalated"
-    signals = [{"ts": "2026-08-27T04:00:00+00:00", "signal": "crash", "action": "restart",
-                "workdir": "robustness-workdir/0"}]
+    signals = [
+        {"ts": "2026-08-27T04:00:00+00:00", "signal": "crash", "action": "restart", "workdir": "robustness-workdir/0"}
+    ]
 
     close = collect_v6_close(tmp_path, state, {"robustness_signals": signals}, [])
 
@@ -570,8 +938,14 @@ def test_close_surfaces_robustness_escalation_and_its_signals(tmp_path):
 def test_close_artifacts_point_only_at_files_that_exist(tmp_path):
     _write_json(tmp_path / "reports" / "final.json", {"ok": True})
     state = _close_state(
-        [{"step": "artifact_package", "status": "done", "ts": "2026-08-27T05:02:00+00:00",
-          "detail": str(tmp_path / "bundle.zip")}]
+        [
+            {
+                "step": "artifact_package",
+                "status": "done",
+                "ts": "2026-08-27T05:02:00+00:00",
+                "detail": str(tmp_path / "bundle.zip"),
+            }
+        ]
     )
 
     artifacts = collect_v6_close(tmp_path, state, {}, [])["artifacts"]
@@ -585,11 +959,107 @@ def test_close_artifacts_point_only_at_files_that_exist(tmp_path):
 def test_close_ignores_a_skipped_artifact_package_detail(tmp_path):
     """``detail`` doubles as the skip reason; only a ``done`` row holds a path."""
     state = _close_state(
-        [{"step": "artifact_package", "status": "skipped", "ts": "2026-08-27T05:02:00+00:00",
-          "detail": "no artifacts matched or dest unwritable"}]
+        [
+            {
+                "step": "artifact_package",
+                "status": "skipped",
+                "ts": "2026-08-27T05:02:00+00:00",
+                "detail": "no artifacts matched or dest unwritable",
+            }
+        ]
     )
 
     assert collect_v6_close(tmp_path, state, {}, [])["artifacts"]["artifact_package_path"] is None
+
+
+# ---------------------------------------------------------------------------
+# close: the end-of-sequence refresh
+# ---------------------------------------------------------------------------
+_FULL_CLOSE_STEPS = [
+    {"step": "sequencer_started", "status": "running", "ts": "2026-08-27T05:00:01+00:00"},
+    {"step": "fact_finalize", "status": "done", "ts": "2026-08-27T05:00:05+00:00"},
+    {"step": "report", "status": "done", "ts": "2026-08-27T05:00:30+00:00"},
+    {"step": "session_breakdown", "status": "done", "ts": "2026-08-27T05:00:45+00:00"},
+    {"step": "artifact_package", "status": "done", "ts": "2026-08-27T05:00:55+00:00", "detail": "/workspace/s.zip"},
+    {"step": "ndjson_drain", "status": "skipped", "ts": "2026-08-27T05:01:00+00:00"},
+    {"step": "done", "status": "done", "ts": "2026-08-27T05:01:05+00:00"},
+]
+
+
+def _session_with_step_two_breakdown(tmp_path: Path) -> Path:
+    """Build a session whose breakdown was written mid-CLOSE, as step 2 does."""
+    _write_json(tmp_path / "state.json", _close_state(_FULL_CLOSE_STEPS[:4]))
+    exporter.write_breakdown_json(tmp_path)
+    # The sequencer then finishes, persisting the remaining steps.
+    _write_json(tmp_path / "state.json", _close_state(_FULL_CLOSE_STEPS, close_sequence_done=True))
+    return tmp_path / exporter.BREAKDOWN_FILENAME
+
+
+def test_close_patch_replaces_the_step_two_snapshot_with_the_finished_sequence(tmp_path):
+    target = _session_with_step_two_breakdown(tmp_path)
+    before = json.loads(target.read_text(encoding="utf-8"))
+    assert before["close"]["status"] == "degraded"
+    assert [step["step"] for step in before["close"]["steps"]] == [
+        "sequencer_started",
+        "fact_finalize",
+        "report",
+        "session_breakdown",
+    ]
+
+    assert exporter.patch_breakdown_close(tmp_path) is True
+
+    after = json.loads(target.read_text(encoding="utf-8"))
+    assert after["close"]["status"] == "succeeded"
+    assert after["close"]["close_sequence_done"] is True
+    assert [step["step"] for step in after["close"]["steps"]] == [step["step"] for step in _FULL_CLOSE_STEPS]
+    assert after["close"]["end_time"] == "2026-08-27T05:01:05+00:00"
+
+
+def test_close_patch_touches_nothing_but_the_close_key(tmp_path):
+    """The whole point of a patch over a rebuild: every other key is frozen."""
+    target = _session_with_step_two_breakdown(tmp_path)
+    before = json.loads(target.read_text(encoding="utf-8"))
+
+    exporter.patch_breakdown_close(tmp_path)
+
+    after = json.loads(target.read_text(encoding="utf-8"))
+    assert set(after) == set(before)
+    assert {key: value for key, value in after.items() if key != "close"} == {
+        key: value for key, value in before.items() if key != "close"
+    }
+
+
+def test_close_patch_is_idempotent(tmp_path):
+    tmp_path_target = _session_with_step_two_breakdown(tmp_path)
+    assert exporter.patch_breakdown_close(tmp_path) is True
+    # Nothing changed the second time, so nothing is rewritten.
+    assert exporter.patch_breakdown_close(tmp_path) is False
+    assert json.loads(tmp_path_target.read_text(encoding="utf-8"))["close"]["status"] == "succeeded"
+
+
+def test_close_patch_is_a_no_op_without_a_breakdown(tmp_path):
+    _write_json(tmp_path / "state.json", _close_state(_FULL_CLOSE_STEPS, close_sequence_done=True))
+
+    assert exporter.patch_breakdown_close(tmp_path) is False
+
+
+def test_close_patch_leaves_a_payload_that_never_carried_close_alone(tmp_path):
+    """A V5-only breakdown has no ``close`` key, and gaining one is a surface change."""
+    target = tmp_path / exporter.BREAKDOWN_FILENAME
+    _write_json(target, {"schema_version": "hyperloom.session_breakdown.v5.0", "baseline": {}})
+    _write_json(tmp_path / "state.json", _close_state(_FULL_CLOSE_STEPS, close_sequence_done=True))
+
+    assert exporter.patch_breakdown_close(tmp_path) is False
+    assert "close" not in json.loads(target.read_text(encoding="utf-8"))
+
+
+def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
+    """It runs at shutdown and must never mask the session's stop_reason."""
+    target = tmp_path / exporter.BREAKDOWN_FILENAME
+    target.write_text("{not json", encoding="utf-8")
+
+    assert exporter.patch_breakdown_close(tmp_path) is False
+    assert target.read_text(encoding="utf-8") == "{not json"
 
 
 # ---------------------------------------------------------------------------

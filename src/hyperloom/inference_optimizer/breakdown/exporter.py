@@ -908,6 +908,79 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
         return False
 
 
+def patch_breakdown_close(session_dir: Path | str) -> bool:
+    """Refresh only the ``close`` section of an already-written breakdown.
+
+    ``session_breakdown`` is step 2 of the CLOSE sequencer, so the breakdown it
+    writes can only ever describe the close-out up to its own step: the four
+    steps after it are not recorded yet and ``close_sequence_done`` is still
+    false. Left alone, every healthy session reports ``close.status:
+    "degraded"`` — an accurate statement about the *record*, but one that reads
+    as the close-out having gone wrong.
+
+    Call this as the last act of the sequencer. ``_record_close_step``
+    persists ``state.json`` on every step, so by then the full sequence and
+    ``close_sequence_done`` are on disk and the recomputed key is the real one.
+
+    Best-effort and self-skipping, exactly like
+    :func:`patch_breakdown_langfuse`: returns False on a missing breakdown, an
+    unchanged section, or any error. Never raises — it runs after
+    ``stop_reason`` and ``close_sequence_done`` are settled and must not mask
+    them at shutdown.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+
+    Returns:
+        ``True`` when the close section was refreshed, ``False`` otherwise.
+    """
+    sd = Path(session_dir).resolve()
+    target = sd / BREAKDOWN_FILENAME
+    try:
+        if not target.exists():
+            return False
+        breakdown = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(breakdown, dict):
+            return False
+        # A V5-only breakdown has no ``close`` key to refresh, and adding one
+        # would change the surface of a payload that never carried it.
+        if "close" not in breakdown:
+            return False
+
+        discard: list[str] = []
+        state = _load_session_json(state_path(sd), "state.json", discard)
+        critic_robustness = _safe_collect(
+            "critic_robustness",
+            lambda: collectors.collect_critic_robustness(sd, discard),
+            discard,
+            default={},
+        )
+        fresh = collectors.collect_v6_close(sd, state, critic_robustness, discard)
+        if breakdown.get("close") == fresh:
+            return False  # already current
+        breakdown["close"] = fresh
+        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{BREAKDOWN_FILENAME}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise
+        log.info("session_breakdown: refreshed close section in %s", target)
+        return True
+    except Exception:  # noqa: BLE001
+        log.debug("session_breakdown: close patch failed (non-fatal)", exc_info=True)
+        return False
+
+
 def _json_default(obj: Any) -> Any:
     """Stringify objects json.dumps can't handle natively (Path, set, ...).
 

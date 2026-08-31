@@ -46,8 +46,10 @@ from ._common import (
 # a failure.
 _FAILED_STATUSES = frozenset({"failed", "error", "failure", "timeout", "aborted"})
 _OK_STATUSES = frozenset({"ok", "succeeded", "success", "complete", "completed", "done"})
-# ``optimizations.attempts[].kind`` values the Kernel Agent owns. Framework and
-# Explore work shares the same attempt model and must not be pulled in here.
+# ``optimizations.attempts[].kind`` values that can belong to the Kernel Agent.
+# This is a candidate filter, never a verdict: ``integrate_patch`` lands every
+# patch source, so its kind says nothing about which lever produced it. See
+# ``_owns_kernel_attempt`` for how ownership is actually decided.
 _KERNEL_ATTEMPT_KINDS = frozenset(
     {
         "kernel_optimization",
@@ -56,6 +58,11 @@ _KERNEL_ATTEMPT_KINDS = frozenset(
         "integrate_patch",
     }
 )
+# Kinds the Kernel Agent is the sole producer of. A row carrying one of these
+# is the Kernel Agent's even with no ownership metadata on it.
+_KERNEL_ONLY_ATTEMPT_KINDS = frozenset({"kernel_optimization", "kernel_collective", "gemm_tuning"})
+_KERNEL_AGENT = "kernel_agent"
+_KERNEL_PHASE = "KERNEL_AGENT"
 # ``optimizations.attempts[].kind`` -> V6 ``attempts[].source_kind``. A
 # ``kernel_optimization`` row is refined further by its producer, because both
 # a per-kernel rewrite and a whole-pipeline GEAK run record under that kind.
@@ -288,14 +295,6 @@ def project_sweep_event(
     variants = [_sweep_variant(point) for point in points]
     ok_count = sum(1 for variant in variants if variant["status"] == "ok")
     failed_count = sum(1 for variant in variants if variant["status"] == "failed")
-    if ok_count and failed_count:
-        status = "degraded"
-    elif ok_count:
-        status = "succeeded"
-    elif failed_count:
-        status = "failed"
-    else:
-        status = "skipped"
 
     stop_reason = _lower(state.get("stop_reason"))
     failed_variant = next((variant for variant in reversed(variants) if variant["status"] == "failed"), {})
@@ -303,6 +302,19 @@ def project_sweep_event(
         (row for row in reversed(attempts) if _lower(row.get("status")) in _FAILED_STATUSES),
         {},
     )
+    # A sweep can fail before it lays down its first grid point, in which case
+    # the only record of it is a failed attempt or a sweep stop reason. Reading
+    # status off the point list alone reports that run as ``skipped`` while the
+    # same event carries ``stop_reason: sweep_failed``.
+    failed_outright = bool(failed_attempt) or stop_reason in _STOP_REASONS_SWEEP
+    if ok_count and (failed_count or failed_outright):
+        status = "degraded"
+    elif ok_count:
+        status = "succeeded"
+    elif failed_count or failed_outright:
+        status = "failed"
+    else:
+        status = "skipped"
     start_time, end_time = _time_window(rows, attempts, [last_sweep] if last_sweep else [])
     return {
         "type": "sweep",
@@ -320,7 +332,12 @@ def project_sweep_event(
             },
             "input_anchor": {
                 "baseline_task_id": _text(
-                    _first(*(row.get("task_id") for row in reversed(_dict_rows(_mapping(baseline).get("attempts_history")))))
+                    _first(
+                        *(
+                            row.get("task_id")
+                            for row in reversed(_dict_rows(_mapping(baseline).get("attempts_history")))
+                        )
+                    )
                 ),
                 # ``current_best`` carries no task id in any recorded shape.
                 "current_best_task_id": None,
@@ -378,6 +395,28 @@ def _conc_arm(arm: Any) -> dict[str, Any]:
     }
 
 
+def _conc_pair_error(row: dict[str, Any], points_by_arm: dict[str, dict[int | None, dict[str, Any]]]) -> str | None:
+    """Explain why a concurrency pair produced no speedup.
+
+    The pairing is an outer join, so a pair fails when an arm errored, or when
+    an arm has no point at that concurrency at all. Only the arm that did not
+    succeed can say why — reporting the first status of the two hands back
+    ``"succeeded"`` as the error whenever it is the optimized arm that broke.
+    """
+    if _to_float(row.get("speedup")) is not None:
+        return None
+    conc = _to_int(row.get("conc"))
+    reasons = []
+    for arm in ("baseline", "optimized"):
+        status = _lower(row.get(f"{arm}_status"))
+        if status in _OK_STATUSES:
+            continue
+        point = _mapping(points_by_arm.get(arm, {}).get(conc))
+        detail = _text(_first(point.get("error"), point.get("error_class"), status)) or "no point recorded"
+        reasons.append(f"{arm}: {detail}")
+    return "; ".join(reasons) or None
+
+
 def project_conc_sweep_event(
     conc_sweep_summary: Any,
     state: Any,
@@ -421,17 +460,17 @@ def project_conc_sweep_event(
     else:
         status = "degraded"
 
+    points_by_arm = {
+        arm: {_to_int(point.get("conc")): point for point in _dict_rows(_mapping(summary.get(arm)).get("points"))}
+        for arm in ("baseline", "optimized")
+    }
     comparison = [
         {
             "conc": _to_int(row.get("conc")),
             "baseline_output_throughput": _to_float(row.get("baseline_tput")),
             "optimized_output_throughput": _to_float(row.get("optimized_tput")),
             "speedup": _to_float(row.get("speedup")),
-            # A pair only fails to form when one arm has no throughput; the
-            # arm's own point carries why, and this row does not duplicate it.
-            "error": None
-            if _to_float(row.get("speedup")) is not None
-            else _text(_first(row.get("baseline_status"), row.get("optimized_status"))),
+            "error": _conc_pair_error(row, points_by_arm),
         }
         for row in _dict_rows(summary.get("comparison"))
     ]
@@ -600,7 +639,9 @@ def _fusion_run(result: dict[str, Any], integrate: dict[str, Any]) -> dict[str, 
         "env_flags": _mapping(result.get("env_flags")),
         "candidate_speedup": _first(serving_speedup, kernel_speedup),
         "candidate_speedup_basis": (
-            "serving_ab" if serving_speedup is not None else ("kernel_microbenchmark" if kernel_speedup is not None else None)
+            "serving_ab"
+            if serving_speedup is not None
+            else ("kernel_microbenchmark" if kernel_speedup is not None else None)
         ),
         "patch_path": _text(_first(result.get("patch"), integrate.get("patch_path"))),
         # forge-fusion emits the V6 vocabulary verbatim.
@@ -621,9 +662,7 @@ def _gemm_tuner_attempts(run: dict[str, Any]) -> list[dict[str, Any]]:
         {
             "tuner": str(_first(candidate.get("tuner"), candidate.get("libtype"), run.get("engine"), "") or ""),
             "status": _lower(candidate.get("status")) or "skipped",
-            "best_micro_speedup": _to_float(
-                _first(candidate.get("best_micro_speedup"), candidate.get("best_speedup"))
-            ),
+            "best_micro_speedup": _to_float(_first(candidate.get("best_micro_speedup"), candidate.get("best_speedup"))),
             "tuned_file": _text(candidate.get("tuned_file")),
             "reason": _text(_first(candidate.get("reason"), candidate.get("error"))),
         }
@@ -738,6 +777,30 @@ def _geak_run(geak: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _owns_kernel_attempt(attempt: dict[str, Any]) -> bool:
+    """Report whether a final-rebench attempt belongs to the Kernel Agent.
+
+    ``kind`` alone cannot answer this. ``integrate_patch`` is the action that
+    lands *every* patch source — Framework Agent enablement and Explore config
+    patches included — which is why ``attribution.py`` resolves its family from
+    ownership metadata rather than from the action name. Filtering on kind here
+    would file a Framework Agent patch under the Kernel timeline, and on a
+    session with no kernel work at all it would conjure a Kernel visit out of
+    one.
+
+    ``attempts[].agent`` is the right field: ``_attempt_agent`` has already run
+    the producer's recorded value, the kind table, and ``patch_author`` over the
+    row. ``phase`` backs it up. Only when a row carries neither — an old
+    recording from before producers stamped ownership — does the kind decide,
+    and then only for the kinds no other agent produces.
+    """
+    agent = _lower(attempt.get("agent"))
+    phase = _upper(attempt.get("phase"))
+    if agent or phase:
+        return agent == _KERNEL_AGENT or phase == _KERNEL_PHASE
+    return _lower(attempt.get("kind")) in _KERNEL_ONLY_ATTEMPT_KINDS
+
+
 def _attempt_source_kind(attempt: dict[str, Any]) -> str:
     """Classify which lane a final-rebench attempt was validating."""
     kind = _lower(attempt.get("kind"))
@@ -782,9 +845,9 @@ def _attempt_accuracy(attempt: dict[str, Any]) -> dict[str, Any]:
         "required": True,
         "reference": _to_float(gate.get("reference")),
         "value": _to_float(_first(gate.get("value"), gate.get("observed"))),
-        "passed": True if status in _OK_STATUSES or _upper(gate.get("decision")) == "PASS" else (
-            False if status in _FAILED_STATUSES else None
-        ),
+        "passed": True
+        if status in _OK_STATUSES or _upper(gate.get("decision")) == "PASS"
+        else (False if status in _FAILED_STATUSES else None),
     }
 
 
@@ -837,7 +900,9 @@ def _final_rebench_attempt(
             attempt.get("decision_reason") if status in _FAILED_STATUSES else None,
         ),
         "artifacts": {
-            "workspace": _text(next((row.get("path") for row in artifacts if _lower(row.get("kind")) == "workspace"), None)),
+            "workspace": _text(
+                next((row.get("path") for row in artifacts if _lower(row.get("kind")) == "workspace"), None)
+            ),
             "benchmark_report_path": _text(
                 next((row.get("path") for row in artifacts if "report" in _lower(row.get("kind"))), None)
             ),
@@ -917,7 +982,9 @@ def project_kernel_events(
     gemm_runs = _dict_rows(optimizations.get("gemm_tuning_runs"))
     collective_attempts = _dict_rows(collective.get("attempts"))
     kernel_attempts = [
-        row for row in _dict_rows(optimizations.get("attempts")) if _lower(row.get("kind")) in _KERNEL_ATTEMPT_KINDS
+        row
+        for row in _dict_rows(optimizations.get("attempts"))
+        if _lower(row.get("kind")) in _KERNEL_ATTEMPT_KINDS and _owns_kernel_attempt(row)
     ]
     geak_engaged = _optional_bool(geak.get("engaged")) is True or bool(geak.get("status"))
 
@@ -931,8 +998,7 @@ def project_kernel_events(
         # was lost or truncated. Keep the evidence rather than drop it, on one
         # synthetic window carrying the session's own cycle.
         warnings.append(
-            "v6.timeline.kernel: kernel evidence exists with no KERNEL_AGENT phase history; "
-            "reported as a single window"
+            "v6.timeline.kernel: kernel evidence exists with no KERNEL_AGENT phase history; reported as a single window"
         )
         windows = [
             {
@@ -1011,8 +1077,86 @@ def project_kernel_events(
 
     events: list[dict[str, Any]] = []
     for window, lanes in zip(windows, lanes_by_window):
-        events.append(_kernel_event(state, collective, window, lanes))
+        events.append(_kernel_event(state, collective, window, lanes, warnings))
     return events
+
+
+_LANE_SOURCE_KINDS = (
+    ("kernel_rewrites", "kernel_rewrite"),
+    ("fusion_runs", "fusion"),
+    ("gemm_tuning_runs", "gemm_tuning"),
+    ("collective_runs", "collective"),
+    ("geak_runs", "geak_e2e"),
+)
+
+# Per lane, the row fields whose values a rebench attempt's ``source_id`` may
+# be spelled as. ``source_id`` is the attempt's ``kernel_id`` where it has one
+# and its operation ``name`` otherwise, so both the subject and the run key
+# have to be offered.
+_LANE_IDENTITY_FIELDS = {
+    "kernel_rewrites": ("kernel_id", "kernel_name", "rewrite_id"),
+    "fusion_runs": ("run_id", "task_id", "source_file"),
+    "gemm_tuning_runs": ("run_id",),
+    "collective_runs": ("kernel_id", "kernel_name", "run_id"),
+    "geak_runs": ("run_id", "task_id"),
+}
+
+
+def _lane_identity_keys(lane_name: str, row: dict[str, Any]) -> set[str]:
+    """Return the identifiers a rebench attempt could name this row by."""
+    keys = set()
+    for field in _LANE_IDENTITY_FIELDS.get(lane_name, ()):
+        value = _lower(row.get(field))
+        if value:
+            keys.add(value)
+    return keys
+
+
+def _link_rebench_attempts(lanes: dict[str, list[Any]], warnings: list[str]) -> None:
+    """Point every candidate at the final rebench attempts that validated it.
+
+    Matching is by identity — the attempt's ``source_id`` against the names the
+    candidate is known by — because the design asks for the rebenches *this
+    candidate* triggered, and grouping by ``source_kind`` alone would give two
+    rewrites in one visit the same two attempts each.
+
+    Identity is not always recorded on both sides. Where a lane holds exactly
+    one row, the kind grouping is unambiguous and is used as the fallback: the
+    unmatched attempts of that kind can only belong to that row. Where several
+    rows compete for an unattributable attempt, the link is left off and a
+    warning is raised, because a wrong edge here reads as a candidate having
+    been validated when it was not.
+    """
+    attempts = lanes["attempts"]
+    by_source: dict[str, list[dict[str, Any]]] = {}
+    for attempt in attempts:
+        by_source.setdefault(attempt["source_kind"], []).append(attempt)
+
+    for lane_name, source_kind in _LANE_SOURCE_KINDS:
+        rows = lanes[lane_name]
+        candidates = by_source.get(source_kind, [])
+        if not rows or not candidates:
+            continue
+        matched_ids: set[str] = set()
+        for row in rows:
+            keys = _lane_identity_keys(lane_name, row)
+            ids = [attempt["attempt_id"] for attempt in candidates if keys and _lower(attempt.get("source_id")) in keys]
+            row["final_rebench_attempt_ids"] = ids
+            matched_ids.update(ids)
+
+        leftover = [attempt["attempt_id"] for attempt in candidates if attempt["attempt_id"] not in matched_ids]
+        if not leftover:
+            continue
+        if len(rows) == 1:
+            rows[0]["final_rebench_attempt_ids"] = sorted(
+                set(rows[0]["final_rebench_attempt_ids"]) | set(leftover),
+                key=lambda value: [attempt["attempt_id"] for attempt in candidates].index(value),
+            )
+            continue
+        warnings.append(
+            f"v6.timeline.kernel: {len(leftover)} {source_kind} rebench attempt(s) match none of the "
+            f"{len(rows)} recorded candidates by id; left unlinked"
+        )
 
 
 def _kernel_event(
@@ -1020,25 +1164,14 @@ def _kernel_event(
     collective: dict[str, Any],
     window: dict[str, Any],
     lanes: dict[str, list[Any]],
+    warnings: list[str],
 ) -> dict[str, Any]:
     """Assemble one Kernel visit from its window and its bucketed lanes."""
     attempts = lanes["attempts"]
     # Every lane row links back to the rebench attempts that validated it. The
     # link is made here rather than in the lane projectors because only now is
     # the window's attempt set known.
-    by_source: dict[str, list[str]] = {}
-    for attempt in attempts:
-        by_source.setdefault(attempt["source_kind"], []).append(attempt["attempt_id"])
-    for lane_name, source_kind in (
-        ("kernel_rewrites", "kernel_rewrite"),
-        ("fusion_runs", "fusion"),
-        ("gemm_tuning_runs", "gemm_tuning"),
-        ("collective_runs", "collective"),
-        ("geak_runs", "geak_e2e"),
-    ):
-        ids = by_source.get(source_kind, [])
-        for row in lanes[lane_name]:
-            row["final_rebench_attempt_ids"] = list(ids)
+    _link_rebench_attempts(lanes, warnings)
 
     exit_row = _mapping(window.get("exit_row"))
     evidence = _mapping(exit_row.get("evidence"))
@@ -1046,14 +1179,22 @@ def _kernel_event(
     stage_failed = bool(evidence.get("error") or evidence.get("error_class"))
     did_work = any(lanes[name] for name in lanes)
     kept = any(_upper(attempt.get("decision")) == "KEEP" for attempt in attempts)
+    # A rebench that ran and produced a verdict, even a REVERT one. A visit
+    # whose every attempt errored out measured nothing, and the count of
+    # attempts alone must not be read as the stage having worked.
+    concluded = [attempt for attempt in attempts if attempt["status"] != "failed"]
     if stage_failed:
         status = "failed"
     elif not window.get("end_time") and did_work:
         # The session ended inside KERNEL; the visit has real work on it but
         # never reached its own exit.
         status = "degraded"
-    elif kept or attempts:
+    elif kept or concluded:
         status = "succeeded"
+    elif attempts:
+        # Every rebench faulted. Whether the visit found anything is unknown,
+        # not negative — the measurements that would have said never landed.
+        status = "failed"
     elif did_work:
         # Candidates were produced but none reached a final rebench.
         status = "degraded"

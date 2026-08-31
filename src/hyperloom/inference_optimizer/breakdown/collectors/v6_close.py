@@ -7,26 +7,29 @@
 the session was wrapped up, not a stage that competes for wall-clock with the
 others.
 
-**A recorded close is always partial, and that is expected.** ``session_breakdown``
-is step 2 of the CLOSE sequencer (``orchestrator/phases/close.py``), and
-``langfuse_flush`` / ``artifact_package`` / ``ndjson_drain`` / ``done`` are all
-recorded *after* it. By the time the sequencer sets ``close_sequence_done``,
-the breakdown on disk was written several steps earlier, and the CLI's finally
-block skips re-writing it (it only splices the ``langfuse`` key back in). So a
-healthy session reports at most ``sequencer_started`` / ``geak_rebench_drain``
-/ ``fact_finalize`` / ``report`` / ``session_breakdown``, with
-``close_sequence_done`` false — and this collector honestly reports
-``degraded`` for it.
+**This collector runs twice, and the first pass is deliberately partial.**
+``session_breakdown`` is step 2 of the CLOSE sequencer
+(``orchestrator/phases/close.py``), so the breakdown written there can only
+describe the close-out as far as itself: ``langfuse_flush`` /
+``artifact_package`` / ``ndjson_drain`` / ``done`` have not happened, and
+``close_sequence_done`` is still false. That snapshot honestly reports
+``degraded``. The sequencer's last act calls
+:func:`~..exporter.patch_breakdown_close`, which recomputes this section
+against the finished ``state.json`` and splices it back in, so the breakdown a
+reader finds on disk describes the whole sequence.
 
-``degraded`` here means "the record of the close-out is incomplete", **not**
-"the close-out failed". A reader wanting to know whether a step genuinely
-failed must look at ``steps[].status``; the absence of a step is not evidence
-against it. ``langfuse_flush`` in particular only ever records a step when it
-fails, so its silence is success.
+``degraded`` therefore means "the record of the close-out is incomplete",
+**not** "the close-out failed" — it is what a session killed before the
+sequencer finished leaves behind. A reader wanting to know whether a step
+genuinely failed must look at ``steps[].status``; the absence of a step is not
+evidence against it. ``langfuse_flush`` in particular only ever records a step
+when it fails, so its silence is success.
 
-Fixing that would mean changing the CLOSE write order, which is a runtime
-change and deliberately out of scope for V6 — V6 stays purely additive
-telemetry that cannot alter a run's outcome.
+Two quirks of the producer are worth knowing before reading ``steps``:
+``sequencer_started`` is a marker recorded once as ``running`` and never
+settled, and ``fact_finalize`` is emitted by the sequencer but absent from the
+V6 field design's ``step`` enum. Both are handled below; neither is a defect
+in the session being reported.
 """
 
 from __future__ import annotations
@@ -46,6 +49,31 @@ from ._common import (
 # track. ``running`` is not among them: a step still running when the
 # breakdown was written never reported an outcome.
 _SETTLED_STATUSES = frozenset({"done", "skipped"})
+
+# ``sequencer_started`` is a marker, not a unit of work: the sequencer records
+# it once as ``running`` on entry and never revisits it, so it has no terminal
+# status to wait for. Treating it as unsettled would make ``succeeded``
+# unreachable by construction, no matter how cleanly the session closed.
+_MARKER_STEPS = frozenset({"sequencer_started"})
+
+# The step vocabulary the CLOSE sequencer actually emits. ``fact_finalize`` is
+# in the runtime but was missing from the V6 field design, which is a gap in
+# the contract rather than in the producer; unknown names are passed through
+# and warned about so drift surfaces instead of being silently dropped.
+_KNOWN_STEPS = frozenset(
+    {
+        "sequencer_started",
+        "geak_rebench_drain",
+        "fact_finalize",
+        "report",
+        "session_breakdown",
+        "langfuse_flush",
+        "artifact_package",
+        "ndjson_drain",
+        "done",
+    }
+)
+
 _ESCALATED_STOP_REASON = "robustness_escalated"
 
 
@@ -145,8 +173,16 @@ def collect_v6_close(
     steps = _collect_steps(state)
     sequence_done = bool(state.get("close_sequence_done"))
 
+    unknown = sorted({step["step"] for step in steps if step["step"] and step["step"] not in _KNOWN_STEPS})
+    if unknown:
+        warnings.append(f"v6.close: unrecognized close step(s) {', '.join(unknown)}; passed through unchanged")
+
     failed = [step for step in steps if step["status"] == "failed"]
-    unsettled = [step for step in steps if step["status"] not in _SETTLED_STATUSES and step["status"] != "failed"]
+    unsettled = [
+        step
+        for step in steps
+        if step["step"] not in _MARKER_STEPS and step["status"] not in _SETTLED_STATUSES and step["status"] != "failed"
+    ]
     if not steps:
         # No close step at all: either the session died before CLOSE, or the
         # breakdown is a cli.finally safety net written outside the sequencer.

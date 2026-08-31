@@ -434,6 +434,21 @@ class ClosePhase(PhaseHandler):
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
         await self._record_close_step("done", status="done")
+
+        # Refresh the breakdown's ``close`` key now that the sequence is on
+        # disk. Step 2 wrote the breakdown, so the copy it produced describes
+        # only the close-out up to itself: the steps above are missing from it
+        # and ``close_sequence_done`` was still false. ``_record_close_step``
+        # persists on every step, so ``state.json`` is complete by this line.
+        # Splices one key; best-effort and last, after stop_reason and
+        # close_sequence_done are settled, so it cannot affect the run.
+        try:
+            from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
+
+            patch_breakdown_close(self.session_dir)
+        except Exception:  # noqa: BLE001
+            log.debug("CLOSE step 6 (close section refresh) failed", exc_info=True)
+
         log.info("CLOSE 7-step sequencer complete")
 
     async def _enqueue_runnable_internal_task(
