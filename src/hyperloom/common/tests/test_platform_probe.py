@@ -186,8 +186,10 @@ def test_platform_fingerprint_unavailable_when_probe_returns_none(monkeypatch):
 
 
 def test_platform_fingerprint_outer_failure_is_status_error(monkeypatch):
+    # Use a non-RuntimeError to pin the broad `except Exception` net; narrowing
+    # it to `except RuntimeError` would let OSError/AttributeError escape.
     def _boom():
-        raise RuntimeError("probe exploded")
+        raise OSError("probe exploded")
 
     monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _boom)
     got = platform_fingerprint()
@@ -195,8 +197,8 @@ def test_platform_fingerprint_outer_failure_is_status_error(monkeypatch):
     assert "probe exploded" in got["reason"]
 
 
-def test_platform_fingerprint_gpu_and_stack_blocks_degrade(monkeypatch):
-    plat = CpuPlatform(
+def _make_plat():
+    return CpuPlatform(
         cpu="AMD EPYC",
         smt="on",
         sockets=2,
@@ -206,19 +208,40 @@ def test_platform_fingerprint_gpu_and_stack_blocks_degrade(monkeypatch):
         boost="on",
         kernel="5.15.0",
     )
-    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", lambda: plat)
+
+
+def test_platform_fingerprint_gpu_block_degrades_stack_survives(monkeypatch):
+    """GPU block error must not corrupt the stack block (per-block independence)."""
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
 
     def _gpu_boom():
         raise OSError("gpu sysfs unreadable")
 
+    fake_stack = {"rocm": "6.0.0", "driver": "amdgpu"}
+    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", _gpu_boom)
+    monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", lambda _env: fake_stack)
+    got = platform_fingerprint(gpu_type="mi300x", multi_node=False)
+    assert got["status"] == "ok"
+    assert got["cpu"] == "AMD EPYC"
+    assert got["gpu"] == {"status": "error"}
+    # Stack block must carry its real content, not the error sentinel.
+    assert got["stack"] == fake_stack
+
+
+def test_platform_fingerprint_stack_block_degrades_gpu_survives(monkeypatch):
+    """Stack block error must not corrupt the GPU block (per-block independence)."""
+    monkeypatch.setattr(platform_probe_mod, "probe_cpu_platform", _make_plat)
+
     def _stack_boom(_env):
         raise RuntimeError("stack probe failed")
 
-    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", _gpu_boom)
+    monkeypatch.setattr(platform_probe_mod, "amdgpu_device_count", lambda: 8)
     monkeypatch.setattr(platform_probe_mod, "detect_stack_fingerprint", _stack_boom)
     got = platform_fingerprint(gpu_type="mi300x", multi_node=True)
     assert got["status"] == "ok"
-    assert got["cpu"] == "AMD EPYC"
     assert got["multi_node_session"] is True
-    assert got["gpu"] == {"status": "error"}
     assert got["stack"] == {"status": "error"}
+    # GPU block must carry real content — presence of gfx_arch confirms the
+    # table lookup ran rather than producing the error sentinel.
+    assert got["gpu"] != {"status": "error"}
+    assert "gfx_arch" in got["gpu"]
