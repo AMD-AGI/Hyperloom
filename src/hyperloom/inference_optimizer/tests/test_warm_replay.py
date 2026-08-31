@@ -43,6 +43,7 @@ class _StubSharedState:
     enable_roofline: bool = True
     last_baseline: dict = field(default_factory=dict)
     explore_search: dict = field(default_factory=dict)
+    rejected_kernel_ids: list = field(default_factory=list)
     optimization_stack: list = field(default_factory=list)
     gain_per_stack_entry: list = field(default_factory=list)
     cumulative_gain_validated: float = 0.0
@@ -1715,6 +1716,38 @@ def test_inject_warm_recipe_history_skips_empty_rows(tmp_path):
     added = coord._inject_warm_recipe_history_into_ledger()
     assert added == 1
     assert coord.shared_state.explore_search["rejected"][0]["name"] == "real"
+
+
+def test_inject_warm_recipe_do_not_repeat_explore_and_kernel(tmp_path):
+    """Compact do_not_repeat rows fill explore.rejected and rejected_kernel_ids."""
+    recipe = {
+        "tier": "exact",
+        "recipe": {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "do_not_repeat": [
+                {
+                    "kind": "explore",
+                    "name": "fp4_kv",
+                    "extra_server_args": "--kv-cache-dtype fp4",
+                    "extra_envs": {},
+                    "error_class": "regress",
+                },
+                {
+                    "kind": "kernel",
+                    "kernel_id": "aiter_mha",
+                    "action": "gemm_tuning",
+                    "reason": "REVERT",
+                },
+                {"kind": "kernel", "kernel_id": "aiter_mha"},
+            ],
+        },
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=recipe)
+    coord.shared_state.explore_search = {}
+    added = coord._inject_warm_recipe_history_into_ledger()
+    assert added == 1
+    assert coord.shared_state.explore_search["rejected"][0]["name"] == "fp4_kv"
+    assert coord.shared_state.rejected_kernel_ids == ["aiter_mha"]
 
 
 @pytest.mark.asyncio

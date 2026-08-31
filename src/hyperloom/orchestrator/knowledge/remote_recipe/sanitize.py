@@ -69,10 +69,17 @@ def _key_parts(value: str) -> tuple[list[str], str]:
     return parts, "".join(parts)
 
 
+# Nested Recipe keys that contain "token" as a word but are spend counters,
+# not credentials. ``_is_secret_key`` would otherwise drop the whole object.
+_SECRET_KEY_ALLOWLIST = frozenset({"token_usage"})
+
+
 def _is_secret_key(value: str) -> bool:
     upper = str(value or "").strip().upper()
     if upper in BENCHMARK_SECRET_ENV_NAMES:
         return True
+    if str(value or "").strip() in _SECRET_KEY_ALLOWLIST:
+        return False
     parts, normalized = _key_parts(value)
     return "token" in parts or any(
         marker in normalized
@@ -211,7 +218,7 @@ def _sanitize_value(value: Any, *, key: str = "") -> Any:
         "target_path",
     }:
         return _DROP
-    if _is_secret_key(key):
+    if _is_secret_key(key) and key not in _SECRET_KEY_ALLOWLIST:
         return _DROP
     if key == "extra_server_args":
         return sanitize_publish_server_args(str(value or ""))

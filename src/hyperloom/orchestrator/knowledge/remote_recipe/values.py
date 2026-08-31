@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Collection, Mapping
 
+from hyperloom.common.gpu_identity import gfx_arch_for_gpu_type
+from hyperloom.common.platform_probe import platform_fingerprint
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
 )
@@ -109,6 +111,485 @@ def _workload_shape(state: Any) -> dict[str, int]:
         if value is not None:
             shape[key] = value
     return shape
+
+
+#: Snapshot keys that are host-local and must never enter the shared Recipe.
+_ROOFLINE_PATH_KEYS = frozenset(
+    {
+        "analysis_md_path",
+        "kernel_roofline_path",
+        "trace_input",
+        "workspace",
+        "workspace_path",
+    }
+)
+_ROOFLINE_ARM_NUMBERS = (
+    "achieved_tok_per_sec",
+    "theoretical_peak_tok_per_sec",
+    "roofline_mem_ceiling_tok_per_sec",
+    "roofline_cmp_ceiling_tok_per_sec",
+    "within_roofline_pct",
+    "gap_to_roofline_pct",
+    "within_roofline_pct_uncapped",
+    "e2e_mean_ms",
+    "roofline_ideal_ms",
+    "compute_pct",
+    "idle_pct",
+    "comm_pct",
+)
+_ROOFLINE_TOP_KERNEL_KEYS = ("name", "gpu_pct", "efficiency_pct", "bound_type")
+
+
+def _finite_or_none(value: Any) -> float | None:
+    """Return a finite float, or ``None`` when the input is missing/non-numeric."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _publishable_roofline_arm(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one snapshot into the path-free arm the miner reads."""
+    arm: dict[str, Any] = {}
+    for key in _ROOFLINE_ARM_NUMBERS:
+        number = _finite_or_none(snapshot.get(key))
+        if number is not None:
+            arm[key] = number
+    exceeded = snapshot.get("roofline_ceiling_exceeded")
+    if isinstance(exceeded, bool):
+        arm["roofline_ceiling_exceeded"] = exceeded
+    bound = str(snapshot.get("roofline_bound_kind") or "").strip()
+    if bound:
+        arm["roofline_bound_kind"] = bound
+    bottleneck = str(snapshot.get("top_bottleneck") or "").strip()
+    if bottleneck:
+        arm["top_bottleneck"] = bottleneck
+    raw_kernel = snapshot.get("top_kernel")
+    if isinstance(raw_kernel, Mapping):
+        kernel: dict[str, Any] = {}
+        name = str(raw_kernel.get("name") or "").strip()
+        if name:
+            kernel["name"] = name
+        for key in _ROOFLINE_TOP_KERNEL_KEYS[1:]:
+            number = _finite_or_none(raw_kernel.get(key))
+            if number is not None:
+                kernel[key] = number
+            else:
+                text = str(raw_kernel.get(key) or "").strip()
+                if key == "bound_type" and text:
+                    kernel[key] = text
+        if kernel:
+            arm["top_kernel"] = kernel
+    return arm
+
+
+def _roofline_arm_usable(arm: Mapping[str, Any]) -> bool:
+    """True when an arm can support a roof or a measured point."""
+    peak = _finite_or_none(arm.get("theoretical_peak_tok_per_sec")) or 0.0
+    ideal = _finite_or_none(arm.get("roofline_ideal_ms")) or 0.0
+    achieved = _finite_or_none(arm.get("achieved_tok_per_sec")) or 0.0
+    e2e = _finite_or_none(arm.get("e2e_mean_ms")) or 0.0
+    return (peak > 0 or ideal > 0) and (achieved > 0 or e2e > 0)
+
+
+def build_publishable_roofline(state: Any) -> dict[str, Any] | None:
+    """Compact baseline/optimized roofline pair for Recipe KB mining.
+
+    Prefers the session's TraceLens/bypass snapshot history. Falls back to the
+    CPU-only ``baseline_roofline_ceiling`` when no trace snapshot is usable.
+    Returns ``None`` rather than a partial roof so miners do not treat a missing
+    measurement as zero headroom. Host paths are dropped here; sanitizer is a
+    second net, not the contract.
+    """
+    snapshots = [item for item in (getattr(state, "roofline_snapshots", None) or []) if isinstance(item, Mapping)]
+    ceiling = getattr(state, "baseline_roofline_ceiling", None)
+    source = "trace"
+    if not snapshots:
+        if isinstance(ceiling, Mapping) and ceiling:
+            snapshots = [ceiling]
+            source = "analytic_backup"
+        else:
+            return None
+
+    baseline_arm = _publishable_roofline_arm(snapshots[0])
+    optimized_snap = snapshots[-1] if snapshots else None
+    optimized_arm = _publishable_roofline_arm(optimized_snap) if optimized_snap is not None else {}
+    if not _roofline_arm_usable(baseline_arm):
+        if source == "trace" and isinstance(ceiling, Mapping) and ceiling:
+            baseline_arm = _publishable_roofline_arm(ceiling)
+            source = "analytic_backup"
+            optimized_arm = {}
+        if not _roofline_arm_usable(baseline_arm):
+            return None
+
+    peak_src = optimized_arm if _roofline_arm_usable(optimized_arm) else baseline_arm
+    record: dict[str, Any] = {
+        "source": source,
+        "baseline": baseline_arm,
+    }
+    unit = str(
+        (optimized_snap or {}).get("throughput_unit")
+        or snapshots[0].get("throughput_unit")
+        or ""
+    ).strip()
+    if unit:
+        record["throughput_unit"] = unit
+    bound = str(
+        (optimized_snap or {}).get("roofline_bound_kind")
+        or snapshots[0].get("roofline_bound_kind")
+        or peak_src.get("roofline_bound_kind")
+        or ""
+    ).strip()
+    if bound and bound != "unknown":
+        record["bound_kind"] = bound
+    peak = _finite_or_none(peak_src.get("theoretical_peak_tok_per_sec"))
+    if peak is not None and peak > 0:
+        record["theoretical_peak_tok_per_sec"] = peak
+    mem = _finite_or_none(peak_src.get("roofline_mem_ceiling_tok_per_sec"))
+    if mem is not None and mem > 0:
+        record["roofline_mem_ceiling_tok_per_sec"] = mem
+    cmp = _finite_or_none(peak_src.get("roofline_cmp_ceiling_tok_per_sec"))
+    if cmp is not None and cmp > 0:
+        record["roofline_cmp_ceiling_tok_per_sec"] = cmp
+    if _roofline_arm_usable(optimized_arm) and source == "trace":
+        record["optimized"] = optimized_arm
+    for key in _ROOFLINE_PATH_KEYS:
+        record.pop(key, None)
+        baseline_arm.pop(key, None)
+        optimized_arm.pop(key, None)
+    return record
+
+
+def _session_gpu_type(state: Any) -> str:
+    """Session board identity, already probe-corrected by the CLI when present."""
+    return str(getattr(state, "gpu_type", "") or getattr(state, "runner_type", "") or "").strip().lower()
+
+
+def _session_multi_node(state: Any) -> bool | None:
+    """Whether this session spans multiple nodes, or ``None`` when unknown.
+
+    Mirrors the run-report fingerprint: a True marker means the CPU/GPU sample
+    may be the orchestrator rather than the benchmark node.
+    """
+    raw = getattr(state, "multi_node", None)
+    if isinstance(raw, bool):
+        return raw
+    try:
+        from ...actions.executors._multi_node_env import is_multi_node
+
+        return bool(is_multi_node())
+    except Exception:  # noqa: BLE001 - unknown is not False
+        return None
+
+
+def _compact_stack(stack: Any) -> dict[str, str]:
+    """Keep resolved stack versions; drop ``unknown`` placeholders."""
+    if not isinstance(stack, Mapping):
+        return {}
+    out: dict[str, str] = {}
+    for key in ("rocm", "aiter", "sglang", "vllm"):
+        value = str(stack.get(key) or "").strip()
+        if value and value.lower() != "unknown":
+            out[key] = value
+    return out
+
+
+def build_publishable_platform(
+    state: Any,
+    *,
+    fingerprint: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Host + GPU facts for Recipe KB mining, without node identity.
+
+    Projects the same probe as ``final.json`` (``platform_fingerprint``) into
+    ``value.platform``. Hostname is dropped so a shared store cannot inventory
+    machines. ``gpu_type`` comes from the session (the KB's hardware dimension)
+    and is a stronger gfx source than a PATH-dependent probe.
+
+    Returns ``None`` when neither a CPU sysfs sample nor a session GPU type
+    is available, so miners do not treat a missing host as a default EPYC.
+    """
+    gpu_type = _session_gpu_type(state)
+    multi_node = _session_multi_node(state)
+    raw = dict(fingerprint) if fingerprint is not None else platform_fingerprint(gpu_type or None, multi_node=multi_node)
+    status = str(raw.get("status") or "").strip() or "error"
+
+    cpu: dict[str, Any] = {}
+    for key in ("cpu", "smt", "sockets", "numa_nodes", "nps", "governor", "boost", "kernel"):
+        value = raw.get(key)
+        if value in (None, ""):
+            continue
+        cpu[key if key != "cpu" else "model"] = value
+
+    gpu_block = raw.get("gpu") if isinstance(raw.get("gpu"), Mapping) else {}
+    gfx = str(gpu_block.get("gfx_arch") or "").strip()
+    if not gfx or gfx.lower() == "unknown":
+        gfx = gfx_arch_for_gpu_type(gpu_type) or ""
+    gpu: dict[str, Any] = {}
+    if gpu_type:
+        gpu["gpu_type"] = gpu_type
+    if gfx:
+        gpu["gfx_arch"] = gfx
+    host_count = gpu_block.get("host_count")
+    if isinstance(host_count, int) and not isinstance(host_count, bool) and host_count > 0:
+        gpu["host_count"] = host_count
+    driver = str(gpu_block.get("amdgpu_driver") or "").strip()
+    if driver and driver.lower() != "unknown":
+        gpu["amdgpu_driver"] = driver
+
+    record: dict[str, Any] = {"status": status}
+    reason = str(raw.get("reason") or "").strip()
+    if reason and status != "ok":
+        record["reason"] = reason
+    if multi_node is not None:
+        record["multi_node_session"] = multi_node
+    elif raw.get("multi_node_session") is not None:
+        record["multi_node_session"] = bool(raw.get("multi_node_session"))
+    if cpu:
+        record["cpu"] = cpu
+    if gpu:
+        record["gpu"] = gpu
+    stack = _compact_stack(raw.get("stack"))
+    if stack:
+        record["stack"] = stack
+    if "cpu" not in record and "gpu" not in record:
+        return None
+    return record
+
+
+_DO_NOT_REPEAT_CAP = 32
+_DO_NOT_REPEAT_REASON_MAX = 160
+_KERNEL_SKIP_ACTIONS = frozenset(
+    {
+        "fusion",
+        "geak_e2e",
+        "gemm_tuning",
+        "integrate",
+        "kernel_opt",
+        "rewrite",
+    }
+)
+_FRAMEWORK_SKIP_ACTIONS = frozenset({"integrate_patch", "framework"})
+
+
+def _reason_line(*parts: Any) -> str:
+    """One-line skip reason; empty when the only content looks like a host path."""
+    text = " ".join(str(part).strip() for part in parts if part not in (None, ""))
+    text = " ".join(text.split())
+    if not text or text.startswith("/") or ":\\" in text[:3]:
+        return ""
+    return text[:_DO_NOT_REPEAT_REASON_MAX]
+
+
+def _skip_explore_row(row: Mapping[str, Any], *, reason: str = "") -> dict[str, Any] | None:
+    """Return a path-free explore skip, or ``None`` when it cannot be fingerprinted."""
+    args = sanitize_publish_server_args(str(row.get("extra_server_args") or row.get("candidate_extra_server_args") or ""))
+    raw_envs = row.get("extra_envs") or row.get("candidate_extra_envs") or {}
+    envs = sanitize_publish_env_mapping(raw_envs if isinstance(raw_envs, Mapping) else {})
+    if not args and not envs:
+        return None
+    from ...actions.executors._canonical_fingerprint import canonical_fingerprint
+
+    item: dict[str, Any] = {
+        "kind": "explore",
+        "fingerprint": canonical_fingerprint(args, envs),
+        "extra_server_args": args,
+        "extra_envs": envs,
+    }
+    error_class = str(row.get("error_class") or row.get("reason") or "").strip()
+    if error_class and not error_class.startswith("/"):
+        item["error_class"] = error_class[:64]
+    name = str(row.get("name") or row.get("variant_name") or "").strip()
+    if name:
+        item["name"] = name[:120]
+    why = _reason_line(reason, error_class, name)
+    if why:
+        item["reason"] = why
+    return item
+
+
+def _skip_kernel_row(kernel_id: str, *, action: str = "", reason: str = "") -> dict[str, Any] | None:
+    kid = str(kernel_id or "").strip()
+    if not kid or kid.startswith("/"):
+        return None
+    item: dict[str, Any] = {"kind": "kernel", "kernel_id": kid[:128]}
+    act = str(action or "").strip().lower()
+    if act:
+        item["action"] = act
+    why = _reason_line(reason, act, kid)
+    if why:
+        item["reason"] = why
+    return item
+
+
+def build_publishable_do_not_repeat(state: Any) -> list[dict[str, Any]]:
+    """Compact skip list so the next run can refuse known-failed work without a prompt.
+
+    Prefer the explore rejected ledger (already fingerprinted) and
+    ``rejected_kernel_ids``. ``last_action_failures`` only contributes when it
+    still carries args/envs or a kernel id — the live store's action/task_id
+    rows are not skippable and are omitted rather than published as prose.
+    """
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def _add(item: dict[str, Any] | None) -> None:
+        if not item or len(items) >= _DO_NOT_REPEAT_CAP:
+            return
+        kind = str(item.get("kind") or "")
+        if kind in {"explore", "framework"}:
+            token = str(item.get("fingerprint") or "")
+        elif kind == "kernel":
+            token = str(item.get("kernel_id") or "")
+        else:
+            return
+        key = (kind, token)
+        if not token or key in seen:
+            return
+        seen.add(key)
+        items.append(item)
+
+    explore = getattr(state, "explore_search", None) or {}
+    rejected = explore.get("rejected") if isinstance(explore, Mapping) else None
+    if isinstance(rejected, list):
+        for row in rejected:
+            if isinstance(row, Mapping):
+                _add(_skip_explore_row(row, reason=str(row.get("reason") or "")))
+
+    for row in _experience(state, "last_action_failures"):
+        if not isinstance(row, Mapping):
+            continue
+        action = str(row.get("action") or "").strip().lower()
+        _add(_skip_explore_row(row, reason=str(row.get("error_class") or "")))
+        kid = str(row.get("kernel_id") or row.get("variant_name") or "").strip()
+        if action in _KERNEL_SKIP_ACTIONS or kid:
+            if action in _KERNEL_SKIP_ACTIONS or action.startswith("kernel"):
+                _add(_skip_kernel_row(kid, action=action, reason=str(row.get("error_class") or "")))
+        if action in _FRAMEWORK_SKIP_ACTIONS:
+            framed = _skip_explore_row(row, reason=str(row.get("error_class") or ""))
+            if framed is not None:
+                framed = {**framed, "kind": "framework"}
+                _add(framed)
+
+    for kid in getattr(state, "rejected_kernel_ids", None) or []:
+        _add(_skip_kernel_row(str(kid), reason="rejected_kernel_ids"))
+    return items
+
+
+_TOKEN_BUCKET_INTS = (
+    "total_in",
+    "total_out",
+    "total_cache_creation",
+    "total_cache_read",
+    "total_reasoning_out",
+    "calls",
+)
+_TOKEN_PHASE_CAP = 16
+
+
+def _session_dir(state: Any) -> Path | None:
+    raw = getattr(state, "session_dir", None) or getattr(state, "_session_dir", None)
+    if raw in (None, ""):
+        return None
+    path = Path(str(raw))
+    return path if path.is_dir() else None
+
+
+def _elapsed_minutes_from_state(state: Any) -> float | None:
+    raw = getattr(state, "elapsed_minutes", None)
+    if callable(raw):
+        try:
+            raw = raw()
+        except Exception:  # noqa: BLE001 — CLOSE must still publish the rest
+            raw = None
+    number = _finite_or_none(raw)
+    if number is None or number <= 0:
+        return None
+    return round(number, 3)
+
+
+def _compact_token_bucket(raw: Any) -> dict[str, Any]:
+    """Project a token bucket to the compact counters miners read."""
+    if not isinstance(raw, Mapping):
+        return {}
+    bucket = {key: int(raw.get(key, 0) or 0) for key in _TOKEN_BUCKET_INTS}
+    from hyperloom.inference_optimizer.breakdown.collectors.decision import _token_convenience
+
+    compact = _token_convenience(bucket)
+    if int(compact.get("calls", 0) or 0) <= 0 and int(compact.get("grand_total", 0) or 0) <= 0:
+        return {}
+    return compact
+
+
+def _token_usage_from_ledger(session_dir: Path) -> dict[str, Any] | None:
+    """Roll up ``reports/trace/llm_calls.jsonl`` without waiting for breakdown."""
+    from hyperloom.inference_optimizer.breakdown.collectors.decision import (
+        _empty_token_bucket,
+        _fold_call_into_bucket,
+        _load_llm_calls,
+    )
+
+    warnings: list[str] = []
+    calls = _load_llm_calls(session_dir, warnings)
+    if not calls:
+        return None
+    session_total = _empty_token_bucket()
+    by_phase: dict[str, dict[str, int]] = {}
+    for call in calls:
+        _fold_call_into_bucket(session_total, call)
+        phase = str(call.get("phase") or "").strip() or "unattributed"
+        _fold_call_into_bucket(by_phase.setdefault(phase, _empty_token_bucket()), call)
+    total = _compact_token_bucket(session_total)
+    if not total:
+        return None
+    phases: dict[str, dict[str, Any]] = {}
+    for phase, bucket in list(by_phase.items())[:_TOKEN_PHASE_CAP]:
+        compact = _compact_token_bucket(bucket)
+        if compact:
+            phases[phase] = compact
+    record: dict[str, Any] = {"session_total": total, "source": "llm_calls"}
+    if phases:
+        record["by_phase"] = phases
+    return record
+
+
+def build_publishable_token_usage(state: Any) -> dict[str, Any] | None:
+    """Compact LLM spend + wall clock for no-run savings estimates.
+
+    CLOSE runs before ``session_breakdown.json`` exists, so this prefers an
+    explicit ``state.token_usage`` and otherwise folds the live
+    ``llm_calls.jsonl`` ledger. ``elapsed_minutes`` comes from SharedState.
+    Returns ``None`` when neither spend nor elapsed is known.
+    """
+    record: dict[str, Any] = {}
+    elapsed = _elapsed_minutes_from_state(state)
+    if elapsed is not None:
+        record["elapsed_minutes"] = elapsed
+    usage = getattr(state, "token_usage", None)
+    compact: dict[str, Any] | None = None
+    if isinstance(usage, Mapping) and usage:
+        total = _compact_token_bucket(usage.get("session_total") if "session_total" in usage else usage)
+        if total:
+            compact = {"session_total": total, "source": "state"}
+            raw_phases = usage.get("by_phase")
+            if isinstance(raw_phases, Mapping):
+                phases: dict[str, dict[str, Any]] = {}
+                for phase, bucket in list(raw_phases.items())[:_TOKEN_PHASE_CAP]:
+                    item = _compact_token_bucket(bucket)
+                    if item:
+                        phases[str(phase)] = item
+                if phases:
+                    compact["by_phase"] = phases
+    if compact is None:
+        session_dir = _session_dir(state)
+        if session_dir is not None:
+            compact = _token_usage_from_ledger(session_dir)
+    if compact:
+        record["token_usage"] = compact
+    return record or None
 
 
 class _Files:
@@ -1160,6 +1641,21 @@ def build_remote_knowledge(
             f"required staged owner sections are missing: {sorted(missing_required_owners)!r}"
         )
     value["patch_timeline"] = _patch_timeline(value)
+    roofline = build_publishable_roofline(state)
+    if roofline:
+        value["roofline"] = roofline
+    platform = build_publishable_platform(state)
+    if platform:
+        value["platform"] = platform
+    do_not_repeat = build_publishable_do_not_repeat(state)
+    if do_not_repeat:
+        value["do_not_repeat"] = do_not_repeat
+    cost = build_publishable_token_usage(state)
+    if cost:
+        if "elapsed_minutes" in cost:
+            value["elapsed_minutes"] = cost["elapsed_minutes"]
+        if "token_usage" in cost:
+            value["token_usage"] = cost["token_usage"]
     knowledge = sanitize_shared_knowledge(
         {
             "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -1263,7 +1759,6 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "validated_gain_pct": validated_gain,
         "what_worked": list(knowledge.get("what_worked") or []),
         "what_failed": list(knowledge.get("what_failed") or []),
-        "remaining_gaps": list(knowledge.get("remaining_gaps") or []),
         "lessons": list(knowledge.get("lessons") or []),
         "pitfalls": list(knowledge.get("pitfalls") or []),
         "sessions": ([{"session_id": session_id, "gain_pct": validated_gain}] if session_id else []),
@@ -1278,9 +1773,18 @@ def knowledge_to_warm_recipe(document: Mapping[str, Any]) -> dict[str, Any]:
         "replay_material_available": (replayable and has_replay_material(document)),
         "replay_disabled_reason": str(view.get("replay_disabled_reason") or ""),
     }
-    for key, value in _mapping(knowledge.get("workload_shape")).items():
+    dnr = value.get("do_not_repeat")
+    if isinstance(dnr, list) and dnr:
+        row["do_not_repeat"] = [item for item in dnr if isinstance(item, dict)]
+    usage = value.get("token_usage")
+    if isinstance(usage, Mapping) and usage:
+        row["token_usage"] = dict(usage)
+    elapsed = _finite_or_none(value.get("elapsed_minutes"))
+    if elapsed is not None:
+        row["elapsed_minutes"] = elapsed
+    for key, shape_value in _mapping(knowledge.get("workload_shape")).items():
         if key in {"tp", "conc", "isl", "osl"}:
-            resolved = _positive_int(value)
+            resolved = _positive_int(shape_value)
             if resolved is not None:
                 row[key] = resolved
     return row
@@ -1295,6 +1799,10 @@ __all__ = [
     "build_kernel_gemm_value",
     "build_kernel_rewrite_value",
     "build_publishable_recipe_config",
+    "build_publishable_roofline",
+    "build_publishable_platform",
+    "build_publishable_do_not_repeat",
+    "build_publishable_token_usage",
     "build_remote_knowledge",
     "has_replay_material",
     "knowledge_to_warm_recipe",

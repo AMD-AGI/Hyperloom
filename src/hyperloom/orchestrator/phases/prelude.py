@@ -254,8 +254,15 @@ class PreludePhase(PhaseHandler):
         exact_history = recipe_attrs.get("exact_history")
         if isinstance(exact_history, dict):
             recipe_attrs = exact_history
-        what_failed = recipe_attrs.get("what_failed") or []
-        if not isinstance(what_failed, list) or not what_failed:
+        skip_rows: list[Any] = []
+        for source in (
+            recipe.get("do_not_repeat") if isinstance(recipe, dict) else None,
+            recipe_attrs.get("do_not_repeat"),
+            recipe_attrs.get("what_failed"),
+        ):
+            if isinstance(source, list):
+                skip_rows.extend(source)
+        if not skip_rows:
             state.warm_history_injected = True
             return 0
 
@@ -270,8 +277,18 @@ class PreludePhase(PhaseHandler):
         existing_fps.discard("")
         added = 0
         tier = str((warm or {}).get("tier") or "")
-        for row in what_failed:
+        kernel_ids = [str(k) for k in (getattr(state, "rejected_kernel_ids", None) or []) if str(k).strip()]
+        existing_kids = set(kernel_ids)
+        initial_kernel_count = len(kernel_ids)
+        for row in skip_rows:
             if not isinstance(row, dict):
+                continue
+            kind = str(row.get("kind") or "").strip().lower()
+            kid = str(row.get("kernel_id") or "").strip()
+            if kind == "kernel" or (kid and kind in {"", "kernel"}):
+                if kid and kid not in existing_kids:
+                    existing_kids.add(kid)
+                    kernel_ids.append(kid)
                 continue
             args = str(row.get("extra_server_args") or "").strip()
             envs = row.get("extra_envs") or {}
@@ -279,7 +296,7 @@ class PreludePhase(PhaseHandler):
                 envs = {}
             if not args and not envs:
                 continue
-            fp = canonical_fingerprint(args, envs)
+            fp = str(row.get("fingerprint") or "").strip() or canonical_fingerprint(args, envs)
             if fp in existing_fps:
                 continue
             existing_fps.add(fp)
@@ -287,12 +304,11 @@ class PreludePhase(PhaseHandler):
                 {
                     "name": str(row.get("name") or "")[:120],
                     "fingerprint": fp,
-                    "reason": "warm_recipe_what_failed",
+                    "reason": str(row.get("reason") or "warm_recipe_what_failed")[:160],
                     "extra_server_args": args,
                     "extra_envs": dict(envs),
                     "source": "warm_start_recipe",
                     "source_tier": tier,
-                    # Preserved for forensics; not used by the dedup gate.
                     "gain_pct": row.get("gain_pct"),
                     "error_class": row.get("error_class") or row.get("reason"),
                 }
@@ -303,9 +319,15 @@ class PreludePhase(PhaseHandler):
             es["rejected"] = rejected
             state.explore_search = es
             log.info(
-                "warm-recipe history: injected %d what_failed rows into explore_search.rejected (tier=%s)",
+                "warm-recipe history: injected %d skip rows into explore_search.rejected (tier=%s)",
                 added,
                 tier,
+            )
+        if len(kernel_ids) > initial_kernel_count:
+            state.rejected_kernel_ids = kernel_ids
+            log.info(
+                "warm-recipe history: injected %d kernel ids into rejected_kernel_ids",
+                len(kernel_ids) - initial_kernel_count,
             )
         state.warm_history_injected = True
         return added

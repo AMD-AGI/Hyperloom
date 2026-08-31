@@ -56,6 +56,10 @@ from hyperloom.orchestrator.knowledge.remote_recipe.sanitize import (
 from hyperloom.orchestrator.knowledge.remote_recipe.values import (
     _Files,
     build_publishable_recipe_config,
+    build_publishable_roofline,
+    build_publishable_platform,
+    build_publishable_do_not_repeat,
+    build_publishable_token_usage,
     has_replay_material,
 )
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
@@ -249,6 +253,406 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
     assert "object_id" not in serialized
     assert "bucket" not in serialized
     assert '"files": [' not in serialized
+
+
+def _roofline_snap(**overrides: object) -> dict:
+    snap = {
+        "theoretical_peak_tok_per_sec": 40000.0,
+        "achieved_tok_per_sec": 10000.0,
+        "within_roofline_pct": 25.0,
+        "gap_to_roofline_pct": 75.0,
+        "roofline_bound_kind": "memory",
+        "throughput_unit": "tok/s",
+        "top_bottleneck": "attention_decode",
+        "top_kernel": {
+            "name": "aiter_mha",
+            "gpu_pct": 41.2,
+            "efficiency_pct": 18.0,
+            "bound_type": "memory",
+        },
+        "kernel_roofline_path": "/workspace/session/reports/kernel_roofline.json",
+        "analysis_md_path": "/tmp/tl/analysis.md",
+        "trace_input": "/workspace/session/traces/prefill.json.gz",
+        "perfmodel_breakdown": {"ops": ["/opt/rocm/never-publish"]},
+    }
+    snap.update(overrides)
+    return snap
+
+
+def _assert_no_host_paths(payload: object) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            assert "path" not in key.lower(), key
+            _assert_no_host_paths(value)
+        return
+    if isinstance(payload, list):
+        for item in payload:
+            _assert_no_host_paths(item)
+        return
+    if isinstance(payload, str):
+        assert not payload.startswith("/"), payload
+        assert "://" not in payload, payload
+        assert not (len(payload) >= 3 and payload[1] == ":" and payload[2] in "\\/"), payload
+
+
+def test_publishable_roofline_omitted_without_snapshots(tmp_path: Path) -> None:
+    assert build_publishable_roofline(_state(tmp_path)) is None
+    bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files-no-roof")
+    assert "roofline" not in bundle.knowledge["value"]
+
+
+def test_publishable_roofline_strips_host_paths_and_keeps_warm_start(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.roofline_snapshots = [
+        _roofline_snap(),
+        _roofline_snap(
+            achieved_tok_per_sec=23272.2,
+            within_roofline_pct=58.18,
+            gap_to_roofline_pct=41.82,
+            kernel_roofline_path="/workspace/session/reports/kernel_roofline_opt.json",
+        ),
+    ]
+
+    record = build_publishable_roofline(state)
+    assert record is not None
+    assert record["source"] == "trace"
+    assert record["theoretical_peak_tok_per_sec"] == 40000.0
+    assert record["baseline"]["achieved_tok_per_sec"] == 10000.0
+    assert record["optimized"]["achieved_tok_per_sec"] == 23272.2
+    _assert_no_host_paths(record)
+
+    bundle = build_remote_knowledge(state, tmp_path / "files-roof")
+    roof = bundle.knowledge["value"]["roofline"]
+    _assert_no_host_paths(roof)
+    serialized = json.dumps(bundle.knowledge)
+    assert "/workspace" not in serialized
+    assert "/tmp/" not in serialized
+    assert "kernel_roofline" not in serialized
+
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True, "source": "current"},
+        }
+    )
+    assert row["best_throughput"] == 130.0
+    assert row["validated_gain_pct"] == 30.0
+    assert row["replay_material_available"] is True
+
+
+def test_publishable_roofline_falls_back_to_analytic_ceiling(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.roofline_snapshots = [
+        {
+            "kernel_roofline_path": "/bad/trace.json",
+            "top_kernel": {"name": "x", "source_file": "/opt/hidden.cu"},
+        }
+    ]
+    state.baseline_roofline_ceiling = _roofline_snap(
+        ceiling_arm="baseline",
+        kernel_roofline_path="",
+        analysis_md_path="",
+        trace_input="",
+    )
+    record = build_publishable_roofline(state)
+    assert record is not None
+    assert record["source"] == "analytic_backup"
+    assert "optimized" not in record
+    _assert_no_host_paths(record)
+
+
+def test_roofline_alone_is_not_replay_material() -> None:
+    assert not has_replay_material(
+        {
+            "knowledge": {
+                "value": {
+                    "config": {"extra_server_args": "", "extra_envs": {}},
+                    "explore": {"patches": [], "artifacts": []},
+                    "framework": {"patches": [], "artifacts": []},
+                    "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+                    "patch_timeline": [],
+                    "roofline": {
+                        "source": "trace",
+                        "theoretical_peak_tok_per_sec": 40000.0,
+                        "baseline": {"achieved_tok_per_sec": 10000.0},
+                    },
+                }
+            }
+        }
+    )
+
+
+def _fingerprint_fixture(**overrides: object) -> dict:
+    raw = {
+        "status": "ok",
+        "host": "fs355-secret-node",
+        "multi_node_session": False,
+        "cpu": "AMD EPYC 9575F 64-Core Processor",
+        "smt": "on",
+        "sockets": 2,
+        "numa_nodes": 2,
+        "nps": "NPS1",
+        "governor": "schedutil",
+        "boost": "on",
+        "kernel": "6.8.0-134-generic",
+        "gpu": {
+            "host_count": 8,
+            "gfx_arch": "gfx950",
+            "amdgpu_driver": "6.19.14.31400100",
+        },
+        "stack": {"rocm": "7.2.2", "aiter": "unknown", "sglang": "unknown", "vllm": "unknown"},
+    }
+    raw.update(overrides)
+    return raw
+
+
+def test_publishable_platform_omitted_without_host_or_gpu() -> None:
+    state = SimpleNamespace(gpu_type="", kernel_optimizer="native", tp=8, conc=1, isl=1, osl=1)
+    assert (
+        build_publishable_platform(
+            state,
+            fingerprint={"status": "unavailable", "reason": "no host CPU sysfs on this machine"},
+        )
+        is None
+    )
+
+
+def test_publishable_platform_strips_hostname_and_keeps_host_gpu(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _state(tmp_path)
+    state.gpu_type = "mi355x"
+    state.multi_node = False
+    record = build_publishable_platform(state, fingerprint=_fingerprint_fixture())
+    assert record is not None
+    assert "host" not in record
+    assert "fs355-secret-node" not in json.dumps(record)
+    assert record["cpu"]["model"] == "AMD EPYC 9575F 64-Core Processor"
+    assert record["cpu"]["governor"] == "schedutil"
+    assert record["cpu"]["smt"] == "on"
+    assert record["cpu"]["nps"] == "NPS1"
+    assert record["gpu"] == {
+        "gpu_type": "mi355x",
+        "gfx_arch": "gfx950",
+        "host_count": 8,
+        "amdgpu_driver": "6.19.14.31400100",
+    }
+    assert record["stack"] == {"rocm": "7.2.2"}
+    assert record["multi_node_session"] is False
+    _assert_no_host_paths(record)
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.values.platform_fingerprint",
+        lambda *a, **k: _fingerprint_fixture(),
+    )
+    bundle = build_remote_knowledge(state, tmp_path / "files-platform")
+    platform = bundle.knowledge["value"]["platform"]
+    assert "host" not in platform
+    assert "fs355-secret-node" not in json.dumps(bundle.knowledge)
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True, "source": "current"},
+        }
+    )
+    assert row["best_throughput"] == 130.0
+    assert row["replay_material_available"] is True
+
+
+def test_publishable_platform_gpu_type_resolves_gfx_without_sysfs() -> None:
+    record = build_publishable_platform(
+        SimpleNamespace(gpu_type="MI300X", multi_node=True),
+        fingerprint={"status": "unavailable", "reason": "no host CPU sysfs on this machine"},
+    )
+    assert record == {
+        "status": "unavailable",
+        "reason": "no host CPU sysfs on this machine",
+        "multi_node_session": True,
+        "gpu": {"gpu_type": "mi300x", "gfx_arch": "gfx942"},
+    }
+
+
+def test_platform_alone_is_not_replay_material() -> None:
+    assert not has_replay_material(
+        {
+            "knowledge": {
+                "value": {
+                    "config": {"extra_server_args": "", "extra_envs": {}},
+                    "explore": {"patches": [], "artifacts": []},
+                    "framework": {"patches": [], "artifacts": []},
+                    "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+                    "patch_timeline": [],
+                    "platform": {
+                        "status": "ok",
+                        "gpu": {"gpu_type": "mi355x", "gfx_arch": "gfx950"},
+                        "cpu": {"governor": "schedutil"},
+                    },
+                }
+            }
+        }
+    )
+
+
+def test_publishable_do_not_repeat_from_ledgers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _state(tmp_path)
+    state.gpu_type = "mi355x"
+    state.explore_search = {
+        "rejected": [
+            {
+                "name": "fp4_kv",
+                "extra_server_args": "--kv-cache-dtype fp4",
+                "extra_envs": {},
+                "reason": "regress",
+                "kernel_roofline_path": "/workspace/secret.json",
+            }
+        ]
+    }
+    state.rejected_kernel_ids = ["aiter_mha", "aiter_mha"]
+    state.last_action_failures = [
+        {"action": "explore", "task_id": "t-1", "ts": "2026-08-01T00:00:00Z"},
+        {
+            "action": "gemm_tuning",
+            "kernel_id": "fused_moe",
+            "error_class": "compile_error",
+        },
+    ]
+    rows = build_publishable_do_not_repeat(state)
+    kinds = {row["kind"] for row in rows}
+    assert "explore" in kinds
+    assert "kernel" in kinds
+    assert any(row.get("kernel_id") == "aiter_mha" for row in rows)
+    assert any(row.get("kernel_id") == "fused_moe" for row in rows)
+    _assert_no_host_paths(rows)
+    serialized = json.dumps(rows)
+    assert "/workspace" not in serialized
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.values.platform_fingerprint",
+        lambda *a, **k: {"status": "unavailable", "reason": "test"},
+    )
+    bundle = build_remote_knowledge(state, tmp_path / "files-dnr")
+    assert bundle.knowledge["value"]["do_not_repeat"]
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True, "source": "current"},
+        }
+    )
+    assert "remaining_gaps" not in row
+    assert row["do_not_repeat"]
+    assert row["tp"] == 8
+
+
+def test_do_not_repeat_alone_is_not_replay_material() -> None:
+    assert not has_replay_material(
+        {
+            "knowledge": {
+                "value": {
+                    "config": {"extra_server_args": "", "extra_envs": {}},
+                    "explore": {"patches": [], "artifacts": []},
+                    "framework": {"patches": [], "artifacts": []},
+                    "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+                    "patch_timeline": [],
+                    "do_not_repeat": [{"kind": "explore", "extra_server_args": "--x", "extra_envs": {}}],
+                }
+            }
+        }
+    )
+
+
+def test_publishable_token_usage_from_state_and_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _state(tmp_path)
+    state.elapsed_minutes = 87.5
+    state.token_usage = {
+        "session_total": {
+            "total_in": 1000,
+            "total_out": 200,
+            "total_cache_creation": 10,
+            "total_cache_read": 40,
+            "total_reasoning_out": 50,
+            "calls": 4,
+        },
+        "by_phase": {
+            "EXPLORE": {"total_in": 800, "total_out": 100, "calls": 2},
+            "KERNEL_AGENT": {"total_in": 200, "total_out": 100, "calls": 2},
+        },
+    }
+    cost = build_publishable_token_usage(state)
+    assert cost is not None
+    assert cost["elapsed_minutes"] == 87.5
+    assert cost["token_usage"]["session_total"]["grand_total"] == 1300
+    assert cost["token_usage"]["session_total"]["total_in_out"] == 1200
+    assert "EXPLORE" in cost["token_usage"]["by_phase"]
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.knowledge.remote_recipe.values.platform_fingerprint",
+        lambda *a, **k: {"status": "unavailable", "reason": "test"},
+    )
+    bundle = build_remote_knowledge(state, tmp_path / "files-cost")
+    value = bundle.knowledge["value"]
+    assert value["elapsed_minutes"] == 87.5
+    assert value["token_usage"]["session_total"]["grand_total"] == 1300
+    serialized = json.dumps(bundle.knowledge)
+    assert "token_usage" in serialized
+    row = knowledge_to_warm_recipe(
+        {
+            "canonical_id": "inference:m:h:f:mt:a:v:p",
+            "session_id": "session-1",
+            "schema_version": 2,
+            "knowledge": bundle.knowledge,
+            "view": {"replayable": True, "source": "current"},
+        }
+    )
+    assert row["elapsed_minutes"] == 87.5
+    assert row["token_usage"]["session_total"]["grand_total"] == 1300
+
+    ledger_state = SimpleNamespace(session_dir=tmp_path, elapsed_minutes=12.0)
+    trace = tmp_path / "reports" / "trace"
+    trace.mkdir(parents=True)
+    (trace / "llm_calls.jsonl").write_text(
+        json.dumps(
+            {
+                "status": "ok",
+                "phase": "EXPLORE",
+                "input_tokens": 10,
+                "output_tokens": 3,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 2,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    from_ledger = build_publishable_token_usage(ledger_state)
+    assert from_ledger is not None
+    assert from_ledger["token_usage"]["source"] == "llm_calls"
+    assert from_ledger["token_usage"]["session_total"]["grand_total"] == 15
+    assert from_ledger["token_usage"]["by_phase"]["EXPLORE"]["calls"] == 1
+
+
+def test_token_usage_alone_is_not_replay_material() -> None:
+    assert not has_replay_material(
+        {
+            "knowledge": {
+                "value": {
+                    "config": {"extra_server_args": "", "extra_envs": {}},
+                    "explore": {"patches": [], "artifacts": []},
+                    "framework": {"patches": [], "artifacts": []},
+                    "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
+                    "patch_timeline": [],
+                    "elapsed_minutes": 90.0,
+                    "token_usage": {"session_total": {"grand_total": 1_000_000, "calls": 12}},
+                }
+            }
+        }
+    )
 
 
 def test_publishable_config_excludes_runtime_and_enablement_bases() -> None:

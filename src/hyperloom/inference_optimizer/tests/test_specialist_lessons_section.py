@@ -24,6 +24,7 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
     _section_lessons,
     _section_pitfalls,
+    _section_recipe,
     build_specialist_prompts,
 )
 
@@ -216,6 +217,28 @@ def test_section_lessons_skips_lessons_with_empty_statement():
     assert "real one" in text
     # No empty bullet row.
     assert "**** " not in text
+
+
+def test_section_recipe_omits_remaining_gaps_and_raw_failures():
+    inp = SpecialistPromptInputs(
+        task_id="t-1",
+        domain=get_domain("serving_specialist"),
+        warm_start_recipe={
+            "tier": "exact",
+            "recipe": {
+                "best_throughput": 130.0,
+                "remaining_gaps": [{"symptom": "huge", "attempts": [{"n": i} for i in range(20)]}],
+                "what_failed": [{"action": "explore", "stderr_tail": "x" * 4000}],
+                "do_not_repeat": [{"kind": "explore", "extra_server_args": "--kv-cache-dtype fp4", "extra_envs": {}}],
+            },
+        },
+    )
+    text = "\n".join(_section_recipe(inp))
+    assert "do_not_repeat" in text
+    assert "--kv-cache-dtype fp4" in text
+    assert "remaining_gaps" not in text
+    assert "what_failed" not in text
+    assert "stderr_tail" not in text
 
 
 def test_build_specialist_prompts_inserts_5b_between_recipe_and_pr_monitor():

@@ -1728,6 +1728,35 @@ def _section_roofline_evidence(inp: SpecialistPromptInputs) -> list[str]:
     return rows
 
 
+_PROMPT_RECIPE_DROP = frozenset(
+    {
+        "remaining_gaps",
+        "what_failed",
+        "view",
+        "provenance",
+        "exact_history",
+    }
+)
+
+
+def _slim_warm_start_for_prompt(payload: Any) -> Any:
+    """Drop bulky negative history from the specialist recipe dump.
+
+    Skip lists belong in ``do_not_repeat`` (and the explore/kernel ledgers).
+    ``remaining_gaps`` / raw ``what_failed`` envelopes are session forensics
+    and cost tokens without changing the search gate.
+    """
+    if isinstance(payload, dict):
+        return {
+            key: _slim_warm_start_for_prompt(value)
+            for key, value in payload.items()
+            if key not in _PROMPT_RECIPE_DROP
+        }
+    if isinstance(payload, list):
+        return [_slim_warm_start_for_prompt(item) for item in payload]
+    return payload
+
+
 # Section 5 — Recipe summary
 def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
     """Render Section 5 (warm-start recipe summary) of the prompt.
@@ -1747,7 +1776,7 @@ def _section_recipe(inp: SpecialistPromptInputs) -> list[str]:
         return rows
     rows.append("**find-recipe result:**")
     rows.append("```json")
-    rows.append(json.dumps(inp.warm_start_recipe, sort_keys=True, separators=(",", ":")))
+    rows.append(json.dumps(_slim_warm_start_for_prompt(inp.warm_start_recipe), sort_keys=True, separators=(",", ":")))
     rows.append("```")
     return rows
 

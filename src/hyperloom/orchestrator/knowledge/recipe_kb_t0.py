@@ -461,7 +461,7 @@ def _build_warm_start_context(
         history = recipe.get("exact_history")
         prior_source = history if isinstance(history, Mapping) else recipe
         ctx["proven_prior"] = list(prior_source.get("what_worked") or [])
-        ctx["do_not_repeat"] = list(prior_source.get("what_failed") or [])
+        ctx["do_not_repeat"] = list(prior_source.get("do_not_repeat") or prior_source.get("what_failed") or [])
         ctx["lessons"] = list(prior_source.get("lessons") or [])
         ctx["pitfalls"] = list(prior_source.get("pitfalls") or [])
     # Replay config comes from the donor, or the identity recipe as self-donor.
