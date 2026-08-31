@@ -2050,7 +2050,7 @@ async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeyp
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "FRAMEWORK_AGENT"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "x", {}))
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
 
     async def _scout():
         return None
@@ -2065,7 +2065,9 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 
     coord.shared_state.phase = "PRELUDE"
     monkeypatch.setattr(
-        ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "robustness_escalated", {"evidence": "llm_escalation"})
+        ps,
+        "compute_next_phase",
+        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase):
@@ -2073,7 +2075,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "EXPLORE"
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
 
 @pytest.mark.asyncio

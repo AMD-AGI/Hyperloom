@@ -14,7 +14,6 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 
-from kernelforge.cli_forward_compat import stamp_ignored_cli_options
 from kernelforge.rewrite_by_flydsl import protocol
 from kernelforge.rewrite_by_flydsl.budget import DEFAULT_REWRITE_BUDGET
 from kernelforge.durable_io import atomic_write_text
@@ -157,15 +156,9 @@ def build_result(
     )
 
 
-def emit_result(
-    result: RewriteResult,
-    result_json: str | None = None,
-    *,
-    ignored_cli_options: list[str] | None = None,
-) -> str:
+def emit_result(result: RewriteResult, result_json: str | None = None) -> str:
     """Write (optional) + sentinel-wrap the result JSON, returning the payload."""
     document = result.to_dict()
-    stamp_ignored_cli_options(document, ignored_cli_options)
     if result.applyback_ok and result.applyback_required:
         protocol.validate_applyback_outer_result(document)
     payload = json.dumps(document)

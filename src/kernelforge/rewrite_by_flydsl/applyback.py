@@ -24,6 +24,7 @@ from kernelforge.agent_backends import (
     AgentHooks,
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
 from kernelforge.config import Config
@@ -367,7 +368,7 @@ async def _run_agent(
     )
     result = await asyncio.wait_for(
         backend.run(run_spec),
-        timeout=timeout_sec,
+        timeout=watchdog_timeout_sec(timeout_sec),
     )
     # A turn cap or SDK error leaves a half-rewired integration that passes host
     # validation and every gate after it, so it must be raised rather than published.

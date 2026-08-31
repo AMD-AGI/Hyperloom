@@ -85,6 +85,7 @@ def configure_aiter_cache_isolation(
     aiter_root_dir.mkdir(parents=True, exist_ok=True)
     aiter_jit_dir.mkdir(parents=True, exist_ok=True)
     flydsl_cache_dir.mkdir(parents=True, exist_ok=True)
+    _seed_flydsl_cache(flydsl_cache_dir)
     owner_file = cache_root / _OWNER_FILE
     owner_pid = os.getpid()
     _atomic_write_json(
@@ -142,7 +143,7 @@ def configure_aiter_cache_isolation(
 
 
 def child_cache_environment(cache_root: Path) -> dict[str, str]:
-    """Create one private AITER build cache and return the env that selects it.
+    """Create one private build cache and return the env that selects it.
 
     All three runtime compilers are redirected exactly as
     :func:`configure_aiter_cache_isolation` redirects them -- ``cpp_itfs`` reads
@@ -157,9 +158,12 @@ def child_cache_environment(cache_root: Path) -> dict[str, str]:
     shared cache. ``FORGE_AITER_CACHE_OWNER_PID`` stays this process's pid,
     because this process creates the root and is the one that removes it.
 
-    The shard is deliberately left empty: no prebuilt module is seeded into it
-    (see :func:`seed_prebuilt_modules`), so a subprocess that edits a source
-    compiles that source instead of importing a ``.so`` built from another one.
+    No prebuilt AITER module is seeded into the shard (see
+    :func:`seed_prebuilt_modules`), so a subprocess that edits a source compiles
+    that source instead of importing a ``.so`` built from another one. The
+    FlyDSL shard *is* seeded, because its entries are keyed by a hash of the
+    kernel source: an edit lands on a different key and compiles, so a warm
+    entry can never stand in for it the way a name-keyed ``.so`` can.
 
     Creating the directories here is what makes a failure loud -- the caller
     gets an ``OSError`` rather than a cache root it cannot use.
@@ -171,6 +175,7 @@ def child_cache_environment(cache_root: Path) -> dict[str, str]:
     aiter_root_dir.mkdir(parents=True, exist_ok=True)
     aiter_jit_dir.mkdir(parents=True, exist_ok=True)
     flydsl_cache_dir.mkdir(parents=True, exist_ok=True)
+    _seed_flydsl_cache(flydsl_cache_dir)
     return {
         "AITER_ROOT_DIR": str(aiter_root_dir),
         "AITER_JIT_DIR": str(aiter_jit_dir),
@@ -326,6 +331,11 @@ def activate_aiter_cache_for_sources(
     aiter_root_dir.mkdir(parents=True, exist_ok=True)
     aiter_jit_dir.mkdir(parents=True, exist_ok=True)
     flydsl_cache_dir.mkdir(parents=True, exist_ok=True)
+    # Every source shard is a fresh directory, so without seeding each one
+    # cold-compiles the kernels the edit never touched. Content addressing is
+    # what makes that safe: the edited kernel hashes to a key no seeded entry
+    # occupies.
+    _seed_flydsl_cache(flydsl_cache_dir)
     owner_file = cache_root / _OWNER_FILE
     owner_pid = os.getpid()
     now = time.time()
@@ -370,19 +380,20 @@ def activate_aiter_cache_for_sources(
     return isolation
 
 
-def _global_aiter_jit_dir() -> Path | None:
-    """Locate a prebuilt JIT dir where warm ``.so`` live.
+def _global_aiter_jit_dirs() -> list[Path]:
+    """Locate all prebuilt JIT directories where warm ``.so`` may live.
 
-    Checked in order: an explicit ``FORGE_AITER_WARM_JIT_DIR`` override, then the
-    installed package's own ``aiter/jit``, then ``~/.aiter/jit``. The last is
-    important for read-only wheel installs: aiter can't write prebuilt modules
-    back into the (read-only) site-packages tree, so they land under the user
-    cache instead, and checking only the package dir would find nothing.
+    Checked in order: an explicit ``FORGE_AITER_WARM_JIT_DIR`` override (returned
+    alone), then the installed package's own ``aiter/jit``, then ``~/.aiter/jit``.
+    Both package and user dirs are returned so the caller can pick the one that
+    actually holds the relevant content; stopping at the first existing dir would
+    always return the package dir and never reach the user cache, which is where
+    read-only wheel installs store compiled modules.
     """
     override = os.environ.get("FORGE_AITER_WARM_JIT_DIR", "").strip()
     if override:
         candidate = Path(override).expanduser()
-        return candidate if candidate.is_dir() else None
+        return [candidate] if candidate.is_dir() else []
     candidates: list[Path] = []
     try:
         import importlib.util
@@ -393,10 +404,35 @@ def _global_aiter_jit_dir() -> Path | None:
     if spec is not None and spec.origin:
         candidates.append(Path(spec.origin).parent / "jit")
     candidates.append(Path.home() / ".aiter" / "jit")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    return None
+    return [c for c in candidates if c.is_dir()]
+
+
+def _seed_flydsl_cache(target: Path) -> None:
+    """Symlink precompiled FlyDSL artefacts from the global cache into *target*."""
+    target.mkdir(parents=True, exist_ok=True)
+    source = next(
+        (d / "flydsl_cache" for d in _global_aiter_jit_dirs() if (d / "flydsl_cache").is_dir()),
+        None,
+    )
+    if source is None:
+        return
+    try:
+        hash_dirs = sorted(source.iterdir())
+    except OSError:
+        return
+    for entry in hash_dirs:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
+        destination = target / entry.name
+        if destination.exists() or destination.is_symlink():
+            continue
+        try:
+            os.symlink(entry.resolve(), destination)
+        except OSError as error:
+            log.warning("aiter-cache: could not link FlyDSL cache %s: %s", entry.name, error)
 
 
 def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
@@ -418,7 +454,10 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
     fresh content-keyed shard dir and compile normally).
     """
     stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "src": "", "errors": 0}
-    global_dir = _global_aiter_jit_dir()
+    global_dirs = _global_aiter_jit_dirs()
+    global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (
+        global_dirs[0] if global_dirs else None
+    )
     if global_dir is None:
         return stats
     stats["src"] = str(global_dir)
@@ -581,7 +620,7 @@ def cleanup_owned_aiter_cache(isolation: AiterCacheIsolation) -> dict[str, Any]:
         stats["deleted"] = True
         _CACHE_POLICIES.pop(str(isolation.cache_root.resolve()), None)
         prefix = str(isolation.cache_root.resolve()) + os.sep
-        for key in ("AITER_ROOT_DIR", "AITER_JIT_DIR"):
+        for key in ("AITER_ROOT_DIR", "AITER_JIT_DIR", "FLYDSL_RUNTIME_CACHE_DIR"):
             value = os.environ.get(key, "")
             if value.startswith(prefix):
                 os.environ.pop(key, None)

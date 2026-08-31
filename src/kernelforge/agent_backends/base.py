@@ -275,6 +275,25 @@ class AgentRunSpec:
         )
 
 
+#: Extra time an outer watchdog adds over ``AgentRunSpec.timeout_sec``. A watchdog
+#: set to the same budget races the backend's own deadline, and the cancel it
+#: delivers destroys the outputs that deadline was about to preserve.
+AGENT_WATCHDOG_GRACE_SEC: int = 300
+
+
+def watchdog_timeout_sec(session_timeout: float | int) -> float:
+    """Return the outer-watchdog budget for a session bounded by ``session_timeout``.
+
+    Args:
+        session_timeout: The value passed to ``AgentRunSpec.timeout_sec``.
+
+    Returns:
+        A timeout strictly greater than ``session_timeout``, so the backend's own
+        graceful-deadline path always fires first.
+    """
+    return float(session_timeout) + AGENT_WATCHDOG_GRACE_SEC
+
+
 @dataclass
 class AgentRunResult:
     """Normalize one backend session result for the Forge loop."""

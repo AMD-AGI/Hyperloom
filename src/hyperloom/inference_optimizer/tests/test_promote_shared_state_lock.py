@@ -16,10 +16,11 @@ from hyperloom.orchestrator.roles import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop import writeback as wb
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _keep_owner_section
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -522,18 +523,22 @@ async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_phase", "section"),
-    [("EXPLORE", "explore"), ("FRAMEWORK_AGENT", "framework")],
-)
-async def test_integrate_keep_stages_patch_for_proposal_owner(
-    session_dir, tmp_path, monkeypatch, source_phase, section
+@pytest.mark.parametrize("source_phase", ["EXPLORE", "FRAMEWORK_AGENT"])
+async def test_integrate_keep_stages_an_authored_patch_under_the_source_section(
+    session_dir, tmp_path, monkeypatch, source_phase
 ):
+    """A patch stages where its lever files it, not where its proposer ran.
+
+    ``_entry_origin`` files an authored diff under ``framework`` whichever arm
+    dispatched it. Staging it under the proposing phase instead would mint the
+    same patch twice -- once as a ``framework`` ref from the entry and once as
+    an ``explore`` ref from the staged section -- and replay it twice.
+    """
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    patch = tmp_path / f"{section}.diff"
-    patch.write_bytes(f"{section} bytes".encode())
+    patch = tmp_path / "authored.diff"
+    patch.write_bytes(b"authored bytes")
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 100.0
 
@@ -542,23 +547,54 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(
         {
             "status": "kept",
             "output_throughput": 120.0,
-            "specialist_task_id": f"spec-{section}",
+            "specialist_task_id": "spec-authored",
             "source_phase": source_phase,
             "patches_applied": [str(patch)],
         },
         task=_task(
             "integrate_patch",
             params={
-                "specialist_task_id": f"spec-{section}",
+                "specialist_task_id": "spec-authored",
                 "source_phase": source_phase,
             },
         ),
     )
 
-    staged = KnowledgeSections(draft).staged(section)
-    ref = f"{section}/overlays/000000/00-{section}.patch"
-    assert staged.knowledge["patches"] == [ref]
+    ref = "framework/overlays/000000/00-authored.patch"
+    assert KnowledgeSections(draft).staged("framework").knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+    assert KnowledgeSections(draft).staged("explore") is None
+
+
+@pytest.mark.asyncio
+async def test_a_config_lever_keep_stages_under_the_configuration_section(session_dir, tmp_path, monkeypatch):
+    """A KEEP that touched nothing on disk belongs to the configuration lever.
+
+    The section it stages into is the other half of the routing an authored
+    diff exercises: reading the phase instead would file both under one owner.
+    """
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "lever_kind": LEVER_CONFIG,
+            "source_phase": "EXPLORE",
+            "extra_server_args": "--page-size 32",
+            "patches_applied": [],
+        },
+        task=_task("integrate_patch", params={"source_phase": "EXPLORE"}),
+    )
+
+    stack = coord.shared_state.optimization_stack
+    assert stack and stack[-1]["lever_kind"] == LEVER_CONFIG
+    assert _keep_owner_section({"source_phase": "EXPLORE"}, {"lever_kind": LEVER_CONFIG}) == "EXPLORE"
 
 
 @pytest.mark.asyncio

@@ -121,7 +121,6 @@ from .roofline import (
 )
 from .explore import (
     _shape_ledger as _shape_ledger,
-    _patch_winners_history as _patch_winners_history,
     _shape_winners_history as _shape_winners_history,
     collect_explore_search as collect_explore_search,
     _VARIANT_NAME_RE as _VARIANT_NAME_RE,
@@ -186,6 +185,11 @@ from .geak import (
     _geak_reconstruct_from_disk as _geak_reconstruct_from_disk,
     collect_geak as collect_geak,
 )
+from .v6 import (
+    collect_v6_metadata as collect_v6_metadata,
+    collect_v6_outcome as collect_v6_outcome,
+    collect_v6_timeline as collect_v6_timeline,
+)
 
 __all__ = [
     "collect_attribution",
@@ -209,6 +213,9 @@ __all__ = [
     "collect_sweep",
     "collect_telemetry",
     "collect_token_usage",
+    "collect_v6_metadata",
+    "collect_v6_outcome",
+    "collect_v6_timeline",
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",

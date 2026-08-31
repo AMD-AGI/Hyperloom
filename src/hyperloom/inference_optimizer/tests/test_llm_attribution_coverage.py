@@ -168,7 +168,7 @@ def test_component_labels_come_from_the_closed_vocabulary() -> None:
             if keyword.value.value not in VALID_COMPONENTS:
                 offenders.append(f"{relative}:{node.lineno}: {name}(component={keyword.value.value!r})")
     assert not offenders, "LLM call sites naming an unknown component:\n" + "\n".join(offenders)
-    assert checked >= 15, f"only {checked} literal components found; the scan is no longer finding them"
+    assert checked >= 14, f"only {checked} literal components found; the scan is no longer finding them"
 
 
 def _iter_component_field_labels() -> Iterator[tuple[Path, int, str]]:

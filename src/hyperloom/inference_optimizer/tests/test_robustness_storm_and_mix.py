@@ -66,15 +66,7 @@ def test_consecutive_config_only_ignores_unknown_change_type():
     assert s.consecutive_config_only_rounds == 1
 
 
-# 3. explore_specialist_dispatched_count
-def test_specialist_dispatch_counter_increments():
-    s = SharedState()
-    assert s.explore_specialist_dispatched_count == 0
-    assert s.bump_specialist_dispatched() == 1
-    assert s.bump_specialist_dispatched(3) == 4
-
-
-# 4. Coordinator hook: explore KEEP → config; integrate_patch kept → code_patch
+# 3. Coordinator hook: explore KEEP → config; integrate_patch kept → code_patch
 def test_coordinator_intervention_hook_records_config_for_explore():
     from hyperloom.orchestrator.loop.coordinator import Coordinator
     from hyperloom.orchestrator.state.task_registry import Task
@@ -169,7 +161,7 @@ def test_coordinator_intervention_hook_records_integrate_attempts():
     assert c.shared_state.consecutive_config_only_rounds == 0
 
 
-# 5. Advisory intervention-mix prompt summary
+# 4. Advisory intervention-mix prompt summary
 def test_intervention_mix_summary_no_escalation_when_balanced():
     s = SharedState()
     s.record_intervention(change_type="config", action="explore")

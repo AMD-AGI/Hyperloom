@@ -41,7 +41,14 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
-from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..agent_ownership import (
+    UNATTRIBUTED,
+    agent_from_lever,
+    agent_from_phase,
+    patch_author,
+    patch_lever_kind,
+)
+from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -183,12 +190,7 @@ def _operation_status(status: Any) -> str:
 
 
 _AGENT_BY_ACTION = {
-    "framework_agent": "framework_agent",
-    "framework": "framework_agent",
     "explore": "explore",
-    "backends": "explore",
-    "params": "explore",
-    "specialist": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
     "baseline": "coordinator",
@@ -229,7 +231,12 @@ def _resolve_agent(
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    return agent_from_phase(result.get("source_phase")) or agent_from_phase(phase) or UNATTRIBUTED
+    return (
+        agent_from_lever(patch_lever_kind(result))
+        or agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -511,7 +518,6 @@ def _mirror_action_v4(
         "baseline": "workload",
         "profile": "profile",
         "roofline": "roofline_snapshot",
-        "framework_agent": "framework_candidate",
         "explore": "variant",
         "sweep": "sweep",
         "conc_sweep": "concurrency_sweep",
@@ -620,36 +626,7 @@ def _mirror_action_v4(
                 "metadata": {"trace_health": result.get("trace_health")},
             }
         )
-    elif action == "framework_agent":
-        for name in ("apply", "benchmark", "evaluation", "decision"):
-            substeps.append(
-                {
-                    "substep_id": _stable_id("substep", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": status,
-                    "ended_at": ended_at,
-                }
-            )
     gates: list[dict[str, Any]] = []
-    if action == "framework_agent":
-        for name, value in (
-            ("accuracy", result.get("accuracy_pass")),
-            ("throughput", result.get("throughput_pass")),
-            ("critic", result.get("critic_pass")),
-        ):
-            if value is None:
-                continue
-            gates.append(
-                {
-                    "gate_id": _stable_id("gate", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": "passed" if bool(value) else "failed",
-                    "decision": "allow" if bool(value) else "deny",
-                    "evaluated_at": ended_at,
-                }
-            )
     agent = _resolve_agent(action, result=result, phase=phase)
     # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
     # zero is a verdict, not a missing value.
@@ -694,7 +671,6 @@ def _mirror_action_v4(
     if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
         verdict = executor_verdict
     adoptable_actions = {
-        "framework_agent",
         "explore",
         "integrate",
         "integrate_patch",
@@ -758,7 +734,7 @@ def _mirror_action_v4(
         session_dir,
         operation_id=operation_id,
         root_operation_id=operation_id,
-        kind="composite" if action in {"baseline", "roofline", "framework_agent"} else action,
+        kind="composite" if action in {"baseline", "roofline"} else action,
         name=action,
         phase=phase,
         macro_cycle=int(macro_cycle or 0),
@@ -1114,11 +1090,9 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
-    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 
@@ -3637,10 +3611,9 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
-        phase (str): the phase the round ran in; falls back to
-            ``entry["phase"]``, then to the reader's timestamp backfill. A
-            specialist runs in more than one phase, so this cannot be a
-            constant.
+        phase (str): the runtime phase used when the entry does not already
+            declare ``source_phase``. A specialist runs in more than one phase,
+            so this cannot be a constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3648,19 +3621,23 @@ def record_specialist_round(
         trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
-        key = str(entry.get("round_id") or "") or None
+        source_phase = str(entry.get("source_phase") or phase or entry.get("phase") or "").strip().upper()
+        recorded_entry = dict(entry)
+        if source_phase:
+            recorded_entry.setdefault("source_phase", source_phase)
+        key = str(recorded_entry.get("round_id") or "") or None
         _recorder(session_dir, producer).record_item(
             "specialist_runs",
-            dict(entry),
+            recorded_entry,
             key=key,
         )
-        round_id = str(entry.get("round_id") or key or entry.get("task_id") or "unknown")
+        round_id = str(recorded_entry.get("round_id") or key or recorded_entry.get("task_id") or "unknown")
         operation_id = _stable_id("op", "specialist", round_id)
         round_subject_id = _stable_id("subject", "specialist-round", round_id)
-        domains = list(entry.get("domains") or [])
-        if entry.get("domain"):
-            domains.append(str(entry.get("domain")))
-        domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
+        domains = list(recorded_entry.get("domains") or [])
+        if recorded_entry.get("domain"):
+            domains.append(str(recorded_entry.get("domain")))
+        domains.extend(str(tag) for tag in (recorded_entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
         record_subject(
             session_dir,
@@ -3670,7 +3647,7 @@ def record_specialist_round(
             name=round_id,
             attributes={
                 "domains": domains,
-                "proposals_total": entry.get("proposals_total"),
+                "proposals_total": recorded_entry.get("proposals_total"),
             },
             producer=producer,
         )
@@ -3688,7 +3665,7 @@ def record_specialist_round(
             )
             domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
         proposal_subjects: list[dict[str, Any]] = []
-        proposals = entry.get("proposal_set")
+        proposals = recorded_entry.get("proposal_set")
         if isinstance(proposals, list):
             for index, proposal in enumerate(proposals):
                 if not isinstance(proposal, Mapping):
@@ -3713,19 +3690,19 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase=phase or str(entry.get("phase") or ""),
-            status="succeeded" if entry.get("completed_at") else "partial",
+            phase=source_phase,
+            status="succeeded" if recorded_entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
             purpose="proposal",
-            scope=str(entry.get("scope") or ""),
+            scope=str(recorded_entry.get("scope") or ""),
             strategy_group="specialist",
             strategy="multi_domain",
             producer=producer,
-            ended_at=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            ended_at=str(recorded_entry.get("completed_at") or recorded_entry.get("dispatched_at") or ""),
             subject={"subject_id": round_subject_id, "subject_type": "specialist_round"},
             subjects=domain_subjects + proposal_subjects,
-            outputs=dict(entry),
+            outputs=recorded_entry,
             adoption_refs=[],
             extensions={"downstream_relation": "proposal_only"},
         )
@@ -3747,6 +3724,8 @@ def record_critic_iteration(
     session_dir: Path | str | None,
     *,
     iter_n: int,
+    request: dict[str, Any] | None = None,
+    judge_bundle: dict[str, Any] | None = None,
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
@@ -3755,9 +3734,10 @@ def record_critic_iteration(
 ) -> None:
     """Record one ``critic_robustness.critic_iterations`` item.
 
-    Recorded per-iteration (idempotent on ``iter_n``) so the critic backend's
-    workdir pruning never erases history; payload mirrors
-    ``collectors.collect_critic_robustness``.
+    Recorded per-iteration under a session-unique identity so workdir pruning
+    and resume-time turn-index reuse never erase history; payload mirrors
+    ``collectors.collect_critic_robustness`` and retains normalized Framework
+    review rows for the V6 timeline.
 
     ``kb_priors`` (when provided) carries the per-iteration KB integration
     trace: whether the historical priors were used, the request, the response,
@@ -3767,7 +3747,9 @@ def record_critic_iteration(
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
-        iter_n (int): the critic iteration number (idempotency key).
+        iter_n (int): the process-local critic iteration number.
+        request (dict[str, Any] | None): the critic request payload.
+        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
         review (dict[str, Any] | None): the critic review payload.
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
@@ -3783,6 +3765,14 @@ def record_critic_iteration(
         review = review if isinstance(review, dict) else {}
         emit = emit if isinstance(emit, dict) else {}
         wd = Path(workdir) if workdir else None
+        request = request if isinstance(request, dict) else read_json(wd / "request.json", default={}) if wd else {}
+        judge_bundle = (
+            judge_bundle
+            if isinstance(judge_bundle, dict)
+            else read_json(wd / "judge_bundle.json", default={})
+            if wd
+            else {}
+        )
         payload = {
             "iter": int(iter_n),
             "ts": str(emit.get("ts") or review.get("ts") or ""),
@@ -3795,14 +3785,45 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
+        request_context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        phase = str(request_context.get("phase") or "").strip().upper()
+        if phase:
+            payload["phase"] = phase
+        try:
+            macro_cycle = int(request_context["macro_cycle"])
+        except (KeyError, TypeError, ValueError):
+            macro_cycle = None
+        if macro_cycle is not None:
+            payload["macro_cycle"] = macro_cycle
+        framework_reviews = normalize_framework_reviews(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            review_path=_rel(wd / "review.json", session_dir).replace("\\", "/") if wd else None,
+        )
+        if framework_reviews:
+            payload["framework_reviews"] = framework_reviews
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
+        iteration_id = _stable_id(
+            "critic-iteration",
+            iter_n,
+            payload.get("ts"),
+            [row.get("proposal_msg_id") for row in framework_reviews],
+            payload.get("topic"),
+            request,
+            judge_bundle,
+            review,
+            emit,
+        )
+        payload["iteration_id"] = iteration_id
         _recorder(session_dir, producer).record_item(
             "critic_iterations",
             payload,
-            key=str(iter_n),
+            key=iteration_id,
         )
-        operation_id = _stable_id("op", "critic", iter_n)
+        operation_id = _stable_id("op", iteration_id)
         artifact_refs: list[str] = []
         for name in ("request_path", "judge_bundle_path", "emit_path", "review_path"):
             path = payload.get(name)
@@ -3861,7 +3882,7 @@ def record_critic_iteration(
             write_key = (
                 write.get("write_id") or write.get("point_id") or write.get("edge_id") or write.get("kind") or index
             )
-            write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
+            write_operation_id = _stable_id("op", "kb-write", iteration_id, write_key)
             result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}
             write_status = _operation_status(result_payload.get("status") or write.get("status") or "succeeded")
             record_operation(
@@ -4212,6 +4233,8 @@ _AGENT_BY_OPERATION_KIND = {
     "kernel_optimizer_selection": "kernel_agent",
     "strategy_selection": "kernel_agent",
     "gemm_tuning": "kernel_agent",
+    # A specialist round is discovery, not an attempt: it carries no gain and
+    # no adoption, so this names the agent whose activity it was.
     "specialist": "explore",
     "critic": "critic",
     "kb_write": "critic",
