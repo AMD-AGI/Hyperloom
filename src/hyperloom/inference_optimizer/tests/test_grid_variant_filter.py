@@ -31,6 +31,9 @@ def test_single_node_is_a_strict_noop(monkeypatch):
         _v("keep", args="--cuda-graph-max-bs 64"),
     ]
     kept, dropped = apply_multi_node_invalid_variants(grid)
+    # Identity is the production contract: single-node returns the input
+    # list (`return grid, []`), not a copy. Sibling filters copy on their
+    # no-op path; this one does not, so `is` is the pin.
     assert kept is grid
     assert dropped == []
 
@@ -49,6 +52,7 @@ def test_multi_node_drops_cuda_graph_max_bs_below_conc(_multi_node, monkeypatch)
     assert [row["name"] for row in dropped] == ["space-form", "equals-form"]
     assert all(row["source"] == "multi_node_invalid" for row in dropped)
     assert "CONC=64" in dropped[0]["reason"]
+    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
 
 
 def test_conc_zero_does_not_drop(_multi_node, monkeypatch):
@@ -73,6 +77,8 @@ def test_multi_node_flag_in_non_leading_position_is_detected(_multi_node, monkey
     kept, dropped = apply_multi_node_invalid_variants(grid)
     assert [v.name for v in kept] == ["multi-flag-keep"]
     assert [row["name"] for row in dropped] == ["multi-flag-drop"]
+    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
+    assert "CONC=64" in dropped[0]["reason"]
 
 
 def test_conc_unset_defaults_to_64(_multi_node, monkeypatch):
@@ -86,6 +92,7 @@ def test_conc_unset_defaults_to_64(_multi_node, monkeypatch):
     assert [v.name for v in kept] == ["at-default"]
     assert [row["name"] for row in dropped] == ["below-default"]
     assert "CONC=64" in dropped[0]["reason"]
+    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
 
 
 def test_conc_empty_string_defaults_to_64(_multi_node, monkeypatch):
@@ -99,6 +106,7 @@ def test_conc_empty_string_defaults_to_64(_multi_node, monkeypatch):
     assert [v.name for v in kept] == ["at-default"]
     assert [row["name"] for row in dropped] == ["below-default"]
     assert "CONC=64" in dropped[0]["reason"]
+    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
 
 
 def test_unparseable_conc_falls_back_to_64(_multi_node, monkeypatch):
@@ -111,3 +119,13 @@ def test_unparseable_conc_falls_back_to_64(_multi_node, monkeypatch):
     assert [v.name for v in kept] == ["at-default"]
     assert [row["name"] for row in dropped] == ["below-default"]
     assert "CONC=64" in dropped[0]["reason"]
+    assert "cuda_graph_max_bs=32" in dropped[0]["reason"]
+
+
+def test_none_extra_server_args_is_treated_as_empty(_multi_node, monkeypatch):
+    """`v.extra_server_args or ""` must not raise or match when args is None."""
+    monkeypatch.setenv("CONC", "64")
+    v = GridVariant(name="none-args", extra_server_args=None)
+    kept, dropped = apply_multi_node_invalid_variants([v])
+    assert kept == [v]
+    assert dropped == []
