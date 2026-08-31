@@ -380,19 +380,20 @@ def activate_aiter_cache_for_sources(
     return isolation
 
 
-def _global_aiter_jit_dir() -> Path | None:
-    """Locate a prebuilt JIT dir where warm ``.so`` live.
+def _global_aiter_jit_dirs() -> list[Path]:
+    """Locate all prebuilt JIT directories where warm ``.so`` may live.
 
-    Checked in order: an explicit ``FORGE_AITER_WARM_JIT_DIR`` override, then the
-    installed package's own ``aiter/jit``, then ``~/.aiter/jit``. The last is
-    important for read-only wheel installs: aiter can't write prebuilt modules
-    back into the (read-only) site-packages tree, so they land under the user
-    cache instead, and checking only the package dir would find nothing.
+    Checked in order: an explicit ``FORGE_AITER_WARM_JIT_DIR`` override (returned
+    alone), then the installed package's own ``aiter/jit``, then ``~/.aiter/jit``.
+    Both package and user dirs are returned so the caller can pick the one that
+    actually holds the relevant content; stopping at the first existing dir would
+    always return the package dir and never reach the user cache, which is where
+    read-only wheel installs store compiled modules.
     """
     override = os.environ.get("FORGE_AITER_WARM_JIT_DIR", "").strip()
     if override:
         candidate = Path(override).expanduser()
-        return candidate if candidate.is_dir() else None
+        return [candidate] if candidate.is_dir() else []
     candidates: list[Path] = []
     try:
         import importlib.util
@@ -403,31 +404,46 @@ def _global_aiter_jit_dir() -> Path | None:
     if spec is not None and spec.origin:
         candidates.append(Path(spec.origin).parent / "jit")
     candidates.append(Path.home() / ".aiter" / "jit")
-    for candidate in candidates:
-        if candidate.is_dir():
-            return candidate
-    return None
+    return [c for c in candidates if c.is_dir()]
+
+
+def _global_aiter_jit_dir() -> Path | None:
+    """Return the first available global JIT directory, or ``None``."""
+    dirs = _global_aiter_jit_dirs()
+    return dirs[0] if dirs else None
 
 
 def _seed_flydsl_cache(target: Path) -> None:
-    """Create *target* and symlink the package's FlyDSL launch directories in.
+    """Warm *target* with precompiled FlyDSL artefacts from the global cache.
 
-    Each entry in the packaged cache is a launch-hash directory of precompiled
-    artefacts. Linking the directories rather than their contents shares
-    gigabytes of warm kernels without copying, and a compile in the shard adds
-    a directory of its own.
+    Each hash directory in the source cache is symlinked into the shard.
+    Content-addressing ensures that a compilation of new source code produces
+    a new hash key, so FlyDSL never writes into an existing hash dir: the
+    symlink acts as a read-only view of the precompiled artefacts and new
+    entries land beside it in the shard's own directory.
 
     Args:
         target: Cache directory this process will compile into.
     """
     target.mkdir(parents=True, exist_ok=True)
-    global_jit = _global_aiter_jit_dir()
-    source = global_jit / "flydsl_cache" if global_jit else None
-    if source is None or not source.is_dir():
+    source = next(
+        (d / "flydsl_cache" for d in _global_aiter_jit_dirs() if (d / "flydsl_cache").is_dir()),
+        None,
+    )
+    if source is None:
         return
-    for entry in sorted(source.iterdir()):
+    try:
+        hash_dirs = sorted(source.iterdir())
+    except OSError:
+        return
+    for entry in hash_dirs:
+        try:
+            if not entry.is_dir():
+                continue
+        except OSError:
+            continue
         destination = target / entry.name
-        if not entry.is_dir() or destination.exists() or destination.is_symlink():
+        if destination.exists() or destination.is_symlink():
             continue
         try:
             os.symlink(entry.resolve(), destination)
@@ -454,7 +470,10 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
     fresh content-keyed shard dir and compile normally).
     """
     stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "src": "", "errors": 0}
-    global_dir = _global_aiter_jit_dir()
+    # Search all global dirs for .so files; the user cache (~/.aiter/jit) may
+    # hold compiled modules that the read-only site-packages tree cannot store.
+    global_dirs = _global_aiter_jit_dirs()
+    global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (global_dirs[0] if global_dirs else None)
     if global_dir is None:
         return stats
     stats["src"] = str(global_dir)
