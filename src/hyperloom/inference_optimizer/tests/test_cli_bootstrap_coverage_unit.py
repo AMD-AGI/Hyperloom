@@ -41,13 +41,11 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_force_exit_budget_pct=0.2,
         explore_overtime_kill_ratio="bad",
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
-        no_explore=True,
         research_scout=False,
         research_scout_interval=0,
         target_advisory=False,
@@ -121,8 +119,8 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
+    # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
-    assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
     assert state.conc_sweep_variant_timeout_sec == 30

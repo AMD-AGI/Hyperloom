@@ -25,7 +25,9 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain_validated float — % over baseline at the last full-stack rebench
+    cumulative_gain_validated float — % over baseline at the last measurement
+                                that promoted (an explore KEEP's decision round,
+                                or a full-stack revalidation)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -100,6 +102,27 @@ def first_positive_tput(d: Any) -> float:
         if isinstance(val, (int, float)) and val > 0:
             return float(val)
     return 0.0
+
+
+def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
+    """Grade against the live anchor when a KEEP landed after this task snapshotted its params.
+
+    A task carries ``base_tput`` from the moment it was created; a KEEP landing
+    while it queued makes that snapshot stale and would grade the candidate
+    against a recipe it no longer sits on top of.
+
+    Args:
+        snapshot_tput: The anchor recorded in the task's params.
+        state: Any object exposing ``current_best`` / ``baseline_tput``.
+
+    Returns:
+        ``(anchor, drifted)`` — the anchor to grade against, and whether the
+        live value displaced a positive snapshot (i.e. worth logging).
+    """
+    live = resolve_grading_anchor_tput(state)
+    if live > snapshot_tput:
+        return live, snapshot_tput > 0
+    return snapshot_tput, False
 
 
 def resolve_grading_anchor_tput(state: Any) -> float:
@@ -549,8 +572,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
-    explore_enabled: bool = True
     # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
     # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
     # only governs the entry's own dispatch: orchestration can still request
@@ -579,7 +600,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Internal-only baseline cold+hot double-run switch; default-on keeps EXPLORE
+    # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
@@ -682,6 +703,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
     benchmark_backend: str = ""
+    # The card's compute-partition shape this session was measured in, as
+    # observed at launch: mode, partition count, CU and memory per partition,
+    # streams per partition. Empty when the card reported nothing. Part of the
+    # measurement contract, not a tuning knob -- the same configuration in SPX
+    # and in CPX is two different experiments.
+    compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
@@ -701,7 +728,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
+    # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
     # non-transactional integrate_patch window and cleared after stack/current
@@ -734,7 +761,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     closing_report_task_id: str = ""
     # True at END of CLOSE 7-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
-    # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
+    # Auto-roofline gate (optimisation-phase entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
@@ -806,7 +833,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_failure_streak: int = 0
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
-    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → EXPLORE); ``--no-framework-agent`` opts out.
+    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT); ``--no-framework-agent`` opts out.
     framework_agent_phase_enabled: bool = True
     # FRAMEWORK progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
     framework_agent_phase_progress: list[dict[str, Any]] = field(
@@ -835,26 +862,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # instead of skipping the phase. Requires framework_agent_authoring_enabled;
     # --no-framework-local-explore opts out (restores discover-exhaustion exit).
     framework_local_explore_enabled: bool = True
-    # Default OFF. When True the Coordinator may run explore-style config-grid
-    # exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor) before the
-    # phase advances. Coordinator-driven, never the LLM.
-    framework_config_exploration_enabled: bool = False
-    # Compact records of framework config-exploration rounds; kept separate from
-    # framework_agent_phase_progress so it never perturbs the plateau gate.
-    framework_config_exploration_results: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
-    # FRAMEWORK config-exploration subphase state machine:
-    # "" (not started) -> "running" -> "done". Drives the advance-time hold.
-    framework_config_lane_state: str = ""
-    # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
-    # capped by _framework_config_max_rounds(). Reset on macro-cycle reloop.
-    framework_config_lane_round: int = 0
-    # Config variant grid harvested from the last generation specialist,
-    # awaiting an explore round. Consumed by _maybe_hold_for_framework_config_lane.
-    framework_config_pending_grid: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id
     # (PR URL), so the authored-outcome bridge can key the progress row on the
     # PR-URL that ``_select_next_framework_agent_candidate`` checks.
@@ -871,11 +878,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
+    # Apply-failure re-author attempts per candidate id, capped by
+    # ``_AUTHORED_LANE_MAX_ATTEMPTS``. Declared (not set ad hoc) because
+    # ``to_dict`` is ``asdict``, which walks declared fields only: an undeclared
+    # attribute is dropped at every save, so the cap would be re-spent from zero
+    # on every resume.
+    apply_fail_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # Retry contexts queued by the authored lane and drained by
+    # ``_drain_apply_fail_retry_pending``. Declared for the same reason: an
+    # undeclared attribute means a resume silently discards queued retries.
+    apply_fail_retry_pending: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision
     # run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM
-    # measure time when active else the cold baseline; warmup + stack-rebench exempt.
+    # measure time when active else the cold baseline; the warmup round is exempt.
     explore_overtime_kill_ratio: float = 2.0
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
@@ -929,7 +950,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
+    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
     # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
@@ -940,7 +961,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
-    # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
+    # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
@@ -3901,7 +3922,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
+        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
 
         Returns:
             bool: ``True`` when ``optimization_stack`` is longer than

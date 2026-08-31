@@ -56,7 +56,7 @@ _PHASE_HEADERS: dict[str, str] = {
 
 # Phases each scoped prompt module belongs to.
 _KERNEL_REQUEST_PHASES: frozenset[str] = frozenset({"KERNEL_AGENT"})
-_EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"EXPLORE"})
+_EXPLORE_GRID_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT"})
 _BASELINE_RECOVERY_PHASES: frozenset[str] = frozenset({"PRELUDE"})
 
 # ``<!-- phase: A, B -->`` scopes the ``### `` heading that follows it.
@@ -99,9 +99,9 @@ def _section_mission() -> list[str]:
         '   which next action gives the highest expected_gain / cost_minutes?"',
         "",
         'An optimization is only "real" once it has been validated as part of the',
-        "full optimization_stack. ``explore`` inlines a per-KEEP stack rebench, so",
+        "full optimization_stack. ``explore`` measures each KEEP on that stack, so",
         "cumulative_gain_validated advances automatically — drive the loop until",
-        "``explore`` has produced at least one KEEP that survived the rebench.",
+        "``explore`` has produced at least one KEEP.",
     ]
 
 
@@ -112,7 +112,6 @@ def _section_session_context(
     objective_kind: str,
     objective_value: float | str | None,
     max_minutes: int,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
     framework_source_roots: tuple[str, ...] | None = None,
 ) -> list[str]:
@@ -121,7 +120,6 @@ def _section_session_context(
     Args:
         framework (str): The framework name shown verbatim.
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled.
-        explore_enabled (bool): Whether the EXPLORE phase is enabled.
         framework_agent_phase_enabled (bool): Whether the FRAMEWORK_AGENT phase
             is enabled.
         objective_kind (str): The objective kind (e.g. ``time_only``,
@@ -146,8 +144,7 @@ def _section_session_context(
         "",
         f"- framework        : {framework}",
         f"- kernel_enabled   : {'true' if kernel_enabled else 'false'}",
-        f"- explore_enabled  : {'true' if explore_enabled else 'false'}",
-        f"- framework_agent_phase_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
+        f"- optimize_enabled : {'true' if framework_agent_phase_enabled else 'false'}",
         f"- objective        : {obj}",
         f"- max_minutes      : {max_minutes}",
         f"- framework_source_roots: {roots_line}",
@@ -156,7 +153,7 @@ def _section_session_context(
         "Shared session state, KB hints, inbox tail) is appended below the",
         "system prompt every tick by the Coordinator.",
         "The Time-budget block carries `remaining=X.Xmin`.",
-        "See PHASE CONTRACT below for the 6-phase chain, per-phase allowed",
+        "See PHASE CONTRACT below for the phase chain, per-phase allowed",
         "actions, and phase-transition rules.",
     ]
 
@@ -164,20 +161,18 @@ def _section_session_context(
 def _section_phase_semantics(
     *,
     kernel_enabled: bool,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
 ) -> list[str]:
     """Render the per-phase LLM-proposable action contract (current phase
     injected dynamically by the Coordinator).
 
-    Phases switched off by ``--no-explore`` / ``--no-kernel`` /
-    ``--no-framework-agent`` keep their row in the 6-phase chain but are annotated
+    Phases switched off by ``--no-framework-agent`` / ``--no-kernel`` keep
+    their row in the chain but are annotated
     ``(DISABLED: --no-xxx — phase skipped)`` so Orchestration plans against the
     phases the run will actually enter.
 
     Args:
         kernel_enabled: Whether kernel_agent-owned actions are enabled.
-        explore_enabled: Whether the EXPLORE phase is enabled.
         framework_agent_phase_enabled: Whether the FRAMEWORK_AGENT phase is enabled.
 
     Returns:
@@ -189,15 +184,13 @@ def _section_phase_semantics(
     disabled_suffix: dict[str, str] = {}
     if not framework_agent_phase_enabled:
         disabled_suffix["FRAMEWORK_AGENT"] = "--no-framework-agent"
-    if not explore_enabled:
-        disabled_suffix["EXPLORE"] = "--no-explore"
     if not kernel_enabled:
         disabled_suffix["KERNEL_AGENT"] = "--no-kernel"
 
     lines: list[str] = [
         "## 3a. PHASE CONTRACT",
         "",
-        "The Coordinator runs the optimization in a 6-phase linear pipeline.",
+        "The Coordinator runs the optimization as a linear pipeline.",
         "Each tick it injects a `=== Phase ===` block with the current",
         "phase. Per-phase proposable action sets (PolicyGate R1 enforces these):",
         "",
@@ -220,9 +213,9 @@ def _section_phase_semantics(
             "lands in your inbox as a `policy_denied` event.",
             "",
             "Phase transitions are Coordinator-owned. The hard advance gates",
-            "are: `baseline_tput > 0` exits PRELUDE; IR-6 force-exit, the per-",
-            "phase budget cap, or a terminal stop_reason exit EXPLORE / KERNEL_AGENT",
-            "/ SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
+            "are: `baseline_tput > 0` exits PRELUDE; the per-phase budget cap",
+            "or a terminal stop_reason exits FRAMEWORK_AGENT / KERNEL_AGENT /",
+            "SWEEP; the wall-clock deadline (closing phase) routes to CLOSE.",
             "You may also emit `escalate_strategy_change{next_action_hint=",
             "'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}` directly",
             "(no longer robustness-only) when you judge the current phase",
@@ -395,6 +388,13 @@ def _format_gain_pair(meta: ActionMetadata) -> str:
     return f"{lo:.0f}-{hi:.0f}%"
 
 
+def _llm_selectable_domains() -> str:
+    """The domains Orchestration may name, pipe-separated, from the registry."""
+    from ..specialists.domains import SPECIALIST_DOMAINS
+
+    return "|".join(d.key for d in SPECIALIST_DOMAINS if d.llm_selectable)
+
+
 def _format_emit_hint(meta: ActionMetadata) -> str:
     """Build the per-action ``EMIT:`` hint showing the correct transport.
 
@@ -417,10 +417,7 @@ def _format_emit_hint(meta: ActionMetadata) -> str:
     if meta.name == "specialist":
         return (
             "delegate{action_name='specialist', params={"
-            "domain=<one of serving_specialist|framework_rewrite_specialist|"
-            "kernel_switch_specialist|comm_specialist|compiler_specialist|"
-            "system_specialist|pr_intel_specialist|research_scout_specialist|"
-            "static_recon_specialist>, "
+            f"domain=<one of {_llm_selectable_domains()}>, "
             "gap_canonical_id=<stable gap id>, "
             "gap_symptom?=<str>, gap_layer?=<str>, "
             "gap_evidence?={profile_trace:..., ...}, "
@@ -456,9 +453,9 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "args_mode?: 'append'|'replace', provenance, kb_evidence?, "
             "pr_evidence?, source_evidence?}, ...], "
             "base_extra_args?, base_tput?, accuracy_baseline?, "
-            "keep_threshold_pct?: <session-cycle default>, stack_stable_threshold_pct?: <keep/2>}}`. "
-            "Variants run serially; each KEEP triggers an inlined stack "
-            "rebench. Variant identity is content-based (args+envs+"
+            "keep_threshold_pct?: <session-cycle default>}}`. "
+            "Variants run serially; a KEEP is graded on its decision "
+            "round. Variant identity is content-based (args+envs+"
             "remove_args+unset_envs+args_mode); only exact duplicates within "
             "the same submitted grid are collapsed, so any prior fingerprint "
             "may be re-proposed. "
@@ -542,7 +539,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
     """Build the DECISION FRAMEWORK section lines.
 
     Covers the per-tick selection order, FAILURE RECOVERY, and the
-    EXPLORE-scoped IDEA GENERATION block.
+    Config-arm IDEA GENERATION block.
 
     Args:
         kernel_enabled (bool): Whether kernel_agent-owned actions are enabled for this
@@ -565,7 +562,7 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
         "   propose `report` once (if not already done) then heartbeat 'goal-reached'.",
         "2. **Measure**: if `baseline_tput == 0`, propose `baseline`. Wait for",
         "   delegated_result; do NOT re-baseline on a positive result with warnings.",
-        "3. **Inlined stack-rebench**: route every grid attempt through",
+        "3. **Stack-aware grids**: route every grid attempt through",
         "   ``delegate{action_name='explore', params={grid: [...] }}``;",
         "   there is no standalone validation step (see Hard rules).",
     ]
@@ -606,14 +603,15 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "      automatically from the Coordinator-owned analysis task at",
             "      PRELUDE and at every +10% watermark crossing — you do not",
             "      need a manually-proposed profile before ``kernel_opt``.",
-            "6. **Phase budget awareness**. The `=== Phase ===` block carries",
-            "   ``phase_budget_remaining_pct``. As that number falls below 0.2,",
-            "   prefer lower-cost / known-good actions (explore over kernel_opt).",
-            "   The Plateau advisory block is informational only for KERNEL /",
-            "   FRAMEWORK plateaus (they never auto-advance the phase); a detected",
-            "   EXPLORE plateau, by contrast, deterministically advances",
-            "   EXPLORE -> KERNEL_AGENT (``reason=explore_no_more_leverage``) at the",
-            "   next phase-compute. When you judge the current phase exhausted,",
+            "6. **Phase budget awareness**. The `=== Phase ===` block's",
+            "   ``budget`` line carries ``remaining_sec`` against the phase's",
+            "   ``pct`` share; as it falls, prefer lower-cost / known-good",
+            "   actions (explore over kernel_opt).",
+            "   The Plateau advisory block is informational only for KERNEL. In",
+            "   OPTIMIZE it reports each arm separately: BOTH arms dry advances",
+            "   to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at the",
+            "   next phase-compute, while one arm dry means work the other.",
+            "   When you judge the current phase exhausted,",
             "   emit ``escalate_strategy_change{next_action_hint=",
             "   'skip_to_kernel' | 'skip_to_sweep' | 'skip_to_close'}`` (see",
             "   PHASE CONTRACT for the skip_to_close exception).",
@@ -689,7 +687,7 @@ def _failure_recovery_lines(*, phase: str, transport: str = "") -> list[str]:
 
 
 def _idea_generation_lines() -> list[str]:
-    """Build the EXPLORE-scoped IDEA GENERATION block.
+    """Build the config-arm IDEA GENERATION block.
 
     Returns:
         list[str]: Markdown lines describing how to compose the next
@@ -988,7 +986,6 @@ def build_orchestration_prompt(
     enabled_actions: Iterable[str],
     framework: str = "sglang",
     kernel_enabled: bool | None = None,
-    explore_enabled: bool = True,
     framework_agent_phase_enabled: bool = True,
     objective_kind: str = "time_only",
     objective_value: float | str | None = None,
@@ -1010,7 +1007,6 @@ def build_orchestration_prompt(
         framework: ``sglang`` / ``vllm`` — printed in SESSION CONTEXT.
         kernel_enabled: explicit override; ``None`` derives from KERNEL_OWNED
             actions.
-        explore_enabled: when False (``--no-explore``) the EXPLORE phase is
             skipped; the prompt annotates it as DISABLED so Orchestration's plan
             matches the real phase chain.
         framework_agent_phase_enabled: when False (``--no-framework-agent``) the
@@ -1074,14 +1070,12 @@ def build_orchestration_prompt(
             objective_kind=objective_kind,
             objective_value=objective_value,
             max_minutes=max_minutes,
-            explore_enabled=explore_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
             framework_source_roots=framework_source_roots,
         ),
         _section_pipeline_and_budget(actions, max_minutes=max_minutes),
         _section_phase_semantics(
             kernel_enabled=kernel_enabled,
-            explore_enabled=explore_enabled,
             framework_agent_phase_enabled=framework_agent_phase_enabled,
         ),
         _section_action_catalogue(actions, phase=phase_norm),
@@ -1108,21 +1102,19 @@ def build_orchestration_prompt(
 def default_enabled_actions(
     *,
     no_kernel: bool,
-    no_explore: bool = False,
+    no_optimize: bool = False,
 ) -> tuple[str, ...]:
     """Return the canonical enabled-action set used by the CLI.
 
     Filters :data:`FULL_ENABLED_ACTIONS` per flag so the flags compose: a
-    ``--no-kernel --no-explore`` run drops both kernel_agent-owned names and the
-    ``explore`` grid-runner. ``--no-framework-agent`` is intentionally absent — the
-    ``framework_agent`` action is Coordinator-internal and never appears in the
-    catalogue, so it has nothing to trim.
+    ``--no-kernel --no-framework-agent`` run drops both kernel_agent-owned
+    names and the ``explore`` grid-runner.
 
     Args:
         no_kernel (bool): When ``True``, drop the kernel-only actions (keep the
             intersection with :data:`NO_KERNEL_AGENT_ENABLED_ACTIONS`).
-        no_explore (bool): When ``True``, drop the ``explore`` grid-runner
-            action (EXPLORE phase is skipped).
+        no_optimize (bool): When ``True``, drop the ``explore`` grid-runner
+            action: the phase that dispatches it is skipped.
 
     Returns:
         tuple[str, ...]: The filtered enabled-action set, preserving
@@ -1131,7 +1123,7 @@ def default_enabled_actions(
     actions = list(FULL_ENABLED_ACTIONS)
     if no_kernel:
         actions = [a for a in actions if a in NO_KERNEL_AGENT_ENABLED_ACTIONS]
-    if no_explore:
+    if no_optimize:
         actions = [a for a in actions if a != "explore"]
     return tuple(actions)
 

@@ -3415,7 +3415,7 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision, stack_rebench, and their grading anchor) are
+            # explore decision and their grading anchor) are
             # measured with a warm prefix cache, keeping them mutually
             # comparable. Carryover is config-dependent (tracks KV-block
             # capacity) and is not a uniform offset.
@@ -3790,7 +3790,7 @@ class BaselineExecutor:
         """Whether baseline double-run is enabled.
 
         Public CLI/env controls are intentionally unsupported. The session
-        default is on so EXPLORE warm-decision compares hot candidates against a
+        default is on so the warm decision compares hot candidates against a
         hot baseline. Internal callers may pass
         ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
         set the session state directly.

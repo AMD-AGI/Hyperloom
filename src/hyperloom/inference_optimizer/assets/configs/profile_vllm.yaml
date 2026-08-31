@@ -14,21 +14,24 @@
 #      vllm_*.sh when PROFILE=1.
 # These are required for TraceLens fusion / roofline analysis.
 #
-# Issue #194 §4: `capture_torch_profiler_dir` and `detailed_trace_annotation`
+# Issue #194 §4: `capture_torch_profiler` and `detailed_trace_annotation`
 # ship upstream from vLLM 0.26; below that they come from the TraceLens
 # patch set at
 # TraceLens-internal/examples/custom_workflows/inference_analysis/vllm_patches/.
-# On 0.26+ the patcher only verifies the fields are present. Below it,
-# Hyperloom's runtime patcher (HYPERLOOM_ENABLE_PATCH=1, default) tries
-# to apply the matching `config_vllm_v<version>.patch` against the
-# in-container vLLM install at the start of every profile. Capture
-# sidecars land under <torch_profiler_dir>/capture_traces, driven by the
-# `capture_torch_profiler_dir` path Magpie's TraceLens route supplies. If
-# patching succeeds, materialize_config_with_envs auto-appends
-# detailed_trace_annotation to EXTRA_VLLM_ARGS; if it fails (version
-# unsupported, fs read-only, already-patched fork, etc.) we fall back to
-# today's safe behaviour: only delay_iterations / max_iterations +
-# ignore_frontend get injected.
+# Every supported version still takes a patch, because upstream took the
+# config fields but NOT the graph-capture implementation: from 0.26 that
+# moved into the v2 runner and stayed patch-only. So Hyperloom's runtime
+# patcher (HYPERLOOM_ENABLE_PATCH=1, default) applies the matching
+# `config_vllm_v<version>.patch` against the in-container vLLM install at
+# the start of every profile, on 0.26+ as well. Capture sidecars land under
+# <torch_profiler_dir>/capture_traces, written by the graph-capture module
+# the patch creates at vllm/profiler/graph_capture.py -- which is also how
+# the patcher tells a patched 0.26+ install from a stock one, since there
+# the config fields alone are present either way. If patching succeeds,
+# materialize_config_with_envs auto-appends capture_torch_profiler and
+# detailed_trace_annotation to EXTRA_VLLM_ARGS; if it fails (version unsupported, fs read-only,
+# already-patched fork, etc.) we fall back to today's safe behaviour: only
+# delay_iterations / max_iterations + ignore_frontend get injected.
 # Set HYPERLOOM_ENABLE_PATCH=0 to disable runtime patching entirely.
 
 benchmark:

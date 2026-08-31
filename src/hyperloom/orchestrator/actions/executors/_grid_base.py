@@ -63,7 +63,16 @@ def variant_fingerprint(
     )
 
 
-_VARIANT_TIMEOUT_SEC_DEFAULT = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+# Single home for the grid-level defaults every graded executor shares. They
+# were previously redefined per executor with identical values, which is how
+# they drifted apart.
+DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
+# Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
+# It is the only bar a variant clears. This default sits above grid noise, but
+# the Coordinator injects a per-cycle threshold that decays as a session runs
+# out of large wins, so a late-cycle KEEP is admitted on a thinner margin than
+# this. Override per task via ``params['keep_threshold_pct']``.
+DEFAULT_KEEP_THRESHOLD_PCT = 1.0
 
 
 @dataclass

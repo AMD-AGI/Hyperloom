@@ -11,7 +11,6 @@ manifest from being trusted.
 from __future__ import annotations
 
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -372,24 +371,23 @@ def test_a_refused_applyback_names_the_clause_that_refused_it(repo):
 
 
 def test_installed_producer_contract_is_consumed_without_a_local_fixture(repo):
-    """Materialize the real producer documents and pass them through this consumer."""
-    producer_root = forge_submit._ensure_forge_on_path()
-    if not producer_root:
-        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
+    """Materialize the real producer documents and pass them through this consumer.
+
+    This used to skip unless ``$FORGE_PATH`` named a checkout, which meant the
+    one test pinning both halves of the contract against each other never ran
+    anywhere. KernelForge ships in this distribution, so the producer is always
+    present and the test always runs.
+    """
     proc = subprocess.run(
         [
             sys.executable,
             "-m",
-            "kernel_agents.cli",
+            "kernelforge.cli",
             "forge-rewrite-by-flydsl",
             "--applyback-contract-json",
         ],
         capture_output=True,
         text=True,
-        env={
-            **os.environ,
-            "PYTHONPATH": (producer_root + os.pathsep + os.environ.get("PYTHONPATH", "")),
-        },
         timeout=120,
     )
     assert proc.returncode == 0, proc.stderr

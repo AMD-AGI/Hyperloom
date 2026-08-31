@@ -41,7 +41,7 @@ OUTCOME_SKIP: str = "skipped"
 # Task kinds whose result carries an authoritative per-status verdict the
 # journal outcome must follow rather than the coarse dispatcher ``promotable``
 # flag (a ``reverted`` patch is promotable yet was rolled back).
-_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch", "framework_agent"})
+_STATUS_DRIVEN_JOURNAL_KINDS: frozenset[str] = frozenset({"integrate_patch"})
 
 # Task kinds whose result can legitimately declare ``was_skipped``. Scoped so
 # reusing that key elsewhere cannot silently demote a kept patch.
@@ -109,6 +109,11 @@ class JournalEntry:
     task_id: str = ""
     variant_name: str = ""
     ts: str = ""
+    # Which lever this decision moved (config / source_patch / upstream_pr /
+    # enablement). ``phase`` above says when the decision was taken, which stops
+    # being evidence of ownership once two lanes share a phase; this says what
+    # was changed, which does not.
+    lever_kind: str = ""
     # Proposer attribution: ``provenance`` is the raw explore label, ``scope``
     # the specialist dial, ``fingerprint`` the join key into ``explore_search``.
     provenance: str = ""
@@ -362,8 +367,8 @@ def derive_journal_outcome(
 ) -> str:
     """Derive the journal ``outcome`` for a settled per-task result.
 
-    For source-patch kinds (``integrate_patch`` / ``framework_agent``) the
-    outcome follows the executor's authoritative per-status verdict:
+    For ``integrate_patch`` the outcome follows the executor's authoritative
+    per-status verdict:
 
     - ``status == "kept"`` → ``OUTCOME_KEEP``, unless the promote path stamped
       :data:`PROMOTION_REFUSED_KEY` because the anchor gate declined to lift it

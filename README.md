@@ -127,6 +127,11 @@ and are NOT covered by the MIT license above — see the "Third-Party
 Tools and Agents" section in [`LICENSE`](LICENSE). You are responsible
 for reviewing and complying with each tool's individual license.
 
+A few files distributed *inside* Hyperloom are also third-party — reference
+kernels and a Triton oracle carried in forge's knowledge base and examples.
+They keep their own licences; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists them and
+`REUSE.toml` carries the machine-readable form.
+
 For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
 contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).
 

@@ -162,11 +162,11 @@ RANDOM_RANGE_RATIO=0.8
 INFERENCEX_PATH=${NFS_SHARED_ROOT}/InferenceX
 TRACELENS_ROOT=${NFS_SHARED_ROOT}/TraceLens
 MAGPIE_PATH=${NFS_SHARED_ROOT}/Magpie
-FORGE_PATH=${NFS_SHARED_ROOT}/KernelForge
 ```
 
-`FORGE_PATH` is only needed for the Kernel-Forge kernel backend (also accepts
-`KERNEL_FORGE_ROOT` / `KERNEL_FORGE_PATH`). Behind a TLS-terminating proxy add
+The Kernel-Forge kernel backend needs no checkout and no path variable:
+KernelForge ships inside Hyperloom. Select it with `KERNEL_OPT_BACKEND_ORDER=forge`
+(Workload B only). Behind a TLS-terminating proxy add
 `NODE_TLS_REJECT_UNAUTHORIZED=0` and `ANTHROPIC_SKIP_TLS_VERIFY=true`.
 
 ---

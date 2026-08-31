@@ -18,6 +18,9 @@ from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_UPSTREAM_PR,
+    patch_lever_kind,
     patch_owner_phase,
 )
 from ..kernel._recorder_trace import trace_recording_skipped
@@ -95,6 +98,36 @@ log = _logging.getLogger(__name__)
 # ``phase_breakdown`` and the action-family table publish. Anything that
 # reconciles a ``framework_agent`` task against the stack has to translate.
 _FRAMEWORK_STACK_ACTION = "framework"
+
+#: Task kind -> the lever it moves, for winners whose params carried no stamp.
+#: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
+#: evidence and a missing one is a real gap rather than something to guess at.
+_LEVER_BY_TASK_KIND = {
+    "explore": LEVER_CONFIG,
+    "sweep": LEVER_CONFIG,
+    "conc_sweep": LEVER_CONFIG,
+    "framework_agent": LEVER_UPSTREAM_PR,
+    _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
+}
+
+
+def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
+    """Resolve the lever a winner moved.
+
+    Args:
+        task_kind: The action kind that produced the winner.
+        bv: The winning variant dict, read for a ``lever_kind`` stamp.
+
+    Returns:
+        One of :data:`LEVER_KINDS`, or ``""`` when nothing named a lever --
+        which the caller logs rather than papering over.
+    """
+    # The kind decides where it can only move one lever; ``integrate_patch``
+    # lands every lever, so there the producer's stamp is the only evidence.
+    by_kind = _LEVER_BY_TASK_KIND.get(str(task_kind or "").strip(), "")
+    if by_kind:
+        return by_kind
+    return patch_lever_kind(bv if isinstance(bv, dict) else None)
 
 
 @dataclass
@@ -518,9 +551,10 @@ class WritebackCollaborator:
                 gain anchor.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
-            measurement_basis: ``e2e_rebench`` when ``new_tput`` was measured
-                end to end, ``derived_speedup`` when it was inferred from a
-                micro-benchmark.
+            measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
+                full-stack revalidation, ``e2e_decision_round`` when it is the
+                round an explore variant was graded on, ``derived_speedup``
+                when it was inferred from a micro-benchmark.
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
@@ -817,11 +851,7 @@ class WritebackCollaborator:
             state.enablement.revalidation_task_id = ""
             state.enablement.validation_pending = False
             state.enablement.stall_streak = int(state.enablement.stall_streak or 0) + 1
-            try:
-                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-            except ImportError:
-                _max_stall = 5
-            if state.enablement.stall_streak >= _max_stall and not state.stop_reason:
+            if state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL and not state.stop_reason:
                 state.set_stop_reason("enablement_stalled")
             else:
                 state.enablement.inflight_task_id = ""
@@ -853,7 +883,7 @@ class WritebackCollaborator:
         result_payload = dict(result or {})
         if task.kind == "conc_sweep" and not result_payload.get("status"):
             result_payload["status"] = "failed"
-        if task.kind in {"framework_agent", "conc_sweep", "replay_warm_recipe", "integrate_patch"}:
+        if task.kind in {"conc_sweep", "replay_warm_recipe", "integrate_patch"}:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -937,10 +967,10 @@ class WritebackCollaborator:
                 },
             )
             self.shared_state.record_conc_sweep(result_payload)
-        # A framework_agent task that settles failed/empty never reaches the
-        # promote branch that writes the terminal progress row; stamp
+        # An upstream-PR candidate task that settles failed/empty never reaches
+        # the promote branch that writes the terminal progress row; stamp
         # no_result_failed so the pump does not re-select it every tick.
-        if task.kind == "framework_agent":
+        if task.kind == "integrate_patch" and (task.params or {}).get("framework_agent_candidate_id"):
             cand = (task.params or {}).get("candidate")
             cand_id = self._framework_candidate_key(cand if isinstance(cand, dict) else None)
             if cand_id:
@@ -1363,6 +1393,7 @@ class WritebackCollaborator:
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
+                lever_kind=_lever_kind_for_lift(kind, result_dict if isinstance(result_dict, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -1475,6 +1506,8 @@ class WritebackCollaborator:
         outcome_raw = str(variant_outcome.get("outcome") or "")
         if outcome_raw == "KEEP":
             outcome = OUTCOME_KEEP
+        # ``KEEP_UNSTABLE`` is only reachable for a session recorded before the
+        # per-KEEP confirmation round was removed; it still reads as a revert.
         elif outcome_raw in ("REVERT", "FAILED", "KEEP_UNSTABLE"):
             outcome = OUTCOME_REVERT
         elif outcome_raw == "SKIPPED_DEDUP":
@@ -1511,7 +1544,6 @@ class WritebackCollaborator:
             for k in (
                 "runtime_sec",
                 "wall_clock_ratio_vs_baseline",
-                "stack_rebench_tput",
                 "estimated_output_throughput",
             )
             if isinstance(metrics, dict) and metrics.get(k) is not None
@@ -1519,6 +1551,7 @@ class WritebackCollaborator:
         journal.append_entry(
             JournalEntry(
                 phase=self._journal_entry_phase(),
+                lever_kind=_lever_kind_for_lift(kind, variant_outcome if isinstance(variant_outcome, dict) else None),
                 iter=int(self.shared_state.tick or 0),
                 kind=kind,
                 change=change,
@@ -2359,7 +2392,7 @@ class WritebackCollaborator:
                     task.task_id,
                 )
 
-        # Consume static-recon bridge candidates into gaps[] so the EXPLORE
+        # Consume static-recon bridge candidates into gaps[] so the
         # freeform specialist picks them up with a precise mandate. Fail-soft.
         if domain == "static_recon_specialist":
             try:
@@ -2370,7 +2403,7 @@ class WritebackCollaborator:
                     task.task_id,
                 )
 
-        # Aggregate research evidence from any domain (e.g. pr_intel) that
+        # Aggregate research evidence from any research domain that
         # self-reports a ``research`` block, so FRAMEWORK / explore lanes
         # reuse the session-wide seen-set. Idempotent for research_scout
         # (already harvested above). Fail-soft.
@@ -2448,7 +2481,7 @@ class WritebackCollaborator:
         session-wide seen-set, de-duped across the session.
 
         Applies to every domain that self-reports a ``research`` block
-        (``pr_intel`` + ``research_scout``), so FRAMEWORK / explore lanes
+        (candidate discovery + research_scout), so FRAMEWORK / explore lanes
         do not re-fetch the same references. Fail-soft: never raises (the caller
         also guards, but keep this self-contained so partial payloads degrade
         gracefully).
@@ -2523,7 +2556,7 @@ class WritebackCollaborator:
             self.shared_state.register_seen_pr_ids(pr_ids)
         except Exception:  # noqa: BLE001 — defensive
             log.exception("research-scout: register_seen_pr_ids failed")
-        # Seed high-priority hints as gaps[] so EXPLORE tries them early.
+        # Seed high-priority hints as gaps[] so the config arm tries them early.
         try:
             self._seed_gaps_from_research_hints()
         except Exception:  # noqa: BLE001 — defensive
@@ -2647,6 +2680,15 @@ class WritebackCollaborator:
                     or (getattr(self.shared_state, "phase", "") if task_kind != "integrate_patch" else "")
                     or ""
                 ).strip()
+                # The phase fallback above inherits whatever is live at
+                # writeback time, which is not what authored the winner.
+                lever_kind = _lever_kind_for_lift(task_kind, bv)
+                if not lever_kind:
+                    log.warning(
+                        "lift: no lever_kind for a %s winner (variant=%s); the stack entry will report as unattributed",
+                        task_kind,
+                        variant_name,
+                    )
                 stack_entry: dict[str, Any] = {
                     "action": task_kind,
                     "variant_name": variant_name,
@@ -2666,6 +2708,8 @@ class WritebackCollaborator:
                 }
                 if source_phase:
                     stack_entry["source_phase"] = source_phase
+                if lever_kind:
+                    stack_entry["lever_kind"] = lever_kind
                 if gap_canonical_id:
                     stack_entry["gap_canonical_id"] = gap_canonical_id
                 # Stamp the variant's stable join key (and source) so breakdown
@@ -2854,7 +2898,7 @@ class WritebackCollaborator:
         # only reached further down this call, so mirroring it here published
         # every replay as discarded -- including the ones that went on to be
         # pushed onto the stack.
-        if task_kind in {"framework_agent", "conc_sweep", "integrate_patch"}:
+        if task_kind in {"conc_sweep", "integrate_patch"}:
             try:
                 from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -2874,7 +2918,7 @@ class WritebackCollaborator:
                     result=v4_result,
                     extras={
                         "candidate_id": self._framework_candidate_key(result.get("candidate"))
-                        if task_kind == "framework_agent" and isinstance(result.get("candidate"), dict)
+                        if isinstance(result.get("candidate"), dict)
                         else ""
                     },
                     phase=str(getattr(self.shared_state, "phase", "") or ""),
@@ -2912,7 +2956,6 @@ class WritebackCollaborator:
         "roofline": "_promote_roofline",
         "explore": "_promote_explore",
         "integrate_patch": "_promote_integrate_patch",
-        "framework_agent": "_promote_framework_agent",
         "sweep": "_promote_sweep",
         "conc_sweep": "_promote_conc_sweep",
     }
@@ -3001,14 +3044,8 @@ class WritebackCollaborator:
                         self.shared_state.enablement.stall_streak = (
                             int(getattr(self.shared_state.enablement, "stall_streak", 0) or 0) + 1
                         )
-                        _max_stall = getattr(self, "_ENABLEMENT_MAX_STALL", None)
-                        if _max_stall is None:
-                            try:
-                                from ..phases.framework import _ENABLEMENT_MAX_STALL as _max_stall
-                            except ImportError:
-                                _max_stall = 5
                         if (
-                            self.shared_state.enablement.stall_streak >= _max_stall
+                            self.shared_state.enablement.stall_streak >= _ENABLEMENT_MAX_STALL
                             and not self.shared_state.stop_reason
                         ):
                             self.shared_state.set_stop_reason("enablement_stalled")
@@ -3175,7 +3212,7 @@ class WritebackCollaborator:
             # Research scout (parallel, read-only, CPU-only).
             await self._maybe_enqueue_prelude_research_scout()
             # Static-recon (parallel, read-only, CPU-only): seed bridge
-            # candidates as gaps[] before EXPLORE starts.
+            # candidates as gaps[] before the optimisation phase starts.
             await self._maybe_enqueue_prelude_static_recon()
         outcome.changed = changed
         outcome.audit_decision = audit_decision
@@ -3548,8 +3585,8 @@ class WritebackCollaborator:
         changed = False
         audit_decision: str | None = None
         audit_extras: dict[str, Any] = {}
-        # Winners arrive already graded by the executor (per-variant KEEP/REVERT +
-        # rebench); Coordinator is single-writer for explore_search.accepted +
+        # Winners arrive already graded by the executor, on the decision round
+        # that judged them; Coordinator is single-writer for explore_search.accepted +
         # current_best + optimization_stack. The lift still refuses a winner that
         # no longer beats the live anchor.
         # 1. Apply the executor's ledger increment.
@@ -3915,7 +3952,7 @@ class WritebackCollaborator:
             # reflects the full stack.  Lifting only the highest-gain winner credited
             # that stacked throughput to a config missing the others' args, and the
             # missed winners' recipe_deltas never reached the ledger at all.
-            # Each winner carries its own tput from the decision or stack-rebench round.
+            # Each winner carries its own tput from the round that graded it.
             # Because KEEP requires a positive gain over the advancing running base, each
             # winner's tput is strictly greater than the previous one, so the anchor
             # check inside _lift_to_current_best clears for every in-round winner.
@@ -3942,10 +3979,12 @@ class WritebackCollaborator:
         except Exception:  # noqa: BLE001 — defensive
             log.exception("depth: note_explore_outcome failed")
         if promoted:
-            # explore inlines the per-KEEP rebench: promote into cumulative_gain_validated +
-            # advance validated_stack_len so the unvalidated-stack guard clears.
+            # A KEEP's own measurement promotes into cumulative_gain_validated and
+            # advances validated_stack_len so the unvalidated-stack guard clears.
+            # An explore round grades a variant on its decision round and reports
+            # that, so the basis names the round the number came from.
             if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                self._update_cumulative_gain_validated(best_tput)
+                self._update_cumulative_gain_validated(best_tput, measurement_basis="e2e_decision_round")
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
@@ -3966,7 +4005,6 @@ class WritebackCollaborator:
             "best_variant_name": (best_winner.get("name") if isinstance(best_winner, dict) else None),
             "best_gain_pct_vs_base": result.get("best_gain_pct"),
             "output_throughput": best_tput,
-            "keep_unstable_count": len(result.get("keep_unstable_in_stack") or []),
             "explore_grid_exhausted": bool(result.get("explore_grid_exhausted")),
         }
         outcome.changed = changed
@@ -4048,6 +4086,11 @@ class WritebackCollaborator:
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
             }
+            # The mandate's stamp and the deliverable's markers together;
+            # the result wins on a collision.
+            lever_kind = patch_lever_kind({**task_params, **result})
+            if lever_kind:
+                lift["lever_kind"] = lever_kind
             if source_phase:
                 lift["source_phase"] = source_phase
             if origin_domain:
@@ -4140,124 +4183,6 @@ class WritebackCollaborator:
                     task=task,
                     include_patches=True,
                 )
-        outcome.changed = changed
-        outcome.audit_decision = audit_decision
-        outcome.audit_extras = audit_extras
-
-    async def _promote_framework_agent(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Promote a framework_agent candidate: progress row, batch max-gain stat, KEEP lift."""
-        changed = False
-        stack_len_before = len(self.shared_state.optimization_stack or [])
-        audit_decision: str | None = None
-        audit_extras: dict[str, Any] = {}
-        # FRAMEWORK per-candidate result: append a progress row, update the batch
-        # max-gain stat, and on KEEP lift to current_best + validated gain + watermark.
-        status = str(result.get("status") or "")
-        candidate = result.get("candidate") or {}
-        cand_id = self._framework_candidate_key(candidate if isinstance(candidate, dict) else None)
-        # Silent apply/bench failure: recover the candidate key from task
-        # params and coerce the status so the row is a real terminal verdict
-        # the pump can dedup on, not a blank row keyed on "".
-        if not cand_id and task is not None:
-            task_cand = (getattr(task, "params", None) or {}).get("candidate")
-            cand_id = self._framework_candidate_key(task_cand if isinstance(task_cand, dict) else None)
-        if not status:
-            status = "no_result_failed"
-        batch_id = str(
-            result.get("batch_id")
-            or candidate.get("batch_id")
-            or ((getattr(task, "params", None) or {}).get("batch_id") if task is not None else "")
-            or ""
-        )
-        delta_pct = result.get("delta_pct")
-        new_tput = result.get("output_throughput")
-        kept_flag = status == "kept"
-        progress_entry = {
-            "candidate_id": cand_id,
-            "pr_url": str(candidate.get("pr_url") or ""),
-            "status": status,
-            "pre_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "post_tput": float(new_tput) if isinstance(new_tput, (int, float)) else 0.0,
-            "gain_pct": float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0,
-            "kept": kept_flag,
-            "batch_id": batch_id,
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "cycle": int(getattr(self.shared_state, "macro_cycle", 0) or 0),
-        }
-        if not isinstance(self.shared_state.framework_agent_phase_progress, list):
-            self.shared_state.framework_agent_phase_progress = []
-        self.shared_state.framework_agent_phase_progress.append(progress_entry)
-        # Update batch max-gain rolling stat (for the plateau judge).
-        batches = getattr(self.shared_state, "framework_agent_batches", None) or []
-        if isinstance(batches, list) and batches:
-            for entry in reversed(batches):
-                if isinstance(entry, dict) and str(entry.get("batch_id") or "") == batch_id:
-                    prev = float(entry.get("max_gain_pct_observed_in_batch") or 0.0)
-                    gain = float(delta_pct) if isinstance(delta_pct, (int, float)) else 0.0
-                    if gain > prev:
-                        entry["max_gain_pct_observed_in_batch"] = gain
-                    break
-        changed = True
-        lifted = False
-        if kept_flag and isinstance(new_tput, (int, float)) and new_tput > 0:
-            if not cand_id:
-                # A falsy key skips the stack append but still lifts current_best,
-                # so the win counts without leaving a step anything can reconcile,
-                # dedupe or replay.
-                log.warning(
-                    "FRAMEWORK: KEEP carries no candidate key (candidate_id / pr_url / ref all "
-                    "empty, and task params had none either). current_best still advances, but "
-                    "no optimization_stack entry records how. task=%s",
-                    getattr(task, "task_id", "") if task is not None else "",
-                )
-            lift = {
-                # The canonical candidate key, unadorned: it becomes the stack
-                # entry's variant_name, which resume reconciliation matches
-                # against the KEEP recorded on the event log.
-                "name": cand_id,
-                "task_id": getattr(task, "task_id", "") if task is not None else "",
-                "candidate_extra_server_args": "",
-                "extra_envs": {},
-                "workspace": result.get("workspace"),
-                # Direct framework candidates are owned by FRAMEWORK_AGENT even
-                # if writeback runs after the state machine has advanced.
-                "source_phase": "FRAMEWORK_AGENT",
-                "provenance": "framework_agent",
-            }
-            lifted = self._lift_to_current_best(_FRAMEWORK_STACK_ACTION, float(new_tput), lift)
-            if lifted and self.shared_state.baseline_tput > 0:
-                self._update_cumulative_gain_validated(new_tput)
-                await self._maybe_enqueue_watermark_roofline(
-                    reason="framework_keep_watermark",
-                )
-        if lifted:
-            audit_decision = "promoted"
-        elif kept_flag:
-            audit_decision = "no_promote"
-            result[PROMOTION_REFUSED_KEY] = True
-        else:
-            audit_decision = "discarded"
-        audit_extras = {
-            "candidate_id": cand_id,
-            "batch_id": batch_id,
-            "status": status,
-            "delta_pct": delta_pct,
-            "output_throughput": new_tput,
-            "kept": kept_flag,
-        }
-        if lifted and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            self._enqueue_agent_keep_outbox(
-                owner="FRAMEWORK_AGENT",
-                stack_index=len(self.shared_state.optimization_stack) - 1,
-                result=result,
-                task=task,
-                include_patches=True,
-            )
         outcome.changed = changed
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
@@ -4930,6 +4855,9 @@ class WritebackCollaborator:
                 # the GEAK baseline (no path is left snapshot-less).
                 **_source_layer_handles(result),
             }
+            replay_lever = patch_lever_kind(result)
+            if replay_lever:
+                bv["lever_kind"] = replay_lever
             source_phase = patch_owner_phase(result)
             gap_layer = str(result.get("gap_layer") or "").strip()
             if source_phase:
@@ -5279,9 +5207,9 @@ class WritebackCollaborator:
         single-variant bench + accuracy gate passed and the patch was committed),
         so a kept-but-absent one is a crash before the append landed → replay it
         (idempotent), unless its run workspace is gone → discard + alert. ``explore``
-        / ``framework`` KEEPs are ambiguous (KEEP_UNSTABLE eviction can drop a
-        kept explore variant from the stack), so they are surfaced as a
-        ``medium`` alert rather than resurrected. Whatever the stack ends up as
+        / ``framework`` KEEPs are ambiguous (the stack they landed on is only
+        known to the round that ran), so they are surfaced as a ``medium``
+        alert rather than resurrected. Whatever the stack ends up as
         is re-validated by the Gap A full-stack rebench.
 
         Args:
@@ -5480,12 +5408,16 @@ class WritebackCollaborator:
                     self.tasks,
                     int(getattr(self.shared_state, "macro_cycle", 0) or 0),
                 )
+                lanes, ttl = self._registry_lanes_ttl("explore")
                 task, existing = await self.tasks.create_or_return_existing(
                     kind="explore",
                     params=params_ps,
                     idempotency_key=idempotency_key,
-                    # Without a TTL the row is invisible to ``reclaim_expired_running``.
-                    lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
+                    # Both halves of the catalogue contract: without lanes the row
+                    # launches a server unserialised; without a TTL it is invisible
+                    # to ``reclaim_expired_running``.
+                    requires_lanes=lanes,
+                    lease_ttl_sec=ttl,
                 )
                 try:
                     from hyperloom.inference_optimizer.breakdown.recorder import instrument
@@ -5541,7 +5473,6 @@ class WritebackCollaborator:
             ],
             # Cumulative-vs-baseline, same as the geak revalidation above.
             "base_tput": float(getattr(self.shared_state, "baseline_tput", 0.0) or 0.0),
-            "enable_stack_rebench": False,
         }
         if cb_remove:
             params["base_remove_args"] = [cb_remove] if isinstance(cb_remove, str) else list(cb_remove or [])
@@ -5551,12 +5482,13 @@ class WritebackCollaborator:
             params["base_args_mode"] = "replace"
         if self.shared_state.baseline_config_path:
             params["config_path"] = self.shared_state.baseline_config_path
+        lanes, ttl = self._registry_lanes_ttl("explore")
         task, existing = await self.tasks.create_or_return_existing(
             kind="explore",
             params=params,
             idempotency_key="resume-stack-revalidate",
-            # Without a TTL the row is invisible to ``reclaim_expired_running``.
-            lease_ttl_sec=self._registry_lanes_ttl("explore")[1],
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         return {"task_id": task.task_id, "existing": bool(existing)}
 
