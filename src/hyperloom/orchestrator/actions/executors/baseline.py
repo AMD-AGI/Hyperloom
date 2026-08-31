@@ -268,6 +268,38 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return False
 
 
+# Startup-time "the GPUs are already occupied" refusals. The server raises these
+# BEFORE loading weights, so they are distinct from a mid-run OOM: the fix is to
+# free VRAM held by somebody else, not to shrink the workload.
+_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
+    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less
+    # than desired GPU memory utilization (0.95, 273.59 GiB). Decrease GPU
+    # memory utilization or reduce GPU memory used by other processes."
+    "on startup is less than desired gpu memory utilization",
+    "reduce gpu memory used by other processes",
+    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
+    "not enough memory. please try to increase --mem-fraction-static",
+)
+
+
+def _is_insufficient_gpu_memory(*texts: str) -> bool:
+    """True when a server refused to boot because VRAM was already occupied.
+
+    Distinguishes "another process is squatting on the GPUs" from a genuine
+    workload OOM. The former is recoverable by reaping the squatter and
+    retrying; the latter is not, so a naked retry only burns attempts.
+
+    Args:
+        *texts: Log / stdout / stderr blobs to scan.
+
+    Returns:
+        ``True`` when a startup-time GPU-preoccupied refusal is detected,
+        else ``False``.
+    """
+    blob = "\n".join(t for t in texts if t).lower()
+    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
+
+
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
 # vllm uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {

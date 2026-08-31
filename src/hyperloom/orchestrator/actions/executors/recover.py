@@ -477,7 +477,35 @@ class RecoverExecutor:
 recover_executor = RecoverExecutor()
 
 
+def probe_gpu_free_mb() -> list[dict[str, Any]]:
+    """Per-GPU free VRAM, for callers that need the probe without the action.
+
+    Blocking (shells out to ``rocm-smi``); call via ``asyncio.to_thread``.
+
+    Returns:
+        list[dict[str, Any]]: One entry per visible GPU, or ``[]`` when the
+        probe is unavailable.
+    """
+    return recover_executor._probe_gpu_free_mb()
+
+
+def kill_stale_gpu_owners() -> list[dict[str, Any]]:
+    """TERM/KILL stale inference-server owners holding VRAM.
+
+    The same soft-cleanup stage ``recover`` runs under
+    ``force_gpu_cleanup=True``, exposed so an executor can reclaim the GPUs
+    inline instead of waiting for the robustness agent to delegate a whole
+    ``recover`` action. Blocking; call via ``asyncio.to_thread``.
+
+    Returns:
+        list[dict[str, Any]]: The processes that were signalled, possibly empty.
+    """
+    return recover_executor._kill_stale_owners()
+
+
 __all__ = [
     "RecoverExecutor",
+    "kill_stale_gpu_owners",
+    "probe_gpu_free_mb",
     "recover_executor",
 ]

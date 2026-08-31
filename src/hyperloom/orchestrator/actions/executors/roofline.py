@@ -23,6 +23,7 @@ Design constraints:
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -39,9 +40,77 @@ log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
 
+# Settle time after reclaiming GPUs before the next profile attempt. A SIGKILLed
+# server's VRAM is not returned by the KFD the instant the process dies, so an
+# immediate retry can still read the old free-memory figure and refuse to boot.
+_GPU_RECLAIM_SETTLE_S = 20.0
+
 # Env switch for the multi-node compute-bound auto re-profile (default on; set to
 # "0" to disable). Only ever consulted on multi-node runs.
 _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
+
+
+async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> None:
+    """Free GPUs held by an orphaned server before the next profile attempt.
+
+    The profile retry loop otherwise changes nothing between attempts, so a
+    boot that failed because the GPUs were already occupied fails identically
+    on every attempt — three refusals inside three minutes, all against a
+    squatter that is still very much alive.
+
+    Two best-effort stages, cheapest first:
+
+    1. ``reap_orphaned_servers`` on this session's own ``runs/`` pidfiles. This
+       is cmdline-gated and scoped to pidfiles this session wrote, so it cannot
+       touch a co-located session. It is the common case: ``explore`` boots
+       variant servers with ``cleanup=false`` to keep them hot, and its
+       ``finally`` teardown never runs if the driver dies first.
+    2. ``kill_stale_gpu_owners`` — recover's soft-cleanup stage, for a squatter
+       whose pidfile is already gone.
+
+    Never raises: reclaiming is an optimisation on the retry path, and a failure
+    here must not mask the underlying profile error.
+
+    Args:
+        session_dir: Session directory whose ``runs/`` subtree owns the pidfiles.
+        attempt: The attempt that just failed, for log correlation.
+    """
+    from ._server_lifecycle import reap_orphaned_servers
+    from .recover import kill_stale_gpu_owners, probe_gpu_free_mb
+
+    try:
+        reaped = await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
+    except Exception:  # noqa: BLE001 — best-effort
+        log.debug("roofline: orphan reap failed", exc_info=True)
+        reaped = []
+    try:
+        killed = await asyncio.to_thread(kill_stale_gpu_owners)
+    except Exception:  # noqa: BLE001 — best-effort
+        log.debug("roofline: stale-owner cleanup failed", exc_info=True)
+        killed = []
+
+    if not reaped and not killed:
+        log.warning(
+            "roofline: attempt %d hit insufficient GPU memory but found no "
+            "reclaimable owner; the VRAM belongs to something outside this "
+            "session and retrying will not help",
+            attempt,
+        )
+        return
+
+    log.warning(
+        "roofline: attempt %d hit insufficient GPU memory; reaped=%s killed=%s; settling %.0fs before retry",
+        attempt,
+        reaped,
+        [p.get("pid") for p in killed],
+        _GPU_RECLAIM_SETTLE_S,
+    )
+    await asyncio.sleep(_GPU_RECLAIM_SETTLE_S)
+    try:
+        free_mb = await asyncio.to_thread(probe_gpu_free_mb)
+        log.info("roofline: post-reclaim free VRAM: %s", free_mb)
+    except Exception:  # noqa: BLE001 — best-effort
+        log.debug("roofline: post-reclaim probe failed", exc_info=True)
 
 
 def _trace_is_high_idle(ta_result: dict[str, Any]) -> bool:
@@ -332,9 +401,38 @@ class RooflineExecutor:
         from .baseline import (
             _disable_cuda_graph_flag,
             _is_cuda_graph_capture_failure,
+            _is_insufficient_gpu_memory,
         )
 
         eager_flag = _disable_cuda_graph_flag(framework)
+
+        # Preflight: an explore variant boots its server with ``cleanup=false``
+        # to keep it hot and tears it down in a ``finally`` — which never runs
+        # if the driver process dies. Nothing else clears the pidfile, because
+        # reap_orphaned_servers is called only at coordinator startup/resume, so
+        # the stale server keeps the VRAM until the NEXT session boots. Reap
+        # this session's own orphans before asking for eight GPUs.
+        #
+        # Safe to do unconditionally here: roofline holds ``profile_lane``,
+        # which resource_lock declares mutually exclusive with
+        # ``benchmark_lane`` / ``server_lifecycle`` / ``gpu_research_lane``. No
+        # task in this session may legitimately be holding a server while we
+        # run, so any surviving pidfile is by definition an orphan. The reap is
+        # additionally scoped to this session's own ``runs/`` pidfiles and gated
+        # on a cmdline match, so a co-located session is never touched.
+        from ._server_lifecycle import reap_orphaned_servers
+
+        try:
+            _pre_reaped = await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
+            if _pre_reaped:
+                log.warning(
+                    "roofline: preflight reaped %d orphaned server pid(s) before profiling: %s",
+                    len(_pre_reaped),
+                    _pre_reaped,
+                )
+        except Exception:  # noqa: BLE001 — best-effort
+            log.debug("roofline: preflight orphan reap failed", exc_info=True)
+
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
             profile_ctx = self._wrap_profile_ctx(
                 ctx,
@@ -363,6 +461,8 @@ class RooflineExecutor:
                         "roofline: cuda-graph capture failure detected; next attempt boots eager (%s)",
                         eager_flag,
                     )
+                elif attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(last_error):
+                    await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
                 continue
             if not isinstance(profile_result, dict):
                 last_phase = "profile"
@@ -412,6 +512,12 @@ class RooflineExecutor:
                         "roofline: cuda-graph capture failure detected; next attempt boots eager (%s)",
                         eager_flag,
                     )
+                elif attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(
+                    last_error,
+                    _profile_err_text(profile_result),
+                    _profile_server_log_tail(profile_result),
+                ):
+                    await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
                 continue
             if not trace_path:
                 last_phase = "profile_no_trace"
