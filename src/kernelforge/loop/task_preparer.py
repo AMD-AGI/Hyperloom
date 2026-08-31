@@ -100,7 +100,12 @@ log = logging.getLogger(__name__)
 # ~3600s budget), so a larger value never overruns the outer budget.
 PREPARE_MAX_ATTEMPTS = int(os.environ.get("FORGE_PREPARE_MAX_ATTEMPTS", "3") or "3")
 PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "3000")
-PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", "900") or "900")
+# Per-attempt cap is derived from the wall and attempt count so it scales with
+# both, rather than being a fixed constant that falls below the wall/attempts
+# ratio when either grows.  The env override still wins so operators can tune
+# without changing the formula.
+_derived_cap = max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
+PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", str(_derived_cap)) or str(_derived_cap))
 # Smallest budget worth spending on a RETRY. Measured over 25 recorded attempts:
 # successful ones ran 350-896s, and every retry that started with less than that
 # floor (150s, 298s, 300s, 325s) burned its whole budget without writing a byte.
@@ -2118,7 +2123,12 @@ async def prepare_task(
                 starved_retry_sec = remaining
                 break
             attempts += 1
-            attempt_timeout = min(remaining, float(PER_ATTEMPT_CAP_SEC))
+            is_last_attempt = attempts >= PREPARE_MAX_ATTEMPTS
+            attempt_timeout = (
+                remaining
+                if is_last_attempt
+                else min(remaining, float(PER_ATTEMPT_CAP_SEC))
+            )
             # Each attempt authors against the reference bundle; the preceding
             # attempt's verdict retired it (see _reset_scaffold).
             _open_scaffold()
