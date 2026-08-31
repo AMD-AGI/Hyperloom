@@ -1672,15 +1672,19 @@ def test_site_stats_record_caps_shape_sigs_and_callers_while_tallies_grow(probe_
     width = probe_module._MAX_CONTAINER_WIDTH
     callers_cap = probe_module._MAX_CALLERS_PER_SITE
     for i in range(width + 3):
-        stats.record(elapsed=0.1, nbytes=10, shape_sig=f"s{i}", caller=f"c{i}", at_s=float(i))
+        # Start at 1.0 (not 0.0) so first_s == 1.0 is distinguishable from the
+        # degenerate sentinel value (-1.0 → latched 0.0 when first call passes
+        # at_s=0.0).  Both the sentinel-init mutation and the always-overwrite
+        # mutation now turn this test red.
+        stats.record(elapsed=0.1, nbytes=10, shape_sig=f"s{i}", caller=f"c{i}", at_s=float(i) + 1.0)
 
     assert stats.count == width + 3
     assert stats.wall_s == pytest.approx(0.1 * (width + 3))
     assert stats.nbytes == 10 * (width + 3)
     assert len(stats.shape_sigs) == width
     assert len(stats.callers) == callers_cap
-    assert stats.first_s == 0.0
-    assert stats.last_s == float(width + 2)
+    assert stats.first_s == 1.0
+    assert stats.last_s == float(width + 2) + 1.0
 
     stats.record(elapsed=0.5, nbytes=7, shape_sig="overflow-shape", caller="overflow-caller", at_s=99.0)
     assert stats.count == width + 4
