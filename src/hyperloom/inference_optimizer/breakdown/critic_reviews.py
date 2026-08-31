@@ -38,6 +38,7 @@ FRAMEWORK_REVIEW_FIELDS = (
     "review_path",
 )
 
+
 def _candidate_id(value: Any) -> str:
     candidate = _mapping(value)
     return str(

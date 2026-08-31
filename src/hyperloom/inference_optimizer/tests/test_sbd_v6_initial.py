@@ -650,9 +650,7 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
         ("install", "resume")
     ]
     assert (tmp_path / "reports" / "sbd_v6" / "timeline" / "000001-install.json").is_file()
-    assert json.loads((tmp_path / "reports" / "sbd_v6" / "install.json").read_text(encoding="utf-8")) == (
-        fresh_install
-    )
+    assert json.loads((tmp_path / "reports" / "sbd_v6" / "install.json").read_text(encoding="utf-8")) == (fresh_install)
 
 
 def test_preflight_records_install_steps_in_execution_order(tmp_path, monkeypatch):
