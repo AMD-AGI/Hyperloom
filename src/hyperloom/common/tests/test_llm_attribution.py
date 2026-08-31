@@ -378,11 +378,8 @@ class TestNestedInjectionRefines:
         # x-litellm-trace-id carries a bare value, so an operator's own tracing
         # header is indistinguishable from ours; letting it win would make their
         # trace id the run's session and misjoin every reconciliation.
-        env = {
-            _ANTHROPIC: (
-                "x-litellm-tags: application=hyperloom,session=real-run\nx-litellm-trace-id: operator-trace"
-            )
-        }
+        tag = "x-litellm-tags: application=hyperloom,session=real-run"
+        env = {_ANTHROPIC: f"{tag}\nx-litellm-trace-id: operator-trace"}
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         assert "session=real-run" in self._tags(env)
         assert "operator-trace" not in self._tags(env)
