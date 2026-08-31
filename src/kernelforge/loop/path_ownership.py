@@ -9,6 +9,11 @@ delta. *producer* is forge's own bookkeeping, which must never reach a patch.
 *runtime* is machine-generated cache and compiled output, which must never be
 staged: a compile during a turn adds entries and the guard reads them as the
 turn creating files.
+
+Runtime splits again by consumer. Keeping a path out of a git index and keeping
+it out of a copy are different demands, and the wider answer is fatal to the
+narrower one: a scratch copy shadows the installed package, so a name dropped
+there has to be one no package imports from.
 """
 
 from __future__ import annotations
@@ -28,7 +33,12 @@ PRODUCER_PATH_PATTERNS: tuple[str, ...] = (
     "optimized_versions",
 )
 
-#: Directory basenames holding machine-generated artefacts.
+#: Directory basenames holding machine-generated artefacts, at any depth.
+#:
+#: A name here is dropped from a copy as well as from an index, so it must never
+#: be one a package also uses for source. ``aiter`` alone rules out ``jit`` and
+#: ``dist``: ``aiter/jit`` holds ``core.py`` and the extension modules
+#: ``import aiter`` loads, and ``aiter/dist`` holds its distributed sources.
 RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
     {
         "__pycache__",
@@ -36,9 +46,7 @@ RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
         ".pytest_cache",
         ".ruff_cache",
         "build",
-        "dist",
         "flydsl_cache",
-        "jit",
         "jit_cache",
     }
 )
@@ -46,8 +54,15 @@ RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset(
 #: Directory patterns that only a glob can express.
 RUNTIME_DIRECTORY_GLOBS: tuple[str, ...] = ("*.egg-info",)
 
-#: Suffixes that are always build output.
-RUNTIME_FILE_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo", ".so"})
+#: Suffixes worth neither copying nor hashing.
+RUNTIME_FILE_SUFFIXES: frozenset[str] = frozenset({".pyc", ".pyo"})
+
+#: Suffixes a copy must carry and an index must not hash.
+#:
+#: A scratch copy shadows the installed package outright, so dropping the
+#: extension modules leaves nothing to import and nothing to fall back to.
+#: Hashing them instead costs the loop a binary in every diff it takes.
+COMPILED_FILE_SUFFIXES: frozenset[str] = frozenset({".so"})
 
 
 def is_producer_owned_path(path: str) -> bool:
@@ -72,12 +87,14 @@ def runtime_gitignore_globs() -> tuple[str, ...]:
     """Gitignore patterns covering every runtime artefact.
 
     Written into a repository's exclude file before a baseline ``git add`` so
-    compiled output is never hashed.
+    compiled output is never hashed. Wider than what a copy filter may use: it
+    also covers the extension modules a copy has to keep.
 
     Returns:
         Directory and suffix patterns in gitignore syntax.
     """
     directories = sorted(RUNTIME_DIRECTORY_NAMES) + list(RUNTIME_DIRECTORY_GLOBS)
+    suffixes = sorted(RUNTIME_FILE_SUFFIXES | COMPILED_FILE_SUFFIXES)
     return tuple(f"{name}/" for name in directories) + tuple(
-        f"*{suffix}" for suffix in sorted(RUNTIME_FILE_SUFFIXES)
+        f"*{suffix}" for suffix in suffixes
     )
