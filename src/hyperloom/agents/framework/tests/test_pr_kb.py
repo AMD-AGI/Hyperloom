@@ -15,6 +15,7 @@ from hyperloom.common.jsonio import iter_sse_objects
 from hyperloom.agents.framework import pr_kb, pr_kb_slug
 from hyperloom.agents.framework.gbrain_page_client import (
     GbrainPageClient,
+    GbrainPageError,
     _select_mcp_response,
     build_gbrain_page_client_from_env,
 )
@@ -143,6 +144,26 @@ def test_parse_index_prs():
 def test_build_client_from_env_none_when_unset(monkeypatch):
     monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
     monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
+    assert build_gbrain_page_client_from_env() is None
+
+
+def test_gbrain_client_rejects_non_http_schemes():
+    with pytest.raises(GbrainPageError, match="unsupported URL scheme"):
+        GbrainPageClient("file:///etc/passwd", "tok")
+    with pytest.raises(GbrainPageError, match="unsupported URL scheme"):
+        GbrainPageClient("ftp://gbrain.example/mcp", "tok")
+
+
+def test_build_client_from_env_none_when_scheme_is_not_http(monkeypatch):
+    monkeypatch.setenv("GBRAIN_BASE_URL", "file:///tmp/gbrain")
+    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
+    assert build_gbrain_page_client_from_env() is None
+
+
+def test_build_client_from_env_none_when_url_is_unparseable(monkeypatch):
+    """An unterminated IPv6 literal raises ValueError from under the scheme check."""
+    monkeypatch.setenv("GBRAIN_BASE_URL", "http://[::1")
+    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
     assert build_gbrain_page_client_from_env() is None
 
 
