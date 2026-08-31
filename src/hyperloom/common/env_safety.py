@@ -114,7 +114,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
-        "FORGE_PATH",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
@@ -155,6 +154,10 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "AITER_",
     "FORGE_",
     "GEAK_",
+    # Not covered by "FORGE_": KernelForge's own knobs (writable-state root,
+    # rewrite handshake, mori KB opt-in) are spelled KERNELFORGE_*, and now that
+    # forge ships inside this distribution an operator configures them here.
+    "KERNELFORGE_",
     "HF_",
     "HYPERLOOM_",
     "INFERENCE_OPTIMIZER_",
@@ -173,7 +176,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         # credential on the way back in.
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
-        "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
         "GEAK_CLAUDE_MODEL",
         "GEAK_E2E_RUNNER",
@@ -192,6 +194,10 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         "KERNEL_AGENT_ROOT",
+        # KernelForge's writable-state root. Forge subprocesses resolve their
+        # experiments/caches/learned-KB under it, and without it here an operator
+        # setting it sees the child fall back to ~/.cache/hyperloom.
+        "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "MAGPIE_PATH",
         "MAGPIE_PYTHON",

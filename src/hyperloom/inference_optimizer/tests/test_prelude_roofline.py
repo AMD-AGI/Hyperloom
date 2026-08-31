@@ -335,7 +335,7 @@ async def test_on_enter_kernel_reprofiles_on_change(coord: Coordinator, monkeypa
     monkeypatch.setattr(coord.dispatcher, "_gemm_tuning_required_before_kernel_opt", lambda: False)
     coord.shared_state.cumulative_gain_validated = 20.0  # cur = 100 * 1.20 = 120
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert len(coord.sub.tasks_run) == 1
     # The reason carries a profile fingerprint suffix so repeated kernel entries
@@ -365,7 +365,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
     monkeypatch.setattr(coord.phase_kernel, "_run_forge_fusion", _run_fusion)
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert fusion_calls == 1
 
@@ -400,7 +400,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord:
     monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
     monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert dispatched == 1
 
@@ -426,7 +426,7 @@ async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: 
     monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
     monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
 
-    await coord._on_enter_kernel(from_phase="EXPLORE")
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert dispatched == 0
 

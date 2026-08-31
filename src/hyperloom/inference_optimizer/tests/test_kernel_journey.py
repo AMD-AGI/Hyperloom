@@ -37,6 +37,17 @@ def _init_git_repo(path: Path) -> str:
     return out.stdout.strip()
 
 
+def _distribution_version() -> str:
+    """The version forge's provenance entry must now report.
+
+    Resolved independently of ``instrument``'s own probe so the assertion is an
+    oracle rather than a tautology.
+    """
+    from importlib.metadata import version
+
+    return version("hyperloom-inference_optimizer")
+
+
 def test_kernel_journey_absent_without_substreams(tmp_path: Path) -> None:
     # Only an unrelated section recorded -> kernel_journey must not appear.
     instrument.record_phase_event(
@@ -322,7 +333,12 @@ def test_forge_backend_mints_versions_entry(tmp_path: Path) -> None:
     assert atts[0]["backend"] == "forge"
     versions = out["versions"]
     assert versions["forge"]["tool"] == "forge"
-    assert versions["forge"]["version"] == sha
+    # KernelForge ships inside this distribution, so its version IS Hyperloom's;
+    # there is no separate checkout left to ``git rev-parse``. The producer-supplied
+    # root_dir still yields a commit, so provenance keeps both halves.
+    assert versions["forge"]["version"] == _distribution_version()
+    assert versions["forge"]["version"] != sha
+    assert versions["forge"]["commit"] == sha
 
 
 def test_geak_provenance_resolves_geak_root_env_without_explicit_root(tmp_path: Path, monkeypatch) -> None:
@@ -400,10 +416,13 @@ def test_tool_version_probe_git_strategies(tmp_path: Path) -> None:
     # tracelens -> git describe (--always falls back to the short sha here).
     meta_tl = instrument._tool_metadata("tracelens", root=str(tmp_path))
     assert meta_tl["version"]  # non-empty describe output
-    # forge -> git short SHA (own backend); same strategy as geak.
+    # forge -> the distribution version: it is vendored into Hyperloom, not a
+    # checkout, so the git strategy geak uses does not apply to it. The commit
+    # still comes from the root the caller passed.
     meta_forge = instrument._tool_metadata("forge", root=str(tmp_path))
     assert meta_forge["commit"] == sha
-    assert meta_forge["version"] == sha
+    assert meta_forge["version"] == _distribution_version()
+    assert meta_forge["version"] != sha
     # A caller-supplied version always wins over the probe.
     meta_explicit = instrument._tool_metadata(
         "geak",

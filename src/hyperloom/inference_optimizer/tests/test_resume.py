@@ -122,11 +122,11 @@ class TestAClosedSessionIsReopenedOnResume:
     @pytest.mark.asyncio
     async def test_a_session_stopped_anywhere_else_resumes_where_it_stopped(self, session_dir):
         """Only the phase with no exit is reopened; the rest can still make progress."""
-        SharedState(session_id="mid", phase="EXPLORE").save(session_dir)
+        SharedState(session_id="mid", phase="FRAMEWORK_AGENT").save(session_dir)
 
         coordinator = Coordinator(session_dir, backends=_backends_full())
         try:
-            assert coordinator.shared_state.phase == "EXPLORE"
+            assert coordinator.shared_state.phase == "FRAMEWORK_AGENT"
             assert coordinator.shared_state.phase_history == []
         finally:
             await coordinator.stop()

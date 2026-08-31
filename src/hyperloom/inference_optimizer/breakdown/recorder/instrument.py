@@ -2468,8 +2468,10 @@ _TOOL_PROVENANCE: dict[str, dict[str, Any]] = {
     # The whole-pipeline GEAK e2e optimizer. Its checkout lives under $GEAK_ROOT
     # and its version is that repo's git SHA.
     "geak": {"root_env": "GEAK_ROOT", "version": "git_short"},
-    # forge (Kernel-Forge autonomous loop) locates its repo via $FORGE_PATH.
-    "forge": {"root_env": "FORGE_PATH", "version": "git_short"},
+    # forge (the Kernel-Forge autonomous loop) ships inside this distribution,
+    # so there is no checkout to ``git rev-parse``: its version is Hyperloom's.
+    # The "forge" key stays -- downstream provenance JSON reads it by name.
+    "forge": {"root_env": "", "version": ("dist", ("hyperloom-inference_optimizer",))},
     "claude": {"root_env": "", "version": ("cmd", ("claude", "--version"))},
     "codex": {"root_env": "", "version": ("cmd", ("codex", "--version"))},
     "inferencex": {"root_env": "INFERENCEX_PATH", "version": "git_short"},
@@ -3625,6 +3627,7 @@ def record_specialist_round(
     session_dir: Path | str | None,
     entry: dict[str, Any],
     *,
+    phase: str = "",
     producer: str = PRODUCER_COORDINATOR,
 ) -> None:
     """Record one ``specialist_runs`` round (idempotent by ``round_id``).
@@ -3634,6 +3637,10 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
+        phase (str): the phase the round ran in; falls back to
+            ``entry["phase"]``, then to the reader's timestamp backfill. A
+            specialist runs in more than one phase, so this cannot be a
+            constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3706,7 +3713,7 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase="EXPLORE",
+            phase=phase or str(entry.get("phase") or ""),
             status="succeeded" if entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
@@ -4370,7 +4377,8 @@ def record_session_validation(
         stack_len: Adopted-stack length this figure was validated at.
         source: The path that promoted it, e.g. ``integrate_patch``.
         measurement_basis: ``e2e_rebench`` when the throughput was measured
-            end to end, ``derived_speedup`` when it was inferred from a
+            end to end, ``e2e_decision_round`` when it is an explore round's own
+            grading measurement, ``derived_speedup`` when it was inferred from a
             micro-benchmark's speedup.
         ts: Author-time stamp; defaults to now.
         producer: Recorder producer label.

@@ -710,7 +710,6 @@ async def _run_rewrite_integrate(
         "framework_source_root": str(repo),
         "base_tput": base_tput,
         "accuracy_baseline": 1.0,
-        "enable_stack_rebench": False,
     }
     if extra_params:
         task_params.update(extra_params)

@@ -6,7 +6,7 @@
 
 The orchestrator writes an input JSON with one validated agent backend, model,
 and sandbox policy and calls this script; the autonomous fusion pipeline itself
-lives in KernelForge and is invoked as ``kernel-agents forge-fuse``.
+lives in KernelForge and is invoked as ``kernelforge forge-fuse``.
 
 It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
 Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
@@ -87,7 +87,11 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
 
     from hyperloom.common import llm_config  # noqa: PLC0415 - standalone import-light
 
-    options = llm_config.claude_sdk_env_options(env=os.environ)
+    options = llm_config.claude_sdk_env_options(
+        env=os.environ,
+        component="forge",
+        operation="author_kernel",
+    )
     resolved_env = options.get("env")
     if isinstance(resolved_env, dict):
         # Exactly the synthesizable subset: mirroring the subscription token
@@ -97,6 +101,15 @@ def _inject_author_gateway_env(agent_backend: str) -> None:
             value = str(resolved_env.get(name) or "").strip()
             if value:
                 os.environ.setdefault(name, value)
+    # The authoring child inherits this process's environment, not the resolved
+    # copy above, so the tag has to be merged in here or the run arrives at the
+    # gateway anonymous. It is merged rather than copied from ``resolved_env``
+    # because that copy has been through ``_expand_env_refs``: writing it back
+    # would publish the operator's gateway secret in this process's environment,
+    # whereas merging preserves the ``${VAR}`` the child resolves for itself.
+    from hyperloom.common.llm_attribution import inject_env  # noqa: PLC0415 - standalone import-light
+
+    inject_env(os.environ, component="forge", operation="author_kernel")
     # claude's bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     # Only set it when actually running as root so we do not defeat the guard
     # for non-root sessions that never needed the escape hatch.
@@ -126,7 +139,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 def _build_cmd(args: dict[str, Any]) -> list[str]:
     agent_backend = _validated_agent_backend(args.get("agent_backend"))
     agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
-    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-fuse"]
+    cmd = [sys.executable, "-m", "kernelforge.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)

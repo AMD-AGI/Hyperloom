@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.phases.machine_state import (
-    _framework_agent_consecutive_no_keep,
+    framework_agent_consecutive_no_keep,
 )
 
 from .test_framework_agent_authoring import _Stub
@@ -109,7 +109,7 @@ def test_dispatch_failures_do_not_trip_the_plateau():
             {"status": "dispatch_failed", "kept": False},
         ]
     )
-    assert _framework_agent_consecutive_no_keep(state) == 0
+    assert framework_agent_consecutive_no_keep(state) == 0
 
 
 def test_real_outcomes_still_trip_the_plateau():
@@ -121,7 +121,7 @@ def test_real_outcomes_still_trip_the_plateau():
             {"status": "not_applicable", "kept": False},
         ]
     )
-    assert _framework_agent_consecutive_no_keep(state) == 3
+    assert framework_agent_consecutive_no_keep(state) == 3
 
 
 def test_dispatch_failures_do_not_mask_real_outcomes():
@@ -133,7 +133,7 @@ def test_dispatch_failures_do_not_mask_real_outcomes():
             {"status": "reverted", "kept": False},
         ]
     )
-    assert _framework_agent_consecutive_no_keep(state) == 2
+    assert framework_agent_consecutive_no_keep(state) == 2
 
 
 def test_a_keep_still_breaks_the_streak_through_a_dispatch_failure():
@@ -145,4 +145,4 @@ def test_a_keep_still_breaks_the_streak_through_a_dispatch_failure():
             {"status": "author_empty", "kept": False},
         ]
     )
-    assert _framework_agent_consecutive_no_keep(state) == 1
+    assert framework_agent_consecutive_no_keep(state) == 1

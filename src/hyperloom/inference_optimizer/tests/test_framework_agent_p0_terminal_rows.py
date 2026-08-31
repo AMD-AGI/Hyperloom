@@ -115,13 +115,21 @@ def test_stamp_empty_key_is_noop(tmp_path: Path):
 
 
 def test_failed_framework_task_stamps_no_result_failed(tmp_path: Path):
-    """A framework_agent task settling ``status="failed"`` routes to
-    ``_handle_unpromotable_result`` and must be stamped no_result_failed."""
+    """An upstream-PR task settling ``status="failed"`` routes to
+    ``_handle_unpromotable_result`` and must be stamped no_result_failed.
+
+    That task never reaches the promote branch that writes the terminal row,
+    so without this stamp the pump re-selects the candidate every tick.
+    """
     coord = _MiniCoord(tmp_path)
     task = SimpleNamespace(
-        kind="framework_agent",
+        kind="integrate_patch",
         task_id="t-1",
-        params={"candidate": {"pr_url": "https://example.com/pr/7"}, "batch_id": "b1"},
+        params={
+            "framework_agent_candidate_id": "https://example.com/pr/7",
+            "candidate": {"pr_url": "https://example.com/pr/7"},
+            "batch_id": "b1",
+        },
     )
     result = {"status": "failed", "reason": "server never came up"}
     asyncio.run(coord._handle_unpromotable_result(task, result))

@@ -431,7 +431,12 @@ class LlmRcaEngine:
             params["temperature"] = 0.2
         _t0 = time.perf_counter()
         try:
-            result = await llm_config.achat_completion(self._ensure_client(), **params)
+            result = await llm_config.achat_completion(
+                self._ensure_client(),
+                component="robustness",
+                operation="analyze_symptom",
+                **params,
+            )
         except Exception as exc:  # noqa: BLE001 - degrade-to-empty is this engine's contract
             self._note_call_failure(exc)
             return ""
@@ -494,6 +499,8 @@ class AnthropicRcaEngine(LlmRcaEngine):
         _t0 = time.perf_counter()
         try:
             result = await llm_config.aanthropic_completion(
+                component="robustness",
+                operation="analyze_symptom",
                 model=self.model,
                 system=load_rca_system_prompt(),
                 messages=[{"role": "user", "content": _build_user_prompt(symptom)}],

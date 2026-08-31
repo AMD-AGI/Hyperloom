@@ -7,6 +7,7 @@ resolution, and the best-effort revert fallback chain."""
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 
 from hyperloom.orchestrator.actions.executors import _git as gitmod
@@ -519,3 +520,24 @@ def test_enforce_critic_gate_handles_state_without_verdict_method():
     out = ip._enforce_critic_gate(_NoMethod(), "spec-4")
     assert out is not None
     assert out["status"] == "rejected_by_critic"
+
+
+def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> None:
+    """The lane fetches a diff from a remote and applies it to the live tree.
+
+    PolicyGate does not re-validate a queued or resume-dispatched row, which is
+    why the specialist lane gates again in the executor; this lane ran the
+    fetch and the apply with no verdict check of its own.
+    """
+    ex = ip.IntegratePatchExecutor(session_dir=tmp_path)
+    ctx = types.SimpleNamespace(task=types.SimpleNamespace(task_id="t-cand"))
+    params = {
+        "candidate": {"repo": "vllm-project/vllm", "pr_number": 1015},
+        "framework_agent_candidate_id": "vllm-project/vllm#1015",
+    }
+
+    out = ex._stage_resolve_upstream_pr(ctx, params, _Verdict("reject"))
+
+    assert out is not None
+    assert out["status"] == "rejected_by_critic"
+    assert "patches" not in params

@@ -11,7 +11,7 @@ management and usage accounting instead of hand-rolling a tool-calling loop.
 persistent role; :func:`run_codex_turn` is the one-shot form for a caller
 whose work is a single turn.
 
-The SDK plumbing follows ``kernel_agents.agent_backends.codex.CodexBackend``,
+The SDK plumbing follows ``kernelforge.agent_backends.codex.CodexBackend``,
 but that class cannot be reused: its workspace guard requires the session cwd
 to be a git worktree and enforces KernelForge's benchmark-file protection.
 Hyperloom's Codex sessions run against plain output directories, so only the
@@ -51,6 +51,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.llm_config import LLMConfigError, parse_custom_headers, resolve_openai_client_config
 
 # Name Codex records the gateway under in its own TOML config. Only stability
@@ -906,6 +907,8 @@ class CodexSession:
         base_url_env: str = "OPENAI_BASE_URL",
         codex_bin: str = "",
         env: dict[str, str] | None = None,
+        component: str = "",
+        operation: str = "",
     ) -> None:
         self.cwd = Path(cwd)
         self.model = model
@@ -916,6 +919,8 @@ class CodexSession:
         self.base_url_env = base_url_env
         self.codex_bin = codex_bin
         self.env = env
+        self.component = component
+        self.operation = operation
         self._stack: contextlib.AsyncExitStack | None = None
         self._sdk: Any | None = None
         self._sandbox: Any = None
@@ -950,6 +955,15 @@ class CodexSession:
         if self._stack is not None:
             return
         effective_env = _effective_env(self.env)
+        # Tag before provider resolution so the header is mapped into
+        # ``env_http_headers`` with the gateway's own. The session snapshots its
+        # environment here, so the tag reflects the phase Codex started in.
+        if self.component:
+            inject_attribution_env(
+                effective_env,
+                component=self.component,
+                operation=self.operation,
+            )
         resolved_sandbox_mode = _resolve_codex_sandbox_mode(
             sandbox_mode=self.sandbox_mode,
             source=effective_env,
@@ -1144,6 +1158,8 @@ async def run_codex_turn(
     codex_bin: str = "",
     output_schema: dict[str, Any] | None = None,
     env: dict[str, str] | None = None,
+    component: str = "",
+    operation: str = "",
 ) -> CodexSessionResult:
     """Run one non-interactive Codex turn in a session of its own.
 
@@ -1166,6 +1182,9 @@ async def run_codex_turn(
         output_schema (dict[str, Any] | None): JSON schema the final response
             must match.
         env (dict[str, str] | None): Values overlaid on ``os.environ``.
+        component (str): Producer label for the turn's calls; ``""`` disables
+            attribution tagging.
+        operation (str): What the turn is being run to do.
 
     Returns:
         CodexSessionResult: The normalized turn outcome.
@@ -1190,6 +1209,8 @@ async def run_codex_turn(
         base_url_env=base_url_env,
         codex_bin=codex_bin,
         env=env,
+        component=component,
+        operation=operation,
     )
     await session.start()
     result: CodexSessionResult | None = None

@@ -22,6 +22,7 @@ from typing import Any
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
@@ -193,6 +194,7 @@ def _seed_shared_state(
     args: argparse.Namespace,
     *,
     session_id: str,
+    compute_partition: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run.
 
@@ -203,6 +205,12 @@ def _seed_shared_state(
         session_dir: Directory for the new session.
         args: Parsed CLI arguments.
         session_id: Identifier assigned to the session.
+        compute_partition: The shape the launch validated, passed in rather than
+            re-read because the environment carries a lossy subset of it: the
+            published variables cannot express where the CU count came from, and
+            an absent provenance flag would be reported as a board-table guess
+            when the device was in fact probed. Falls back to the published
+            variables when a caller has no verdict to hand over.
 
     Returns:
         The seeded :class:`SharedState` instance.
@@ -244,9 +252,6 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback
     # default when unset. Inherited env is NOT a config source (issue #903); the
@@ -398,6 +403,7 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
@@ -417,7 +423,6 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        explore_enabled=not bool(getattr(args, "no_explore", False)),
         # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
         # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
         # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
@@ -427,10 +432,6 @@ def _seed_shared_state(
         # stopping the session. Routing AgentX through the same channel as
         # ``--no-eval`` is what makes the opt-out legible to that guard.
         eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
-        # FRAMEWORK config-exploration lane toggle (default OFF).
-        framework_config_exploration_enabled=bool(
-            getattr(args, "enable_framework_config_exploration", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
@@ -556,7 +557,7 @@ def _print_final_summary(
             f"ts={state.cumulative_gain_validated_ts}){stale}"
         )
     else:
-        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` stack-rebench has succeeded yet")
+        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` KEEP has landed yet")
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")
