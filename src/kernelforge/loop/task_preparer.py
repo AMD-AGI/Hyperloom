@@ -112,6 +112,11 @@ PER_ATTEMPT_CAP_SEC = int(
 # better than not trying — but handing the scraps to a retry only converts the
 # tail of the wall into tokens and a misleading "FAILED after 2 attempts".
 PREPARE_MIN_RETRY_SEC = int(os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350")
+# Seconds reserved at the tail of every attempt for the salvage preflight.
+# Subtracting this from attempt_timeout ensures preflight_deadline_unix is still
+# in the future when salvage runs, so _deadline_timeout returns more than its
+# 1s floor. The value covers one correctness check on a warm cache.
+_SALVAGE_RESERVE_SEC: float = float(os.environ.get("FORGE_SALVAGE_RESERVE", "120") or "120")
 
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
 # These deliberately differ from bench_wallclock's measurement defaults (10/30,
@@ -2120,7 +2125,8 @@ async def prepare_task(
                 break
             attempts += 1
             is_last_attempt = attempts >= PREPARE_MAX_ATTEMPTS
-            attempt_timeout = remaining if is_last_attempt else min(remaining, float(PER_ATTEMPT_CAP_SEC))
+            spendable = max(0.0, remaining - _SALVAGE_RESERVE_SEC)
+            attempt_timeout = spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))
             # Each attempt authors against the reference bundle; the preceding
             # attempt's verdict retired it (see _reset_scaffold).
             _open_scaffold()
