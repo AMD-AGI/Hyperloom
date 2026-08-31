@@ -197,4 +197,36 @@ def test_redact_secret_values_masks_quoted_assignments():
 
     assert double == 'export MYAPP_PASSWORD="[REDACTED]"'
     assert single == "export MYAPP_PASSWORD='[REDACTED]'"
-    assert "hunter2" not in escaped
+    assert escaped == '{"command": "export MYAPP_PASSWORD=\\"[REDACTED]\\""}'
+    assert common_env_safety.redact_secret_values(r"PASSWORD=C:\foo\bar") == "PASSWORD=[REDACTED]"
+
+
+def test_redact_secret_values_spares_tokenizer_and_max_tokens():
+    """TOKEN as a name fragment must not mask workload knobs in an optimizer."""
+    for text in (
+        '--tokenizer="/models/x"',
+        "--tokenizer=/models/x",
+        "HYPERLOOM_EVAL_BOUNDS max_tokens=4096 stop=[</s>]",
+        '--max-tokens="4096"',
+        "num_speculative_tokens=5",
+        "TOKENIZERS_PARALLELISM=false",
+    ):
+        assert common_env_safety.redact_secret_values(text) == text
+
+    still_secret = common_env_safety.redact_secret_values('HF_TOKEN=abc ANTHROPIC_AUTH_TOKEN="tok-abcdef"')
+    assert "abc" not in still_secret
+    assert "tok-abcdef" not in still_secret
+    assert still_secret.count("[REDACTED]") == 2
+
+
+def test_redact_secret_values_masks_aws_key_and_jwt_shapes():
+    """AWS access-key ids and compact JWTs are masked by shape, not by assignment."""
+    access_id = "AKIA" + "IOSFODNN7EXAMPLE"
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxIn0." + "aaaaaaaaaa"
+    text = f"aws --secret-key {access_id} Authorization: {jwt}"
+
+    redacted = common_env_safety.redact_secret_values(text)
+
+    assert access_id not in redacted
+    assert jwt not in redacted
+    assert redacted.count("[REDACTED]") == 2
