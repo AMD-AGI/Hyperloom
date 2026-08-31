@@ -7,14 +7,14 @@ from argparse import Namespace
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.io import atomic_write_json
-from hyperloom.common.jsonio import read_json
+from hyperloom.common.io import append_jsonl, atomic_write_json
+from hyperloom.common.jsonio import read_json, read_jsonl
+from hyperloom.common.timeutil import now_iso
 
 from .session_paths import (
-    sbd_v6_install_path,
-    sbd_v6_model_gate_path,
     sbd_v6_timeline_dir,
     sbd_v6_timeline_event_path,
+    sbd_v6_write_warnings_path,
 )
 
 
@@ -25,13 +25,10 @@ _EVENT_TYPES = ("install", "model_gate")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 
-def _event_path(session_dir: Path | str, event_type: str) -> Path:
-    root = Path(session_dir)
-    if event_type == "install":
-        return sbd_v6_install_path(root)
-    if event_type == "model_gate":
-        return sbd_v6_model_gate_path(root)
-    raise ValueError(f"unsupported SBD V6 timeline event type: {event_type!r}")
+def _validate_event_type(event_type: str) -> str:
+    if event_type not in _EVENT_TYPES:
+        raise ValueError(f"unsupported SBD V6 timeline event type: {event_type!r}")
+    return event_type
 
 
 def _public_event(event: dict[str, Any]) -> dict[str, Any]:
@@ -87,59 +84,10 @@ def _read_event_file(
     return _public_event(event)
 
 
-def _event_identity(event_type: str, event: dict[str, Any]) -> tuple[str, str, str] | None:
-    ext = event.get("ext") if isinstance(event.get("ext"), dict) else {}
-    start_time = str(event.get("start_time") or "")
-    run_kind = str(ext.get("run_kind") or "")
-    if not start_time and not run_kind:
-        return None
-    return event_type, start_time, run_kind
-
-
-def _ensure_timeline_history(session_dir: Path | str) -> list[tuple[int, str, Path]]:
-    history = _history_files(session_dir)
-    root = Path(session_dir)
-    stored_events: list[tuple[int, str, Path, dict[str, Any]]] = []
-    for sequence, event_type, path in history:
-        event = _read_event_file(path, event_type)
-        if event is not None:
-            stored_events.append((sequence, event_type, path, event))
-
-    next_sequence = max((sequence for sequence, _, _ in history), default=0)
-    for event_type in _EVENT_TYPES:
-        legacy_path = _event_path(root, event_type)
-        if not legacy_path.is_file():
-            continue
-        event = _read_event_file(legacy_path, event_type)
-        if event is None:
-            continue
-        if any(stored_event == event for _, _, _, stored_event in stored_events):
-            continue
-        identity = _event_identity(event_type, event)
-        matching = next(
-            (
-                row
-                for row in reversed(stored_events)
-                if identity is not None and _event_identity(row[1], row[3]) == identity
-            ),
-            None,
-        )
-        if matching is not None:
-            _write_event(matching[2], event)
-            stored_events[stored_events.index(matching)] = (*matching[:3], event)
-            continue
-        next_sequence += 1
-        path = sbd_v6_timeline_event_path(root, next_sequence, event_type)
-        _write_event(path, event)
-        stored_events.append((next_sequence, event_type, path, event))
-    return _history_files(root)
-
-
 def write_timeline_event(session_dir: Path | str, event: dict[str, Any]) -> Path:
     """Persist one event without replacing an earlier run of the same stage."""
-    event_type = str(event.get("type") or "").strip()
-    latest_path = _event_path(session_dir, event_type)
-    history = _ensure_timeline_history(session_dir)
+    event_type = _validate_event_type(str(event.get("type") or "").strip())
+    history = _history_files(session_dir)
 
     raw_sequence = event.get(_STORAGE_SEQUENCE_KEY)
     try:
@@ -157,12 +105,9 @@ def write_timeline_event(session_dir: Path | str, event: dict[str, Any]) -> Path
         sequence = max((stored_sequence for stored_sequence, _, _ in history), default=0) + 1
         event[_STORAGE_SEQUENCE_KEY] = sequence
 
-    _write_event(
-        sbd_v6_timeline_event_path(Path(session_dir), sequence, event_type),
-        event,
-    )
-    _write_event(latest_path, event)
-    return latest_path
+    path = sbd_v6_timeline_event_path(Path(session_dir), sequence, event_type)
+    _write_event(path, event)
+    return path
 
 
 def read_timeline_event(
@@ -170,18 +115,14 @@ def read_timeline_event(
     event_type: str,
 ) -> dict[str, Any] | None:
     """Read the latest persisted event of one type."""
-    _event_path(session_dir, event_type)
-    for _, stored_type, path in reversed(_ensure_timeline_history(session_dir)):
+    _validate_event_type(event_type)
+    for _, stored_type, path in reversed(_history_files(session_dir)):
         if stored_type != event_type:
             continue
         event = _read_event_file(path, event_type)
         if event is not None:
             return event
-
-    path = _event_path(session_dir, event_type)
-    if not path.is_file():
-        return None
-    return _read_event_file(path, event_type)
+    return None
 
 
 def read_timeline_event_for_update(
@@ -189,8 +130,8 @@ def read_timeline_event_for_update(
     event_type: str,
 ) -> dict[str, Any] | None:
     """Read the latest event with its private storage sequence attached."""
-    _event_path(session_dir, event_type)
-    for sequence, stored_type, path in reversed(_ensure_timeline_history(session_dir)):
+    _validate_event_type(event_type)
+    for sequence, stored_type, path in reversed(_history_files(session_dir)):
         if stored_type != event_type:
             continue
         event = _read_event_file(path, event_type)
@@ -206,24 +147,69 @@ def read_timeline_events(
     warnings: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Read all persisted V6 events in execution order."""
-    history = _ensure_timeline_history(session_dir)
-    if history:
-        events: list[dict[str, Any]] = []
-        for _, event_type, path in history:
-            event = _read_event_file(path, event_type, warnings)
-            if event is not None:
-                events.append(event)
-        return events
-
-    events = []
-    for event_type in _EVENT_TYPES:
-        path = _event_path(session_dir, event_type)
-        if not path.is_file():
-            continue
+    if warnings is not None:
+        for warning in read_write_warnings(session_dir, warnings=warnings):
+            if warning not in warnings:
+                warnings.append(warning)
+    events: list[dict[str, Any]] = []
+    for _, event_type, path in _history_files(session_dir):
         event = _read_event_file(path, event_type, warnings)
         if event is not None:
             events.append(event)
     return events
+
+
+def record_write_warning(
+    session_dir: Path | str,
+    *,
+    component: str,
+    exc: BaseException,
+) -> bool:
+    """Best-effort persist a V6 writer failure for the next export."""
+    try:
+        append_jsonl(
+            sbd_v6_write_warnings_path(Path(session_dir)),
+            {
+                "ts": now_iso(timespec="seconds"),
+                "component": str(component or "unknown"),
+                "error_class": type(exc).__name__,
+                "message": str(exc) or repr(exc),
+            },
+            make_parents=True,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    except Exception:  # noqa: BLE001 — warning persistence cannot change runtime behavior
+        return False
+    return True
+
+
+def read_write_warnings(
+    session_dir: Path | str,
+    *,
+    warnings: list[str] | None = None,
+) -> list[str]:
+    """Read durable V6 writer failures without mutating the session."""
+    path = sbd_v6_write_warnings_path(Path(session_dir))
+    if not path.is_file():
+        return []
+    rows = read_jsonl(
+        path,
+        require_dict=True,
+        skip_malformed=True,
+        on_error=(
+            (lambda exc: warnings.append(f"timeline.write_warnings: failed to parse {path}: {exc!r}"))
+            if warnings is not None
+            else None
+        ),
+    )
+    result: list[str] = []
+    for row in rows:
+        component = str(row.get("component") or "unknown")
+        error_class = str(row.get("error_class") or "Error")
+        message = str(row.get("message") or "write failed")
+        result.append(f"sbd_v6.write.{component}: {error_class}: {message}")
+    return result
 
 
 def set_pending_install_event(args: Namespace | None, event: dict[str, Any]) -> None:
@@ -252,9 +238,11 @@ __all__ = [
     "SCHEMA_VERSION_V6",
     "pending_install_event",
     "persist_pending_install_event",
+    "read_write_warnings",
     "read_timeline_event",
     "read_timeline_event_for_update",
     "read_timeline_events",
+    "record_write_warning",
     "set_pending_install_event",
     "write_timeline_event",
 ]

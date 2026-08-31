@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +9,19 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 
 from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
+from ._common import (
+    _AUTHORING_TASK_KINDS,
+    _FRAMEWORK_PHASES,
+    _dict_rows,
+    _first,
+    _mapping,
+    _optional_bool,
+    _parse_iso_unix as _timestamp_number,
+    _safe_get as _nested,
+    _string_list,
+    _to_float as _optional_float,
+    _to_int as _optional_int,
+)
 
 
 _SUCCESS_STOP_REASONS = frozenset(
@@ -30,7 +42,6 @@ _MODEL_GATE_STOP_REASONS = frozenset(
         "unsupported_model_arch",
     }
 )
-_FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
 _FRAMEWORK_EXIT_REASON_MAP = {
     "explore_no_more_leverage": "optimize_no_more_leverage",
     "plateau_explore": "optimize_no_more_leverage",
@@ -38,13 +49,6 @@ _FRAMEWORK_EXIT_REASON_MAP = {
     "explore_budget_cap": "optimize_budget_cap",
     "explore_force_exit_low_budget": "optimize_force_exit_low_budget",
 }
-_AUTHORING_TASK_KINDS = frozenset(
-    {
-        "explore_apply_retry",
-        "framework_authoring",
-        "framework_local_explore",
-    }
-)
 
 
 def _tool_versions(versions: Any) -> dict[str, str | None]:
@@ -159,70 +163,8 @@ def collect_v6_metadata(
     }
 
 
-def _mapping(value: Any) -> dict[str, Any]:
-    return value if isinstance(value, dict) else {}
-
-
-def _dict_rows(value: Any) -> list[dict[str, Any]]:
-    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
-
-
 def _dict_value_rows(value: Any) -> list[dict[str, Any]]:
     return [row for row in value.values() if isinstance(row, dict)] if isinstance(value, dict) else []
-
-
-def _first(*values: Any) -> Any:
-    for value in values:
-        if value is not None and value != "":
-            return value
-    return None
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_float(value: Any) -> float | None:
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int) and value in (0, 1):
-        return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on", "passed", "succeeded"}:
-            return True
-        if normalized in {"0", "false", "no", "off", "failed"}:
-            return False
-    return None
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple, set)):
-        return []
-    return [str(item) for item in value if item not in (None, "")]
-
-
-def _nested(mapping: dict[str, Any], *path: str) -> Any:
-    value: Any = mapping
-    for key in path:
-        if not isinstance(value, dict):
-            return None
-        value = value.get(key)
-    return value
 
 
 def _row_cycle(row: dict[str, Any]) -> int | None:
@@ -252,16 +194,6 @@ def _row_timestamp(row: dict[str, Any]) -> str:
         )
         or ""
     )
-
-
-def _timestamp_number(value: Any) -> float | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
-    except (TypeError, ValueError):
-        return None
 
 
 def _operation_name(operation: dict[str, Any]) -> str:

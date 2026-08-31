@@ -2413,12 +2413,20 @@ def _finish_install_event(
 
 def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -> None:
     """Persist the pre-session install trace without changing launch behavior."""
-    from ..session.sbd_v6 import persist_pending_install_event
+    from ..session.sbd_v6 import persist_pending_install_event, record_write_warning
 
     try:
-        persist_pending_install_event(args, session_dir)
+        path = persist_pending_install_event(args, session_dir)
     except Exception as exc:  # noqa: BLE001
+        log.warning("failed to persist SBD V6 install event", exc_info=True)
+        if not record_write_warning(session_dir, component="install.event", exc=exc):
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+        return
+    if path is None:
+        exc = RuntimeError("pending install event is unavailable")
         log.warning("failed to persist SBD V6 install event: %s", exc)
+        if not record_write_warning(session_dir, component="install.event", exc=exc):
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
 
 
 def _preflight(

@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Added
 
+- **Session breakdown exports now include the additive V6 startup contract.**
+  The existing V5 payload remains intact while `metadata`, `outcome`,
+  `timeline`, and `close` provide the V6 read model. Install and model-gate
+  source events use one ordered timeline ledger that preserves fresh and resume
+  attempts, and write failures are surfaced through `metadata.warnings`.
+
 - **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
   Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
   `85b49f2f` (upstream `main`, PR #53 included) into `src/kernelforge/`;

@@ -1883,14 +1883,24 @@ def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[
 
 
 def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
-    from ..session.sbd_v6 import write_timeline_event
+    from ..session.sbd_v6 import record_write_warning, write_timeline_event
 
     try:
         write_timeline_event(session_dir, event)
-    except Exception:  # noqa: BLE001 — observability must never change gate behavior
+    except Exception as exc:  # noqa: BLE001 — observability must never change gate behavior
         log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
+        if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
+            log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
         return False
     return True
+
+
+def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseException) -> None:
+    """Best-effort retain a model-gate observability failure for export."""
+    from ..session.sbd_v6 import record_write_warning
+
+    if not record_write_warning(session_dir, component=component, exc=exc):
+        log.debug("failed to persist SBD V6 model-gate warning", exc_info=True)
 
 
 def _model_gate_status(
@@ -1959,8 +1969,9 @@ def _record_model_gate_check(
             skip_reason=str(ext.get("skip_reason") or "") or None,
         )
         _write_model_gate_event(session_dir, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change gate behavior
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change gate behavior
         log.warning("failed to record SBD V6 model-gate check", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
 
 
 def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
@@ -1969,8 +1980,9 @@ def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         event = _new_model_gate_event(args)
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
         log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
 
 
 def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
@@ -1984,8 +1996,9 @@ def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
         )
         event["end_time"] = now_iso(timespec="seconds")
         _write_model_gate_event(session_dir, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change launch behavior
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
         log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
 
 
 def _record_resumed_model_gate(
@@ -2017,17 +2030,17 @@ def _record_resumed_model_gate(
         ]
         setattr(args, _MODEL_GATE_EVENT_ATTR, event)
         _write_model_gate_event(session_dir, event)
-    except Exception:  # noqa: BLE001 — V6 observability must never change resume behavior
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change resume behavior
         log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
 
 
 def _write_model_gate_breakdown(
-    args: argparse.Namespace,
     session_dir: Path,
     *,
     failure_label: str,
 ) -> None:
-    """Write the fail-fast SBD and then persist its truthful artifact status."""
+    """Write the fail-fast SBD once without masking the gate failure."""
     try:
         from ..breakdown import write_breakdown_json
 
@@ -2037,24 +2050,7 @@ def _write_model_gate_breakdown(
             f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
             file=sys.stderr,
         )
-        return
-
-    try:
-        event = _load_model_gate_event(args, session_dir)
-        ext = event.get("ext")
-        failure = ext.get("failure") if isinstance(ext, dict) else None
-        artifacts = failure.get("artifacts") if isinstance(failure, dict) else None
-        if not isinstance(artifacts, dict):
-            return
-        artifacts["breakdown_written"] = True
-        if not _write_model_gate_event(session_dir, event):
-            return
-        write_breakdown_json(session_dir)
-    except Exception:  # noqa: BLE001 — V6 refresh must not mask the gate failure
-        log.warning(
-            "failed to refresh session_breakdown.json with model-gate artifact status",
-            exc_info=True,
-        )
+        _record_model_gate_warning(session_dir, component=f"model_gate.{failure_label}.breakdown", exc=exc)
 
 
 def _context_headroom_tokens() -> int:
@@ -2271,13 +2267,12 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             "message": reason,
             "artifacts": {
                 "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
-                "breakdown_written": False,
             },
         },
     )
     # Delivery-artifact parity: emit session_breakdown.json here too since
     # fail-fast exits before coordinator.run()'s finally.
-    _write_model_gate_breakdown(args, session_dir, failure_label="context")
+    _write_model_gate_breakdown(session_dir, failure_label="context")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
@@ -2390,11 +2385,10 @@ def _preflight_model_config_compat(
             "message": reason,
             "artifacts": {
                 "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
-                "breakdown_written": False,
             },
         },
     )
-    _write_model_gate_breakdown(args, session_dir, failure_label="config")
+    _write_model_gate_breakdown(session_dir, failure_label="config")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
@@ -2613,13 +2607,12 @@ def _preflight_unsupported_model_arch(
             "message": reason,
             "artifacts": {
                 "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
-                "breakdown_written": False,
             },
         },
     )
     # Delivery-artifact parity: emit session_breakdown.json here too since
     # fail-fast exits before coordinator.run()'s finally.
-    _write_model_gate_breakdown(args, session_dir, failure_label="unsupported-model")
+    _write_model_gate_breakdown(session_dir, failure_label="unsupported-model")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)

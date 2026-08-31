@@ -287,14 +287,9 @@ def sbd_v6_timeline_event_path(session_dir: Path, sequence: int, event_type: str
     return sbd_v6_timeline_dir(session_dir) / f"{int(sequence):06d}-{event_type}.json"
 
 
-def sbd_v6_install_path(session_dir: Path) -> Path:
-    """Compute the persisted V6 ``install`` timeline event path."""
-    return sbd_v6_dir(session_dir) / "install.json"
-
-
-def sbd_v6_model_gate_path(session_dir: Path) -> Path:
-    """Compute the persisted V6 ``model_gate`` timeline event path."""
-    return sbd_v6_dir(session_dir) / "model_gate.json"
+def sbd_v6_write_warnings_path(session_dir: Path) -> Path:
+    """Compute the durable V6 write-warning ledger path."""
+    return sbd_v6_dir(session_dir) / "write_warnings.jsonl"
 
 
 def enablement_dir(session_dir: Path) -> Path:
@@ -906,10 +901,9 @@ __all__ = [
     "runs_dir",
     "runs_root",
     "sbd_v6_dir",
-    "sbd_v6_install_path",
-    "sbd_v6_model_gate_path",
     "sbd_v6_timeline_dir",
     "sbd_v6_timeline_event_path",
+    "sbd_v6_write_warnings_path",
     "state_path",
     "target_analysis_dir",
     "target_analysis_report_md",

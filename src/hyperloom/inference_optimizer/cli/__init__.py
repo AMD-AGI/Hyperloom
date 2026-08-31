@@ -111,7 +111,6 @@ from ..session.paths import (
     ENV_USER_DATA_PATH,
     asset_system_prompts_dir,
     make_session_dir,
-    workspace_root,
 )
 
 
@@ -1837,38 +1836,6 @@ def _exit_code_for_stop_reason(stop_reason: str | None) -> int:
     return 0 if (stop_reason or "") in _SUCCESS_STOP_REASONS else 1
 
 
-def _is_valid_resume_session_dir(candidate: Path) -> bool:
-    """Return whether ``candidate`` is an initialized, readable session."""
-    if not (candidate / "manifest.json").is_file() or not (candidate / "state.json").is_file():
-        return False
-    try:
-        manifest = load_manifest(candidate)
-        state = SharedState.load_or_init(candidate)
-    except Exception:  # noqa: BLE001 — invalid resume input must fall back without masking preflight
-        return False
-    if not isinstance(manifest, Mapping):
-        return False
-    manifest_session_id = str(manifest.get("session_id") or "").strip()
-    state_session_id = str(state.session_id or "").strip()
-    return bool(manifest_session_id and state_session_id and manifest_session_id == state_session_id)
-
-
-def _preflight_failure_session_dir(args: argparse.Namespace) -> Path:
-    """Return a safe session directory for a pre-session install failure."""
-    resume_from = str(getattr(args, "resume_from", "") or "").strip()
-    if resume_from:
-        candidate = Path(resume_from).expanduser().resolve()
-        try:
-            candidate.relative_to(workspace_root().resolve())
-        except (OSError, ValueError):
-            pass
-        else:
-            if candidate.is_dir() and _is_valid_resume_session_dir(candidate):
-                return candidate
-
-    return _new_preflight_failure_session_dir(args, failed_attempt=bool(resume_from))
-
-
 def _new_preflight_failure_session_dir(
     args: argparse.Namespace,
     *,
@@ -1889,12 +1856,15 @@ def _new_preflight_failure_session_dir(
 
 def _persist_preflight_failure_artifacts(
     args: argparse.Namespace,
-    exc: BaseException,
+    exc: Exception,
 ) -> Path | None:
     """Best-effort materialize the failed install event and final SBD."""
     _mark_pending_install_event_failed(args, exc)
     try:
-        session_dir = _preflight_failure_session_dir(args)
+        session_dir = _new_preflight_failure_session_dir(
+            args,
+            failed_attempt=bool(str(getattr(args, "resume_from", "") or "").strip()),
+        )
     except Exception:  # noqa: BLE001 — never replace the original preflight failure
         log.warning("failed to create a session for SBD V6 preflight failure", exc_info=True)
         return None
@@ -1902,23 +1872,10 @@ def _persist_preflight_failure_artifacts(
     session_lock = SessionLock(session_dir)
     try:
         session_lock.acquire()
-    except Exception as lock_exc:  # noqa: BLE001 — a busy resume must not mutate the active session
+    except Exception:  # noqa: BLE001 — never replace the original preflight failure
         session_lock.release()
-        if not str(getattr(args, "resume_from", "") or "").strip():
-            log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
-            return None
-        log.warning(
-            "resume session unavailable for preflight failure artifacts (%s); using an isolated failed-attempt session",
-            lock_exc,
-        )
-        try:
-            session_dir = _new_preflight_failure_session_dir(args, failed_attempt=True)
-            session_lock = SessionLock(session_dir)
-            session_lock.acquire()
-        except Exception:  # noqa: BLE001 — never replace the original preflight failure
-            session_lock.release()
-            log.warning("failed to create an isolated SBD V6 preflight failure session", exc_info=True)
-            return None
+        log.warning("failed to lock SBD V6 preflight failure session", exc_info=True)
+        return None
 
     try:
         if not (session_dir / "manifest.json").is_file():
@@ -1927,16 +1884,22 @@ def _persist_preflight_failure_artifacts(
                 if not getattr(manifest_args, "model", None):
                     manifest_args.model = os.environ.get("MODEL_PATH", "")
                 write_manifest(session_dir, args=manifest_args)
-            except Exception:  # noqa: BLE001 — the install event can still stand alone
+            except Exception as write_exc:  # noqa: BLE001 — the install event can still stand alone
                 log.warning("failed to write manifest for SBD V6 preflight failure", exc_info=True)
+                from ..session.sbd_v6 import record_write_warning
+
+                record_write_warning(session_dir, component="preflight_failure.manifest", exc=write_exc)
 
         _persist_install_event(args, session_dir)
         try:
             from ..breakdown import write_breakdown_json
 
             write_breakdown_json(session_dir)
-        except Exception:  # noqa: BLE001 — never replace the original preflight failure
+        except Exception as write_exc:  # noqa: BLE001 — never replace the original preflight failure
             log.warning("failed to write SBD V6 preflight failure breakdown", exc_info=True)
+            from ..session.sbd_v6 import record_write_warning
+
+            record_write_warning(session_dir, component="preflight_failure.breakdown", exc=write_exc)
     finally:
         session_lock.release()
     print(f"Preflight failure artifacts: {session_dir}", file=sys.stderr)
@@ -2085,10 +2048,10 @@ async def _run_optimize(args: argparse.Namespace) -> int:
     codex_follows_claude = _codex_model_should_follow_claude()
     try:
         resolved_urls = _preflight(args)
-    except BaseException as exc:
+    except Exception as exc:  # noqa: BLE001 — only unexpected defects create diagnostic sessions
         try:
             _persist_preflight_failure_artifacts(args, exc)
-        except BaseException:  # noqa: BLE001 — preserve the original failure exactly
+        except Exception:  # noqa: BLE001 — preserve the original failure exactly
             log.warning("failed to preserve SBD V6 preflight failure", exc_info=True)
         raise
 

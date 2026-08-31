@@ -1076,6 +1076,8 @@ class CriticIteration(TypedDict, total=False):
         judge_bundle_path (str): Path to the judge bundle.
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
+        phase (str): Coordinator phase captured with the critic request.
+        macro_cycle (int): Coordinator macro cycle captured with the request.
         framework_reviews (list[dict[str, Any]]): Durable normalized V6
             Framework review rows.
     """
@@ -1090,6 +1092,8 @@ class CriticIteration(TypedDict, total=False):
     judge_bundle_path: str
     emit_path: str
     review_path: str
+    phase: str
+    macro_cycle: int
     framework_reviews: list[dict[str, Any]]
 
 

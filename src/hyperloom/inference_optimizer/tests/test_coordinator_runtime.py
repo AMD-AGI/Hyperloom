@@ -342,9 +342,17 @@ class _SelfTracingLLMFailingBackend(_LLMFailingBackend):
         super().__init__(name)
         self._session_dir = session_dir
         self.trace_ctx_calls = 0
+        self.trace_contexts: list[dict[str, object]] = []
 
-    def set_trace_context(self, *, tick: int | None = None, phase: str | None = None) -> None:
+    def set_trace_context(
+        self,
+        *,
+        tick: int | None = None,
+        phase: str | None = None,
+        macro_cycle: int | None = None,
+    ) -> None:
         self.trace_ctx_calls += 1
+        self.trace_contexts.append({"tick": tick, "phase": phase, "macro_cycle": macro_cycle})
 
     async def run(
         self,
@@ -390,6 +398,8 @@ async def test_self_tracing_backend_failure_is_recorded_exactly_once(session_dir
         # The surviving row is the backend's richer one (real review model).
         assert {r["model"] for r in rows} == {"claude-opus-4-7"}
         assert {r["component"] for r in rows} == {"critic"}
+        assert backends["critic"].trace_contexts
+        assert all("macro_cycle" in context for context in backends["critic"].trace_contexts)
     finally:
         await c.stop()
 

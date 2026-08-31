@@ -2,8 +2,19 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
+
+from .collectors._common import (
+    _AUTHORING_TASK_KINDS,
+    _FRAMEWORK_PHASES,
+    _dict_rows,
+    _first,
+    _mapping,
+    _optional_bool,
+    _safe_get as _nested,
+    _string_list,
+    _to_int,
+)
 
 
 FRAMEWORK_REVIEW_FIELDS = (
@@ -27,58 +38,6 @@ FRAMEWORK_REVIEW_FIELDS = (
     "review_path",
 )
 
-_FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
-_AUTHORING_TASK_KINDS = frozenset(
-    {
-        "explore_apply_retry",
-        "framework_authoring",
-        "framework_local_explore",
-    }
-)
-_MACRO_CYCLE_RE = re.compile(r"(?:^|\s)macro_cycle\s*=\s*(-?\d+)(?=\s|$)")
-
-
-def _mapping(value: Any) -> dict[str, Any]:
-    return dict(value) if isinstance(value, dict) else {}
-
-
-def _dict_rows(value: Any) -> list[dict[str, Any]]:
-    return [dict(row) for row in value or [] if isinstance(row, dict)] if isinstance(value, list) else []
-
-
-def _first(*values: Any) -> Any:
-    return next((value for value in values if value is not None and value != ""), None)
-
-
-def _nested(value: Any, *keys: str) -> Any:
-    current = value
-    for key in keys:
-        if not isinstance(current, dict):
-            return None
-        current = current.get(key)
-    return current
-
-
-def _optional_bool(value: Any) -> bool | None:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"1", "true", "yes", "on"}:
-            return True
-        if normalized in {"0", "false", "no", "off"}:
-            return False
-    if isinstance(value, (int, float)):
-        return bool(value)
-    return None
-
-
-def _string_list(value: Any) -> list[str]:
-    if not isinstance(value, (list, tuple, set)):
-        return []
-    return [str(item) for item in value if str(item)]
-
-
 def _candidate_id(value: Any) -> str:
     candidate = _mapping(value)
     return str(
@@ -91,16 +50,6 @@ def _candidate_id(value: Any) -> str:
         )
         or ""
     )
-
-
-def _prompt_macro_cycle(value: Any) -> int | None:
-    match = _MACRO_CYCLE_RE.search(str(value or ""))
-    if match is None:
-        return None
-    try:
-        return int(match.group(1))
-    except (TypeError, ValueError):
-        return None
 
 
 def _has_patch_refs(params: dict[str, Any]) -> bool:
@@ -223,18 +172,19 @@ def normalize_framework_reviews(
                 "ts": str(_first(verdict_row.get("ts"), emit.get("ts"), review.get("ts")) or ""),
                 "review_path": normalized_review_path,
                 "phase": review_phase,
-                "macro_cycle": _first(
-                    payload.get("cycle"),
-                    payload.get("macro_cycle"),
-                    params.get("cycle"),
-                    params.get("macro_cycle"),
-                    proposal.get("cycle"),
-                    proposal.get("macro_cycle"),
-                    _nested(request, "context", "macro_cycle"),
-                    _nested(request, "context", "cycle"),
-                    _prompt_macro_cycle(request.get("raw_prompt")),
-                    _nested(judge, "merged_context", "macro_cycle"),
-                    _nested(judge, "merged_context", "cycle"),
+                "macro_cycle": _to_int(
+                    _first(
+                        payload.get("cycle"),
+                        payload.get("macro_cycle"),
+                        params.get("cycle"),
+                        params.get("macro_cycle"),
+                        proposal.get("cycle"),
+                        proposal.get("macro_cycle"),
+                        _nested(request, "context", "macro_cycle"),
+                        _nested(request, "context", "cycle"),
+                        _nested(judge, "merged_context", "macro_cycle"),
+                        _nested(judge, "merged_context", "cycle"),
+                    )
                 ),
             }
         )

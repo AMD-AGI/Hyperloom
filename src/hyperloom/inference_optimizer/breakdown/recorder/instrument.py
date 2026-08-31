@@ -3812,6 +3812,16 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
+        request_context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        phase = str(request_context.get("phase") or "").strip().upper()
+        if phase:
+            payload["phase"] = phase
+        try:
+            macro_cycle = int(request_context["macro_cycle"])
+        except (KeyError, TypeError, ValueError):
+            macro_cycle = None
+        if macro_cycle is not None:
+            payload["macro_cycle"] = macro_cycle
         framework_reviews = normalize_framework_reviews(
             request=request,
             judge_bundle=judge_bundle,
