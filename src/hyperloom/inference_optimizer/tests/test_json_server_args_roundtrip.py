@@ -284,15 +284,21 @@ class TestUndeliverableTokenReport:
                 compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
         assert caplog.text.count("cannot represent") == 1
 
-    def test_an_untokenizable_input_still_names_something(self, caplog):
-        """The ``<unparseable>`` sentinel owns no option, and must not report none.
+    def test_an_unbalanced_quote_is_reported_under_its_own_option(self, caplog):
+        """An unbalanced quote names the option that owns it, not a sentinel.
 
-        It is reported in place of the string itself, so it is not one of the
-        tokens the owner walk can attribute.
+        This used to be the ``<unparseable>`` case: ``shlex`` raised on the whole
+        string, so the report could only say "something in here is unparseable"
+        and the removal fell through to a lossy whitespace re-split. Splitting on
+        whitespace directly -- which is what the unquoted transport does anyway
+        -- leaves nothing for a quote to unbalance, so the token is attributed
+        like any other and the removal is exact.
         """
         with caplog.at_level("WARNING"):
-            remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
-        assert "<unparseable>" in caplog.text
+            out = remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
+        assert "--foo" in caplog.text
+        assert "<unparseable>" not in caplog.text
+        assert out == "--foo 'unclosed"
 
 
 class TestValueSpanStopsAtShortOptions:
@@ -395,3 +401,133 @@ class TestExactPairRemoval:
             variant_extra_args=compact_json_server_args(_ATOM_ARGS, "atom"),
         )
         assert _json_value_of(composed, "--online_quant_config") == json.loads(_ATOM_QUANT_JSON)
+
+
+# ---------------------------------------------------------------------------
+# Mechanical coverage of remove_server_args.
+#
+# Three rounds of review found three separate span/quote bugs in this function,
+# each in a case the hand-written matrix did not contain, because the matrix was
+# written from memory of the PREVIOUS bug. Enumerating the token shapes and
+# asserting invariants over the product finds the next one without anybody
+# having to guess it first.
+# ---------------------------------------------------------------------------
+
+# One representative per token shape that reaches this sink. Each entry is
+# ``(flag, operands)`` and every combination is placed at the head, middle and
+# tail of an arg string, with every subset of removal spellings applied.
+_SHAPES: tuple[tuple[str, str], ...] = (
+    ("--tp", "8"),
+    ("-tp", "8"),  # single-dash short option, once swallowed as a value
+    ("--seed", "-1"),  # negative number, not an option
+    ("--cuda-graph-bs", "1 2 4"),  # multi-operand list
+    ("--quant", '{"a":1}'),  # compact JSON
+    ("--quant2", '{"k":"v with space"}'),  # JSON whose value carries whitespace
+    ("--broken", "a}"),  # unbalanced brace: ran the span off the end
+    ("--parser", "'hermes'"),  # quoted operand, no whitespace
+    ("--parser2", "'my parser'"),  # quoted operand with whitespace
+    ("--half", "'unclosed"),  # single edge quote, untokenizable for shlex
+    ("--tmpl", '{"t":"a  b"}'),  # double space inside a JSON string value
+)
+
+_NOISE = "--max-num-seqs 64"
+
+
+def _spellings(flag: str, operands: str) -> list[str]:
+    """The removal spellings an operator or LLM plausibly writes for one flag."""
+    first = operands.split()[0]
+    out = [flag, f"{flag} {operands}", f"{flag} {first}"]
+    quoted = len(first) >= 2 and first[0] == first[-1] and first[0] in "\"'"
+    if quoted or first[0] not in "\"'":
+        # Re-quoting a whole operand must not change what it names. Only a
+        # MATCHED pair is quoting; a lone edge quote (``'my`` from a
+        # whitespace-bearing value) is a byte of the value under this transport,
+        # so re-quoting it would name something else and is not a spelling of
+        # the same removal.
+        bare = first[1:-1] if quoted else first
+        out.append(f'{flag} "{bare}"')
+        out.append(f"{flag} '{bare}'")
+    return out
+
+
+@pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: s[0].lstrip("-"))
+@pytest.mark.parametrize("position", ["head", "middle", "tail"])
+def test_removing_a_flag_never_disturbs_its_neighbours(shape: tuple[str, str], position: str):
+    """Every retained flag keeps its own bytes, whatever was removed.
+
+    The invariant the whole function exists for. ``--online_quant_config``
+    reached a server mangled because a neighbouring removal rewrote it, and the
+    span bug found in review deleted the entire tail of the string when one
+    flag's operand happened to carry an unbalanced brace.
+    """
+    flag, operands = shape
+    target = f"{flag} {operands}"
+    if position == "head":
+        args = f"{target} {_NOISE} --port 8000"
+    elif position == "middle":
+        args = f"{_NOISE} {target} --port 8000"
+    else:
+        args = f"{_NOISE} --port 8000 {target}"
+
+    for spelling in _spellings(flag, operands):
+        got = remove_server_args(args, [spelling])
+        # The neighbours come back byte for byte, and nothing of the target is
+        # left behind -- so this one assertion covers both the removal and the
+        # span not reaching past it.
+        assert got == f"{_NOISE} --port 8000", f"{spelling!r} on {args!r} gave {got!r}"
+
+
+@pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: s[0].lstrip("-"))
+def test_an_unrelated_removal_returns_every_other_flag_verbatim(shape: tuple[str, str]):
+    """A removal that matches nothing on this flag must not touch its value.
+
+    This is the case the review's whitespace finding lived in: removing
+    ``--max-num-seqs`` collapsed the double space inside a retained
+    ``{"chat_template":"a  b"}`` because reassembly went through ``" ".join``.
+    """
+    flag, operands = shape
+    args = f"{flag} {operands} {_NOISE}"
+    got = remove_server_args(args, ["--max-num-seqs"])
+    assert got == f"{flag} {operands}"
+
+
+@pytest.mark.parametrize("shape", _SHAPES, ids=lambda s: s[0].lstrip("-"))
+def test_removal_is_idempotent_and_leaves_no_bare_words(shape: tuple[str, str]):
+    """Applying a removal twice changes nothing, and never orphans an operand.
+
+    Bare argv words are the concrete damage a half-removed operand list does:
+    ``validate_server_args_shell_safe`` rejects them outright and the paths that
+    skip it hand them to the server as positionals.
+    """
+    flag, operands = shape
+    args = f"{_NOISE} {flag} {operands} --port 8000"
+    for spelling in _spellings(flag, operands):
+        once = remove_server_args(args, [spelling])
+        assert remove_server_args(once, [spelling]) == once
+        for word in once.split():
+            if word.startswith("-") or "{" in word or "}" in word or word[0] in "\"'":
+                continue
+            # Anything left that is not an option name must be an operand of the
+            # option that precedes it, never a word standing on its own.
+            assert once.split().index(word) > 0, f"{once!r} starts with a bare word"
+
+
+def test_the_whole_shape_matrix_removed_at_once_leaves_nothing_behind():
+    """All shapes in one string, all removed together.
+
+    The per-shape cases above each isolate one flag; composing them checks that
+    the spans do not interfere, which is where the depth-tracking version failed
+    -- one unbalanced operand consumed every flag after it.
+    """
+    args = " ".join(f"{flag} {operands}" for flag, operands in _SHAPES)
+    got = remove_server_args(args, [flag for flag, _ in _SHAPES])
+    assert got == ""
+
+
+def test_removing_one_flag_from_the_shape_matrix_keeps_all_the_others():
+    """The inverse: one removal out of the full matrix disturbs nothing else."""
+    args = " ".join(f"{flag} {operands}" for flag, operands in _SHAPES)
+    for flag, operands in _SHAPES:
+        got = remove_server_args(args, [flag])
+        expected = " ".join(f"{f} {o}" for f, o in _SHAPES if f != flag)
+        assert got == expected, f"removing {flag} gave {got!r}"

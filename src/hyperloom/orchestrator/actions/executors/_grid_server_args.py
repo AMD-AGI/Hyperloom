@@ -23,6 +23,11 @@ from typing import Any
 
 from hyperloom.common.coerce import optional_positive_int, to_str_list
 
+# Single definition of "is this an option name rather than a value". Two copies
+# drifted apart once already; the fingerprint module is a leaf, so importing it
+# here adds no cycle.
+from ._canonical_fingerprint import _is_flag as _is_flag_token
+
 
 log = logging.getLogger(__name__)
 
@@ -100,93 +105,84 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
-def _tokenize_for_removal(text: str) -> tuple[list[str], list[str]]:
-    """Tokenize for removal matching, keeping every quote byte.
+_WHITESPACE_RUN_RE = re.compile(r"(\s+)")
 
-    ``shlex`` in non-POSIX mode preserves quote bytes, so each token comes back
-    carrying the quoting its author wrote — including the compacted JSON whose
-    inner double quotes a POSIX split drops and :func:`_repair_unquoted_json`
-    cannot re-quote once any bareword falls outside :data:`_JSON_BAREWORD`
-    (atom's ``*expert*`` wildcards). Per-token fidelity is what makes removal
-    safe to attempt: whatever is retained is handed back with its own bytes, so
-    dropping one flag never rewrites another's value. Refusing the removal
-    wholesale instead is what let a benchmark-harness flag reach a served
-    config.
 
-    This is NOT a byte-for-byte round trip of ``text``, and no caller may treat
-    it as one. Three things change: :func:`_reserialize_json_blobs` runs first
-    and rewrites every parseable JSON blob to its compact form, ``" ".join`` of
-    the result normalizes the separators between tokens (``--a  b`` comes back
-    as ``--a b``), and the ``ValueError`` fallback below is a plain whitespace
-    split that keeps no quoting at all. The removal argument rests on the
-    per-token property above, not on reproducing the input.
+def _split_keeping_separators(text: str) -> list[str]:
+    """Split into alternating word / whitespace pieces; ``"".join`` is exact.
 
-    Returns:
-        tuple[list[str], list[str]]: ``(tokens, unsafe)`` — the tokens, and the
-        subset the unquoted transport cannot carry, for the caller to report.
-        ``unsafe`` is a diagnostic only: those tokens are passed through
-        verbatim, since they are already malformed on the way in and dropping
-        the removal does not make them launchable. An input ``shlex`` cannot
-        tokenize at all falls back to a whitespace split, which collapses
-        whitespace runs and no longer reflects the quoting the author wrote —
-        it is reported through ``unsafe`` as ``"<unparseable>"`` rather than by
-        echoing the string, which can carry credentials.
+    Whitespace is *the* argv separator on this path and nothing else is. Magpie
+    expands ``EXTRA_*_ARGS`` through a shell wrapper without quoting it, so the
+    shell word-splits on whitespace and performs no quote removal: a quote byte
+    reaches the server as part of the value. Splitting the same way is therefore
+    not an approximation of the sink, it IS the sink — which is why ``shlex``,
+    POSIX or not, was the wrong model here. It disagreed with the transport
+    about where the tokens are, and every disagreement showed up as a removal
+    that deleted the wrong bytes.
+
+    Keeping the separator pieces is what makes reassembly byte-exact, so an
+    untouched neighbour is returned with its own whitespace — including the
+    interior of a JSON string value, which a ``" ".join`` silently collapsed
+    (``{"chat_template":"a  b"}`` reached the server as ``"a b"``).
     """
-    normalized = _reserialize_json_blobs(str(text or "").strip())
-    if not normalized:
-        return [], []
-    try:
-        tokens = shlex.split(normalized, posix=False)
-    except ValueError:
-        # Unbalanced quotes: shlex cannot tokenize at all. Best-effort rather
-        # than abandoned, because this feeds strip_benchmark_harness_flags on
-        # every compose and a skipped removal serves a benchmark-only flag.
-        return normalized.split(), ["<unparseable>"]
-    return tokens, _transport_unsafe_tokens(tokens)
+    return [piece for piece in _WHITESPACE_RUN_RE.split(text) if piece]
 
 
-def _is_flag_token(token: str) -> bool:
-    """Whether ``token`` is an option name rather than a value.
+def _words_of(text: str) -> list[str]:
+    """The non-whitespace pieces of ``text`` after JSON normalization."""
+    return [p for p in _split_keeping_separators(_reserialize_json_blobs(str(text or "").strip())) if not p.isspace()]
 
-    Single-dash short options are options too: treating only ``--`` as a flag
-    made a removal swallow ``-tp 8`` as if it were the removed flag's value.
-    A leading dash followed by a digit is a negative number, so it stays a
-    value. Mirrors ``_canonical_fingerprint._is_flag``.
+
+def _logical_value(word: str) -> str:
+    """The bytes a comparison should use, with one matched quote pair removed.
+
+    Removal specs are written by hand and by an LLM, and both quote habitually:
+    ``--foo "bar"`` and ``--foo bar`` name the same configuration. Comparing raw
+    bytes made the quoted spelling a silent no-op on either side. Only a matched
+    outer pair is stripped, so a stray edge quote (``'my`` from a
+    whitespace-bearing quoted value) keeps its bytes and still fails to match
+    anything but itself.
     """
-    if not token.startswith("-"):
-        return False
-    stripped = token.lstrip("-")
-    return bool(stripped) and not stripped[0].isdigit()
+    if len(word) >= 2 and word[0] == word[-1] and word[0] in "\"'":
+        return word[1:-1]
+    return word
 
 
-def _value_span_end(tokens: list[str], flag_index: int) -> int:
-    """Index just past the value fragments belonging to the flag at ``flag_index``.
+def _span_end(words: list[str], flag_index: int) -> int:
+    """Index just past the operands of the option at ``flag_index``.
 
-    A JSON value carrying whitespace survives ``shlex`` as several tokens, so a
-    flag's value can be more than one token and consuming only the first leaves
-    the rest behind as bare argv words. The span therefore runs to the next
-    option name — but never stops inside an unbalanced JSON blob, where a
-    fragment like ``-1}`` or a dashed bareword would otherwise end it early.
+    An option owns every following word up to the next option name, and nothing
+    tracks JSON nesting here on purpose. The depth-tracking version this
+    replaced could enter a blob that never balanced (``--foo a}``) and then run
+    to the end of the string, so removing that one flag silently deleted the
+    entire tail of the configuration and the server booted without it.
+
+    Fragments of a whitespace-bearing JSON value need no special case: they are
+    not option names, so the plain scan already takes them as one span. They are
+    also already undeliverable — :func:`_transport_unsafe_tokens` reports them —
+    so no removal decision can make that input launchable either way.
     """
     end = flag_index + 1
-    depth, in_string, escaped = 0, False, False
-    while end < len(tokens):
-        if depth == 0 and not in_string and _is_flag_token(tokens[end]):
-            break
-        depth, in_string, escaped = _json_scan(tokens[end], depth, in_string, escaped)
+    while end < len(words) and not _is_flag_token(words[end]):
         end += 1
     return end
 
 
-# Option sets already reported as undeliverable, so the warning below fires once
-# per distinct set per process. ``remove_server_args`` is reached by every
+# Payloads already reported as undeliverable, so the warning below fires once
+# per distinct payload per process. ``remove_server_args`` is reached by every
 # compose of every variant of every cycle, so a single legitimate quoted operand
 # (``--tool-call-parser 'my parser'``) used to print a multi-line WARNING
-# hundreds of times across one session.
-_UNSAFE_TRANSPORT_WARNED: set[str] = set()
+# hundreds of times across one session. Keyed on the owning option names plus
+# how many tokens were undeliverable — deliberately not on the values, which is
+# the whole point of not echoing them. Two payloads that differ only in a value
+# under the same option therefore report once; the message names the option so
+# an operator can find both.
+#
+# Insertion-ordered so a full cache evicts its OLDEST entry. Clearing the whole
+# cache instead re-armed every option already reported, which on a long session
+# is the repetition this exists to stop.
+_UNSAFE_TRANSPORT_WARNED: dict[str, None] = {}
 
-# Bounds the cache above. A session composes a bounded number of distinct arg
-# strings, but nothing enforces that, so the cache resets rather than growing.
 _UNSAFE_TRANSPORT_WARNED_CAP = 256
 
 
@@ -209,144 +205,177 @@ def _unsafe_token_owners(tokens: list[str], unsafe: list[str]) -> list[str]:
         if token in unsafe_set:
             owners.append(current)
             matched.add(token)
-    # An untokenizable input is reported as the ``<unparseable>`` sentinel
-    # rather than by echoing the string, so it is not one of the tokens and owns
-    # no option: carry it through as its own label instead of dropping it and
-    # naming nothing at all.
     owners.extend(unsafe_set - matched)
     return sorted(set(owners))
 
 
 def _warn_undeliverable_tokens(tokens: list[str], unsafe: list[str], remove_count: int) -> None:
-    """Report undeliverable tokens once per distinct option set per process."""
+    """Report undeliverable tokens once per distinct payload per process."""
     owners = _unsafe_token_owners(tokens, unsafe)
-    key = "|".join(owners)
+    names = ", ".join(owners)
+    key = f"{len(unsafe)}|{'|'.join(owners)}"
     if key in _UNSAFE_TRANSPORT_WARNED:
         log.debug(
             "Server args still carry %d token(s) the unquoted EXTRA_*_ARGS transport "
             "cannot represent, under %s; already reported this process.",
             len(unsafe),
-            key,
+            names,
         )
         return
-    if len(_UNSAFE_TRANSPORT_WARNED) >= _UNSAFE_TRANSPORT_WARNED_CAP:
-        _UNSAFE_TRANSPORT_WARNED.clear()
-    _UNSAFE_TRANSPORT_WARNED.add(key)
+    while len(_UNSAFE_TRANSPORT_WARNED) >= _UNSAFE_TRANSPORT_WARNED_CAP:
+        _UNSAFE_TRANSPORT_WARNED.pop(next(iter(_UNSAFE_TRANSPORT_WARNED)))
+    _UNSAFE_TRANSPORT_WARNED[key] = None
     log.warning(
         "Server args carry %d token(s) the unquoted EXTRA_*_ARGS transport cannot "
         "represent, under %s; applying the %d removal spec(s) to the rest and passing "
         "those tokens through verbatim. The value reaches the server with its "
         "quote/whitespace bytes intact, which is almost certainly not what was "
         "intended. Values and removal specs are withheld because both are "
-        "author-supplied and can carry credentials. Reported once per option set.",
+        "author-supplied and can carry credentials. Reported once per payload.",
         len(unsafe),
-        key,
+        names,
         remove_count,
     )
+
+
+def _parse_remove_specs(removes: list[str]) -> tuple[set[str], set[tuple[str, str]]]:
+    """Split removal specs into bare-flag names and (flag, operand) pairs.
+
+    Both keys a pair spec registers are compared on :func:`_logical_value`, so
+    the spelling of the quoting on either side does not decide whether a removal
+    happens. A multi-operand spec registers its whole operand list AND its first
+    operand, which is what lets ``--foo bar`` name ``--foo bar baz``.
+    """
+    remove_flags: set[str] = set()
+    remove_pairs: set[tuple[str, str]] = set()
+    for spec in removes:
+        words = _words_of(spec)
+        i = 0
+        while i < len(words):
+            word = words[i]
+            if not _is_flag_token(word):
+                i += 1
+                continue
+            if "=" in word:
+                flag, _, value = word.partition("=")
+                remove_pairs.add((flag, _logical_value(value)))
+                i += 1
+                continue
+            end = _span_end(words, i)
+            if end > i + 1:
+                operands = words[i + 1 : end]
+                remove_pairs.add((word, " ".join(_logical_value(o) for o in operands)))
+                remove_pairs.add((word, _logical_value(operands[0])))
+                i = end
+            else:
+                remove_flags.add(word)
+                i += 1
+    return remove_flags, remove_pairs
 
 
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
     ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
-    its following value when one is present; ``"--foo=bar"`` removes that exact
-    token shape; ``"--foo bar"`` removes ``--foo`` when ``bar`` is its first (or
-    only) operand, and takes the whole operand list with it — a flag's operands
-    are removed as a unit, never split, or the leftovers become bare argv words.
-    Both ``--long`` and ``-short`` option names count as flags, so a removal
-    never mistakes ``-tp 8`` for the value of the flag before it.
+    its following operands when any are present; ``"--foo=bar"`` removes that
+    exact token shape; ``"--foo bar"`` removes ``--foo`` when ``bar`` is its
+    first (or only) operand.
 
-    An input that cannot be tokenized is handled best-effort rather than left
-    untouched: this is the sink every compose reaches, so declining silently
-    served the flag that was supposed to be dropped.
+    SEMANTIC NOTE — a pair spec removes the WHOLE operand list, not just the
+    operand it names: ``remove_args: ["--cuda-graph-bs 1"]`` against
+    ``--cuda-graph-bs 1 2 4`` removes all three operands. A flag's operands are
+    a unit; deleting ``1`` alone leaves ``2 4`` as bare argv words, which
+    :func:`validate_server_args_shell_safe` rejects outright and which the paths
+    that skip it hand to the server as positionals. When a spec names one
+    operand and the flag carries several, this logs a WARNING rather than
+    widening the removal silently, because the gain or regression then belongs
+    to a different knob than the one the spec named.
 
-    JSON-valued flags survive verbatim: both sides of the comparison are
-    tokenized by :func:`_tokenize_for_removal`, whose non-POSIX split keeps
-    every quote byte, so a retained neighbour is never silently stripped of its
-    quotes and the removal still happens. A token the unquoted transport cannot
-    carry is passed through rather than abandoning the whole removal, and is
-    reported once per distinct option set per process (see
-    :func:`_warn_undeliverable_tokens`; this is a per-compose sink, so an
-    unconditional warning repeated itself for a whole session)
-    — this is a launch-path sink (``_workload_envs`` writes the result straight
-    into ``EXTRA_*_ARGS``) and ``strip_benchmark_harness_flags`` rides on it, so
-    a skipped removal serves a benchmark-only flag and misattributes the gain.
+    Matching is quote-insensitive on both sides (:func:`_logical_value`) but
+    reassembly is byte-exact for everything retained: words and the whitespace
+    between them come back unchanged, so removing one flag cannot rewrite
+    another's value — the failure that shipped a mangled
+    ``--online_quant_config`` to the server. Both sides are split on whitespace
+    only, which is exactly what the unquoted ``EXTRA_*_ARGS`` transport does
+    (see :func:`_split_keeping_separators`); there is no separate untokenizable
+    path, because there is nothing left for a quote to unbalance.
+
+    A word the transport cannot carry is passed through rather than abandoning
+    the whole removal, and is reported once per distinct payload per process
+    (see :func:`_warn_undeliverable_tokens`; this is a per-compose sink, so an
+    unconditional warning repeated itself for a whole session) — this is a
+    launch-path sink (``_workload_envs`` writes the result straight into
+    ``EXTRA_*_ARGS``) and ``strip_benchmark_harness_flags`` rides on it, so a
+    skipped removal serves a benchmark-only flag and misattributes the gain.
     """
     args = str(server_args or "").strip()
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
-    tokens, unsafe = _tokenize_for_removal(args)
-    if not tokens:
+    pieces = _split_keeping_separators(_reserialize_json_blobs(args))
+    word_at = [i for i, piece in enumerate(pieces) if not piece.isspace()]
+    words = [pieces[i] for i in word_at]
+    if not words:
         return args
+    unsafe = _transport_unsafe_tokens(words)
     if unsafe:
-        _warn_undeliverable_tokens(tokens, unsafe, len(removes))
+        _warn_undeliverable_tokens(words, unsafe, len(removes))
 
-    remove_flags: set[str] = set()
-    remove_pairs: set[tuple[str, str | None]] = set()
-    for spec in removes:
-        spec_tokens, _ = _tokenize_for_removal(spec)
-        if not spec_tokens:
-            spec_tokens = spec.split()
-        i = 0
-        while i < len(spec_tokens):
-            tok = spec_tokens[i]
-            if not _is_flag_token(tok):
-                i += 1
-                continue
-            if "=" in tok:
-                flag, _, value = tok.partition("=")
-                remove_pairs.add((flag, value))
-                i += 1
-            elif i + 1 < len(spec_tokens) and not _is_flag_token(spec_tokens[i + 1]):
-                end = _value_span_end(spec_tokens, i)
-                remove_pairs.add((tok, " ".join(spec_tokens[i + 1 : end])))
-                i = end
-            else:
-                remove_flags.add(tok)
-                i += 1
+    remove_flags, remove_pairs = _parse_remove_specs(removes)
 
-    out: list[str] = []
+    dropped: set[int] = set()
+
+    def drop(first: int, last: int) -> None:
+        """Drop words ``[first, last)`` and one flanking separator each."""
+        for k in range(first, last):
+            at = word_at[k]
+            dropped.add(at)
+            # Take the separator BEFORE the word so the neighbours it sat
+            # between end up adjacent exactly once; at the head of the string
+            # there is none, so take the one after instead.
+            if at - 1 >= 0 and pieces[at - 1].isspace():
+                dropped.add(at - 1)
+            elif at + 1 < len(pieces) and pieces[at + 1].isspace():
+                dropped.add(at + 1)
+
     i = 0
-    while i < len(tokens):
-        tok = tokens[i]
-        if not _is_flag_token(tok):
-            out.append(tok)
+    while i < len(words):
+        word = words[i]
+        if not _is_flag_token(word):
             i += 1
             continue
-        if "=" in tok:
-            flag, _, value = tok.partition("=")
-            if flag in remove_flags or (flag, value) in remove_pairs:
-                i += 1
+        if "=" in word:
+            flag, _, value = word.partition("=")
+            if flag in remove_flags or (flag, _logical_value(value)) in remove_pairs:
+                drop(i, i + 1)
+            i += 1
+            continue
+        end = _span_end(words, i)
+        operands = words[i + 1 : end]
+        if word in remove_flags:
+            drop(i, end)
+            i = end
+            continue
+        if operands:
+            whole = (word, " ".join(_logical_value(o) for o in operands))
+            first = (word, _logical_value(operands[0]))
+            if whole in remove_pairs or first in remove_pairs:
+                if len(operands) > 1 and whole not in remove_pairs:
+                    log.warning(
+                        "Removal spec names one operand of %s but the served args give it "
+                        "%d; removing the whole operand list, since a flag's operands "
+                        "cannot be split without leaving bare argv words. Attribute any "
+                        "resulting gain or regression to all of them, not just the one "
+                        "named.",
+                        word,
+                        len(operands),
+                    )
+                drop(i, end)
+                i = end
                 continue
-            out.append(tok)
-            i += 1
-            continue
-        # The value is every following token up to the next option name: a JSON
-        # blob with whitespace survives shlex as several tokens, and removing
-        # only the first would leave the rest behind as bare argv words.
-        end = _value_span_end(tokens, i)
-        span_value = " ".join(tokens[i + 1 : end])
-        if tok in remove_flags:
-            i = end
-            continue
-        # A ``--foo bar`` spec names one operand, so it matches both a
-        # single-operand span and the FIRST operand of a multi-value one
-        # (``--cuda-graph-bs 1 2 4``): comparing only against the whole span
-        # made the spec a no-op the moment another word followed. Either way the
-        # whole span goes. An operand list belongs to its flag, so deleting the
-        # flag and its first value alone left ``2 4`` behind as bare argv words
-        # — which validate_server_args_shell_safe rejects outright ("must be
-        # argv-like flags"), aborting the launch, and which the paths that skip
-        # that validator hand to the server as positional arguments.
-        if span_value and ((tok, span_value) in remove_pairs or (tok, tokens[i + 1]) in remove_pairs):
-            i = end
-            continue
-        out.append(tok)
         i += 1
-    # Compact the surviving JSON blobs to the one shape the unquoted transport
-    # can carry.
-    return _reserialize_json_blobs(" ".join(out))
+
+    return "".join(piece for i, piece in enumerate(pieces) if i not in dropped).strip()
 
 
 # Serving-ineligible harness flags. Enroll here; compose_server_args strips them
@@ -626,6 +655,11 @@ def _transport_unsafe_tokens(tokens: list[str]) -> list[str]:
     shell word-splits on whitespace but performs no quote removal: a token with
     embedded whitespace loses its boundary, and a quote byte at either edge
     reaches the server as part of the value.
+
+    ``remove_server_args`` passes whitespace-split words, which can never carry
+    embedded whitespace themselves — there a JSON value that did shows up as
+    several fragments, each with nonzero brace depth, which is the second check.
+    The whitespace check stays for any caller tokenizing some other way.
     """
     unsafe: list[str] = []
     for token in tokens:
