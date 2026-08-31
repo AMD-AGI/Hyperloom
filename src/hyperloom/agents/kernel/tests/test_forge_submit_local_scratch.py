@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -85,20 +86,44 @@ def test_the_sweep_leaves_unrelated_directories_alone(monkeypatch: pytest.Monkey
     assert stranger.is_dir()
 
 
-def test_the_copy_filter_keeps_what_a_package_is_imported_through() -> None:
-    directories, suffixes = forge_submit._runtime_artifact_names()
+def test_the_scratch_copy_keeps_what_a_package_is_imported_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The copy shadows the install, so a dropped name has nothing to fall back to."""
+    _on_network_fs(monkeypatch, False)
+    pkg = tmp_path / "site-packages" / "aiter"
+    (pkg / "jit").mkdir(parents=True)
+    (pkg / "dist").mkdir()
+    (pkg / "__pycache__").mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    (pkg / "jit" / "core.py").write_text("x = 1\n", encoding="utf-8")
+    (pkg / "jit" / "extension.so").write_bytes(b"\x7fELF")
+    (pkg / "dist" / "shard.py").write_text("y = 2\n", encoding="utf-8")
+    (pkg / "__pycache__" / "stale.pyc").write_bytes(b"\x00")
 
-    assert "jit" not in directories
-    assert "dist" not in directories
-    assert ".so" not in suffixes
+    prepared = forge_submit._prepare_worktree_nogit(
+        str(pkg / "__init__.py"),
+        "",
+        _durable_attempt(tmp_path, "session-copy", "aiter"),
+        "forge/scratch",
+    )
+
+    assert prepared is not None
+    copied = Path(prepared[0]) / "aiter"
+    assert (copied / "jit" / "core.py").is_file()
+    assert (copied / "jit" / "extension.so").is_file()
+    assert (copied / "dist" / "shard.py").is_file()
+    assert not (copied / "__pycache__").exists()
 
 
-def test_the_git_exclude_still_covers_extension_modules() -> None:
-    assert "*.so" in forge_submit._runtime_artifact_globs()
+def test_the_scratch_exclude_covers_what_the_copy_had_to_keep(tmp_path: Path) -> None:
+    """The wider answer belongs to the index: copied always, hashed never."""
+    workspace = tmp_path / "scratch"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
 
+    forge_submit._exclude_runtime_artifacts(workspace)
 
-def test_the_fallback_lists_answer_the_same_way_the_producer_does() -> None:
-    assert "jit" not in forge_submit._FALLBACK_RUNTIME_DIRECTORY_NAMES
-    assert "dist" not in forge_submit._FALLBACK_RUNTIME_DIRECTORY_NAMES
-    assert ".so" not in forge_submit._FALLBACK_RUNTIME_FILE_SUFFIXES
-    assert ".so" in forge_submit._FALLBACK_COMPILED_FILE_SUFFIXES
+    written = (workspace / ".git" / "info" / "exclude").read_text(encoding="utf-8").split()
+    assert "*.so" in written
+    assert "__pycache__/" in written

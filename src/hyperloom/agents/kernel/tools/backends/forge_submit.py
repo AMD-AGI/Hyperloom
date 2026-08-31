@@ -797,8 +797,10 @@ def _prepare_worktree_nogit(
        one top-level package subtree (e.g. ``vllm/``), NEVER the entire
        ``dist-packages``/``site-packages`` directory (which would copy every
        installed package — torch, vllm, ... — 5-15 GB per submit, risking
-       ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
-       ``dist/`` to keep the copy small and fast.
+       ENOSPC). Ignores ``.git`` and the runtime-artefact names the producer's
+       registry lists, which deliberately exclude any name a package is
+       imported through -- ``aiter/jit`` and ``aiter/dist`` are sources, and
+       the copy shadows the install, so dropping them leaves nothing to import.
     3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
        bytecode caches + ``git add -A`` + initial commit so Forge's
        ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
@@ -861,8 +863,18 @@ def _prepare_worktree_nogit(
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
-    runtime_dirs, runtime_suffixes = _runtime_artifact_names()
-    skipped_dirs = runtime_dirs | {".git"}
+    # Imported inside the call for the reason ``_is_on_network_fs`` states: this
+    # file also runs standalone, where the wheel carrying the producer is absent.
+    # A scratch copy is placed ahead of site-packages and shadows the install, so
+    # the narrow set is the only one it may drop -- the compiled suffixes the
+    # index skips have to survive the copy.
+    from kernelforge.loop.path_ownership import (  # noqa: PLC0415
+        RUNTIME_DIRECTORY_NAMES,
+        RUNTIME_FILE_SUFFIXES,
+    )
+
+    skipped_dirs = RUNTIME_DIRECTORY_NAMES | {".git"}
+    runtime_suffixes = tuple(RUNTIME_FILE_SUFFIXES)
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
         return [n for n in names if n in skipped_dirs or n.endswith((".egg-info", *runtime_suffixes))]
@@ -1374,53 +1386,6 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
 
 
-# The floor used when the producer's manifest cannot be reached. KernelForge
-# owns the authoritative list and is asked for it first, so the two stay in step
-# wherever it is installed -- but it is not a declared dependency of this
-# package and CI does not install it, so requiring it would turn every scratch
-# copy into an ImportError on a node that never needed the producer.
-#
-# What a copy may drop and what an index may drop are different questions. A
-# scratch copy is placed ahead of site-packages and shadows the install
-# outright, so a name dropped from it has to be one no package imports from:
-# aiter/jit carries the extension modules `import aiter` loads and aiter/dist
-# carries its distributed sources, so neither name can appear here. Extension
-# modules are the same case one level down -- copied always, hashed never.
-_FALLBACK_RUNTIME_DIRECTORY_NAMES: frozenset[str] = frozenset({"__pycache__", "build", "flydsl_cache", "jit_cache"})
-_FALLBACK_RUNTIME_FILE_SUFFIXES: tuple[str, ...] = (".pyc", ".pyo")
-_FALLBACK_COMPILED_FILE_SUFFIXES: tuple[str, ...] = (".so",)
-
-
-def _runtime_artifact_names() -> tuple[frozenset[str], tuple[str, ...]]:
-    """Return the directory names and file suffixes a scratch copy must skip.
-
-    Narrower than :func:`_runtime_artifact_globs`, which also covers what the
-    copy has to keep.
-    """
-    _ensure_forge_on_path()
-    try:
-        from kernel_agents.loop.path_ownership import (  # noqa: PLC0415
-            RUNTIME_DIRECTORY_NAMES,
-            RUNTIME_FILE_SUFFIXES,
-        )
-    except ImportError:
-        return _FALLBACK_RUNTIME_DIRECTORY_NAMES, _FALLBACK_RUNTIME_FILE_SUFFIXES
-    return RUNTIME_DIRECTORY_NAMES, tuple(RUNTIME_FILE_SUFFIXES)
-
-
-def _runtime_artifact_globs() -> tuple[str, ...]:
-    """Return gitignore patterns keeping runtime artefacts out of the index."""
-    _ensure_forge_on_path()
-    try:
-        from kernel_agents.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
-    except ImportError:
-        suffixes = sorted(_FALLBACK_RUNTIME_FILE_SUFFIXES + _FALLBACK_COMPILED_FILE_SUFFIXES)
-        return tuple(
-            [f"{name}/" for name in sorted(_FALLBACK_RUNTIME_DIRECTORY_NAMES)] + [f"*{suffix}" for suffix in suffixes]
-        )
-    return runtime_gitignore_globs()
-
-
 def _exclude_generated_drivers(workspace: Path) -> None:
     """Keep generated drivers out of whatever the producer stages.
 
@@ -1469,13 +1434,15 @@ def _exclude_runtime_artifacts(workspace: Path) -> None:
     Only the throwaway scratch repository needs this. Real repositories carry
     their own ignore rules, and entries written there would outlive the run.
     """
+    from kernelforge.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
+
     exclude = _git_exclude_file(workspace)
     if exclude is None:
         return
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
         present = set(existing.split())
-        missing = [g for g in _runtime_artifact_globs() if g not in present]
+        missing = [g for g in runtime_gitignore_globs() if g not in present]
         if not missing:
             return
         exclude.parent.mkdir(parents=True, exist_ok=True)
