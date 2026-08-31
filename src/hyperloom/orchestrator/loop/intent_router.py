@@ -79,7 +79,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-
 def _is_upstream_pr_candidate(pending: Any) -> bool:
     """True for an ``integrate_patch`` proposal that pre-screens a PR candidate.
 

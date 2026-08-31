@@ -455,7 +455,9 @@ def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
     """
     stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "src": "", "errors": 0}
     global_dirs = _global_aiter_jit_dirs()
-    global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (global_dirs[0] if global_dirs else None)
+    global_dir = next((d for d in global_dirs if any(d.glob("*.so"))), None) or (
+        global_dirs[0] if global_dirs else None
+    )
     if global_dir is None:
         return stats
     stats["src"] = str(global_dir)

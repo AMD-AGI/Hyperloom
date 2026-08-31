@@ -902,10 +902,9 @@ def _prepare_worktree_nogit(
 
     def _ignore(directory: str, names: list[str]) -> list[str]:
         return [
-            n for n in names
-            if n in skipped_dirs
-            or n.endswith(runtime_suffixes)
-            or any(_fnmatch.fnmatchcase(n, g) for g in dir_globs)
+            n
+            for n in names
+            if n in skipped_dirs or n.endswith(runtime_suffixes) or any(_fnmatch.fnmatchcase(n, g) for g in dir_globs)
         ]
 
     try:
