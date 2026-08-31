@@ -1944,6 +1944,7 @@ def record_geak_e2e_attempt(
         }
         measurement_refs: list[str] = []
         for name, numeric in (("baseline_throughput", before), ("final_throughput", after)):
+            is_accounting_anchor = name == "baseline_throughput"
             measurement_id = _stable_id(
                 "measurement",
                 operation_id,
@@ -1960,10 +1961,24 @@ def record_geak_e2e_attempt(
                 name=name,
                 value=numeric,
                 unit="tok/s",
-                status="validated",
+                # ``before`` is the residual ledger anchor, not a throughput
+                # sample taken by the GEAK harness.  It can be synthesized as
+                # ``pre_geak + claimed_kernel_delta`` so calling it validated
+                # would put a fictitious measurement on the canonical stream.
+                status="derived" if is_accounting_anchor else "validated",
                 measured_at=now,
                 metric_basis="output",
-                dimensions={"role": "baseline" if name == "baseline_throughput" else "final"},
+                dimensions={
+                    "role": "baseline" if is_accounting_anchor else "final",
+                    **(
+                        {
+                            "derived": True,
+                            "derivation": "geak_route_residual_anchor",
+                        }
+                        if is_accounting_anchor
+                        else {}
+                    ),
+                },
                 **_measurement_metadata("geak_e2e_orchestrator", harness="geak_e2e"),
             )
             measurement_refs.append(measurement_id)

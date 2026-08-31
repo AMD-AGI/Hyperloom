@@ -387,6 +387,34 @@ def test_geak_route_level_win_reaches_the_geak_column(tmp_path: Path) -> None:
     assert geak.get("total_gain_pct") == 3.2, geak
 
 
+def test_geak_route_residual_anchor_is_not_a_validated_measurement(tmp_path: Path) -> None:
+    """The route's synthetic start is accounting evidence, not a sample."""
+    instrument.record_geak_e2e_attempt(
+        tmp_path,
+        kind="kernel_optimization",
+        throughput_before=1070.0,
+        throughput_after=1120.0,
+        baseline_tput=BASELINE_TPUT,
+        gain_pct=5.0,
+        macro_cycle=0,
+        provenance="geak_orch_harness_validated",
+    )
+
+    measurements = {
+        str(row.get("name") or ""): row
+        for row in assemble_parts(tmp_path).get("measurements") or []
+        if isinstance(row, dict)
+    }
+    anchor = measurements["baseline_throughput"]
+    assert anchor["status"] == "derived"
+    assert anchor["dimensions"] == {
+        "role": "baseline",
+        "derived": True,
+        "derivation": "geak_route_residual_anchor",
+    }
+    assert measurements["final_throughput"]["status"] == "validated"
+
+
 def test_two_promotions_in_one_macro_cycle_are_two_attempts(tmp_path: Path) -> None:
     """The attempt id keyed only by macro cycle merged re-promotions.
 
