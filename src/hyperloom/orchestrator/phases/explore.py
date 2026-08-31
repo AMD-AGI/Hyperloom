@@ -85,7 +85,7 @@ def _forward_integrate_source(
     # ``lever_kind`` travels with the proposal: the patch that lands moved the
     # same lever the specialist was dispatched against, and re-deriving it at
     # writeback time is how attribution drifts.
-    for key in ("gap_canonical_id", "gap_layer", "lever_kind"):
+    for key in ("gap_canonical_id", "gap_layer", "lever_kind", "reauthor_attempt", "apply_retry_attempt"):
         value = src.get(key)
         if value not in (None, "", [], {}):
             dst[key] = value
@@ -1852,6 +1852,7 @@ class ExplorePhase(CoordinatorCollaborator):
         task: Task,
         done_payload: dict[str, Any],
         source: str,
+        run_error: str = "",
     ) -> dict[str, Any]:
         """Translate a specialist done payload into a SharedState.specialist_rounds[] row; round_id defaults to task_id for idempotent overwrite.
 
@@ -1860,6 +1861,7 @@ class ExplorePhase(CoordinatorCollaborator):
             done_payload: The specialist done payload (proposal_set, domain,
                 tags, summary, etc.).
             source: The emitting agent string, recorded on the row.
+            run_error: Dispatch failure text when no valid payload was produced.
 
         Returns:
             A specialist-round row dict suitable for
@@ -1868,7 +1870,18 @@ class ExplorePhase(CoordinatorCollaborator):
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
-        round_id = str((task.params or {}).get("round_id") or task.task_id)
+        task_params = task.params or {}
+        round_id = str(task_params.get("round_id") or task.task_id)
+        source_phase = (
+            str(
+                task_params.get("source_phase")
+                or done_payload.get("source_phase")
+                or getattr(getattr(self, "shared_state", None), "phase", "")
+                or ""
+            )
+            .strip()
+            .upper()
+        )
         from ..specialists.domains import normalize_dispatch_tags
 
         # Knowledge-domain tags; reported tags win over dispatch params.
@@ -1880,18 +1893,43 @@ class ExplorePhase(CoordinatorCollaborator):
             "task_id": task.task_id,
             "source": source or "coordinator",
             "completed_at": datetime.now(timezone.utc).isoformat(),
-            "domain": str(done_payload.get("domain") or ""),
+            "domain": str(done_payload.get("domain") or task_params.get("domain") or ""),
             "tags": list(tags),
-            "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+            "gap_canonical_id": str(done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""),
             "empty": bool(done_payload.get("empty")) or len(proposals) == 0,
             "proposals_total": len(proposals),
             "proposal_set": list(proposals),
             "summary": str(done_payload.get("summary") or "")[:480],
-            "reason": str(done_payload.get("reason") or "")[:480],
+            "reason": str(run_error or done_payload.get("reason") or "")[:480],
             "confidence": done_payload.get("confidence"),
             "new_findings": list(done_payload.get("new_findings") or []),
             "residual_questions": list(done_payload.get("residual_questions") or []),
         }
+        for key in (
+            "task_kind",
+            "scope",
+            "proposal_msg_id",
+            "framework_agent_candidate_id",
+            "framework_batch_id",
+            "reauthor_attempt",
+            "apply_retry_attempt",
+        ):
+            value = done_payload.get(key)
+            if value in (None, "", [], {}):
+                value = task_params.get(key)
+            if value not in (None, "", [], {}):
+                entry[key] = value
+        for key in ("candidate_discovery", "framework_agent_authoring"):
+            if bool(done_payload.get(key) or task_params.get(key)):
+                entry[key] = True
+        if run_error:
+            entry["status"] = "failed"
+            entry["error"] = str(run_error)[:1000]
+            entry["run_error"] = str(run_error)[:1000]
+        elif done_payload.get("status") not in (None, ""):
+            entry["status"] = str(done_payload.get("status"))
+        if source_phase:
+            entry["source_phase"] = source_phase
         gpu_ids = done_payload.get("allocated_gpu_ids") or []
         if isinstance(gpu_ids, list) and gpu_ids:
             entry["allocated_gpu_ids"] = [

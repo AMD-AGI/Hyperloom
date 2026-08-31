@@ -226,6 +226,7 @@ def test_materialize_unknown_route_dispatches_both_tracks(
     params = spec["params"]
     assert params["framework_agent_authoring"] is True
     assert params["domain"] == "serving_specialist"
+    assert params["source_phase"] == "FRAMEWORK_AGENT"
     assert params["framework_agent_candidate_id"] == _CANDIDATE["pr_url"]
     assert params.get("task_kind") == "framework_authoring"
     pr_lead = params.get("pr_lead") or {}
@@ -243,6 +244,33 @@ def test_materialize_authoring_disabled_runs_diff_track_only(
 
     kinds = [c["kind"] for c in stub.tasks.created]
     assert kinds == ["integrate_patch"]
+
+
+def test_reauthor_attempt_propagates_into_specialist_and_integrate_params(tmp_path: Path):
+    from hyperloom.orchestrator.phases.explore import _forward_integrate_source
+
+    stub = _Stub(tmp_path, authoring=True)
+
+    task_id = asyncio.run(
+        stub._enqueue_framework_agent_authoring_specialist(
+            dict(_CANDIDATE),
+            {},
+            reauthor_attempt=1,
+        )
+    )
+
+    specialist_task = stub.tasks._queued[-1]
+    assert task_id == specialist_task.task_id
+    assert specialist_task.params["reauthor_attempt"] == 1
+    round_entry = stub._build_specialist_round_entry(
+        task=specialist_task,
+        done_payload={"proposal_set": [], "empty": True},
+        source=f"specialist:{task_id}",
+    )
+    assert round_entry["reauthor_attempt"] == 1
+    integrate_params: dict[str, Any] = {}
+    _forward_integrate_source(specialist_task.params, integrate_params)
+    assert integrate_params["reauthor_attempt"] == 1
 
 
 @pytest.mark.parametrize(
@@ -377,6 +405,7 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
             "framework_agent_candidate_id": "pr-42",
             "framework_batch_id": "b1",
             "specialist_task_id": "s-1",
+            "reauthor_attempt": 1,
         },
     )
     result = SimpleNamespace(
@@ -397,6 +426,7 @@ def test_record_authored_outcome_writes_progress_and_rolls_max_gain(
     assert row["provenance"] == "authored"
     assert row["candidate_id"] == "pr-42"
     assert row["gain_pct"] == pytest.approx(6.5)
+    assert row["reauthor_attempt"] == 1
     assert stub.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == pytest.approx(6.5)
 
 
@@ -620,7 +650,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     task = SimpleNamespace(
         task_id="integrate-cross-phase",
         kind="integrate_patch",
-        params={"framework_agent_authoring": True},
+        params={"framework_agent_authoring": True, "reauthor_attempt": 1},
     )
     result = SubAgentResult(
         task_id=task.task_id,
@@ -631,6 +661,7 @@ async def test_dispatcher_records_authored_outcome_after_phase_transition(tmp_pa
     await DispatcherCollaborator(stub)._reap_dispatched_task(task, result, None)
 
     assert recorded == ["reverted"]
+    assert result.result["reauthor_attempt"] == 1
 
 
 def test_empty_outcome_fires_when_patch_dropped_by_vetting(tmp_path: Path):

@@ -42,6 +42,7 @@ from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
 from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -3637,10 +3638,9 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
-        phase (str): the phase the round ran in; falls back to
-            ``entry["phase"]``, then to the reader's timestamp backfill. A
-            specialist runs in more than one phase, so this cannot be a
-            constant.
+        phase (str): the runtime phase used when the entry does not already
+            declare ``source_phase``. A specialist runs in more than one phase,
+            so this cannot be a constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3648,19 +3648,23 @@ def record_specialist_round(
         trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
-        key = str(entry.get("round_id") or "") or None
+        source_phase = str(entry.get("source_phase") or phase or entry.get("phase") or "").strip().upper()
+        recorded_entry = dict(entry)
+        if source_phase:
+            recorded_entry.setdefault("source_phase", source_phase)
+        key = str(recorded_entry.get("round_id") or "") or None
         _recorder(session_dir, producer).record_item(
             "specialist_runs",
-            dict(entry),
+            recorded_entry,
             key=key,
         )
-        round_id = str(entry.get("round_id") or key or entry.get("task_id") or "unknown")
+        round_id = str(recorded_entry.get("round_id") or key or recorded_entry.get("task_id") or "unknown")
         operation_id = _stable_id("op", "specialist", round_id)
         round_subject_id = _stable_id("subject", "specialist-round", round_id)
-        domains = list(entry.get("domains") or [])
-        if entry.get("domain"):
-            domains.append(str(entry.get("domain")))
-        domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
+        domains = list(recorded_entry.get("domains") or [])
+        if recorded_entry.get("domain"):
+            domains.append(str(recorded_entry.get("domain")))
+        domains.extend(str(tag) for tag in (recorded_entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
         record_subject(
             session_dir,
@@ -3670,7 +3674,7 @@ def record_specialist_round(
             name=round_id,
             attributes={
                 "domains": domains,
-                "proposals_total": entry.get("proposals_total"),
+                "proposals_total": recorded_entry.get("proposals_total"),
             },
             producer=producer,
         )
@@ -3688,7 +3692,7 @@ def record_specialist_round(
             )
             domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
         proposal_subjects: list[dict[str, Any]] = []
-        proposals = entry.get("proposal_set")
+        proposals = recorded_entry.get("proposal_set")
         if isinstance(proposals, list):
             for index, proposal in enumerate(proposals):
                 if not isinstance(proposal, Mapping):
@@ -3713,19 +3717,19 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase=phase or str(entry.get("phase") or ""),
-            status="succeeded" if entry.get("completed_at") else "partial",
+            phase=source_phase,
+            status="succeeded" if recorded_entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
             purpose="proposal",
-            scope=str(entry.get("scope") or ""),
+            scope=str(recorded_entry.get("scope") or ""),
             strategy_group="specialist",
             strategy="multi_domain",
             producer=producer,
-            ended_at=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            ended_at=str(recorded_entry.get("completed_at") or recorded_entry.get("dispatched_at") or ""),
             subject={"subject_id": round_subject_id, "subject_type": "specialist_round"},
             subjects=domain_subjects + proposal_subjects,
-            outputs=dict(entry),
+            outputs=recorded_entry,
             adoption_refs=[],
             extensions={"downstream_relation": "proposal_only"},
         )
@@ -3747,6 +3751,8 @@ def record_critic_iteration(
     session_dir: Path | str | None,
     *,
     iter_n: int,
+    request: dict[str, Any] | None = None,
+    judge_bundle: dict[str, Any] | None = None,
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
@@ -3755,9 +3761,10 @@ def record_critic_iteration(
 ) -> None:
     """Record one ``critic_robustness.critic_iterations`` item.
 
-    Recorded per-iteration (idempotent on ``iter_n``) so the critic backend's
-    workdir pruning never erases history; payload mirrors
-    ``collectors.collect_critic_robustness``.
+    Recorded per-iteration under a session-unique identity so workdir pruning
+    and resume-time turn-index reuse never erase history; payload mirrors
+    ``collectors.collect_critic_robustness`` and retains normalized Framework
+    review rows for the V6 timeline.
 
     ``kb_priors`` (when provided) carries the per-iteration KB integration
     trace: whether the historical priors were used, the request, the response,
@@ -3767,7 +3774,9 @@ def record_critic_iteration(
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
-        iter_n (int): the critic iteration number (idempotency key).
+        iter_n (int): the process-local critic iteration number.
+        request (dict[str, Any] | None): the critic request payload.
+        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
         review (dict[str, Any] | None): the critic review payload.
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
@@ -3783,6 +3792,14 @@ def record_critic_iteration(
         review = review if isinstance(review, dict) else {}
         emit = emit if isinstance(emit, dict) else {}
         wd = Path(workdir) if workdir else None
+        request = request if isinstance(request, dict) else read_json(wd / "request.json", default={}) if wd else {}
+        judge_bundle = (
+            judge_bundle
+            if isinstance(judge_bundle, dict)
+            else read_json(wd / "judge_bundle.json", default={})
+            if wd
+            else {}
+        )
         payload = {
             "iter": int(iter_n),
             "ts": str(emit.get("ts") or review.get("ts") or ""),
@@ -3795,14 +3812,45 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
+        request_context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        phase = str(request_context.get("phase") or "").strip().upper()
+        if phase:
+            payload["phase"] = phase
+        try:
+            macro_cycle = int(request_context["macro_cycle"])
+        except (KeyError, TypeError, ValueError):
+            macro_cycle = None
+        if macro_cycle is not None:
+            payload["macro_cycle"] = macro_cycle
+        framework_reviews = normalize_framework_reviews(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            review_path=_rel(wd / "review.json", session_dir).replace("\\", "/") if wd else None,
+        )
+        if framework_reviews:
+            payload["framework_reviews"] = framework_reviews
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
+        iteration_id = _stable_id(
+            "critic-iteration",
+            iter_n,
+            payload.get("ts"),
+            [row.get("proposal_msg_id") for row in framework_reviews],
+            payload.get("topic"),
+            request,
+            judge_bundle,
+            review,
+            emit,
+        )
+        payload["iteration_id"] = iteration_id
         _recorder(session_dir, producer).record_item(
             "critic_iterations",
             payload,
-            key=str(iter_n),
+            key=iteration_id,
         )
-        operation_id = _stable_id("op", "critic", iter_n)
+        operation_id = _stable_id("op", iteration_id)
         artifact_refs: list[str] = []
         for name in ("request_path", "judge_bundle_path", "emit_path", "review_path"):
             path = payload.get(name)
@@ -3861,7 +3909,7 @@ def record_critic_iteration(
             write_key = (
                 write.get("write_id") or write.get("point_id") or write.get("edge_id") or write.get("kind") or index
             )
-            write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
+            write_operation_id = _stable_id("op", "kb-write", iteration_id, write_key)
             result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}
             write_status = _operation_status(result_payload.get("status") or write.get("status") or "succeeded")
             record_operation(
