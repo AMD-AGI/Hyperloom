@@ -392,13 +392,12 @@ class ClosePhase(PhaseHandler):
         # Bundle the curated result/report/analysis files into a single zip under
         # ``/workspace`` so the Claw sandbox sync ships it to object storage even
         # when ``$USER_DATA_PATH`` points outside ``/workspace``. Best-effort.
+        session_id = str(getattr(self.shared_state, "session_id", "") or "")
+        pkg_path = None
         try:
             from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
-            pkg_path = package_session_artifacts(
-                self.session_dir,
-                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
-            )
+            pkg_path = package_session_artifacts(self.session_dir, session_id=session_id)
             if pkg_path is not None:
                 await self._record_close_step(
                     "artifact_package",
@@ -442,10 +441,24 @@ class ClosePhase(PhaseHandler):
         # persists on every step, so ``state.json`` is complete by this line.
         # Splices one key; best-effort and last, after stop_reason and
         # close_sequence_done are settled, so it cannot affect the run.
+        #
+        # Re-package when that changed something. ``session_breakdown.json`` is
+        # bundled into the zip *and* the loose tree, and the package is what
+        # external sync actually ships — the same reason the langfuse splice
+        # above insists on running before the packaging step. The refresh has
+        # to come after, because the close section cannot be complete until
+        # ``artifact_package`` has an outcome to report, so the bundle is
+        # rebuilt rather than reordered. No close step is recorded for the
+        # rebuild: it rewrites the same path the ``artifact_package`` step
+        # already names, and recording it would strand the bundled copy one
+        # step behind again.
         try:
             from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
 
-            patch_breakdown_close(self.session_dir)
+            if patch_breakdown_close(self.session_dir) and pkg_path is not None:
+                from hyperloom.inference_optimizer.breakdown import package_session_artifacts
+
+                package_session_artifacts(self.session_dir, session_id=session_id)
         except Exception:  # noqa: BLE001
             log.debug("CLOSE step 6 (close section refresh) failed", exc_info=True)
 

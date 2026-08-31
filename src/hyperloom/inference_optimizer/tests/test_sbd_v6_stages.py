@@ -15,11 +15,12 @@ hold.
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.breakdown import exporter
+from hyperloom.inference_optimizer.breakdown import exporter, session_package
 from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collectors
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
@@ -567,7 +568,7 @@ def test_kernel_links_each_lane_row_to_the_rebench_that_validated_it(tmp_path):
                             "attempt_id": "bk-1",
                             "backend": "triton",
                             "status": "ok",
-                            "decision": "candidate",
+                            "decision": "KEEP",
                             "compile_passed": True,
                             "correctness_passed": True,
                             "micro_speedup": 1.4,
@@ -606,7 +607,7 @@ def _journey_kernel(kernel_id: str, ts: str) -> dict:
                 "attempt_id": f"bk-{kernel_id}",
                 "backend": "triton",
                 "status": "ok",
-                "decision": "candidate",
+                "decision": "KEEP",
                 "micro_speedup": 1.3,
                 "ts": ts,
             }
@@ -679,18 +680,275 @@ def test_an_unidentifiable_rebench_is_left_unlinked_and_warned_about(tmp_path):
     assert any("match none of the 2 recorded candidates" in warning for warning in warnings)
 
 
-def test_a_lone_candidate_still_absorbs_a_rebench_it_cannot_be_matched_to(tmp_path):
-    """One row in the lane makes the kind grouping unambiguous again."""
+def test_a_lone_candidate_does_not_absorb_a_rebench_of_a_different_kernel(tmp_path):
+    """Being the only candidate is not evidence the record meant this one.
+
+    The attempt says it rebenched ``layernorm``; the visit's only rewrite is
+    ``rmsnorm``. Absorbing it would report that ``rmsnorm`` was validated
+    end-to-end on the strength of a measurement of something else.
+    """
+    warnings: list[str] = []
     timeline = collect_v6_timeline(
         tmp_path,
-        [],
+        warnings,
         state=_kernel_state(),
         optimizations={"attempts": [_kernel_attempt("att-1", 0, kernel_id="layernorm")]},
         kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
     )
 
     rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert rewrites[0]["final_rebench_attempt_ids"] == []
+    assert any("name kernels (layernorm)" in warning for warning in warnings)
+
+
+def test_a_lone_candidate_absorbs_a_rebench_that_names_no_subject(tmp_path):
+    """The fallback survives for what it was for: an attempt with no subject.
+
+    ``source_id`` degrades to the attempt's own id when the producer recorded
+    no kernel, which is a record of *what kind* of thing was rebenched and
+    nothing more. With one candidate of that kind in the visit, it can only be
+    that one.
+    """
+    warnings: list[str] = []
+    attempt = _kernel_attempt("att-1", 0)
+    attempt.pop("kernel_id", None)
+    attempt.pop("name", None)
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        optimizations={"attempts": [attempt]},
+        kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
     assert rewrites[0]["final_rebench_attempt_ids"] == ["att-1"]
+    assert warnings == []
+
+
+def test_a_fusion_rebench_naming_its_kernel_is_not_a_conflict(tmp_path):
+    """Kernel ids and fusion run ids are different vocabularies.
+
+    A fusion rebench records the kernel it patched; the fusion lane is keyed by
+    run id. Reading those as rival claims would withhold a link the record
+    fully supports, so the conflict rule only fires on a lane that is itself
+    keyed on kernel identity.
+    """
+    warnings: list[str] = []
+    state = _kernel_state() | {
+        "last_fusion": {"run_id": "fus-1", "status": "ok", "kept": True, "ts": "2026-08-27T01:20:00+00:00"},
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        optimizations={
+            "attempts": [_kernel_attempt("att-fusion", 0, producer="forge_fusion", kernel_id="rmsnorm")],
+        },
+    )
+
+    fusion_runs = _event(timeline, "kernel")["ext"]["fusion_runs"]
+    assert fusion_runs[0]["final_rebench_attempt_ids"] == ["att-fusion"]
+    assert warnings == []
+
+
+def _two_backend_kernel() -> dict:
+    """One kernel, two backends, one winner — the shape adoption is about."""
+    return {
+        "kernels": [
+            {
+                "kernel_id": "rmsnorm",
+                "name": "rmsnorm",
+                "micro_speedup": 1.4,
+                "backend_attempts": [
+                    {
+                        "attempt_id": "backend-good",
+                        "backend": "triton",
+                        "status": "completed",
+                        "decision": "KEEP",
+                        "micro_speedup": 1.4,
+                        "best_artifact_path": "kernels/rmsnorm.py",
+                        "ts": "2026-08-27T01:10:00+00:00",
+                    },
+                    {
+                        "attempt_id": "backend-bad",
+                        "backend": "hip",
+                        "status": "failed",
+                        "decision": "FAILED",
+                        "error": "compile error",
+                        "ts": "2026-08-27T01:12:00+00:00",
+                    },
+                ],
+                "e2e": {"decision": "KEEP", "target_file": "layers/rmsnorm.py"},
+            }
+        ]
+    }
+
+
+def test_only_the_adopted_backend_attempt_carries_the_kernels_e2e_outcome(tmp_path):
+    """``e2e`` describes the attempt that was integrated, not every attempt.
+
+    V5 already stamps the kernel decision onto the adopted attempt alone. A
+    losing backend inheriting ``KEEP`` reads as a rewrite that shipped, next to
+    a ``micro_decision`` of ``FAILED`` saying it never compiled.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        kernel_journey=_two_backend_kernel(),
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert {row["rewrite_id"]: row["outcome"] for row in rewrites} == {
+        "backend-good": "KEEP",
+        "backend-bad": "FAILED",
+    }
+    assert {row["rewrite_id"]: row["micro_decision"] for row in rewrites} == {
+        "backend-good": "KEEP",
+        "backend-bad": "FAILED",
+    }
+    # The kernel's best micro speedup belongs to the attempt that achieved it.
+    assert {row["rewrite_id"]: row["verification"]["micro_speedup"] for row in rewrites} == {
+        "backend-good": 1.4,
+        "backend-bad": None,
+    }
+
+
+def test_a_losing_backend_attempt_does_not_claim_the_kernels_rebench(tmp_path):
+    """Every attempt on a kernel shares its ``kernel_id``.
+
+    Offering that id as an identity key for all of them lets a failed backend
+    claim the rebench the adopted one triggered.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={"attempts": [_kernel_attempt("att-rmsnorm", 0, kernel_id="rmsnorm")]},
+        kernel_journey=_two_backend_kernel(),
+    )
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert {row["rewrite_id"]: row["final_rebench_attempt_ids"] for row in rewrites} == {
+        "backend-good": ["att-rmsnorm"],
+        "backend-bad": [],
+    }
+
+
+def test_a_kernel_with_one_backend_attempt_is_unchanged_by_adoption(tmp_path):
+    """The common shape: nothing to lose to, so nothing is withheld."""
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={"attempts": [_kernel_attempt("att-rmsnorm", 0, kernel_id="rmsnorm")]},
+        kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
+    )
+
+    row = _event(timeline, "kernel")["ext"]["kernel_rewrites"][0]
+    assert row["outcome"] == "KEEP"
+    assert row["final_rebench_attempt_ids"] == ["att-rmsnorm"]
+
+
+def test_producer_status_words_are_mapped_onto_the_documented_enums(tmp_path):
+    """``completed`` and ``ok`` are ordinary successes, not schema violations."""
+    warnings: list[str] = []
+    state = _kernel_state() | {
+        "last_fusion": {"run_id": "fus-1", "status": "ok", "kept": True, "ts": "2026-08-27T01:20:00+00:00"},
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        kernel_journey=_two_backend_kernel(),
+    )
+
+    ext = _event(timeline, "kernel")["ext"]
+    assert {row["rewrite_id"]: row["execution_status"] for row in ext["kernel_rewrites"]} == {
+        "backend-good": "succeeded",
+        "backend-bad": "failed",
+    }
+    assert ext["fusion_runs"][0]["status"] == "succeeded"
+    # Neither spelling is drift; both are the normal success path.
+    assert warnings == []
+
+
+def test_an_unknown_status_word_is_reported_as_failed_and_warned_about(tmp_path):
+    warnings: list[str] = []
+    journey = _two_backend_kernel()
+    journey["kernels"][0]["backend_attempts"][0]["status"] = "quiesced"
+    timeline = collect_v6_timeline(tmp_path, warnings, state=_kernel_state(), kernel_journey=journey)
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert rewrites[0]["execution_status"] == "failed"
+    assert any("unrecognized kernel_rewrites status 'quiesced'" in warning for warning in warnings)
+
+
+def test_the_journey_rollup_vocabulary_is_translated_not_uppercased(tmp_path):
+    """``outcome`` is a closed enum; ``kernel_journey.outcome`` is not in it."""
+    warnings: list[str] = []
+    journey = _two_backend_kernel()
+    journey["kernels"][0]["e2e"] = {}
+    journey["kernels"][0]["outcome"] = "adopted"
+    timeline = collect_v6_timeline(tmp_path, warnings, state=_kernel_state(), kernel_journey=journey)
+
+    rewrites = _event(timeline, "kernel")["ext"]["kernel_rewrites"]
+    assert rewrites[0]["outcome"] == "KEEP"
+    assert warnings == []
+
+
+def test_a_visit_whose_every_rebench_was_skipped_is_not_succeeded(tmp_path):
+    """A skip measured nothing, so it concludes nothing.
+
+    The candidate that was built and never validated leaves the visit
+    ``degraded``, not ``succeeded``.
+    """
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-1", 0, kernel_id="rmsnorm", status="skipped", decision="FAILED"),
+            ]
+        },
+        kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
+    )
+
+    assert _event(timeline, "kernel")["status"] == "degraded"
+
+
+def test_a_visit_holding_only_skipped_rebenches_and_no_candidates_is_skipped(tmp_path):
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-1", 0, kernel_id="rmsnorm", status="skipped", decision="FAILED"),
+            ]
+        },
+    )
+
+    assert _event(timeline, "kernel")["status"] == "skipped"
+
+
+def test_a_measured_rebench_still_makes_the_visit_succeeded(tmp_path):
+    """The ladder's ordinary path, pinned against the skipped-attempt fix."""
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt("att-1", 0, kernel_id="rmsnorm", status="succeeded", decision="REVERT"),
+            ]
+        },
+        kernel_journey={"kernels": [_journey_kernel("rmsnorm", "2026-08-27T01:10:00+00:00")]},
+    )
+
+    assert _event(timeline, "kernel")["status"] == "succeeded"
 
 
 def test_kernel_failure_is_read_off_the_phase_exit_evidence(tmp_path):
@@ -1060,6 +1318,87 @@ def test_close_patch_swallows_a_corrupt_breakdown(tmp_path):
 
     assert exporter.patch_breakdown_close(tmp_path) is False
     assert target.read_text(encoding="utf-8") == "{not json"
+
+
+# ---------------------------------------------------------------------------
+# what the consumer actually receives
+# ---------------------------------------------------------------------------
+def _packaged_close(session_dir: Path, dest_root: Path) -> tuple[dict, dict]:
+    """Return the ``close`` key as delivered, from inside the zip and loose.
+
+    External sync ships the package, not the session directory, so these two
+    copies — not the one under ``session_dir`` — are what a consumer reads.
+    """
+    zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
+    with zipfile.ZipFile(zip_path) as bundle:
+        zipped = json.loads(bundle.read(exporter.BREAKDOWN_FILENAME))
+    loose = json.loads((dest_root / exporter.BREAKDOWN_FILENAME).read_text(encoding="utf-8"))
+    return zipped["close"], loose["close"]
+
+
+def test_the_delivered_package_carries_the_finished_close_section(tmp_path):
+    """Patching the session copy is not delivery; the package has to be rebuilt.
+
+    Mirrors the sequencer's order: package (CLOSE step 5), then patch the close
+    section, then rebuild the bundle so the copies that ship agree with it.
+    """
+    session_dir = tmp_path / "session"
+    dest_root = tmp_path / "dest"
+    _session_with_step_two_breakdown(session_dir)
+
+    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    assert exporter.patch_breakdown_close(session_dir) is True
+    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+
+    zipped, loose = _packaged_close(session_dir, dest_root)
+    for delivered in (zipped, loose):
+        assert delivered["status"] == "succeeded"
+        assert delivered["close_sequence_done"] is True
+        assert [step["step"] for step in delivered["steps"]] == [step["step"] for step in _FULL_CLOSE_STEPS]
+
+
+def test_a_package_built_before_the_patch_ships_the_step_two_snapshot(tmp_path):
+    """The regression this guards: the fix reaching the session dir only.
+
+    Without the rebuild the session copy reads ``succeeded`` while both
+    delivered copies still say ``degraded`` and stop four steps in — the state
+    that made the previous round's fix invisible to its consumers.
+    """
+    session_dir = tmp_path / "session"
+    dest_root = tmp_path / "dest"
+    target = _session_with_step_two_breakdown(session_dir)
+
+    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    exporter.patch_breakdown_close(session_dir)
+
+    assert json.loads(target.read_text(encoding="utf-8"))["close"]["status"] == "succeeded"
+    zipped, loose = _packaged_close(session_dir, dest_root)
+    for stale in (zipped, loose):
+        assert stale["status"] == "degraded"
+        assert "artifact_package" not in {step["step"] for step in stale["steps"]}
+
+
+def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
+    """A surgical member swap would leave the manifest describing the old file.
+
+    Hence a full repackage: the manifest is rebuilt from the members that were
+    actually written, so its digest of ``session_breakdown.json`` matches what
+    the consumer unzips.
+    """
+    session_dir = tmp_path / "session"
+    dest_root = tmp_path / "dest"
+    _session_with_step_two_breakdown(session_dir)
+
+    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+    exporter.patch_breakdown_close(session_dir)
+    session_package.package_session_artifacts(session_dir, session_id="sess-1", dest_root=dest_root)
+
+    zip_path = dest_root / session_package.PACKAGE_SUBDIR / "sess-1.zip"
+    with zipfile.ZipFile(zip_path) as bundle:
+        manifest = json.loads(bundle.read(session_package.MANIFEST_JSON_NAME))
+        member = bundle.getinfo(exporter.BREAKDOWN_FILENAME)
+    entry = next(row for row in manifest["included_files"] if row["path"] == exporter.BREAKDOWN_FILENAME)
+    assert entry["bytes"] == member.file_size
 
 
 # ---------------------------------------------------------------------------

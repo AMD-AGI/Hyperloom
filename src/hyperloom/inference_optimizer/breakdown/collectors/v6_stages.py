@@ -72,6 +72,26 @@ _SOURCE_KIND_BY_ATTEMPT_KIND = {
     "gemm_tuning": "gemm_tuning",
     "integrate_patch": "kernel_rewrite",
 }
+_PARTIAL_STATUSES = frozenset({"partial", "partial_success", "degraded"})
+_SKIPPED_STATUSES = frozenset({"skipped", "skip", "not_run", "noop", "no_op"})
+# ``kernel_journey`` rolls a kernel's lifecycle up into its own vocabulary,
+# which is not the ``outcome`` enum. Uppercasing it emits ``ADOPTED`` into a
+# field whose closed enum has no such member.
+_ROLLUP_TO_OUTCOME = {
+    "adopted": "KEEP",
+    "reverted": "REVERT",
+    "failed": "FAILED",
+    # Considered but never carried to an end-to-end verdict. The candidate's
+    # own ``micro_decision`` is where that part of the story is told.
+    "attempted": "SKIPPED",
+    "dispatched": "SKIPPED",
+    "discovered": "SKIPPED",
+    "skipped": "SKIPPED",
+}
+_OUTCOME_VALUES = frozenset({"KEEP", "REVERT", "FAILED", "NEEDS_REVIEW", "SKIPPED"})
+_MICRO_DECISIONS = frozenset({"KEEP", "REVERT", "PARTIAL", "FAILED", "SKIPPED"})
+# The run-level lanes spell the same field in their own lowercase vocabulary.
+_CANDIDATE_DECISIONS = frozenset({"candidate", "no_improvement", "failed", "skipped"})
 _STOP_REASONS_SWEEP = frozenset({"sweep_failed", "sweep_unusable", "sweep_timeout"})
 _STOP_REASONS_CONC_SWEEP = frozenset({"conc_sweep_failed", "conc_sweep_unusable", "conc_sweep_timeout"})
 
@@ -94,6 +114,81 @@ def _lower(value: Any) -> str:
 
 def _upper(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def _lane_status(raw: Any, *, where: str, warnings: list[str], allow_partial: bool = False) -> str:
+    """Map a producer's status spelling onto the V6 enum for the field.
+
+    Producers write their own vocabulary — a backend attempt succeeds as
+    ``completed``, forge-fusion as ``ok`` — while these V6 fields are closed
+    enums. Passing the raw value through hands a strict consumer a payload it
+    has to reject over an ordinary success, which is the opposite of what the
+    field is for.
+
+    A spelling nothing here recognizes is read as ``failed``, matching how the
+    other lanes already treat an unknown status, and warned about so an
+    unlisted vocabulary surfaces rather than being quietly filed as a defeat.
+    """
+    status = _lower(raw)
+    if not status or status in _SKIPPED_STATUSES:
+        return "skipped"
+    if status in _OK_STATUSES:
+        return "succeeded"
+    if allow_partial and status in _PARTIAL_STATUSES:
+        return "partial"
+    if status not in _FAILED_STATUSES:
+        warnings.append(f"v6.timeline.kernel: unrecognized {where} status {status!r}; reported as failed")
+    return "failed"
+
+
+def _lane_outcome(*values: Any, where: str, warnings: list[str]) -> str:
+    """Resolve a candidate's business outcome onto the closed ``outcome`` enum.
+
+    The first value that says anything wins; ``kernel_journey``'s coarse rollup
+    vocabulary is translated rather than uppercased, and ``PARTIAL`` — legal for
+    a ``micro_decision`` but not for an ``outcome`` — becomes ``NEEDS_REVIEW``,
+    which is the enum's word for "measured, but not a verdict".
+    """
+    for value in values:
+        raw = _lower(value)
+        if not raw:
+            continue
+        mapped = _ROLLUP_TO_OUTCOME.get(raw, raw.upper())
+        if mapped in _OUTCOME_VALUES:
+            return mapped
+        if mapped == "PARTIAL":
+            return "NEEDS_REVIEW"
+        warnings.append(f"v6.timeline.kernel: unrecognized {where} outcome {raw!r}; reported as SKIPPED")
+        return "SKIPPED"
+    return "SKIPPED"
+
+
+def _candidate_decision(raw: Any, *, where: str, warnings: list[str], default: str) -> str:
+    """Resolve a run-level ``micro_decision`` onto the lowercase lane enum.
+
+    ``kernel_rewrites`` spells this field in the ``KEEP``/``REVERT`` vocabulary;
+    the fusion, GEMM and collective lanes use ``candidate | no_improvement |
+    failed | skipped`` instead. Those three are the only place a producer's word
+    reaches the field unmediated, so drift is warned about rather than shipped.
+    """
+    decision = _lower(raw)
+    if not decision:
+        return default
+    if decision in _CANDIDATE_DECISIONS:
+        return decision
+    warnings.append(f"v6.timeline.kernel: unrecognized {where} decision {decision!r}; reported as {default}")
+    return default
+
+
+def _micro_decision(raw: Any, *, where: str, warnings: list[str], default: str = "SKIPPED") -> str:
+    """Resolve a candidate-level decision onto the ``micro_decision`` enum."""
+    decision = _upper(raw)
+    if not decision:
+        return default
+    if decision in _MICRO_DECISIONS:
+        return decision
+    warnings.append(f"v6.timeline.kernel: unrecognized {where} decision {decision!r}; reported as {default}")
+    return default
 
 
 def _action_rows(phase_timeline: Any, actions: frozenset[str]) -> list[dict[str, Any]]:
@@ -573,12 +668,71 @@ def _window_index(ts: Any, windows: list[dict[str, Any]]) -> int:
     return index
 
 
-def _kernel_rewrite(entry: dict[str, Any], attempt: dict[str, Any]) -> dict[str, Any]:
-    """Project one ``kernel_journey`` entry plus its best backend attempt."""
+def _adopted_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Pick the backend attempt the kernel's end-to-end verdict belongs to.
+
+    A kernel is rewritten by several backends and at most one of those attempts
+    is carried to integrate, so the kernel-level ``e2e`` block describes exactly
+    one of them. V5 already resolves this: ``collectors/kernels.py`` stamps the
+    kernel decision and its verification onto the adopted attempt alone, using
+    ``verification.best_attempt_id`` then ``best_backend`` then the highest
+    micro speedup. The hints are consumed there and do not survive onto the
+    journey entry, so the same order is re-derived from what does survive —
+    ``best_artifact_path``, which is only ever written onto the adopted row,
+    then the speedup ordering V5 falls back to.
+
+    Returns:
+        The adopted attempt, or ``None`` when there is nothing to adopt.
+    """
+    rows = [row for row in attempts if row]
+    if not rows:
+        return None
+    stamped = [row for row in rows if row.get("best_artifact_path")]
+    if len(stamped) == 1:
+        return stamped[0]
+
+    def _rank(row: dict[str, Any]) -> tuple[float, str]:
+        speedup = _to_float(_first(row.get("micro_speedup"), row.get("speedup")))
+        return (speedup if speedup is not None else float("-inf"), str(row.get("ts") or ""))
+
+    return max(stamped or rows, key=_rank)
+
+
+def _kernel_rewrite(
+    entry: dict[str, Any],
+    attempt: dict[str, Any],
+    *,
+    adopted: bool,
+    warnings: list[str],
+) -> dict[str, Any]:
+    """Project one ``kernel_journey`` entry's backend attempt into a rewrite row.
+
+    ``adopted`` says whether this is the attempt the kernel's ``e2e`` verdict
+    was reached on. Only that one may carry kernel-level facts: the E2E
+    ``outcome``, the kernel's best micro speedup, and — via
+    :func:`_lane_identity_keys` — the kernel's identity when final rebenches are
+    linked. A losing attempt that inherited them would read as having been
+    integrated and validated, when the run rejected it.
+    """
     e2e = _mapping(entry.get("e2e"))
     dispatch = _mapping(entry.get("dispatch"))
-    decision = _upper(attempt.get("decision"))
+    where = "kernel_rewrites"
+    decision = _micro_decision(attempt.get("decision"), where=where, warnings=warnings)
+    execution_status = _lane_status(attempt.get("status"), where=where, warnings=warnings, allow_partial=True)
     optimized_files = _string_list(attempt.get("optimized_files"))
+    if adopted:
+        outcome = _lane_outcome(e2e.get("decision"), entry.get("outcome"), decision, where=where, warnings=warnings)
+        reason = _text(e2e.get("rejection_reason"))
+        # The kernel-level best speedup describes whichever attempt achieved
+        # it, so it is only a fallback for the attempt that did.
+        micro_speedup = _to_float(_first(attempt.get("micro_speedup"), entry.get("micro_speedup")))
+    else:
+        # This attempt never reached a final rebench, so it has no end-to-end
+        # result of its own. Its own decision is still reported as
+        # ``micro_decision``; ``outcome`` says only how far it got.
+        outcome = "FAILED" if execution_status == "failed" or decision == "FAILED" else "SKIPPED"
+        reason = "not the adopted backend attempt for this kernel"
+        micro_speedup = _to_float(attempt.get("micro_speedup"))
     return {
         "rewrite_id": str(_first(attempt.get("attempt_id"), entry.get("kernel_id")) or ""),
         # Backend attempts are keyed by run, not by orchestrator task.
@@ -589,15 +743,15 @@ def _kernel_rewrite(entry: dict[str, Any], attempt: dict[str, Any]) -> dict[str,
         "task_group_key": _text(dispatch.get("task_group")),
         "source_file": _text(_first(entry.get("source_file"), e2e.get("target_file"))),
         "backend": _lower(attempt.get("backend")) or None,
-        "execution_status": _lower(attempt.get("status")) or "skipped",
-        "micro_decision": decision or "SKIPPED",
+        "execution_status": execution_status,
+        "micro_decision": decision,
         "verification": {
             "compile_passed": _optional_bool(attempt.get("compile_passed")),
             "correctness_passed": _optional_bool(attempt.get("correctness_passed")),
             # Which reference the correctness check ran against is decided
             # inside the backend and never surfaces on the attempt record.
             "correctness_source": None,
-            "micro_speedup": _to_float(_first(attempt.get("micro_speedup"), entry.get("micro_speedup"))),
+            "micro_speedup": micro_speedup,
         },
         "artifact": {
             "artifact_path": _first(
@@ -611,13 +765,13 @@ def _kernel_rewrite(entry: dict[str, Any], attempt: dict[str, Any]) -> dict[str,
         },
         # Filled by the caller once the window's attempts are known.
         "final_rebench_attempt_ids": [],
-        "outcome": _upper(_first(e2e.get("decision"), entry.get("outcome"), decision)) or "SKIPPED",
-        "reason": _text(e2e.get("rejection_reason")),
+        "outcome": outcome,
+        "reason": reason,
         "failure": _failure(attempt.get("error_class"), attempt.get("error")),
     }
 
 
-def _fusion_run(result: dict[str, Any], integrate: dict[str, Any]) -> dict[str, Any]:
+def _fusion_run(result: dict[str, Any], integrate: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     """Project ``state.last_fusion`` (+ its integrate verdict) into one row.
 
     Only the last fusion survives in state — the field is overwritten per run,
@@ -628,11 +782,12 @@ def _fusion_run(result: dict[str, Any], integrate: dict[str, Any]) -> dict[str, 
     compile_pass_flag = _text(result.get("compile_pass_flag"))
     serving_speedup = _to_float(result.get("serving_speedup"))
     kernel_speedup = _to_float(result.get("kernel_speedup"))
-    integrate_decision = _upper(integrate.get("decision"))
     return {
         "run_id": str(_first(result.get("run_id"), result.get("experiment_id"), "forge_fusion") or "forge_fusion"),
         "task_id": _text(_first(result.get("task_id"), "kernel_entry_fusion")),
-        "status": _lower(result.get("status")) or "skipped",
+        # forge-fusion reports success as ``ok``; the field's enum does not
+        # have that word.
+        "status": _lane_status(result.get("status"), where="fusion_runs", warnings=warnings),
         "candidate_kind": "compile_pass" if compile_pass_flag else ("authored_fusion" if kept else None),
         "source_file": _text(_first(result.get("source_file"), result.get("target_file"))),
         "best_pattern": _text(result.get("best_pattern")),
@@ -644,10 +799,20 @@ def _fusion_run(result: dict[str, Any], integrate: dict[str, Any]) -> dict[str, 
             else ("kernel_microbenchmark" if kernel_speedup is not None else None)
         ),
         "patch_path": _text(_first(result.get("patch"), integrate.get("patch_path"))),
-        # forge-fusion emits the V6 vocabulary verbatim.
-        "micro_decision": _lower(result.get("micro_decision")) or ("failed" if result.get("error") else "skipped"),
+        # forge-fusion emits the V6 vocabulary verbatim; anything else is drift.
+        "micro_decision": _candidate_decision(
+            result.get("micro_decision"),
+            where="fusion_runs",
+            warnings=warnings,
+            default="failed" if result.get("error") else "skipped",
+        ),
         "final_rebench_attempt_ids": [],
-        "outcome": integrate_decision or _upper(result.get("decision")) or "SKIPPED",
+        "outcome": _lane_outcome(
+            integrate.get("decision"),
+            result.get("decision"),
+            where="fusion_runs",
+            warnings=warnings,
+        ),
         "reason": _text(_first(integrate.get("reason"), result.get("verdict"))),
         "failure": _failure(
             _first(result.get("error_class"), integrate.get("error_class")),
@@ -657,11 +822,17 @@ def _fusion_run(result: dict[str, Any], integrate: dict[str, Any]) -> dict[str, 
     }
 
 
-def _gemm_tuner_attempts(run: dict[str, Any]) -> list[dict[str, Any]]:
+def _gemm_tuner_attempts(run: dict[str, Any], warnings: list[str]) -> list[dict[str, Any]]:
     return [
         {
             "tuner": str(_first(candidate.get("tuner"), candidate.get("libtype"), run.get("engine"), "") or ""),
-            "status": _lower(candidate.get("status")) or "skipped",
+            # This enum, alone among the lanes, has a fourth member for a tuner
+            # that ran cleanly and produced nothing.
+            "status": (
+                "empty"
+                if _lower(candidate.get("status")) == "empty"
+                else _lane_status(candidate.get("status"), where="tuner_attempts", warnings=warnings)
+            ),
             "best_micro_speedup": _to_float(_first(candidate.get("best_micro_speedup"), candidate.get("best_speedup"))),
             "tuned_file": _text(candidate.get("tuned_file")),
             "reason": _text(_first(candidate.get("reason"), candidate.get("error"))),
@@ -670,23 +841,22 @@ def _gemm_tuner_attempts(run: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def _gemm_tuning_run(run: dict[str, Any]) -> dict[str, Any]:
+def _gemm_tuning_run(run: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     """Project one ``optimizations.gemm_tuning_runs`` row."""
     parameters = _mapping(run.get("parameters"))
     summary = _mapping(run.get("summary"))
     speedup = _to_float(run.get("best_speedup"))
-    status = _lower(run.get("status"))
     return {
         # A tuning run's artifact is its dispatch CSV, which is also the
         # identity ``GemmTuningRun`` is keyed by.
         "run_id": str(_first(run.get("tuned_file"), run.get("workspace"), run.get("engine"), "") or ""),
         "task_id": None,
         "backend": _lower(run.get("engine")) or None,
-        "status": "succeeded" if status in _OK_STATUSES else ("skipped" if status == "skipped" else "failed"),
+        "status": _lane_status(run.get("status"), where="gemm_tuning_runs", warnings=warnings),
         "precision": _text(run.get("precision")),
         "shape_source": _text(parameters.get("shape_source")),
         "shape_artifact_path": _text(_first(parameters.get("shape_artifact_path"), parameters.get("shapes_path"))),
-        "tuner_attempts": _gemm_tuner_attempts(run),
+        "tuner_attempts": _gemm_tuner_attempts(run, warnings),
         "recommended_env": _mapping(_first(summary.get("recommended_env"), parameters.get("recommended_env"))),
         "micro_decision": (
             "candidate"
@@ -694,14 +864,19 @@ def _gemm_tuning_run(run: dict[str, Any]) -> dict[str, Any]:
             else ("no_improvement" if speedup is not None else ("failed" if run.get("error") else "skipped"))
         ),
         "final_rebench_attempt_ids": [],
-        "outcome": _upper(run.get("decision")) or ("KEEP" if run.get("adopted") else "SKIPPED"),
+        "outcome": _lane_outcome(
+            run.get("decision"),
+            "adopted" if run.get("adopted") else None,
+            where="gemm_tuning_runs",
+            warnings=warnings,
+        ),
         "reason": _text(run.get("error")),
         "failure": _failure(run.get("error_class"), run.get("error")),
         "workspace": _text(run.get("workspace")),
     }
 
 
-def _collective_run(attempt: dict[str, Any]) -> dict[str, Any]:
+def _collective_run(attempt: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     """Project one ``collective.attempts[]`` campaign."""
     status = _lower(attempt.get("status"))
     kept = _optional_bool(attempt.get("kept"))
@@ -713,7 +888,7 @@ def _collective_run(attempt: dict[str, Any]) -> dict[str, Any]:
         "source_file": _text(attempt.get("source_file")),
         "collective_op": _text(attempt.get("collective_op")),
         "world_size": _to_int(attempt.get("world_size")),
-        "status": "succeeded" if status in _OK_STATUSES else ("skipped" if status == "skipped" else "failed"),
+        "status": _lane_status(attempt.get("status"), where="collective_runs", warnings=warnings),
         "kernel_speedup": _to_float(attempt.get("kernel_speedup")),
         "patch_path": _text(attempt.get("patch_path")),
         "micro_decision": (
@@ -722,7 +897,12 @@ def _collective_run(attempt: dict[str, Any]) -> dict[str, Any]:
         "final_rebench_attempt_ids": [],
         # The E2E gate is the verdict that decides adoption; the
         # microbenchmark ``decision`` only decides whether it runs.
-        "outcome": _upper(_first(attempt.get("integration_decision"), attempt.get("decision"))) or "SKIPPED",
+        "outcome": _lane_outcome(
+            attempt.get("integration_decision"),
+            attempt.get("decision"),
+            where="collective_runs",
+            warnings=warnings,
+        ),
         "reason": _text(_first(attempt.get("integration_error"), attempt.get("error"))),
         "failure": _failure(
             _first(attempt.get("error_class"), attempt.get("integration_error_class")),
@@ -1029,26 +1209,38 @@ def project_kernel_events(
         for _ in windows
     ]
 
+    # Rewrite rows that may speak for their whole kernel. Only the adopted
+    # backend attempt gets the kernel's identity when rebenches are linked;
+    # see ``_adopted_attempt``.
+    adopted_by_window: list[set[str]] = [set() for _ in windows]
+
     for entry in journey_entries:
         attempts = _dict_rows(entry.get("backend_attempts"))
         if not attempts:
             # Discovered or dispatched but never attempted: the journey row is
             # still the only record that the kernel was considered.
             attempts = [{}]
+        adopted = _adopted_attempt(attempts)
         for attempt in attempts:
             index = _window_index(_first(attempt.get("ts"), _safe_get(entry, "e2e", "ts")), windows)
-            lanes_by_window[index]["kernel_rewrites"].append(_kernel_rewrite(entry, attempt))
+            is_adopted = attempt is adopted or adopted is None
+            row = _kernel_rewrite(entry, attempt, adopted=is_adopted, warnings=warnings)
+            lanes_by_window[index]["kernel_rewrites"].append(row)
+            if is_adopted:
+                adopted_by_window[index].add(row["rewrite_id"])
 
     if fusion_result:
         index = _window_index(_first(fusion_integrate.get("ts"), fusion_result.get("ts")), windows)
-        lanes_by_window[index]["fusion_runs"].append(_fusion_run(fusion_result, fusion_integrate))
+        lanes_by_window[index]["fusion_runs"].append(_fusion_run(fusion_result, fusion_integrate, warnings))
 
     for run in gemm_runs:
-        lanes_by_window[_window_index(run.get("ts"), windows)]["gemm_tuning_runs"].append(_gemm_tuning_run(run))
+        lanes_by_window[_window_index(run.get("ts"), windows)]["gemm_tuning_runs"].append(
+            _gemm_tuning_run(run, warnings)
+        )
 
     for attempt in collective_attempts:
         index = _window_index(_first(attempt.get("integration_ts"), attempt.get("ts")), windows)
-        lanes_by_window[index]["collective_runs"].append(_collective_run(attempt))
+        lanes_by_window[index]["collective_runs"].append(_collective_run(attempt, warnings))
 
     if geak_engaged:
         if len(windows) > 1:
@@ -1057,6 +1249,16 @@ def project_kernel_events(
                 f"{len(windows)} kernel visits; attached to the first"
             )
         lanes_by_window[0]["geak_runs"].append(_geak_run(geak))
+
+    # The kernel each rebench says it was validating, where the producer
+    # recorded one. ``source_id`` on the projected row falls back to the
+    # operation name and then to the attempt's own id, so it cannot be read
+    # back as "a kernel was named".
+    subject_ids = {
+        str(attempt.get("attempt_id") or ""): _lower(attempt.get("kernel_id"))
+        for attempt in kernel_attempts
+        if attempt.get("attempt_id") and _lower(attempt.get("kernel_id"))
+    }
 
     cycle_to_index = {int(window.get("cycle") or 0): position for position, window in enumerate(windows)}
     for attempt in kernel_attempts:
@@ -1076,8 +1278,8 @@ def project_kernel_events(
         )
 
     events: list[dict[str, Any]] = []
-    for window, lanes in zip(windows, lanes_by_window):
-        events.append(_kernel_event(state, collective, window, lanes, warnings))
+    for window, lanes, adopted_ids in zip(windows, lanes_by_window, adopted_by_window):
+        events.append(_kernel_event(state, collective, window, lanes, adopted_ids, subject_ids, warnings))
     return events
 
 
@@ -1102,17 +1304,31 @@ _LANE_IDENTITY_FIELDS = {
 }
 
 
-def _lane_identity_keys(lane_name: str, row: dict[str, Any]) -> set[str]:
-    """Return the identifiers a rebench attempt could name this row by."""
+def _lane_identity_keys(lane_name: str, row: dict[str, Any], *, adopted: bool = True) -> set[str]:
+    """Return the identifiers a rebench attempt could name this row by.
+
+    A rewrite row that is not its kernel's adopted attempt answers only to its
+    own ``rewrite_id``. Every backend attempt on a kernel carries the same
+    ``kernel_id``, so offering that as a key would let each of them claim the
+    one rebench the adopted attempt actually triggered.
+    """
+    fields = _LANE_IDENTITY_FIELDS.get(lane_name, ())
+    if lane_name == "kernel_rewrites" and not adopted:
+        fields = ("rewrite_id",)
     keys = set()
-    for field in _LANE_IDENTITY_FIELDS.get(lane_name, ()):
+    for field in fields:
         value = _lower(row.get(field))
         if value:
             keys.add(value)
     return keys
 
 
-def _link_rebench_attempts(lanes: dict[str, list[Any]], warnings: list[str]) -> None:
+def _link_rebench_attempts(
+    lanes: dict[str, list[Any]],
+    adopted_rewrites: set[str],
+    subject_ids: dict[str, str],
+    warnings: list[str],
+) -> None:
     """Point every candidate at the final rebench attempts that validated it.
 
     Matching is by identity — the attempt's ``source_id`` against the names the
@@ -1120,12 +1336,20 @@ def _link_rebench_attempts(lanes: dict[str, list[Any]], warnings: list[str]) -> 
     candidate* triggered, and grouping by ``source_kind`` alone would give two
     rewrites in one visit the same two attempts each.
 
-    Identity is not always recorded on both sides. Where a lane holds exactly
-    one row, the kind grouping is unambiguous and is used as the fallback: the
-    unmatched attempts of that kind can only belong to that row. Where several
-    rows compete for an unattributable attempt, the link is left off and a
-    warning is raised, because a wrong edge here reads as a candidate having
-    been validated when it was not.
+    An attempt that names no subject can still be placed: where its lane holds
+    exactly one row, the kind grouping is unambiguous and that row takes it.
+    An attempt that *does* name a subject its lane speaks the same language as
+    — a kernel id, against a lane keyed on kernel identity — and matches none
+    of them is never absorbed, however few candidates are on offer. The record
+    says it validated some other kernel, and one available row is not evidence
+    against that. Both it and the merely unplaceable are warned about, because
+    a wrong edge here reads as a candidate having been validated when it was
+    not.
+
+    The comparison is deliberately namespace-aware. A fusion rebench carrying
+    the kernel it patched is not in conflict with the visit's only fusion run,
+    which is identified by run id; treating those two vocabularies as rivals
+    would withhold a link the record fully supports.
     """
     attempts = lanes["attempts"]
     by_source: dict[str, list[dict[str, Any]]] = {}
@@ -1137,26 +1361,41 @@ def _link_rebench_attempts(lanes: dict[str, list[Any]], warnings: list[str]) -> 
         candidates = by_source.get(source_kind, [])
         if not rows or not candidates:
             continue
+        order = [attempt["attempt_id"] for attempt in candidates]
         matched_ids: set[str] = set()
         for row in rows:
-            keys = _lane_identity_keys(lane_name, row)
+            adopted = lane_name != "kernel_rewrites" or row["rewrite_id"] in adopted_rewrites
+            keys = _lane_identity_keys(lane_name, row, adopted=adopted)
             ids = [attempt["attempt_id"] for attempt in candidates if keys and _lower(attempt.get("source_id")) in keys]
             row["final_rebench_attempt_ids"] = ids
             matched_ids.update(ids)
 
-        leftover = [attempt["attempt_id"] for attempt in candidates if attempt["attempt_id"] not in matched_ids]
+        leftover = [attempt for attempt in candidates if attempt["attempt_id"] not in matched_ids]
         if not leftover:
             continue
-        if len(rows) == 1:
-            rows[0]["final_rebench_attempt_ids"] = sorted(
-                set(rows[0]["final_rebench_attempt_ids"]) | set(leftover),
-                key=lambda value: [attempt["attempt_id"] for attempt in candidates].index(value),
+        # Only a lane keyed on kernel identity can be contradicted by an
+        # attempt that names a kernel.
+        keyed_on_kernel = "kernel_id" in _LANE_IDENTITY_FIELDS.get(lane_name, ())
+        conflicting = [attempt for attempt in leftover if keyed_on_kernel and subject_ids.get(attempt["attempt_id"])]
+        conflicting_ids = {attempt["attempt_id"] for attempt in conflicting}
+        anonymous = [attempt["attempt_id"] for attempt in leftover if attempt["attempt_id"] not in conflicting_ids]
+        if anonymous:
+            if len(rows) == 1:
+                rows[0]["final_rebench_attempt_ids"] = sorted(
+                    set(rows[0]["final_rebench_attempt_ids"]) | set(anonymous),
+                    key=order.index,
+                )
+            else:
+                warnings.append(
+                    f"v6.timeline.kernel: {len(anonymous)} {source_kind} rebench attempt(s) name no source and "
+                    f"{len(rows)} candidates could own them; left unlinked"
+                )
+        if conflicting:
+            named = ", ".join(sorted({subject_ids[attempt["attempt_id"]] for attempt in conflicting}))
+            warnings.append(
+                f"v6.timeline.kernel: {len(conflicting)} {source_kind} rebench attempt(s) name kernels "
+                f"({named}) that match none of the {len(rows)} recorded candidates; left unlinked"
             )
-            continue
-        warnings.append(
-            f"v6.timeline.kernel: {len(leftover)} {source_kind} rebench attempt(s) match none of the "
-            f"{len(rows)} recorded candidates by id; left unlinked"
-        )
 
 
 def _kernel_event(
@@ -1164,6 +1403,8 @@ def _kernel_event(
     collective: dict[str, Any],
     window: dict[str, Any],
     lanes: dict[str, list[Any]],
+    adopted_rewrites: set[str],
+    subject_ids: dict[str, str],
     warnings: list[str],
 ) -> dict[str, Any]:
     """Assemble one Kernel visit from its window and its bucketed lanes."""
@@ -1171,34 +1412,40 @@ def _kernel_event(
     # Every lane row links back to the rebench attempts that validated it. The
     # link is made here rather than in the lane projectors because only now is
     # the window's attempt set known.
-    _link_rebench_attempts(lanes, warnings)
+    _link_rebench_attempts(lanes, adopted_rewrites, subject_ids, warnings)
 
     exit_row = _mapping(window.get("exit_row"))
     evidence = _mapping(exit_row.get("evidence"))
     entry_row = next(iter(window.get("rows") or []), {})
     stage_failed = bool(evidence.get("error") or evidence.get("error_class"))
-    did_work = any(lanes[name] for name in lanes)
+    candidates = any(lanes[name] for name, _ in _LANE_SOURCE_KINDS)
+    did_work = candidates or bool(attempts)
     kept = any(_upper(attempt.get("decision")) == "KEEP" for attempt in attempts)
-    # A rebench that ran and produced a verdict, even a REVERT one. A visit
-    # whose every attempt errored out measured nothing, and the count of
-    # attempts alone must not be read as the stage having worked.
-    concluded = [attempt for attempt in attempts if attempt["status"] != "failed"]
+    # A rebench that produced a measurement, even one that decided REVERT. A
+    # skipped attempt measured nothing, so the count of attempt rows alone must
+    # not be read as the stage having concluded anything.
+    measured = [attempt for attempt in attempts if attempt["status"] == "succeeded"]
+    faulted = [attempt for attempt in attempts if attempt["status"] == "failed"]
     if stage_failed:
         status = "failed"
     elif not window.get("end_time") and did_work:
         # The session ended inside KERNEL; the visit has real work on it but
         # never reached its own exit.
         status = "degraded"
-    elif kept or concluded:
+    elif kept or measured:
         status = "succeeded"
-    elif attempts:
-        # Every rebench faulted. Whether the visit found anything is unknown,
-        # not negative — the measurements that would have said never landed.
+    elif faulted:
+        # Every rebench that ran faulted. Whether the visit found anything is
+        # unknown, not negative — the measurements never landed.
         status = "failed"
-    elif did_work:
-        # Candidates were produced but none reached a final rebench.
+    elif candidates:
+        # Candidates were produced and none of them earned a measurement,
+        # either because no rebench ran or because every one was skipped.
         status = "degraded"
     else:
+        # Nothing was built and nothing was measured. A visit holding only
+        # skipped rebench rows lands here too: a skip is a record of work
+        # declined, not of work done.
         status = "skipped"
 
     return {
