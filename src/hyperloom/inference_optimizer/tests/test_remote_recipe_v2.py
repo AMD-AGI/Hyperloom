@@ -1920,22 +1920,26 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
 
 def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
     """Replay refs already on the section must union with newly staged refs, without duplicates."""
-    patch = tmp_path / "authored.patch"
-    patch.write_text("authored", encoding="utf-8")
+    patch_a = tmp_path / "authored_a.patch"
+    patch_b = tmp_path / "authored_b.patch"
+    patch_a.write_text("authored_a", encoding="utf-8")
+    patch_b.write_text("authored_b", encoding="utf-8")
     sections = _sections(tmp_path)
-    staged_refs = FrameworkAgentKB(sections).stage_patches([patch], stack_index=2)
-    staged_ref = staged_refs[0]
+    staged_refs = FrameworkAgentKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
+    staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
     prior_patch = "framework/overlays/000000/00-replayed.patch"
     prior_artifact = "framework/artifacts/prior.bin"
+    # before holds prior_patch + staged_ref_a; after (sections) holds *both* staged refs.
+    # A mutation that discards after when before is non-empty would silently drop staged_ref_b.
     value = {
         "framework": {
-            "patches": [prior_patch, staged_ref],
+            "patches": [prior_patch, staged_ref_a],
             "artifacts": [prior_artifact],
         }
     }
     merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
     assert merged == ["framework"]
-    assert value["framework"]["patches"] == [prior_patch, staged_ref]
+    assert value["framework"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
     assert value["framework"]["artifacts"] == [prior_artifact]
 
 
