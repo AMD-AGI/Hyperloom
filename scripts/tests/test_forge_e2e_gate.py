@@ -77,6 +77,8 @@ def test_workflow_dispatches_the_kernelforge_smoke_contract() -> None:
     assert "KERNELFORGE_SOURCE_PULL_REF:$pullref" in dispatcher
     assert 'KF_USE_GIT:"1"' in dispatcher
     assert "STATUS_CONTEXT: ci-e2e/kernelforge" in workflow
+    assert "CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}" in workflow
+    assert "secrets.KERNEL_OPT_WORKSPACE" not in workflow
     assert ".github/scripts/forge-ci-e2e-dispatch.sh" in workflow
 
 

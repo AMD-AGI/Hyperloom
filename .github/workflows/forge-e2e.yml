@@ -246,7 +246,10 @@ jobs:
           GPU_TARGET: ${{ vars.FORGE_E2E_GPU_TARGET || 'gfx950' }}
           FORGE_MODEL: ${{ vars.FORGE_E2E_MODEL }}
           CI_E2E_USER_NAME: ${{ secrets.CI_E2E_USER_NAME }}
-          CI_E2E_WORKSPACE: ${{ secrets.KERNEL_OPT_WORKSPACE || 'control-plan-hyperloom-ci' }}
+          # The registered kernelforge workload template is deployed here. Do
+          # not reuse KERNEL_OPT_WORKSPACE: that names an optimizer workspace,
+          # and may not be a Kubernetes namespace on the Robust cluster.
+          CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}
           CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
           CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
           CI_E2E_CACERT: ${{ secrets.CI_E2E_CACERT }}
