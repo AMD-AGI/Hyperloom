@@ -143,7 +143,7 @@ def configure_aiter_cache_isolation(
 
 
 def child_cache_environment(cache_root: Path) -> dict[str, str]:
-    """Create one private AITER build cache and return the env that selects it.
+    """Create one private build cache and return the env that selects it.
 
     All three runtime compilers are redirected exactly as
     :func:`configure_aiter_cache_isolation` redirects them -- ``cpp_itfs`` reads
@@ -409,56 +409,30 @@ def _global_aiter_jit_dir() -> Path | None:
     return None
 
 
-def _global_flydsl_cache_dir() -> Path | None:
-    """Locate the bundled FlyDSL runtime cache.
+def _seed_flydsl_cache(target: Path) -> None:
+    """Create *target* and symlink the package's FlyDSL launch directories in.
 
-    ``aiter/__init__.py`` sets ``FLYDSL_RUNTIME_CACHE_DIR`` to
-    ``<aiter>/jit/flydsl_cache`` when the variable is absent.  Return that
-    directory so the isolation code can seed symlinks rather than copying.
+    Each entry in the packaged cache is a launch-hash directory of precompiled
+    artefacts. Linking the directories rather than their contents shares
+    gigabytes of warm kernels without copying, and a compile in the shard adds
+    a directory of its own.
+
+    Args:
+        target: Cache directory this process will compile into.
     """
-    override = os.environ.get("FORGE_FLYDSL_WARM_CACHE_DIR", "").strip()
-    if override:
-        candidate = Path(override).expanduser()
-        return candidate if candidate.is_dir() else None
+    target.mkdir(parents=True, exist_ok=True)
     global_jit = _global_aiter_jit_dir()
-    if global_jit is None:
-        return None
-    candidate = global_jit / "flydsl_cache"
-    return candidate if candidate.is_dir() else None
-
-
-def _seed_flydsl_cache(target: Path) -> dict[str, Any]:
-    """Symlink the bundled FlyDSL launch-hash subdirectories into *target*.
-
-    Each entry in the bundled FlyDSL cache is a subdirectory keyed by a launch
-    hash; its contents are precompiled artefacts.  Symlinking the directories
-    (not their contents) keeps the isolation shard from duplicating gigabytes
-    while still making every compiled kernel readable.  New compiles in the
-    isolated shard create fresh subdirectories that do not appear in the global
-    cache.
-    """
-    stats: dict[str, Any] = {"seeded": 0, "skipped": 0, "errors": 0, "src": ""}
-    src = _global_flydsl_cache_dir()
-    if src is None:
-        return stats
-    stats["src"] = str(src)
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-        candidates = [p for p in src.iterdir() if p.is_dir()]
-    except OSError:
-        stats["errors"] += 1
-        return stats
-    for entry in candidates:
-        dest = target / entry.name
-        if dest.exists() or dest.is_symlink():
-            stats["skipped"] += 1
+    source = global_jit / "flydsl_cache" if global_jit else None
+    if source is None or not source.is_dir():
+        return
+    for entry in sorted(source.iterdir()):
+        destination = target / entry.name
+        if not entry.is_dir() or destination.exists() or destination.is_symlink():
             continue
         try:
-            os.symlink(entry.resolve(), dest)
-            stats["seeded"] += 1
-        except OSError:
-            stats["errors"] += 1
-    return stats
+            os.symlink(entry.resolve(), destination)
+        except OSError as error:
+            log.warning("aiter-cache: could not link FlyDSL cache %s: %s", entry.name, error)
 
 
 def seed_prebuilt_modules(jit_dir: Path) -> dict[str, Any]:
