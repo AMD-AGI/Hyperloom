@@ -11,6 +11,7 @@ rather than to "the artifact did not apply".
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -138,11 +139,31 @@ class TestServerLogParsing:
         "[aiter] shape is M:1082, N:5120, K:17408, found padded_M: 1088, N:5120, "
         "K:17408 is tuned on cu_num = 256 in /x/candidate.csv , kernel name is k!"
     )
+    # Verbatim from a production Qwen3 vLLM server.log. The dispatch kwargs sit
+    # between ``K:`` and ``found padded_M:``, which an earlier pattern did not
+    # allow -- it matched none of that log's 5024 hit lines.
+    HIT_WITH_KWARGS = (
+        "(Worker_TP7 pid=380239) [aiter] shape is M:16384, N:4608, K:8192 "
+        "dtype='torch.bfloat16' otype='torch.bfloat16' bias=False, scaleAB=False, "
+        "bpreshuffle=False found padded_M: 8192, N:4608, K:8192 is tuned on "
+        "cu_num = 256 in /shared_nfs/x/merged_tuned_dense_bf16.csv,"
+    )
 
     def test_parses_misses_and_hits(self):
         missed, hit = parse_aiter_shape_lookups("\n".join([self.MISS, self.MISS_QUANT, self.HIT]))
         assert missed == {(8192, 7168, 5120), (512, 5120, 17408)}
         assert hit == {(1082, 5120, 17408)}
+
+    def test_parses_hit_with_dispatch_kwargs_between_k_and_padded_m(self):
+        missed, hit = parse_aiter_shape_lookups(self.HIT_WITH_KWARGS)
+        assert missed == set()
+        assert hit == {(16384, 4608, 8192)}
+
+    def test_hit_pattern_does_not_span_lines(self):
+        """A miss on one line must not pair with a hit on the next."""
+        missed, hit = parse_aiter_shape_lookups("\n".join([self.MISS, self.HIT_WITH_KWARGS]))
+        assert missed == {(8192, 7168, 5120)}
+        assert hit == {(16384, 4608, 8192)}
 
     def test_empty_log(self):
         assert parse_aiter_shape_lookups("") == (set(), set())
@@ -328,6 +349,34 @@ class TestTunedCsvCoverage:
         report = tuned_config_coverage([(1, 2, 3)], [])
         assert report["requested"] == 0
         assert report["coverage_pct"] is None
+
+    def test_retry_integrate_dir_is_scanned(self, tmp_path):
+        """A ``-2`` retry replaces the first attempt; it must not be ignored."""
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import read_latest_integrate_server_log
+
+        integrate = tmp_path / "runs" / "integrate"
+        first = integrate / "integrate-gemm_tune_fmoe_ck" / "r"
+        retry = integrate / "integrate-gemm_tune_fmoe_ck-2" / "r"
+        for d in (first, retry):
+            d.mkdir(parents=True)
+        (first / "server.log").write_text("first attempt", encoding="utf-8")
+        (retry / "server.log").write_text("retry attempt", encoding="utf-8")
+        os.utime(retry / "server.log", (2_000_000_000, 2_000_000_000))
+        os.utime(first / "server.log", (1_000_000_000, 1_000_000_000))
+
+        found = read_latest_integrate_server_log(tmp_path, "integrate-gemm_tune_fmoe_ck")
+        assert found is not None
+        assert found[1] == "retry attempt"
+
+    def test_runtime_confirmed_hit_counts_as_covered(self):
+        """aiter saying it used a row beats our replay of its padding rules."""
+        requested = [(16384, 4608, 8192)]
+        # Deliberately empty: the ladder can prove nothing here.
+        assert tuned_config_coverage([], requested)["covered"] == 0
+        report = tuned_config_coverage([], requested, known_covered=requested)
+        assert report["covered"] == 1
+        assert report["coverage_pct"] == 100.0
+        assert report["uncovered_sample"] == []
 
 
 class TestCoverageGateDoesNotBlockOnMissingEvidence:

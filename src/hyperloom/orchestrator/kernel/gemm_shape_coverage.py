@@ -37,8 +37,19 @@ _AITER_SHAPE_MISS_RE = re.compile(
     r"shape is M:(\d+), N:(\d+), K:(\d+)(?:[^\n]*?)not found tuned config in (\S+?),",
 )
 # Emitted by aiter (only under AITER_LOG_TUNED_CONFIG) on a lookup hit.
+#
+# ``K:`` and ``found padded_M:`` are *not* adjacent in practice: aiter prints the
+# dispatch kwargs between them, and only some of those are comma-separated --
+#
+#   shape is M:16384, N:4608, K:8192 dtype='torch.bfloat16' otype='torch.bfloat16'
+#   bias=False, scaleAB=False, bpreshuffle=False found padded_M: 8192, N:4608, ...
+#
+# An earlier pattern required a comma straight after ``K:<n>`` and so matched
+# none of the 5024 hit lines in a production Qwen3 log, which scored a fully
+# served tuned table as ``no_shape_key_matched`` and reverted it. The trailing
+# ``is tuned`` anchor keeps the lazy ``[^\n]*?`` from spanning an unrelated line.
 _AITER_SHAPE_HIT_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+), found padded_M: (\d+)",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+), N:\d+, K:\d+ is tuned",
 )
 
 Shape = tuple[int, int, int]
@@ -431,10 +442,16 @@ def read_latest_integrate_server_log(
     session_dir: Path,
     integrate_name: str = FMOE_INTEGRATE_RUN,
 ) -> tuple[Path, str] | None:
-    """Return the newest ``server.log`` under an integrate run, if readable."""
-    run_dir = session_dir / "runs" / "integrate" / integrate_name
+    """Return the newest ``server.log`` under an integrate run, if readable.
+
+    Retries land in ``<integrate_name>-2``/``-3`` siblings rather than inside
+    the original directory, so those are scanned too; otherwise a retried run is
+    judged on the attempt it replaced.
+    """
+    parent = session_dir / "runs" / "integrate"
+    run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
     logs = sorted(
-        run_dir.rglob("server.log"),
+        (log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")),
         key=lambda p: p.stat().st_mtime if p.exists() else 0,
     )
     if not logs:
@@ -579,15 +596,28 @@ def tuned_csv_shapes(path: str | Path) -> set[Shape]:
 def tuned_config_coverage(
     tuned_shapes: Iterable[Shape],
     requested_shapes: Iterable[Shape],
+    known_covered: Iterable[Shape] | None = None,
 ) -> dict[str, Any]:
     """Report how many requested shapes a tuned CSV can actually serve.
 
     Replays aiter's three-step lookup against the CSV keys, so the result
     answers "will this artifact ever be used?" rather than "did the micro
     benchmark look good?".
+
+    Args:
+        tuned_shapes: ``(M, N, K)`` keys present in the tuned CSV.
+        requested_shapes: ``(M, N, K)`` triples the runtime asked for.
+        known_covered: Shapes the runtime *itself* reported as resolved against
+            the tuned table. These count as covered without replaying the
+            ladder: aiter has already stated which row it used, and that is
+            better evidence than our reconstruction of its padding rules. Any
+            drift between the two -- a new rung, a variant with different
+            clamping -- would otherwise score a served shape as uncovered and
+            revert a run that worked.
     """
     tuned = {(int(m), int(n), int(k)) for m, n, k in tuned_shapes}
     requested = sorted({(int(m), int(n), int(k)) for m, n, k in requested_shapes})
+    confirmed = {(int(m), int(n), int(k)) for m, n, k in (known_covered or ())}
     if not requested:
         return {
             "requested": 0,
@@ -595,7 +625,9 @@ def tuned_config_coverage(
             "coverage_pct": None,
             "tuned_rows": len(tuned),
         }
-    covered = [shape for shape in requested if any(key in tuned for key in aiter_lookup_keys(shape))]
+    covered = [
+        shape for shape in requested if shape in confirmed or any(key in tuned for key in aiter_lookup_keys(shape))
+    ]
     return {
         "requested": len(requested),
         "covered": len(covered),

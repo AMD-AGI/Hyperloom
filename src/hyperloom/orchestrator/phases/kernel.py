@@ -116,6 +116,21 @@ def _safe_mtime(path: Path) -> float:
         return 0.0
 
 
+def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
+    """Server logs for a tuner's integrate run, retries included, oldest first.
+
+    A retried integrate lands in a sibling directory with a ``-2``/``-3``
+    suffix, so scanning only ``integrate-gemm_tune_<tuner>`` grades the retry on
+    the *first* attempt's log. Seven such retries exist on the fleet, including
+    every faulted post-merge session.
+    """
+    parent = session_dir / "runs" / "integrate"
+    base = f"integrate-gemm_tune_{tuner_name}"
+    dirs = [parent / base, *sorted(parent.glob(f"{base}-*"))]
+    logs = [log_path for run_dir in dirs for log_path in run_dir.rglob("server.log")]
+    return sorted(logs, key=_safe_mtime)
+
+
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
     """Return the tuned artifact a candidate's env points at.
 
@@ -2212,8 +2227,7 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             return None
         try:
@@ -2247,7 +2261,7 @@ class KernelPhase(PhaseHandler):
         if not tuned:
             _unreadable("dense")
             return None
-        report = tuned_config_coverage(tuned, requested)
+        report = tuned_config_coverage(tuned, requested, known_covered=hit)
         report["server_log"] = str(logs[-1])
         report["runtime_lookup_miss"] = len(missed)
         report["runtime_lookup_hit"] = len(hit)
@@ -2442,14 +2456,13 @@ class KernelPhase(PhaseHandler):
         csv_paths = [value for key, value in envs.items() if key.startswith("AITER_CONFIG")]
         if not csv_paths:
             return None
-        run_dir = self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}"
-        logs = sorted(run_dir.rglob("server.log"), key=_safe_mtime)
+        logs = _integrate_server_logs(self.session_dir, tuner_name)
         if not logs:
             # Say so. This whole change exists to stop checks from failing
             # quietly, and a missing log is the one way this one can.
             log.warning(
-                "forge gemm E2E: no server.log under %s; apply verification cannot run for %s",
-                run_dir,
+                "forge gemm E2E: no server.log under %s (retries included); apply verification cannot run for %s",
+                self.session_dir / "runs" / "integrate" / f"integrate-gemm_tune_{tuner_name}",
                 tuner_name,
             )
             return None
