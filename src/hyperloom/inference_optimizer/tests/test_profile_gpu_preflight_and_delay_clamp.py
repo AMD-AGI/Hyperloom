@@ -64,9 +64,7 @@ def test_scans_every_blob_like_the_cuda_graph_classifier():
 def test_ignores_a_mid_run_workload_oom():
     # A genuine OOM is NOT recoverable by reaping a squatter; reclaiming and
     # retrying would just burn attempts.
-    assert not _is_insufficient_gpu_memory(
-        "torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB"
-    )
+    assert not _is_insufficient_gpu_memory("torch.OutOfMemoryError: HIP out of memory. Tried to allocate 2.00 GiB")
 
 
 def test_ignores_an_empty_blob():
@@ -197,9 +195,7 @@ def _delay_of(tmp_path: Path, monkeypatch, envs: dict, *, r: str | None = None) 
         monkeypatch.delenv(key, raising=False)
     if r is not None:
         monkeypatch.setenv("RANDOM_RANGE_RATIO", r)
-    out = we.materialize_config_with_envs(
-        _profile_yaml(tmp_path, "sglang", envs), tmp_path / "out"
-    )
+    out = we.materialize_config_with_envs(_profile_yaml(tmp_path, "sglang", envs), tmp_path / "out")
     body = yaml.safe_load(out.read_text(encoding="utf-8"))["benchmark"]["envs"]
     import json
 
