@@ -291,7 +291,7 @@ def make_supervisor_fn(
                             user_prompt=user_prompt,
                             cwd=workspace,
                             writable=False,
-                            timeout_sec=timeout_sec,
+                            timeout_sec=max(1, int(remaining)),
                             reasoning_effort="max",
                             tool_policy=AgentToolPolicy(
                                 read=True,

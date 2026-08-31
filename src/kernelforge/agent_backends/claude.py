@@ -665,8 +665,11 @@ class ClaudeBackend:
                     if spec.progress_log is not None:
                         spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
         except asyncio.CancelledError:
-            # Once a session exists its outputs are a caller's to salvage; only a
-            # cancel before that leaves nothing worth keeping.
+            # The subprocess and any detached benchmark children are running
+            # regardless of whether a session id was established; reap them so
+            # they do not hold the GPU past this point. The caller receives the
+            # exception, but any workspace writes and the resume handle survive.
+            reap_on_exit = True
             if not session_id:
                 rollback_on_exit = True
             raise
