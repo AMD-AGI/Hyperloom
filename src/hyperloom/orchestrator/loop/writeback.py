@@ -4086,6 +4086,21 @@ class WritebackCollaborator:
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
             }
+            # ``IntegratePatchExecutor`` nests benchmark output in
+            # ``bench_result``. Preserve its launch evidence when lifting the
+            # winning measurement; otherwise the handoff is correctly marked
+            # unverified despite the grid runner having captured proof.
+            bench_result = result.get("bench_result")
+            if not isinstance(bench_result, Mapping):
+                bench_result = {}
+            for evidence_field in (
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+            ):
+                value = result.get(evidence_field) or bench_result.get(evidence_field)
+                if value:
+                    lift[evidence_field] = value
             # The mandate's stamp and the deliverable's markers together;
             # the result wins on a collision.
             lever_kind = patch_lever_kind({**task_params, **result})

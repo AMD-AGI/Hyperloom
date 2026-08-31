@@ -286,6 +286,93 @@ def _config_framework(config_path: Path | str) -> str:
     return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
 
 
+def _attach_baseline_launch_evidence(
+    result: dict[str, Any],
+    *,
+    config_path: Path,
+    output_dir: Path,
+    framework: str,
+) -> None:
+    """Persist the declared and observed server identity for a baseline result.
+
+    Baselines do not run through ``run_grid``, so they need the same evidence
+    contract explicitly. The returned result is later promoted to
+    ``current_best`` and becomes the GEAK handoff reference.
+    """
+    from ._grid_runner import _measurement_server_log_path
+    from ._grid_server_args import server_args_env_name
+
+    workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
+    actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
+    result["server_log_path"] = actual_log or ""
+
+    benchmark: dict[str, Any] = {}
+    try:
+        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if isinstance(parsed, dict):
+            raw = parsed.get("benchmark")
+            benchmark = raw if isinstance(raw, dict) else {}
+    except (OSError, yaml.YAMLError):
+        pass
+
+    args_env = server_args_env_name(framework)
+    envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
+    requested_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
+    requested_args = str(envs.get(args_env) or "").strip()
+    recipe_digest = ""
+    try:
+        recipe_digest = f"sha256:{hashlib.sha256(config_path.read_bytes()).hexdigest()}"
+    except OSError:
+        pass
+
+    observed_flags = ""
+    observed_server_identity: dict[str, Any] = {}
+    if actual_log:
+        try:
+            from ...loop.coordinator_helpers import (
+                _LAUNCH_ARGV_MARKERS,
+                _launch_argv_from_log,
+                _observed_sglang_server_identity_from_log,
+            )
+
+            marker = _LAUNCH_ARGV_MARKERS.get(framework)
+            observed_flags = _launch_argv_from_log(actual_log, marker) if marker else ""
+            if not observed_flags and framework == "sglang":
+                observed_server_identity = _observed_sglang_server_identity_from_log(actual_log)
+        except Exception:  # noqa: BLE001 - evidence must not alter a valid baseline
+            observed_flags = ""
+            observed_server_identity = {}
+
+    evidence: dict[str, Any] = {
+        "schema_version": 1,
+        "materialized_config_path": str(config_path),
+        "recipe_digest": recipe_digest,
+        "framework": framework,
+        "model_path": str(benchmark.get("model") or ""),
+        "requested_server_args": requested_args,
+        "requested_server_flags": requested_args,
+        "requested_server_env": requested_env,
+        "actual_server_log_path": actual_log or "",
+        "observed_server_launch_flags": observed_flags,
+        "observed_server_identity": observed_server_identity,
+        "warm_reuse": {
+            "reused_ready_server": bool(actual_log and "warmup_round" in Path(actual_log).parts),
+            "provenance": "warmup_round"
+            if actual_log and "warmup_round" in Path(actual_log).parts
+            else "fresh_or_unobserved",
+            "source_server_log_path": actual_log or "",
+        },
+    }
+    result["launch_evidence"] = evidence
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        evidence_path = output_dir / "launch_evidence.json"
+        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
+        result["launch_evidence_path"] = str(evidence_path)
+    except OSError as exc:
+        log.warning("baseline_executor: failed to persist launch evidence in %s: %s", output_dir, exc)
+
+
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
     """``server.log`` path for the subprocess watchdogs, or None when server-less.
 
@@ -3480,6 +3567,27 @@ class BaselineExecutor:
                 result["nonfatal_warnings"].append(
                     "baseline_double_run_discarded_first",
                 )
+                # The measured pass re-attaches to the server launched by the
+                # warmup pass. Its own slot has no fresh launch record, so its
+                # evidence must retain the warmup's observed identity rather
+                # than degrading an otherwise verifiable baseline handoff.
+                for evidence_field in (
+                    "launch_evidence",
+                    "launch_evidence_path",
+                    "server_log_path",
+                ):
+                    if warmup_result.get(evidence_field):
+                        result[evidence_field] = warmup_result[evidence_field]
+                warmup_evidence = result.get("launch_evidence")
+                if isinstance(warmup_evidence, Mapping):
+                    measured_evidence = dict(warmup_evidence)
+                    measured_evidence["warm_reuse"] = {
+                        **dict(warmup_evidence.get("warm_reuse") or {}),
+                        "reused_ready_server": True,
+                        "provenance": "warmup_round",
+                        "source_server_log_path": str(result.get("server_log_path") or ""),
+                    }
+                    result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
                 self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the
@@ -4686,6 +4794,12 @@ class BaselineExecutor:
             # is honored as an intentional opt-out.
             "run_eval_disabled": bool(run_eval_disabled),
         }
+        _attach_baseline_launch_evidence(
+            result,
+            config_path=materialized_config_path,
+            output_dir=output_dir,
+            framework=framework,
+        )
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
         # gate for scriptable frameworks). Pass the framework so scriptable runs
