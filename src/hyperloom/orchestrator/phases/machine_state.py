@@ -674,11 +674,13 @@ def _kernel_idle_min_seconds() -> float:
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
 
+#: How often the intent router refreshes the inline-step liveness stamp.
+KERNEL_HEARTBEAT_SEC: float = 150.0
+
 #: How stale ``kernel_inline_step_seen_unix`` may be and still mean "running".
-#: The intent router refreshes it every 150s (``_KERNEL_HEARTBEAT_SEC``); three
-#: intervals of slack absorbs a late beat under load, and a stamp orphaned by a
-#: process that died mid-step expires soon after rather than muting the guard.
-KERNEL_INLINE_STEP_STALE_SECONDS: float = 450.0
+#: Three heartbeat intervals absorb a late beat under load; a stamp orphaned by a
+#: process that died mid-step expires shortly after rather than muting the guard.
+KERNEL_INLINE_STEP_STALE_SECONDS: float = 3.0 * KERNEL_HEARTBEAT_SEC
 
 
 def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:

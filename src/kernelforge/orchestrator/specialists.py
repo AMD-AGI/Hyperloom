@@ -756,16 +756,6 @@ class SpecialistAgent:
             # straight under the configured root, where an earlier ledger would
             # be reported as this session's.
             ledger_path.unlink(missing_ok=True)
-            # The sentinel is campaign-scoped, but the only thing that used to
-            # create it was ``DeviceBenchmarkLock``, which a campaign reaches at
-            # fan-out -- after the analysis round. A probe opens the file
-            # without creating it, on purpose, so every probe of every
-            # analysis-phase specialist was refused for a sentinel that nothing
-            # had made yet, and the round planned against zero measurements.
-            # Created here for the same reason the lane path creates it: what
-            # serializes probe against lane is the shared path, not the maker.
-            candidate.device_lock.parent.mkdir(parents=True, exist_ok=True)
-            candidate.device_lock.touch(exist_ok=True)
         except OSError as error:
             return self._no_probe(assignment, f"the scratch root could not be prepared: {error}")
         # The server validates its own environment and would refuse a session it
@@ -776,6 +766,16 @@ class SpecialistAgent:
             load_sandbox(candidate.server_env())
         except ProbeSandboxError as error:
             return self._no_probe(assignment, str(error))
+        # The sentinel is campaign-scoped. Only create it for a probe that was
+        # actually offered: an offered probe means a benchmark will run, and the
+        # DeviceBenchmarkLock a lane creates would otherwise be the only maker.
+        # Creating it before load_sandbox would leave an orphaned sentinel on a
+        # refused probe with no code to unlink it.
+        try:
+            candidate.device_lock.parent.mkdir(parents=True, exist_ok=True)
+            candidate.device_lock.touch(exist_ok=True)
+        except OSError as error:
+            return self._no_probe(assignment, f"could not create device sentinel: {error}")
         return candidate
 
     def _no_probe(self, assignment: SpecialistAssignment, reason: str) -> _ProbeSetup:

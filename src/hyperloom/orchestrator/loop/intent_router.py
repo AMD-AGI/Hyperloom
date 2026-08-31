@@ -79,7 +79,7 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 
 
 # Half the robustness stall threshold, so one dropped beat cannot trip it.
-_KERNEL_HEARTBEAT_SEC: float = 150.0
+from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC  # noqa: E402
 
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:
