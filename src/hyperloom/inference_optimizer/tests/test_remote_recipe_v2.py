@@ -497,6 +497,66 @@ def test_platform_alone_is_not_replay_material() -> None:
     )
 
 
+def test_unsanitizable_rejected_row_is_dropped_not_raised(tmp_path: Path) -> None:
+    """A broken rejected config must cost its own skip, never the whole recipe."""
+    state = _state(tmp_path)
+    state.explore_search = {
+        "rejected": [
+            # unbalanced quote: shlex.split raises
+            {"name": "bad_quote", "extra_server_args": '--foo "unterminated', "extra_envs": {}},
+            # whitespace-bearing operand: rejected by Magpie's unquoted expansion
+            {"name": "spaced", "extra_server_args": '--bar "a b"', "extra_envs": {}},
+            {"name": "good", "extra_server_args": "--kv-cache-dtype fp8_e4m3", "extra_envs": {}},
+        ]
+    }
+    rows = build_publishable_do_not_repeat(state)
+    assert [row["name"] for row in rows] == ["good"]
+
+
+def test_do_not_repeat_cap_reserves_room_for_kernel_skips(tmp_path: Path) -> None:
+    """A long explore phase must not crowd kernel skips out of the cap."""
+    state = _state(tmp_path)
+    state.explore_search = {
+        "rejected": [
+            {"name": f"v{i}", "extra_server_args": f"--page-size {i}", "extra_envs": {}} for i in range(64)
+        ]
+    }
+    state.rejected_kernel_ids = [f"kernel_{i}" for i in range(10)]
+    rows = build_publishable_do_not_repeat(state)
+    assert len(rows) == 32
+    kernel_ids = [row["kernel_id"] for row in rows if row["kind"] == "kernel"]
+    # all 10 kernels survive, since the reserve is 16
+    assert kernel_ids == [f"kernel_{i}" for i in range(10)]
+    assert sum(1 for row in rows if row["kind"] == "explore") == 22
+
+
+def test_do_not_repeat_cap_gives_unused_kernel_reserve_back_to_explore(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.explore_search = {
+        "rejected": [
+            {"name": f"v{i}", "extra_server_args": f"--page-size {i}", "extra_envs": {}} for i in range(64)
+        ]
+    }
+    state.rejected_kernel_ids = []
+    rows = build_publishable_do_not_repeat(state)
+    assert len(rows) == 32
+    assert all(row["kind"] == "explore" for row in rows)
+
+
+def test_do_not_repeat_cap_splits_evenly_when_both_overflow(tmp_path: Path) -> None:
+    state = _state(tmp_path)
+    state.explore_search = {
+        "rejected": [
+            {"name": f"v{i}", "extra_server_args": f"--page-size {i}", "extra_envs": {}} for i in range(64)
+        ]
+    }
+    state.rejected_kernel_ids = [f"kernel_{i}" for i in range(64)]
+    rows = build_publishable_do_not_repeat(state)
+    assert len(rows) == 32
+    assert sum(1 for row in rows if row["kind"] == "explore") == 16
+    assert sum(1 for row in rows if row["kind"] == "kernel") == 16
+
+
 def test_publishable_do_not_repeat_from_ledgers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     state = _state(tmp_path)
     state.gpu_type = "mi355x"

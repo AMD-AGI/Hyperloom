@@ -362,6 +362,9 @@ def build_publishable_platform(
 
 _DO_NOT_REPEAT_CAP = 32
 _DO_NOT_REPEAT_REASON_MAX = 160
+#: Slots held back for kernel skips so a long explore phase cannot crowd them
+#: out. Unused reserve flows back to explore rows, and vice versa.
+_DO_NOT_REPEAT_KERNEL_RESERVE = _DO_NOT_REPEAT_CAP // 2
 _KERNEL_SKIP_ACTIONS = frozenset(
     {
         "fusion",
@@ -385,8 +388,19 @@ def _reason_line(*parts: Any) -> str:
 
 
 def _skip_explore_row(row: Mapping[str, Any], *, reason: str = "") -> dict[str, Any] | None:
-    """Return a path-free explore skip, or ``None`` when it cannot be fingerprinted."""
-    args = sanitize_publish_server_args(str(row.get("extra_server_args") or row.get("candidate_extra_server_args") or ""))
+    """Return a path-free explore skip, or ``None`` when it cannot be fingerprinted.
+
+    A skip list is an optimization, not replay material, so an unsanitizable
+    row is dropped rather than raised. Rejected configs are the likeliest place
+    to find broken quoting, and losing one skip must never cost the session its
+    whole published recipe.
+    """
+    try:
+        args = sanitize_publish_server_args(
+            str(row.get("extra_server_args") or row.get("candidate_extra_server_args") or "")
+        )
+    except ValueError:
+        return None
     raw_envs = row.get("extra_envs") or row.get("candidate_extra_envs") or {}
     envs = sanitize_publish_env_mapping(raw_envs if isinstance(raw_envs, Mapping) else {})
     if not args and not envs:
@@ -433,24 +447,27 @@ def build_publishable_do_not_repeat(state: Any) -> list[dict[str, Any]]:
     still carries args/envs or a kernel id — the live store's action/task_id
     rows are not skippable and are omitted rather than published as prose.
     """
-    items: list[dict[str, Any]] = []
+    config_items: list[dict[str, Any]] = []
+    kernel_items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
     def _add(item: dict[str, Any] | None) -> None:
-        if not item or len(items) >= _DO_NOT_REPEAT_CAP:
+        if not item:
             return
         kind = str(item.get("kind") or "")
         if kind in {"explore", "framework"}:
             token = str(item.get("fingerprint") or "")
+            bucket = config_items
         elif kind == "kernel":
             token = str(item.get("kernel_id") or "")
+            bucket = kernel_items
         else:
             return
         key = (kind, token)
         if not token or key in seen:
             return
         seen.add(key)
-        items.append(item)
+        bucket.append(item)
 
     explore = getattr(state, "explore_search", None) or {}
     rejected = explore.get("rejected") if isinstance(explore, Mapping) else None
@@ -476,7 +493,10 @@ def build_publishable_do_not_repeat(state: Any) -> list[dict[str, Any]]:
 
     for kid in getattr(state, "rejected_kernel_ids", None) or []:
         _add(_skip_kernel_row(str(kid), reason="rejected_kernel_ids"))
-    return items
+
+    config_budget = _DO_NOT_REPEAT_CAP - min(len(kernel_items), _DO_NOT_REPEAT_KERNEL_RESERVE)
+    items = config_items[:config_budget]
+    return items + kernel_items[: _DO_NOT_REPEAT_CAP - len(items)]
 
 
 _TOKEN_BUCKET_INTS = (
