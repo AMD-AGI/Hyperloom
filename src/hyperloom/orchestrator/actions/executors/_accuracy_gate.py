@@ -112,8 +112,17 @@ def materialized_run_eval_disabled(config_path: Path | str) -> bool:
     from the base YAML ``benchmark.envs``, ``reference_envs``, ``extra_envs`` and
     process ``$RUN_EVAL``, defaulting to "true") into ``benchmark.envs.RUN_EVAL``
     -- the value the benchmark subprocess actually consumes. Reading it back is
-    the single source of truth for "did eval run this round", reusing the shared
+    the one place to ask what the subprocess was told, reusing the shared
     ``_RUN_EVAL_FALSE_VALUES`` present-and-falsey semantics.
+
+    This reports what was configured, not what should be: a graded round injects
+    ``RUN_EVAL=true`` on purpose (see :func:`accuracy_gate_applies`), because the
+    value folded in here comes from a base config, reference envs, a variant's
+    own ``extra_envs`` and the process env, none of which the grading executor
+    controls -- a stale config or a variant-supplied ``RUN_EVAL=false`` would
+    otherwise leave no score on disk and fail a good variant closed. The
+    session-level opt-out (``--no-eval``) is the supported way to mean "do not
+    evaluate", and it skips the grading too rather than racing this value.
 
     Lives in this module because every arm that asks the question needs it --
     the baseline, the grid and the env materializer -- and this module imports no
