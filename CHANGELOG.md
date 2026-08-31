@@ -108,6 +108,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING: `forge-loop` and `forge-rewrite-by-flydsl` now reject an undeclared
+  option instead of dropping it.** These two were the only tolerant entry points
+  in the forge CLI: an option they did not declare was discarded, named on
+  stderr, and recorded as `ignored_cli_options` on the result document, and the
+  run proceeded on the defaults. The exemption existed because a consumer in a
+  *separate repository* drove them and could ship ahead of the installed
+  producer; vendoring put producer and consumer in one tree and one wheel, so
+  that skew can no longer occur. What the tolerance still absorbed was typos and
+  renames — silently. Seven shipped examples kept passing a `--fellow` flag after
+  the `fellow` -> `kernel_backend` rename and ran an inferred backend instead of
+  the intended one, exiting 0 the whole time; contrast the fusion wrapper's
+  `--llm-model` -> `--model` rename, which `forge-fuse` rejected outright and
+  which was therefore found and fixed. Both commands now behave like every other
+  forge subcommand — click's own error, exit 2, before any GPU work starts, with
+  a "Did you mean" suggestion. `kernelforge/cli_forward_compat.py` and the
+  `ignored_cli_options` result field are removed; nothing in Hyperloom read that
+  field. The retired `--max-iters`, previously accepted and ignored, is now
+  rejected too.
+
 - **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
   installs forge, so there is no checkout to point at and nothing to clone:
   `local_setup.sh` no longer clones the private KernelForge repo (and the
@@ -143,9 +162,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `kernel_backend`, and a config carrying the retired key **fails loudly at
   load** rather than migrating silently; the environment variable is
   `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
-  The CLI flag is the one place where the failure is *not* loud on its own:
-  `forge-loop` is a `TolerantCommand`, so `--fellow triton-fellow` is dropped
-  with a warning and the campaign proceeds on an inferred backend. The seven
+  The CLI flag was the one place where the failure was *not* loud on its own:
+  `forge-loop` still tolerated unknown options at the time, so `--fellow
+  triton-fellow` was dropped with a warning and the campaign proceeded on an
+  inferred backend. That tolerance is removed in this same release (see above),
+  so the flag now fails like the config key does. The seven
   shipped `run_example.sh` that still passed it are fixed, and the rename guard
   that should have caught them — its exemption globbed `data/*` rather than
   `data/*.md`, so it was exempting runnable scripts along with the prose it
