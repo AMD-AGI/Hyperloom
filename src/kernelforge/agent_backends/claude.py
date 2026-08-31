@@ -665,10 +665,8 @@ class ClaudeBackend:
                     if spec.progress_log is not None:
                         spec.progress_log.append(f"end: sdk-error {str(exc)[:_PROGRESS_TEXT_CHARS]}")
         except asyncio.CancelledError:
-            # Roll back only when no session was established.  Once a session
-            # id exists the backend already preserved the agent's outputs via
-            # its own graceful-deadline path; a cancel at that point must not
-            # destroy work the salvage preflight below can still accept.
+            # Once a session exists its outputs are a caller's to salvage; only a
+            # cancel before that leaves nothing worth keeping.
             if not session_id:
                 rollback_on_exit = True
             raise

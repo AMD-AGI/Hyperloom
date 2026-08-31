@@ -19,10 +19,10 @@ from kernelforge.loop.path_ownership import (
     RUNTIME_FILE_SUFFIXES,
 )
 
-# The staging transaction must never copy or hash machine-generated artefacts:
-# a compile during the attempt mutates the cache, causing publish() to reject
-# an otherwise-valid driver for "external artifact directory changed outside the
-# staging transaction".  These names come from the shared manifest.
+# A driver bundle is a handful of sources beside a kernel cache the driver
+# rewrites on every compile -- observed: 3 payload files against 693 cache files
+# / 382 MB. Staging those costs two copies and three hashes per attempt, and a
+# compile mid-attempt makes publish() reject a driver that was fine.
 _IGNORED_DIRECTORY_NAMES = RUNTIME_DIRECTORY_NAMES | {".git"}
 _IGNORED_FILE_SUFFIXES = RUNTIME_FILE_SUFFIXES
 
