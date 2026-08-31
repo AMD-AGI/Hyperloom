@@ -83,7 +83,8 @@ def test_success_report_includes_timing_and_effect_metrics() -> None:
     assert "| speedup | **1.044164x** (+4.42%) |" in body
     assert "| validation | PASS (SNR 103.7 dB) |" in body
     assert "| iterations | 3 (best at iteration 2) |" in body
-    assert "| LLM usage | 20 calls, $22.62 |" in body
+    assert "LLM usage" not in body
+    assert "$22.62" not in body
 
 
 def test_missing_logs_degrade_to_timing_only() -> None:

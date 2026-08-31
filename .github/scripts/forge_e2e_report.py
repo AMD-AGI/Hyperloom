@@ -164,18 +164,6 @@ def render_report(
         if isinstance(best_commit, str) and best_commit:
             rows.append(("best commit", f"`{best_commit}`"))
 
-        usage = forge_result.get("llm_usage")
-        if isinstance(usage, dict):
-            calls = usage.get("calls")
-            cost = _number(usage.get("total_cost_usd"), 2)
-            values = []
-            if isinstance(calls, int):
-                values.append(f"{calls} calls")
-            if cost is not None:
-                values.append(f"${cost}")
-            if values:
-                rows.append(("LLM usage", ", ".join(values)))
-
     if error:
         rows.append(("reason", error))
 
