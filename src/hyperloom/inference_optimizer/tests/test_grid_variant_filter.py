@@ -52,11 +52,53 @@ def test_multi_node_drops_cuda_graph_max_bs_below_conc(_multi_node, monkeypatch)
 
 
 def test_conc_zero_does_not_drop(_multi_node, monkeypatch):
+    # Documents observable behaviour: CONC=0 never drops anything.
+    # The `conc > 0 and` guard was removed from production because the regex
+    # (\d+) guarantees conc is always >= 0, making the guard unreachable; the
+    # invariant is preserved by `n < conc` being False for all n >= 1 when conc=0.
     monkeypatch.setenv("CONC", "0")
     grid = [_v("low-graph", args="--cuda-graph-max-bs 1")]
     kept, dropped = apply_multi_node_invalid_variants(grid)
     assert [v.name for v in kept] == ["low-graph"]
     assert dropped == []
+
+
+def test_multi_node_flag_in_non_leading_position_is_detected(_multi_node, monkeypatch):
+    """The filter uses re.search(), not re.match() — flag anywhere in the string must fire."""
+    monkeypatch.setenv("CONC", "64")
+    grid = [
+        _v("multi-flag-drop", args="--tp 8 --cuda-graph-max-bs 32"),
+        _v("multi-flag-keep", args="--tp 8 --cuda-graph-max-bs 128"),
+    ]
+    kept, dropped = apply_multi_node_invalid_variants(grid)
+    assert [v.name for v in kept] == ["multi-flag-keep"]
+    assert [row["name"] for row in dropped] == ["multi-flag-drop"]
+
+
+def test_conc_unset_defaults_to_64(_multi_node, monkeypatch):
+    """CONC env var absent → the os.environ.get default of '64' applies."""
+    monkeypatch.delenv("CONC", raising=False)
+    grid = [
+        _v("below-default", args="--cuda-graph-max-bs 32"),
+        _v("at-default", args="--cuda-graph-max-bs 64"),
+    ]
+    kept, dropped = apply_multi_node_invalid_variants(grid)
+    assert [v.name for v in kept] == ["at-default"]
+    assert [row["name"] for row in dropped] == ["below-default"]
+    assert "CONC=64" in dropped[0]["reason"]
+
+
+def test_conc_empty_string_defaults_to_64(_multi_node, monkeypatch):
+    """CONC='' → the `or 64` branch applies (empty string is falsy)."""
+    monkeypatch.setenv("CONC", "")
+    grid = [
+        _v("below-default", args="--cuda-graph-max-bs 32"),
+        _v("at-default", args="--cuda-graph-max-bs 64"),
+    ]
+    kept, dropped = apply_multi_node_invalid_variants(grid)
+    assert [v.name for v in kept] == ["at-default"]
+    assert [row["name"] for row in dropped] == ["below-default"]
+    assert "CONC=64" in dropped[0]["reason"]
 
 
 def test_unparseable_conc_falls_back_to_64(_multi_node, monkeypatch):
