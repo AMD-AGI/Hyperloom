@@ -561,6 +561,9 @@ def build(
         default={},
     )
     v6_warnings = list(warnings)
+    # GEAK is collected only for V6: the V5 payload has no ``geak`` key, and
+    # adding one would change the V5 surface, which V6 must not do.
+    v6_geak = _safe_collect("geak", lambda: collectors.collect_geak(sd, state, v6_warnings), v6_warnings, default={})
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(
@@ -571,6 +574,15 @@ def build(
             critic_iterations=(
                 critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
             ),
+            baseline=baseline,
+            sweep=sweep,
+            conc_sweep_summary=conc_sweep_summary,
+            phase_timeline=phase_timeline,
+            optimizations=optimizations,
+            kernel_journey=kernel_journey,
+            collective=collective,
+            geak=v6_geak,
+            kernel_optimization_summary=kernel_optimization_summary,
         ),
         v6_warnings,
         default=[],
@@ -603,6 +615,14 @@ def build(
         v6_warnings,
         default={},
     )
+    v6_close = _safe_collect(
+        "close",
+        lambda: collectors.collect_v6_close(sd, state, critic_robustness, v6_warnings),
+        v6_warnings,
+        default={},
+    )
+    # Snapshot last: every V6 collector above feeds this list, and it is the
+    # only place a V6 failure is allowed to surface.
     if isinstance(metadata, dict):
         metadata["warnings"] = list(v6_warnings)
 
@@ -667,7 +687,7 @@ def build(
         "metadata": metadata,
         "outcome": outcome,
         "timeline": timeline,
-        "close": {},
+        "close": v6_close,
         "warnings": warnings,
         "source_files": source_files,
     }

@@ -12,15 +12,23 @@ from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
     _FRAMEWORK_PHASES,
+    _KERNEL_PHASES,
     _dict_rows,
     _first,
     _mapping,
+    _operation_task_id,
     _optional_bool,
     _parse_iso_unix as _timestamp_number,
     _safe_get as _nested,
     _string_list,
     _to_float as _optional_float,
     _to_int as _optional_int,
+)
+from .v6_stages import (
+    project_baseline_event,
+    project_conc_sweep_event,
+    project_kernel_events,
+    project_sweep_event,
 )
 
 
@@ -264,17 +272,6 @@ def _is_framework_specialist(row: dict[str, Any], *, allow_legacy: bool) -> bool
     return allow_legacy
 
 
-def _operation_task_id(operation: dict[str, Any]) -> str:
-    return str(
-        _first(
-            _nested(operation, "extensions", "task_id"),
-            _nested(operation, "outputs", "task_id"),
-            _nested(operation, "metadata", "extras", "task_id"),
-        )
-        or ""
-    )
-
-
 def _candidate_id(value: Any) -> str:
     candidate = _mapping(value)
     return str(
@@ -313,7 +310,7 @@ def _is_framework_operation(operation: dict[str, Any]) -> bool:
     return name.startswith("specialist") and _is_framework_specialist(operation, allow_legacy=True)
 
 
-def _new_framework_window(cycle: int, start_time: str = "") -> dict[str, Any]:
+def _new_phase_window(cycle: int, start_time: str = "") -> dict[str, Any]:
     return {
         "cycle": cycle,
         "start_time": start_time,
@@ -323,10 +320,27 @@ def _new_framework_window(cycle: int, start_time: str = "") -> dict[str, Any]:
     }
 
 
-def _framework_windows(
+def _phase_windows(
     state: dict[str, Any],
-    recorded_operations: list[dict[str, Any]],
+    phases: frozenset[str],
 ) -> list[dict[str, Any]]:
+    """Cut ``state.phase_history`` into one window per stay inside ``phases``.
+
+    A stage that the macro loop re-enters (Framework Agent, Kernel Agent) needs
+    each visit kept apart, because V6 disambiguates repeats by
+    ``ext.macro_cycle``. Entering the phase set opens a window, leaving it
+    closes one, and a transition that stays inside the set (``EXPLORE`` ->
+    ``FRAMEWORK_AGENT``) extends the open window rather than starting a new one.
+
+    Args:
+        state (dict[str, Any]): The V5 ``state.json`` mapping.
+        phases (frozenset[str]): Upper-case phase names forming the stage.
+
+    Returns:
+        list[dict[str, Any]]: Windows sorted by ``(cycle, start_time)``, each
+        ``{cycle, start_time, end_time, rows, exit_row}``. ``end_time`` is
+        empty for a window the session never left.
+    """
     windows: list[dict[str, Any]] = []
     active: dict[str, Any] | None = None
     history = _dict_rows(state.get("phase_history"))
@@ -338,20 +352,20 @@ def _framework_windows(
         cycle = _row_cycle(row)
         if cycle is None:
             cycle = int(state.get("macro_cycle") or 0)
-        from_framework = from_phase in _FRAMEWORK_PHASES
-        to_framework = to_phase in _FRAMEWORK_PHASES
-        if to_framework and not from_framework:
-            active = _new_framework_window(cycle, str(row.get("ts") or ""))
+        from_inside = from_phase in phases
+        to_inside = to_phase in phases
+        if to_inside and not from_inside:
+            active = _new_phase_window(cycle, str(row.get("ts") or ""))
             active["rows"].append(row)
             windows.append(active)
             continue
-        if from_framework and to_framework:
+        if from_inside and to_inside:
             if active is None or int(active["cycle"]) != cycle:
-                active = _new_framework_window(cycle)
+                active = _new_phase_window(cycle)
                 windows.append(active)
             active["rows"].append(row)
             continue
-        if from_framework and not to_framework:
+        if from_inside and not to_inside:
             if active is None or int(active["cycle"]) != cycle:
                 active = next(
                     (
@@ -362,7 +376,7 @@ def _framework_windows(
                     None,
                 )
             if active is None:
-                active = _new_framework_window(cycle)
+                active = _new_phase_window(cycle)
                 windows.append(active)
             active["rows"].append(row)
             active["end_time"] = str(row.get("ts") or "")
@@ -371,10 +385,24 @@ def _framework_windows(
             continue
     current_phase = str(state.get("phase") or "").strip().upper()
     current_cycle = int(state.get("macro_cycle") or 0)
-    if current_phase in _FRAMEWORK_PHASES and not any(
+    if current_phase in phases and not any(
         int(window["cycle"]) == current_cycle and not window["end_time"] for window in windows
     ):
-        windows.append(_new_framework_window(current_cycle, str(state.get("phase_started_ts") or "")))
+        windows.append(_new_phase_window(current_cycle, str(state.get("phase_started_ts") or "")))
+    windows.sort(
+        key=lambda window: (
+            int(window["cycle"]),
+            _timestamp_number(window.get("start_time")) or float("inf"),
+        )
+    )
+    return windows
+
+
+def _framework_windows(
+    state: dict[str, Any],
+    recorded_operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    windows = _phase_windows(state, _FRAMEWORK_PHASES)
 
     evidence_rows: list[dict[str, Any]] = []
     for operation in recorded_operations:
@@ -402,7 +430,7 @@ def _framework_windows(
         cycle = _row_cycle(row)
         if cycle is None or cycle in known_cycles:
             continue
-        windows.append(_new_framework_window(cycle))
+        windows.append(_new_phase_window(cycle))
         known_cycles.add(cycle)
 
     windows.sort(
@@ -1913,8 +1941,24 @@ def collect_v6_timeline(
     state: dict[str, Any] | None = None,
     recorded_operations: list[dict[str, Any]] | None = None,
     critic_iterations: list[dict[str, Any]] | None = None,
+    baseline: Any = None,
+    sweep: Any = None,
+    conc_sweep_summary: Any = None,
+    phase_timeline: Any = None,
+    optimizations: Any = None,
+    kernel_journey: Any = None,
+    collective: Any = None,
+    geak: Any = None,
+    kernel_optimization_summary: Any = None,
 ) -> list[dict[str, Any]]:
-    """Load durable events and project framework work without mutating V5 state."""
+    """Load durable events and project stage work without mutating V5 state.
+
+    ``install`` and ``model_gate`` are read back from the durable event
+    directory because they run before the Coordinator exists. Everything else
+    is projected here from V5 sections the exporter has already built, so the
+    keyword arguments are all optional: a caller that passes none still gets
+    the durable events plus the framework projection.
+    """
     timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
@@ -1932,6 +1976,29 @@ def collect_v6_timeline(
                 len(windows),
             )
         )
+    timeline.extend(
+        event
+        for event in (
+            project_baseline_event(baseline, phase_timeline, warnings),
+            project_sweep_event(sweep, state, baseline, phase_timeline, warnings),
+            project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
+        )
+        if event is not None
+    )
+    timeline.extend(
+        project_kernel_events(
+            state,
+            _phase_windows(state, _KERNEL_PHASES),
+            warnings,
+            optimizations=optimizations,
+            kernel_journey=kernel_journey,
+            collective=collective,
+            geak=geak,
+            baseline=baseline,
+            recorded_operations=operations,
+            kernel_optimization_summary=kernel_optimization_summary,
+        )
+    )
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
