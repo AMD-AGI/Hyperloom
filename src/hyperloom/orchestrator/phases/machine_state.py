@@ -434,12 +434,8 @@ DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remain
 # the run is considered converged (stop looping → CLOSE).
 DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 
-# A macro-cycle "gained" when validated cumulative gain rose by more than this
-# (percentage points); guards against float noise being read as progress.
-DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
-
 # Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. It
-# is injected at dispatch for explore, integrate_patch and framework_agent, and
+# is injected at dispatch for explore and integrate_patch, and
 # also sets the stack-stable threshold (=keep/2) and the convergence gain bar.
 # The kernel-owned families hold their own fixed thresholds instead.
 KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
@@ -1104,7 +1100,7 @@ def phase_cumulative_seconds(
 
 
 def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Return total Explore wall-clock seconds across all macro cycles.
+    """Return total optimisation-phase wall-clock seconds across all macro cycles.
 
     Completed segments are accumulated at every transition out of the
     optimisation phase. If it is still current, append the live segment at
@@ -1503,7 +1499,7 @@ def compute_plateau_kernel(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_kernel → ``(triggered, evidence)``.
 
-    Trigger (OR, weaker than explore's AND): revert_streak
+    Trigger (OR, weaker than the config arm's AND): revert_streak
     >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
 
     Args:
@@ -2974,7 +2970,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# Human-friendly labels for the six coordinator phases.
+# Human-friendly labels for the coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
@@ -3363,7 +3359,6 @@ __all__ = [
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
-    "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",

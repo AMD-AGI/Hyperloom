@@ -111,27 +111,6 @@ def _files_page(patches, *, truncated=False):
     return {"markdown": body}
 
 
-def test_fetch_pr_kb_diff_ok():
-    page = _files_page([{"filename": "s.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"}])
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(page))
-    assert src == "gbrain_pr_kb"
-    assert "diff --git a/s.py b/s.py" in text
-
-
-def test_fetch_pr_kb_diff_truncated_bails():
-    page = _files_page([{"filename": "s.py", "status": "modified", "patch": "@@ x"}], truncated=True)
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(page))
-    assert (text, src) == ("", "")
-
-
-def test_fetch_pr_kb_diff_missing_page():
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(None))
-    assert (text, src) == ("", "")
-
-
-# --- index parse ------------------------------------------------------------
-
-
 def test_parse_index_prs():
     prs = [{"number": 9, "state": "open", "title": "x"}]
     md = "---\nrepo: ROCm/vllm\n---\n# index\n\n## PRs JSON\n\n```json\n" + json.dumps(prs) + "\n```\n"

@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    LEVER_SOURCE_PATCH,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -113,16 +112,14 @@ class IntentRouter:
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created.
 
-        Stamps both the lever the work moves and the phase that owns it. The
-        lever is the durable half: it says what was changed, which stays true
-        after the phase machine is rearranged, while the phase only says when.
+        Stamps the phase that owns the work, and the lever only where the
+        mandate already names one. A mandate that names neither a PR nor an
+        enablement flag does not know which lever its specialist will move, and
+        a guess written here would outrank the delivery that settles it.
         """
         lever = patch_lever_kind(params)
-        if not lever:
-            # A specialist that neither names a PR nor carries an enablement
-            # flag is authoring against the source tree.
-            lever = LEVER_SOURCE_PATCH
-        params["lever_kind"] = lever
+        if lever:
+            params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
@@ -130,6 +127,11 @@ class IntentRouter:
             # Layer first, phase last: both lanes share one phase, so the live
             # phase no longer says which lever a specialist moves. The phase
             # stays as the fallback when the mandate named neither.
+            #
+            # ``EXPLORE`` below is an owner namespace, not a phase this build
+            # can enter: it is the published KB section name for the
+            # configuration lever, and renaming it would orphan the overlays
+            # every record already stores under that prefix.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
@@ -148,8 +150,6 @@ class IntentRouter:
         owner = patch_owner_phase(params)
         if owner:
             params["source_phase"] = owner
-            if not params.get("lever_kind"):
-                params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
             return owner
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -178,8 +178,6 @@ class IntentRouter:
             if value not in (None, "", [], {}):
                 params.setdefault(key, value)
         params["source_phase"] = owner
-        if not params.get("lever_kind"):
-            params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:

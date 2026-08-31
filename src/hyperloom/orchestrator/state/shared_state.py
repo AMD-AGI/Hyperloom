@@ -835,15 +835,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # One row per phase-discover batch; read by exit_normal_framework_agent plateau gate (3 batches <1% => exit).
+    # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # True when FRAMEWORK loop has no more candidates; compute_next_phase uses it for framework_agent_phase_done exit.
+    # True when the source arm has no more candidates; read by its plateau gate.
     framework_agent_phase_done: bool = False
-    # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
+    # Consecutive discovery failures; the arm declines only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
-    # Consecutive empty-but-valid ``fa phase-discover`` batches; tolerate up to
+    # Consecutive empty-but-valid discovery batches; tolerate up to
     # DISCOVER_FAILURE_RETRY_LIMIT before exiting. Reset on any non-empty batch.
     framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
@@ -948,10 +948,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     params_no_promote_streak: int = 0
     # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
-    # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
+    # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: EXPLORE rounds since a specialist was
-    # dispatched / since a KEEP landed. Both ++ once per EXPLORE round, reset on
+    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was
+    # dispatched / since a KEEP landed. Both ++ once per round, reset on
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
@@ -978,8 +978,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # switch ``--no-static-recon``. PRELUDE-only one-shot source reconnaissance.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
-    # Total specialist dispatches in current EXPLORE entry; reset on fresh entry. Robustness detects specialist storms.
-    explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at
@@ -1036,7 +1034,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     target_gap_pct: float = 0.0
 
     # Phase state machine fields
-    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
+    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -1044,8 +1042,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Durable sum of completed EXPLORE segments. None means a legacy resumed
-    # state whose pre-upgrade total is unknowable. The current active EXPLORE
+    # Durable sum of completed optimisation-phase segments. None means a legacy
+    # resumed state whose pre-upgrade total is unknowable. The current active
     # segment is added at status-render time; accumulating completed segments
     # avoids undercounting long macro-cycle runs after phase_history is capped.
     explore_elapsed_accum_s: float | None = 0.0
@@ -1067,7 +1065,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each
-    # SWEEP→EXPLORE loopback increments it). Stamped onto every phase_history row.
+    # SWEEP→FRAMEWORK_AGENT loopback increments it). Stamped onto every phase_history row.
     macro_cycle: int = 0
     # Per-cycle budget: wall-clock minutes for ONE macro-cycle. When > 0 the
     # per-phase budget math is computed against this window instead of
@@ -1077,7 +1075,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle's start, and the consecutive no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
-    # Cyclic bottleneck re-direction: set when a cyclic EXPLORE plateau winds the
+    # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the
     # cycle down; the next macro-cycle's prompt surfaces a redirect advisory off
     # ``last_cycle_bottleneck``. Cleared once the live top bottleneck drifts off it.
     pending_bottleneck_switch: bool = False
@@ -1455,7 +1453,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         # state.json naming one would raise here instead of being ignored.
         known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A pre-telemetry state may already have completed EXPLORE segments,
+        # A pre-telemetry state may already have completed optimisation segments,
         # but their exact sum cannot be reconstructed once phase_history has
         # been capped. Preserve "unknown" instead of reporting a misleading
         # partial zero after resume. Fresh states still start from 0.0.
@@ -2308,7 +2306,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
         """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).
 
-        Called when a cyclic EXPLORE plateau winds the cycle down. Records the
+        Called when a cyclic config plateau winds the cycle down. Records the
         bottleneck we plateaued on so the redirect advisory can steer specialists
         away from it; falls back to the live top bottleneck when not supplied.
 

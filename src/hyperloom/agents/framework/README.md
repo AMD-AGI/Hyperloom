@@ -1,14 +1,12 @@
 # framework-agent
 
 vllm/sglang source-layer optimisation companion for
-[`inference_optimizer`](../../inference_optimizer/). The live Hyperloom
-integration uses the FRAMEWORK discovery path:
+[`inference_optimizer`](../../inference_optimizer/).
 
-- **FRAMEWORK discovery** (`fa phase-discover`) — returns upstream PR
-  candidates to `inference_optimizer`, which owns Critic review, diff
-  apply, benchmark, KEEP, and REVERT.
 - **Standalone PR exploration** (`fa candidates` / `fa explore`) —
   ad-hoc tooling outside the `inference_optimizer` runtime path.
+- **Shared tables** — repo map, PR-KB adapters and the KB partitions the
+  Coordinator reads through `hyperloom.orchestrator.framework`.
 
 - **Enablement** (opt-in) — make a `(model, backend)` combo that is
   **non-runnable**, or that boots but **fails its accuracy eval**, *run
@@ -58,9 +56,6 @@ the always-allowed `aiter`).
 cd Hyperloom
 pip install -e '.[test]'
 
-# Live IO discovery path
-fa phase-discover --request /path/to/request.json --out -
-
 # Standalone PR exploration
 fa schema
 fa candidates --request /path/to/request.json
@@ -83,11 +78,12 @@ pytest -q src/hyperloom/agents/framework/tests/test_logging_setup.py \
 
 ## Used by inference_optimizer
 
-`inference_optimizer` drives PR discovery in the Coordinator-owned
-FRAMEWORK_AGENT phase. After `baseline` completes, the Coordinator calls
-`fa phase-discover`, routes each candidate through Critic review, then
-uses `FrameworkAgentExecutor` to apply the diff to the live framework tree,
-benchmark it, and KEEP/REVERT based on throughput and correctness gates.
+`inference_optimizer` discovers upstream PR candidates with a
+`candidate_discovery_specialist` inside the FRAMEWORK_AGENT phase, and lands
+each one through `integrate_patch` with `patch_source='upstream_pr'` — the
+same apply / vet / bench / KEEP-REVERT pipeline every other patch source
+uses. This package supplies the repo map and PR-KB adapters that path reads;
+it is not itself invoked as a subprocess.
 
 Gap / keywords are auto-composed from SharedState (`framework`,
 `gpu_type`, `model_class`, `precision`).
@@ -102,8 +98,8 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
     --max-hours 2
 ```
 
-See `src/hyperloom/inference_optimizer/SKILL.md` "FRAMEWORK_AGENT phase (Coordinator-internal)"
-and `src/hyperloom/orchestrator/actions/executors/framework_agent.py`.
+See `src/hyperloom/inference_optimizer/SKILL.md` "FRAMEWORK_AGENT phase — the
+optimisation phase" and `src/hyperloom/orchestrator/phases/framework.py`.
 
 ## Design references
 

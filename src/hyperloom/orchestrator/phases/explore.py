@@ -318,7 +318,7 @@ class ExplorePhase(CoordinatorCollaborator):
         return True
 
     def _apply_macro_cycle_reloop(self, evidence: dict[str, Any]) -> None:
-        """Open a new macro-cycle on a SWEEP loopback (to FRAMEWORK or EXPLORE).
+        """Open a new macro-cycle on a SWEEP loopback into FRAMEWORK_AGENT.
 
         Increments ``macro_cycle``, persists the no-gain streak + per-cycle gain
         anchor, and resets per-cycle counters (including re-opening FRAMEWORK) for
@@ -379,7 +379,7 @@ class ExplorePhase(CoordinatorCollaborator):
                     }
                 )
         except Exception:  # noqa: BLE001 — plateau-reset marker is best-effort
-            log.exception("Coordinator: framework_agent cycle_boundary marker append failed")
+            log.exception("Coordinator: cycle_boundary marker append failed")
         try:
             self._record_cycle_strategy_for_current_cycle()
         except Exception:  # noqa: BLE001 — focus is advisory only
@@ -477,7 +477,7 @@ class ExplorePhase(CoordinatorCollaborator):
     async def _on_cycle_start_reprofile(self, *, from_phase: str) -> None:
         """Force a fresh analysis at the start of a reopened macro-cycle.
 
-        Reached on every cycle start now. It used to be attached to EXPLORE
+        Reached on every cycle start now. It used to be attached to the config-arm
         entry, and the reloop targeted FRAMEWORK_AGENT whenever the framework
         phase was enabled -- so with the default configuration this never ran,
         and each new cycle re-targeted the bottleneck the *previous* cycle
@@ -506,7 +506,7 @@ class ExplorePhase(CoordinatorCollaborator):
 
     async def _maybe_force_stalled_domain_specialist(self) -> None:
         """Force-dispatch a domain specialist for a domain untouched for too many
-        EXPLORE rounds that still has an open gap in the gaps[] ledger.
+        config-arm rounds that still has an open gap in the gaps[] ledger.
 
         A real scheduling event (a domain delegate routed through PolicyGate +
         warmup + the GPU specialist pool). Idempotent per

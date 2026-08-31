@@ -10,7 +10,7 @@ heartbeats.
 
 Silence is only evidence of a stall when nothing else is moving. A phase whose
 work is one multi-hour deterministic task — a baseline pair, a profile and its
-roofline, an explore grid — has no LLM turn to emit, so agent silence there is
+roofline, a config grid — has no LLM turn to emit, so agent silence there is
 the design rather than a fault, and alerting on it trains operators to ignore
 the signal. :attr:`SourceData.local_task_progress` carries the counter-evidence:
 while an agent's *own* dispatched work is still reporting units, the accusation

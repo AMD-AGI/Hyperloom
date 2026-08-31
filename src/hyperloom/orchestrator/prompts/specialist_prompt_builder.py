@@ -199,52 +199,6 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_cross_framework_rewrite_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for cross-framework feature porting.
-
-    Static porting methodology only (cacheable in the system prompt). The
-    per-task landing data (source diff, symbol-level landing points, target
-    module current source) is injected separately via the Coordinator seed.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (unused; the block is
-            framework-agnostic methodology).
-
-    Returns:
-        list[str]: Markdown lines for the cross-framework rewrite focus block.
-    """
-    return [
-        "You **PORT a feature across frameworks** (e.g. SGLang <-> vLLM). This",
-        "is a REWRITE task, NOT a `git apply`.",
-        "",
-        "**Hard rules**",
-        "- The upstream diff targets a DIFFERENT framework's repo layout / API.",
-        "  It can NEVER be applied directly. Re-implement the EQUIVALENT feature",
-        "  against the TARGET framework's live source in your worktree.",
-        "- Land ONLY at the provided symbol-level landing points and their direct",
-        "  dependencies. Do not refactor unrelated modules (blast-radius control).",
-        "- Match the target framework's abstractions, naming and error handling;",
-        "  translate SEMANTICS, not syntax.",
-        "",
-        "**Method**",
-        "1. Read the source diff as INSPIRATION for the feature's intent.",
-        "2. Read the target module's current source (in the seed) to learn its",
-        "   API surface, data structures and call-order contracts.",
-        "3. Re-implement the feature at the landing points using the target API.",
-        "4. SELF-CHECK before finishing: the touched modules must import / compile",
-        "   cleanly (`python -c 'import ...'` / `py_compile`). A patch that fails",
-        "   self-check is NOT a deliverable — fix it or report blocked.",
-        "",
-        "**Deliverable**",
-        "- A unified-diff source patch (`patches_written`) against the TARGET",
-        "  framework source. A pure config-lever proposal is NOT sufficient for a",
-        "  cross-framework port.",
-        "- Echo `source_framework` / `target_framework` in your proposal and set",
-        "  the `provenance` exactly as instructed in the task seed so the KB",
-        "  ledger records the cross-framework outcome.",
-    ]
-
-
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Build the domain-focus block for the kernel-switch specialist.
 
@@ -681,7 +635,7 @@ def _focus_static_recon_specialist(
         "the source path you read, ``why_disabled_here`` explains the False",
         "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
         "sketch — you do NOT write the patch), and ``domain_hint`` is the",
-        "EXPLORE specialist that should author it (``freeform`` keeps the whole",
+        "specialist that should author it (``freeform`` keeps the whole",
         "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
         "is dropped.",
         "",
@@ -854,7 +808,6 @@ def _focus_framework_rewrite_specialist(
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
-    "cross_framework_rewrite_specialist": _focus_cross_framework_rewrite_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,

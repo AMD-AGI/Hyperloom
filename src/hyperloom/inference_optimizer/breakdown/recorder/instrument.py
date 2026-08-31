@@ -41,7 +41,13 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
-from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..agent_ownership import (
+    UNATTRIBUTED,
+    agent_from_lever,
+    agent_from_phase,
+    patch_author,
+    patch_lever_kind,
+)
 from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
@@ -184,12 +190,7 @@ def _operation_status(status: Any) -> str:
 
 
 _AGENT_BY_ACTION = {
-    "framework_agent": "framework_agent",
-    "framework": "framework_agent",
     "explore": "explore",
-    "backends": "explore",
-    "params": "explore",
-    "specialist": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
     "baseline": "coordinator",
@@ -230,7 +231,12 @@ def _resolve_agent(
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    return agent_from_phase(result.get("source_phase")) or agent_from_phase(phase) or UNATTRIBUTED
+    return (
+        agent_from_lever(patch_lever_kind(result))
+        or agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -512,7 +518,6 @@ def _mirror_action_v4(
         "baseline": "workload",
         "profile": "profile",
         "roofline": "roofline_snapshot",
-        "framework_agent": "framework_candidate",
         "explore": "variant",
         "sweep": "sweep",
         "conc_sweep": "concurrency_sweep",
@@ -621,36 +626,7 @@ def _mirror_action_v4(
                 "metadata": {"trace_health": result.get("trace_health")},
             }
         )
-    elif action == "framework_agent":
-        for name in ("apply", "benchmark", "evaluation", "decision"):
-            substeps.append(
-                {
-                    "substep_id": _stable_id("substep", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": status,
-                    "ended_at": ended_at,
-                }
-            )
     gates: list[dict[str, Any]] = []
-    if action == "framework_agent":
-        for name, value in (
-            ("accuracy", result.get("accuracy_pass")),
-            ("throughput", result.get("throughput_pass")),
-            ("critic", result.get("critic_pass")),
-        ):
-            if value is None:
-                continue
-            gates.append(
-                {
-                    "gate_id": _stable_id("gate", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": "passed" if bool(value) else "failed",
-                    "decision": "allow" if bool(value) else "deny",
-                    "evaluated_at": ended_at,
-                }
-            )
     agent = _resolve_agent(action, result=result, phase=phase)
     # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
     # zero is a verdict, not a missing value.
@@ -695,7 +671,6 @@ def _mirror_action_v4(
     if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
         verdict = executor_verdict
     adoptable_actions = {
-        "framework_agent",
         "explore",
         "integrate",
         "integrate_patch",
@@ -759,7 +734,7 @@ def _mirror_action_v4(
         session_dir,
         operation_id=operation_id,
         root_operation_id=operation_id,
-        kind="composite" if action in {"baseline", "roofline", "framework_agent"} else action,
+        kind="composite" if action in {"baseline", "roofline"} else action,
         name=action,
         phase=phase,
         macro_cycle=int(macro_cycle or 0),
@@ -1115,11 +1090,9 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
-    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 
@@ -4260,6 +4233,8 @@ _AGENT_BY_OPERATION_KIND = {
     "kernel_optimizer_selection": "kernel_agent",
     "strategy_selection": "kernel_agent",
     "gemm_tuning": "kernel_agent",
+    # A specialist round is discovery, not an attempt: it carries no gain and
+    # no adoption, so this names the agent whose activity it was.
     "specialist": "explore",
     "critic": "critic",
     "kb_write": "critic",
