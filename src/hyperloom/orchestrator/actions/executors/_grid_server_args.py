@@ -116,7 +116,11 @@ def _tokenize_for_removal(text: str) -> tuple[list[str], list[str]]:
         subset the unquoted transport cannot carry, for the caller to report.
         ``unsafe`` is a diagnostic only: those tokens are passed through
         verbatim, since they are already malformed on the way in and dropping
-        the removal does not make them launchable.
+        the removal does not make them launchable. An input ``shlex`` cannot
+        tokenize at all falls back to a whitespace split, which collapses
+        whitespace runs and no longer reflects the quoting the author wrote —
+        it is reported through ``unsafe`` as ``"<unparseable>"`` rather than by
+        echoing the string, which can carry credentials.
     """
     normalized = _reserialize_json_blobs(str(text or "").strip())
     if not normalized:
@@ -124,23 +128,42 @@ def _tokenize_for_removal(text: str) -> tuple[list[str], list[str]]:
     try:
         tokens = shlex.split(normalized, posix=False)
     except ValueError:
-        # Unbalanced quotes: shlex cannot tokenize at all. A whitespace split
-        # still rejoins byte-for-byte (modulo whitespace runs), so the removal
-        # proceeds on a best-effort basis rather than being abandoned.
-        return normalized.split(), [normalized]
+        # Unbalanced quotes: shlex cannot tokenize at all. Best-effort rather
+        # than abandoned, because this feeds strip_benchmark_harness_flags on
+        # every compose and a skipped removal serves a benchmark-only flag.
+        return normalized.split(), ["<unparseable>"]
     return tokens, _transport_unsafe_tokens(tokens)
+
+
+def _is_flag_token(token: str) -> bool:
+    """Whether ``token`` is an option name rather than a value.
+
+    Single-dash short options are options too: treating only ``--`` as a flag
+    made a removal swallow ``-tp 8`` as if it were the removed flag's value.
+    A leading dash followed by a digit is a negative number, so it stays a
+    value. Mirrors ``_canonical_fingerprint._is_flag``.
+    """
+    if not token.startswith("-"):
+        return False
+    stripped = token.lstrip("-")
+    return bool(stripped) and not stripped[0].isdigit()
 
 
 def _value_span_end(tokens: list[str], flag_index: int) -> int:
     """Index just past the value fragments belonging to the flag at ``flag_index``.
 
     A JSON value carrying whitespace survives ``shlex`` as several tokens, so a
-    flag's value is every following token up to the next ``--flag``. Consuming
-    the whole span is what keeps a removal from leaving a dangling fragment
-    behind.
+    flag's value can be more than one token and consuming only the first leaves
+    the rest behind as bare argv words. The span therefore runs to the next
+    option name — but never stops inside an unbalanced JSON blob, where a
+    fragment like ``-1}`` or a dashed bareword would otherwise end it early.
     """
     end = flag_index + 1
-    while end < len(tokens) and not tokens[end].startswith("--"):
+    depth, in_string, escaped = 0, False, False
+    while end < len(tokens):
+        if depth == 0 and not in_string and _is_flag_token(tokens[end]):
+            break
+        depth, in_string, escaped = _json_scan(tokens[end], depth, in_string, escaped)
         end += 1
     return end
 
@@ -150,8 +173,13 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
 
     ``remove_args`` entries are flag-oriented. ``"--foo"`` removes ``--foo`` and
     its following value when one is present; ``"--foo=bar"`` removes that exact
-    token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
-    unparseable inputs are left untouched rather than guessed.
+    token shape; ``"--foo bar"`` removes the exact flag/value pair. Both
+    ``--long`` and ``-short`` option names count as flags, so a removal never
+    mistakes ``-tp 8`` for the value of the flag before it.
+
+    An input that cannot be tokenized is handled best-effort rather than left
+    untouched: this is the sink every compose reaches, so declining silently
+    served the flag that was supposed to be dropped.
 
     JSON-valued flags survive verbatim: both sides of the comparison are
     tokenized by :func:`_tokenize_for_removal`, whose non-POSIX split keeps
@@ -189,14 +217,14 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         i = 0
         while i < len(spec_tokens):
             tok = spec_tokens[i]
-            if not tok.startswith("--"):
+            if not _is_flag_token(tok):
                 i += 1
                 continue
             if "=" in tok:
                 flag, _, value = tok.partition("=")
                 remove_pairs.add((flag, value))
                 i += 1
-            elif i + 1 < len(spec_tokens) and not spec_tokens[i + 1].startswith("--"):
+            elif i + 1 < len(spec_tokens) and not _is_flag_token(spec_tokens[i + 1]):
                 end = _value_span_end(spec_tokens, i)
                 remove_pairs.add((tok, " ".join(spec_tokens[i + 1 : end])))
                 i = end
@@ -208,7 +236,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     i = 0
     while i < len(tokens):
         tok = tokens[i]
-        if not tok.startswith("--"):
+        if not _is_flag_token(tok):
             out.append(tok)
             i += 1
             continue
@@ -220,13 +248,22 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             out.append(tok)
             i += 1
             continue
-        # The value is every following token up to the next flag: a JSON blob
-        # with whitespace survives shlex as several tokens, and removing only
-        # the first would leave the rest behind as bare argv words.
+        # The value is every following token up to the next option name: a JSON
+        # blob with whitespace survives shlex as several tokens, and removing
+        # only the first would leave the rest behind as bare argv words.
         end = _value_span_end(tokens, i)
-        value = " ".join(tokens[i + 1 : end])
-        if tok in remove_flags or (value and (tok, value) in remove_pairs):
+        span_value = " ".join(tokens[i + 1 : end])
+        if tok in remove_flags:
             i = end
+            continue
+        if span_value and (tok, span_value) in remove_pairs:
+            i = end
+            continue
+        # A ``--foo bar`` spec names one operand, so it still matches when the
+        # flag is followed by further positional words: consuming the whole span
+        # here would have made that spec a no-op on ``--foo bar baz``.
+        if end > i + 1 and (tok, tokens[i + 1]) in remove_pairs:
+            i += 2
             continue
         out.append(tok)
         i += 1
@@ -471,16 +508,15 @@ def tokenize_server_args_preserving_json(
     return normalized, tokens
 
 
-def _json_token_depth(token: str) -> int:
-    """Net ``{[``/``]}`` nesting depth of ``token``, ignoring braces in strings.
+def _json_scan(text: str, depth: int, in_string: bool, escaped: bool) -> tuple[int, bool, bool]:
+    """Advance a JSON brace/string scan through ``text``.
 
-    A balanced JSON value must survive as one token, so a non-zero depth at a
-    token boundary means embedded whitespace split it.
+    The state has to be carried across tokens, not restarted per token: a
+    fragment that ends mid-string (``{"k":"v``) leaves the scan inside a string,
+    and restarting would read the next fragment's closing quote as an opening
+    one, hiding the ``}`` that balances the blob.
     """
-    depth = 0
-    in_string = False
-    escaped = False
-    for char in token:
+    for char in text:
         if in_string:
             if escaped:
                 escaped = False
@@ -494,7 +530,16 @@ def _json_token_depth(token: str) -> int:
             depth += 1
         elif char in "}]":
             depth -= 1
-    return depth
+    return depth, in_string, escaped
+
+
+def _json_token_depth(token: str) -> int:
+    """Net ``{[``/``]}`` nesting depth of ``token``, ignoring braces in strings.
+
+    A balanced JSON value must survive as one token, so a non-zero depth at a
+    token boundary means embedded whitespace split it.
+    """
+    return _json_scan(token, 0, False, False)[0]
 
 
 def _transport_unsafe_tokens(tokens: list[str]) -> list[str]:

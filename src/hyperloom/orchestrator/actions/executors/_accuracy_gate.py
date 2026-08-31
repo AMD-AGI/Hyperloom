@@ -527,6 +527,44 @@ def accuracy_gate_applies(*, scriptable: bool, baseline_accuracy: float, eval_di
     return bool(scriptable) or float(baseline_accuracy or 0.0) > 0.0
 
 
+def reconcile_baseline_accuracy(proposed: Any, shared_state: Any, *, where: str = "") -> float:
+    """Prefer the measured baseline over a proposed one, reporting disagreement.
+
+    ``accuracy_baseline`` is offered to the LLM in the action schema while every
+    in-tree writer only ever copies ``SharedState.baseline_accuracy``, so a
+    proposed figure that disagrees is a hallucination rather than a second
+    opinion. Now that the gate grades every variant carrying a reference, one
+    bad number can fail a whole grid, where it used to reach only the handful of
+    variants a flag catalogue called risky.
+
+    Args:
+        proposed (Any): The ``accuracy_baseline`` from task params, if any.
+        shared_state (Any): The state holding the measured baseline; may be
+            ``None`` for an external / manual invocation.
+        where (str): Caller label for the log line.
+
+    Returns:
+        float: The measured baseline when there is one, else the proposed value
+        (``0.0`` when neither is usable, which skips the gate as documented).
+    """
+    try:
+        proposed_value = float(proposed or 0.0)
+    except (TypeError, ValueError):
+        proposed_value = 0.0
+    measured = float(getattr(shared_state, "baseline_accuracy", 0.0) or 0.0) if shared_state is not None else 0.0
+    if measured <= 0:
+        return proposed_value
+    if proposed_value > 0 and abs(proposed_value - measured) > 1e-6:
+        log.warning(
+            "%sIgnoring proposed accuracy_baseline=%.6f; using the measured "
+            "SharedState.baseline_accuracy=%.6f instead.",
+            f"{where}: " if where else "",
+            proposed_value,
+            measured,
+        )
+    return measured
+
+
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the bench report.
 
@@ -829,6 +867,7 @@ __all__ = [
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
     "accuracy_gate_applies",
+    "reconcile_baseline_accuracy",
     "accuracy_keep_block",
     "accuracy_meets_floor",
     "accuracy_passed",

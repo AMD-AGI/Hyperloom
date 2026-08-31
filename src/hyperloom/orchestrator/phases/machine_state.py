@@ -2778,6 +2778,10 @@ def _optimize_declared_no_leverage(state: Any) -> bool:
     escalation, which say the operator wanted SWEEP sooner — not that the arms
     are dry — so only the ``plateau`` flavour counts.
 
+    With KERNEL disabled the same exit is recorded as ``no_kernel_skipped`` with
+    the real reason under ``evidence.passed_through_reason``, so both labels are
+    read: that path is where a reloop has the least left to try.
+
     Args:
         state (Any): Frozen SharedState view.
 
@@ -2791,10 +2795,18 @@ def _optimize_declared_no_leverage(state: Any) -> bool:
             continue
         if str(row.get("from_phase") or "").strip().upper() != PHASE_FRAMEWORK_AGENT:
             continue
-        if str(row.get("reason") or "").strip() != "optimize_no_more_leverage":
-            continue
         evidence = row.get("evidence")
-        return isinstance(evidence, dict) and bool(evidence.get("plateau"))
+        evidence = evidence if isinstance(evidence, dict) else {}
+        reason = str(row.get("reason") or "").strip()
+        if reason == "no_kernel_skipped":
+            # With KERNEL disabled the OPTIMIZE exit is relabelled and the real
+            # reason moves into the evidence, so matching only the label left
+            # the whole guard inert on the ``--no-kernel`` path -- exactly where
+            # a reloop has no KERNEL arm left to try either.
+            reason = str(evidence.get("passed_through_reason") or "").strip()
+        if reason != "optimize_no_more_leverage":
+            continue
+        return bool(evidence.get("plateau"))
     return False
 
 

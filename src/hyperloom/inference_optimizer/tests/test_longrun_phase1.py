@@ -92,13 +92,22 @@ def test_failed_conc_sweep_stays_the_stop_reason_when_reloop_is_blocked():
     assert "loopback" not in evidence
 
 
-def _optimize_exit_row(evidence: dict, *, cycle: int = 0) -> dict:
+def _optimize_exit_row(
+    evidence: dict,
+    *,
+    cycle: int = 0,
+    reason: str = "optimize_no_more_leverage",
+    extra_evidence: dict | None = None,
+) -> dict:
     now = datetime.now(timezone.utc)
+    # With KERNEL disabled the exit lands on SWEEP under ``no_kernel_skipped``,
+    # carrying the real reason in the evidence.
+    to_phase = ps.PHASE_SWEEP if reason == "no_kernel_skipped" else ps.PHASE_KERNEL_AGENT
     return ps.make_history_row(
         from_phase=ps.PHASE_FRAMEWORK_AGENT,
-        to_phase=ps.PHASE_KERNEL_AGENT,
-        reason="optimize_no_more_leverage",
-        evidence=evidence,
+        to_phase=to_phase,
+        reason=reason,
+        evidence={**evidence, **(extra_evidence or {})},
         ts=now.isoformat(),
         ts_unix=now.timestamp(),
         cycle=cycle,
@@ -149,6 +158,37 @@ def test_a_plateau_from_an_earlier_cycle_does_not_close_this_one():
     """The plateau is per-cycle; a stale one must not end a later cycle."""
     stale = _optimize_exit_row({"evidence": "both_arms_plateaued", "plateau": True}, cycle=99)
     target, reason, _ = ps.compute_next_phase(_failed_conc_sweep_state(stale))
+    assert target == ps.PHASE_FRAMEWORK_AGENT
+    assert reason == "cycle_reloop"
+
+
+def test_the_plateau_guard_also_reads_the_no_kernel_relabelling():
+    """With KERNEL disabled the same exit is recorded under a different label.
+
+    Matching only ``optimize_no_more_leverage`` left the guard inert on the
+    ``--no-kernel`` path, which is where a reloop has the least left to try: it
+    re-entered an OPTIMIZE that had just reported both arms dry, with no KERNEL
+    arm to switch to either.
+    """
+    row = _optimize_exit_row(
+        {"evidence": "both_arms_plateaued", "plateau": True},
+        reason="no_kernel_skipped",
+        extra_evidence={"passed_through_reason": "optimize_no_more_leverage"},
+    )
+    target, reason, evidence = ps.compute_next_phase(_failed_conc_sweep_state(row))
+    assert target == ps.PHASE_CLOSE
+    assert reason == "conc_sweep_failed"
+    assert evidence["reloop_blocked"] == "both_arms_plateaued"
+
+
+def test_a_no_kernel_exit_that_was_not_a_plateau_still_reloops():
+    """Only the plateau flavour closes, whichever label carried it."""
+    row = _optimize_exit_row(
+        {"evidence": "skip_to_sweep"},
+        reason="no_kernel_skipped",
+        extra_evidence={"passed_through_reason": "optimize_no_more_leverage"},
+    )
+    target, reason, _ = ps.compute_next_phase(_failed_conc_sweep_state(row))
     assert target == ps.PHASE_FRAMEWORK_AGENT
     assert reason == "cycle_reloop"
 

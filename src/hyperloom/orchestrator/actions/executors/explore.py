@@ -55,6 +55,7 @@ from ._accuracy_gate import (
     accuracy_gate_applies,
     accuracy_passed,
     parse_eval_results,
+    reconcile_baseline_accuracy,
 )
 from . import _framework_switch_manifest as _switch_manifest
 from ._canonical_fingerprint import workload_signature
@@ -768,30 +769,13 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        # The measured baseline on SharedState wins over anything in params.
-        # ``accuracy_baseline`` is offered to the LLM in the action schema, and
-        # every in-tree writer only ever copies SharedState's value, so a params
-        # figure that disagrees is a hallucination rather than a second opinion.
-        # It used to cost at most a few high-risk variants; now that the gate
-        # grades every variant with a reference, one bad number can REVERT the
-        # whole grid or mark all of it accuracy_drop.
-        proposed_baseline = float(params.get("accuracy_baseline") or 0.0) or float(
-            params.get("baseline_accuracy") or 0.0
+        # The measured baseline on SharedState wins over anything in params; see
+        # reconcile_baseline_accuracy for why a disagreement is a hallucination.
+        baseline_accuracy = reconcile_baseline_accuracy(
+            params.get("accuracy_baseline") or params.get("baseline_accuracy"),
+            ss,
+            where="explore",
         )
-        measured_baseline = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0) if ss is not None else 0.0
-        if measured_baseline > 0:
-            baseline_accuracy = measured_baseline
-            if proposed_baseline > 0 and abs(proposed_baseline - measured_baseline) > 1e-6:
-                log.warning(
-                    "Ignoring proposed accuracy_baseline=%.6f; using the measured "
-                    "SharedState.baseline_accuracy=%.6f instead.",
-                    proposed_baseline,
-                    measured_baseline,
-                )
-        else:
-            # No measured reference (external / manual invocation): params is the
-            # only source there is, and <= 0 skips the gate as documented.
-            baseline_accuracy = proposed_baseline
         keep_threshold_pct = float(
             params.get(
                 "keep_threshold_pct",

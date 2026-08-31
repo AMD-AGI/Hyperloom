@@ -223,6 +223,50 @@ class TestRemovalStillWorks:
         out = remove_server_args("--foo 'unclosed --max-num-seqs 64", ["--max-num-seqs"])
         assert "--max-num-seqs" not in out
 
+
+class TestValueSpanStopsAtShortOptions:
+    """A value span must not swallow the option that follows it.
+
+    Consuming "everything up to the next ``--``" traded the old bug (a removal
+    that silently did nothing) for a worse one: a removal that deletes flags
+    nobody asked to remove, on the same unconditional launch path.
+    """
+
+    def test_a_single_dash_option_is_not_eaten_as_a_value(self):
+        out = strip_benchmark_harness_flags("--no-enable-prefix-caching -tp 8 --max-num-seqs 64")
+        assert out == "-tp 8 --max-num-seqs 64"
+
+    def test_a_short_option_can_itself_be_removed(self):
+        assert remove_server_args("-tp 8 --max-num-seqs 64", ["-tp"]) == "--max-num-seqs 64"
+
+    def test_a_negative_number_is_a_value_not_an_option(self):
+        """``-1`` must stay bound to its flag, or the span ends one token early."""
+        assert remove_server_args("--a -1 --b 2", ["--b"]) == "--a -1"
+
+    def test_a_whitespace_bearing_json_value_still_spans_its_fragments(self):
+        """The span may only end at an option once the JSON braces are balanced."""
+        assert remove_server_args('--a {"k":"v with space"} --max-num-seqs 64', ["--a"]) == "--max-num-seqs 64"
+
+    def test_an_option_after_a_fragmented_json_value_survives(self):
+        args = '--a {"k":"v with space"} -tp 8 --b 2'
+        assert remove_server_args(args, ["--b"]) == '--a {"k":"v with space"} -tp 8'
+
+
+class TestExactPairRemoval:
+    def test_a_pair_spec_matches_a_flag_with_trailing_positionals(self):
+        """``--foo bar`` names one operand, not "everything after --foo".
+
+        Comparing the spec against the whole span made the spec a no-op as soon
+        as another positional word followed.
+        """
+        assert remove_server_args("--foo bar baz", ["--foo bar"]) == "baz"
+
+    def test_a_pair_spec_matches_mid_string(self):
+        assert remove_server_args("--a 1 --foo bar baz --b 2", ["--foo bar"]) == "--a 1 baz --b 2"
+
+    def test_a_pair_spec_leaves_a_different_value_alone(self):
+        assert remove_server_args("--foo qux --b 2", ["--foo bar"]) == "--foo qux --b 2"
+
     def test_json_neighbour_survives_an_untokenizable_sibling(self):
         """One undeliverable sibling must not corrupt a JSON value beside it.
 

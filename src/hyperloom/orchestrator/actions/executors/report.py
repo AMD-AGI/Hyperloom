@@ -407,10 +407,10 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
     "conc_sweep_failed": (
         "Post-sweep concurrency sweep reached a failed terminal result and the run wound down "
-        "instead of opening another macro-cycle; the phase record's `reloop_blocked` says which "
-        "condition applied (exhausted budget, plateaued arms, saturation or convergence). The "
-        "optimization result itself is unaffected: conc_sweep only scans concurrency after the "
-        "search is done."
+        "instead of opening another macro-cycle — because the budget, the arms, roofline "
+        "saturation or convergence left nothing to reloop into; the phase record carries which "
+        "one when it was recorded. The optimization result itself is unaffected: conc_sweep only "
+        "scans concurrency after the search is done."
     ),
     "optimize_no_more_leverage": (
         "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
