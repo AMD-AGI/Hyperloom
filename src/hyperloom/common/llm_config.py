@@ -47,8 +47,8 @@ from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.coerce import to_int as _to_int
-from hyperloom.common.llm_attribution import ATTRIBUTION_ENV
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
+from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 
 log = logging.getLogger(__name__)
@@ -958,7 +958,10 @@ def _headers_for(component: str, operation: str) -> dict[str, str]:
     """
     if component:
         return _attribution_headers(component=component, operation=operation)
-    if os.environ.get(ATTRIBUTION_ENV, "").strip():
+    # Gated on a gateway actually being selected, not merely on the variable
+    # being set: a misspelled preset emits nothing either, and blaming the call
+    # site for that would send someone to instrument code that is already fine.
+    if _gateway_selected():
         site = _first_caller_outside_this_module()
         if site not in _UNTAGGED_SITES:
             _UNTAGGED_SITES.add(site)

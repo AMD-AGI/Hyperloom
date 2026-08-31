@@ -374,6 +374,22 @@ class TestNestedInjectionRefines:
         llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
         assert "phase=" not in self._tags(env)
 
+    def test_a_bare_trace_id_alone_is_not_taken_for_a_session(self) -> None:
+        # Nothing is lost by declining it: a tag this module wrote always
+        # carries the combined header, because application is never empty.
+        env = {_ANTHROPIC: "x-litellm-trace-id: operator-trace"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "operator-trace" not in self._tags(env)
+
+    def test_an_inherited_reference_is_never_left_to_be_expanded(self) -> None:
+        # A recovered value is re-rendered into a tag this process sends, and
+        # whoever reads that header next expands ${VAR} -- which would put this
+        # process's gateway secret into a tag the gateway itself logs. Asserted
+        # against the unexpanded setting, since reading it back expands it.
+        env = {_ANTHROPIC: "x-litellm-tags: application=hyperloom,session=${GATEWAY_KEY}"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "${" not in env[_ANTHROPIC]
+
     def test_the_self_describing_tag_outranks_a_bare_trace_id(self) -> None:
         # x-litellm-trace-id carries a bare value, so an operator's own tracing
         # header is indistinguishable from ours; letting it win would make their
@@ -433,6 +449,43 @@ class TestSelfInjectionDoesNotAccumulate:
         own = dict(_env())
         llm_attribution.inject_env(own, component="forge", source=own)
         assert "session=claw-abc" in self._tags(own)
+
+
+class TestInheritanceReadsBothVariables:
+    """The two header variables are read together, not one instead of the other."""
+
+    def _tags(self, env: dict[str, str]) -> str:
+        return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
+
+    def test_a_partly_written_variable_does_not_hide_the_other(self) -> None:
+        # Reading only the first variable that parses would drop exactly the
+        # ambient fields inheritance exists to carry.
+        env = {
+            _ANTHROPIC: "x-litellm-tags: application=hyperloom,session=sess-1",
+            _OPENAI: "x-litellm-tags: application=hyperloom,session=sess-1,phase=KERNEL_AGENT,type=kernel_opt",
+        }
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        tags = self._tags(env)
+        assert "phase=KERNEL_AGENT" in tags
+        assert "type=kernel_opt" in tags
+
+
+class TestNoGatewaySelected:
+    """The no-op contract: an unconfigured deployment is not read at all."""
+
+    def test_a_malformed_selection_writes_nothing(self) -> None:
+        env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "not-a-preset"})
+        assert env == {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+
+    def test_the_json_encoding_survives_an_injection(self) -> None:
+        # One arbiter decides the encoding for both reading and writing, so a
+        # setting stored as JSON is still JSON afterwards.
+        env = {_ANTHROPIC: json.dumps({"Ocp-Apim-Subscription-Key": "secret"})}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        decoded = json.loads(env[_ANTHROPIC])
+        assert decoded["Ocp-Apim-Subscription-Key"] == "secret"
+        assert decoded["x-litellm-tags"] == "application=hyperloom,component=fusion"
 
 
 class TestSdkEnvOverlay:

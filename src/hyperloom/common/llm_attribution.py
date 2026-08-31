@@ -71,6 +71,7 @@ __all__ = [
     "call_headers",
     "current_action",
     "current_action_scope",
+    "gateway_selected",
     "current_phase",
     "inject_env",
     "sdk_env_overlay",
@@ -372,6 +373,22 @@ def _configured_headers(env: Mapping[str, str]) -> tuple[AttributionHeader, ...]
     return PRESETS.get((env.get(ATTRIBUTION_ENV) or "").strip().lower(), ())
 
 
+def gateway_selected(env: Mapping[str, str] | None = None) -> bool:
+    """Whether a known gateway preset is selected, so attribution is emitted.
+
+    Distinct from :data:`ATTRIBUTION_ENV` being set: a value naming no preset
+    selects nothing, and a caller that treats the two as the same reports a
+    deployment as instrumented when it emits nothing at all.
+
+    Args:
+        env: Environment mapping to inspect; defaults to :data:`os.environ`.
+
+    Returns:
+        True when the selection names a preset in :data:`PRESETS`.
+    """
+    return bool(_configured_headers(env if env is not None else os.environ))
+
+
 def call_headers(
     *,
     component: str,
@@ -427,6 +444,30 @@ def call_headers(
     return {name: value for name, value in rendered.items() if value}
 
 
+def _json_object(text: str) -> dict[str, object] | None:
+    """Decode a ``*_CUSTOM_HEADERS`` setting written as a JSON object.
+
+    Sole arbiter of whether a setting is in the JSON encoding, so that reading
+    one and writing it back cannot disagree: a malformed object that
+    :func:`_merge_raw` appends to as lines must not read back as nothing, which
+    would drop the parent's tag exactly where the setting is already suspect.
+
+    Args:
+        text: The stripped setting value.
+
+    Returns:
+        The decoded object, or ``None`` when the setting is not one -- including
+        when it opens like one but does not parse, which is handled as lines.
+    """
+    if not text.startswith("{"):
+        return None
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def _raw_headers(raw: str | None) -> dict[str, str]:
     """Read a raw ``*_CUSTOM_HEADERS`` setting back into header name and value.
 
@@ -439,19 +480,13 @@ def _raw_headers(raw: str | None) -> dict[str, str]:
         raw: Current value of the setting, possibly unset.
 
     Returns:
-        Lowercased header name to value; empty when the setting is unset or its
-        encoding is unreadable.
+        Lowercased header name to value; empty when the setting is unset or
+        carries no header.
     """
     text = (raw or "").strip()
     if not text:
         return {}
-    if text.startswith("{"):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            return {}
-        if not isinstance(parsed, dict):
-            return {}
+    if (parsed := _json_object(text)) is not None:
         return {str(key).strip().lower(): str(value).strip() for key, value in parsed.items()}
     found: dict[str, str] = {}
     for line in text.splitlines():
@@ -483,14 +518,9 @@ def _merge_raw(raw: str | None, headers: Mapping[str, str]) -> str:
         The merged setting, in whichever encoding the original used.
     """
     text = (raw or "").strip()
-    if text.startswith("{"):
-        try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
-            parsed = None
-        if isinstance(parsed, dict):
-            parsed.update(headers)
-            return json.dumps(parsed)
+    if (parsed := _json_object(text)) is not None:
+        parsed.update(headers)
+        return json.dumps(parsed)
 
     replaced = {name.lower() for name in headers}
     lines = [
@@ -535,17 +565,25 @@ def _inherited_context(
     starts empty. Reading them back makes a nested injection refine the tag
     rather than replace it -- the child names itself and keeps the rest.
 
-    The variables are tried in :func:`_merge_targets` order and the first that
-    yields anything wins, because both carry the tag this module wrote and a
-    deployment that has them disagreeing has a larger problem than field order.
+    Recovery is per field across every variable in :func:`_merge_targets` order,
+    not a choice of one variable to read. The two are written together, so they
+    disagree only when one was partly set by hand -- and taking the first that
+    parses at all would then drop exactly the ``phase``/``type`` this exists to
+    carry, because the variable that answered first happened to hold less.
 
-    Within one variable the headers do not get equal say. A ``raw`` header
-    carries a bare value, so reading it back is a guess that it was written by
-    this module: an operator who sets ``x-litellm-trace-id`` for their own
-    tracing is indistinguishable from our own copy, and taking it would make
-    their trace id the run's ``session`` and misjoin every reconciliation. So a
-    field already recovered from a self-describing header is never overwritten
-    by a guessed one.
+    Only self-describing headers are read. A ``raw`` header carries a bare
+    value, so reading it back would be a guess that this module wrote it: an
+    operator setting ``x-litellm-trace-id`` for their own tracing is
+    indistinguishable from our copy of it, and taking that would make their
+    trace id the run's ``session`` and misjoin every reconciliation. Nothing is
+    lost by declining, because a tag this module wrote always includes the
+    ``combined`` header -- ``application`` is never empty.
+
+    Values are sanitized on the way back in. They are re-rendered into a tag
+    this process sends, so a separator surviving here would forge fields nobody
+    wrote, and a surviving ``${VAR}`` would be expanded downstream into a header
+    the gateway logs -- turning an inherited tag into a way to read this
+    process's secrets.
 
     Args:
         env: Environment mapping the tag would be merged into.
@@ -555,21 +593,21 @@ def _inherited_context(
         Field name to value, restricted to :data:`_INHERITED_FIELDS`; empty when
         nothing recoverable is present.
     """
+    recovered: dict[str, str] = {}
     for variable in _merge_targets(env):
         present = _raw_headers(env.get(variable))
         if not present:
             continue
-        context: dict[str, str] = {}
-        for header in sorted(headers, key=lambda item: item.shape == "raw"):
+        for header in headers:
+            if header.shape == "raw":
+                continue
             value = present.get(header.name.lower())
             if not value:
                 continue
-            for name, recovered_value in _PARSERS[header.shape](header.fields, value).items():
-                context.setdefault(name, recovered_value)
-        recovered = {field: value for field, value in context.items() if field in _INHERITED_FIELDS}
-        if recovered:
-            return recovered
-    return {}
+            for field, text in _PARSERS[header.shape](header.fields, value).items():
+                if field in _INHERITED_FIELDS and (clean := _sanitize(text)):
+                    recovered.setdefault(field, clean)
+    return recovered
 
 
 def inject_env(
@@ -607,7 +645,10 @@ def inject_env(
         **extra: Additional attribution fields.
     """
     configuration = source if source is not None else os.environ
-    inherited = _inherited_context(env, _configured_headers(configuration))
+    configured = _configured_headers(configuration)
+    if not configured:
+        return
+    inherited = _inherited_context(env, configured)
     if env is configuration:
         # Injecting into this process's own environment -- as forge_fusion does,
         # so the CLI it spawns later inherits the tag -- leaves that tag in place

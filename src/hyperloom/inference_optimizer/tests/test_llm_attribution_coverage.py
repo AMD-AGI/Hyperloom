@@ -50,7 +50,10 @@ _TAGGED_ENTRY_POINTS = frozenset(
 #: the call site, so the call-site scan below cannot see it.
 _COMPONENT_FIELD = "attribution_component"
 
-_SRC_ROOT = Path(__file__).resolve().parents[2]
+#: Every first-party package, not just ``hyperloom``: the forge loop spends from
+#: ``kernelforge``, so scoping the scan to one package would exempt the tree
+#: where a rewrite campaign's whole bill is produced.
+_SRC_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _iter_production_trees() -> Iterator[tuple[Path, ast.AST]]:
@@ -70,22 +73,46 @@ def _iter_production_trees() -> Iterator[tuple[Path, ast.AST]]:
             continue
 
 
+def _imported_under(tree: ast.AST) -> dict[str, str]:
+    """Map each aliased import back to the name it was imported under.
+
+    Half the spawn boundaries import ``inject_env`` under a local alias, so
+    matching a call by the name written at the call site would exempt exactly
+    the sites where a whole child process's spend is labelled.
+
+    Args:
+        tree: A parsed module.
+
+    Returns:
+        Local name to original name, for the imports that renamed something.
+    """
+    aliases: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for entry in node.names:
+                if entry.asname:
+                    aliases[entry.asname] = entry.name.rsplit(".", 1)[-1]
+    return aliases
+
+
 def _iter_tagged_calls() -> Iterator[tuple[Path, ast.Call, str]]:
     """Yield every production call to a tagged entry point.
 
     Yields:
         The path relative to the source root, the call node, and the name it
-        was called by. Tests are skipped: they call these entry points to
+        was imported under. Tests are skipped: they call these entry points to
         exercise them, not to spend against the gateway.
     """
     for relative, tree in _iter_production_trees():
+        aliases = _imported_under(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
             func = node.func
             name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
-            if name in _TAGGED_ENTRY_POINTS:
-                yield relative, node, name
+            canonical = aliases.get(name, name)
+            if canonical in _TAGGED_ENTRY_POINTS:
+                yield relative, node, canonical
 
 
 def _scan_call_sites(field: str) -> tuple[int, list[str]]:

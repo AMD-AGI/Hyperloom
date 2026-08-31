@@ -200,24 +200,58 @@ def resolve_anthropic_gateway() -> LlmGateway:
     )
 
 
+#: Default ports, so ``https://gw`` and ``https://gw:443`` are one origin.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+#: Headers the OpenAI line authenticates itself with. Borrowing these from the
+#: Anthropic line would replace the bearer the SDK builds from OPENAI_API_KEY --
+#: a 401 on every call, blamed on a variable that is set correctly.
+_LINE_OWN_AUTH_HEADERS = frozenset({"authorization", "x-api-key"})
+
+
+def _origin(url: str) -> tuple[str, str, int] | None:
+    """Reduce a base URL to the origin that decides who may see its headers.
+
+    Compares scheme, host and effective port rather than the raw authority:
+    the scheme is what separates a TLS endpoint from a plaintext one carrying
+    the same name, the default port must compare equal to its explicit form,
+    and any userinfo is not part of the identity of the host.
+
+    Args:
+        url: A base URL, possibly empty or unparseable.
+
+    Returns:
+        ``(scheme, host, port)``, or ``None`` when the URL names no host or the
+        port is unusable -- neither of which may be treated as a match.
+    """
+    if not url:
+        return None
+    try:
+        parts = urlsplit(url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme, host = parts.scheme.lower(), (parts.hostname or "").lower()
+    if not host:
+        return None
+    resolved = port if port is not None else _DEFAULT_PORTS.get(scheme)
+    if resolved is None:
+        return None
+    return scheme, host, resolved
+
+
 def _same_host(first: str, second: str) -> bool:
-    """Whether two base URLs address the same host and port.
+    """Whether two base URLs address the same origin.
 
     Args:
         first: A base URL, possibly empty.
         second: The base URL to compare against, possibly empty.
 
     Returns:
-        True only when both parse and their authorities match; an unparseable
-        or absent URL is never treated as a match.
+        True only when both resolve to an origin and the two match.
     """
-    if not first or not second:
-        return False
-    try:
-        left, right = urlsplit(first), urlsplit(second)
-    except ValueError:
-        return False
-    return bool(left.netloc) and left.netloc.lower() == right.netloc.lower()
+    left = _origin(first)
+    return left is not None and left == _origin(second)
 
 
 def _resolve_openai_gateway_headers(base_url: str) -> dict[str, str]:
@@ -229,15 +263,21 @@ def _resolve_openai_gateway_headers(base_url: str) -> dict[str, str]:
     protocols, with the LiteLLM spend tag and the APIM subscription key written
     to the Anthropic side alone.
 
-    The host check is what keeps that from becoming a credential leak. These
-    headers routinely carry a gateway secret, so reusing them across hosts would
-    hand it to a machine the operator never pointed at -- and an ``Authorization``
-    among them would also displace this line's own bearer. Hyperloom's
-    ``resolve_openai_client_config`` reaches the same place from the other
-    direction: it borrows only when the OpenAI base URL was *derived* from
-    ``ANTHROPIC_BASE_URL``, which is same-host by construction. KernelForge
-    always requires an explicit ``OPENAI_BASE_URL``, so it has to compare the
-    hosts it was given rather than infer the relationship.
+    Two things bound the borrowing. The origin check keeps it from becoming a
+    credential leak: these headers routinely carry a gateway secret, so reusing
+    them elsewhere would hand it to a machine the operator never pointed at.
+    Hyperloom's ``resolve_openai_client_config`` reaches the same place from the
+    other direction -- it borrows only when the OpenAI base URL was *derived*
+    from ``ANTHROPIC_BASE_URL``, which is same-origin by construction -- while
+    KernelForge always requires an explicit ``OPENAI_BASE_URL`` and so has to
+    compare the two it was given.
+
+    The second bound is that authentication is never borrowed even within one
+    origin. The two lines authenticate separately, so an ``Authorization`` from
+    the Anthropic side would replace the bearer the OpenAI SDK builds from
+    ``OPENAI_API_KEY`` and 401 every call. What is worth carrying across is
+    everything else the endpoint requires of any caller: the subscription key
+    the gateway rejects a call without, and the spend tag.
 
     Args:
         base_url: The OpenAI-compatible base URL already resolved for this line.
@@ -250,7 +290,8 @@ def _resolve_openai_gateway_headers(base_url: str) -> dict[str, str]:
         return headers
     if not _same_host(base_url, os.environ.get("ANTHROPIC_BASE_URL", "").strip()):
         return {}
-    return parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS"))
+    borrowed = parse_custom_headers(os.environ.get("ANTHROPIC_CUSTOM_HEADERS"))
+    return {name: value for name, value in borrowed.items() if name.lower() not in _LINE_OWN_AUTH_HEADERS}
 
 
 def resolve_openai_gateway() -> LlmGateway:

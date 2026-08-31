@@ -262,6 +262,46 @@ def test_an_unknown_anthropic_host_is_not_assumed_to_match(clean_env):
     assert resolve_openai_gateway().headers == {}
 
 
+def test_a_plaintext_endpoint_is_not_the_same_origin_as_a_tls_one(clean_env):
+    # Same name, no TLS: sending the subscription key here puts it on the wire.
+    clean_env.setenv("OPENAI_BASE_URL", "http://gw.example/llm-proxy/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
+    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub")
+    assert resolve_openai_gateway().headers == {}
+
+
+def test_the_default_port_matches_its_explicit_form(clean_env):
+    # Spelling the default port must not silently drop a fallback that applies.
+    clean_env.setenv("OPENAI_BASE_URL", "https://gw.example:443/llm-proxy/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
+    clean_env.setenv("ANTHROPIC_CUSTOM_HEADERS", "Ocp-Apim-Subscription-Key: sub")
+    assert resolve_openai_gateway().headers == {"Ocp-Apim-Subscription-Key": "sub"}
+
+
+def test_this_line_keeps_its_own_credential(clean_env):
+    """Borrowed headers never carry the other line's authentication.
+
+    ``default_headers`` are applied over the SDK's own, so an inherited
+    ``Authorization`` would replace the bearer built from OPENAI_API_KEY and
+    401 every call -- while the subscription key and the spend tag still have
+    to get through.
+    """
+    clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
+    clean_env.setenv("OPENAI_API_KEY", "openai")
+    clean_env.setenv("ANTHROPIC_BASE_URL", "https://gw.example/llm-proxy")
+    clean_env.setenv(
+        "ANTHROPIC_CUSTOM_HEADERS",
+        "Authorization: Bearer anthropic-only\nx-api-key: anthropic-native\n"
+        "Ocp-Apim-Subscription-Key: sub\nx-litellm-tags: application=hyperloom",
+    )
+    assert resolve_openai_gateway().headers == {
+        "Ocp-Apim-Subscription-Key": "sub",
+        "x-litellm-tags": "application=hyperloom",
+    }
+
+
 def test_openai_line_inherits_litellm_tags_from_anthropic(clean_env):
     clean_env.setenv("OPENAI_BASE_URL", "https://gw.example/llm-proxy/v1")
     clean_env.setenv("OPENAI_API_KEY", "openai")
