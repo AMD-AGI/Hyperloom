@@ -430,7 +430,9 @@ class LocalRecipeStore:
 
         If ``history/v{N}.json`` already holds a snapshot of the current live
         row, that archive is kept (crash between the two renames) and only
-        live is advanced.
+        live is advanced. The kept envelope records the write that created
+        the archive, which may not have finished; the completing write's
+        provenance is on the live row.
 
         Returns ``{"canonical_id", "version", "created", "prior_counts",
         "counts"}``. The two count maps are the sizes of each list-valued
@@ -460,7 +462,16 @@ class LocalRecipeStore:
                     canonical_id,
                     prior_version,
                 )
-                existing_archive = _read_json(archive_path)
+                try:
+                    existing_archive = _read_json(archive_path)
+                except LocalRecipeStoreError as exc:
+                    log.warning(
+                        "put_recipe: unreadable history v%s at %s (%s); rewriting it",
+                        prior_version,
+                        archive_path,
+                        exc,
+                    )
+                    existing_archive = None
                 snapshot = dict(live) if isinstance(live, dict) else {}
                 if (
                     isinstance(existing_archive, dict)

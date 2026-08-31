@@ -275,6 +275,46 @@ def test_put_recipe_keeps_existing_history_envelope_when_snapshot_matches(
     assert v1 is not None and v1["best_throughput"] == 1000.0
 
 
+@pytest.mark.parametrize("corrupt_body", ["{ truncated", "[]"])
+def test_put_recipe_rewrites_unreadable_history_and_still_advances(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    corrupt_body: str,
+) -> None:
+    """A leftover history file that cannot be parsed must not block later puts."""
+    store = LocalRecipeStore(root=tmp_path)
+    cid = _cid()
+    store.put_recipe(
+        canonical_id=cid,
+        best_throughput=1000.0,
+        provenance={"source": "first", "generator": "ut"},
+    )
+    store.put_recipe(
+        canonical_id=cid,
+        best_throughput=2000.0,
+        provenance={"source": "second", "generator": "ut"},
+    )
+    archive_path = store._history_version_path(cid, 2)
+    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_path.write_text(corrupt_body, encoding="utf-8")
+
+    with caplog.at_level("WARNING"):
+        third = store.put_recipe(
+            canonical_id=cid,
+            best_throughput=3000.0,
+            provenance={"source": "third", "generator": "ut"},
+        )
+    assert third["version"] == 3
+    live = store.get_recipe(canonical_id=cid)
+    assert live is not None
+    assert live["version"] == 3
+    assert live["best_throughput"] == 3000.0
+    rewritten = json.loads(archive_path.read_text(encoding="utf-8"))
+    assert rewritten["replaced_by"] == {"source": "third", "generator": "ut"}
+    assert rewritten["snapshot"]["best_throughput"] == 2000.0
+    assert any("unreadable history" in rec.message for rec in caplog.records)
+
+
 def test_put_recipe_counts_report_pre_and_post_write_sizes(
     tmp_path: Path,
 ) -> None:
