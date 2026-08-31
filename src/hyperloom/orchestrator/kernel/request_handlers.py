@@ -90,8 +90,6 @@ from ..state.kernel_decision_settings import (
 
 log = logging.getLogger(__name__)
 
-# Recognized trace-analysis routes; an unknown value falls back to ``agent``.
-_VALID_ANALYSIS_ROUTES = frozenset({"bypass", "deterministic", "agent"})
 STACK_INCREMENTAL_KEEP_THRESHOLD_PCT = 0.5
 KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT = 1.0
 # A patch whose correctness was only established against a reference kernel;
@@ -5252,32 +5250,28 @@ def _build_trace_analyze_cmd(
     workspace_path: str,
     trace_input: Any,
     tracelens_root: "Path | None",
-    is_bypass: bool,
     scriptable: bool,
     workload: dict,
     model_name: str,
     framework: str,
     target_platform: str,
     analysis_mode: str,
-    analysis_route: str,
 ) -> "tuple[list[str], str]":
-    """Assemble the trace-analysis tool argv (TraceLens or bypass); returns
+    """Assemble the TraceLens trace-analysis tool argv; returns
     ``(cmd, steady_state_mode)`` so the caller can record discovery provenance."""
-    # Both tools share the CLI surface below except ``--tracelens-root``.
-    tool_name = "bypass_trace_analysis.py" if is_bypass else "tracelens_analysis.py"
     cmd = [
         "python3",
-        str(_kernel_agent_tool_path(tool_name)),
+        str(_kernel_agent_tool_path("tracelens_analysis.py")),
         "--trace-input",
         str(trace_input),
         "--session-id",
         str(payload.get("session_id") or session_dir.name),
         "--workspace-path",
         workspace_path,
-    ]
-    if not is_bypass:
         # Pass the resolved root explicitly so the tool never relies on inherited env.
-        cmd += ["--tracelens-root", str(tracelens_root)]
+        "--tracelens-root",
+        str(tracelens_root),
+    ]
     if model_name:
         cmd += ["--model-name", str(model_name)]
     if framework:
@@ -5302,13 +5296,11 @@ def _build_trace_analyze_cmd(
     if precision:
         cmd += ["--precision", precision]
     runtime_config = str(payload.get("runtime_config") or getattr(state, "baseline_config_path", "") or "").strip()
-    if runtime_config and not is_bypass:
+    if runtime_config:
         cmd += ["--runtime-config", runtime_config]
 
     if scriptable:
-        # --skip-split is TraceLens-only; the bypass backend has its own windowing.
-        if not is_bypass:
-            cmd += ["--skip-split"]
+        cmd += ["--skip-split"]
         # Forward the denoise-step count for per-step roofline timings.
         # Priority: payload override > baseline workload metadata.
         num_denoise = payload.get("num_denoise_steps") or workload.get("num_inference_steps")
@@ -5341,9 +5333,6 @@ def _build_trace_analyze_cmd(
     steady_state_mode = str(steady_state_mode).strip()
     if steady_state_mode:
         cmd += ["--steady-state-mode", steady_state_mode]
-    # Forward the analysis route (bypass takes no such flag).
-    if analysis_route in ("deterministic", "agent"):
-        cmd += ["--analysis-route", analysis_route]
     # Post-kernel-opt roofline writes a separate report so it never overwrites
     # the baseline kernel_roofline.json.
     roofline_output_name = str(payload.get("roofline_output_name") or "").strip()
@@ -5425,45 +5414,15 @@ async def trace_analyze_handler(
     if not analysis_mode and framework.lower() in {"vllm", "sglang"}:
         analysis_mode = "inference"
 
-    # Analysis route: default ``agent`` (TraceLens); ``bypass`` (TraceLens-free)
-    # and ``deterministic`` (no-LLM TraceLens) are explicit routes via payload
-    # ``analysis_route`` / ``HYPERLOOM_TRACE_ANALYSIS_ROUTE``. Coerce to str.
-    explicit_route = (
-        str(payload.get("analysis_route") or os.environ.get("HYPERLOOM_TRACE_ANALYSIS_ROUTE", "")).strip().lower()
-    )
-    # Reject an unknown route: warn and fall back to the default ``agent`` route.
-    route_health_warnings: list[dict[str, Any]] = []
-    if explicit_route and explicit_route not in _VALID_ANALYSIS_ROUTES:
-        log.warning(
-            "trace_analyze: unknown analysis_route %r (expected one of %s); falling back to the default 'agent' route",
-            explicit_route,
-            sorted(_VALID_ANALYSIS_ROUTES),
-        )
-        route_health_warnings.append(
-            {
-                "code": "invalid_analysis_route",
-                "severity": "warning",
-                "message": (
-                    f"unknown analysis_route {explicit_route!r} (expected one of "
-                    f"{sorted(_VALID_ANALYSIS_ROUTES)}); fell back to the default 'agent' route."
-                ),
-                "requested_route": explicit_route,
-            }
-        )
-        explicit_route = ""
-    analysis_route = explicit_route or "agent"
-    is_bypass = analysis_route == "bypass"
     # Resolve TraceLens root independently of inherited env, self-healing a
-    # vanished checkout before validation. Skipped on bypass.
-    tracelens_root: Path | None = None
-    if not is_bypass:
-        tracelens_root = _resolve_tracelens_root()
-        # Self-heal when the checkout is missing or incomplete (no .git).
-        if not (tracelens_root / ".git").exists():
-            _maybe_selfheal_tracelens_root(tracelens_root, log=log)
-        tl_err = _tracelens_root_error(tracelens_root)
-        if tl_err:
-            return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
+    # vanished checkout before validation.
+    tracelens_root = _resolve_tracelens_root()
+    # Self-heal when the checkout is missing or incomplete (no .git).
+    if not (tracelens_root / ".git").exists():
+        _maybe_selfheal_tracelens_root(tracelens_root, log=log)
+    tl_err = _tracelens_root_error(tracelens_root)
+    if tl_err:
+        return {"status": "failed", "error_class": "tracelens_root_missing", "error": tl_err}
 
     # Pass the session root so artefacts settle under ``<session_dir>/kernel-agent/runs/...``.
     workspace_path = payload.get("workspace_path") or str(session_dir)
@@ -5484,14 +5443,12 @@ async def trace_analyze_handler(
         workspace_path=workspace_path,
         trace_input=trace_input,
         tracelens_root=tracelens_root,
-        is_bypass=is_bypass,
         scriptable=scriptable,
         workload=workload,
         model_name=model_name,
         framework=framework,
         target_platform=target_platform,
         analysis_mode=analysis_mode,
-        analysis_route=analysis_route,
     )
     timeout_sec = int(payload.get("budget_minutes", 60)) * 60
 
@@ -5548,9 +5505,7 @@ async def trace_analyze_handler(
             result.setdefault("orchestrator_error", failure_warning.get("error", ""))
 
         # Prepend handler validation warnings so they reach the LLM.
-        result["trace_health_warnings"] = (
-            framework_warnings + route_health_warnings + list(result.get("trace_health_warnings") or [])
-        )
+        result["trace_health_warnings"] = framework_warnings + list(result.get("trace_health_warnings") or [])
 
         _enrich_candidate_runtime_metadata(result.get("hot_kernels"), metadata)
         candidates_path = result.get("candidates_path")
@@ -5566,17 +5521,10 @@ async def trace_analyze_handler(
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
             _hot = result.get("hot_kernels_top15") or result.get("hot_kernels") or []
-            # Discovery source = the route that ran; deterministic maps to
-            # ``bypass``, the TraceLens LLM route to ``tracelens``.
-            _orch_mode = str(result.get("orchestrator_mode") or "").strip().lower()
-            _independent_bypass = _orch_mode == "bypass" or is_bypass
-            _is_bypass = _independent_bypass or _orch_mode == "deterministic" or analysis_route == "deterministic"
-            _disc_source = "bypass" if _is_bypass else "tracelens"
-            _disc_tool = "bypass" if _independent_bypass else "tracelens"
             instrument.record_kernel_discovery(
                 session_dir,
-                source=_disc_source,
-                tool=_disc_tool,
+                source="tracelens",
+                tool="tracelens",
                 status=str(result.get("status") or ""),
                 hot_kernels=_hot if isinstance(_hot, list) else [],
                 scan={
@@ -5584,7 +5532,7 @@ async def trace_analyze_handler(
                     "trace_dir": str(trace_input),
                     "candidates_path": str(result.get("candidates_path") or ""),
                     "trace_report_path": str(result.get("trace_report_path") or ""),
-                    "analysis_route": _disc_source,
+                    "analysis_route": "tracelens",
                 },
                 duration_sec=_disc_duration_sec,
                 error=(str(result.get("error") or "") or None if str(result.get("status") or "") == "failed" else None),

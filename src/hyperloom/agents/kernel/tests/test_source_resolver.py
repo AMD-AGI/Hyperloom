@@ -41,6 +41,20 @@ def _fake_framework(tmp_path: Path) -> dict[str, source_env.FrameworkRoot]:
     return {"vllm": fr}
 
 
+# --- is_editable_source (migrated from the deleted bypass source resolver) --
+def test_native_sources_are_editable():
+    for p in ("/x/a.cu", "/x/b.cuh", "/x/c.hip", "/x/d.h"):
+        assert kernel_source_index.is_editable_source(p) is True
+
+
+def test_repo_triton_py_is_editable_but_generated_is_not():
+    assert kernel_source_index.is_editable_source("/repo/aiter/ops/triton/fused.py") is True
+    assert kernel_source_index.is_editable_source("/tmp/torchinductor_root/xx/cabc.py") is False
+    assert kernel_source_index.is_editable_source("/repo/x.py", "triton_inductor_generated") is False
+    assert kernel_source_index.is_editable_source("/x/notes.txt") is False
+    assert kernel_source_index.is_editable_source("") is False
+
+
 # --- base_symbol -----------------------------------------------------------
 def test_base_symbol_from_demangled():
     name = "void vllm::act_and_mul_kernel<c10::BFloat16, true>(c10::BFloat16*, c10::BFloat16 const*, int)"

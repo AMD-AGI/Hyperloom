@@ -125,9 +125,8 @@ def _role_haystack(candidate: dict[str, Any]) -> str:
     ``Class::method`` symbol whose class name can itself contain another
     role's marker); either way, only the trailing symbol segment is
     matched, never the whole qualified string. This repo's own convention
-    (``_task_group_contract.logical_operator_name()``,
-    ``_bypass_report.py``'s task-group builder) is to set ``operation`` to
-    the fully-qualified name too, e.g. ``mori::EpDispatchCombineOp::combine``
+    (``_task_group_contract.logical_operator_name()``) is to set ``operation``
+    to the fully-qualified name too, e.g. ``mori::EpDispatchCombineOp::combine``
     -- taking ``operation`` verbatim would silently reintroduce the exact
     dispatch/combine ambiguity this function exists to resolve the moment
     some producer starts populating that field on a candidate row (PR #1191

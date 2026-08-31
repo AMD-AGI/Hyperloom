@@ -252,11 +252,10 @@ consumers and triage read a contract rather than candidate internals.
 
 ### Candidate review
 
-One agent session may audit the finished candidate table when
-`--analysis-route agent` is used. The `deterministic` route never runs it, and
-keeps its no-model guarantee by not reaching the stage at all.
+One agent session may audit the finished candidate table. It is skipped on a
+`--dry-run`, which plans without spending an agent session.
 
-The stage is tool-enabled rather than a completion call because the deterministic
+The stage is tool-enabled rather than a completion call because the resolution
 tiers' real failure mode is not coming up empty but coming up confidently wrong,
 and a model ranking paths by keyword off a prompt assembled in advance cannot
 tell the difference — it never sees what a kernel actually *is*.

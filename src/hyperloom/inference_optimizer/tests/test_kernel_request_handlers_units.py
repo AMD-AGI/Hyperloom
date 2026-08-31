@@ -5526,11 +5526,7 @@ class TestTracelensRootResolution:
             called["n"] += 1
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
-        out = asyncio.run(
-            krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
-            )
-        )
+        out = asyncio.run(krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path))
         assert called["n"] == 1  # self-heal was attempted
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
@@ -5553,11 +5549,7 @@ class TestTracelensRootResolution:
             shutil.rmtree(root, ignore_errors=True)
 
         monkeypatch.setattr(krh, "_maybe_selfheal_tracelens_root", _fake_heal)
-        out = asyncio.run(
-            krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
-            )
-        )
+        out = asyncio.run(krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path))
         assert called["n"] == 1  # self-heal attempted despite the dir existing
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
@@ -5577,11 +5569,7 @@ class TestTracelensRootResolution:
             "_maybe_selfheal_tracelens_root",
             lambda *_a, **_k: heal_called.__setitem__("n", heal_called["n"] + 1),
         )
-        out = asyncio.run(
-            krh.trace_analyze_handler(
-                {"trace_input": str(tmp_path / "trace"), "analysis_route": "deterministic"}, session_dir=tmp_path
-            )
-        )
+        out = asyncio.run(krh.trace_analyze_handler({"trace_input": str(tmp_path / "trace")}, session_dir=tmp_path))
         assert out["status"] == "failed"
         assert out["error_class"] == "tracelens_root_missing"
 
@@ -5807,7 +5795,7 @@ class TestKernelOptArtifactBundleRecording:
 
 class TestBuildTraceAnalyzeCmd:
     """argv golden for ``_build_trace_analyze_cmd``: the splitter (non-scriptable)
-    and diffusion (scriptable) surfaces, plus the bypass vs TraceLens difference."""
+    and diffusion (scriptable) TraceLens surfaces."""
 
     def _common(self, monkeypatch, tmp_path):
         monkeypatch.delenv("INFERENCE_OPTIMIZER_STEADY_STATE_MODE", raising=False)
@@ -5825,15 +5813,14 @@ class TestBuildTraceAnalyzeCmd:
             workspace_path="/ws",
             trace_input="/t/trace",
             tracelens_root=Path("/tl"),
-            is_bypass=False,
             scriptable=False,
             workload={"conc": 8, "osl": 256, "random_range_ratio": "0.5"},
             model_name="Qwen",
             framework="sglang",
             target_platform="MI300X",
-            analysis_mode="deterministic",
-            analysis_route="deterministic",
+            analysis_mode="default",
         )
+        # The collapse landed: the agent tracelens tool, and no --analysis-route flag.
         assert cmd == [
             "python3",
             "/tools/tracelens_analysis.py",
@@ -5852,7 +5839,7 @@ class TestBuildTraceAnalyzeCmd:
             "--target-platform",
             "MI300X",
             "--analysis-mode",
-            "deterministic",
+            "default",
             # splitter hints: payload override wins over workload metadata.
             "--split-conc",
             "64",
@@ -5860,9 +5847,8 @@ class TestBuildTraceAnalyzeCmd:
             "1024",
             "--split-r",
             "0.5",
-            "--analysis-route",
-            "deterministic",
         ]
+        assert "--analysis-route" not in cmd
         assert steady == ""
 
     def test_sglang_cmd_forwards_model_context(self, monkeypatch, tmp_path):
@@ -5878,20 +5864,19 @@ class TestBuildTraceAnalyzeCmd:
             workspace_path="/ws",
             trace_input="/t/trace",
             tracelens_root=Path("/tl"),
-            is_bypass=False,
             scriptable=False,
             workload={"precision": "mxfp8"},
             model_name="MiniMax",
             framework="sglang",
             target_platform="MI355X",
             analysis_mode="default",
-            analysis_route="agent",
         )
         assert cmd[cmd.index("--model-path") + 1] == "/models/sglang-model"
         assert cmd[cmd.index("--precision") + 1] == "fp8"
         assert cmd[cmd.index("--runtime-config") + 1] == "/session/materialized.yaml"
 
-    def test_bypass_scriptable_cmd(self, monkeypatch, tmp_path):
+    def test_scriptable_cmd(self, monkeypatch, tmp_path):
+        """Scriptable (diffusion) forwards --skip-split + denoise/model/precision."""
         state, session_dir = self._common(monkeypatch, tmp_path)
         state.model_path = "/models/flux"
         cmd, steady = krh._build_trace_analyze_cmd(
@@ -5907,28 +5892,22 @@ class TestBuildTraceAnalyzeCmd:
             state=state,
             workspace_path="/ws",
             trace_input="/t/trace",
-            tracelens_root=None,
-            is_bypass=True,
+            tracelens_root=Path("/tl"),
             scriptable=True,
             workload={},
             model_name="",
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="bypass",
         )
-        # bypass tool name; no --tracelens-root and no --skip-split.
-        assert cmd[1] == "/tools/bypass_trace_analysis.py"
-        assert "--tracelens-root" not in cmd
-        assert "--skip-split" not in cmd
+        assert cmd[1] == "/tools/tracelens_analysis.py"
+        assert "--skip-split" in cmd
         # scriptable forwards denoise/model/precision; not the splitter hints.
         assert "--num-denoise-steps" in cmd and cmd[cmd.index("--num-denoise-steps") + 1] == "30"
         assert "--model-path" in cmd and cmd[cmd.index("--model-path") + 1] == "/models/flux"
         assert "--precision" in cmd and cmd[cmd.index("--precision") + 1] == "bf16"
         assert "--split-conc" not in cmd
-        # bypass takes no analysis-route flag.
         assert "--analysis-route" not in cmd
-        assert "--runtime-config" not in cmd
         assert "--steady-state-mode" in cmd and cmd[cmd.index("--steady-state-mode") + 1] == "auto"
         assert cmd[-1] == "--dry-run"
         assert steady == "auto"
@@ -5943,14 +5922,12 @@ class TestBuildTraceAnalyzeCmd:
             workspace_path="/ws",
             trace_input="/t/trace",
             tracelens_root=Path("/tl"),
-            is_bypass=False,
             scriptable=False,
             workload={},
             model_name="",
             framework="",
             target_platform="",
             analysis_mode="",
-            analysis_route="agent",
         )
         assert steady == "median"
         assert cmd[cmd.index("--steady-state-mode") + 1] == "median"

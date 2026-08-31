@@ -34,7 +34,7 @@ from pathlib import Path
 
 try:  # package import (TraceLens route / tests)
     from . import source_env
-except ImportError:  # flat top-level import (bypass route puts tools/ on sys.path)
+except ImportError:  # flat top-level import (tools/ on sys.path)
     import source_env  # type: ignore[no-redef]
 
 log = logging.getLogger(__name__)
@@ -42,11 +42,41 @@ log = logging.getLogger(__name__)
 # ``FrameworkRoot`` is referenced via the module (``source_env.FrameworkRoot``) to
 # keep a single import style for ``source_env`` across both branches above.
 
-# Native source extensions to scan. Kept in sync with
-# ``_bypass_source_resolver._NATIVE_SOURCE_EXTS`` (the editability filter): a
-# ``__global__`` def indexed from an extension the resolver would later reject as
-# non-editable is dead weight, so both lists must agree.
+# Native source extensions to scan, and the editability filter's native set (one
+# and the same): a ``__global__`` def indexed from an extension
+# ``is_editable_source`` would later reject as non-editable is dead weight, so the
+# scan set and the editability set are a single tuple.
 _NATIVE_EXTS = (".cu", ".cuh", ".hip", ".h")
+
+
+def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool:
+    """Return whether ``path`` is a source we can route a kernel rewrite at.
+
+    Editable == native device code (``.cu``/``.cuh``/``.hip``/``.h``) or a
+    repo-resident Triton/TileLang ``.py``. Generated Triton is excluded
+    (``triton_inductor_generated`` kind and any ``torchinductor`` / ``/tmp/``
+    path).
+
+    Args:
+        path: Candidate source path (from a trace ``kernel_file`` or the finder).
+        kernel_kind: Optional kernel-kind hint.
+
+    Returns:
+        ``True`` when the path is an editable source, else ``False``.
+    """
+    if not path:
+        return False
+    low = path.lower()
+    if low.endswith(_NATIVE_EXTS):
+        return True
+    if low.endswith(".py"):
+        if kernel_kind == "triton_inductor_generated":
+            return False
+        if "torchinductor" in path or path.startswith("/tmp/"):  # nosec B108 - marker for generated compiler artifacts.
+            return False
+        return True
+    return False
+
 
 # --- kernel-definition scanning ---------------------------------------------
 # A definition head is ``__global__`` <attrs / return type> NAME ( params ).
@@ -235,10 +265,10 @@ def _save_cache(index: SourceIndex) -> None:
         log.debug("kernel index: cache write failed (%s): %s", index.fingerprint, exc)
 
 
-# Process-level singleton for the no-argument (production) call. Both the bypass
-# route (per candidate) and the TraceLens route otherwise re-run
-# ``discover_frameworks()`` + ``fingerprint()`` + ``json.load`` on every resolve;
-# memoizing here makes "built once per container, later resolves ~free" true.
+# Process-level singleton for the no-argument (production) call. The agent path
+# otherwise re-runs ``discover_frameworks()`` + ``fingerprint()`` + ``json.load``
+# on every resolve; memoizing here makes "built once per container, later resolves
+# ~free" true.
 _PROCESS_INDEX: SourceIndex | None = None
 
 
@@ -311,4 +341,4 @@ if __name__ == "__main__":
     raise SystemExit(_main())
 
 
-__all__ = ["SourceIndex", "build_index", "load_or_build"]
+__all__ = ["SourceIndex", "build_index", "is_editable_source", "load_or_build"]
