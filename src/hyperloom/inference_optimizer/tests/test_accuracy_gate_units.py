@@ -25,6 +25,63 @@ class TestNoHighRiskPredicate:
             assert not hasattr(ag, name), f"{name} should not be reintroduced"
 
 
+class TestAccuracyGateApplies:
+    """What replaced the flag catalogue: a reference exists, or it does not."""
+
+    @pytest.mark.parametrize(
+        ("scriptable", "baseline_accuracy", "expected"),
+        [
+            # Any measured reference gates, whatever flags the variant carries --
+            # this is the case the by-name catalogue used to miss.
+            pytest.param(False, 0.9704, True, id="serving_with_baseline"),
+            pytest.param(False, 0.0, False, id="serving_without_baseline"),
+            # A scriptable framework's own quality verdict is its only signal, so
+            # it gates with no baseline at all.
+            pytest.param(True, 0.0, True, id="scriptable_needs_no_baseline"),
+            pytest.param(True, 0.9704, True, id="scriptable_with_baseline"),
+        ],
+    )
+    def test_gates_on_whether_a_reference_exists(self, scriptable, baseline_accuracy, expected):
+        assert (
+            ag.accuracy_gate_applies(
+                scriptable=scriptable,
+                baseline_accuracy=baseline_accuracy,
+                eval_disabled=False,
+            )
+            is expected
+        )
+
+    @pytest.mark.parametrize(
+        ("scriptable", "baseline_accuracy"),
+        [
+            # Both of the ways the gate could otherwise still fire: a baseline
+            # measured before the opt-out, and a scriptable framework, which
+            # does not consult the baseline at all.
+            pytest.param(False, 0.9704, id="stale_baseline_on_state"),
+            pytest.param(True, 0.0, id="scriptable"),
+            pytest.param(True, 0.9704, id="scriptable_with_baseline"),
+        ],
+    )
+    def test_disabled_eval_skips_the_gate_not_just_the_injection(self, scriptable, baseline_accuracy):
+        """Opting out of eval must opt out of grading too.
+
+        Forcing RUN_EVAL and reading the score were two separate conditions, so
+        a round could be graded on an eval it was never going to run and REVERT
+        every variant as ``accuracy_unavailable``.
+        """
+        assert (
+            ag.accuracy_gate_applies(
+                scriptable=scriptable,
+                baseline_accuracy=baseline_accuracy,
+                eval_disabled=True,
+            )
+            is False
+        )
+
+    def test_a_negative_baseline_is_not_a_reference(self):
+        assert ag.accuracy_gate_applies(scriptable=False, baseline_accuracy=-1.0, eval_disabled=False) is False
+
+
 class TestParseEvalResults:
     def test_returns_error_when_no_results_dir(self, tmp_path):
         out = ag.parse_eval_results(tmp_path)

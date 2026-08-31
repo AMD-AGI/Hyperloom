@@ -52,6 +52,7 @@ from ..stop_attribution import (
     stopped_by_the_run_class,
 )
 from ._accuracy_gate import (
+    accuracy_gate_applies,
     accuracy_passed,
     parse_eval_results,
 )
@@ -767,11 +768,30 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
+        # The measured baseline on SharedState wins over anything in params.
+        # ``accuracy_baseline`` is offered to the LLM in the action schema, and
+        # every in-tree writer only ever copies SharedState's value, so a params
+        # figure that disagrees is a hallucination rather than a second opinion.
+        # It used to cost at most a few high-risk variants; now that the gate
+        # grades every variant with a reference, one bad number can REVERT the
+        # whole grid or mark all of it accuracy_drop.
+        proposed_baseline = float(params.get("accuracy_baseline") or 0.0) or float(
             params.get("baseline_accuracy") or 0.0
         )
-        if baseline_accuracy <= 0 and ss is not None:
-            baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0)
+        measured_baseline = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0) if ss is not None else 0.0
+        if measured_baseline > 0:
+            baseline_accuracy = measured_baseline
+            if proposed_baseline > 0 and abs(proposed_baseline - measured_baseline) > 1e-6:
+                log.warning(
+                    "Ignoring proposed accuracy_baseline=%.6f; using the measured "
+                    "SharedState.baseline_accuracy=%.6f instead.",
+                    proposed_baseline,
+                    measured_baseline,
+                )
+        else:
+            # No measured reference (external / manual invocation): params is the
+            # only source there is, and <= 0 skips the gate as documented.
+            baseline_accuracy = proposed_baseline
         keep_threshold_pct = float(
             params.get(
                 "keep_threshold_pct",
@@ -1085,12 +1105,23 @@ class ExploreExecutor:
         # and fail an otherwise good variant closed as ``accuracy_unavailable``.
         # The two other gating paths already do exactly this -- see
         # ``framework_agent`` and ``integrate_patch._framework_run_eval_envs``.
-        # ``--no-eval`` still wins: it means no reference was asked for, which
-        # also leaves ``baseline_accuracy`` at 0 and skips the gate entirely.
         from hyperloom.inference_optimizer import framework_registry
 
         scriptable = framework_registry.is_scriptable(framework)
-        force_run_eval = (scriptable or baseline_accuracy > 0) and not bool(getattr(ss, "eval_disabled", False))
+        # One predicate drives both the gate and the RUN_EVAL injection. They
+        # were computed separately, and ``--no-eval`` only suppressed the
+        # injection: a session that disabled eval while a baseline was still on
+        # the state (or any scriptable framework, which gates regardless of the
+        # baseline) then graded every variant against a score the round was
+        # never going to produce, REVERTing the whole thing as
+        # ``accuracy_unavailable`` -- the exact failure the injection was added
+        # to remove. Opting out of eval has to opt out of the gate too.
+        accuracy_gate_enabled = accuracy_gate_applies(
+            scriptable=scriptable,
+            baseline_accuracy=baseline_accuracy,
+            eval_disabled=bool(getattr(ss, "eval_disabled", False)),
+        )
+        force_run_eval = accuracy_gate_enabled
         # Decision-round overtime anchor: the WARM measure time when warm-decision
         # is active and available, else the cold baseline wall-clock (legacy).
         decision_anchor_sec = (
@@ -1529,7 +1560,9 @@ class ExploreExecutor:
                         accuracy_value: float | None = None
                         # Serving still needs a baseline to compare against;
                         # scriptable compares against a fixed 1.0 reference.
-                        if scriptable or baseline_accuracy > 0:
+                        # Same predicate as the RUN_EVAL injection above, so the
+                        # round is never graded on an eval it did not run.
+                        if accuracy_gate_enabled:
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):

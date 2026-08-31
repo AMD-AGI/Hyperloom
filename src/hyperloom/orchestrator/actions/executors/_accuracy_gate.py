@@ -3,10 +3,11 @@
 
 """Accuracy gate — GSM8K eval integration for hyperloom.inference_optimizer.
 
-Baseline always runs GSM8K; high-risk variants too. Threshold is
+Baseline always runs GSM8K, and so does every variant with a reference:
+:func:`accuracy_gate_applies` decides by whether a reference exists, not by
+guessing which flags look risky. Threshold is
 ``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise.
-High-risk = precision/compute-path changes; kernel patches handled by
-kernel-agent.
+Kernel patches are handled by kernel-agent.
 """
 
 from __future__ import annotations
@@ -498,6 +499,34 @@ def accuracy_keep_block(
 # EXPLORE now parses and gates unconditionally.
 
 
+def accuracy_gate_applies(*, scriptable: bool, baseline_accuracy: float, eval_disabled: bool) -> bool:
+    """Whether a round is graded on accuracy — and therefore has to evaluate.
+
+    One predicate for two decisions that must not diverge: whether to force
+    ``RUN_EVAL`` on for the round, and whether to read a score from it
+    afterwards. Computing them separately let a round be graded on an eval it
+    was never going to run, which REVERTs every variant as
+    ``accuracy_unavailable``.
+
+    ``eval_disabled`` wins outright. Opting out of eval has to opt out of the
+    gate: a session can carry a measured ``baseline_accuracy`` from before the
+    opt-out, and a scriptable framework gates regardless of any baseline, so
+    neither can be relied on to skip the gate by itself.
+
+    Args:
+        scriptable (bool): Whether the framework's bench script supplies its own
+            quality verdict (the only correctness signal it has).
+        baseline_accuracy (float): The measured reference; ``<= 0`` means none.
+        eval_disabled (bool): Whether the session opted out of eval entirely.
+
+    Returns:
+        bool: ``True`` when the round must both run the eval and be graded.
+    """
+    if eval_disabled:
+        return False
+    return bool(scriptable) or float(baseline_accuracy or 0.0) > 0.0
+
+
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
     """Read a scriptable (server-less) quality gate from the bench report.
 
@@ -799,6 +828,7 @@ __all__ = [
     "EVAL_KIND_RUNTIME_FAILURE",
     "EVAL_PROBE_FILENAME",
     "_extract_eval_contract_fields",
+    "accuracy_gate_applies",
     "accuracy_keep_block",
     "accuracy_meets_floor",
     "accuracy_passed",
