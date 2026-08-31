@@ -72,6 +72,43 @@ subtrees:
   - file: reference/troubleshooting.md
     title: Troubleshooting
 
+- caption: KernelForge (built-in kernel-opt agent)
+  entries:
+  - file: kernelforge/index
+    title: KernelForge
+  - file: kernelforge/what-is-kernelforge.md
+    title: What is KernelForge?
+  - file: kernelforge/install/quickstart.md
+    title: Quickstart
+  - file: kernelforge/quickstart.md
+    title: Campaign quickstart
+  - file: kernelforge/conceptual/architecture.md
+    title: Architecture
+  - file: kernelforge/conceptual/optimization-loop.md
+    title: Optimization loop
+  - file: kernelforge/how-to/run-a-campaign.md
+    title: Run a campaign
+  - file: kernelforge/how-to/autonomous-loop.md
+    title: Autonomous overnight loop
+  - file: kernelforge/how-to/kernel-fusion.md
+    title: Fuse a launch-bound decode path
+  - file: kernelforge/how-to/debug-task-preparation.md
+    title: Debug task preparation
+  - file: kernelforge/how-to/extending.md
+    title: Add a kernel backend, tool, or knowledge
+  - file: kernelforge/reference/cli.md
+    title: CLI reference
+  - file: kernelforge/reference/deployment-modes.md
+    title: Deployment modes
+  - file: kernelforge/reference/experience-store.md
+    title: Experience store
+  - file: kernelforge/reference/api-reference.rst
+    title: API reference
+  - file: kernelforge/reference/measured-results.md
+    title: Measured results
+  - file: kernelforge/forge_long_horizon_state.md
+    title: Long-horizon loop state
+
 - caption: About
   entries:
   - file: about.md

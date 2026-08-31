@@ -680,8 +680,9 @@ async def test_promote_integrate_patch_reverted_keeps_current_best(session_dir):
 
 
 # ---------------------------------------------------------------------------
-# GAP 6: framework_agent appends a progress row every time and lifts on KEEP.
-# framework_agent is NOT in _AUDIT_ACTIONS.
+# GAP 6: an upstream-PR integrate_patch lifts current_best on KEEP. The
+# candidate's progress row is the dispatcher's authored-outcome bridge, not
+# this promote (see test_framework_agent_authoring).
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_promote_framework_agent_kept_lifts_and_records_progress(session_dir):
@@ -691,33 +692,33 @@ async def test_promote_framework_agent_kept_lifts_and_records_progress(session_d
     s.phase = "KERNEL_AGENT"
 
     await coord._promote_to_shared_state(
-        "framework_agent",
+        "integrate_patch",
         {
             "status": "kept",
             "output_throughput": 130.0,
             "delta_pct": 30.0,
-            "batch_id": "b1",
-            "candidate": {"pr_url": "https://x/pull/1", "ref": "PR:1"},
+            "specialist_task_id": "https://x/pull/1",
             "workspace": "/w",
+            "source_phase": "FRAMEWORK_AGENT",
         },
-        task=_task("framework_agent", task_id="t1"),
+        task=_task(
+            "integrate_patch",
+            task_id="t1",
+            params={
+                "framework_agent_candidate_id": "https://x/pull/1",
+                "batch_id": "b1",
+                "patch_source": "upstream_pr",
+                "source_phase": "FRAMEWORK_AGENT",
+            },
+        ),
     )
 
-    # One progress row appended; KEEP lifted current_best to the framework arm.
-    assert isinstance(s.framework_agent_phase_progress, list)
-    assert len(s.framework_agent_phase_progress) == 1
-    row = s.framework_agent_phase_progress[0]
-    assert row["status"] == "kept"
-    assert row["kept"] is True
-    assert row["batch_id"] == "b1"
-    assert s.current_best["action"] == "framework"
+    assert s.current_best["action"] == "integrate_patch"
     assert s.current_best["tput"] == 130.0
     assert s.optimization_stack[-1]["source_phase"] == "FRAMEWORK_AGENT"
-    assert s.optimization_stack[-1]["provenance"] == "framework_agent"
     # The stack variant must be the canonical candidate key, undecorated, so
-    # resume can reconcile it against the recorded framework_agent KEEP.
+    # resume can reconcile it against the recorded KEEP.
     assert s.optimization_stack[-1]["variant_name"] == "https://x/pull/1"
-    assert not hasattr(s, "last_framework_agent")
 
 
 @pytest.mark.asyncio
@@ -731,14 +732,17 @@ async def test_framework_agent_keep_stages_returned_raw_patch(session_dir, tmp_p
     coord.shared_state.baseline_tput = 100.0
 
     await coord._promote_to_shared_state(
-        "framework_agent",
+        "integrate_patch",
         {
             "status": "kept",
             "output_throughput": 130.0,
-            "candidate": {"pr_url": "https://x/pull/7"},
+            "specialist_task_id": "https://x/pull/7",
             "patches_applied": [str(patch)],
         },
-        task=_task("framework_agent"),
+        task=_task(
+            "integrate_patch",
+            params={"patch_source": "upstream_pr", "source_phase": "FRAMEWORK_AGENT"},
+        ),
     )
 
     staged = KnowledgeSections(draft).staged("framework")
@@ -759,7 +763,7 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(sessio
     coord.shared_state.baseline_tput = 100.0
 
     await coord._promote_to_shared_state(
-        "framework_agent",
+        "integrate_patch",
         {
             "status": "kept",
             "output_throughput": 130.0,
@@ -767,7 +771,7 @@ async def test_explicit_empty_patches_applied_never_scans_stale_workspace(sessio
             "patches_applied": [],
             "workspace": str(workspace),
         },
-        task=_task("framework_agent"),
+        task=_task("integrate_patch"),
     )
 
     # Final config comes from current_best at CLOSE; an explicit empty patch
@@ -789,14 +793,14 @@ async def test_local_mode_without_remote_draft_does_not_enqueue_outbox(session_d
     coord.shared_state.baseline_tput = 100.0
 
     await coord._promote_to_shared_state(
-        "framework_agent",
+        "integrate_patch",
         {
             "status": "kept",
             "output_throughput": 130.0,
             "candidate": {"pr_url": "https://x/pull/10"},
             "patches_applied": [str(patch)],
         },
-        task=_task("framework_agent"),
+        task=_task("integrate_patch"),
     )
 
     assert coord.shared_state.kb_stage_outbox == []
@@ -826,14 +830,14 @@ async def test_keep_kb_hook_runs_only_after_authoritative_save(session_dir, tmp_
     )
 
     await coord._promote_to_shared_state(
-        "framework_agent",
+        "integrate_patch",
         {
             "status": "kept",
             "output_throughput": 130.0,
-            "candidate": {"pr_url": "https://x/pull/9"},
+            "specialist_task_id": "https://x/pull/9",
             "patches_applied": [str(patch)],
         },
-        task=_task("framework_agent"),
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
     )
 
     assert events[0:2] == ["save", "stage"]
@@ -972,80 +976,7 @@ async def test_resume_settles_state_before_draining_kb_outbox(
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_agent_kept_without_a_candidate_key_is_skipped_loudly(
-    session_dir,
-    caplog,
-):
-    """A KEEP with no identity advances current_best but leaves no stack entry.
-
-    Promote used to name the stack entry ``f"framework:{cand_id}"``, which is
-    truthy even when the key is empty, so a candidate carrying no candidate_id,
-    pr_url or ref was stacked under the bare name ``"framework:"``. The
-    undecorated key is falsy, so ``_lift_to_current_best``'s guard now skips the
-    append instead.
-
-    Only the append: current_best is set unconditionally
-    further down, so the win still counts — it just is not recorded as a step
-    anything can later reconcile, dedupe or replay. Pinned because that split is
-    easy to misread in either direction, and because a KEEP that leaves no trace
-    in the stack has to at least leave one in the log.
-    """
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.current_best = {"action": "baseline", "tput": 100.0}
-
-    with caplog.at_level("WARNING"):
-        await coord._promote_to_shared_state(
-            "framework_agent",
-            {
-                "status": "kept",
-                "output_throughput": 130.0,
-                "delta_pct": 30.0,
-                "batch_id": "b1",
-                # No candidate_id, no pr_url, no ref — and no task params to
-                # recover one from either.
-                "candidate": {},
-            },
-            task=_task("framework_agent", task_id="t-nameless"),
-        )
-
-    # The win lands, ...
-    assert s.current_best["action"] == "framework"
-    assert s.current_best["tput"] == 130.0
-    # ... but nothing in the stack says how it was reached.
-    assert not [e for e in s.optimization_stack if str(e.get("action")) == "framework"]
-    assert "no candidate key" in caplog.text
-    # The outcome is still recorded, so the pump does not re-select it.
-    assert len(s.framework_agent_phase_progress) == 1
-    assert s.framework_agent_phase_progress[0]["status"] == "kept"
-
-
 @pytest.mark.asyncio
-async def test_promote_framework_agent_failed_records_progress_no_lift(session_dir):
-    coord = _coord(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.current_best = {"action": "baseline", "tput": 100.0}
-
-    await coord._promote_to_shared_state(
-        "framework_agent",
-        {
-            "status": "reverted",
-            "output_throughput": 80.0,
-            "delta_pct": -20.0,
-            "batch_id": "b1",
-            "candidate": {"pr_url": "https://x/pull/2", "ref": "PR:2"},
-        },
-        task=_task("framework_agent", task_id="t2"),
-    )
-
-    assert len(s.framework_agent_phase_progress) == 1
-    assert s.framework_agent_phase_progress[0]["kept"] is False
-    # No lift on a non-kept candidate.
-    assert s.current_best["action"] == "baseline"
-
-
 # ---------------------------------------------------------------------------
 # GAP 7: replay_warm_recipe routes through _promote_warm_replay (self-saves) and
 # never sets outcome.changed, so the unified tail neither audits nor re-saves.

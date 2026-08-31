@@ -6,7 +6,7 @@
 
 The orchestrator writes an input JSON with one validated agent backend, model,
 and sandbox policy and calls this script; the autonomous fusion pipeline itself
-lives in KernelForge and is invoked as ``kernel-agents forge-fuse``.
+lives in KernelForge and is invoked as ``kernelforge forge-fuse``.
 
 It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
 Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
@@ -139,7 +139,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 def _build_cmd(args: dict[str, Any]) -> list[str]:
     agent_backend = _validated_agent_backend(args.get("agent_backend"))
     agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
-    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-fuse"]
+    cmd = [sys.executable, "-m", "kernelforge.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)

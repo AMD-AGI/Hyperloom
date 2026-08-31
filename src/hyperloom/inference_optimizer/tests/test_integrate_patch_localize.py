@@ -150,3 +150,24 @@ async def test_attempt_root_added_to_allowlist_only(_executor, monkeypatch, tmp_
     out = await _executor._stage_localize_source(ctx, {"localization_candidate": _pr_candidate()}, "t-1")
     assert out is None, out
     assert len(ctx._ip_localization_patches) == 1
+
+
+def test_empty_allowlist_fail_closed():
+    """No trusted write root: every non-empty path is out of bounds."""
+    outside = ip._localization_paths_outside_allowlist(
+        ["a/b.py", "/etc/passwd", "", "  "],
+        None,
+        [],
+    )
+    assert outside == ["a/b.py", "/etc/passwd"]
+
+
+def test_empty_allowlist_still_uses_framework_root(tmp_path):
+    """framework_root alone is a trusted root even when allow_roots is empty."""
+    outside = ip._localization_paths_outside_allowlist(
+        ["ok.py", "/etc/passwd"],
+        tmp_path,
+        [],
+    )
+    assert "ok.py" not in outside
+    assert "/etc/passwd" in outside

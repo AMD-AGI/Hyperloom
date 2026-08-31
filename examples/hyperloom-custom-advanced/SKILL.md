@@ -103,7 +103,7 @@ Collect these required values:
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
 - Optional phase budget percentages for `PRELUDE`, `FRAMEWORK_AGENT`,
-  `EXPLORE`, `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
+  `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
 
 ## Default Values
 
@@ -141,7 +141,7 @@ resolved values in the launch plan before starting the optimizer.
     initial orchestration.
   - `PHASE_BUDGET_FRAMEWORK_PCT=0.20`: framework-agent work, including source
     patching or framework-side exploration.
-  - `PHASE_BUDGET_EXPLORE_PCT=0.35`: serving-parameter exploration and
+  - `PHASE_BUDGET_FRAMEWORK_PCT=0.55`: the OPTIMIZE phase — serving-parameter exploration and
     benchmark validation.
   - `PHASE_BUDGET_KERNEL_PCT=0.28`: kernel-agent TraceLens/GEAK/native-kernel
     optimization work.
@@ -154,11 +154,11 @@ resolved values in the launch plan before starting the optimizer.
 
 Collect these optional advanced values:
 
-- Phase toggles: `--no-kernel`, `--no-explore`, `--no-framework-agent`,
+- Phase toggles: `--no-kernel`, `--no-framework-agent`,
   `--no-enable-conc-sweep`, `--no-enable-roofline`.
 - Phase budget percentages:
   `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,
-  `PHASE_BUDGET_EXPLORE_PCT`, `PHASE_BUDGET_KERNEL_PCT`,
+  `PHASE_BUDGET_KERNEL_PCT`,
   `PHASE_BUDGET_SWEEP_PCT`, and `PHASE_BUDGET_CLOSE_PCT`.
   Explain what each phase does before asking. Accept only values where
   `0 < pct <= 1`; leave a value unset to use the optimizer default.
@@ -174,7 +174,7 @@ Guardrails:
   pass explicit CLI flags in the optimize command.
 - Omit `--gpu-type` unless the user explicitly chooses a hint; otherwise let
   Hyperloom auto-detect from ROCm/system info.
-- Warn the user when both `--no-explore` and `--no-kernel` are selected; that
+- Warn the user when both `--no-framework-agent` and `--no-kernel` are selected; that
   collapses the run mostly to baseline and sweep validation.
 - Phase budget percentages are caps, not guaranteed time usage. A phase may end
   earlier, and disabled work phases have their share redistributed by the
@@ -283,7 +283,6 @@ export MAX_HOURS="${MAX_HOURS:-8}"
 export TARGET_GAIN="${TARGET_GAIN:-30}"
 export PHASE_BUDGET_PRELUDE_PCT="${PHASE_BUDGET_PRELUDE_PCT:-}"
 export PHASE_BUDGET_FRAMEWORK_PCT="${PHASE_BUDGET_FRAMEWORK_PCT:-}"
-export PHASE_BUDGET_EXPLORE_PCT="${PHASE_BUDGET_EXPLORE_PCT:-}"
 export PHASE_BUDGET_KERNEL_PCT="${PHASE_BUDGET_KERNEL_PCT:-}"
 export PHASE_BUDGET_SWEEP_PCT="${PHASE_BUDGET_SWEEP_PCT:-}"
 export PHASE_BUDGET_CLOSE_PCT="${PHASE_BUDGET_CLOSE_PCT:-}"
@@ -318,12 +317,11 @@ OPT_FLAGS=(
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
 [ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
 [ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
-[ -n "${PHASE_BUDGET_EXPLORE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-explore-pct "$PHASE_BUDGET_EXPLORE_PCT")
 [ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
 [ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
 [ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
-[ "${NO_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-explore)
+[ "${NO_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)

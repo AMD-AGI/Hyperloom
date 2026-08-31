@@ -416,7 +416,7 @@ class CapabilityEntry(TypedDict, total=False):
     best_gain_pct: float | None
     reason: str  # human readable, e.g. "geak backend only this run"
     # explore-specific:
-    keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
+    keep_unstable_count: int  # Pre-removal sessions only: KEEP'd variants a confirmation round evicted
     winners_history: int  # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split keyed by SpecialistDomain.key;
     # every catalogue domain is seeded not_attempted for presence-free iteration.
@@ -1346,7 +1346,7 @@ class PhaseBreakdown(TypedDict, total=False):
     Attributes:
         prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
         framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
-        explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
+        explore (PhaseBreakdownExplore): Configuration-lever gain by domain.
         kernel_agent (PhaseBreakdownKernel): KERNEL_AGENT phase gain by
             ``kernel_id``. Unlike ``framework``, which the producer normalizes
             down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
@@ -1379,6 +1379,13 @@ class Attribution(TypedDict, total=False):
             ``single_source`` / ``reconstructed`` / ``missing``).
         source_breakdown (SourceBreakdown): Gain split by contributing source.
         phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
+        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``:
+            ``config`` (server args / envs), ``source_patch`` (a diff a
+            specialist wrote), ``upstream_pr`` (a diff fetched from a PR),
+            ``enablement`` (graded on runnability, not throughput) and
+            ``kernel`` (a tuned or authored kernel). ``unattributed`` collects
+            gain no stamp claimed. Two levers share the optimisation phase, so
+            the lever -- not the phase that was live -- says which earned it.
         notes (list[str]): Human-readable caveats about the attribution.
     """
 
@@ -1387,6 +1394,7 @@ class Attribution(TypedDict, total=False):
     method: str
     source_breakdown: SourceBreakdown
     phase_breakdown: PhaseBreakdown
+    lever_breakdown: dict[str, float]
     notes: list[str]  # human-readable caveats
 
 
@@ -1399,7 +1407,7 @@ class PhaseSegment(TypedDict, total=False):
 
     Attributes:
         phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_AGENT`` /
-            ``EXPLORE`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
+            ``FRAMEWORK_AGENT`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
         from_phase (str): Previous phase (empty for the first segment).
         entered_ts (str): ISO UTC timestamp of entry.
         entered_unix (float | None): Unix time of entry, or None.
@@ -1410,7 +1418,7 @@ class PhaseSegment(TypedDict, total=False):
         elapsed_seconds (float | None): Segment duration in seconds, or None.
     """
 
-    phase: str  # PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE
+    phase: str  # PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE
     from_phase: str  # previous phase (empty for first segment)
     entered_ts: str  # iso UTC of entry
     entered_unix: float | None
@@ -2389,7 +2397,7 @@ class TokenUsage(TypedDict, total=False):
         by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
             (orchestration / kernel / critic / specialist / proposal_scorer / ...).
         by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
-            (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / ...).
+            (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...).
         attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
         timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
             their token spend joined on ``task_id``.
@@ -2602,7 +2610,6 @@ class EnablementBreakdown(TypedDict, total=False):
         localization_manifest: Files the localization pass identified.
         build_novelty: Novelty keys of the targeted builds requested.
         human_review_count: Number of logs parked for human review.
-        stack_actions: Candidate stack actions considered this session.
         active_runtime: The currently-promoted attempt runtime, or {} when none.
         attempt_runtimes: Retained attempt-runtime records (capped).
         failure_kind: Last classified enablement failure kind.
@@ -2652,7 +2659,6 @@ class EnablementBreakdown(TypedDict, total=False):
     localization_manifest: list[str]
     build_novelty: list[str]
     human_review_count: int
-    stack_actions: list[EnablementStackActionSummary]
     active_runtime: EnablementAttemptRuntime
     attempt_runtimes: list[EnablementAttemptRuntime]
     failure_kind: str

@@ -47,13 +47,11 @@ def _args(**overrides):
         plateau_kernel_revert_streak=3,
         plateau_kernel_keep_gain=2.5,
         plateau_kernel_lookback=5,
-        explore_force_exit_budget_pct=0.2,
         explore_overtime_kill_ratio="bad",
         explore_variant_timeout_sec="bad",
         explore_variant_timeout_safety_margin="bad",
         enable_roofline=False,
         no_framework_agent=True,
-        no_explore=True,
         research_scout=False,
         research_scout_interval=0,
         target_advisory=False,
@@ -135,8 +133,8 @@ def test_seed_shared_state_populates_geak_and_cli_overrides(
     assert state.explore_overtime_kill_ratio == 2.0
     assert state.explore_variant_timeout_sec_override == 0
     assert state.explore_variant_timeout_safety_margin == 0.5
+    # One switch for the one phase.
     assert state.framework_agent_phase_enabled is False
-    assert state.explore_enabled is False
     assert state.conc_sweep_concs == [1, 4, 8]
     assert state.conc_sweep_total_budget_sec == 120
     assert state.conc_sweep_variant_timeout_sec == 30
@@ -164,6 +162,48 @@ def test_seed_shared_state_records_custom_workload_paths(
     assert state.bypass_scripts_dir == "/scripts"
     assert state.framework_repo_path == "/fw"
     assert state.benchmark_backend == "bypass"
+
+
+def _neutralize_seed_io(monkeypatch):
+    """Stub the model/recipe reads so a seed can be asserted on one field."""
+    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
+    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
+    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
+    from hyperloom.orchestrator.policy import gate as policy
+
+    monkeypatch.setattr(policy, "detect_gpu_count", lambda: 1)
+    monkeypatch.setattr(policy, "research_lane_ceiling", lambda: 1)
+
+
+def test_seed_records_the_launch_verdict_for_the_partition_shape(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """The verdict carries provenance the published env cannot express.
+
+    ``published_shape()`` reads back mode, count, CU and streams, but nothing
+    that says the CU count was probed from the device rather than derived from
+    the board table. Re-reading the env therefore reported a fresh launch's
+    probed count as a table guess, which is the one thing the section is for.
+    """
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "CPX", "cu_per_partition": 32})
+
+    verdict = {"mode": "CPX", "partitions": 8, "cu_per_partition": 32, "cu_probed": True}
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-shape", compute_partition=verdict)
+
+    assert state.compute_partition == verdict
+
+
+def test_seed_falls_back_to_the_published_shape_when_handed_no_verdict(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _neutralize_seed_io(monkeypatch)
+    monkeypatch.setattr(cb, "published_shape", lambda: {"mode": "DPX"})
+
+    state = cb._seed_shared_state(tmp_path, _args(), session_id="s-fallback")
+    assert state.compute_partition == {"mode": "DPX"}
 
 
 def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(

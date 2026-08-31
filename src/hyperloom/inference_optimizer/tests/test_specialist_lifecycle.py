@@ -439,7 +439,7 @@ def force_coord(tmp_path: Path):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState()
-    c.shared_state.phase = "EXPLORE"
+    c.shared_state.phase = "FRAMEWORK_AGENT"
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
 

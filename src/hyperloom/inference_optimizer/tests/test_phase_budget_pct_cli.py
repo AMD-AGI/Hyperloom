@@ -84,8 +84,6 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
         "0.05",
         "--phase-budget-framework-pct",
         "0.20",
-        "--phase-budget-explore-pct",
-        "0.30",
         "--phase-budget-kernel-pct",
         "0.40",
         "--phase-budget-sweep-pct",
@@ -97,7 +95,6 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
     normalized = normalize_budget_pct(cli._build_phase_budget_pct(args))
     assert normalized["PRELUDE"] == pytest.approx(0.05)
     assert normalized[PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
-    assert normalized["EXPLORE"] == pytest.approx(0.30)
     assert normalized[PHASE_KERNEL_AGENT] == pytest.approx(0.40)
     assert normalized["SWEEP"] == pytest.approx(0.15)
     assert normalized["CLOSE"] == pytest.approx(0.03)
@@ -106,22 +103,21 @@ def test_all_phase_budget_pct_spellings_parse() -> None:
 def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
     """The 3h demo budget stays normalized after disabling framework/kernel.
 
-    The demo passes explicit EXPLORE/SWEEP caps because disabled phase shares are
-    redistributed onto the remaining work phases. A lone EXPLORE=0.95 override
-    would combine with defaults to over-budget after redistribution.
+    The demo passes explicit optimisation/SWEEP caps because disabled phase
+    shares are redistributed onto the remaining work phases; a lone 0.95
+    override would combine with defaults to over-budget after redistribution.
 
     The two literals below MUST stay in lockstep with the flags documented in
     ``examples/hyperloom-qwen3-8b-3h/SKILL.md``: they are chosen so the demo's
     overrides plus the *defaults* for the phases it does not override still sum
-    to exactly 1.0. EXPLORE moved 0.46 -> 0.39 when KERNEL's default share went
-    0.28 -> 0.35 (and SWEEP's 0.12 -> 0.05).
+    to exactly 1.0, so they move whenever a default they lean on moves.
     """
     args = _parse_optimize(
         [
             "--max-hours",
             "3",
-            "--max-minutes-explore-pct",
-            "0.39",
+            "--max-minutes-framework-pct",
+            "0.44",
             "--max-minutes-sweep-pct",
             "0.01",
             "--no-framework-agent",
@@ -134,16 +130,15 @@ def test_qwen3_8b_3h_no_kernel_budget_shape() -> None:
 
     out = redistribute_budget_pct(
         normalized,
-        explore_enabled=not args.no_explore,
         kernel_enabled=not args.no_kernel,
-        framework_enabled=not args.no_framework_agent,
+        optimize_enabled=not args.no_framework_agent,
     )
     assert out[PHASE_FRAMEWORK_AGENT] == 0.0
     assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == pytest.approx(0.03)
     assert out["CLOSE"] == pytest.approx(0.02)
-    assert out["EXPLORE"] == pytest.approx(0.92625)
-    assert out["SWEEP"] == pytest.approx(0.02375)
+    # SWEEP is the only work phase left, so it absorbs both freed shares.
+    assert out["SWEEP"] == pytest.approx(0.95)
     assert sum(out.values()) == pytest.approx(1.0)
 
 
@@ -164,13 +159,12 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
     PRELUDE/CLOSE are fixed overhead and must not absorb; the total is preserved.
     """
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    out = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
-    assert out["EXPLORE"] == 0.0
+    out = redistribute_budget_pct(base, kernel_enabled=False, optimize_enabled=True)
+    assert out[PHASE_KERNEL_AGENT] == 0.0
     assert out["PRELUDE"] == base["PRELUDE"]
     assert out["CLOSE"] == base["CLOSE"]
-    # Freed EXPLORE share landed on the enabled work phases.
+    # Freed KERNEL share landed on the enabled work phases.
     assert out[PHASE_FRAMEWORK_AGENT] > base[PHASE_FRAMEWORK_AGENT]
-    assert out[PHASE_KERNEL_AGENT] > base[PHASE_KERNEL_AGENT]
     assert out["SWEEP"] > base["SWEEP"]
     assert sum(out.values()) == pytest.approx(sum(base.values()))
 
@@ -178,13 +172,7 @@ def test_redistribute_disabled_phase_share_goes_to_work_phases() -> None:
 def test_redistribute_all_enabled_is_noop_and_idempotent() -> None:
     """No disabled phase → unchanged; re-running never drifts."""
     base = dict(DEFAULT_PHASE_BUDGET_PCT)
-    once = redistribute_budget_pct(base, explore_enabled=True, kernel_enabled=True, framework_enabled=True)
+    once = redistribute_budget_pct(base, kernel_enabled=True, optimize_enabled=True)
     assert once == base
-    twice = redistribute_budget_pct(
-        redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True),
-        explore_enabled=False,
-        kernel_enabled=True,
-        framework_enabled=True,
-    )
-    single = redistribute_budget_pct(base, explore_enabled=False, kernel_enabled=True, framework_enabled=True)
-    assert twice == single
+    twice = redistribute_budget_pct(once, kernel_enabled=True, optimize_enabled=True)
+    assert twice == once

@@ -8,7 +8,7 @@
 """Producer for the model-agnostic ``TraceShapeManifest`` (P0-A / WP-1).
 
 The manifest is the frozen contract consumed by the Trace->CSV tuning loop
-(KernelForge ``forge_gemm_tune``). Unlike the existing hot-kernel candidate
+(KernelForge ``kernelforge.gemm_tune``). Unlike the existing hot-kernel candidate
 lists (which *collapse* dtype/shape variants and *discard* CUDA-graph capture
 shards), this producer keeps a **variant-discriminating signature** per row and
 weights each row by its steady-state replay time.
@@ -71,7 +71,7 @@ _OP_RULES: tuple[tuple[str, "re.Pattern[str]"], ...] = (
 #: GEMM-family ops -> ``is_gemm`` (broad coverage denominator).
 _GEMM_FAMILY = frozenset({"gemm", "moe"})
 
-#: dtype tokens a forge_gemm_tune tuner can address today (best-effort match on
+#: dtype tokens a kernelforge.gemm_tune tuner can address today (best-effort match on
 #: the Kineto ``Input type`` strings). Refined further on the consumer side.
 _TUNER_DTYPE_RE = re.compile(
     r"bf16|bfloat16|fp16|float16|half|fp8|float8|e4m3|e5m2|fp4|float4|f8|f4",

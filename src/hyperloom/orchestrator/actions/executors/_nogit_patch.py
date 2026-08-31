@@ -3,7 +3,7 @@
 
 """Shared non-git patch apply / revert primitives.
 
-Lets the EXPLORE specialist executor and the FRAMEWORK-phase per-candidate
+Lets the specialist and upstream-PR patch
 executor share one backup-based apply/revert channel without git.
 
 Public surface

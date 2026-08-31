@@ -173,7 +173,11 @@ The following variables are exported on the sandbox side before calling `optimiz
 | `MAGPIE_PATH` | Magpie checkout path under `${NFS_SHARED_ROOT}` |
 | `TRACELENS_ROOT` | TraceLens checkout path under `${NFS_SHARED_ROOT}` |
 | `SGLANG_DISAGGREGATION_*_TIMEOUT` | PD bootstrap and wait timeouts (Workload A only) |
-| `FORGE_PATH` | Kernel-Forge checkout for the Forge kernel backend (Workload B only) |
+
+Forge is not in that list and does not need to be: it ships inside the Hyperloom
+wheel, so there is no checkout to export. `FORGE_PATH` is removed. Set
+`KERNELFORGE_PROJECT_ROOT` only to point forge's writable state, or a resource
+override, somewhere other than the default.
 
 Do not set `HYPERLOOM_MN_EXT_*` variables or `USER_DATA_PATH` — the platform
 injects those.

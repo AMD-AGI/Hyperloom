@@ -20,6 +20,7 @@ from hyperloom.orchestrator.policy.gate import (
     SPECIALIST_FREEFORM_TASK_DESC_MAX_CHARS,
     SPECIALIST_FREEFORM_WAVE_MAX,
 )
+from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
 from hyperloom.orchestrator.specialists.profile import (
     DEFAULT_BENCH,
     DEFAULT_LANE,
@@ -742,8 +743,13 @@ def test_dispatch_with_garbage_tag_allowed(gate, orchestration_role):
     )
 
 
-def test_specialist_emit_hint_lists_all_eight_llm_domains():
-    """The specialist emit hint must enumerate all 8 LLM-selectable domains."""
+def test_specialist_emit_hint_lists_every_llm_selectable_domain():
+    """The hint must name every domain Orchestration is allowed to pick.
+
+    Derived from the registry: a domain added without appearing in the hint is
+    one the LLM can never choose, and one listed but not selectable is an
+    invitation PolicyGate will refuse.
+    """
     from types import SimpleNamespace
 
     from hyperloom.orchestrator.prompts.prompt_builder import (
@@ -752,17 +758,12 @@ def test_specialist_emit_hint_lists_all_eight_llm_domains():
 
     # _format_emit_hint only reads meta.name.
     hint = _format_emit_hint(SimpleNamespace(name="specialist"))
-    for key in (
-        "serving_specialist",
-        "kernel_switch_specialist",
-        "comm_specialist",
-        "compiler_specialist",
-        "system_specialist",
-        "pr_intel_specialist",
-        "research_scout_specialist",
-        "static_recon_specialist",
-    ):
+    selectable = [d.key for d in SPECIALIST_DOMAINS if d.llm_selectable]
+    assert selectable
+    for key in selectable:
         assert key in hint, key
+    for key in (d.key for d in SPECIALIST_DOMAINS if not d.llm_selectable):
+        assert key not in hint, key
 
 
 # --------------------------------------------------------------------------- #
@@ -809,10 +810,11 @@ def test_research_default_mode_domain_resolves_to_research():
     """Domains with default_mode='research' yield mode=research when no explicit mode is given."""
     from hyperloom.orchestrator.specialists.domains import get_domain
 
-    for key in ("research_scout_specialist", "static_recon_specialist", "pr_intel_specialist"):
+    research_keys = [d.key for d in SPECIALIST_DOMAINS if d.default_mode == "research"]
+    assert research_keys, "the registry declares no research-mode domain"
+    for key in research_keys:
         domain = get_domain(key)
         assert domain is not None
-        assert domain.default_mode == "research"
         profile = resolve_specialist_profile({"domain": key}, domain=domain)
         assert profile.mode == MODE_RESEARCH, f"{key} should resolve to research mode"
         assert profile.lane == LANE_CPU, f"{key} should resolve to cpu lane"

@@ -525,6 +525,8 @@ def collect_capability_summary(
                 default=None,
             )
         _fold_search_ledger_keeps(explore, explore_search)
+        # Only a session recorded before the confirmation round was removed
+        # carries these rows; the reader stays so its report still renders.
         keep_unstable_count = sum(
             1
             for entry in (explore_search.get("rejected") or [])
@@ -681,7 +683,7 @@ _SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
     "comm_specialist",
     "compiler_specialist",
     "system_specialist",
-    "pr_intel_specialist",
+    "candidate_discovery_specialist",
     "research_scout_specialist",
 )
 

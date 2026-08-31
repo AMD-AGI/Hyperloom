@@ -69,9 +69,18 @@ class ApplyVerdict:
 def _parse(server_log: Path) -> dict | None:
     """Parse the serving log with forge's evidence module, if it is installed."""
     try:
-        from forge_gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
-        log.info("forge_gemm_tune not importable; apply verification unavailable")
+        # Warning, not info: kernelforge ships in this same wheel, so an
+        # ImportError here is a broken install rather than a supported
+        # configuration. At info level the run silently loses apply
+        # verification and looks identical to one where it passed.
+        log.warning(
+            "kernelforge.gemm_tune is not importable, so apply verification is "
+            "skipped for this run -- it ships with Hyperloom, so this means an "
+            "incomplete install; reinstall with the forge extra "
+            '(pip install -e ".[forge]")'
+        )
         return None
     try:
         return parse_log_file(server_log)
