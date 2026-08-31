@@ -210,13 +210,21 @@ def test_redact_secret_values_spares_tokenizer_and_max_tokens():
         '--max-tokens="4096"',
         "num_speculative_tokens=5",
         "TOKENIZERS_PARALLELISM=false",
+        "eos_string=</s>,max_retries=5,tokenized_requests=False,max_length=13312",
+        "HYPERLOOM_EVAL_BOUNDS max_tokens=4096 stop_token_ids=[154820, 154827, 154829]",
+        "token_budget=128",
+        "tokens_per_second=12.3",
     ):
         assert common_env_safety.redact_secret_values(text) == text
 
-    still_secret = common_env_safety.redact_secret_values('HF_TOKEN=abc ANTHROPIC_AUTH_TOKEN="tok-abcdef"')
+    still_secret = common_env_safety.redact_secret_values(
+        'HF_TOKEN=abc HF_TOKEN_2=def ANTHROPIC_AUTH_TOKEN="tok-abcdef" api_key=real-secret'
+    )
     assert "abc" not in still_secret
+    assert "def" not in still_secret
     assert "tok-abcdef" not in still_secret
-    assert still_secret.count("[REDACTED]") == 2
+    assert "real-secret" not in still_secret
+    assert still_secret.count("[REDACTED]") == 4
 
 
 def test_redact_secret_values_masks_aws_key_and_jwt_shapes():

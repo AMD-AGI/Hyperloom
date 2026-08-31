@@ -92,18 +92,22 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     # the quoting intact; folding it into the value class instead would end the
     # match on the first quote and leave the secret readable.
     #
-    # ``TOKEN(?!IZER|S\b)`` keeps tokenizer / max-tokens / num_speculative_tokens
-    # out of the name class: those are workload knobs, not credentials, and
-    # ``_SECRET_FRAGMENT_EXEMPTIONS`` already carves ``TOKENIZER`` out of the
-    # env-name classifier for the same reason. A backslash is only excluded
+    # ``TOKEN`` is a suffix of the identifier (optional ``_`` + digits so
+    # ``HF_TOKEN_2`` still matches), not a substring. A negative lookahead
+    # for IZER / TOKENS still left ``tokenized_requests`` and
+    # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
+    # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
+    # worse than leaving the knob readable. ``API_KEY`` / ``SECRET`` /
+    # ``PASSWORD`` / ``CREDENTIAL`` still allow trailing name characters, so
+    # ``AWS_SECRET_ACCESS_KEY`` is unchanged. A backslash is only excluded
     # from the value when it precedes a quote, so a JSON-escaped closer is
     # left in place (the quoting stays balanced) while ``PASSWORD=C:\foo``
     # is still masked whole.
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:API_?KEY|TOKEN(?!IZER|S\b)|SECRET|PASSWORD|CREDENTIAL)"
-            r"[A-Z0-9_]*\s*[=:]\s*)"
+            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"\s*[=:]\s*)"
             r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
         r"\1\2[REDACTED]",
