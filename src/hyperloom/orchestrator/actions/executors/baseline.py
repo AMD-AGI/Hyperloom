@@ -30,6 +30,7 @@ from typing import Any, Mapping
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
@@ -751,87 +752,6 @@ def _is_double_run_accuracy_handoff(
     return _WARMUP_ROUND_DIR in Path(source).parts
 
 
-# Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
-# mount flap), where a process whose cwd lives on such a mount sees relative-path
-# writes ENOENT. Such FS types trigger local mirroring of the InferenceX
-# checkout (the server's cwd for its cuda-graph pickle dump).
-_NETWORK_FS_TYPES = frozenset(
-    {
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "lustre",
-        "glusterfs",
-        "ceph",
-        "fuse.weka",
-        "wekafs",
-        "wekafsgw",
-        "fuse.juicefs",
-        "fuse.s3fs",
-        "fuse.sshfs",
-        "9p",
-    }
-)
-
-
-def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
-
-    Picks the longest mountpoint that is a prefix of the resolved path.
-    Returns ``""`` when it cannot be determined (non-Linux, unreadable
-    ``/proc/mounts``, ...), which callers treat as "assume local".
-
-    Args:
-        path: Filesystem path whose backing mount type is resolved.
-
-    Returns:
-        The filesystem type backing ``path``, or ``""`` when it cannot be
-        determined.
-    """
-    try:
-        rp = os.path.realpath(path)
-    except OSError:
-        return ""
-    best_mp = ""
-    best_type = ""
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # /proc/mounts octal-escapes spaces in the mountpoint.
-                try:
-                    mp = parts[1].encode("latin-1").decode("unicode_escape")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    mp = parts[1]
-                fstype = parts[2]
-                norm = mp.rstrip("/") or "/"
-                if norm == "/":
-                    is_under = True  # root matches everything (lowest priority)
-                else:
-                    is_under = rp == norm or rp.startswith(norm + "/")
-                if is_under and len(norm) >= len(best_mp):
-                    best_mp = norm
-                    best_type = fstype
-    except OSError:
-        return ""
-    return best_type
-
-
-def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem.
-
-    Args:
-        path: Filesystem path to classify.
-
-    Returns:
-        ``True`` when ``path`` lives on a known network filesystem type.
-    """
-    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
-
-
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     """Mirror an InferenceX checkout onto stable local disk.
 
@@ -872,7 +792,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     ):
         return src
     try:
-        if not _is_network_fs(src):
+        if not is_network_fs(src):
             return src
     except Exception:  # noqa: BLE001 — detection is best-effort
         return src
@@ -1208,11 +1128,34 @@ def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
 
 
 def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets."""
+    """Return the framework root whose tree holds the warm-replay patch targets.
+
+    A Recipe records the root each patch was applied into. Records written before
+    that field existed carry none, and only those fall back to probing the
+    patch text against the allowlist.
+    """
     if not params.get("patches"):
         return ""
-    from .integrate_patch import _resolve_framework_root
+    from ...framework.paths import resolve_source_file_allowlist
+    from .integrate_patch import _resolve_framework_root, allowlisted_explicit_root
 
+    recorded = {
+        str(entry.get("framework_root") or "").strip()
+        for entry in params["patches"]
+        if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
+    }
+    if len(recorded) == 1:
+        sole = recorded.pop()
+        allowed = allowlisted_explicit_root(sole, allowlist=resolve_source_file_allowlist())
+        if allowed is not None:
+            return str(allowed)
+        reason = f"recorded apply root {sole!r} is not usable"
+    elif recorded:
+        reason = f"patches record {len(recorded)} apply roots"
+    else:
+        reason = "no recorded apply root"
+
+    log.info("warm replay: %s; resolving from patch targets", reason)
     root = _resolve_framework_root(
         resolve_session_framework_root() or None,
         patch_texts=_patch_texts_from_warm_params(params),
@@ -3392,7 +3335,7 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision, stack_rebench, and their grading anchor) are
+            # explore decision and their grading anchor) are
             # measured with a warm prefix cache, keeping them mutually
             # comparable. Carryover is config-dependent (tracks KV-block
             # capacity) and is not a uniform offset.
@@ -3767,7 +3710,7 @@ class BaselineExecutor:
         """Whether baseline double-run is enabled.
 
         Public CLI/env controls are intentionally unsupported. The session
-        default is on so EXPLORE warm-decision compares hot candidates against a
+        default is on so the warm decision compares hot candidates against a
         hot baseline. Internal callers may pass
         ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
         set the session state directly.

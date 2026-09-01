@@ -163,6 +163,7 @@ _EFFORT_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_EFFORT"
 _EFFORT_ENV_ORCH: str = "INFERENCE_OPTIMIZER_CLAUDE_ORCHESTRATION_EFFORT"
 _EFFORT_ENV_KERNEL: str = "INFERENCE_OPTIMIZER_CLAUDE_KERNEL_EFFORT"
 _THINKING_ENV: str = "INFERENCE_OPTIMIZER_CLAUDE_THINKING"
+_CLI_PATH_ENV: str = "HYPERLOOM_CLAUDE_CLI_PATH"
 _VALID_EFFORT: frozenset[str] = frozenset({"low", "medium", "high", "xhigh", "max"})
 
 
@@ -214,6 +215,12 @@ class ClaudeBackend:
     raw_completion: bool = False
     # Role's allowed intent set for the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
+    # Attribution labels for the spend this backend's turns produce. One class
+    # serves several roles -- ``executors`` reuses it for in-process specialists
+    # -- so a fixed label would file their spend under orchestration and leave
+    # the rollup unable to tell the two apart. Defaults keep the orchestrator's.
+    attribution_component: str = "orchestration"
+    attribution_operation: str = "orchestrate_turn"
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
     # streamed SDK messages before the turn is aborted. Env override:
     # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
@@ -758,6 +765,9 @@ class ClaudeBackend:
         kwargs: dict[str, Any] = {"max_turns": max_turns}
         if self.model:
             kwargs["model"] = self.model
+        cli_path = os.environ.get(_CLI_PATH_ENV, "").strip()
+        if cli_path:
+            kwargs["cli_path"] = cli_path
         if system_prompt:
             kwargs["system_prompt"] = system_prompt
         if resume_session_id:
@@ -805,7 +815,13 @@ class ClaudeBackend:
         env to the SDK subprocess and disable settings sources so the run is
         hermetic (Claude Code otherwise reads ``~/.claude`` config).
         """
-        kwargs.update(claude_sdk_env_options(model=self.model))
+        kwargs.update(
+            claude_sdk_env_options(
+                model=self.model,
+                component=self.attribution_component,
+                operation=self.attribution_operation,
+            )
+        )
 
     def _apply_effort_options(self, kwargs: dict[str, Any]) -> None:
         """Add env-driven reasoning effort + adaptive thinking to the options.

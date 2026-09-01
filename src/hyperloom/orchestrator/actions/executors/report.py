@@ -400,13 +400,19 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
     "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
-    "explore_force_exit_low_budget": "EXPLORE force-exited: it had spent its own phase budget down to the force-exit threshold.",
+    "optimize_no_more_leverage": (
+        "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
+    ),
+    "optimize_phase_budget_exhausted": "OPTIMIZE spent its phase budget.",
+    "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
+    # Retired reason names, kept so a report over an archived session still
+    # explains what it is reading.
+    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",
@@ -562,6 +568,9 @@ def _build_summary_dict(
         # Degraded-mode advisory: benchmark numbers reflect the text path only.
         "degraded_mode": bool(getattr(state, "degraded_mode", False)),
         "model_warnings": list(getattr(state, "model_warnings", None) or []),
+        # The card's partition shape these numbers were measured in. A property
+        # of the session, not a result of it.
+        "compute_partition": dict(getattr(state, "compute_partition", None) or {}),
     }
     if external_baseline:
         summary["external_baseline"] = external_baseline
@@ -631,7 +640,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- current_best        : `{framework_registry.format_primary_metric(_fw, cb_tput)}` "
             f"(action=`{cb.get('action', '?')}`)"
         )
-    # Printed even when never validated, so a missing rebench is stated, not implied.
+    # Printed even when never validated, so the absence is stated, not implied.
     val_gain = summary.get("cumulative_gain_validated", 0.0) or 0.0
     val_ts = summary.get("cumulative_gain_validated_ts") or ""
     val_len = summary.get("cumulative_gain_validated_stack_len", 0) or 0
@@ -647,7 +656,7 @@ def _format_md(summary: dict[str, Any]) -> str:
             f"- cumulative_gain_val : `{val_gain:.2f}%` (validated_at_stack_len={val_len}, ts=<missing>){stale}"
         )
     else:
-        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — no full-stack rebench ran in this session")
+        lines.append("- cumulative_gain_val : `0.00%` ⚠ never validated — nothing has promoted in this session")
     if cb.get("ttft_mean_ms") is not None:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
@@ -717,6 +726,7 @@ def _format_md(summary: dict[str, Any]) -> str:
     lines.append("")
 
     lines.extend(_format_degraded_mode_section(summary))
+    lines.extend(_format_compute_partition_section(summary))
 
     roofline_cmp = summary.get("roofline_comparison")
     if roofline_cmp:
@@ -765,6 +775,71 @@ def _format_degraded_mode_section(summary: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
+    """State the compute-partition shape these numbers were measured in.
+
+    Only rendered for a partitioned card. An unpartitioned card is what every
+    other report in the corpus describes, so saying so on all of them would be
+    noise; a split card is the exception that changes how the numbers compare,
+    and it says so where someone reading two reports side by side will see it.
+
+    Args:
+        summary: The summary payload built by :func:`_build_summary_dict`.
+
+    Returns:
+        Markdown lines, or ``[]`` when the card was whole or unknown.
+    """
+    shape = summary.get("compute_partition") or {}
+    partitions = int(shape.get("partitions") or 0)
+    if not shape.get("mode") or partitions <= 1:
+        return []
+    streams = int(shape.get("streams_per_partition") or 0)
+    lines = ["## Compute partitioning", ""]
+    lines.append(
+        f"This card was split into {partitions} partitions (`{shape['mode']}`), so these "
+        f"numbers are not comparable with an unpartitioned run of the same configuration."
+    )
+    lines.append("")
+    lines.append(f"- mode              : `{shape['mode']}` ({partitions} partitions)")
+    if shape.get("cu_per_partition"):
+        # Absent is its own answer. The published environment cannot carry the
+        # provenance flag, so a shape recovered from it knows the count but not
+        # where it came from -- and reporting that as the board table would be
+        # the exact false provenance this section exists to prevent.
+        probed = shape.get("cu_probed")
+        origin = "" if probed is None else (" (from the device)" if probed else " (derived from the board table)")
+        lines.append(f"- CU per partition  : {shape['cu_per_partition']}{origin}")
+    if shape.get("gib_per_partition"):
+        lines.append(f"- HBM per partition : `{float(shape['gib_per_partition']):.1f}` GiB")
+    # Omitted where nothing fans out: the number would describe a placement that
+    # never happened, directly above a paragraph saying it did not.
+    if streams and shape.get("fanout_expected") is not False:
+        lines.append(f"- streams/partition : {streams} ({streams * partitions} concurrent streams total)")
+    lines.append("")
+    if shape.get("fanout_expected") is False:
+        lines.append(
+            f"**This session's benchmark does not place work on individual partitions.** The "
+            f"throughput is therefore one device's, not the total across all {partitions}, and "
+            f"which device it was is not recorded here -- whole cards enumerate before "
+            f"partitions, so it may be a whole card or a single partition."
+        )
+    else:
+        lines.append(
+            f"Whether the throughput is one partition's or the total across all {partitions} "
+            f"depends on the benchmark placing work on each of them. The shape above is read "
+            f"from the card, but the fan-out is not this process's to do, and it cannot be "
+            f"verified from here -- so do not read the figure as an aggregate unless the "
+            f"benchmark entrypoint is known to fan out."
+        )
+    lines.append("")
+    lines.append(
+        "Partitioning only ever gives a single stream fewer CUs, so per-request latency "
+        "is worse here than on the whole card by construction."
+    )
+    lines.append("")
+    return lines
+
+
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     """Render honesty annotations for work left unfinished (unvalidated
     KEEPs, untried hot kernels, KEEPs awaiting integrate).
@@ -785,7 +860,7 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
     if unvalidated:
         lines.append(
             "- ⚠ `optimization_stack` has KEEPs landed since the last "
-            "full-stack rebench — `cumulative_gain_validated` does not "
+            "validated measurement — `cumulative_gain_validated` does not "
             "yet reflect them (unvalidated)."
         )
     if pending_keeps:

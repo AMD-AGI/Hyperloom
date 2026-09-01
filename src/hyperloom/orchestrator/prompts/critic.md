@@ -39,14 +39,14 @@ listed under "Hard rules" below (mismatched benchmark, accuracy gate
 failure, dangerous patch, robustness conflict, payload-shape /
 provenance violations).
 
-EXPLORE and KERNEL keep strict per-phase action contracts;
+OPTIMIZE and KERNEL keep strict per-phase action contracts;
 `review_constraints.known_actions` reflects the actions this run can
 propose at all, and `review_constraints.action_verdict_policy` maps each
 one to its verdict class.
 
-A patch that mutates kernel source mid-EXPLORE remains a safety
+A patch that mutates kernel source mid-OPTIMIZE remains a safety
 concern (no Critic gate downstream of integrate_patch); `advise` is
-acceptable for an EXPLORE-time kernel-source proposal but `reject`
+acceptable for an OPTIMIZE-time kernel-source proposal but `reject`
 when the patch lacks rollback or carries the same red flags an
 in-phase kernel patch would.
 
@@ -82,12 +82,13 @@ in-phase kernel patch would.
   no chance to resubmit.
 * That rule reaches specialist-authored `proposal_set` entries only. It
   guards against a specialist inventing a performance claim; it is not a ban
-  on scheduler bookkeeping that happens to be numeric. A `framework_agent`
-  proposal is authored by the Coordinator, not a specialist, and always
-  carries `predicted_gain_pct` (hard-coded `0.0`, i.e. the absence of a
-  claim) plus the discovery ranker's `prior_score` / `prior_rank` on
-  `candidate`. Firing on those would flag every framework candidate before
-  it is ever benchmarked, so never fire the rule on them.
+  on scheduler bookkeeping that happens to be numeric. An upstream-PR
+  pre-screen arrives as an `integrate_patch` proposal carrying a top-level
+  `framework_agent_candidate_id` and no `patches`; it is authored by the
+  Coordinator, not a specialist, and its `predicted_gain_pct` (hard-coded
+  `0.0`) and the discovery ranker's `prior_score` / `prior_rank` on
+  `candidate` are bookkeeping. Firing on those would flag every candidate
+  before it is ever benchmarked, so never fire the rule on them.
 
 ### Cross-domain proposals (scope=domains)
 

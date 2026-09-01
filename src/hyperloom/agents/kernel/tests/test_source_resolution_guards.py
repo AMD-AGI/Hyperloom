@@ -206,7 +206,7 @@ def test_successful_grep_replaces_a_prior_rejection_method(monkeypatch):
     )
     item = {"name": "k", "source_file": "Not found", "duration_us": 1.0}
 
-    got = tl._finalize_candidates([item], allow_model_tiers=False)[0]
+    got = tl._finalize_candidates([item])[0]
 
     assert got["source_file"] == "/repo/pkg/kernel.py"
     assert got["source_resolution_method"] == "name_grep"
@@ -466,7 +466,6 @@ def test_trace_launcher_caller_does_not_override_grep_definition(
     got = tl._finalize_candidates(
         [_wiring_candidate()],
         trace_files=[_wiring_trace(tmp_path, f"{launcher}(42): launch")],
-        allow_model_tiers=False,
     )[0]
 
     assert got["source_file"] == definition
@@ -477,28 +476,112 @@ def test_trace_launcher_caller_does_not_override_grep_definition(
     assert "trace launcher differs from grep source" in got["source_resolution_reason"]
 
 
-def test_unconfirmed_trace_launcher_continues_to_model_fallback(
+def test_grep_prefers_defining_module_over_reexporting_init(monkeypatch, tmp_path):
+    """A package ``__init__`` that re-exports a kernel is not its source.
+
+    The re-exporter scores well on path shape alone, so plain ranking put it
+    ahead of the module holding the ``@triton.jit`` body and handed a backend a
+    file with no kernel in it.
+    """
+    pkg = tmp_path / "pkg" / "kernels" / "linear"
+    (pkg / "mxfp8").mkdir(parents=True)
+    (pkg / "__init__.py").write_text(
+        'from .mxfp8.rocm_native import _mxfp8_linear_kernel\n\n__all__ = ["_mxfp8_linear_kernel"]\n',
+        encoding="utf-8",
+    )
+    definition = pkg / "mxfp8" / "rocm_native.py"
+    definition.write_text(
+        "import triton\n\n\n@triton.jit\ndef _mxfp8_linear_kernel(a, b):\n    pass\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
+
+    assert tl.locate_source_via_grep("_mxfp8_linear_kernel") == str(definition)
+
+
+def test_grep_resolves_a_name_an_fstring_assembled_at_runtime(monkeypatch, tmp_path):
+    """Only the head of an f-string-built kernel name is literal in source.
+
+    aiter's MoE GEMMs launch as ``mfma_moe1_silu_mul_afp8_wfp8_bf16_...`` but
+    are written ``f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"``, so both
+    the whole-name pass and the trailing sub-window pass search text that is
+    never written down, and the hottest kernels on the trace resolved to
+    nothing.
+    """
+    root = tmp_path / "aiter" / "ops" / "flydsl" / "kernels"
+    root.mkdir(parents=True)
+    composer = root / "mixed_moe_gemm_2stage.py"
+    composer.write_text(
+        'name = f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
+
+    launched = "mfma_moe1_silu_mul_afp8_wfp8_bf16_t32x128x256_pm1_swiglu_v32"
+    assert tl.locate_source_via_grep(launched) == str(composer)
+
+
+def test_grep_prefers_the_file_that_spells_out_more_of_a_composed_name(
     monkeypatch,
     tmp_path,
 ):
-    """An unconfirmed launcher must leave source empty for the next tier."""
-    fallback_calls = []
+    """Sibling f-strings share a short prefix; characters break the tie.
 
-    def _record_fallback(item):
-        """Record that finalization reached the model fallback tier."""
-        fallback_calls.append(item["name"])
+    ``mfma_moe2_a{a_dtype}...`` and ``mfma_moe2_{in_dtype}...`` both answer to
+    the keyword ``mfma_moe2``, and only the first one built the launched name.
+    """
+    root = tmp_path / "aiter" / "ops" / "flydsl" / "kernels"
+    root.mkdir(parents=True)
+    mixed = root / "mixed_moe_gemm_2stage.py"
+    mixed.write_text(
+        'n = f"mfma_moe2_a{a_dtype}_w{b_dtype}_{out_s}_cshuffle"\n',
+        encoding="utf-8",
+    )
+    plain = root / "moe_gemm_2stage.py"
+    plain.write_text(
+        'n = f"mfma_moe2_{in_dtype}_{out_s}_{epilog_tag}"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
 
+    launched = "mfma_moe2_afp8_wfp8_bf16_cshuffle_t32x128x256_vscale_v1_pm1"
+    assert tl.locate_source_via_grep(launched) == str(mixed)
+
+
+def test_grep_falls_back_to_ranking_when_no_file_defines_the_symbol(
+    monkeypatch,
+    tmp_path,
+):
+    """Preferring definitions must not drop mention-only hits on the floor."""
+    root = tmp_path / "pkg" / "kernels"
+    root.mkdir(parents=True)
+    mention = root / "dispatch.py"
+    mention.write_text("launch(_mxfp8_linear_kernel, grid)\n", encoding="utf-8")
+    monkeypatch.setattr(tl, "kernel_search_roots", lambda: (str(tmp_path),))
+
+    assert tl.locate_source_via_grep("_mxfp8_linear_kernel") == str(mention)
+
+
+def test_unconfirmed_trace_launcher_leaves_the_source_empty(
+    monkeypatch,
+    tmp_path,
+):
+    """An unconfirmed launcher is evidence, never an attribution.
+
+    Finalization stops here rather than guessing from the symbol; the
+    whole-table review that follows can weigh the blank against the launcher
+    frame and the rest of the table.
+    """
     launcher = "/repo/model/launcher.py"
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
-    monkeypatch.setattr(tl, "_apply_llm_source_fallback", _record_fallback)
 
     got = tl._finalize_candidates(
         [_wiring_candidate()],
         trace_files=[_wiring_trace(tmp_path, f"{launcher}(42): launch")],
     )[0]
 
-    assert fallback_calls == [got["name"]]
     assert got["source_file"] == ""
+    assert got["reusable_native_kernel"] is False
     assert got["trace_launcher_file"] == launcher
     assert got.get("source_resolution_method") != "trace_python_stack"
     assert "trace launcher unconfirmed by name grep" in got["source_resolution_reason"]
@@ -520,19 +603,14 @@ def test_wiring_without_trace_files_falls_back_quietly(tmp_path):
     assert "trace_resolver_error" not in str(got.get("source_resolution_reason", ""))
 
 
-def test_deterministic_finalization_never_calls_model_tiers(
-    monkeypatch,
-    tmp_path,
-):
-    """The deterministic route's no-LLM contract is enforced below the CLI."""
+def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
+    """Source resolution is wholly deterministic; review is a later stage.
+
+    Nothing under ``_finalize_candidates`` may reach a provider, so the
+    deterministic route gets its no-LLM guarantee from the code rather than
+    from a flag it has to remember to pass.
+    """
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
-
-    def _model_called(*_args, **_kwargs):
-        """Fail if either model tier is reached."""
-        raise AssertionError("deterministic route called a model tier")
-
-    monkeypatch.setattr(tl, "_apply_llm_source_fallback", _model_called)
-    monkeypatch.setattr(tl, "_review_source_resolution", _model_called)
     artifact = tmp_path / "kernel_source_resolution.json"
     item = {
         "name": "zz_no_source_kernel",
@@ -540,13 +618,9 @@ def test_deterministic_finalization_never_calls_model_tiers(
         "duration_us": 100.0,
         "gpu_pct": 10.0,
     }
-    got = tl._finalize_candidates(
-        [item],
-        source_resolution_out=artifact,
-        allow_model_tiers=False,
-    )[0]
+    got = tl._finalize_candidates([item], source_resolution_out=artifact)[0]
     assert got["source_file"] == ""
-    assert "deterministic route" in got["source_resolution_reason"]
+    assert got["skip_reason"] == "source file not resolved"
     assert artifact.is_file()
     doc = json.loads(artifact.read_text(encoding="utf-8"))
     assert "llm_audit" not in doc

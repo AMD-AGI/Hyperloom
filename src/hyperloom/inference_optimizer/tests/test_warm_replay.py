@@ -347,6 +347,9 @@ def _patch_current_sdk_readers(
         def read_patches(self):
             return list(self.refs)
 
+        def read_patch_roots(self):
+            return {}
+
         def prior_file(self, ref):
             return paths.get(ref)
 
@@ -2639,3 +2642,37 @@ def test_scored_replay_drives_accuracy_pass_through_the_real_promote_path(tmp_pa
     assert attempt["adopted"] is True
     assert attempt["validation_basis"] == "accuracy_pass"
     assert ledger["validation"]["unscored_keep_count"] == 0
+
+
+# ---- Phase 4: recipe carries apply root -----------------------------------
+def test_agent_kb_read_patch_roots_with_recorded_root(tmp_path):
+    from hyperloom.orchestrator.knowledge.agent_kb import _ConfigPatchAgentKB
+
+    root = str(tmp_path / "sglang_root")
+    ref = "framework/overlays/000000/00-p.patch"
+
+    class _FakeKB(_ConfigPatchAgentKB):
+        SECTION = "framework"
+
+        def read(self):
+            return {
+                "patches": [ref],
+                "patch_roots": {ref: root},
+            }
+
+    kb = _FakeKB(None)
+    assert kb.read_patch_roots() == {ref: root}
+    assert kb.read_patches() == [ref]
+
+
+def test_read_patch_roots_returns_empty_for_legacy_records():
+    from hyperloom.orchestrator.knowledge.agent_kb import _ConfigPatchAgentKB
+
+    class _LegacyKB(_ConfigPatchAgentKB):
+        SECTION = "framework"
+
+        def read(self):
+            return {"patches": ["framework/overlays/000000/00-x.patch"]}
+
+    kb = _LegacyKB(None)
+    assert kb.read_patch_roots() == {}

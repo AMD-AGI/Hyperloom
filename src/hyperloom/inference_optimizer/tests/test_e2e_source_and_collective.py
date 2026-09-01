@@ -71,7 +71,11 @@ def framework_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         """Return the temporary reusable roots for this test."""
         return patch_roots
 
-    monkeypatch.setattr(tl, "KNOWN_SEARCH_ROOTS", tuple(root.rstrip("/") for root in patch_roots))
+    monkeypatch.setattr(
+        tl,
+        "kernel_search_roots",
+        lambda: tuple(root.rstrip("/") for root in patch_roots),
+    )
     monkeypatch.setattr(tl, "_resolve_patch_target_roots", _fixture_patch_roots)
     tl._framework_patch_roots.cache_clear()
     tl._GREP_CACHE.clear()

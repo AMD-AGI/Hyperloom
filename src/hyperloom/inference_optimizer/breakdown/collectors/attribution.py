@@ -15,11 +15,33 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
-from ..agent_ownership import patch_author
+from ..agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_KERNEL,
+    LEVER_UPSTREAM_PR,
+    UNATTRIBUTED,
+    patch_author,
+    patch_lever_kind,
+)
 from ._common import (
     _to_float,
     phase_at,
 )
+
+
+#: Phase bucket -> the lever that bucket could only have moved, for rows
+#: written before ``lever_kind`` was stamped. ``explore`` and ``sweep`` only
+#: ever moved configuration, ``framework`` only ever landed upstream PRs, and
+#: the three kernel lanes only ever shipped kernels. ``prelude`` and ``close``
+#: are absent because neither carries gain.
+_LEVER_BY_PHASE_BUCKET = {
+    "explore": LEVER_CONFIG,
+    "sweep": LEVER_CONFIG,
+    "framework": LEVER_UPSTREAM_PR,
+    "kernel_agent": LEVER_KERNEL,
+    "gemm_tuning": LEVER_KERNEL,
+    "geak": LEVER_KERNEL,
+}
 
 
 def _normalize_specialist_key(provenance: str) -> str:
@@ -66,9 +88,9 @@ _ACTION_FAMILY_TABLE: tuple[tuple[Callable[[str], bool], str], ...] = (
     # instead of vanishing into the non-emitted ``other`` family. The label may
     # carry a tier suffix (``replay_warm_recipe:exact``), so match the base token.
     (lambda s: s.split(":", 1)[0] == "replay_warm_recipe", "replay_warm_recipe"),
-    # FRAMEWORK: exact legacy action label. ``integrate_patch`` is phase-generic
-    # (FRAMEWORK_AGENT, EXPLORE, and pre-baseline enablement), so it is resolved
-    # from entry metadata by ``_entry_family`` rather than blanket-credited here.
+    # FRAMEWORK: exact legacy action label. ``integrate_patch`` serves both
+    # levers and pre-baseline enablement, so ``_entry_family`` resolves it from
+    # entry metadata rather than blanket-crediting it here.
     (lambda s: s == "framework", "framework"),
     # GEMM_TUNING: deterministic FP8 tuner KEEPs, bucketed apart from generic
     # ``kernel`` so the dashboard can split tuner vs source-level rewrite gain.
@@ -302,11 +324,11 @@ def _phase_at(ts_unix: float | None, timeline: list[tuple[float, str]]) -> str:
 def _entry_family(entry: dict[str, Any]) -> str:
     """Resolve attribution family using phase/ownership metadata when needed.
 
-    ``integrate_patch`` is not intrinsically a Framework action. Framework
-    authoring owns explicitly marked or FRAMEWORK_AGENT entries; EXPLORE owns
-    its own patch applications; PRELUDE baseline-enablement entries are
-    configuration prerequisites and remain non-attributable. Missing ownership
-    stays unattributed instead of being inferred from execution phase.
+    ``integrate_patch`` lands every patch source, so the action name says
+    nothing about which lever moved. The source arm owns explicitly marked
+    entries; the config arm owns its own patch applications; PRELUDE
+    baseline-enablement entries are prerequisites and remain non-attributable.
+    Missing ownership stays unattributed rather than inferred from the phase.
     """
 
     action = str(entry.get("action") or "").strip().lower()
@@ -516,8 +538,11 @@ def collect_attribution(
         notes.append(note)
         warnings.append(f"attribution: {note}")
 
-    # Per-phase gain breakdown (buckets each KEEP by its active phase).
-    phase_breakdown = _collect_phase_breakdown(state, entries, warnings)
+    # Per-phase gain breakdown (buckets each KEEP by its active phase), and the
+    # same total split by lever instead. They are two views of one number: the
+    # phase view answers "when", the lever view answers "what was changed", and
+    # only the second survives a phase being merged away.
+    phase_breakdown, lever_breakdown = _collect_phase_breakdown(state, entries, warnings)
 
     return {
         "gain_per_stack_entry": entries,
@@ -541,6 +566,7 @@ def collect_attribution(
             "validated_total_pct": round(validated_total, 2),
         },
         "phase_breakdown": phase_breakdown,
+        "lever_breakdown": lever_breakdown,
         "notes": notes,
     }
 
@@ -564,10 +590,11 @@ def _collect_phase_breakdown(
             ``phase_history`` is empty).
 
     Returns:
-        dict[str, Any]: Per-phase gain buckets (prelude / framework /
-        explore / kernel / gemm_tuning / sweep / close, plus a conditional
-        ``unattributed``), each with a ``total_gain_pct`` and phase-specific
-        sub-breakdowns.
+        tuple[dict[str, Any], dict[str, float]]: Per-phase gain buckets
+        (prelude / framework / explore / kernel / gemm_tuning / sweep / close,
+        plus a conditional ``unattributed``), each with a ``total_gain_pct``
+        and phase-specific sub-breakdowns; and the same total split by lever
+        kind instead of by phase.
     """
     # Phase timeline: for an entry ts, pick the latest row with ts_unix <= ts.
     timeline = _phase_timeline(state)
@@ -589,6 +616,8 @@ def _collect_phase_breakdown(
             if fp and sc:
                 scope_by_fp[fp] = sc
 
+    #: Lever totals, keyed by :data:`LEVER_KINDS` plus ``unattributed``.
+    lever_buckets: dict[str, float] = {}
     phase_buckets: dict[str, dict[str, Any]] = {
         "prelude": {"total_gain_pct": 0.0},
         # by_pr keyed per adopted PR.
@@ -613,14 +642,12 @@ def _collect_phase_breakdown(
         if delta is None or delta <= 0:
             continue
         phase = _phase_at(_entry_ts(e), timeline).lower()
-        # ``phase_history`` records the phase as ``FRAMEWORK_AGENT`` but the
-        # attribution bucket is named ``framework``; normalize so framework-phase
-        # KEEPs land in the framework bucket instead of missing the bucket key and
-        # falling through to the action-family fallback (and then ``unattributed``).
-        if phase == "framework_agent":
-            phase = "framework"
         action = str(e.get("action") or "").lower()
         fam = _entry_family(e)
+        # Both levers run inside FRAMEWORK_AGENT, so the live phase no longer
+        # says which one moved a KEEP. The entry's own family does.
+        if phase == "framework_agent":
+            phase = "framework" if fam == "framework" else "explore"
         if action.startswith("integrate_patch"):
             # For this delayed application mechanism, proposal ownership is the
             # attribution phase; the acceptance timestamp is only execution
@@ -650,6 +677,21 @@ def _collect_phase_breakdown(
             float(bucket["total_gain_pct"]) + float(delta),
             2,
         )
+        # Lever split, accumulated from the same rows and the same deltas as the
+        # phase split above. It is the phase-free view of the identical total:
+        # a phase says when a KEEP landed, which a delayed application makes a
+        # lie; the lever says what was changed, which stays true.
+        lever = patch_lever_kind(e) or _LEVER_BY_PHASE_BUCKET.get(phase, "")
+        if lever:
+            lever_buckets[lever] = round(
+                float(lever_buckets.get(lever, 0.0)) + float(delta),
+                2,
+            )
+        else:
+            lever_buckets[UNATTRIBUTED] = round(
+                float(lever_buckets.get(UNATTRIBUTED, 0.0)) + float(delta),
+                2,
+            )
         if phase == "explore":
             by_domain = bucket.setdefault("by_domain", {})
             fp = str(e.get("fingerprint") or e.get("variant_fingerprint") or "")
@@ -716,11 +758,13 @@ def _collect_phase_breakdown(
     # Drop the unattributed bucket when nothing landed there.
     if phase_buckets["unattributed"]["total_gain_pct"] == 0.0:
         phase_buckets.pop("unattributed", None)
+    if lever_buckets.get(UNATTRIBUTED) == 0.0:
+        lever_buckets.pop(UNATTRIBUTED, None)
 
     if not timeline:
         warnings.append("attribution.phase_breakdown: phase_history empty; gains bucketed via action family fallback")
 
-    return phase_buckets
+    return phase_buckets, lever_buckets
 
 
 def _reconstruct_gain_ledger(

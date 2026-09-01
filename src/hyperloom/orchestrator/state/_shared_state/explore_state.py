@@ -54,6 +54,7 @@ class _ExploreStateMixin:
             instrument.record_specialist_round(
                 getattr(self, "_session_dir", None),
                 entry,
+                phase=str(getattr(self, "phase", "") or ""),
             )
         except Exception:  # noqa: BLE001 — author-time capture must never block record
             log.debug("record_specialist_round capture failed", exc_info=True)
@@ -66,7 +67,7 @@ class _ExploreStateMixin:
 
     def bump_domain_round_counters(self) -> None:
         """Increment both per-anchor round counters for every knowledge-domain
-        anchor. Called once per EXPLORE round so a long-idle domain's counters
+        anchor. Called once per optimisation round so a long-idle domain's counters
         climb until the Coordinator escalation forces a dispatch."""
         from ...specialists.domains import KNOWLEDGE_DOMAIN_TAGS
 
@@ -339,18 +340,6 @@ class _ExploreStateMixin:
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
 
-    def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """Increment the per-EXPLORE specialist dispatch counter; returns post-increment value.
-
-        Args:
-            n (int): Amount to add to the dispatch counter (default 1).
-
-        Returns:
-            int: The post-increment dispatch count.
-        """
-        self.explore_specialist_dispatched_count = int(self.explore_specialist_dispatched_count or 0) + int(n)
-        return self.explore_specialist_dispatched_count
-
     def bump_research_scout_runs(self, n: int = 1) -> int:
         """Increment the research-scout dispatch counter; return new total.
 
@@ -402,13 +391,9 @@ class _ExploreStateMixin:
         earned it.
         """
         self.params_no_promote_streak = 0
-        self.explore_specialist_dispatched_count = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0
-        self.framework_config_lane_state = ""
-        self.framework_config_lane_round = 0
-        self.framework_config_pending_grid = []
         self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
@@ -431,18 +416,18 @@ class _ExploreStateMixin:
 
     def record_specialist_patch_verdict(
         self,
-        specialist_task_id: str,
+        subject: str,
         verdict: str,
     ) -> None:
-        """Record the Critic verdict for a specialist worktree patch; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
+        """Record the Critic verdict for a patch's review subject; idempotent (later verdict overwrites), empty ``verdict`` clears the entry to force re-review.
 
         Args:
-            specialist_task_id (str): The specialist task id; blank is a
-                no-op.
+            subject (str): The specialist task id for an authored patch, the
+                candidate id for a PR pre-screen; blank is a no-op.
             verdict (str): The Critic verdict; blank clears the recorded
                 verdict to force re-review.
         """
-        sid = str(specialist_task_id or "").strip()
+        sid = str(subject or "").strip()
         if not sid:
             return
         v = str(verdict or "").strip().lower()
@@ -453,18 +438,19 @@ class _ExploreStateMixin:
 
     def get_specialist_patch_verdict(
         self,
-        specialist_task_id: str,
+        subject: str,
     ) -> str:
         """Return the patch verdict, or empty when no Critic decision exists.
 
         Args:
-            specialist_task_id (str): The specialist task id.
+            subject (str): The review subject, as
+                :meth:`record_specialist_patch_verdict` keys it.
 
         Returns:
             str: The recorded verdict, or ``""`` when none exists or the id
                 is blank.
         """
-        sid = str(specialist_task_id or "").strip()
+        sid = str(subject or "").strip()
         if not sid:
             return ""
         return self.specialist_patch_verdicts.get(sid, "") or ""

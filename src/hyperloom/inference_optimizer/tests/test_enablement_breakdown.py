@@ -145,20 +145,17 @@ def test_collect_enablement_vllm_ref_surfaced():
 
 
 def test_collect_enablement_combined_rung3_and_rung5():
-    """Both attempt-runtime (stack_actions) and build_manifest fields co-exist."""
+    """Attempt runtimes and build_manifest fields co-exist."""
     out = collect_enablement(
         Path("/tmp"),
         _state(
-            enablement_stack_actions=[
+            enablement_attempt_runtimes=[
                 {
-                    "kind": "runtime_candidate",
                     "framework": "vllm",
-                    "capability": "deepseek_v4",
                     "acquisition_method": "wheel",
                     "repo_url": "",
                     "ref": "",
                     "index_url": "",
-                    "reason": "",
                 }
             ],
             enablement_build_manifest=[
@@ -175,7 +172,7 @@ def test_collect_enablement_combined_rung3_and_rung5():
         ),
         [],
     )
-    assert "stack_actions" in out
+    assert "attempt_runtimes" in out
     assert "build_attempts" in out
     assert "last_build_failure" in out
     assert out["last_build_failure"]["failure_class"] == "symbol_missing"
@@ -248,7 +245,6 @@ def test_collect_enablement_boot_origin_round_surfaced():
             enablement_succeeded=True,
             enablement_last_specialist_task_id="spec-1",
             enablement_launch_log="EngineCore failed to start.\nTraceback (most recent call last):",
-            enablement_stack_actions=[],
             enablement_attempt_runtimes=[],
             enablement_build_manifest=[],
         ),

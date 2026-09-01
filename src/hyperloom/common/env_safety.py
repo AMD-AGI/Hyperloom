@@ -80,14 +80,37 @@ _SECRET_REDACTION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"(?i)(bearer\s+)[A-Za-z0-9\-_.=]{8,}"), r"\1[REDACTED]"),
     (re.compile(r"\b((?:ak|sk|pk)-(?:lf-)?)[A-Za-z0-9\-_]{6,}"), r"\1[REDACTED]"),
     (re.compile(r"\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{10,}"), r"\1[REDACTED]"),
+    # AWS access-key id and compact JWT. Same two shapes the specialist
+    # transcript redactor already matches; kept here so a command that
+    # carries either form is masked whether it went through an assignment
+    # or not.
+    (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "[REDACTED]"),
+    (re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b"), "[REDACTED]"),
+    # Shell commands quote the value (``PASSWORD="x"``), and a command that has
+    # been through ``json.dumps`` carries an escaped quote (``PASSWORD=\"x\"``).
+    # The opening quote is matched separately and re-emitted so the mask keeps
+    # the quoting intact; folding it into the value class instead would end the
+    # match on the first quote and leave the secret readable.
+    #
+    # ``TOKEN`` is a suffix of the identifier (optional ``_`` + digits so
+    # ``HF_TOKEN_2`` still matches), not a substring. A negative lookahead
+    # for IZER / TOKENS still left ``tokenized_requests`` and
+    # ``stop_token_ids`` matching — TOKEN is a generic word in this stack,
+    # and a half-redacted list (``stop_token_ids=[REDACTED], 154827]``) is
+    # worse than leaving the knob readable. ``API_KEY`` / ``SECRET`` /
+    # ``PASSWORD`` / ``CREDENTIAL`` still allow trailing name characters, so
+    # ``AWS_SECRET_ACCESS_KEY`` is unchanged. A backslash is only excluded
+    # from the value when it precedes a quote, so a JSON-escaped closer is
+    # left in place (the quoting stays balanced) while ``PASSWORD=C:\foo``
+    # is still masked whole.
     (
         re.compile(
             r"(?i)\b([A-Z0-9_]*"
-            r"(?:API_?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)"
-            r"[A-Z0-9_]*\s*[=:]\s*)"
-            r"[^\s,;'\"]+"
+            r"(?:(?:API_?KEY|SECRET|PASSWORD|CREDENTIAL)[A-Z0-9_]*|TOKEN(?:_\d+)?)"
+            r"\s*[=:]\s*)"
+            r"(\\?[\"'])?(?:\\(?![\"'])|[^\s,;'\"\\])+"
         ),
-        r"\1[REDACTED]",
+        r"\1\2[REDACTED]",
     ),
 )
 
@@ -114,7 +137,6 @@ DOTENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_BASE_URL",
         "DEEPSEEK_MODEL",
-        "FORGE_PATH",
         "FRAMEWORK",
         "GEAK_CLAUDE_MODEL",
         "HIP_PATH",
@@ -155,6 +177,10 @@ DOTENV_PREFIX_ALLOWLIST: tuple[str, ...] = (
     "AITER_",
     "FORGE_",
     "GEAK_",
+    # Not covered by "FORGE_": KernelForge's own knobs (writable-state root,
+    # rewrite handshake, mori KB opt-in) are spelled KERNELFORGE_*, and now that
+    # forge ships inside this distribution an operator configures them here.
+    "KERNELFORGE_",
     "HF_",
     "HYPERLOOM_",
     "INFERENCE_OPTIMIZER_",
@@ -173,7 +199,6 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         # credential on the way back in.
         "ANTHROPIC_CUSTOM_HEADERS",
         "CLAUDE_CODE_OAUTH_TOKEN",
-        "FORGE_PATH",
         "GEAK_CLAUDE_BIN",
         "GEAK_CLAUDE_MODEL",
         "GEAK_E2E_RUNNER",
@@ -192,6 +217,10 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
         "KERNEL_AGENT_ENV",
         "KERNEL_AGENT_LOG_LEVEL",
         "KERNEL_AGENT_ROOT",
+        # KernelForge's writable-state root. Forge subprocesses resolve their
+        # experiments/caches/learned-KB under it, and without it here an operator
+        # setting it sees the child fall back to ~/.cache/hyperloom.
+        "KERNELFORGE_PROJECT_ROOT",
         "KERNEL_OPT_BACKEND_ORDER",
         "MAGPIE_PATH",
         "MAGPIE_PYTHON",

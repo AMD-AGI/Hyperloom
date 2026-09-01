@@ -16,11 +16,13 @@ import logging
 import os
 import sys
 import time
+import warnings
 from pathlib import Path
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.common.env import forge_explicitly_enabled
+from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.timeutil import now_iso
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     agentx_enabled as _agentx_enabled,
@@ -60,6 +62,48 @@ def parse_operator_extra_env(args: argparse.Namespace) -> dict[str, str]:
         if sep and key.strip():
             pins[key.strip()] = value
     return pins
+
+
+#: Default for the KERNEL-entry kernel_opt dispatch when neither spelling of the
+#: flag is passed. Both parser dests default to ``None`` so "not passed" stays
+#: distinguishable from an explicit value, which is what lets the deprecated
+#: alias be honoured without letting it override the current flag.
+AUTO_KERNEL_OPT_DEFAULT: bool = True
+
+
+def resolve_auto_kernel_opt(args: argparse.Namespace) -> bool:
+    """Resolve the KERNEL-entry auto-dispatch switch across both spellings.
+
+    ``--auto-kernel-opt`` is the current flag; ``--continue-kernel-after-gemm``
+    is its deprecated spelling, kept working because dropping it outright would
+    turn a launcher's opt-out into a silent opt-in. The current flag wins when
+    both are passed; the alias wins over nothing but the default.
+
+    Args:
+        args: Parsed CLI arguments.
+
+    Returns:
+        Whether KERNEL entry should dispatch the source-level kernel_opt batch.
+    """
+    current = getattr(args, "auto_kernel_opt", None)
+    legacy = getattr(args, "continue_kernel_after_gemm", None)
+    if legacy is not None:
+        message = (
+            "--continue-kernel-after-gemm is deprecated; use --auto-kernel-opt "
+            "(the switch gates the KERNEL-entry kernel_opt dispatch on both "
+            "routes, not only after GEMM tuning)"
+        )
+        # Logged as well as warned. DeprecationWarning is silent under the
+        # default filter unless the caller is __main__, and the old flag is
+        # hidden from --help by SUPPRESS, so a launcher still passing it had no
+        # way to learn the transition had started.
+        log.warning("%s", message)
+        warnings.warn(message, DeprecationWarning, stacklevel=2)
+    if current is not None:
+        return bool(current)
+    if legacy is not None:
+        return bool(legacy)
+    return AUTO_KERNEL_OPT_DEFAULT
 
 
 def resolve_model_display_name(args: argparse.Namespace) -> str:
@@ -150,6 +194,7 @@ def _seed_shared_state(
     args: argparse.Namespace,
     *,
     session_id: str,
+    compute_partition: dict[str, Any] | None = None,
 ) -> SharedState:
     """Construct and persist the initial :class:`SharedState` for a run.
 
@@ -160,6 +205,12 @@ def _seed_shared_state(
         session_dir: Directory for the new session.
         args: Parsed CLI arguments.
         session_id: Identifier assigned to the session.
+        compute_partition: The shape the launch validated, passed in rather than
+            re-read because the environment carries a lossy subset of it: the
+            published variables cannot express where the CU count came from, and
+            an absent provenance flag would be reported as a board-table guess
+            when the device was in fact probed. Falls back to the published
+            variables when a caller has no verdict to hand over.
 
     Returns:
         The seeded :class:`SharedState` instance.
@@ -201,9 +252,6 @@ def _seed_shared_state(
         plateau_overrides["kernel_keep_gain_pct"] = float(args.plateau_kernel_keep_gain)
     if getattr(args, "plateau_kernel_lookback", None) is not None:
         plateau_overrides["kernel_lookback"] = int(args.plateau_kernel_lookback)
-    # EXPLORE hard force-exit thresholds.
-    if getattr(args, "explore_force_exit_budget_pct", None) is not None:
-        plateau_overrides["force_exit_budget_pct"] = float(args.explore_force_exit_budget_pct)
 
     # Resolve int workload knobs from the CLI arg, applying the shared fallback
     # default when unset. Inherited env is NOT a config source (issue #903); the
@@ -340,7 +388,7 @@ def _seed_shared_state(
         max_model_len=_int_arg("max_model_len", 0),
         kernel_enabled=not getattr(args, "no_kernel", False),
         kernel_optimizer=_kernel_optimizer_record,
-        continue_kernel_after_gemm=bool(getattr(args, "continue_kernel_after_gemm", True)),
+        auto_kernel_opt_enabled=resolve_auto_kernel_opt(args),
         target_summary=args.target_summary or _default_target_summary(args),
         baseline_tput=0.0,
         cumulative_gain_validated=0.0,
@@ -355,6 +403,7 @@ def _seed_shared_state(
         bypass_scripts_dir=os.environ.get("HYPERLOOM_BYPASS_SCRIPTS_DIR", "").strip(),
         framework_repo_path=os.environ.get("FRAMEWORK_REPO_PATH", "").strip(),
         benchmark_backend=os.environ.get("HYPERLOOM_BENCHMARK_BACKEND", "").strip().lower(),
+        compute_partition=dict(compute_partition if compute_partition is not None else (published_shape() or {})),
         nodes=max(1, int(getattr(args, "nodes", 1) or 1)),
         robustness_options=_build_robustness_options(args),
         warm_replay_enabled=not bool(getattr(args, "no_warm_replay", False)),
@@ -374,7 +423,6 @@ def _seed_shared_state(
         framework_local_explore_enabled=not bool(getattr(args, "no_framework_local_explore", False)),
         # Enablement self-heal lanes; --enablement off opts out.
         enablement_mode=str(getattr(args, "enablement", "all") or "all"),
-        explore_enabled=not bool(getattr(args, "no_explore", False)),
         # AgentX is a DELIBERATE eval opt-out, not an incidental one. Its client
         # (aiperf_client.sh) never invokes lm-eval, so a genuine AgentX baseline
         # carries no accuracy. ``baseline._maybe_stop_on_missing_baseline_accuracy``
@@ -384,10 +432,6 @@ def _seed_shared_state(
         # stopping the session. Routing AgentX through the same channel as
         # ``--no-eval`` is what makes the opt-out legible to that guard.
         eval_disabled=bool(getattr(args, "no_eval", False)) or _agentx_enabled(),
-        # FRAMEWORK config-exploration lane toggle (default OFF).
-        framework_config_exploration_enabled=bool(
-            getattr(args, "enable_framework_config_exploration", False),
-        ),
         explore_variant_timeout_sec_override=explore_variant_timeout_sec_override,
         explore_variant_timeout_safety_margin=explore_variant_timeout_safety_margin,
         research_scout_enabled=bool(getattr(args, "research_scout", True)),
@@ -513,7 +557,7 @@ def _print_final_summary(
             f"ts={state.cumulative_gain_validated_ts}){stale}"
         )
     else:
-        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` stack-rebench has succeeded yet")
+        print("  cumulative_gain_val  : 0.00% ⚠ never validated — no `explore` KEEP has landed yet")
     print(f"  current_best         : {state.current_best}")
     print(f"  pruned_families      : {state.pruned_families}")
     print(f"  crash_count          : {state.crash_count}")

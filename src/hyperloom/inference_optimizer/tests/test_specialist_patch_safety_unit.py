@@ -7,9 +7,13 @@ git grounding, missing-target detection, and quantitative-claim guards)."""
 from __future__ import annotations
 
 
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from hyperloom.orchestrator.specialists import patch_safety as ps
+from hyperloom.orchestrator.specialists import runner
 
 
 _DIFF = "diff --git a/foo.py b/foo.py\nindex 111..222 100644\n--- a/foo.py\n+++ b/foo.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"
@@ -335,7 +339,7 @@ def test_the_codes_carry_no_blank_entry():
 
 
 # ---- advisory_rules_govern -------------------------------------------------
-@pytest.mark.parametrize("action_name", ["specialist", "explore", "framework_agent"])
+@pytest.mark.parametrize("action_name", ["specialist", "explore"])
 def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
     """``proposal_set[*]`` reaches review as a specialist proposal or the explore
     grid it is materialised into; the framework candidate is the one the
@@ -374,3 +378,121 @@ def test_vet_patches_unreadable(tmp_path):
     assert kept == []
     assert dropped[0]["verdict"] == "unreadable"
     assert not spans_roots
+
+
+# ---- nested root collapse + GROUND_AMBIGUOUS_ROOT -------------------------
+def _make_git_repo(root: Path, files: dict[str, str]) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    for rel, content in files.items():
+        p = root / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True)
+    subprocess.run(
+        ["git", "-C", str(root), "-c", "user.email=a@b", "-c", "user.name=t", "commit", "-qm", "base"],
+        check=True,
+    )
+    return root
+
+
+def test_nested_root_collapse_picks_outer(tmp_path):
+    outer = _make_git_repo(tmp_path / "sglang", {"python/sglang/srt/foo.py": "old\n"})
+    inner = outer / "python"
+    inner.mkdir(exist_ok=True)
+    diff = "--- a/python/sglang/srt/foo.py\n+++ b/python/sglang/srt/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.resolve_patch_apply_root([diff], explicit_root=None, candidate_roots=[outer, inner])
+    assert res.root is not None
+    assert res.root.resolve() == outer.resolve()
+    assert res.reason == ""
+
+
+def test_disjoint_ambiguity_still_fails(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"srt/foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"srt/foo.py": "old\n"})
+    diff = "--- a/srt/foo.py\n+++ b/srt/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.resolve_patch_apply_root([diff], explicit_root=None, candidate_roots=[tree_a, tree_b])
+    assert res.root is None
+    assert res.reason == "ambiguous_root"
+
+
+def test_ground_patch_text_returns_ambiguous_root_verdict(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
+    diff = "--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n"
+    res = ps.ground_patch_text(diff, base_checkout=tree_a, candidate_roots=(tree_b,))
+    assert res.verdict == ps.GROUND_AMBIGUOUS_ROOT
+    assert res.is_garbage
+
+
+def test_vet_patches_ambiguous_root_not_labeled_missing_target(tmp_path):
+    tree_a = _make_git_repo(tmp_path / "a", {"foo.py": "old\n"})
+    tree_b = _make_git_repo(tmp_path / "b", {"foo.py": "old\n"})
+    diff_file = tmp_path / "p.patch"
+    diff_file.write_text("--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-old\n+new\n", encoding="utf-8")
+    _, dropped, grounding, _ = ps.vet_patches([str(diff_file)], base_checkout=tree_a, candidate_roots=(tree_b,))
+    assert len(dropped) == 1
+    assert dropped[0]["verdict"] == ps.GROUND_AMBIGUOUS_ROOT
+    assert grounding[str(diff_file)] == ps.GROUND_AMBIGUOUS_ROOT
+
+
+# ---- grounding root selection ----------------------------------------------
+def test_grounding_root_uses_a_harvest_the_whole_set_agrees_on():
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/wt/patches/_worktree_diff.patch"],
+        patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
+    )
+    assert root == Path("/sgl-workspace/sglang")
+
+
+def test_grounding_root_declines_when_a_hand_authored_patch_rides_along():
+    """Its target tree is unknown; the harvest root would drop it as a mismatch."""
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/wt/patches/_worktree_diff.patch", "/wt/patches/manual.patch"],
+        patch_roots={"/wt/patches/_worktree_diff.patch": "/sgl-workspace/sglang"},
+    )
+    assert root is None
+
+
+def test_grounding_root_declines_when_harvests_disagree():
+    root = runner._grounding_explicit_root(
+        declared="",
+        patches=["/a.patch", "/b.patch"],
+        patch_roots={"/a.patch": "/tree/one", "/b.patch": "/tree/two"},
+    )
+    assert root is None
+
+
+def test_grounding_root_prefers_a_declared_source_root():
+    root = runner._grounding_explicit_root(
+        declared="/declared/tree",
+        patches=["/a.patch"],
+        patch_roots={"/a.patch": "/harvested/tree"},
+    )
+    assert root == Path("/declared/tree")
+
+
+def test_grounding_root_declines_for_an_empty_set():
+    assert runner._grounding_explicit_root(declared="", patches=[], patch_roots={}) is None
+
+
+def test_a_deleted_line_that_looks_like_a_header_is_not_a_path():
+    """A hunk body line is not a header, whatever it starts with.
+
+    Deleting a source line that begins with ``--`` renders as ``--- ...`` in
+    the diff. Reading lines independently cannot tell that from a header, and
+    a comment naming an absolute path got the whole patch rejected as a
+    traversal.
+    """
+    for body in ("-- /etc/hosts is read at startup", "-- ../legacy/foo is gone"):
+        diff = f"--- a/x.sql\n+++ b/x.sql\n@@ -1,2 +1,1 @@\n-{body}\n keep\n"
+        assert ps.patch_escapes_tree(diff) is None
+
+
+def test_the_escape_check_reads_the_paths_the_applier_resolves():
+    """Both sides of every header pair, normalised the way ``-p1`` strips them."""
+    assert ps.patch_escapes_tree("--- a/ok.py\n+++ b//etc/passwd\n") == "/etc/passwd"
+    assert ps.patch_escapes_tree("--- a/../../escape.py\n+++ b/ok.py\n") == "../../escape.py"
+    assert ps.patch_escapes_tree("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n") is None

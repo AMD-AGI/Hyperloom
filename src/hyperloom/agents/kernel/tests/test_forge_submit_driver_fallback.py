@@ -35,7 +35,6 @@ def _submit_with_stubbed_loop(
         "_prepare_worktree",
         lambda *_args, **_kwargs: (str(workspace), str(kernel), "base-commit"),
     )
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
     monkeypatch.setattr(
         forge_submit,

@@ -66,7 +66,7 @@ calculation. A comma `$CONC` value such as `4,16,128` is accepted for
 compatibility; the single baseline CONC becomes the first value. Use
 `--conc-sweep-concs` for the explicit sweep ladder.
 
-EXPLORE may deliberately ablate operator-supplied server flags. A grid variant
+The configuration arm may deliberately ablate operator-supplied server flags. A grid variant
 can carry `remove_args` to delete inherited CLI flags before its own
 `extra_args` are appended, or `unset_envs` to remove inherited environment
 keys before `extra_envs` are applied. Use these fields when testing whether a

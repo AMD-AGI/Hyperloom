@@ -25,7 +25,9 @@ Fields::
     current_best        dict  — champion snapshot: ``action`` + ``tput`` plus
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
-    cumulative_gain_validated float — % over baseline at the last full-stack rebench
+    cumulative_gain_validated float — % over baseline at the last measurement
+                                that promoted (an explore KEEP's decision round,
+                                or a full-stack revalidation)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -53,12 +55,12 @@ import math
 import os
 import shlex
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
@@ -100,6 +102,27 @@ def first_positive_tput(d: Any) -> float:
         if isinstance(val, (int, float)) and val > 0:
             return float(val)
     return 0.0
+
+
+def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, bool]:
+    """Grade against the live anchor when a KEEP landed after this task snapshotted its params.
+
+    A task carries ``base_tput`` from the moment it was created; a KEEP landing
+    while it queued makes that snapshot stale and would grade the candidate
+    against a recipe it no longer sits on top of.
+
+    Args:
+        snapshot_tput: The anchor recorded in the task's params.
+        state: Any object exposing ``current_best`` / ``baseline_tput``.
+
+    Returns:
+        ``(anchor, drifted)`` — the anchor to grade against, and whether the
+        live value displaced a positive snapshot (i.e. worth logging).
+    """
+    live = resolve_grading_anchor_tput(state)
+    if live > snapshot_tput:
+        return live, snapshot_tput > 0
+    return snapshot_tput, False
 
 
 def resolve_grading_anchor_tput(state: Any) -> float:
@@ -319,7 +342,7 @@ _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
 
 
 #: top-level state.json schema version; absent key treated as v1 and migrated to LATEST_STATE_SCHEMA_VERSION on first save.
-LATEST_STATE_SCHEMA_VERSION: int = 5
+LATEST_STATE_SCHEMA_VERSION: int = 6
 
 #: FRAMEWORK fields renamed by the framework_agent rename, old name -> current
 #: name. A state written before that rename spells them the old way, and the
@@ -337,6 +360,15 @@ _FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
     "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
     "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
     "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
+}
+
+#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
+#: current name. The old spelling tied the switch to GEMM tuning, which stopped
+#: being true once the dispatch moved into the shared entry tail. Without this
+#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
+#: a resumed opt-out session would silently start dispatching again.
+_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
+    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
 }
 
 #: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
@@ -540,10 +572,11 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # When False (``--no-explore``) EXPLORE is skipped: PRELUDE/FRAMEWORK_AGENT route to KERNEL (or SWEEP).
-    explore_enabled: bool = True
-    # After FP8 GEMM tuning succeeds, continue into source-level kernel_opt by default.
-    continue_kernel_after_gemm: bool = True
+    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
+    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
+    # only governs the entry's own dispatch: orchestration can still request
+    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
+    auto_kernel_opt_enabled: bool = True
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -567,7 +600,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
-    # Internal-only baseline cold+hot double-run switch; default-on keeps EXPLORE
+    # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
     baseline_accuracy: float = 0.0
@@ -666,6 +699,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_repo_path: str = ""
     # ``HYPERLOOM_BENCHMARK_BACKEND`` at seed time (``bypass`` for custom).
     benchmark_backend: str = ""
+    # The card's compute-partition shape this session was measured in, as
+    # observed at launch: mode, partition count, CU and memory per partition,
+    # streams per partition. Empty when the card reported nothing. Part of the
+    # measurement contract, not a tuning knob -- the same configuration in SPX
+    # and in CPX is two different experiments.
+    compute_partition: dict[str, Any] = field(default_factory=dict)
     # ``--nodes``, feeding the robustness defaults and the IR-8 check. NOT the
     # cluster hand-off, which is resolved from argv before this state loads.
     nodes: int = 1
@@ -685,7 +724,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
-    # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
+    # ``optimization_stack`` length at the last validated measurement; longer => new KEEPs need validation.
     cumulative_gain_validated_stack_len: int = 0
     # Resume sentinels. ``pending_integrate`` is written before a
     # non-transactional integrate_patch window and cleared after stack/current
@@ -718,7 +757,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     closing_report_task_id: str = ""
     # True at END of CLOSE 7-step sequencer; cli.finally short-circuits emergency breakdown write. Resume clears it (idempotent).
     close_sequence_done: bool = False
-    # Auto-roofline gate (EXPLORE-entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
+    # Auto-roofline gate (optimisation-phase entry): pending roofline task_id; blocks first-round specialist dispatch until snapshot lands.
     auto_roofline_pending_task_id: str = ""
     current_action: str = ""
     crash_count: int = 0
@@ -790,21 +829,21 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     roofline_failure_streak: int = 0
 
     # Feature toggles (mirrored from ``cli.py`` flags at session start).
-    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → EXPLORE); ``--no-framework-agent`` opts out.
+    # FRAMEWORK_AGENT phase toggle (PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT); ``--no-framework-agent`` opts out.
     framework_agent_phase_enabled: bool = True
     # FRAMEWORK progress: one entry per candidate benchmark; used by breakdown + plateau exit judgment.
     framework_agent_phase_progress: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # One row per phase-discover batch; read by exit_normal_framework_agent plateau gate (3 batches <1% => exit).
+    # One row per discovery batch; read by the source arm's plateau gate (3 batches <1% => exit).
     framework_agent_batches: list[dict[str, Any]] = field(
         default_factory=list,
     )
-    # True when FRAMEWORK loop has no more candidates; compute_next_phase uses it for framework_agent_phase_done exit.
+    # True when the source arm has no more candidates; read by its plateau gate.
     framework_agent_phase_done: bool = False
-    # Consecutive ``fa phase-discover`` failures; phase marked done only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
+    # Consecutive discovery failures; the arm declines only after DISCOVER_FAILURE_RETRY_LIMIT (default 3).
     framework_agent_discover_failures: int = 0
-    # Consecutive empty-but-valid ``fa phase-discover`` batches; tolerate up to
+    # Consecutive empty-but-valid discovery batches; tolerate up to
     # DISCOVER_FAILURE_RETRY_LIMIT before exiting. Reset on any non-empty batch.
     framework_agent_empty_discoveries: int = 0
     # Consecutive FRAMEWORK_AGENT phase completions that discovered zero candidates
@@ -819,26 +858,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # instead of skipping the phase. Requires framework_agent_authoring_enabled;
     # --no-framework-local-explore opts out (restores discover-exhaustion exit).
     framework_local_explore_enabled: bool = True
-    # Default OFF. When True the Coordinator may run explore-style config-grid
-    # exploration inside FRAMEWORK_AGENT (reusing ExploreExecutor) before the
-    # phase advances. Coordinator-driven, never the LLM.
-    framework_config_exploration_enabled: bool = False
-    # Compact records of framework config-exploration rounds; kept separate from
-    # framework_agent_phase_progress so it never perturbs the plateau gate.
-    framework_config_exploration_results: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
-    # FRAMEWORK config-exploration subphase state machine:
-    # "" (not started) -> "running" -> "done". Drives the advance-time hold.
-    framework_config_lane_state: str = ""
-    # Rounds dispatched in the current FRAMEWORK config-exploration subphase;
-    # capped by _framework_config_max_rounds(). Reset on macro-cycle reloop.
-    framework_config_lane_round: int = 0
-    # Config variant grid harvested from the last generation specialist,
-    # awaiting an explore round. Consumed by _maybe_hold_for_framework_config_lane.
-    framework_config_pending_grid: list[dict[str, Any]] = field(
-        default_factory=list,
-    )
     # Maps an authoring specialist task_id -> originating FRAMEWORK candidate id
     # (PR URL), so the authored-outcome bridge can key the progress row on the
     # PR-URL that ``_select_next_framework_agent_candidate`` checks.
@@ -855,11 +874,25 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     framework_agent_review_counts: dict[str, int] = field(
         default_factory=dict,
     )
+    # Apply-failure re-author attempts per candidate id, capped by
+    # ``_AUTHORED_LANE_MAX_ATTEMPTS``. Declared (not set ad hoc) because
+    # ``to_dict`` is ``asdict``, which walks declared fields only: an undeclared
+    # attribute is dropped at every save, so the cap would be re-spent from zero
+    # on every resume.
+    apply_fail_reauthor_attempts: dict[str, int] = field(
+        default_factory=dict,
+    )
+    # Retry contexts queued by the authored lane and drained by
+    # ``_drain_apply_fail_retry_pending``. Declared for the same reason: an
+    # undeclared attribute means a resume silently discards queued retries.
+    apply_fail_retry_pending: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
     # Default True: Coordinator auto-analysis is ``roofline`` (profile+trace_analyze+analysis.md); False enqueues plain ``profile``.
     enable_roofline: bool = True
     # ExploreExecutor per-variant overtime kill multiplier; >0 kills the decision
     # run past anchor*ratio (outcome='KILLED_OVERTIME'). Anchor is the WARM
-    # measure time when active else the cold baseline; warmup + stack-rebench exempt.
+    # measure time when active else the cold baseline; the warmup round is exempt.
     explore_overtime_kill_ratio: float = 2.0
     # ExploreExecutor per-variant hard timeout override; 0 => auto-derive from baseline_runtime_sec*(kill_ratio+safety_margin).
     explore_variant_timeout_sec_override: int = 0
@@ -913,18 +946,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     pending_kernel_integrations: dict[str, Any] = field(default_factory=dict)
     # Consecutive grid-runner tasks with no new current_best; Robustness nudges Orch off the plateau. Reset on advance.
     params_no_promote_streak: int = 0
-    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` includes stack-rebench survivors, rebench-evicted entries move to rejected.
+    # Unified persistent explore-search ledger; ``tested`` keyed by canonical_fingerprint, ``accepted`` holds the round's KEEPs, everything graded down moves to rejected.
     explore_search: dict[str, Any] = field(default_factory=dict)
-    # specialist sub-agent rolling state; one entry per EXPLORE round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
+    # specialist sub-agent rolling state; one entry per config-arm round (round_id, tasks, proposals_total/kept/rejected/skipped, etc.).
     specialist_rounds: list[dict[str, Any]] = field(default_factory=list)
-    # Per-kb_anchor coverage counters: EXPLORE rounds since a specialist was
-    # dispatched / since a KEEP landed. Both ++ once per EXPLORE round, reset on
+    # Per-kb_anchor coverage counters: config-arm rounds since a specialist was
+    # dispatched / since a KEEP landed. Both ++ once per round, reset on
     # dispatch / KEEP.
     rounds_since_last_specialist: dict[str, int] = field(default_factory=dict)
     rounds_since_last_keep: dict[str, int] = field(default_factory=dict)
     # last specialist task snapshot (parity with other ``last_<action>`` mirrors).
     last_specialist: dict[str, Any] = field(default_factory=dict)
-    # Per-specialist patch verdict ledger by task_id; Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
+    # Patch verdict ledger keyed by review subject (a specialist task_id, or a candidate id for a PR pre-screen); Critic must approve/advise before PolicyGate allows the integrate_patch delegate.
     specialist_patch_verdicts: dict[str, str] = field(default_factory=dict)
     # Intervention-mix ledger ({change_type∈{config,code_patch}, action, task_id, ts, delta_pct}); Robustness detects config-only loops.
     intervention_mix: list[dict[str, Any]] = field(default_factory=list)
@@ -945,8 +978,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # switch ``--no-static-recon``. PRELUDE-only one-shot source reconnaissance.
     static_recon_enabled: bool = True
     static_recon_runs: int = 0
-    # Total specialist dispatches in current EXPLORE entry; reset on fresh entry. Robustness detects specialist storms.
-    explore_specialist_dispatched_count: int = 0
     # Research-lane capacity locked at session start (core field; PolicyGate denies mid-session mutation).
     research_lane_capacity: int = 1
     # GPU pool capacity for needs_gpu specialists (0 disables); locked at
@@ -993,6 +1024,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # lasted ``KERNEL_IDLE_MIN_SECONDS``. Rebased to now while a kernel-lane task
     # is in flight so a 30-minute build never accrues idle time.
     kernel_idle_since_unix: float = 0.0
+    # Unix time an inline kernel request (``integrate``, ``run_optimization``,
+    # ...) last reported itself running. Those are awaited straight in the intent
+    # router and never become a row in the task registry, so the KERNEL idle
+    # guard's in-flight probe cannot see them and reads a long one as a dead
+    # phase. A timestamp rather than a flag, so one left behind by a process that
+    # died mid-step goes stale instead of muting the guard for the next run.
+    kernel_inline_step_seen_unix: float = 0.0
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -1003,7 +1041,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     target_gap_pct: float = 0.0
 
     # Phase state machine fields
-    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
+    # ``phase`` — run-level pipeline phase (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/CLOSE); Coordinator-only (CORE_STATE_FIELDS). Empty => not yet initialised.
     phase: str = ""
     # ISO UTC timestamp the current phase was entered (breakdown.phase_segments + budget judge).
     phase_started_ts: str = ""
@@ -1011,8 +1049,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     phase_started_unix: float = 0.0
     # Append-only log of phase transitions (rows from machine_state.make_history_row; reason in PHASE_EXIT_REASONS). Capped at _PHASE_HISTORY_CAP.
     phase_history: list[dict[str, Any]] = field(default_factory=list)
-    # Durable sum of completed EXPLORE segments. None means a legacy resumed
-    # state whose pre-upgrade total is unknowable. The current active EXPLORE
+    # Durable sum of completed optimisation-phase segments. None means a legacy
+    # resumed state whose pre-upgrade total is unknowable. The current active
     # segment is added at status-render time; accumulating completed segments
     # avoids undercounting long macro-cycle runs after phase_history is capped.
     explore_elapsed_accum_s: float | None = 0.0
@@ -1034,7 +1072,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Wall-clock budget percentages per phase (from CLI flags/defaults); persisted for resume. Empty => library defaults.
     phase_budget_pct: dict[str, float] = field(default_factory=dict)
     # Cyclic phase machine macro-cycle counter (cycle 0 is the first pass; each
-    # SWEEP→EXPLORE loopback increments it). Stamped onto every phase_history row.
+    # SWEEP→FRAMEWORK_AGENT loopback increments it). Stamped onto every phase_history row.
     macro_cycle: int = 0
     # Per-cycle budget: wall-clock minutes for ONE macro-cycle. When > 0 the
     # per-phase budget math is computed against this window instead of
@@ -1044,7 +1082,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # macro-cycle's start, and the consecutive no-gain cycle streak.
     gain_at_cycle_start: float = 0.0
     no_gain_cycle_streak: int = 0
-    # Cyclic bottleneck re-direction: set when a cyclic EXPLORE plateau winds the
+    # Cyclic bottleneck re-direction: set when a cyclic config plateau winds the
     # cycle down; the next macro-cycle's prompt surfaces a redirect advisory off
     # ``last_cycle_bottleneck``. Cleared once the live top bottleneck drifts off it.
     pending_bottleneck_switch: bool = False
@@ -1093,6 +1131,51 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Non-field instance attr (set in load_or_init / save): session dir for
     # breakdown instrumentation. Plain class attr => not serialized.
     _session_dir = None
+
+    #: Fields of :meth:`profile_workload_context` that say *what was profiled*.
+    #: The rest -- ``server_args``, ``extra_envs``, ``remove_args``,
+    #: ``unset_envs``, ``args_mode`` -- say how the profile task was
+    #: parameterized, and are only populated when the recorder had those params
+    #: to hand. Two call sites record the same trace differently for that reason
+    #: alone, so comparing them makes a perfectly fresh trace read as stale.
+    #: ``serving_config`` is excluded here too: it has its own comparison, which
+    #: comes from ``current_best`` on both sides and is therefore symmetric.
+    #:
+    #: ``ClassVar`` because a bare annotation would make this constant a
+    #: dataclass field: it would be written into every ``state.json``, accepted
+    #: back from disk, and writable through ``apply_changes`` since a constant
+    #: is not something ``CORE_STATE_FIELDS`` thinks to lock. None of that
+    #: changes behaviour while the sole reader goes through ``cls``, which is
+    #: exactly what makes it worth closing -- it decides trace staleness, so an
+    #: instance-scoped read added later would let a stored value govern whether
+    #: a profile is reused or re-run.
+    PROFILE_WORKLOAD_IDENTITY_KEYS: ClassVar[tuple[str, ...]] = (
+        "framework",
+        "precision",
+        "model_path",
+        "tp",
+        "conc",
+        "isl",
+        "osl",
+        "max_model_len",
+    )
+
+    @classmethod
+    def profile_workload_identity(cls, context: Any) -> dict[str, Any]:
+        """Project a workload context down to what identifies the profiled run.
+
+        Args:
+            context (Any): A :meth:`profile_workload_context` result, or
+                anything else (treated as carrying no identity).
+
+        Returns:
+            dict[str, Any]: The identity fields, missing ones included as
+            ``None`` so a recorded context and a freshly built one compare
+            equal when they describe the same workload.
+        """
+        if not isinstance(context, Mapping):
+            return {}
+        return {key: context.get(key) for key in cls.PROFILE_WORKLOAD_IDENTITY_KEYS}
 
     def profile_workload_context(
         self,
@@ -1372,9 +1455,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         incoming_version = int(raw.get("schema_version") or 1)
 
         # Filter to known fields; unknown keys dropped, missing keys default.
-        known = {f for f in cls.__dataclass_fields__}
+        # ``fields()`` rather than ``__dataclass_fields__``: the latter also
+        # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
+        # state.json naming one would raise here instead of being ignored.
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
-        # A pre-telemetry state may already have completed EXPLORE segments,
+        # A pre-telemetry state may already have completed optimisation segments,
         # but their exact sum cannot be reconstructed once phase_history has
         # been capped. Preserve "unknown" instead of reporting a misleading
         # partial zero after resume. Fresh states still start from 0.0.
@@ -1405,7 +1491,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         if incoming_version < 4:
             # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = set(EnablementRound.__dataclass_fields__)
+            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
             flat = {
                 k[len("enablement_") :]: v
                 for k, v in raw.items()
@@ -1447,6 +1533,16 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                     else entry
                     for entry in stack
                 ]
+
+        if incoming_version < 6:
+            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
+            # reasoning as the v5 block: the old spelling is not a dataclass
+            # field, so the filter above has already dropped it, and a state
+            # holding both spellings is mid-migration with the current one
+            # winning.
+            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
+                if legacy in raw and current not in raw:
+                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
@@ -2217,7 +2313,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     def mark_bottleneck_switch(self, prev_bottleneck: str = "") -> None:
         """Flag that the next macro-cycle should redirect off ``prev_bottleneck`` (R3).
 
-        Called when a cyclic EXPLORE plateau winds the cycle down. Records the
+        Called when a cyclic config plateau winds the cycle down. Records the
         bottleneck we plateaued on so the redirect advisory can steer specialists
         away from it; falls back to the live top bottleneck when not supplied.
 
@@ -2419,8 +2515,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
             core_fields = CORE_STATE_FIELDS
         applied: dict[str, Any] = {}
+        # ``fields()`` excludes ClassVar pseudo-fields, so a class constant is
+        # not writable here. CORE_STATE_FIELDS locks the session fields someone
+        # thought to lock, and nobody thinks to lock a constant.
+        writable = {f.name for f in fields(self)}
         for key, value in changes.items():
-            if key not in self.__dataclass_fields__:
+            if key not in writable:
                 continue
             if key in core_fields:
                 log.warning(
@@ -3823,7 +3923,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         return time.monotonic() + usable
 
     def optimization_stack_has_unvalidated_keeps(self) -> bool:
-        """True iff a new KEEP landed since the last inline stack rebench (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
+        """True iff a new KEEP landed since the last validated measurement (purely a stack-length check vs ``cumulative_gain_validated_stack_len``).
 
         Returns:
             bool: ``True`` when ``optimization_stack`` is longer than

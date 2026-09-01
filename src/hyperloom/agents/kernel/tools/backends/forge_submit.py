@@ -100,7 +100,7 @@ def _knowledge_config_for_forge():
 
 
 _FORGE_EXPERIMENT_ID = "hyperloom"
-# Mirrors kernel_agents.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
+# Mirrors kernelforge.cli.MIN_MAX_HOURS (1.0h): forge-loop refuses a shorter
 # runtime budget rather than running a non-productive campaign.
 _FORGE_MIN_BUDGET_SEC = 3600
 _FORGE_SHUTDOWN_GRACE_SEC = 30
@@ -154,25 +154,6 @@ class _RetainedWorkspaceCollision(FileExistsError):
     """The requested workspace path already contains a retained attempt."""
 
 
-def _ensure_forge_on_path() -> str:
-    """Make `kernel_agents` (Kernel-Forge) importable from $FORGE_PATH.
-
-    Reads $FORGE_PATH, resolves the dir that contains the `kernel_agents`
-    package (the repo root, its `src/`, or the package dir itself) and prepends
-    it to sys.path. When the env var is unset, does nothing and relies on an
-    installed `kernel_agents`. Returns the path inserted, or "".
-    """
-    root = (os.environ.get("FORGE_PATH") or "").strip()
-    if not root:
-        return ""
-    for cand in (os.path.join(root, "src"), root, os.path.dirname(root)):
-        if os.path.isfile(os.path.join(cand, "kernel_agents", "__init__.py")):
-            if cand not in sys.path:
-                sys.path.insert(0, cand)
-            return cand
-    return ""
-
-
 # Platform -> gfx target.
 _PLATFORM_TO_GFX = {
     "mi300x": "gfx942",
@@ -181,21 +162,21 @@ _PLATFORM_TO_GFX = {
     "mi355x": "gfx950",
 }
 
-# Triton/python source maps to the triton fellow.
-_SOURCE_TYPE_TO_FELLOW = {
-    "triton": "triton-fellow",
-    "python": "triton-fellow",
+# Triton/python source maps to the triton kernel_backend.
+_SOURCE_TYPE_TO_KERNEL_BACKEND = {
+    "triton": "triton",
+    "python": "triton",
 }
 
-# Compiled-kernel fellows. Opt out with FORGE_DISABLE_COMPILED_FELLOWS=1.
-_COMPILED_SOURCE_TYPE_TO_FELLOW = {
-    "hip_cpp": "hip-fellow",
-    "hip": "hip-fellow",
-    "cuda_cpp": "hip-fellow",
-    "ck": "ck-fellow",
-    "aiter": "aiter-fellow",
-    "hipblaslt": "hipblaslt-fellow",
-    "flydsl": "flydsl-fellow",
+# Compiled-kernel kernel_backends. Opt out with FORGE_DISABLE_COMPILED_KERNEL_BACKENDS=1.
+_COMPILED_SOURCE_TYPE_TO_KERNEL_BACKEND = {
+    "hip_cpp": "hip",
+    "hip": "hip",
+    "cuda_cpp": "hip",
+    "ck": "ck",
+    "aiter": "aiter",
+    "hipblaslt": "hipblaslt",
+    "flydsl": "flydsl",
 }
 
 
@@ -468,32 +449,58 @@ def _resolve_kernel_kind(source_type: str, kernel_kind: str) -> str:
     return ""
 
 
-def _fellow_for_source_type(source_type: str) -> str | None:
-    """Map source_type to a Forge fellow. None if unsupported.
+# ``FORGE_DISABLE_COMPILED_FELLOWS`` was this knob's name before the
+# fellow -> kernel_backend rename. It cannot simply be dropped: ``FORGE_`` is on
+# env_safety's dotenv prefix allowlist, so an operator's old value is still
+# forwarded into the run and then ignored, which silently re-enables the
+# compiled kernel backends they had switched off. Honouring the old spelling
+# would keep the retired vocabulary alive, so it is refused instead -- once, and
+# loudly enough to be actionable.
+_RETIRED_COMPILED_OPT_OUT = "FORGE_DISABLE_COMPILED_FELLOWS"
+_retired_opt_out_warned = False
 
-    Triton/python map to triton-fellow. Compiled source types
-    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native fellow by default;
-    opt out with FORGE_DISABLE_COMPILED_FELLOWS=1 for triton-only.
+
+def _warn_on_retired_compiled_opt_out() -> None:
+    """Warn once if the pre-rename opt-out variable is still set."""
+    global _retired_opt_out_warned
+    if _retired_opt_out_warned or not os.environ.get(_RETIRED_COMPILED_OPT_OUT, "").strip():
+        return
+    _retired_opt_out_warned = True
+    log.warning(
+        "%s is set but no longer read; it was renamed to "
+        "FORGE_DISABLE_COMPILED_KERNEL_BACKENDS. Compiled kernel backends are "
+        "ENABLED for this run -- set the new name to keep them off.",
+        _RETIRED_COMPILED_OPT_OUT,
+    )
+
+
+def _kernel_backend_for_source_type(source_type: str) -> str | None:
+    """Map source_type to a Forge kernel_backend. None if unsupported.
+
+    Triton/python map to triton. Compiled source types
+    (hip_cpp/ck/aiter/hipblaslt/flydsl) map to their native kernel backend by default;
+    opt out with FORGE_DISABLE_COMPILED_KERNEL_BACKENDS=1 for triton-only.
     """
     st = (source_type or "").strip().lower()
-    fellow = _SOURCE_TYPE_TO_FELLOW.get(st)
-    if fellow is not None:
-        return fellow
-    if os.environ.get("FORGE_DISABLE_COMPILED_FELLOWS", "").strip().lower() in ("1", "true", "yes"):
+    kernel_backend = _SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
+    if kernel_backend is not None:
+        return kernel_backend
+    _warn_on_retired_compiled_opt_out()
+    if os.environ.get("FORGE_DISABLE_COMPILED_KERNEL_BACKENDS", "").strip().lower() in ("1", "true", "yes"):
         return None
-    return _COMPILED_SOURCE_TYPE_TO_FELLOW.get(st)
+    return _COMPILED_SOURCE_TYPE_TO_KERNEL_BACKEND.get(st)
 
 
-def _resolve_fellow(source_type: str, kernel_kind: str) -> str | None:
-    """Resolve the fellow deterministically from language and curated kernel kind."""
+def _resolve_kernel_backend(source_type: str, kernel_kind: str) -> str | None:
+    """Resolve the kernel backend deterministically from language and curated kernel kind."""
     kind = str(kernel_kind or "").strip().lower().replace("-", "_")
     if "flydsl" in kind:
-        return _fellow_for_source_type("flydsl")
+        return _kernel_backend_for_source_type("flydsl")
     if kind == "ck" or kind.endswith("_ck") or kind.startswith("ck_"):
-        return _fellow_for_source_type("ck")
+        return _kernel_backend_for_source_type("ck")
     if "triton" in kind:
-        return _fellow_for_source_type("triton")
-    return _fellow_for_source_type(source_type)
+        return _kernel_backend_for_source_type("triton")
+    return _kernel_backend_for_source_type(source_type)
 
 
 def _git_toplevel(path: str) -> str:
@@ -560,6 +567,16 @@ def _prepare_worktree(source_file: str, kernel_repo: str, output_dir: Path, bran
         rel = src_abs.relative_to(Path(repo).resolve())
     except ValueError:
         return None  # source_file not inside the repo
+
+    # Being inside the repo is not the same as being tracked by it. A framework
+    # tree can host a git repo that indexes only part of itself (a scratch repo
+    # over site-packages that only added ``vllm/``, say). ``git worktree add``
+    # then succeeds and produces a worktree WITHOUT the kernel, and the failure
+    # surfaces far downstream as "prepared kernel does not exist". Fall back to
+    # the no-git scratch path instead, which copies the file in.
+    tracked = _run_git(["-C", repo, "ls-files", "--error-unmatch", "--", rel.as_posix()], timeout=30)
+    if tracked.returncode != 0:
+        return None
 
     wt = output_dir / "worktree"
     # A prior attempt at this path is retained for inspection. Never remove or
@@ -697,6 +714,95 @@ def _pkg_sys_path_root(source_file: str) -> str:
     return str(top.parent)
 
 
+def _is_on_network_fs(path: Path) -> bool:
+    """True when ``path`` or its nearest existing ancestor is on a network FS.
+
+    Imported inside the call: this file also runs as a standalone script on
+    nodes with no ``hyperloom`` on the path, the invariant
+    ``test_forge_submit_stays_import_light`` pins.
+    """
+    from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
+
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return is_network_fs(str(probe))
+
+
+def _local_scratch_dir(output_dir: Path) -> Path:
+    """Return where the scratch worktree belongs for ``output_dir``.
+
+    A worktree is throwaway but gets copied and git-hashed in full, so on a
+    network mount it is placed on local disk instead. Only the worktree moves;
+    the durable archive under ``output_dir`` stays where the operator put it.
+    Override the local root with ``$FORGE_LOCAL_SCRATCH_ROOT``.
+
+    The local tree mirrors ``<session_id>/<attempt>`` from the durable side.
+    The attempt name alone is the kernel's, so two sessions optimizing one
+    kernel would claim one path and the second would be refused for a collision
+    with the first. Carrying the session id also scopes the owner marker that
+    lets the sweep identify live trees regardless of durable-root differences.
+    """
+    if not _is_on_network_fs(output_dir):
+        return output_dir / "worktree"
+    root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
+    local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
+    session_dir = local_root / output_dir.parent.name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _write_scratch_owner(session_dir)
+    _sweep_orphaned_scratch(local_root, output_dir.parent.name)
+    return session_dir / output_dir.name / "worktree"
+
+
+def _scratch_owner_file(session_dir: Path) -> Path:
+    return session_dir / ".owner"
+
+
+def _write_scratch_owner(session_dir: Path) -> None:
+    """Record pid and start-time so the sweep can tell live from dead sessions."""
+    pid = os.getpid()
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            starttime = fh.read().split()[21]
+    except OSError:
+        starttime = "0"
+    _scratch_owner_file(session_dir).write_text(f"{pid}:{starttime}", encoding="ascii")
+
+
+def _scratch_owner_alive(session_dir: Path) -> bool:
+    """True when the process that created this scratch session is still running."""
+    try:
+        text = _scratch_owner_file(session_dir).read_text(encoding="ascii").strip()
+        pid_str, starttime = text.split(":", 1)
+        pid = int(pid_str)
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # EPERM proves the pid exists, owned by another uid
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            current_starttime = fh.read().split()[21]
+        return current_starttime == starttime
+    except OSError:
+        return True  # unreadable stat: assume live to avoid deleting a running tree
+
+
+def _sweep_orphaned_scratch(local_root: Path, current_session: str) -> None:
+    """Delete local scratch whose owning process is no longer running."""
+    for child in local_root.iterdir():
+        if not child.is_dir() or child.name == current_session:
+            continue
+        if not any(child.glob("*/worktree")):
+            continue
+        if not _scratch_owner_alive(child):
+            shutil.rmtree(child, ignore_errors=True)
+            log.info("forge: swept orphaned scratch session %s", child)
+
+
 def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
@@ -717,8 +823,7 @@ def _prepare_worktree_nogit(
        one top-level package subtree (e.g. ``vllm/``), NEVER the entire
        ``dist-packages``/``site-packages`` directory (which would copy every
        installed package — torch, vllm, ... — 5-15 GB per submit, risking
-       ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
-       ``dist/`` to keep the copy small and fast.
+       ENOSPC). Ignores ``.git`` and the producer's runtime-artefact names.
     3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
        bytecode caches + ``git add -A`` + initial commit so Forge's
        ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
@@ -775,18 +880,32 @@ def _prepare_worktree_nogit(
         rel = Path(src_abs.name)
         copy_subtrees = None
 
-    scratch_dir = output_dir / "worktree"
+    scratch_dir = _local_scratch_dir(output_dir)
     if scratch_dir.exists() or scratch_dir.is_symlink():
         raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
+    # In-call for the reason ``_is_on_network_fs`` states. The copy takes the
+    # narrow set; only the index may drop what a package is imported through.
+    from kernelforge.loop.path_ownership import (  # noqa: PLC0415
+        COPY_FILTER_DIRECTORY_NAMES,
+        RUNTIME_DIRECTORY_GLOBS,
+        RUNTIME_DIRECTORY_NAMES,
+        RUNTIME_FILE_SUFFIXES,
+    )
+    import fnmatch as _fnmatch  # noqa: PLC0415
+
+    skipped_dirs = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
+    runtime_suffixes = tuple(RUNTIME_FILE_SUFFIXES)
+    dir_globs = RUNTIME_DIRECTORY_GLOBS
+
     def _ignore(directory: str, names: list[str]) -> list[str]:
-        ignored: list[str] = []
-        for n in names:
-            if n in (".git", "__pycache__", "build", "dist") or n.endswith(".egg-info"):
-                ignored.append(n)
-        return ignored
+        return [
+            n
+            for n in names
+            if n in skipped_dirs or n.endswith(runtime_suffixes) or any(_fnmatch.fnmatchcase(n, g) for g in dir_globs)
+        ]
 
     try:
         if copy_subtrees is None:
@@ -806,7 +925,14 @@ def _prepare_worktree_nogit(
 
     def _scaffold(cmds: list[list[str]]) -> bool:
         for cmd in cmds:
-            proc = _run_git(cmd, timeout=120)
+            # 120s, not less: the baseline ``git add -A`` hashes every copied
+            # extension module, and a framework package carries GBs of them.
+            try:
+                proc = _run_git(cmd, timeout=120)
+            except subprocess.TimeoutExpired:
+                log.warning("forge: non-git scaffold git step timed out: %s", cmd)
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                return False
             if proc.returncode != 0:
                 log.warning(
                     "forge: non-git scaffold git init step failed: %s -> %s",
@@ -829,7 +955,7 @@ def _prepare_worktree_nogit(
 
     # Must precede the baseline `git add -A`, so the pattern is in force for
     # every commit the loop later makes against this repository.
-    _exclude_bytecode_caches(scratch_dir)
+    _exclude_runtime_artifacts(scratch_dir)
 
     if not _scaffold(
         [
@@ -1293,7 +1419,6 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 
 
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
-_BYTECODE_CACHE_GLOB = "__pycache__/"
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
@@ -1338,32 +1463,31 @@ def _git_exclude_file(workspace: Path) -> Path | None:
     return common / "info" / "exclude"
 
 
-def _exclude_bytecode_caches(workspace: Path) -> None:
-    """Keep regenerated bytecode caches out of the scratch repository's commits.
-
-    Importing the sources the loop edits rewrites ``__pycache__`` beside them.
-    The scratch copy skips the caches that existed, but nothing stops a broad
-    ``git add`` from staging the ones written while the loop runs: they then
-    reach the published patch as binary hunks, and ``git apply`` refuses those
-    for lacking a full index line, so the solution cannot be replayed.
+def _exclude_runtime_artifacts(workspace: Path) -> None:
+    """Keep machine-generated artefacts out of the scratch repository's index.
 
     Only the throwaway scratch repository needs this. Real repositories carry
-    their own ignore rules, and an entry written there would outlive the run.
+    their own ignore rules, and entries written there would outlive the run.
     """
+    from kernelforge.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
+
     exclude = _git_exclude_file(workspace)
     if exclude is None:
         return
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if _BYTECODE_CACHE_GLOB in existing.split():
+        present = set(existing.split())
+        missing = [g for g in runtime_gitignore_globs() if g not in present]
+        if not missing:
             return
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with open(exclude, "a", encoding="utf-8") as handle:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
-            handle.write(_BYTECODE_CACHE_GLOB + "\n")
+            for glob in missing:
+                handle.write(glob + "\n")
     except OSError as error:
-        log.warning("forge: could not exclude bytecode caches from git: %s", error)
+        log.warning("forge: could not write scratch exclude patterns: %s", error)
 
 
 def _restore_generated_driver_exclude(workspace: Path) -> None:
@@ -1700,32 +1824,32 @@ def _ensure_flydsl_aiter_compat(protocol_path: str = "") -> bool:
 def _openai_only_provider() -> bool:
     """Return true when the OpenAI side is the only configured provider.
 
-    The forge fellow reaches an OpenAI-protocol gateway only through
+    The forge kernel backend reaches an OpenAI-protocol gateway only through
     KernelForge's codex provider, so this predicate is what selects it over the
     claude provider that ``Config.agent_backend='auto'`` would otherwise resolve
     to. The shape test lives in :mod:`hyperloom.common.llm_config` so that the
-    fellow, backend selection and the TraceLens runner cannot disagree.
+    kernel backend, backend selection and the TraceLens runner cannot disagree.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
     return llm_config.is_openai_only()
 
 
-def _apply_fellow_env(env: dict) -> None:
-    """Apply fellow (claude CLI / codex SDK) stability defaults to ``env``.
+def _apply_kernel_backend_env(env: dict) -> None:
+    """Apply kernel backend (claude CLI / codex SDK) stability defaults to ``env``.
 
     Mutates the given child-process env dict ONLY -- never the parent
     ``os.environ`` -- so the rewrite (notably the ANTHROPIC_BASE_URL streaming
     proxy) cannot leak outside this forge attempt. The forge-loop subprocess
-    inherits this env; inside it the fellow drives either the claude CLI
+    inherits this env; inside it the kernel backend drives either the claude CLI
     streaming transport or the codex SDK, per the configured provider side.
     ``setdefault`` keeps operator overrides authoritative.
     """
-    claude_fellow = not _openai_only_provider()
+    claude_kernel_backend = not _openai_only_provider()
     # bypassPermissions refuses to start under root unless IS_SANDBOX=1.
     if hasattr(os, "geteuid") and os.geteuid() == 0:
         env.setdefault("IS_SANDBOX", "1")
-    if claude_fellow:
+    if claude_kernel_backend:
         # claude CLI discovery: the child may inherit a stripped PATH, so resolve
         # claude's absolute path here, export FORGE_CLAUDE_BIN, and prepend its dir
         # to the child PATH.
@@ -1746,11 +1870,19 @@ def _apply_fellow_env(env: dict) -> None:
         base_url = str(env.get("ANTHROPIC_BASE_URL") or "").strip()
         if base_url.endswith("/llm-gateway"):
             env["ANTHROPIC_BASE_URL"] = base_url[: -len("/llm-gateway")] + "/api/v1/llm-proxy"
-    # Fellow-hung mitigation: bound the claude CLI's own request timeout and cut
+    # KernelBackend-hung mitigation: bound the claude CLI's own request timeout and cut
     # non-essential traffic / autoupdate that can block in headless containers.
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
+    # The forge loop spends against the gateway for the whole of its run, and
+    # every agent it drives inherits this env, so without a tag here that spend
+    # arrives naming no component at all. Injecting from this side is what makes
+    # the phase and the action travel: both live in this process only, and the
+    # loop can refine the component it is given without having to restate them.
+    from hyperloom.common.llm_attribution import inject_env
+
+    inject_env(env, component="forge", operation="forge_loop")
     # Shared KnowledgePlane contract. KernelForge remains responsible for its
     # own local knowledge implementation and remote kernel-experience behavior.
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (
@@ -1766,7 +1898,7 @@ def _apply_fellow_env(env: dict) -> None:
     # side, where the codex provider authenticates from OPENAI_API_KEY, and under
     # a subscription token, which any API key would silently override.
     if (
-        claude_fellow
+        claude_kernel_backend
         and not env.get("ANTHROPIC_API_KEY", "").strip()
         and not env.get("CLAUDE_CODE_OAUTH_TOKEN", "").strip()
     ):
@@ -2747,7 +2879,7 @@ def _run_loop_via_cli(
     branch: str,
     gpu_target: str,
     gpu_type: str,
-    fellow: str,
+    kernel_backend: str,
     program_md_file: str,
     invocation_spec_file: str,
     experiments_dir: Path,
@@ -2762,14 +2894,14 @@ def _run_loop_via_cli(
 ) -> ForgeLoopOutcome:
     """Run the Forge IterationLoop as an isolated subprocess (CLI mode).
 
-    Shells out to ``kernel-agents forge-loop`` (like the GEAK backend shells
+    Shells out to ``kernelforge forge-loop`` (like the GEAK backend shells
     out to its CLI) so the LLM-driven loop runs in a hard-killable child
-    process. A hung fellow can no longer freeze the orchestrator: the timeout
+    process. A hung kernel backend can no longer freeze the orchestrator: the timeout
     terminates the whole process group, then returns any persisted best
     checkpoint for recovery.
 
-    The subprocess resolves ``kernel_agents`` from $FORGE_PATH (prepended to
-    PYTHONPATH) and runs ``python -m kernel_agents.cli forge-loop``.
+    The child runs ``python -m kernelforge.cli forge-loop`` against the
+    installed package, which ships inside this distribution.
     """
     import json as _json
 
@@ -2784,14 +2916,11 @@ def _run_loop_via_cli(
             raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
         if stale_path.exists():
             raise RuntimeError(f"stale Forge recovery artifact still exists: {stale_path}")
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    # Fellow stability defaults scoped to this child env only.
-    _apply_fellow_env(env)
+    # KernelBackend stability defaults scoped to this child env only.
+    _apply_kernel_backend_env(env)
     # Identity for the commits the loop makes, so no repo .git/config is touched.
     env.setdefault("GIT_AUTHOR_NAME", "forge-bot")
     env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
@@ -2808,7 +2937,7 @@ def _run_loop_via_cli(
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
         worktree_kernel,
@@ -2824,8 +2953,8 @@ def _run_loop_via_cli(
         branch,
         "--gpu-target",
         gpu_target,
-        "--fellow",
-        fellow,
+        "--kernel-backend",
+        kernel_backend,
         "--experiments-dir",
         str(experiments_dir),
         "--experiment-id",
@@ -3057,13 +3186,10 @@ def _run_rewrite_via_cli(
     if result_json.exists():
         raise RuntimeError(f"stale rewrite result still exists: {result_json}")
 
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    _apply_fellow_env(env)
+    _apply_kernel_backend_env(env)
     # Same provider pin the generic loop applies through argv, which this command
     # has no options for: it takes no --agent-backend, so its Config reads these.
     # Without them an OpenAI-only deployment resolves "auto" to the claude
@@ -3088,7 +3214,7 @@ def _run_rewrite_via_cli(
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         _flydsl_rewrite.REWRITE_COMMAND,
         "--source-kernel",
         source_kernel,
@@ -3620,7 +3746,7 @@ def _read_vendor_playbook_cached_result(lock_dir: Path, *, max_failure_age_s: fl
     the intended dedup behavior. A cached FAILURE is only returned while it
     is younger than ``max_failure_age_s``; once it ages out it is treated as
     absent so a fresh submission actually retries instead of one transient
-    failure (FORGE_PATH momentarily unset, a flaky bundle copy, etc.)
+    failure (a flaky bundle copy, a transient git failure, etc.)
     permanently wedging the whole playbook group for the rest of the session
     (PR #1191 review finding #2).
     """
@@ -3885,7 +4011,7 @@ def _run_vendor_playbook_loop_via_cli(
     branch: str,
     gpu_target: str,
     gpu_type: str,
-    fellow: str,
+    kernel_backend: str,
     program_md_file: str,
     target_functions: list[str],
     experiments_dir: Path,
@@ -3911,20 +4037,17 @@ def _run_vendor_playbook_loop_via_cli(
         except OSError as exc:
             raise RuntimeError(f"could not clear stale Forge recovery artifact {stale_path}: {exc}") from exc
 
-    forge_root = _ensure_forge_on_path()
     env = dict(os.environ)
-    if forge_root:
-        env["PYTHONPATH"] = forge_root + os.pathsep + env.get("PYTHONPATH", "")
     env["GPU_TARGET"] = gpu_target
     _apply_gpu_type_env(env, gpu_type)
-    _apply_fellow_env(env)
+    _apply_kernel_backend_env(env)
     for key, value in (extra_env or {}).items():
         env[str(key)] = str(value)
 
     cmd = [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
         kernel_anchor,
@@ -3940,8 +4063,8 @@ def _run_vendor_playbook_loop_via_cli(
         branch,
         "--gpu-target",
         gpu_target,
-        "--fellow",
-        fellow,
+        "--kernel-backend",
+        kernel_backend,
         "--experiments-dir",
         str(experiments_dir),
         "--experiment-id",
@@ -4055,6 +4178,27 @@ def _run_vendor_playbook_loop_via_cli(
     )
 
 
+def _resolve_vendor_task_bundle(relative: str) -> Path | None:
+    """Locate a vendor playbook's task bundle under KernelForge's ``examples/``.
+
+    The bundle ships inside the installed ``kernelforge`` package, so this needs
+    no environment at all -- it used to hard-fail with "FORGE_PATH is not set",
+    which is no longer a precondition. An operator who must substitute a bundle
+    without reinstalling points ``$KERNELFORGE_PROJECT_ROOT`` at a tree holding
+    it, which :func:`resource_path` honours ahead of the packaged copy.
+
+    Returns ``None`` for an empty ``relative``. ``missing_ok`` keeps a bundle
+    the package does not carry reportable as a concrete path, which the caller
+    turns into ``skipped`` rather than a failure.
+    """
+    if not relative:
+        return None
+
+    from kernelforge.resources import default_project_root, resource_path
+
+    return resource_path(relative, default_project_root(), missing_ok=True)
+
+
 def _run_claimed_vendor_playbook(
     *,
     candidate: dict[str, Any],
@@ -4076,25 +4220,12 @@ def _run_claimed_vendor_playbook(
     here leaves ``claimed.lock`` in place forever with no result for any
     waiting sibling or later retry to find.
     """
-    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if not forge_root:
+    task_bundle_root = _resolve_vendor_task_bundle(str(playbook.get("task_bundle") or ""))
+    if task_bundle_root is None or not task_bundle_root.is_dir():
         result = _normalized(
             2,
             "",
-            "forge: FORGE_PATH is not set; cannot locate the KernelForge "
-            f"examples/ task bundle for vendor playbook {group_id!r}",
-            time.time() - started,
-            skipped=True,
-        )
-        _write_vendor_playbook_result(lock_dir, result)
-        return result
-
-    task_bundle_root = Path(forge_root) / str(playbook.get("task_bundle") or "")
-    if not task_bundle_root.is_dir():
-        result = _normalized(
-            2,
-            "",
-            f"forge: vendor playbook task bundle not found: {task_bundle_root}",
+            f"forge: vendor playbook task bundle not found: {task_bundle_root} (playbook {group_id!r})",
             time.time() - started,
             skipped=True,
         )
@@ -4161,7 +4292,7 @@ def _run_claimed_vendor_playbook(
         branch=branch,
         gpu_target=gpu_target,
         gpu_type=gpu_type,
-        fellow=str(playbook.get("fellow") or "aiter-fellow"),
+        kernel_backend=str(playbook.get("kernel_backend") or "aiter"),
         program_md_file=str(program_md),
         target_functions=[str(f) for f in (playbook.get("target_functions") or [])],
         experiments_dir=experiments_dir,
@@ -4386,8 +4517,8 @@ def submit(
     """Run Forge's autonomous loop on one kernel; emit Hyperloom-contract artifacts.
 
     Hyperloom prepares an isolated git worktree / in-place edit, then runs the
-    Forge IterationLoop in a hard-killable CLI subprocess (`kernel-agents
-    forge-loop`) so a hung fellow can never freeze the orchestrator. Returns a
+    Forge IterationLoop in a hard-killable CLI subprocess (`kernelforge
+    forge-loop`) so a hung kernel backend can never freeze the orchestrator. Returns a
     normalized result dict and writes optimized_versions/ +
     optimization_report.md under output_dir.
     """
@@ -4398,7 +4529,7 @@ def submit(
 
     # Vendor-operator-playbook route: a closed-source vendor op (e.g. mori's EP
     # dispatch/combine) has no rewritable device source to worktree/rewrite --
-    # skip the entire git-worktree / fellow-resolution / rewrite-route pipeline
+    # skip the entire git-worktree / kernel_backend-resolution / rewrite-route pipeline
     # below and copy the validated KernelForge task bundle instead. See
     # _vendor_operator_playbooks.py and KernelForge PR #88.
     if candidate.get("patch_strategy") == "vendor_playbook":
@@ -4422,8 +4553,8 @@ def submit(
         (".cu", ".cuh", ".hip")
     ):
         source_type = "hip_cpp"
-    # Curated kernel_kind refines the fellow choice: an aiter CK .cu is best
-    # tuned by the ck-fellow, not generic HIP; aiter_asm is a prebuilt assembly
+    # Curated kernel_kind refines the kernel backend choice: an aiter CK .cu is best
+    # tuned by the ck, not generic HIP; aiter_asm is a prebuilt assembly
     # core the agent cannot rewrite -> skip cleanly.
     kernel_kind = _resolve_kernel_kind(
         source_type,
@@ -4438,16 +4569,16 @@ def submit(
             time.time() - started,
             skipped=True,
         )
-    fellow = _resolve_fellow(source_type, kernel_kind)
+    kernel_backend = _resolve_kernel_backend(source_type, kernel_kind)
     log.info(
-        "forge dispatch: source_file=%s source_type=%s kernel_kind=%s fellow=%s op=%s",
+        "forge dispatch: source_file=%s source_type=%s kernel_kind=%s kernel_backend=%s op=%s",
         source_file,
         source_type,
         kernel_kind or "-",
-        fellow,
+        kernel_backend,
         (candidate or {}).get("operation", ""),
     )
-    if fellow is None:
+    if kernel_backend is None:
         return _normalized(
             2,
             "",
@@ -4523,10 +4654,6 @@ def submit(
     # the value reaches the caller, so mutating it there is visible to them.
     finalized_result: dict[str, Any] = {}
     try:
-        # Locate the Kernel-Forge code via $FORGE_PATH (the loop runs in a
-        # subprocess, so kernel_agents need not be importable in this process).
-        forge_root = _ensure_forge_on_path()
-
         shapes = _shapes_from_candidate(candidate)
         grouped_cases = task_group_shape_cases(candidate)
         requires_multi_case_driver = len(grouped_cases) > 1
@@ -4564,7 +4691,6 @@ def submit(
             attempt_id=output_dir.name,
             timeout_s=timeout_s,
             invocation_spec_file=invocation_spec_file,
-            forge_root=forge_root,
         )
         if not rewrite_route.eligible and rewrite_route.reason != "route_disabled":
             log.info(
@@ -4612,8 +4738,8 @@ def submit(
         experiments_dir.mkdir(parents=True, exist_ok=True)
         snr_threshold = float((candidate.get("targets") or {}).get("snr_db", 30.0))
 
-        # Run the loop in an isolated, hard-killable subprocess so a hung fellow
-        # can never freeze the orchestrator. Fellow stability env defaults are
+        # Run the loop in an isolated, hard-killable subprocess so a hung kernel backend
+        # can never freeze the orchestrator. KernelBackend stability env defaults are
         # applied inside _run_loop_via_cli, scoped to the child env only.
         # forge-loop rejects --max-hours below its own MIN_MAX_HOURS (1.0) with a
         # click BadParameter (exit 2) that reads like a forge crash and leaves no
@@ -4663,7 +4789,7 @@ def submit(
             branch=branch,
             gpu_target=gpu_target,
             gpu_type=gpu_type,
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             program_md_file=str(prompt_file),
             invocation_spec_file=invocation_spec_file,
             experiments_dir=experiments_dir,
@@ -4787,7 +4913,7 @@ def submit(
             f"search_start={search_start_ms} best={best_ms} "
             f"mean_case_speedup={mean_case_speedup} improved={improved} "
             f"improved_during_search={improved_during_search} "
-            f"fellow={fellow} gpu={gpu_target} "
+            f"kernel_backend={kernel_backend} gpu={gpu_target} "
             f"knowledge={knowledge_status.mode}/{knowledge_status.backend} "
             f"salvaged={'yes' if salvaged else 'no'}"
         )

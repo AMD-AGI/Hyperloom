@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
@@ -50,6 +51,7 @@ import tracelens_analysis as tla  # noqa: E402
 import forge_submit  # noqa: E402
 import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
+    load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
     resolve_kernel_anchor_path,
     _reset_vendor_operator_playbooks_cache,
@@ -307,11 +309,139 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
         assert tla.looks_like_source_path(source_file)
 
 
+def test_playbook_anchor_overrides_a_same_word_grep_collision():
+    """A registry match outranks whatever the grep tier guessed.
+
+    These operators reduce to the keywords "dispatch" and "combine", which
+    collide with unrelated vendor files (``mxfp4_moe_aux_dispatch.h``,
+    ``fmha_fwd_d64_bf16_combine.cu``) once the search roots actually resolve.
+    The registry is a curated statement that the operator is tuned through a
+    task bundle, so handing a backend the colliding path would rewrite the
+    wrong file.
+    """
+    collision = "/usr/local/lib/python3.12/dist-packages/aiter_meta/csrc/x_dispatch.h"
+    candidates = [
+        _mori_dispatch_candidate(source_file=collision),
+        _mori_combine_candidate(source_file=collision),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert item["source_file"] != collision
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+
+
+def test_playbook_anchor_also_overrides_a_correct_grep_hit():
+    """The override does not depend on the guess being wrong.
+
+    ``dispatch_combine.py`` under site-packages really is where these operators
+    live, so this is the case where the grep tier was right. The anchor still
+    wins: the registry says the operator is tuned through a task bundle, and a
+    backend handed the device source has nothing to rewrite there. The
+    displaced path stays on the row so the override is auditable rather than
+    silent.
+    """
+    candidates = [
+        _mori_dispatch_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+        _mori_combine_candidate(source_file=_MORI_SITE_PACKAGES_FILE),
+    ]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    for item in out:
+        assert item["patch_strategy"] == "vendor_playbook"
+        assert str(item["source_file"]).endswith("mori_ep_config.py")
+        assert item["source_file_superseded_by_playbook"] == _MORI_SITE_PACKAGES_FILE
+
+
+def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
+    """Nothing displaced, nothing recorded.
+
+    The search roots are emptied so the grep tier cannot resolve anything: on a
+    host with the frameworks installed it reaches the same-word collision this
+    file's other cases describe, which is a displacement rather than the
+    graph-captured no-source shape under test here.
+    """
+    monkeypatch.setattr(tla, "kernel_search_roots", lambda: ())
+    candidates = [_mori_dispatch_candidate(source_file="")]
+    out = tla._finalize_candidates(candidates, total_dur=1000.0)
+
+    assert str(out[0]["source_file"]).endswith("mori_ep_config.py")
+    assert "source_file_superseded_by_playbook" not in out[0]
+
+
+def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog, tmp_path):
+    """The anchorless entry is kept out of the pipeline, not guarded against.
+
+    Every consumer of a match overrides ``source_file`` with the anchor, so an
+    entry without one substitutes nothing for whatever tier resolved the path
+    and lands the candidate as ``missing_native_source``. Guarding each consumer
+    was tried and went wrong in a way the data never justified: the guard's
+    marker gated on ``source_file``, so a row with neither anchor nor path read
+    as anchor-backed, went into ``protected_ids``, and the row most in need of
+    the review was refused it. Refusing the entry at load makes the shape
+    unreachable instead.
+    """
+    registry = tmp_path / "vendor_operator_playbooks.json"
+    registry.write_text(
+        json.dumps(
+            {
+                "playbooks": [
+                    {"id": "with-anchor", "kernel_anchor": "mori_ep_config.py"},
+                    {"id": "no-anchor", "role": "dispatch"},
+                    {"id": "blank-anchor", "kernel_anchor": "   "},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    # Redirect the registry rather than patching ``Path.read_text``, which is
+    # ``pathlib.Path``'s and would answer for every read in the process.
+    monkeypatch.setattr("_vendor_operator_playbooks._REGISTRY_PATH", registry)
+    _reset_vendor_operator_playbooks_cache()
+    with caplog.at_level(logging.WARNING, logger="_vendor_operator_playbooks"):
+        loaded = load_vendor_operator_playbooks()
+    _reset_vendor_operator_playbooks_cache()
+
+    assert [entry["id"] for entry in loaded] == ["with-anchor"]
+    assert "no-anchor" in caplog.text
+    assert "blank-anchor" in caplog.text
+
+
+def test_a_playbook_candidate_is_not_open_to_review_rewriting():
+    """Protection cannot key on the tier that resolved the replaced path.
+
+    ``source_file`` holds the task bundle's anchor whatever tier ran before, so
+    keying protection on that tier alone leaves the row open: a review proposal
+    could point the field back at framework source, routing the candidate to a
+    backend with nothing to rewrite and losing the playbook route.
+    """
+    resolved_by_grep = {
+        "kernel_id": "k010",
+        "source_resolution_method": "name_grep",
+        "op_to_source_status": "",
+    }
+    assert tla._is_curated_resolution(resolved_by_grep) is False
+
+    assert tla._is_curated_resolution({**resolved_by_grep, "patch_strategy": "vendor_playbook"}) is True
+
+
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --
 
 
-def _write_fake_mori_bundle(forge_path: Path) -> Path:
-    bundle = forge_path / "examples" / "mori_ep_dispatch_combine"
+#: Captured before any test monkeypatches it, so a test that injects a resolver
+#: failure can hand the real one back partway through.
+_real_resolve_vendor_task_bundle = forge_submit._resolve_vendor_task_bundle
+
+
+def _write_fake_mori_bundle(project_root: Path) -> Path:
+    """Plant a substitute bundle where ``resource_path`` looks before the package.
+
+    ``$KERNELFORGE_PROJECT_ROOT`` is the surviving override now that $FORGE_PATH
+    is gone: the layout under it mirrors the packaged data tree, so the same
+    relative path resolves against either.
+    """
+    bundle = project_root / "examples" / "mori_ep_dispatch_combine"
     bundle.mkdir(parents=True)
     (bundle / "mori_ep_config.py").write_text("def get_ep_launch_config():\n    return {}\n", encoding="utf-8")
     (bundle / "driver.py").write_text("# real, hand-written mori driver\n", encoding="utf-8")
@@ -339,10 +469,9 @@ def _stub_run_loop(monkeypatch, captured_calls: list[dict]):
 
 
 def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch, tmp_path):
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     captured: list[dict] = []
@@ -409,7 +538,7 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
     call = captured[0]
     assert call["kernel_anchor"] == str(workspace / "mori_ep_config.py")
     assert call["driver"] == str(workspace / "driver.py")
-    assert call["fellow"] == "aiter-fellow"
+    assert call["kernel_backend"] == "aiter"
     assert call["target_functions"] == ["get_ep_launch_config", "dispatch", "combine"]
     assert call["extra_env"]["KERNELFORGE_INCLUDE_MORI_KB"] == "1"
     assert call["program_md_file"] == str(workspace / "program.md")
@@ -474,10 +603,9 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
 
 def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(monkeypatch, tmp_path):
     """dispatch+combine invoke KernelForge as ONE Forge session, not two."""
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     captured: list[dict] = []
@@ -587,8 +715,60 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
     assert combine_proposal["decision"] == "KEEP", combine_proposal["reasons"]
 
 
-def test_submit_vendor_playbook_reports_missing_forge_path(monkeypatch, tmp_path):
-    monkeypatch.delenv("FORGE_PATH", raising=False)
+def test_submit_vendor_playbook_runs_from_the_packaged_bundle_without_forge_path(monkeypatch, tmp_path):
+    """No $FORGE_PATH is the normal case now, and it must reach forge-loop.
+
+    This used to be ``test_submit_vendor_playbook_reports_missing_forge_path``
+    and asserted the opposite: an unset env var hard-failed the submission with
+    ``skipped=True``. KernelForge ships inside this distribution, so the task
+    bundle is packaged and there is nothing left to configure -- if this ever
+    goes back to skipping, every mori vendor-playbook attempt silently does
+    nothing on a stock install.
+    """
+    calls: list[dict] = []
+    _stub_run_loop(monkeypatch, calls)
+    # This is the only test here that drives submit() far enough to resolve a
+    # gfx target, and that resolver ends in rocminfo. Left to the host, the test
+    # passes on a GPU box and fails on a CI runner -- and what it is about is the
+    # bundle, not the hardware. Name the target so the answer is the same either way.
+    monkeypatch.setenv("GPU_TARGET", "gfx950")
+
+    playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
+    candidate = _mori_dispatch_candidate(
+        patch_strategy="vendor_playbook",
+        vendor_operator_playbook=playbook,
+        vendor_playbook_role="dispatch",
+    )
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("# fallback prompt\n", encoding="utf-8")
+    output_dir = tmp_path / "forge" / "session2" / "attempt_dispatch"
+
+    result = forge_submit.submit(
+        source_file=_MORI_SITE_PACKAGES_FILE,
+        prompt_file=prompt_file,
+        output_dir=output_dir,
+        candidate=candidate,
+        timeout_s=3600,
+    )
+
+    assert result.get("skipped") is not True, result.get("stderr_tail")
+    assert calls, "forge-loop was never invoked"
+    # The bundle really was copied, from the packaged tree rather than a checkout.
+    workspace = output_dir / "worktree"
+    assert (workspace / "mori_ep_config.py").is_file()
+    assert (workspace / "driver.py").is_file()
+
+
+def test_submit_vendor_playbook_skips_when_the_bundle_cannot_be_resolved(monkeypatch, tmp_path):
+    """An unresolvable bundle is still a fail-soft skip, not an exception.
+
+    The packaged tree makes this unreachable in practice; the branch stays
+    because a $KERNELFORGE_PROJECT_ROOT override or a truncated install can
+    still produce it, and the caller contract is "write a result, never raise
+    past the claim".
+    """
+    monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", lambda relative: tmp_path / "absent" / relative)
+
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     candidate = _mori_dispatch_candidate(
         patch_strategy="vendor_playbook",
@@ -608,7 +788,7 @@ def test_submit_vendor_playbook_reports_missing_forge_path(monkeypatch, tmp_path
 
     assert result["skipped"] is True
     assert result["returncode"] == 2
-    assert "FORGE_PATH" in result["stderr_tail"]
+    assert "task bundle not found" in result["stderr_tail"]
 
 
 def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatch, tmp_path):
@@ -627,10 +807,9 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
     catch-all wrapper in _submit_vendor_playbook rather than one of the
     pre-existing specific except clauses.
     """
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
 
     def _boom(_output_dir, _source_file):
@@ -688,26 +867,31 @@ def test_submit_vendor_playbook_writes_result_when_bundle_copy_raises(monkeypatc
     assert combine_result["skipped"] is True
 
 
-def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch):
+def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
     """A relative ``source_file`` stand-in is later reinterpreted by
     ``Path(...).resolve()`` against whatever the apply-stage process's CWD
     happens to be, not against the KernelForge bundle it was meant to name
     -- resolve_kernel_anchor_path() must never return a bare relative string,
-    with or without FORGE_PATH set (PR #1191 review finding #8).
+    whether it resolves against the packaged tree or against an operator's
+    $KERNELFORGE_PROJECT_ROOT substitution (PR #1191 review finding #8).
     """
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     assert playbook is not None
 
-    monkeypatch.delenv("FORGE_PATH", raising=False)
-    anchor_no_forge_path = resolve_kernel_anchor_path(playbook)
-    assert anchor_no_forge_path
-    assert Path(anchor_no_forge_path).is_absolute()
+    packaged_anchor = resolve_kernel_anchor_path(playbook)
+    assert packaged_anchor
+    assert Path(packaged_anchor).is_absolute()
+    # With the bundle packaged, the stand-in names a file that actually exists
+    # rather than a synthetic /nonexistent-forge-path placeholder.
+    assert Path(packaged_anchor).is_file()
 
-    monkeypatch.setenv("FORGE_PATH", "/some/checkout/of/KernelForge")
-    anchor_with_forge_path = resolve_kernel_anchor_path(playbook)
-    assert anchor_with_forge_path
-    assert Path(anchor_with_forge_path).is_absolute()
-    assert anchor_with_forge_path.startswith("/some/checkout/of/KernelForge")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
+    overridden_anchor = resolve_kernel_anchor_path(playbook)
+    assert overridden_anchor
+    assert Path(overridden_anchor).is_absolute()
+    assert overridden_anchor.startswith(str(project_root))
 
 
 def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(monkeypatch, tmp_path):
@@ -719,10 +903,9 @@ def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass
     SNR validation had already passed inside forge-loop (PR #1191 review
     finding #5).
     """
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
     _stub_run_loop(monkeypatch, [])
 
@@ -756,10 +939,13 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
     """A cached FAILURE only de-dupes submissions within
     ``_VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S``; once it ages out, a fresh
     submission must actually retry instead of one transient failure
-    (FORGE_PATH momentarily unset, here) permanently wedging the whole
+    (an unresolvable task bundle, here) permanently wedging the whole
     playbook group for the rest of the session (PR #1191 review finding #2).
+
+    The transient failure used to be "FORGE_PATH unset", which no longer fails
+    at all now that the bundle is packaged; it is injected directly instead.
     """
-    monkeypatch.delenv("FORGE_PATH", raising=False)
+    monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", lambda relative: tmp_path / "absent" / relative)
     playbook = match_vendor_operator_playbook(_mori_dispatch_candidate())
     candidate = _mori_dispatch_candidate(
         patch_strategy="vendor_playbook",
@@ -777,7 +963,7 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
         candidate=candidate,
         timeout_s=3600,
     )
-    assert first["skipped"] is True  # FORGE_PATH unset -> a real failure
+    assert first["skipped"] is True  # unresolvable bundle -> a real failure
 
     lock_dir = forge_submit._vendor_playbook_lock_dir(output_dir, "mori_ep_dispatch_combine")
     result_path = lock_dir / "result.json"
@@ -800,10 +986,11 @@ def test_submit_vendor_playbook_stale_failure_cache_allows_retry(monkeypatch, tm
     stale_mtime = time.time() - forge_submit._VENDOR_PLAYBOOK_FAILURE_CACHE_TTL_S - 1.0
     os.utime(result_path, (stale_mtime, stale_mtime))
 
-    forge_path = tmp_path / "KernelForge"
-    _write_fake_mori_bundle(forge_path)
-    monkeypatch.setenv("FORGE_PATH", str(forge_path))
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
+    project_root = tmp_path / "kernelforge-project"
+    _write_fake_mori_bundle(project_root)
+    monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))
+    # Lift the injected failure so the retry can actually resolve a bundle.
+    monkeypatch.setattr(forge_submit, "_resolve_vendor_task_bundle", _real_resolve_vendor_task_bundle)
     monkeypatch.setattr(forge_submit, "_resolve_gpu_target", lambda _candidate: "gfx942")
     captured: list[dict] = []
     _stub_run_loop(monkeypatch, captured)

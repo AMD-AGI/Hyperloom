@@ -5,7 +5,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any
 
 
@@ -67,8 +67,6 @@ class EnablementRound:
     revalidation_task_id: str = ""
     # Monotonically increasing counter for fresh revalidation idempotency keys.
     revalidation_generation: int = 0
-    # Attempt-scoped runtime acquisition state.
-    stack_actions: list = field(default_factory=list)
     active_runtime: dict = field(default_factory=dict)
     attempt_runtimes: list = field(default_factory=list)
     kept_stack_action: dict = field(default_factory=dict)
@@ -91,6 +89,6 @@ class EnablementRound:
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "EnablementRound":
         """Construct from a raw mapping; unknown keys dropped, missing keys default."""
-        known = set(cls.__dataclass_fields__)
+        known = {f.name for f in fields(cls)}
         filtered = {k: v for k, v in raw.items() if k in known}
         return cls(**filtered)

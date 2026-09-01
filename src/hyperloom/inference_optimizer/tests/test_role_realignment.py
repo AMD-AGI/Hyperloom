@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -45,7 +46,9 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         max_minutes=120,
     )
     assert "PHASE CONTRACT" in text
-    for phase in ("PRELUDE", "FRAMEWORK_AGENT", "EXPLORE", "KERNEL_AGENT", "SWEEP", "CLOSE"):
+    # Driven off the phase table: a hand-written list keeps naming a phase the
+    # build dropped, and passes on any other string that happens to contain it.
+    for phase in PHASE_NAMES:
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
     assert "policy_denied" in text.lower()
@@ -76,24 +79,6 @@ def test_orchestration_prompt_no_kernel_marks_kernel_skipped(registry):
     assert "(DISABLED: --no-kernel — phase skipped)" in text
 
 
-def test_orchestration_prompt_no_explore_trims_catalogue_and_marks_skipped(registry):
-    text = build_orchestration_prompt(
-        action_registry=registry,
-        enabled_actions=default_enabled_actions(no_kernel=False, no_explore=True),
-        framework="sglang",
-        kernel_enabled=True,
-        explore_enabled=False,
-        max_minutes=120,
-    )
-    assert "(DISABLED: --no-explore — phase skipped)" in text
-    assert "explore_enabled  : false" in text
-    # The `explore` action bullet must be gone from the catalogue.
-    assert "- **explore** —" not in text
-    # specialist/integrate_patch stay visible (KERNEL still uses them).
-    assert "- **specialist** —" in text
-    assert "- **integrate_patch** —" in text
-
-
 def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(registry):
     text = build_orchestration_prompt(
         action_registry=registry,
@@ -104,7 +89,7 @@ def test_orchestration_prompt_no_framework_agent_marks_skipped_and_context(regis
         max_minutes=120,
     )
     assert "(DISABLED: --no-framework-agent — phase skipped)" in text
-    assert "framework_agent_phase_enabled : false" in text
+    assert "optimize_enabled : false" in text
 
 
 def test_orchestration_prompt_all_enabled_session_context_true(registry):
@@ -113,12 +98,11 @@ def test_orchestration_prompt_all_enabled_session_context_true(registry):
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         kernel_enabled=True,
-        explore_enabled=True,
         framework_agent_phase_enabled=True,
         max_minutes=120,
     )
-    assert "explore_enabled  : true" in text
-    assert "framework_agent_phase_enabled : true" in text
+    assert "optimize_enabled : true" in text
+    assert "kernel_enabled   : true" in text
     assert "(DISABLED:" not in text
 
 
@@ -129,7 +113,7 @@ def test_orchestration_md_carries_phase_awareness():
     body = (asset_system_prompts_dir() / "orchestration.md").read_text(encoding="utf-8")
     assert "Phase awareness" in body
     assert "PRELUDE" in body or "PHASE_PRELUDE" in body
-    assert "EXPLORE" in body
+    assert "FRAMEWORK_AGENT" in body
     assert "KERNEL_AGENT" in body
 
 
@@ -164,31 +148,29 @@ def test_shared_state_phase_status_summary_renders_compact_block():
     # Pin start_ts to the same clock as now_unix so the (charge-back) budget math
     # is well-defined; session and phase both start at 1_000_000.
     s.start_ts = datetime.fromtimestamp(1_000_000.0, tz=timezone.utc).isoformat()
+    phase = _ps.PHASE_FRAMEWORK_AGENT
     s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase,
         reason="prelude_done",
         evidence={"baseline_tput": 100},
         ts="2026-05-19T00:00:00+00:00",
         ts_unix=1_000_000.0,
     )
-    out = s.to_phase_status_summary(
-        budget_pct={"EXPLORE": 0.5},
-        now_unix=1_000_120.0,
-    )
-    assert "phase     : EXPLORE" in out
+    out = s.to_phase_status_summary(budget_pct={phase: 0.5}, now_unix=1_000_120.0)
+    assert f"phase     : {phase}" in out
     assert "entered" in out
     assert "elapsed_sec=120" in out
     # Wiring: the rendered remaining must match the budget helper it delegates to.
-    expected_rem = int(_ps.phase_budget_remaining_seconds(s, budget_pct={"EXPLORE": 0.5}, now_unix=1_000_120.0))
+    expected_rem = int(_ps.phase_budget_remaining_seconds(s, budget_pct={phase: 0.5}, now_unix=1_000_120.0))
     assert f"remaining_sec={expected_rem}" in out
-    # EXPLORE allowlist carries explore + specialist + recover only.
-    assert "explore" in out and "specialist" in out
+    # The merged phase's allowlist carries both arms' levers.
+    assert "explore" in out and "integrate_patch" in out and "specialist" in out
 
 
 def test_shared_state_phase_status_summary_no_max_minutes_marks_unlimited():
     s = SharedState(max_minutes=0)
     s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
@@ -208,7 +190,7 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
         ts_unix=1_000_000.0,
     )
     s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase="FRAMEWORK_AGENT",
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:01:00+00:00",
@@ -217,40 +199,10 @@ def test_shared_state_phase_budget_telemetry_reports_per_phase_elapsed():
     out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
     # PRELUDE: 60s elapsed, cap 108s (3% of 3600s), used 56%.
     assert "PRELUDE: elapsed=60s" in out
-    # EXPLORE: 240s elapsed (300-60), cap 1260s (35% of 3600s), used 19%.
-    assert "EXPLORE: elapsed=240s" in out
+    # FRAMEWORK_AGENT: 240s elapsed (300-60).
+    assert "FRAMEWORK_AGENT: elapsed=240s" in out
     # Both lines present.
     assert out.count("elapsed=") == 2
-
-
-def test_shared_state_phase_budget_telemetry_includes_framework():
-    s = SharedState(max_minutes=60)
-    s.record_phase_transition(
-        to_phase="PRELUDE",
-        reason="phase_entered",
-        evidence={},
-        ts="2026-05-19T00:00:00+00:00",
-        ts_unix=1_000_000.0,
-    )
-    s.record_phase_transition(
-        to_phase="FRAMEWORK_AGENT",
-        reason="prelude_done",
-        evidence={},
-        ts="2026-05-19T00:01:00+00:00",
-        ts_unix=1_000_060.0,
-    )
-    s.record_phase_transition(
-        to_phase="EXPLORE",
-        reason="framework_agent_phase_done",
-        evidence={},
-        ts="2026-05-19T00:03:00+00:00",
-        ts_unix=1_000_180.0,
-    )
-    out = s.to_phase_budget_telemetry(now_unix=1_000_300.0)
-    assert "PRELUDE: elapsed=60s" in out
-    assert "FRAMEWORK_AGENT: elapsed=120s" in out
-    assert "EXPLORE: elapsed=120s" in out
-    assert out.count("elapsed=") == 3
 
 
 def test_shared_state_warm_start_summary_empty_when_no_recipe():
@@ -374,15 +326,14 @@ async def test_compose_prompt_robustness_includes_budget_telemetry(
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK so this exercises PRELUDE → EXPLORE; force a transition for telemetry.
-        c.shared_state.framework_agent_phase_enabled = False
+        # Force PRELUDE -> FRAMEWORK_AGENT so there is a segment to report.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
         prompt = await c._compose_prompt("robustness")
         assert "=== Phase budget telemetry ===" in prompt
         assert "PRELUDE: elapsed=" in prompt
-        assert "EXPLORE: elapsed=" in prompt
+        assert "FRAMEWORK_AGENT: elapsed=" in prompt
     finally:
         await c.stop()
 

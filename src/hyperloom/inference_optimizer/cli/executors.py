@@ -27,7 +27,6 @@ from hyperloom.orchestrator.actions.executors import (
     session_breakdown_executor,
     sweep_executor,
 )
-from hyperloom.orchestrator.actions.executors.framework_agent import FrameworkAgentExecutor
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
 from hyperloom.orchestrator.actions.executors.profile import profile_executor
@@ -197,6 +196,10 @@ def _build_specialist_executor(
                 model=selected_model,
                 max_turns_default=max_turns,
                 allowed_intents=SPECIALIST_INTENTS,
+                # Same label the subprocess dispatch mode reports, so switching
+                # modes does not move this spend between components.
+                attribution_component="specialist",
+                attribution_operation="run_agent",
             )
 
         runner = SpecialistRunner(
@@ -277,14 +280,6 @@ def _register_executors(
     )
 
     # FRAMEWORK per-candidate executor — Coordinator-internal only.
-    # Key must match the kind the FRAMEWORK phase enqueues ("framework_agent",
-    # per action_surfaces.COORDINATOR_INTERNAL_ACTIONS and
-    # ACTION_CATALOGUE); registering it as "framework" left
-    # every discovered PR candidate stamped no_result_failed.
-    coordinator.sub.register_executor(
-        "framework_agent",
-        FrameworkAgentExecutor(session_dir=session_dir),
-    )
 
     # roofline (profile + trace_analyze): auto-enqueued at PRELUDE + each 10%
     # watermark crossing, so always registered.

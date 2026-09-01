@@ -63,23 +63,24 @@ def _commit_strip_level(framework_root: Path, pairs: list[tuple[str, str]]) -> i
     return best_lvl
 
 
-def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
-    """Repo-relative paths the applied ``patches`` created / modified / deleted.
+def _patch_touched_paths_split(framework_root: Path, patches: list[Path]) -> tuple[list[str], list[str]]:
+    """Classify applied patch targets as upserted or deleted.
 
     Per header pair (``old`` ``---``, ``new`` ``+++``):
-      * created / modified → the ``new`` target exists post-apply → emit it.
-      * deleted → ``new`` is ``/dev/null`` (or its target is gone) → emit the
-        ``old`` path so ``git add -A -- <path>`` stages the removal.
-    A header that resolves to neither is dropped so ``git add`` cannot error.
+      * The ``new`` target exists post-apply → upserted (created/modified).
+      * The ``new`` target is ``/dev/null`` or absent post-apply → deleted;
+        emit the ``old`` path.
+      * A header that resolves to neither is dropped.
 
     Args:
         framework_root: The git checkout the patches were applied into.
         patches: The applied patch files to inspect.
 
     Returns:
-        The repo-relative paths to stage, in first-seen order.
+        ``(upserted, deleted)`` each in first-seen order.
     """
-    out: list[str] = []
+    upserted: list[str] = []
+    deleted: list[str] = []
     for patch in patches:
         try:
             text = patch.read_text(encoding="utf-8", errors="replace")
@@ -97,12 +98,26 @@ def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]
             except OSError:
                 new_exists = False
             if rel_new and new_exists:
-                if rel_new not in out:
-                    out.append(rel_new)
+                if rel_new not in upserted:
+                    upserted.append(rel_new)
             elif rel_old:
-                if rel_old not in out:
-                    out.append(rel_old)
-    return out
+                if rel_old not in deleted:
+                    deleted.append(rel_old)
+    return upserted, deleted
+
+
+def _patch_touched_paths(framework_root: Path, patches: list[Path]) -> list[str]:
+    """Repo-relative paths to stage, for callers that need no upsert/delete split.
+
+    Args:
+        framework_root: The git checkout the patches were applied into.
+        patches: The applied patch files to inspect.
+
+    Returns:
+        The repo-relative paths, upserted first.
+    """
+    upserted, deleted = _patch_touched_paths_split(framework_root, patches)
+    return list(dict.fromkeys(upserted + deleted))
 
 
 def _patch_touched_paths_from_text(patch_content: str) -> list[str]:
@@ -356,5 +371,6 @@ __all__ = [
     "_git_commit_kept",
     "_patch_touched_paths",
     "_patch_touched_paths_from_text",
+    "_patch_touched_paths_split",
     "_restore_patch_snapshot",
 ]

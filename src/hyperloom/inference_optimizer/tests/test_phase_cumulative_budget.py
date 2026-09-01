@@ -157,13 +157,13 @@ def test_phase_budget_remaining_hits_zero_once_the_share_is_spent():
 
 def test_totals_accumulate_for_every_phase_not_just_explore():
     state = SharedState()
-    _enter(state, ps.PHASE_EXPLORE, T0)
+    _enter(state, ps.PHASE_FRAMEWORK_AGENT, T0)
     _enter(state, ps.PHASE_KERNEL_AGENT, T0 + 100.0)
     _enter(state, ps.PHASE_SWEEP, T0 + 250.0)
-    _enter(state, ps.PHASE_EXPLORE, T0 + 300.0)
+    _enter(state, ps.PHASE_FRAMEWORK_AGENT, T0 + 300.0)
 
     assert state.phase_elapsed_totals == {
-        ps.PHASE_EXPLORE: 100.0,
+        ps.PHASE_FRAMEWORK_AGENT: 100.0,
         ps.PHASE_KERNEL_AGENT: 150.0,
         ps.PHASE_SWEEP: 50.0,
     }

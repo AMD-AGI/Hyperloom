@@ -9,7 +9,7 @@ myst:
 Magpie is a lightweight, general-purpose framework for evaluating GPU kernel
 correctness and performance on AMD (HIP) GPUs. It exposes
 three evaluation modes — Analyze, Compare, and Benchmark — plus framework-level
-(vLLM, SGLang, or Atom) benchmarking with built-in TraceLens trace analysis.
+(vLLM or SGLang) benchmarking with built-in TraceLens trace analysis.
 
 Within Hyperloom, Magpie is the benchmark engine. The kernel agent and the
 optimization loop drive Magpie to spin up a serving framework, run the workload,

@@ -81,12 +81,17 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "final":              { /* §6  Final state — SaFE contract core */ },
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
   "capability_summary": { /* §8  Capability cards */ },
+  "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
+  "metadata":           { /* additive V6 metadata and launch configuration */ },
+  "outcome":            { /* additive V6 terminal result */ },
+  "timeline":           [ /* additive V6 ordered stage events */ ],
+  "close":              { /* additive V6 close-stage result */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
@@ -95,7 +100,7 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
      Consumers MUST tolerate their absence (total=False TypedDict). */
   "model_info":                  { /* model architecture summary */ },
   "phase_segments":              [ /* per-phase segment records */ ],
-  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
   "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
@@ -116,6 +121,13 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 The `session` (SessionMeta) section also carries `user_data_path` and a
 `recovery` sub-object in addition to the fields documented in §3.
+
+The additive V6 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"` while
+the existing top-level V5 contract remains unchanged. Startup source events are
+stored in execution order under `reports/sbd_v6/timeline/`; writer failures are
+reported through `metadata.warnings` rather than being indistinguishable from a
+stage that never ran.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session
@@ -464,6 +476,12 @@ For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
 - `attempts` — **invocation rows**, not distinct kernels: how many tries the
   lane made. Deliberately a different unit from `keeps`.
 
+GEAK e2e runs do not always create the native
+`kernel-agent/runs/*/optimization_attempts.jsonl` layout. In that case the
+summary falls back to the normalized top-level `geak` section: a real route is
+reported as at least one attempt, and a promoted `geak_e2e` stack entry is
+reported as kept instead of `not_attempted`.
+
 The `specialist` row uses `keeps` / `attempts` differently: see
 `CapabilitySummary` in `schema.py`.
 
@@ -527,6 +545,16 @@ sessions and old readers. The section also includes
 Final concurrency / input sequence length (ISL) / output sequence length (OSL) sweep. Always includes `all_variants`
 (a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
 `pareto_front` are populated when the sweep grid is large enough.
+
+Each `all_variants` row carries `status`:
+
+* `ok` — a readable JSON object was loaded from `benchmark_report.json` and its `success` field was not `false`. Metrics may still be `null` (for example an empty object, or `success: true` with throughput 0); `ok` means the measurement landed, not that it is selectable.
+* `failed` — the report recorded a failure, the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value), or no report was found but `abort_reason.json` is present (the grid runner's tested-but-failed marker).
+* `skipped` — neither `benchmark_report.json` nor `abort_reason.json` was found for that variant.
+
+`error` is present on every row and is always a non-empty string when `status` is `failed` (singular `error`, Magpie-compatible `errors` list, abort marker, or a fixed fallback). It is `null` on `ok` / `skipped` rows. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
+
+This `status` tightening does not bump `schema_version`. No field is renamed or removed; `error` is additive; the value set remains `ok` / `failed` / `skipped`. The change restores the stability guarantee that missing measurements are not fabricated as success.
 
 ---
 
@@ -743,12 +771,12 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "pid": 12345,
     "session_dir": "/workspace/hyperloom/GLM-5-FP8/20260517T113000Z",
     "tick_count": 89,
-    "image": "lmsysorg/sglang-rocm:v0.5.17-rocm724-mi30x-20260821"
+    "image": "lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825"
   },
 
   "workload": {
     "framework_name": "sglang",
-    "framework_version": "0.5.17",
+    "framework_version": "0.5.18",
     "model_name": "GLM-5-FP8",
     "model_path": "/models/GLM-5-FP8",
     "model_class": "moe_mla_nsa",

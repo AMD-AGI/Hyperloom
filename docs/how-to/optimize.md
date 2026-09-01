@@ -75,7 +75,7 @@ for the full prompt field reference (every field maps to a CLI flag defined in
 
 The agent reports a session ID, log path, and PID, then polls until the run
 completes. Under the hood it walks the phase chain
-`PRELUDE → FRAMEWORK_AGENT → EXPLORE → KERNEL_AGENT → SWEEP → CLOSE`; see
+`PRELUDE → FRAMEWORK_AGENT → KERNEL_AGENT → SWEEP → CLOSE`; see
 [Hyperloom optimization loop](../conceptual/optimization-loop.md) for what
 happens in each phase.
 
@@ -105,13 +105,9 @@ fields to read first are:
 
 | Field | What it tells you |
 |-------|-------------------|
-| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM / Atom |
+| `final.throughput_tok_s_per_gpu` | Validated end-of-session serving throughput — the headline number for SGLang / vLLM |
 | `final.cumulative_gain_pct_validated` | Validated gain over baseline |
 | `final.action_path` | Ordered list of changes that make up the final optimized stack |
-
-For scriptable diffusion workloads (`--framework xdit`), the headline metric is
-`final.e2el_mean_ms` (lower is better) and reports use `img/s` as the throughput
-unit.
 
 For the full schema — useful if you are building a dashboard, reporting
 pipeline, or downstream integration on top of this file — see

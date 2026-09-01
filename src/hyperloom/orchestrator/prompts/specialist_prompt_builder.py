@@ -199,52 +199,6 @@ def _focus_serving_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_cross_framework_rewrite_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for cross-framework feature porting.
-
-    Static porting methodology only (cacheable in the system prompt). The
-    per-task landing data (source diff, symbol-level landing points, target
-    module current source) is injected separately via the Coordinator seed.
-
-    Args:
-        inp (SpecialistPromptInputs): The prompt inputs (unused; the block is
-            framework-agnostic methodology).
-
-    Returns:
-        list[str]: Markdown lines for the cross-framework rewrite focus block.
-    """
-    return [
-        "You **PORT a feature across frameworks** (e.g. SGLang <-> vLLM). This",
-        "is a REWRITE task, NOT a `git apply`.",
-        "",
-        "**Hard rules**",
-        "- The upstream diff targets a DIFFERENT framework's repo layout / API.",
-        "  It can NEVER be applied directly. Re-implement the EQUIVALENT feature",
-        "  against the TARGET framework's live source in your worktree.",
-        "- Land ONLY at the provided symbol-level landing points and their direct",
-        "  dependencies. Do not refactor unrelated modules (blast-radius control).",
-        "- Match the target framework's abstractions, naming and error handling;",
-        "  translate SEMANTICS, not syntax.",
-        "",
-        "**Method**",
-        "1. Read the source diff as INSPIRATION for the feature's intent.",
-        "2. Read the target module's current source (in the seed) to learn its",
-        "   API surface, data structures and call-order contracts.",
-        "3. Re-implement the feature at the landing points using the target API.",
-        "4. SELF-CHECK before finishing: the touched modules must import / compile",
-        "   cleanly (`python -c 'import ...'` / `py_compile`). A patch that fails",
-        "   self-check is NOT a deliverable — fix it or report blocked.",
-        "",
-        "**Deliverable**",
-        "- A unified-diff source patch (`patches_written`) against the TARGET",
-        "  framework source. A pure config-lever proposal is NOT sufficient for a",
-        "  cross-framework port.",
-        "- Echo `source_framework` / `target_framework` in your proposal and set",
-        "  the `provenance` exactly as instructed in the task seed so the KB",
-        "  ledger records the cross-framework outcome.",
-    ]
-
-
 def _focus_kernel_switch_specialist(inp: SpecialistPromptInputs) -> list[str]:
     """Build the domain-focus block for the kernel-switch specialist.
 
@@ -449,39 +403,57 @@ def _focus_system_specialist(inp: SpecialistPromptInputs) -> list[str]:
     ]
 
 
-def _focus_pr_intel_specialist(inp: SpecialistPromptInputs) -> list[str]:
-    """Build the domain-focus block for the PR-intel specialist.
+def _focus_candidate_discovery_specialist(inp: SpecialistPromptInputs) -> list[str]:
+    """Build the domain-focus block for the candidate-discovery specialist.
 
-    Frames the specialist as a cross-repo PR researcher that surfaces
-    upstream PRs / commits / issues rather than proposing config knobs.
+    Frames it as the owner of the whole upstream-candidate funnel: find, rank,
+    and judge. It replaced a Coordinator loop that did those three steps with
+    a fixed query, a scoring call and an audit call, so the block has to say
+    that a candidate is only useful once it carries a verdict and a route.
 
     Args:
         inp (SpecialistPromptInputs): The prompt inputs for this dispatch.
 
     Returns:
-        list[str]: Markdown lines for the PR-intel specialist's focus block.
+        list[str]: Markdown lines for the discovery specialist's focus block.
     """
     return [
-        "You are a **cross-repo PR researcher**. Your role is NOT to propose",
-        "configuration knobs — it is to surface PRs / commits / issues from",
-        "(ROCm/aiter, sgl-project/sglang, ROCm/vllm, triton-lang/triton,",
-        "ROCm/rccl) that other specialists should follow up on.",
+        "You own the **upstream candidate funnel**: find what is worth landing,",
+        "rank it, and judge it. This is a first-class lever alongside",
+        "configuration search — not an occasional top-up.",
         "",
         "**What to do**",
-        "- Use ``mcp__pr_monitor__*`` + ``WebSearch`` to find recent PRs",
-        "  related to the gap.",
-        "- For each PR, extract: (repo, number, title, summary, files",
-        "  touched, NVIDIA equivalent if any).",
-        "- Surface as ``proposal_set`` entries where ``provenance`` = research",
-        "  and ``pr_evidence`` is non-empty. Do NOT propose source patches",
-        "  yourself — that's the kernel-switch / serving specialist's job once",
-        "  they read your PR list.",
+        "1. **Find.** Use ``mcp__pr_monitor__*`` + ``WebSearch`` across the",
+        "   allowlisted repos for work that addresses the live bottleneck.",
+        "   Read the gap and the profile evidence first; a PR that does not",
+        "   touch the hot path is not a candidate however good it looks.",
+        "2. **Rank.** Order what you found against the current stack, the",
+        "   already-tried ledger, and the KB priors you were given. Say why",
+        "   the top one is first — the ordering is the deliverable, not a",
+        "   by-product.",
+        "3. **Judge each one.** Exactly one verdict per candidate:",
+        "   - ``already_present`` — the change is already in the installed",
+        "     version. Cite the evidence; a guess here silently skips a real win.",
+        "   - ``not_applicable`` — wrong framework, wrong arch, or it cannot",
+        "     apply to this tree.",
+        "   - ``worth_a_bench`` — plus the route: apply the upstream diff",
+        "     directly, or have a specialist author against it as inspiration.",
+        "     Direct apply needs a git tree and a same-repo candidate; say so",
+        "     when either is missing.",
+        "",
+        "**What to return**",
+        "- ``proposal_set`` entries carrying (repo, number, title, diff_url,",
+        "  head_sha, files touched, verdict, route, and the reason for each).",
+        "  Orchestration reads these and proposes ``integrate_patch`` for the",
+        "  ones it wants benched; you do not apply or benchmark anything.",
         "",
         "**Pitfalls**",
         "- Citing a PR without verifying its target framework matches the",
         "  current install.",
-        "- Spending more than one round; PR intel is best dispatched once",
-        "  per gap and used as input to other specialists.",
+        "- An unevidenced ``already_present``: it is the one verdict that",
+        "  discards a candidate without ever measuring it.",
+        "- Returning candidates with no ordering and no verdicts. A bare list",
+        "  puts the work back on the caller that dispatched you.",
     ]
 
 
@@ -663,7 +635,7 @@ def _focus_static_recon_specialist(
         "the source path you read, ``why_disabled_here`` explains the False",
         "branch on this hardware, ``bridge_sketch`` is the proposed fix (a",
         "sketch — you do NOT write the patch), and ``domain_hint`` is the",
-        "EXPLORE specialist that should author it (``freeform`` keeps the whole",
+        "specialist that should author it (``freeform`` keeps the whole",
         "mandate). A candidate without ``predicate_file`` + ``why_disabled_here``",
         "is dropped.",
         "",
@@ -836,12 +808,11 @@ def _focus_framework_rewrite_specialist(
 _DOMAIN_FOCUS_TEMPLATES: dict[str, "Callable[[SpecialistPromptInputs], list[str]]"] = {
     "serving_specialist": _focus_serving_specialist,
     "framework_rewrite_specialist": _focus_framework_rewrite_specialist,
-    "cross_framework_rewrite_specialist": _focus_cross_framework_rewrite_specialist,
     "kernel_switch_specialist": _focus_kernel_switch_specialist,
     "comm_specialist": _focus_comm_specialist,
     "compiler_specialist": _focus_compiler_specialist,
     "system_specialist": _focus_system_specialist,
-    "pr_intel_specialist": _focus_pr_intel_specialist,
+    "candidate_discovery_specialist": _focus_candidate_discovery_specialist,
     "research_scout_specialist": _focus_research_scout_specialist,
     "static_recon_specialist": _focus_static_recon_specialist,
     "enablement_specialist": _focus_enablement_specialist,

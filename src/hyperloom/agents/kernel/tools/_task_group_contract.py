@@ -14,12 +14,31 @@ from typing import Any
 _SHAPE_RE = re.compile(r"\(([\d,\s]*)\)")
 _NAMED_DIMENSIONS = ("M", "N", "K", "E", "TOPK")
 CASE_SELECTOR_KEY = "CASE_ID"
-OPERATOR_IDENTITY_VERSION = 2
+OPERATOR_IDENTITY_VERSION = 3
 
 
-def normalize_operation_key(operation: str) -> str:
-    """Remove balanced C++ template arguments from an operation identity."""
-    value = str(operation).strip()
+def _strip_dispatch_decoration(operation: str) -> str:
+    """Remove how-a-kernel-was-launched decoration from a traced operation name.
+
+    The launch API, C return type and synthetic-op suffix describe the dispatch,
+    not the operator, so keying on them splits one kernel into a task group per
+    launch path and ports its source once per group.
+    """
+    value = str(operation or "").strip()
+    value = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", value).strip()
+    value = re.sub(
+        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
+        "",
+        value,
+    ).strip()
+    value = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", value).strip()
+    if value.endswith(".kd"):
+        value = value[:-3].strip()
+    return value
+
+
+def _strip_template_arguments(value: str) -> str:
+    """Remove balanced C++ template arguments from an already-clean symbol."""
     if "<" not in value:
         return value
     normalized: list[str] = []
@@ -36,8 +55,30 @@ def normalize_operation_key(operation: str) -> str:
     return result or value
 
 
+def normalize_operation_key(operation: str) -> str:
+    """Remove launch decoration and balanced C++ template arguments."""
+    return _strip_template_arguments(_strip_dispatch_decoration(operation))
+
+
 def logical_operator_name(candidate: dict[str, Any] | None) -> str:
-    """Return the balanced-template-normalized logical operation for Forge."""
+    """Return the stable logical operation for Forge, launch API stripped.
+
+    The trace names a candidate after both rows it occupies -- the CPU-side
+    launch call and the device kernel -- so the same kernel reads
+    ``hipModuleLaunchKernel->_gqa_sparse_fwd_kernel`` in one analysis and
+    ``_gqa_sparse_fwd_kernel`` in another, depending on whether the profiler
+    happened to record the parent that pairs them. Which of those a run sees is
+    not a property of the kernel, and Forge keys its experience store on this
+    name: two profiles of one configuration then write two identities, and the
+    warm-start read of either reports no prior record.
+
+    So the launch call comes off. ``native_operation_key`` already owns that
+    normalization for the task-group identity, along with demangling and
+    return-type removal, and both shapes of the name reduce to the same key
+    under it. How the kernel was launched stays worth knowing -- it is what
+    tells a shapeless candidate from a recorded one -- but it belongs beside the
+    identity rather than inside it.
+    """
     candidate = candidate or {}
     task_group = candidate.get("task_group")
     identity = task_group.get("operator_identity") if isinstance(task_group, dict) else None
@@ -47,31 +88,17 @@ def logical_operator_name(candidate: dict[str, Any] | None) -> str:
         or candidate.get("name")
         or ""
     )
-    normalized = normalize_operation_key(str(raw).strip())
+    normalized = native_operation_key(str(raw).strip())
     return re.sub(r"\s*::\s*", "::", normalized)
 
 
 def native_operation_key(operation: str) -> str:
-    """Return a stable native operator identity across template instances."""
-    normalized = str(operation or "").strip()
-    normalized = re.sub(
-        r"^[A-Za-z][A-Za-z0-9_]*->",
-        "",
-        normalized,
-    ).strip()
-    normalized = re.sub(
-        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
-        "",
-        normalized,
-    ).strip()
-    normalized = re.sub(
-        r"\s*\([^()]*\bOp\)\s*$",
-        "",
-        normalized,
-    ).strip()
-    if normalized.endswith(".kd"):
-        normalized = normalized[:-3].strip()
-    normalized = normalize_operation_key(normalized)
+    """Return a stable native operator identity across template instances.
+
+    Adds Itanium demangling to the shared normalization; every other step is
+    language-independent and lives in :func:`normalize_operation_key`.
+    """
+    normalized = normalize_operation_key(operation)
     if not normalized.startswith(("_Z", "__Z")):
         return normalized
 
@@ -165,7 +192,10 @@ def legacy_operator_identity_keys(
             ]
         )
     )
-    operation_key = native_operation_key(operation) if kind == "native" else normalize_operation_key(operation)
+    # Reproduce v2 key shape (pre-decoration-strip) so warm-start can still match historical records.
+    operation_key = (
+        native_operation_key(operation) if kind == "native" else _strip_template_arguments(str(operation or "").strip())
+    )
     function_keys = {
         (native_operation_key(function_name) if kind == "native" else str(function_name or "")),
         operation_key,

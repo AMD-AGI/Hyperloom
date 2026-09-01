@@ -7,7 +7,7 @@ LLM sub-agent runner for ``delegate{action_name='specialist', ...}``
 (vs the deterministic Python executors of :class:`SubAgentRunner`).
 
 Inv-5.3 single-exit: every exit path synthesises a ``specialist_done``
-payload so the EXPLORE round never blocks; ``status`` carries the original
+payload so the config-arm round never blocks; ``status`` carries the original
 outcome for the audit trail.
 """
 
@@ -16,7 +16,6 @@ from __future__ import annotations
 import enum
 import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
@@ -49,6 +48,7 @@ from .subprocess_ import (
 )
 from . import patch_safety as _patch_safety
 from .profile import MODE_PATCH, SpecialistProfile, resolve_specialist_profile
+from ..framework.paths import resolve_framework_tree
 from ..loop.sub_agent_runner import RunnerContext
 from ..prompts.specialist_prompt_builder import (
     SpecialistPromptInputs,
@@ -140,32 +140,6 @@ _TOKEN_VALUE_RES = (
 )
 
 
-def _framework_checkout(framework: str) -> str:
-    """Return the checkout of the framework this session optimises, if published.
-
-    A scriptable framework runs out of a repo checkout, and
-    ``_publish_scriptable_repo_root`` puts that path in ``os.environ`` as
-    ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR`` so it reaches PolicyGate. The
-    specialist worktree needs the same answer: it must branch off the tree whose
-    files the patches name, not off whichever allowlisted root happens to be a
-    checkout.
-
-    Args:
-        framework: Session framework name, e.g. ``worldplay``.
-
-    Returns:
-        The resolved path, or ``""`` when the framework publishes none (the
-        pip-installed case, where the allowlist order is the right fallback).
-    """
-    name = str(framework or "").strip().upper()
-    candidates = (f"{name}_REPO_PATH", f"{name}_DIR") if name else ()
-    for var in (*candidates, "FRAMEWORK_REPO_PATH"):
-        value = os.environ.get(var, "").strip()
-        if value:
-            return value
-    return ""
-
-
 def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path, ...]:
     """Return the allowlisted source trees other than ``base``.
 
@@ -194,6 +168,36 @@ def _sibling_checkouts(roots: tuple[str, ...], base: Path | None) -> tuple[Path,
             continue
         out.append(root)
     return tuple(out)
+
+
+def _grounding_explicit_root(
+    *,
+    declared: str,
+    patches: list[str],
+    patch_roots: dict[str, str],
+) -> Path | None:
+    """Return the root to ground the whole patch set against, or ``None``.
+
+    ``vet_patches`` grounds one set against one root, so a harvested root can
+    stand in only when every patch was harvested and they agree on it. A
+    hand-authored patch alongside a harvest has an unknown target tree, and
+    grounding it against the harvest root drops it as a mismatch rather than
+    matching it against the candidates.
+
+    Args:
+        declared: ``framework_source_root`` from the task params, if any.
+        patches: The deduplicated patch set about to be vetted.
+        patch_roots: Apply roots recorded for harvested patches.
+
+    Returns:
+        Path | None: The root, or None to fall back to candidate matching.
+    """
+    if declared:
+        return Path(declared)
+    if not patches or any(patch not in patch_roots for patch in patches):
+        return None
+    roots = set(patch_roots.values())
+    return Path(roots.pop()) if len(roots) == 1 else None
 
 
 def _patch_path_within_bases(path: Path, bases: list[Path]) -> bool:
@@ -1227,6 +1231,7 @@ class SpecialistRunner:
             backend_error=backend_error,
             extra_notes=notes,
             patches_written=list(sub_result.patches),
+            patch_roots=dict(sub_result.patch_roots),
         )
 
     # Finalize phase (shared)
@@ -1241,6 +1246,7 @@ class SpecialistRunner:
         backend_error: str,
         extra_notes: list[str],
         patches_written: list[str],
+        patch_roots: dict[str, str] | None = None,
     ) -> SpecialistRunResult:
         """Persist the ``specialist_done`` artifact and build the result.
 
@@ -1297,11 +1303,6 @@ class SpecialistRunner:
         # Re-stamp gap_canonical_id/domain so the on-disk artifact is authoritative.
         done_payload["gap_canonical_id"] = gap or done_payload.get("gap_canonical_id", "")
         done_payload["domain"] = domain.key
-        # Re-stamp cross-framework provenance from task params for the KB ledger.
-        _cf_params = ctx.task.params or {}
-        if _cf_params.get("cross_framework"):
-            done_payload["source_framework"] = str(_cf_params.get("source_framework") or "")
-            done_payload["target_framework"] = str(_cf_params.get("target_framework") or "")
         if gpu_ids:
             done_payload["allocated_gpu_ids"] = list(gpu_ids)
         if "proposal_set" not in done_payload:
@@ -1375,25 +1376,34 @@ class SpecialistRunner:
                 _proposal.setdefault("scope", prep.profile.scope)
 
         # Universal patch-safety gate: drop non-diff/escaping patches, git-ground
-        # the rest against the clean base checkout, and scan for smuggled claims.
-        # The worktree base names one framework tree, but a specialist may target
-        # another allowlisted one, so the rest are offered as candidate roots.
+        # the rest, and scan for smuggled claims. Grounding is per set, not per
+        # patch, so the root below applies to all of them or to none.
+        collected_roots = dict(patch_roots or {})
         base_checkout = prep.worktree_base or prep.worktree
         candidate_roots = _sibling_checkouts(
             tuple(self.subprocess_config.framework_source_roots) if self.subprocess_config else (),
             base_checkout,
         )
-        explicit_value = str((ctx.task.params or {}).get("framework_source_root") or "").strip()
+        explicit_root = _grounding_explicit_root(
+            declared=str((ctx.task.params or {}).get("framework_source_root") or "").strip(),
+            patches=deduped,
+            patch_roots=collected_roots,
+        )
         kept, dropped, grounding, spans_roots = _patch_safety.vet_patches(
             deduped,
             base_checkout=base_checkout,
             candidate_roots=candidate_roots,
-            explicit_root=Path(explicit_value) if explicit_value else None,
+            explicit_root=explicit_root,
         )
         # A set dropped for targets no tree holds is a distinct outcome from
         # "the specialist wrote none", and the next round has to be told which.
         all_dropped_by_grounding = bool(
-            deduped and not kept and all(d.get("verdict") == _patch_safety.GROUND_MISSING_TARGET for d in dropped)
+            deduped
+            and not kept
+            and all(
+                d.get("verdict") in (_patch_safety.GROUND_MISSING_TARGET, _patch_safety.GROUND_AMBIGUOUS_ROOT)
+                for d in dropped
+            )
         )
         numeric_warnings = _patch_safety.scan_numeric_claims(done_payload)
         # Strip, do not forward: the Critic is instructed to reject the whole
@@ -1409,6 +1419,8 @@ class SpecialistRunner:
         )
         done_payload["patches_written"] = kept
         done_payload["patch_grounding"] = grounding
+        if collected_roots:
+            done_payload["patch_roots"] = {p: r for p, r in collected_roots.items() if p in kept}
         if all_dropped_by_grounding:
             done_payload["patches_dropped_by_grounding"] = [d["detail"] for d in dropped[:8]]
         if spans_roots:
@@ -1475,7 +1487,7 @@ class SpecialistRunner:
                 return None, None, ""
         base = _pick_worktree_base(
             self.subprocess_config.framework_source_roots,
-            preferred=_framework_checkout(str((ctx.task.params or {}).get("framework") or "")),
+            preferred=resolve_framework_tree(str((ctx.task.params or {}).get("framework") or "")),
         )
         if base is None:
             return None, None, "no_git_framework_source_root"

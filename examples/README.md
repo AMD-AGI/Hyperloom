@@ -9,6 +9,12 @@ The recommended path is to prepare a dedicated workspace, open that directory in
 Claude Code, and install the wheel into the current directory with `pip install --target .`.
 For source installation instructions, please refer to the [full installation instructions](https://rocm.docs.amd.com/projects/hyperloom/en/latest/install/install.html#source-checkout-manual-installation).
 
+```{note}
+If accessing a remote server through ssh, it is recommended to connect remotely through
+Claude Code, install Hyperloom on the remote server, and use your local instance to
+run the Hyperloom skills.
+```
+
 ## Pip install Hyperloom
 
 The current directory serves as both the install target and the agent workspace.

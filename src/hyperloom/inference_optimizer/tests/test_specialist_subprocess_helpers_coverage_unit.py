@@ -204,13 +204,14 @@ def test_collect_patches(tmp_path: Path) -> None:
     (wt / "patches" / "b.diff").write_text("d", encoding="utf-8")
     (wt / "patches" / "ignore.txt").write_text("x", encoding="utf-8")
     ws = tmp_path / "ws"
-    out = SpecialistSubprocessDispatcher._collect_patches(wt, ws)
+    out, roots = SpecialistSubprocessDispatcher._collect_patches(wt, ws)
     names = sorted(Path(p).name for p in out)
     assert names == ["a.patch", "b.diff"]
+    assert roots == {}
 
 
 def test_collect_patches_none_worktree(tmp_path: Path) -> None:
-    assert SpecialistSubprocessDispatcher._collect_patches(None, tmp_path) == []
+    assert SpecialistSubprocessDispatcher._collect_patches(None, tmp_path) == ([], {})
 
 
 # -- _read_done ------------------------------------------------------------

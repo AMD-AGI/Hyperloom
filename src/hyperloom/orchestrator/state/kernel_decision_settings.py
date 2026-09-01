@@ -45,7 +45,12 @@ _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
 # Holds KERNEL phase-advance open (kernel_work_pending), filters the dispatch
 # batch queue, and drives the advisory 'untried hot kernels' report annotation.
 # It does NOT block ``report``.
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 10.0
+# Tuned for a model whose hot kernels are spread rather than concentrated. A
+# 60-layer sparse-MoE decoder splits its work across so many operators that
+# nothing but a graph-launch wrapper reaches double digits, so a 10% floor
+# admitted no real kernel at all and left the batch dispatcher idle while the
+# orchestrator picked candidates one at a time.
+_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 5.0
 
 
 def resolve_hot_kernel_min_gpu_pct() -> float:

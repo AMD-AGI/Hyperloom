@@ -20,7 +20,12 @@ class MachinePhase(PhaseHandler):
     """Extracted phase handler; delegates unknown attrs to its Coordinator."""
 
     def _ensure_phase_initialised(self) -> None:
-        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent)."""
+        """Set ``phase`` + persist ``phase_budget_pct`` once per session (idempotent).
+
+        Raises:
+            RuntimeError: When the session was recorded at a phase this build's
+                machine does not have.
+        """
         state = self.shared_state
         # Redistribute disabled phases' budget shares to the enabled work phases.
         # Done here (not in Coordinator.__init__) because the enablement flags on
@@ -28,14 +33,21 @@ class MachinePhase(PhaseHandler):
         # the per-tick refresh below is a no-op once applied.
         self._phase_budget_pct = _phase_state.redistribute_budget_pct(
             self._phase_budget_pct,
-            explore_enabled=self._explore_enabled(),
+            optimize_enabled=self._optimize_enabled(),
             kernel_enabled=self._kernel_enabled(),
-            framework_enabled=bool(state.framework_agent_phase_enabled),
         )
         # Persist the phase budget so CLI flags land in state.json for resume parity.
         if not state.phase_budget_pct:
             state.phase_budget_pct = dict(self._phase_budget_pct)
         current = (state.phase or "").strip().upper()
+        # Only an unset phase means fresh; an unknown one would otherwise
+        # re-run PRELUDE over the earlier build's baseline and KEPT stack.
+        if current and current not in _phase_state.PHASE_NAMES:
+            raise RuntimeError(
+                f"session was recorded at phase {current!r}, which this build's phase machine "
+                f"does not have (known: {', '.join(_phase_state.PHASE_NAMES)}). "
+                f"Resume it with the version that wrote it, or start a new session."
+            )
         if current == _phase_state.PHASE_CLOSE:
             self._reopen_a_session_that_was_left_closed()
             current = _phase_state.PHASE_PRELUDE
@@ -143,15 +155,14 @@ class MachinePhase(PhaseHandler):
         """Whether kernel optimization is enabled for this run."""
         return bool(self.shared_state.kernel_enabled)
 
-    def _explore_enabled(self) -> bool:
-        """Whether the EXPLORE phase is enabled for this run.
+    def _optimize_enabled(self) -> bool:
+        """Whether the optimisation phase is enabled for this run.
 
         Returns:
-            ``True`` unless ``--no-explore`` disabled it (collapsing to
-            KERNEL/SWEEP).
+            ``True`` unless ``--no-framework-agent`` disabled it, collapsing
+            the chain to KERNEL/SWEEP.
         """
-        # Mirror persisted explore_enabled flag; --no-explore collapses to KERNEL/SWEEP. EXPLORE is a phase, not a role.
-        return bool(self.shared_state.explore_enabled)
+        return bool(self.shared_state.framework_agent_phase_enabled)
 
     async def _inflight_kernel_task_ids(self) -> tuple[str, ...]:
         """Return the ids of queued/running tasks doing KERNEL-lane work.
@@ -223,7 +234,7 @@ class MachinePhase(PhaseHandler):
             state.kernel_idle_ticks = 0
             state.kernel_idle_since_unix = now
             return
-        if inflight:
+        if inflight or _phase_state.kernel_inline_step_running(state, now_unix=now):
             state.kernel_idle_since_unix = now
             return
         # Only reachable after a tick that opened the streak above, so
@@ -238,24 +249,17 @@ class MachinePhase(PhaseHandler):
         """
         state = self.shared_state
         await self._track_kernel_idle_streak()
-        explore_enabled = self._explore_enabled()
+        optimize_enabled = self._optimize_enabled()
         next_phase = _phase_state.compute_next_phase(
             state,
             kernel_enabled=self._kernel_enabled(),
             budget_pct=self._phase_budget_pct,
-            framework_agent_phase_enabled=bool(state.framework_agent_phase_enabled),
-            explore_enabled=explore_enabled,
+            optimize_enabled=optimize_enabled,
         )
-        if str(state.phase or "").upper() == "EXPLORE":
+        if str(state.phase or "").upper() == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._maybe_enqueue_explore_research_scout()
             await self._maybe_force_stalled_domain_specialist()
         await self._maybe_enqueue_trajectory_reviewer()
-        # (default OFF) FRAMEWORK config-exploration lane: run explore-style
-        # config-grid rounds before leaving FRAMEWORK_AGENT. No-op unless
-        # framework_config_exploration_enabled is set.
-        if self._framework_config_lane_should_engage(next_phase):
-            if await self._maybe_hold_for_framework_config_lane():
-                return
         if next_phase is None:
             return
         target, reason, evidence = next_phase
@@ -276,28 +280,20 @@ class MachinePhase(PhaseHandler):
             # via the more honest reason, so the next phase must not re-evaluate
             # it as if it were still unclaimed.
             state.consume_pending_escalate_hint()
-        elif state.pending_escalate_hint and target != _phase_state.PHASE_EXPLORE:
-            # A phase change fired for a reason unrelated to the hint while one
-            # was still pending (e.g. set by a different phase's agent turn and
-            # never claimed). skip_to_kernel/skip_to_sweep are consumed only
-            # inside exit_normal_explore, so a hint is still legitimately in
-            # flight not just when riding straight to EXPLORE, but also one hop
-            # earlier: PRELUDE -> FRAMEWORK_AGENT still has EXPLORE ahead of it
-            # whenever explore is enabled, and discarding here is the same bug
-            # this branch exists to fix, just moved upstream. Only discard once
-            # the transition moves to a phase from which EXPLORE can no longer
-            # be reached (including EXPLORE itself force-exiting past the hint
-            # via IR-6, or explore being disabled for this session).
-            hint_still_reachable = target == _phase_state.PHASE_FRAMEWORK_AGENT and explore_enabled
-            if not hint_still_reachable:
-                discarded_hint = state.discard_pending_escalate_hint()
-                log.info(
-                    "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
-                    discarded_hint,
-                    prior,
-                    target,
-                    reason,
-                )
+        elif state.pending_escalate_hint and target != _phase_state.PHASE_FRAMEWORK_AGENT:
+            # ``exit_normal_optimize`` is the hint's only consumer, so a
+            # transition away from that phase leaves it unclaimable; keeping it
+            # would let an unrelated phase re-evaluate it. A transition *into*
+            # that phase is the opposite case: discarding there would drop the
+            # hint on the doorstep of the one rule that reads it.
+            discarded_hint = state.discard_pending_escalate_hint()
+            log.info(
+                "phase_machine: discarded stale pending_escalate_hint=%r on unrelated transition %s -> %s (reason=%s)",
+                discarded_hint,
+                prior,
+                target,
+                reason,
+            )
         # Terminal transition (target=CLOSE): mirror the stop_reason onto state.
         if (
             target == _phase_state.PHASE_CLOSE
@@ -308,7 +304,7 @@ class MachinePhase(PhaseHandler):
             and not state.stop_reason
         ):
             state.set_stop_reason(reason)
-        # A cyclic EXPLORE plateau winds the cycle down with ``switch_bottleneck``:
+        # A cyclic config-arm plateau winds the cycle down with ``switch_bottleneck``:
         # record the plateaued bottleneck so the next cycle steers specialists off it.
         if isinstance(evidence, dict) and evidence.get("switch_bottleneck"):
             try:
@@ -430,8 +426,6 @@ class MachinePhase(PhaseHandler):
         target = (to_phase or "").upper()
         if target == _phase_state.PHASE_FRAMEWORK_AGENT:
             await self._on_enter_framework(from_phase=from_phase)
-        elif target == _phase_state.PHASE_EXPLORE:
-            await self._on_enter_explore(from_phase=from_phase)
         elif target == _phase_state.PHASE_KERNEL_AGENT:
             await self._on_enter_kernel(from_phase=from_phase)
         elif target == _phase_state.PHASE_SWEEP:

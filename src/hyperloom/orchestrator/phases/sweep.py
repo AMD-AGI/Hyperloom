@@ -287,12 +287,13 @@ class SweepPhase(PhaseHandler):
             bs = str(last_bl.get("benchmark_script") or "").strip()
             if bs:
                 params["benchmark_script"] = bs
+        lanes, ttl = self._registry_lanes_ttl("sweep")
         task, was_existing = await self.tasks.create_or_return_existing(
             kind="sweep",
             params=params,
             idempotency_key=f"internal-sweep-{reason}{self._cycle_idem_suffix()}",
-            # Without a TTL the row is invisible to ``reclaim_expired_running``.
-            lease_ttl_sec=self._registry_lanes_ttl("sweep")[1],
+            requires_lanes=lanes,
+            lease_ttl_sec=ttl,
         )
         if was_existing:
             log.info(
