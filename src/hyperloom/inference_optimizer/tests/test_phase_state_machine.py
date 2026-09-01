@@ -47,10 +47,12 @@ def test_allowed_actions_disjoint_phases():
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL
+    # entry from a lane budget, so they are proposable in no phase at all.
+    assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
+    for phase in phase_state.PHASE_NAMES:
+        assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
+        assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]

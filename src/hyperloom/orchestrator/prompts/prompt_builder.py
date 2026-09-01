@@ -760,36 +760,13 @@ you want to wind down sooner.
   internally. Only use this legacy request in explicit per-kernel forge mode
   (`KERNEL_OPT_BACKEND_ORDER=forge`).
 
-### `kernel_opt` — payload for `run_optimization`
+### `kernel_opt` and `gemm_tuning` — not yours to propose
 
-Pick the next id from `last_trace_analyze.reusable_native_kernel_ids`
-(NEVER from raw `hot_kernels_top15` — vendor binaries reject as
-`non_reusable_kernel`); if that list is empty, don't propose kernel_opt.
-
-The `kernel_id` MUST be one of those ids copied verbatim (e.g. `k001`).
-NEVER invent an id and NEVER pass an operator name (e.g. `aten::mm`,
-`aiter.silu_and_mul`) or any token from `analysis_md` — operator names
-are non-unique (several kernels share `aten::mm`) and are rejected.
-`skipped_kernels_top` lists operators TraceLens detected but cannot
-rewrite (each with a `skip_reason`); they are off-limits, not targets.
-
-  request{target_agent: 'kernel_agent', kind: 'run_optimization',
-          params: {kernel_id: <picked kernel_id>,
-                   source_file: <hot_kernels[i].source_file>,
-                   candidates_path: <trace_analyze_done.candidates_path>}}
-
-  Budget policy: DO NOT add a `budget_minutes` field. The Coordinator owns
-  the per-optimization wall clock and applies the same value it uses for its
-  own dispatch; naming one here pins the backend to this template's number
-  instead, which is how a raised operator budget got silently discarded.
-
-  Backend policy: DO NOT add a `backends` field. Current GEAK owns the
-  KERNEL phase by default. Forge per-kernel mode is available only when the
-  operator set exactly `KERNEL_OPT_BACKEND_ORDER=forge`.
-  Read `kernel_opt_task_attempts` +
-  `pending_keep_kernels` to
-  see what's still queueable; the batch handler filters
-  rejected/in-flight/exhausted candidates.
+Both lanes are dispatched by the Coordinator once at KERNEL entry, from a
+nomination and a lane budget. Proposing either is refused: a per-tick re-issue
+would spend time the allocation never granted and target kernels the nomination
+did not choose. Read `kernel_opt_task_attempts` and `pending_keep_kernels` to
+see what the lanes did; do not try to drive them.
 
 ### `integrate` — forced immediately after a KEEP
 
@@ -807,11 +784,8 @@ allowed action until the patch lands on `optimization_stack`:
 
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
-  while it is non-empty, nor while `untried_hot_reusable_kernels`
-  (reusable hot kernels with zero attempts and `gpu_pct >= 5%`, the
-  default that `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides) remain —
-  drain them with `run_optimization{candidates_path: <from
-  last_trace_analyze>}` (the batch handler fans out automatically).
+  while it is non-empty. `untried_hot_reusable_kernels` may list kernels the
+  Coordinator's nomination pass declined; those are not yours to drain.
 
 ### KERNEL TARGETING
 

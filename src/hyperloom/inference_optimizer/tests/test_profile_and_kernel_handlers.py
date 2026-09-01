@@ -3911,14 +3911,15 @@ def test_default_kernel_batch_parallel_matches_full_node():
 
 
 @pytest.mark.asyncio
-async def test_coordinator_injects_candidates_path_for_run_optimization(
+async def test_coordinator_refuses_a_model_issued_run_optimization(
     session_dir,
 ):
-    """When the LLM emits ``run_optimization`` without ``candidates_path``,
-    the Coordinator must pull it from ``state.last_trace_analyze`` and
-    inject it into the handler payload so ``_run_optimization_batch``
-    fires instead of silently collapsing to ``_run_optimization_single``
-    (which would waste 7 idle GPUs on an 8-GPU node)."""
+    """The lane is Coordinator-owned, so the request never reaches its handler.
+
+    It used to arrive from the model and have ``candidates_path`` back-filled
+    from state. Dispatch now happens once at phase entry from a nomination and a
+    lane budget, so a per-tick re-issue is refused rather than topped up: it
+    would spend time the allocation never granted."""
     c = Coordinator(session_dir, backends=_backends_silent())
     # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
     # last_profile_trace set; simulate the post-baseline + post-profile state.
@@ -3959,7 +3960,7 @@ async def test_coordinator_injects_candidates_path_for_run_optimization(
                     },
                 ),
             )
-            assert captured["payload"].get("candidates_path") == explicit
+            assert "payload" not in captured, "a Coordinator-owned lane must not reach its handler from the model"
         finally:
             await c.stop()
 

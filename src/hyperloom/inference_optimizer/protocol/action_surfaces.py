@@ -76,6 +76,11 @@ COORDINATOR_OWNED_KERNEL_REQUEST_KINDS: frozenset[str] = frozenset(
     {
         "run_fusion",
         "run_collective",
+        # Dispatched once at phase entry from a nomination and a lane budget. An
+        # LLM re-issuing either per tick would spend budget the allocation never
+        # granted and pick targets the nomination did not choose.
+        "run_optimization",
+        "run_gemm_tuning",
     }
 )
 

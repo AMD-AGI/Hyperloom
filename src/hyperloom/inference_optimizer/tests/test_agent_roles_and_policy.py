@@ -199,43 +199,57 @@ def test_gate_orchestration_propose_kernel_owned_rejected():
         assert exc.value.rule == "kernel_owned_by_kernel_agent", action
 
 
-def test_gate_run_gemm_tuning_request_allowed_for_bf16_geak(monkeypatch):
-    """Hyperloom does not pre-filter GEAK applicability by precision."""
+@pytest.mark.parametrize("precision", ["bf16", "fp8"])
+@pytest.mark.parametrize("backend_order", [None, "forge"])
+def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, backend_order):
+    """Refused by channel, not by applicability.
+
+    The lane is dispatched once at KERNEL entry from a lane budget, so a
+    per-tick re-issue would spend time the allocation never granted. Precision
+    and backend order are still not pre-filtered -- the reason is the same for
+    every combination of them, which is what the parametrization pins.
+    """
     monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    if backend_order:
+        monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", backend_order)
+    state = SharedState(phase="KERNEL_AGENT", precision=precision, framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-        ),
-    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
+            ),
+        )
+    assert exc.value.rule == "phase_incompatible"
 
 
-def test_gate_run_gemm_tuning_request_allowed_for_fp8_geak(monkeypatch):
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
-    state = SharedState(phase="KERNEL_AGENT", precision="fp8", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    gate.validate_intent(
-        "orchestration",
-        Intent(
-            type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-        ),
-    )
-
-
-def test_gate_run_gemm_tuning_request_allowed_for_bf16_forge(monkeypatch):
+def test_gate_refuses_a_model_requested_kernel_optimization(monkeypatch):
+    """Same reason as gemm tuning: the Coordinator owns the dispatch."""
     monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    monkeypatch.setenv("GEMM_TUNING_BACKEND", "geak")
+    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
+    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.REQUEST,
+                payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {}},
+            ),
+        )
+    assert exc.value.rule == "phase_incompatible"
+
+
+def test_gate_still_allows_the_model_to_drain_the_keep_queue(monkeypatch):
+    """Closing the lanes must not close integrate; draining KEEPs stays its job."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
     gate.validate_intent(
         "orchestration",
         Intent(
             type=IntentType.REQUEST,
-            payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
+            payload={"target_agent": "kernel_agent", "kind": "integrate", "params": {"kernel_id": "k1"}},
         ),
     )
 
