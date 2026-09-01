@@ -2407,6 +2407,63 @@ class TestRemoveServerArgsPreservesJson:
         out = _grid_runner.remove_server_args(raw, ["--port"])
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
 
+    def test_sign_prefixed_custom_op_survives_removal(self):
+        """A ``+``/``-`` prefixed custom-op value must survive the round trip.
+
+        Live regression: every variant of an explore round died at vLLM argv
+        parse with ``Invalid JSON: key must be a string`` -- including a control
+        leg that added one env var and zero args, because
+        ``strip_benchmark_harness_flags`` routes EVERY composed variant through
+        ``remove_server_args`` with a non-empty denylist. The old POSIX
+        ``shlex.split``/rejoin stripped the JSON quotes, and the bareword repair
+        heuristic could not re-quote ``+fused_rms_norm_gated`` (its ``+`` was
+        outside the charset), so the corruption reached the server verbatim.
+        """
+        raw = (
+            "--compilation-config "
+            '{"mode":3,"custom_ops":["+fused_rms_norm_gated"],'
+            '"cudagraph_capture_sizes":[1,2,3]} --port 8888'
+        )
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        assert "--port" not in out
+        blob = json.loads(out.split("--compilation-config ", 1)[1].strip())
+        assert blob["custom_ops"] == ["+fused_rms_norm_gated"]
+        assert blob["cudagraph_capture_sizes"] == [1, 2, 3]
+
+    def test_compose_preserves_json_for_every_args_mode(self):
+        """All four variant shapes keep both JSON flags ``json.loads``-able."""
+        cc = '{"mode":3,"custom_ops":["+fused_rms_norm_gated"]}'
+        sc = '{"method":"mtp","num_speculative_tokens":2}'
+        base = f"--max-num-seqs 20 --compilation-config {cc} --speculative-config {sc}"
+
+        def _blob(text, flag):
+            toks = text.split()
+            return json.loads(toks[toks.index(flag) + 1])
+
+        for kwargs in (
+            {"inherited_args": base},
+            {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
+            {"base_extra_args": base, "args_mode": "replace"},
+        ):
+            out = _grid_runner.compose_server_args(**kwargs)
+            assert _blob(out, "--compilation-config") == json.loads(cc)
+            assert _blob(out, "--speculative-config") == json.loads(sc)
+        # Removing the JSON flag and supplying a variant replacement.
+        repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
+        out = _grid_runner.compose_server_args(
+            inherited_args=base,
+            remove_args=["--compilation-config"],
+            variant_extra_args=f"--compilation-config {repl}",
+        )
+        assert out.count("--compilation-config") == 1
+        assert _blob(out, "--compilation-config") == json.loads(repl)
+        assert _blob(out, "--speculative-config") == json.loads(sc)
+
+    def test_shell_quoted_plain_operand_loses_its_wrappers(self):
+        """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
+        out = _grid_runner.remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
+        assert out == "--tool-call-parser kimi_k3"
+
 
 # ---------------------------------------------------------------------------
 # benchmark_report settling (real-run race)
