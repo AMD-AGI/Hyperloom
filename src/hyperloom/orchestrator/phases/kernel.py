@@ -3258,10 +3258,17 @@ class KernelPhase(PhaseHandler):
             result["decision"] = "REVERT"
             result["requires_e2e_validation"] = False
             result["e2e_validated"] = False
-            result["micro_decision"] = "no_e2e_candidates"
-            for stale in ("recommended_env", "extra_envs"):
-                if result.get(stale):
-                    result[stale] = {}
+            # Only when the tuners left no verdict of their own. An existing
+            # ``micro_decision`` is load-bearing downstream --
+            # ``_should_run_bf16_dense_gemm_fallback`` keys the sglang bf16
+            # retry on ``no_improvement`` -- so overwriting it here cancels the
+            # fallback for exactly the runs that need it. Same trap as adding a
+            # new ``status``: the value is a routing key, not a label.
+            if not str(result.get("micro_decision") or "").strip():
+                result["micro_decision"] = "no_e2e_candidates"
+            # ``recommended_env``/``extra_envs`` stay as the tuners left them:
+            # they are the raw record of what was produced, and the eligibility
+            # checks downstream already read them as "must be empty".
             self._replace_latest_gemm_tuning_attempt(result)
             return
 
