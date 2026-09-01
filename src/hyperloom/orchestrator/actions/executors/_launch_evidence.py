@@ -13,6 +13,11 @@ from typing import Any
 
 import yaml
 
+from hyperloom.common.launch_log_evidence import (
+    _LAUNCH_ARGV_MARKERS,
+    _launch_argv_from_log,
+    _observed_sglang_server_identity_from_log,
+)
 from ._grid_server_args import server_args_env_name
 
 log = logging.getLogger(__name__)
@@ -54,12 +59,6 @@ def build_launch_evidence(
     observed_server_identity: dict[str, Any] = {}
     if actual_server_log:
         try:
-            from ...loop.coordinator_helpers import (
-                _LAUNCH_ARGV_MARKERS,
-                _launch_argv_from_log,
-                _observed_sglang_server_identity_from_log,
-            )
-
             marker = _LAUNCH_ARGV_MARKERS.get(resolved_framework)
             observed_flags = _launch_argv_from_log(actual_server_log, marker) if marker else ""
             if not observed_flags and resolved_framework == "sglang":
