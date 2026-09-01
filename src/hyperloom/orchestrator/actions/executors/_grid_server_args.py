@@ -36,6 +36,13 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
     Magpie benchmark scripts expand ``EXTRA_*_ARGS`` through shell wrappers, so
     this is the final sink-side guard against LLM/payload content escaping from
     argv-like flags into shell control operators.
+
+    A flag may be followed by any number of value tokens (argparse ``nargs="+"``
+    semantics). ``--cuda-graph-bs 1 2 4 8`` is a real sglang invocation and is
+    already recognized as multi-valued by :data:`_MULTI_VALUE_FLAGS`; requiring
+    exactly one value here rejected it at the sink while the explore side let it
+    through. Shell control characters are blocked separately above, so the
+    positional-argument check is only a secondary "this looks like argv" guard.
     """
     args = str(server_args or "").strip()
     if not args:
@@ -46,13 +53,12 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
         tokens = shlex.split(args)
     except ValueError as exc:
         raise ValueError(f"extra_server_args is not shell-tokenizable: {exc}") from exc
-    expect_value = False
+    seen_flag = False
     for token in tokens:
         if token.startswith("-"):
-            expect_value = "=" not in token
+            seen_flag = True
             continue
-        if expect_value:
-            expect_value = False
+        if seen_flag:
             continue
         raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
     return args

@@ -77,7 +77,34 @@ def _stub_server_arg_injectors(monkeypatch):
 def test_validate_server_args_rejects_bare_positionals():
     assert validate_server_args_shell_safe("--flag value --other=value") == "--flag value --other=value"
     with pytest.raises(ValueError, match="bare positional"):
-        validate_server_args_shell_safe("--flag value stray")
+        validate_server_args_shell_safe("stray --flag value")
+
+
+def test_validate_server_args_allows_multi_value_flags():
+    """argparse ``nargs="+"`` flags carry several values; the sink must accept them.
+
+    ``--cuda-graph-bs`` is a real sglang invocation and is already listed in
+    ``_MULTI_VALUE_FLAGS``. Rejecting the second value here made the integrate
+    sink refuse recipes the explore side had already run.
+    """
+    args = "--cuda-graph-bs 1 2 4 8 16 24 32 48 64"
+    assert validate_server_args_shell_safe(args) == args
+    assert validate_server_args_shell_safe("--a 1 2 --b=3 --c x y z") == "--a 1 2 --b=3 --c x y z"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        "--flag value; rm -rf /",
+        "--flag `whoami`",
+        "--flag $(id)",
+        "--flag a|b",
+        "--flag a>b",
+    ],
+)
+def test_validate_server_args_still_blocks_shell_control(args):
+    with pytest.raises(ValueError, match="shell control characters"):
+        validate_server_args_shell_safe(args)
 
 
 def test_materialize_remove_args_and_string_unset_env(tmp_path, monkeypatch):
