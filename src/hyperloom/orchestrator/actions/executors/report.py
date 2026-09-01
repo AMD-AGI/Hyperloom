@@ -405,13 +405,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
     "conc_sweep_done": "Post-sweep concurrency sweep finished.",
-    "conc_sweep_failed": (
-        "Post-sweep concurrency sweep reached a failed terminal result and the run wound down "
-        "instead of opening another macro-cycle — because the budget, the arms, roofline "
-        "saturation or convergence left nothing to reloop into; the phase record carries which "
-        "one when it was recorded. The optimization result itself is unaffected: conc_sweep only "
-        "scans concurrency after the search is done."
-    ),
+    "conc_sweep_failed": "Post-sweep concurrency sweep reached a failed terminal result.",
     "optimize_no_more_leverage": (
         "OPTIMIZE exhausted both levers: neither configuration search nor source/upstream landing had leverage left."
     ),

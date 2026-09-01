@@ -204,7 +204,7 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
         "sweep_done",
         "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
-        "conc_sweep_failed",  # SWEEP exit on a failed conc_sweep; reloops when budget remains, else CLOSE
+        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # FRAMEWORK_AGENT → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -2874,39 +2874,13 @@ def compute_next_phase(
         norm = exit_normal_sweep(state, budget_pct=budget_pct, now_unix=now_unix)
         if norm is not None:
             exit_reason, exit_evidence = norm
-            # ``conc_sweep_failed`` never short-circuits the reloop. conc_sweep
-            # is a closeout concurrency scan, not the optimization itself, so
-            # its failure says nothing about whether the remaining budget could
-            # still find gain; short-circuiting on it forfeited ~9.8h of a 16h
-            # run the one time it fired, which is the incident this module's
-            # reloop rule exists to prevent.
-            #
-            # Two guards that tried to be smarter about this were removed rather
-            # than repaired, because both read signals that do not carry the
-            # meaning they need:
-            #
-            #   - "OPTIMIZE reported both arms plateaued" cannot mean the arms
-            #     are exhausted. ``exit_normal_optimize`` stamps
-            #     ``plateau: True`` on the routine ``source_dry and config_dry``
-            #     end of a cycle, and a new cycle re-seeds both arms. Gating on
-            #     it reproduced the original incident from a second branch.
-            #   - "a previous cycle already relooped over this failure" cannot
-            #     be recovered from ``phase_history``. It is capped at
-            #     ``_PHASE_HISTORY_CAP`` rows, so a long run evicts the evidence
-            #     and loses the cap; it is also restored across sessions, so a
-            #     resumed run finds it immediately and closes on the FIRST
-            #     failure. Wrong in both directions.
-            #
-            # Capping deterministic conc_sweep retries is still worth doing, but
-            # it needs a durable SharedState counter (incremented on failure,
-            # reset on success) rather than a predicate divined from a capped
-            # log. Tracked separately; not in this change.
-            #
+            # Failed conc_sweep closeout is terminal: preserve the honest
+            # stop_reason instead of opening another macro-cycle.
+            if exit_reason == "conc_sweep_failed":
+                return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when
-            # reloop is blocked (budget, convergence, or max_cycles). A failure
-            # that reaches here still becomes the stop_reason when reloop is
-            # blocked below, so the honest outcome survives either way.
+            # reloop is blocked (budget, convergence, or max_cycles).
             reloop, reloop_ev = should_reloop_to_explore(state, now_unix=now_unix)
             if reloop and optimize_enabled:
                 reloop_target = PHASE_FRAMEWORK_AGENT
@@ -2917,27 +2891,15 @@ def compute_next_phase(
                         **exit_evidence,
                         **reloop_ev,
                         "loopback": True,
-                        # Which SWEEP exit opened this macro-cycle; the only way
-                        # to tell a clean closeout from a downgraded
-                        # ``conc_sweep_failed`` after the fact.
-                        "sweep_exit_reason": exit_reason,
                     },
                 )
             # R7: if looping was blocked by global convergence or the safety cap,
             # terminate with a terminal stop_reason instead of idling in CLOSE.
             blocked = str(reloop_ev.get("reloop_blocked") or "")
             if blocked in ("global_converged", "max_cycles"):
-                # A failed closeout stays the stop_reason. Convergence explains
-                # why no further cycle opened, not how this one ended, so
-                # reporting it alone turned a run whose conc_sweep failed into a
-                # clean convergence -- and ``reset_per_cycle_plateau_state``
-                # clears ``last_conc_sweep``, so the failure is not recoverable
-                # from state afterwards either. ``reloop_blocked`` still carries
-                # the convergence in the evidence.
-                terminal_reason = exit_reason if exit_reason == "conc_sweep_failed" else "global_converged"
                 return (
                     PHASE_CLOSE,
-                    terminal_reason,
+                    "global_converged",
                     {
                         **exit_evidence,
                         **reloop_ev,

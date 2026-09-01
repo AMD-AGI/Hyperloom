@@ -113,13 +113,6 @@ async def test_both_arms_dry_walks_the_rest_of_the_chain(session_dir: Path):
         # nothing.
         state.explore_search = {"winners_history": [{"gain_pct": 0.01, "cycle": 0} for _ in range(6)]}
         state.specialist_rounds = [{"proposals_total": 0, "proposals_kept": 0, "cycle": 0} for _ in range(6)]
-        # Whole run, not just this cycle. The two arms above dry up the CURRENT
-        # macro-cycle, and a new one re-seeds both, so R1 keeps offering a reloop
-        # until R7's no-gain streak says the RUN has converged. A walkthrough
-        # that has to arrive at CLOSE therefore has to say so in the field R7
-        # reads; SWEEP no longer has a closeout-failure short-circuit that
-        # reaches CLOSE without consulting it.
-        state.no_gain_cycle_streak = 2
         state.save(session_dir)
 
         for tick in range(1, 12):

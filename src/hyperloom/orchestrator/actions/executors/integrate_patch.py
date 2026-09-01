@@ -51,7 +51,6 @@ from ._accuracy_gate import (
     eval_probe_summary,
     parse_eval_results,
     read_eval_probe,
-    reconcile_baseline_accuracy,
 )
 from ._apply_feedback import ApplyFeedback, build_apply_feedback
 from ._git import _run_git_cp
@@ -3201,13 +3200,11 @@ class IntegratePatchExecutor:
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
         acc_required = bool(params.get("require_accuracy_for_keep", fw_authored))
-        # Measured wins over proposed here too: this value is what the KEEP gate
-        # grades against, so an LLM-supplied figure must not outrank it.
-        acc_baseline = reconcile_baseline_accuracy(
-            params.get("accuracy_baseline"),
-            extra.get("shared_state") or extra.get("state"),
-            where="integrate_patch",
-        )
+        acc_baseline = params.get("accuracy_baseline")
+        if acc_required and not acc_baseline:
+            _ss = extra.get("shared_state") or extra.get("state")
+            if _ss is not None:
+                acc_baseline = getattr(_ss, "baseline_accuracy", None)
         acc_block, acc_reason, acc_degraded = accuracy_keep_block(
             accuracy_pass,
             required=acc_required,
