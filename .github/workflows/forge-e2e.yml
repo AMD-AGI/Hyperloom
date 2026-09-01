@@ -207,12 +207,20 @@ jobs:
           else
             description="skipped: no Forge-related files changed"
           fi
+          # Fork pull_request jobs get a read-only GITHUB_TOKEN even with
+          # permissions.statuses: write, so this POST 403s and used to fail
+          # the required skipped-status check. ci-e2e/kernelforge is often
+          # already SUCCESS (posted by a write-capable actor); keep the job
+          # green so skip-e2e / path-skip PRs can merge. A pull_request_target
+          # or workflow_run trigger would get a real write token — see the
+          # PR that introduced this fallback.
           curl -fsS -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             "$API_URL/repos/$REPO/statuses/$SHA" \
             -d "$(jq -n --arg d "$description" \
-              '{state:"success", context:"ci-e2e/kernelforge", description:$d}')"
+              '{state:"success", context:"ci-e2e/kernelforge", description:$d}')" \
+            || echo "status POST not permitted from a fork token; continuing"
 
   e2e:
     needs: resolve
