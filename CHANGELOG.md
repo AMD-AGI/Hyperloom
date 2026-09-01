@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **A published Recipe now carries three columns instead of five.**
+  `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
+  `config`/`patch`/`kernel`, each owned end to end by one SDK facade
+  (`ConfigKB`, `PatchKB`, `KernelAgentKB`). The `explore` and `framework`
+  source overlays merge into a single `patch` column; replay order is the
+  lexicographic order of the zero-padded stack/member indices in each
+  `patch/overlays/<stack>/<member>-<name>.patch` ref, so `patch_timeline` is
+  gone. Each overlay carries a `provenance` row.
+
+- **The recorded apply root is now the sole authority for warm replay.**
+  Each overlay records `provenance[].host_origin.apply_roots` (`{ref:
+  absolute_root}`) and each kernel item records `host_origin.apply_root`, read
+  back at replay to place the change into the checkout it was measured on. The
+  env/allowlist root search is removed: a record that cannot name its checkout
+  is skipped whole rather than applied to a tree the gain was never measured
+  on. `host_origin` is the one sanitizer-exempt subtree allowed to carry
+  absolute paths (secret-named keys are still dropped there).
+
 ### Added
 
 - **Session breakdown exports now include the additive V6 startup contract.**

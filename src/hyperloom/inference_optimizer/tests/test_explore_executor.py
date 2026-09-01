@@ -585,6 +585,65 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
 
 
 @pytest.mark.asyncio
+async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_agent_runner, tmp_path):
+    """The gate no longer asks which knobs look risky.
+
+    ``--online_quant_config`` changes numeric precision directly, and no entry of
+    the deleted high-risk catalogue matched it, so a variant carrying it cleared
+    on throughput alone with its measured accuracy discarded. With a baseline on
+    the state it is now gated like any other variant, and no eval verdict is a
+    REVERT rather than a KEEP.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)  # +5% vs base 800 (clears throughput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    extra_args = '--online_quant_config {"global_quant_config":"ptpc_fp8"}'
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-uncatalogued"),
+            "base_tput": 800.0,
+            "accuracy_baseline": 0.80,
+            "grid": [
+                {
+                    "name": "v_quant",
+                    "extra_args": extra_args,
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-uncatalogued-acc",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint(extra_args, {})]
+    assert tested["outcome"] == "REVERT"
+    reasons = {lr["name"]: lr.get("reason") for lr in res.result["losers"]}
+    assert reasons.get("v_quant") == "accuracy_unavailable"
+    assert state.stop_reason == ""
+
+
+@pytest.mark.asyncio
 async def test_explore_accuracy_gate_falls_back_to_shared_state(sub_agent_runner, tmp_path):
     sub, tr, _ = sub_agent_runner
     state = SharedState()

@@ -125,7 +125,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:missing_snapshot_manifest"]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:/mirror:missing_snapshot_manifest"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
     assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]

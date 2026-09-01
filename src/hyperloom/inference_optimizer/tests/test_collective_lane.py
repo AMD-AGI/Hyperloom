@@ -638,3 +638,64 @@ def test_resume_compat_old_integration_status_accepted(tmp_path):
         }
     )
     assert collective_integration_pending(fake_state) is True
+
+
+def _keep_campaign(attempt_id: str, integration_id: str) -> dict:
+    return {
+        "collective_attempt_id": attempt_id,
+        "integration_id": integration_id,
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+
+
+def test_record_collective_rolls_back_when_save_fails(tmp_path, monkeypatch):
+    """A failed persist must restore in-memory collective state and leave state.json untouched."""
+    state = SharedState.load_or_init(tmp_path)
+    state.record_collective(_keep_campaign("attempt-1", "integration-1"), tmp_path)
+    before_last = dict(state.last_collective)
+    before_attempts = [dict(item) for item in state.collective_attempts]
+    disk_before = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    def _boom(_session_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        state.record_collective(_keep_campaign("attempt-2", "integration-2"), tmp_path)
+
+    assert state.last_collective == before_last
+    assert state.collective_attempts == before_attempts
+    assert (tmp_path / "state.json").read_text(encoding="utf-8") == disk_before
+
+
+def test_record_collective_integration_rolls_back_when_save_fails(tmp_path, monkeypatch):
+    """A failed persist must restore last_collective/collective_attempts and leave state.json untouched."""
+    state = SharedState.load_or_init(tmp_path)
+    state.record_collective(_keep_campaign("attempt-1", "integration-1"), tmp_path)
+    before_last = dict(state.last_collective)
+    before_attempts = [dict(item) for item in state.collective_attempts]
+    disk_before = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    def _boom(_session_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", _boom)
+    with pytest.raises(OSError, match="disk full"):
+        state.record_collective_integration(
+            {
+                "status": "ok",
+                "decision": "KEEP",
+                "patch_cleanup_status": "complete",
+                "patch_cleanup_action": "",
+            },
+            tmp_path,
+            integration_id="integration-1",
+        )
+
+    assert state.last_collective == before_last
+    assert state.collective_attempts == before_attempts
+    assert (tmp_path / "state.json").read_text(encoding="utf-8") == disk_before

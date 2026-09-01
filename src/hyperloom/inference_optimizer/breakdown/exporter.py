@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 from typing import Any
@@ -597,6 +598,9 @@ def build(
         default={},
     )
     v6_warnings = list(warnings)
+    # GEAK is collected only for V6: the V5 payload has no ``geak`` key, and
+    # adding one would change the V5 surface, which V6 must not do.
+    v6_geak = _safe_collect("geak", lambda: collectors.collect_geak(sd, state, v6_warnings), v6_warnings, default={})
     timeline = _safe_collect(
         "timeline",
         lambda: collectors.collect_v6_timeline(
@@ -607,6 +611,14 @@ def build(
             critic_iterations=(
                 critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
             ),
+            baseline=baseline,
+            sweep=sweep,
+            conc_sweep_summary=conc_sweep_summary,
+            phase_timeline=phase_timeline,
+            optimizations=optimizations,
+            kernel_journey=kernel_journey,
+            collective=collective,
+            geak=v6_geak,
         ),
         v6_warnings,
         default=[],
@@ -639,6 +651,14 @@ def build(
         v6_warnings,
         default={},
     )
+    v6_close = _safe_collect(
+        "close",
+        lambda: collectors.collect_v6_close(sd, state, critic_robustness, v6_warnings),
+        v6_warnings,
+        default={},
+    )
+    # Snapshot last: every V6 collector above feeds this list, and it is the
+    # only place a V6 failure is allowed to surface.
     if isinstance(metadata, dict):
         metadata["warnings"] = list(v6_warnings)
 
@@ -707,7 +727,7 @@ def build(
         "metadata": metadata,
         "outcome": outcome,
         "timeline": timeline,
-        "close": {},
+        "close": v6_close,
         "warnings": warnings,
         "source_files": source_files,
     }
@@ -871,6 +891,61 @@ def write_breakdown_json(
     return target
 
 
+def _patch_breakdown(
+    session_dir: Path | str,
+    section: str,
+    revise: Callable[[Path, dict[str, Any]], bool],
+) -> bool:
+    """Rewrite one section of an already-written breakdown, atomically.
+
+    ``revise`` receives the resolved session directory and the parsed payload,
+    mutates it in place, and returns whether anything actually changed; a
+    ``False`` skips the write, so a repeated call costs a read.
+
+    Best-effort throughout: a missing or unparsable breakdown, an unchanged
+    payload, or any error returns ``False``. Never raises — every caller runs
+    at shutdown, after ``stop_reason`` is settled, and must not mask it.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+        section (str): Section name, for the log line.
+        revise (Callable[[Path, dict[str, Any]], bool]): The in-place edit.
+
+    Returns:
+        ``True`` when the file was rewritten, ``False`` otherwise.
+    """
+    sd = Path(session_dir).resolve()
+    target = sd / BREAKDOWN_FILENAME
+    try:
+        if not target.exists():
+            return False
+        breakdown = json.loads(target.read_text(encoding="utf-8"))
+        if not isinstance(breakdown, dict):
+            return False
+        if not revise(sd, breakdown):
+            return False
+        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
+        fd, tmp = tempfile.mkstemp(
+            prefix=f".{BREAKDOWN_FILENAME}.",
+            suffix=".tmp",
+            dir=str(target.parent),
+        )
+        os.close(fd)
+        tmp_path = Path(tmp)
+        try:
+            tmp_path.write_text(payload, encoding="utf-8")
+            os.replace(tmp_path, target)
+        except Exception:
+            with suppress(OSError):
+                tmp_path.unlink()
+            raise
+        log.info("session_breakdown: refreshed %s section in %s", section, target)
+        return True
+    except Exception:  # noqa: BLE001
+        log.debug("session_breakdown: %s patch failed (non-fatal)", section, exc_info=True)
+        return False
+
+
 def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     """Refresh only the ``langfuse`` section of an already-written breakdown.
 
@@ -893,39 +968,79 @@ def patch_breakdown_langfuse(session_dir: Path | str) -> bool:
     """
     from hyperloom.orchestrator.trace.langfuse_emitter import read_receipt
 
-    sd = Path(session_dir).resolve()
-    target = sd / BREAKDOWN_FILENAME
-    try:
+    def _revise(sd: Path, breakdown: dict[str, Any]) -> bool:
         receipt = read_receipt(sd)
-        if receipt is None or not target.exists():
+        if receipt is None:
             return False
         receipt["receipt_source"] = "receipt_file"
-        breakdown = json.loads(target.read_text(encoding="utf-8"))
-        if not isinstance(breakdown, dict):
-            return False
         if breakdown.get("langfuse") == receipt:
             return False  # already current
         breakdown["langfuse"] = receipt
-        payload = json.dumps(breakdown, indent=2, sort_keys=True, default=_json_default)
-        fd, tmp = tempfile.mkstemp(
-            prefix=f".{BREAKDOWN_FILENAME}.",
-            suffix=".tmp",
-            dir=str(target.parent),
-        )
-        os.close(fd)
-        tmp_path = Path(tmp)
-        try:
-            tmp_path.write_text(payload, encoding="utf-8")
-            os.replace(tmp_path, target)
-        except Exception:
-            with suppress(OSError):
-                tmp_path.unlink()
-            raise
-        log.info("session_breakdown: refreshed langfuse section in %s", target)
         return True
-    except Exception:  # noqa: BLE001
-        log.debug("session_breakdown: langfuse patch failed (non-fatal)", exc_info=True)
-        return False
+
+    return _patch_breakdown(session_dir, "langfuse", _revise)
+
+
+def patch_breakdown_close(session_dir: Path | str) -> bool:
+    """Refresh only the ``close`` section of an already-written breakdown.
+
+    ``session_breakdown`` is step 2 of the CLOSE sequencer, so the breakdown it
+    writes can only ever describe the close-out up to its own step: the four
+    steps after it are not recorded yet and ``close_sequence_done`` is still
+    false. Left alone, every healthy session reports ``close.status:
+    "degraded"`` — an accurate statement about the *record*, but one that reads
+    as the close-out having gone wrong.
+
+    Call this as the last act of the sequencer. ``_record_close_step``
+    persists ``state.json`` on every step, so by then the full sequence and
+    ``close_sequence_done`` are on disk and the recomputed key is the real one.
+
+    Best-effort and self-skipping, exactly like
+    :func:`patch_breakdown_langfuse`: returns False on a missing breakdown, an
+    unchanged section, or any error. Never raises — it runs after
+    ``stop_reason`` and ``close_sequence_done`` are settled and must not mask
+    them at shutdown.
+
+    Args:
+        session_dir: The hyperloom session directory holding the breakdown.
+
+    Returns:
+        ``True`` when the close section was refreshed, ``False`` otherwise.
+    """
+
+    def _revise(sd: Path, breakdown: dict[str, Any]) -> bool:
+        # A V5-only breakdown has no ``close`` key to refresh, and adding one
+        # would change the surface of a payload that never carried it.
+        if "close" not in breakdown:
+            return False
+
+        fresh_warnings: list[str] = []
+        state = _load_session_json(state_path(sd), "state.json", fresh_warnings)
+        critic_robustness = _safe_collect(
+            "critic_robustness",
+            lambda: collectors.collect_critic_robustness(sd, fresh_warnings),
+            fresh_warnings,
+            default={},
+        )
+        fresh = collectors.collect_v6_close(sd, state, critic_robustness, fresh_warnings)
+        changed = breakdown.get("close") != fresh
+        breakdown["close"] = fresh
+
+        # This pass is the only one that ever sees the steps recorded *after*
+        # the breakdown was written — ``artifact_package``, ``ndjson_drain``,
+        # ``done`` — so drift among them is reported here or nowhere.
+        # ``metadata.warnings`` is V6's single outlet, so merge into it rather
+        # than overwrite: the first pass's findings are still true.
+        metadata = breakdown.get("metadata")
+        if isinstance(metadata, dict) and fresh_warnings:
+            existing = [str(row) for row in metadata.get("warnings") or []]
+            merged = existing + [row for row in fresh_warnings if row not in existing]
+            if merged != existing:
+                metadata["warnings"] = merged
+                changed = True
+        return changed
+
+    return _patch_breakdown(session_dir, "close", _revise)
 
 
 def _json_default(obj: Any) -> Any:

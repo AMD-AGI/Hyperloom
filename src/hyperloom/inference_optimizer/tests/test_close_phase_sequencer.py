@@ -6,7 +6,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -804,6 +806,69 @@ async def test_phase_transition_into_close_runs_sequencer_e2e(tmp_path: Path):
     steps = [r["step"] for r in evidence.get("close_steps", [])]
     assert "sequencer_started" in steps
     assert "done" in steps
+
+
+@pytest.mark.asyncio
+async def test_the_sequencer_delivers_the_finished_close_section_in_the_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The package, not the session dir, is what external sync ships.
+
+    ``session_breakdown`` is step 2, so the copy it writes describes the
+    close-out only as far as itself, and the artifact package built at step 5
+    bundles that partial copy. The sequencer's last act patches the ``close``
+    key and rebuilds the bundle; this asserts on the two copies a consumer
+    actually reads — inside the zip, and the loose tree beside it.
+    """
+    dest_root = tmp_path / "dest"
+    monkeypatch.setenv("HYPERLOOM_SESSION_PACKAGE_DEST", str(dest_root))
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    # Stand in for the step-2 breakdown task, which does not run under the mock
+    # backends: a payload whose ``close`` key stops where step 2 can see.
+    (session_dir / "session_breakdown.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "hyperloom.session_breakdown.v5.0",
+                "close": {"status": "degraded", "steps": [{"step": "sequencer_started"}]},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    idle_plan = ScriptedPlan(turns=[MockTurn(intents=[])])
+    coord = Coordinator(
+        session_dir=session_dir,
+        backends={
+            "orchestration": MockBackend(idle_plan),
+            "critic": MockBackend(idle_plan),
+            "robustness": MockBackend(idle_plan),
+        },
+        role_registry=default_role_registry(),
+        recipe_kb=None,
+        knowledge_plane=None,
+    )
+    coord.shared_state.phase = "SWEEP"
+    coord.shared_state.phase_history = [{"to_phase": "SWEEP", "evidence": {}, "reason": "plateau_kernel"}]
+    coord.shared_state.record_phase_transition(to_phase="CLOSE", reason="sweep_done", evidence={})
+
+    await coord._on_phase_entered(from_phase="SWEEP", to_phase="CLOSE")
+
+    zips = sorted((dest_root / "hyperloom-session-packages").glob("*.zip"))
+    assert len(zips) == 1
+    with zipfile.ZipFile(zips[0]) as bundle:
+        zipped = json.loads(bundle.read("session_breakdown.json"))
+    loose = json.loads((dest_root / "session_breakdown.json").read_text(encoding="utf-8"))
+
+    for delivered in (zipped["close"], loose["close"]):
+        # The steps recorded after step 2 are the whole point: they are what
+        # the bundled copy was missing before the rebuild. The stage status is
+        # not asserted here because the internal tasks do not run under mock
+        # backends; ``test_sbd_v6_stages.py`` pins the ``succeeded`` ladder on
+        # a finished sequence.
+        assert delivered["close_sequence_done"] is True
+        assert {"artifact_package", "ndjson_drain", "done"} <= {step["step"] for step in delivered["steps"]}
 
 
 @pytest.mark.asyncio
