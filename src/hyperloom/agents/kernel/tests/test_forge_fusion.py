@@ -807,9 +807,7 @@ def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
     """
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    manifest = _aborted_manifest(
-        "exhausted", attempts=1, best_env_flag="QWEN3_FUSED_QK_NORM_ROPE_KVCACHE"
-    )
+    manifest = _aborted_manifest("exhausted", attempts=1, best_env_flag="QWEN3_FUSED_QK_NORM_ROPE_KVCACHE")
     (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
@@ -826,9 +824,7 @@ def test_an_abort_reason_is_matched_tolerantly(tmp_path, reason):
     no_improvement mapping, i.e. straight back into the bug this prevents."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(_aborted_manifest(reason)), encoding="utf-8"
-    )
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(_aborted_manifest(reason)), encoding="utf-8")
 
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
 

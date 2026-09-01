@@ -75,6 +75,7 @@ def _as_int(value: object) -> int:
     except (TypeError, ValueError):
         return 0
 
+
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact
