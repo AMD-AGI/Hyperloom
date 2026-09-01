@@ -635,6 +635,40 @@ AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
 AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
 _AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
 
+# ...and the warmup share does not only vary by model, it varies by CONCURRENCY,
+# which the grace knob cannot express because it is one flat number. The client
+# builds warmup as CANON_WARMUP_PER_LANE requests per lane across CONC lanes, so
+# the work is linear in CONC *by construction*; a grace chosen at one
+# concurrency is arithmetically wrong at another. Measured on Kimi-K3:
+#
+#     conc=8   ->  87 warmup requests, ~3000s        (10.9 req/lane)
+#     conc=16  -> 177 warmup requests, ~5000s        (11.1 req/lane)
+#     conc=64  -> the 12075s warmup the warning below cites
+#
+# Left flat, a conc=32 round derives its cap from a conc=8 budget and is killed
+# mid-warmup -- the exact failure this module's cap-raise exists to prevent, just
+# moved one axis over. So the warmup share carries a CONC-scaled FLOOR.
+#
+# Anchored at 8 rather than at a value invented for the purpose: 8 is the lowest
+# concurrency at which this repo has a measured Kimi-K3 agentic warmup, and the
+# official ladder starts at 4, so at or below it the derivation is unchanged and
+# every previously-validated round keeps its exact cap. The floor only ever
+# RAISES the cap. That asymmetry is deliberate: a cap that is too large costs
+# nothing but a longer wait on a genuinely hung round (and the session budget
+# clamps it anyway via ``session_clamped_timeout_sec``), while a cap that is too
+# small kills a round that would have finished.
+AGENTX_CANON_WARMUP_CONC = 8
+
+
+def _agentx_conc(src: "Mapping[str, str]") -> int:
+    """Concurrency for the round, from CONC; 0 when unset/unparseable."""
+    raw = (src.get("CONC") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 0
+    return value if value > 0 else 0
+
 
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """Resolve the AgentX baseline cap: explicit, else duration + overhead.
@@ -678,6 +712,25 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
         # client, so the cap tracks the round the operator actually configured
         # rather than the one this constant was measured on.
         grace = _int("AGENTX_WARMUP_GRACE_PERIOD", AGENTX_CANON_WARMUP_GRACE_SEC)
+        # CONC-scaled floor: the client's warmup is linear in CONC by
+        # construction (per-lane requests x CONC lanes), but the grace knob is a
+        # flat number, so a grace chosen at one concurrency under-budgets every
+        # higher one. Scale, never shrink, and stay identity at or below the
+        # anchor so previously-validated rounds keep their exact cap.
+        conc = _agentx_conc(src)
+        if conc > AGENTX_CANON_WARMUP_CONC:
+            scaled = (grace * conc) // AGENTX_CANON_WARMUP_CONC
+            log.info(
+                "agentx_baseline_timeout_sec: scaling the warmup share %ds -> %ds for "
+                "CONC=%d (warmup work is linear in CONC; anchor CONC=%d). The floor only "
+                "raises the cap -- an over-large cap costs a longer wait on a hung round, "
+                "an under-sized one kills a round that would have finished.",
+                grace,
+                scaled,
+                conc,
+                AGENTX_CANON_WARMUP_CONC,
+            )
+            grace = scaled
         overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
         if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
             # Nothing has been tuned for this model at all. The derivation
