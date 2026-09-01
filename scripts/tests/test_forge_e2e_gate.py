@@ -107,7 +107,7 @@ def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:
     assert "github.event.comment.author_association == 'MEMBER'" in jobs
     assert "github.event.comment.author_association == 'COLLABORATOR'" in jobs
 
-    group = "forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}"
+    group = "forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}"
     assert workflow.count(group) == 2
     assert workflow.count("cancel-in-progress: true") == 2
 
