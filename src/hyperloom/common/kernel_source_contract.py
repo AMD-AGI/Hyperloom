@@ -30,7 +30,9 @@ from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
-SOURCE_RESOLUTION_SCHEMA_VERSION = "1.0.0"
+#: 1.1.0 adds ``reason_class`` to every entry (additive; readers of 1.0.0 are
+#: unaffected).
+SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
 
 #: Canonical artifact name, relative to the analysis run directory. Mirrored by
 #: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
@@ -70,6 +72,60 @@ KNOWN_METHODS = frozenset(
     }
 )
 
+#: Why a kernel is not dispatchable, as a judgeable class rather than prose.
+#: ``method`` says how a location was decided; this says why there is nothing to
+#: dispatch. The split that matters to a consumer is between the classes below
+#: that can never be optimized from source -- a consumer can skip those for free
+#: -- and ``source_not_resolved``, which is the only one worth spending a search
+#: budget on.
+CLASS_RESOLVED = "resolved"
+CLASS_LAUNCH_API_ONLY = "launch_api_only"
+CLASS_VENDOR_BINARY = "vendor_binary"
+CLASS_DISPATCH_SHIM = "dispatch_shim"
+CLASS_NON_PATCHABLE_NAME = "non_patchable_name"
+CLASS_NOT_REWRITABLE_VERDICT = "not_rewritable_verdict"
+CLASS_SOURCE_NOT_RESOLVED = "source_not_resolved"
+CLASS_UNKNOWN = "unknown"
+
+KNOWN_REASON_CLASSES = frozenset(
+    {
+        CLASS_RESOLVED,
+        CLASS_LAUNCH_API_ONLY,
+        CLASS_VENDOR_BINARY,
+        CLASS_DISPATCH_SHIM,
+        CLASS_NON_PATCHABLE_NAME,
+        CLASS_NOT_REWRITABLE_VERDICT,
+        CLASS_SOURCE_NOT_RESOLVED,
+        CLASS_UNKNOWN,
+    }
+)
+
+#: Classes where no amount of searching produces an editable kernel body. A
+#: consumer deciding where to spend a budget can drop these without measuring.
+UNSALVAGEABLE_REASON_CLASSES = frozenset(
+    {
+        CLASS_LAUNCH_API_ONLY,
+        CLASS_VENDOR_BINARY,
+        CLASS_DISPATCH_SHIM,
+        CLASS_NON_PATCHABLE_NAME,
+        CLASS_NOT_REWRITABLE_VERDICT,
+    }
+)
+
+#: Ordered longest-context-first: the first substring that matches a skip reason
+#: decides the class, so a more specific phrase must precede a broader one.
+_REASON_CLASS_MARKERS: tuple[tuple[str, str], ...] = (
+    ("launch api, not a kernel", CLASS_LAUNCH_API_ONLY),
+    ("source file not resolved", CLASS_SOURCE_NOT_RESOLVED),
+    ("prebuilt assembly compute-core", CLASS_VENDOR_BINARY),
+    ("vendor binary", CLASS_VENDOR_BINARY),
+    ("vendor backend library", CLASS_VENDOR_BINARY),
+    ("precompiled binary", CLASS_VENDOR_BINARY),
+    ("vendor dispatch wrapper", CLASS_DISPATCH_SHIM),
+    ("dispatch shim", CLASS_DISPATCH_SHIM),
+    ("non-patchable kernel name marker", CLASS_NON_PATCHABLE_NAME),
+)
+
 #: Every entry carries these, so a consumer can rely on presence without
 #: defaulting. Values may be empty; the keys may not be absent.
 REQUIRED_ENTRY_KEYS = (
@@ -79,7 +135,39 @@ REQUIRED_ENTRY_KEYS = (
     "source_file",
     "method",
     "reason",
+    "reason_class",
 )
+
+
+def classify_skip_reason(*, reusable: Any, skip_reason: Any, source_file: Any = "") -> str:
+    """Reduce a candidate's routing verdict to one judgeable class.
+
+    Reads only the two fields the gate itself produces, so this stays a pure
+    function of the verdict rather than a second opinion on it.
+
+    Args:
+        reusable: The gate's ``reusable_native_kernel`` verdict.
+        skip_reason: The gate's prose explanation, empty when reusable.
+        source_file: Resolved path, used only to disambiguate an empty reason.
+
+    Returns:
+        One of :data:`KNOWN_REASON_CLASSES`.
+    """
+    if reusable is True:
+        return CLASS_RESOLVED
+    text = str(skip_reason or "").strip().lower()
+    if not text:
+        # No verdict text: an unresolved path is the one case we can still name.
+        return CLASS_SOURCE_NOT_RESOLVED if not str(source_file or "").strip() else CLASS_UNKNOWN
+    for marker, reason_class in _REASON_CLASS_MARKERS:
+        if marker in text:
+            return reason_class
+    # The active finder's own verdict is prefixed by the gate and carries an
+    # arbitrary tail, so it is matched last and by prefix.
+    if text.startswith("source:"):
+        return CLASS_NOT_REWRITABLE_VERDICT
+    return CLASS_UNKNOWN
+
 
 REQUIRED_DOCUMENT_KEYS = ("schema_version", "generated_by", "entries")
 
@@ -98,6 +186,7 @@ def make_entry(
     rejected_value: str = "",
     previous_source_file: str = "",
     previous_method: str = "",
+    reason_class: str = "",
 ) -> dict[str, Any]:
     """Build one resolution entry with every required key present.
 
@@ -134,11 +223,63 @@ def make_entry(
         "confidence": confidence,
         "reason": str(reason or ""),
         "rejected_value": str(rejected_value or ""),
+        # Derived from the caller's verdict when not supplied, so an entry is
+        # never written without a class a consumer can act on.
+        "reason_class": str(reason_class or "")
+        or classify_skip_reason(
+            reusable=bool(source_file),
+            skip_reason=reason,
+            source_file=source_file,
+        ),
     }
     if previous_source_file:
         entry["previous_source_file"] = str(previous_source_file)
         entry["previous_method"] = str(previous_method or "")
     return entry
+
+
+def summarize_resolution(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Count located kernels and group the rest by why they are undispatchable.
+
+    A bare located/total count cannot say whether the unlocated kernels were
+    worth chasing, so this also reports the GPU share behind them and splits it
+    into what a search could still rescue and what nothing can.
+
+    Args:
+        entries: Source-resolution entries, as written to the artifact.
+
+    Returns:
+        ``total`` / ``located`` counts, per-class counts, the GPU share behind
+        undispatchable kernels, and its ``recoverable`` / ``unsalvageable``
+        split.
+    """
+    by_class: dict[str, int] = {}
+    located = 0
+    undispatchable_gpu_pct = 0.0
+    recoverable = 0
+    unsalvageable = 0
+    rows = [entry for entry in entries if isinstance(entry, dict)]
+    for entry in rows:
+        reason_class = str(entry.get("reason_class") or CLASS_UNKNOWN)
+        by_class[reason_class] = by_class.get(reason_class, 0) + 1
+        if reason_class == CLASS_RESOLVED:
+            located += 1
+            continue
+        gpu_pct = entry.get("gpu_pct")
+        if isinstance(gpu_pct, (int, float)) and not isinstance(gpu_pct, bool) and math.isfinite(float(gpu_pct)):
+            undispatchable_gpu_pct += float(gpu_pct)
+        if reason_class in UNSALVAGEABLE_REASON_CLASSES:
+            unsalvageable += 1
+        else:
+            recoverable += 1
+    return {
+        "total": len(rows),
+        "located": located,
+        "by_class": by_class,
+        "undispatchable_gpu_pct": undispatchable_gpu_pct,
+        "recoverable": recoverable,
+        "unsalvageable": unsalvageable,
+    }
 
 
 def make_document(
@@ -202,6 +343,9 @@ def validate_document(doc: Any) -> list[str]:
         method = str(entry.get("method") or "")
         if method and method not in KNOWN_METHODS:
             problems.append(f"entries[{i}] has unknown method {method!r}")
+        reason_class = str(entry.get("reason_class") or "")
+        if reason_class and reason_class not in KNOWN_REASON_CLASSES:
+            problems.append(f"entries[{i}] has unknown reason_class {reason_class!r}")
         src = str(entry.get("source_file") or "")
         if src and method in {METHOD_UNRESOLVED, METHOD_REJECTED}:
             problems.append(f"entries[{i}] has a source_file but method is {method}")
