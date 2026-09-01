@@ -363,9 +363,7 @@ def test_moe_decomposition_reads_a_gemma_style_topk_alias():
         "num_hidden_layers": 30,
         "moe_intermediate_size": 704,
     }
-    _, total, experts, per_tok = rc._compute_expert_decomposition(
-        cfg, weight_bytes=51_611_872_412, dtype_bytes=2.0
-    )
+    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, dtype_bytes=2.0)
     assert (experts, per_tok) == (128, 8)
     assert total == 30 * 128 * 3 * 2816 * 704 * 2
 

@@ -115,8 +115,7 @@ class TestThePerfModelUsesTheSplit:
     def test_the_moe_op_is_charged_to_moe_layers_only(self):
         forty_two = next(o for o in _breakdown(_flash_meta()).ops if o.name == "moe_fused")
         all_forty_five = next(
-            o for o in _breakdown(_flash_meta(moe_layers=45, dense_ffn_layers=0)).ops
-            if o.name == "moe_fused"
+            o for o in _breakdown(_flash_meta(moe_layers=45, dense_ffn_layers=0)).ops if o.name == "moe_fused"
         )
 
         assert forty_two.bytes_moved == pytest.approx(all_forty_five.bytes_moved * 42 / 45)
@@ -147,8 +146,7 @@ class TestThePerfModelUsesTheSplit:
 
         assert "gate_proj" not in ops  # as before: MoE model, no dense FFN
         all_layers = next(
-            o for o in _breakdown(_flash_meta(moe_layers=45, dense_ffn_layers=0)).ops
-            if o.name == "moe_fused"
+            o for o in _breakdown(_flash_meta(moe_layers=45, dense_ffn_layers=0)).ops if o.name == "moe_fused"
         )
         assert ops["moe_fused"].flops == pytest.approx(all_layers.flops)
 
@@ -227,9 +225,7 @@ class TestLoadModelMetaFillsTheSplit:
         prefix = rc.load_model_meta(_write_config(tmp_path / "b", {**cfg, "first_k_dense_replace": 3}, total))
 
         assert no_prefix is not None and prefix is not None
-        assert prefix.expert_weight_bytes == pytest.approx(
-            no_prefix.expert_weight_bytes * 42 / 45, rel=1e-6
-        )
+        assert prefix.expert_weight_bytes == pytest.approx(no_prefix.expert_weight_bytes * 42 / 45, rel=1e-6)
         # Per-token active bytes go *up*, and that is the point. Bytes moved out
         # of the expert pool are dense-FFN weights, and a dense layer's weights
         # are read for every token, whereas only 8 of 288 experts are. Charging

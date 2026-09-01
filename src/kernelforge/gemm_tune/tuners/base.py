@@ -93,9 +93,7 @@ class TuneResult:
             # "missing" made a completed batch read as a truncated one, which is
             # the same conflation the partial_output gate used to make.
             d["filtered_shapes"] = len(self.dropped_inaccurate)
-            d["missing_shapes"] = max(
-                self.expected_shapes - self.total_shapes - len(self.dropped_inaccurate), 0
-            )
+            d["missing_shapes"] = max(self.expected_shapes - self.total_shapes - len(self.dropped_inaccurate), 0)
         if self.unverified_shapes:
             d["unverified_shapes"] = self.unverified_shapes
         if self.shape_results:

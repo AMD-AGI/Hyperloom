@@ -193,7 +193,6 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
-
 def _parse_server_arg(args: str, flag: str) -> str:
     """Return the value following ``--flag`` (space or ``=`` form), else ``""``.
 
@@ -922,11 +921,7 @@ def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: 
             break
 
     dense_only = {int(i) for i in (cfg.get("mlp_only_layers") or []) if isinstance(i, int)}
-    moe = sum(
-        1
-        for i in range(first_dense, num_layers)
-        if (i - first_dense) % stride == 0 and i not in dense_only
-    )
+    moe = sum(1 for i in range(first_dense, num_layers) if (i - first_dense) % stride == 0 and i not in dense_only)
     return moe, num_layers - moe
 
 

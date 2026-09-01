@@ -140,10 +140,7 @@ class TestUnsupportedDtypesAreSkippedNotGuessed:
         assert lines == [f"{BF16},tn_1536_16_7168_ld_7168_7168_1536"]
 
     def test_all_shapes_unsupported_yields_no_input(self, tmp_path):
-        assert (
-            _records(tmp_path, [_key(16, 1536, 7168, "torch.float8_e4m3fn")], precision="mxfp4")
-            is None
-        )
+        assert _records(tmp_path, [_key(16, 1536, 7168, "torch.float8_e4m3fn")], precision="mxfp4") is None
 
 
 class TestTheStatusSaysWhatActuallyHappened:

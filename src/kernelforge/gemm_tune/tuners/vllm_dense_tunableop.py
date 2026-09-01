@@ -67,6 +67,7 @@ def _tunableop_op_for_dtype(raw: Any) -> str | None:
         text = text[len("torch.") :]
     return _TUNABLEOP_OP_BY_DTYPE.get(text)
 
+
 # Demand can list thousands of distinct keys; TunableOp times each one against
 # every hipBLASLt solution, so the whole run would be spent on one tuner.
 _DEMAND_SHAPE_LIMIT = 64
