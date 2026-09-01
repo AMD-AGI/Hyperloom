@@ -33,6 +33,13 @@ from hyperloom.common.llm_config import (
     build_http_timeout,
     get_async_openai_client,
 )
+from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    LEVER_CONFIG,
+    LEVER_ENABLEMENT,
+    LEVER_SOURCE_PATCH,
+    LEVER_UPSTREAM_PR,
+    patch_lever_kind,
+)
 from hyperloom.common.jsonio import extract_first_json_with_key
 from hyperloom.inference_optimizer.protocol.intent import (
     IntentValidationError,
@@ -303,17 +310,13 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "`advise` with a phase hint rather than reject."
     ),
     "FRAMEWORK_AGENT": (
-        "Typical proposal is `integrate_patch` carrying an upstream PR diff or "
-        "an authored enablement patch. The gate here is runnability plus the "
-        "accuracy floor, not throughput — a candidate that boots and holds "
-        "accuracy is a legitimate KEEP even at flat gain."
-    ),
-    "EXPLORE": (
         "Typical proposals are `explore`, `specialist` and `integrate_patch`. "
         "Specialist-style proposal_set packets arrive as "
         "`propose_action='explore'` with a `variants` array — return one "
         "verdict dict per variant msg_id; missing entries are treated as "
-        "`needs_review`."
+        "`needs_review`. What a KEEP has to clear depends on the lever the "
+        "proposal moves, not on the phase — see `review_constraints."
+        "lever_orientation` when it is present."
     ),
     "KERNEL_AGENT": (
         "Typical proposals are the KERNEL_AGENT_OWNED_ACTIONS (proxied via "
@@ -327,6 +330,54 @@ _PHASE_ORIENTATION: dict[str, str] = {
         "measurement, so the before/after gate does not apply."
     ),
 }
+
+
+#: Orientation by the lever a proposal moves. The phase used to carry this,
+#: which worked only while each phase held one lever: the FRAMEWORK entry told
+#: the Critic that flat gain was a legitimate KEEP, and merging the phases would
+#: have silently extended that to configuration search. The deterministic layer
+#: already routes on payload markers rather than phase; this matches it.
+_LEVER_ORIENTATION: dict[str, str] = {
+    LEVER_UPSTREAM_PR: (
+        "This lands an upstream diff nobody here wrote. Judge whether it is "
+        "worth measuring and whether it can be rolled back — the measurement "
+        "itself is the executor's gate, not yours."
+    ),
+    LEVER_ENABLEMENT: (
+        "The gate here is runnability plus the accuracy floor, not throughput: "
+        "a candidate that boots and holds accuracy is a legitimate KEEP even at "
+        "flat gain. Pre-boot, the production evidence cannot exist yet."
+    ),
+    LEVER_SOURCE_PATCH: (
+        "A patch written for this session. It changes the source tree, so "
+        "rollback and blast radius carry the weight; throughput is measured "
+        "afterwards and is not yours to predict."
+    ),
+    LEVER_CONFIG: (
+        "Server arguments and environment only — nothing on disk changes and a "
+        "revert is a non-composition. Judge the reasoning and the accuracy "
+        "risk; the cost of being wrong is one bench."
+    ),
+}
+
+
+def _inject_lever_orientation(judge_bundle: dict[str, Any], payload: dict[str, Any] | None) -> None:
+    """Stamp the orientation for the lever this proposal moves, when known.
+
+    Args:
+        judge_bundle: The judge bundle to enrich in place.
+        payload: The proposal payload, read for a lever stamp or its markers.
+    """
+    lever = patch_lever_kind(payload if isinstance(payload, dict) else None)
+    if not lever:
+        params = (payload or {}).get("params") if isinstance(payload, dict) else None
+        lever = patch_lever_kind(params if isinstance(params, dict) else None)
+    orientation = _LEVER_ORIENTATION.get(lever)
+    if not orientation:
+        return
+    rc = judge_bundle.setdefault("review_constraints", {})
+    rc["lever_kind"] = lever
+    rc["lever_orientation"] = orientation
 
 
 def _inject_phase_constraints(judge_bundle: dict[str, Any], phase: str) -> None:
@@ -464,11 +515,12 @@ class CriticAgentBackend:
     # dataclass field) to avoid descriptor binding as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
-    # Trace context (tick / phase) the Coordinator stamps before each reactor
+    # Trace context the Coordinator stamps before each reactor
     # ``run()`` so the critic's self-written llm_calls row carries the timeline
     # keys.
     _trace_tick: int | None = field(default=None, init=False, repr=False)
     _trace_phase: str | None = field(default=None, init=False, repr=False)
+    _trace_macro_cycle: int | None = field(default=None, init=False, repr=False)
     # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls
     # attribution.
     _trace_reviewed_msg_ids: list[str] | None = field(
@@ -680,6 +732,8 @@ class CriticAgentBackend:
         context = dict(self._static_context)
         if self._trace_phase:
             context["phase"] = str(self._trace_phase).strip().upper()
+        if self._trace_macro_cycle is not None:
+            context["macro_cycle"] = self._trace_macro_cycle
         request: dict[str, Any] = {
             "kind": "coordinator_inbox",
             "session_id": session_id,
@@ -726,6 +780,11 @@ class CriticAgentBackend:
             rc["action_verdict_policy"] = dict(self.action_verdict_policy)
 
         _inject_phase_constraints(judge_bundle, self._trace_phase or "")
+        # The lever says what a KEEP has to clear; the phase no longer can,
+        # now that one phase carries every lever.
+        _proposals = judge_bundle.get("proposals") or []
+        _first = _proposals[0] if isinstance(_proposals, list) and _proposals else None
+        _inject_lever_orientation(judge_bundle, _first if isinstance(_first, dict) else None)
         _maybe_inject_cross_domain_constraints(judge_bundle)
         _maybe_inject_quantitative_claim_constraint(judge_bundle)
 
@@ -811,6 +870,8 @@ class CriticAgentBackend:
             instrument.record_critic_iteration(
                 self.session_dir,
                 iter_n=turn_idx,
+                request=request,
+                judge_bundle=judge_bundle,
                 review=review,
                 emit=emit,
                 workdir=workdir,
@@ -1347,12 +1408,14 @@ class CriticAgentBackend:
         *,
         tick: int | None = None,
         phase: str | None = None,
+        macro_cycle: int | None = None,
     ) -> None:
-        """Stamp the timeline keys for the next reactor turn's trace row.
+        """Stamp the timeline keys for the next reactor turn and request.
 
         The Coordinator calls this before ``run()`` (it owns ``shared_state``)
-        so the critic's self-written ``llm_calls`` row carries the same
-        tick/phase the in-process reactor trace would have. Best-effort: a
+        so the critic request carries the current phase/macro-cycle and its
+        self-written ``llm_calls`` row carries the same tick/phase as the
+        in-process reactor trace. Best-effort: a
         bad value degrades to ``None`` rather than raising.
         """
         try:
@@ -1360,6 +1423,10 @@ class CriticAgentBackend:
         except (TypeError, ValueError):
             self._trace_tick = None
         self._trace_phase = (str(phase) or None) if phase else None
+        try:
+            self._trace_macro_cycle = int(macro_cycle) if macro_cycle is not None else None
+        except (TypeError, ValueError):
+            self._trace_macro_cycle = None
 
     def _trace_critic_llm_call(
         self,

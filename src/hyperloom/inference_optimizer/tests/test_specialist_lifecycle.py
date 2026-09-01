@@ -259,7 +259,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
     coord_obj = Coordinator.__new__(Coordinator)
     task = _StubTask(
         task_id="t-build",
-        params={"round_id": "round-9"},
+        params={"round_id": "round-9", "source_phase": "KERNEL_AGENT"},
     )
     payload = _done_payload(
         domain="serving_specialist",
@@ -290,6 +290,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
         "confidence",
         "new_findings",
         "residual_questions",
+        "source_phase",
     }
     assert expected_keys.issubset(entry.keys())
     assert entry["round_id"] == "round-9"
@@ -297,6 +298,7 @@ async def test_build_specialist_round_entry_carries_full_payload(coord):
     assert entry["proposals_total"] == 2
     assert entry["empty"] is False
     assert entry["confidence"] == 0.62
+    assert entry["source_phase"] == "KERNEL_AGENT"
 
 
 @pytest.mark.asyncio
@@ -439,7 +441,7 @@ def force_coord(tmp_path: Path):
     c = Coordinator.__new__(Coordinator)
     c.session_dir = tmp_path
     c.shared_state = SharedState()
-    c.shared_state.phase = "EXPLORE"
+    c.shared_state.phase = "FRAMEWORK_AGENT"
     c._handle_intent = AsyncMock()  # type: ignore[method-assign]
     return c
 

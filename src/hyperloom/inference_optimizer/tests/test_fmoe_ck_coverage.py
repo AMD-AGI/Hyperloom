@@ -158,12 +158,12 @@ def stub_forge_parser(monkeypatch):
             "consulted_tables": sorted(consulted),
         }
 
-    fake = types.ModuleType("forge_gemm_tune")
-    fake_ev = types.ModuleType("forge_gemm_tune.evidence")
+    fake = types.ModuleType("kernelforge.gemm_tune")
+    fake_ev = types.ModuleType("kernelforge.gemm_tune.evidence")
     fake_ev.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
     fake.evidence = fake_ev  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "forge_gemm_tune", fake)
-    monkeypatch.setitem(sys.modules, "forge_gemm_tune.evidence", fake_ev)
+    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
+    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
 
 
 class TestFmoeCoverageGate:

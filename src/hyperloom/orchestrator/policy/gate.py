@@ -9,7 +9,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 from ..framework.paths import (
     resolve_session_framework_root,
@@ -145,7 +145,7 @@ DELEGATE_ACTION_REQUIRED_PAYLOAD: dict[str, tuple[str, ...]] = {
 # Specialist dispatch action name.
 SPECIALIST_ACTION_NAME: str = "specialist"
 
-# Orchestrator-side patch integration step (EXPLORE phase, gated by a Critic verdict).
+# Orchestrator-side patch integration step (gated by a Critic verdict).
 INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Merged explore action.
@@ -300,6 +300,24 @@ INTEGRATE_PATCH_PERMISSIVE_VERDICTS: frozenset[str] = frozenset(
         "advise",
     }
 )
+
+
+def patch_verdict_subject(params: Mapping[str, Any]) -> str:
+    """Return the id an ``integrate_patch``'s Critic verdict is filed under.
+
+    An authored patch is reviewed as the specialist that wrote it. An
+    upstream-PR candidate is pre-screened before any specialist exists, so the
+    candidate id is what the verdict names.
+
+    Args:
+        params: The action's params.
+
+    Returns:
+        The subject id, or ``""`` when the params name neither.
+    """
+    sid = str(params.get("specialist_task_id") or "").strip()
+    return sid or str(params.get("framework_agent_candidate_id") or "").strip()
+
 
 # Source roles allowed to dispatch a specialist via ``delegate{action='specialist'}``.
 SPECIALIST_DISPATCH_SOURCE_ALLOWLIST: frozenset[str] = frozenset({"orchestration"})
@@ -523,6 +541,12 @@ CORE_STATE_FIELDS: frozenset[str] = frozenset(
         "model_path",
         "model_name",
         "model_class",
+        # The topology every number in the session was measured on, established
+        # once at launch from a read of the card. Locked for the same reason as
+        # model_path: it is provenance, not a decision, and a rewrite would file
+        # the results under a shape the card was never in -- silently, since the
+        # report prints whatever this says.
+        "compute_partition",
         "start_ts",
         # Where the current run leg begins; a forged value hands a previous
         # leg's CLOSE transition back the right to speak for this one.
@@ -785,7 +809,7 @@ class PolicyGate:
             trusted_framework_targets=trusted_framework_targets,
         )
         # Coordinator-managed internal actions (roofline / profile /
-        # replay_warm_recipe / framework_agent / conc_sweep) are dispatched by
+        # replay_warm_recipe / conc_sweep) are dispatched by
         # the Coordinator itself, never LLM-delegated, so they receive path
         # checks only. In particular the SWEEP-entry auto-enqueued conc_sweep
         # must NOT be re-validated against the delegate-body sweep-family
@@ -1316,17 +1340,16 @@ class PolicyGate:
         phase = (getattr(state, "phase", "") or "").strip().upper()
         if not phase or phase not in PHASE_NAMES:
             return
-        explore_enabled = bool(getattr(state, "explore_enabled", True))
-        # --no-explore disables EXPLORE for the whole run, so KERNEL must not
-        # re-introduce an ``explore`` grid. Always fail-closed (independent of
-        # ``strict_phase``): it is an operator decision.
-        if not explore_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
+        optimize_enabled = bool(getattr(state, "framework_agent_phase_enabled", True))
+        # Skipping the optimisation phase must not let KERNEL reintroduce an
+        # ``explore`` grid. Fail-closed independent of ``strict_phase``.
+        if not optimize_enabled and phase == PHASE_KERNEL_AGENT and action_name == EXPLORE_ACTION_NAME:
             raise PolicyDenied(
                 f"action {EXPLORE_ACTION_NAME!r} is disabled for this run "
-                f"(--no-explore); KERNEL may not run an explore grid",
+                f"(--no-framework-agent); KERNEL may not run an explore grid",
                 rule="explore_disabled",
                 hint=(
-                    "--no-explore skips the EXPLORE phase entirely, so "
+                    "--no-framework-agent skips the optimisation phase, so "
                     "`explore` cannot be reintroduced into KERNEL. Use "
                     "kernel_agent-owned actions (kernel_opt / integrate / ...), "
                     "or `specialist` / `integrate_patch` if you need patch "
@@ -1559,16 +1582,16 @@ class PolicyGate:
         self,
         payload: dict[str, Any],
     ) -> None:
-        """PR-A7: enforce ``integrate_patch_requires_critic_verdict`` (needs specialist_task_id + permissive verdict).
+        """Enforce a permissive Critic verdict on the patch's review subject.
 
         Args:
             payload (dict[str, Any]): the integrate_patch intent payload
-                carrying ``params`` with ``specialist_task_id``.
+                carrying ``params``.
 
         Raises:
-            PolicyDenied: when ``params`` is malformed, ``specialist_task_id``
-                is missing, no Critic verdict is on record, or the verdict is
-                not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
+            PolicyDenied: when ``params`` is malformed, name no review
+                subject, no Critic verdict is on record for it, or the verdict
+                is not in :data:`INTEGRATE_PATCH_PERMISSIVE_VERDICTS`.
         """
         params = payload.get("params") or {}
         if not isinstance(params, dict):
@@ -1586,15 +1609,17 @@ class PolicyGate:
         # cancelled, so a successful from-source build never reaches KEEP.
         if params.get("enablement_launch_only"):
             return
-        sid = str(params.get("specialist_task_id") or "").strip()
+        sid = patch_verdict_subject(params)
         if not sid:
             raise PolicyDenied(
-                "integrate_patch.params.specialist_task_id is required",
+                "integrate_patch.params names no Critic review subject",
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "set params.specialist_task_id to the task_id of "
                     "the completed specialist whose worktree carries "
-                    "the patches you want to apply."
+                    "the patches you want to apply, or "
+                    "params.framework_agent_candidate_id to the "
+                    "pre-screened upstream-PR candidate."
                 ),
             )
         ss = getattr(self, "shared_state", None)
@@ -1607,7 +1632,7 @@ class PolicyGate:
                 verdict = ""
         if not verdict:
             raise PolicyDenied(
-                f"integrate_patch: no Critic verdict on record for specialist_task_id={sid!r}",
+                f"integrate_patch: no Critic verdict on record for subject={sid!r}",
                 rule="integrate_patch_requires_critic_verdict",
                 hint=(
                     "Wait for the Critic to emit a "
@@ -1619,8 +1644,8 @@ class PolicyGate:
             )
         if verdict.lower() not in INTEGRATE_PATCH_PERMISSIVE_VERDICTS:
             raise PolicyDenied(
-                f"integrate_patch: Critic verdict for specialist "
-                f"task {sid!r} is {verdict!r}; integrate_patch only "
+                f"integrate_patch: Critic verdict for subject "
+                f"{sid!r} is {verdict!r}; integrate_patch only "
                 f"runs on "
                 f"{sorted(INTEGRATE_PATCH_PERMISSIVE_VERDICTS)!r}",
                 rule="integrate_patch_requires_critic_verdict",
@@ -2523,6 +2548,7 @@ __all__ = [
     "DELEGATE_ACTION_SOURCE_ALLOWLIST",
     "EXTEND_LEASE_MAX_SEC",
     "BASELINE_ACTION_NAME",
+    "INTEGRATE_PATCH_PERMISSIVE_VERDICTS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_AGENT_OWNED_ACTIONS",
     "PATH_LIKE_FIELDS",
@@ -2531,6 +2557,7 @@ __all__ = [
     "PRUNE_BRANCH_SCOPE_QUEUED",
     "PolicyDenied",
     "PolicyGate",
+    "patch_verdict_subject",
     "validate_freeform_wave_task",
     "validate_specialist_max_turns_raw",
     "REQUEST_ROUTING",

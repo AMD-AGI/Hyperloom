@@ -1907,15 +1907,52 @@ def _derive_gemm_skip_reason(tuners_skipped: Any) -> str:
     return "; ".join(parts)
 
 
+_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC = 30
+
+
+def _forge_gemm_tune_probe_cmd() -> list[str]:
+    """Return the exact interpreter and CLI prefix used by GEMM tuning."""
+    return [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "--help"]
+
+
 def _forge_gemm_tune_available() -> bool:
-    """Check if forge-gemm-tune CLI is importable or on PATH."""
-    if shutil.which("forge-gemm-tune"):
-        return True
+    """Check exactly what ``_build_cmd`` will run, in the interpreter it runs in.
+
+    The tuner is a subpackage of the ``kernelforge`` that ships in this
+    distribution, invoked as ``sys.executable -m kernelforge.cli gemm-tune run``.
+    Vendoring forge in-tree removes the cross-checkout failures this probe was
+    built for, but not the reason it is a subprocess: ``find_spec`` proves the
+    module is importable and says nothing about whether ``gemm-tune`` is
+    registered on the CLI, which is the thing ``_build_cmd`` actually needs. So
+    ask the subcommand itself -- in a subprocess, so a heavy CLI import cannot
+    land in the orchestrator's own process. ``--help`` exits 0 only if
+    ``kernelforge.cli`` imported and ``gemm-tune`` is registered on it.
+    """
     try:
-        spec = importlib.util.find_spec("forge_gemm_tune")
-        return spec is not None
-    except (ModuleNotFoundError, ValueError):
+        proc = subprocess.run(
+            _forge_gemm_tune_probe_cmd(),
+            capture_output=True,
+            text=True,
+            timeout=_FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        log.warning(
+            "forge-gemm-tune preflight timed out after %ss in %s",
+            _FORGE_GEMM_PREFLIGHT_TIMEOUT_SEC,
+            sys.executable,
+        )
         return False
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.info("forge-gemm-tune preflight could not start in %s: %s", sys.executable, exc)
+        return False
+    if proc.returncode == 0:
+        return True
+    log.info(
+        "forge-gemm-tune preflight failed (rc=%s): %s",
+        proc.returncode,
+        ((proc.stderr or proc.stdout or "").strip()[-400:] or "(no output)"),
+    )
+    return False
 
 
 def _resolve_aiter_root_for_forge() -> str:
@@ -3121,8 +3158,16 @@ def _warn_if_moe_routing_is_coarser_than_the_log(server_log: str, flags: dict[st
     if not flags.get("aiter_fused_moe"):
         return
     try:
-        from forge_gemm_tune.evidence import parse_log_file
+        from kernelforge.gemm_tune.evidence import parse_log_file
     except ImportError:
+        # Same reasoning as apply_verification._parse: kernelforge is in this
+        # wheel, so a miss is a broken install, and a bare return makes the
+        # missing routing warning indistinguishable from a clean run.
+        log.warning(
+            "kernelforge.gemm_tune is not importable, so the aiter/vLLM MoE "
+            "routing check is skipped -- it ships with Hyperloom, so this means "
+            'an incomplete install; reinstall with pip install -e ".[forge]"'
+        )
         return
     try:
         moe = (parse_log_file(server_log).get("dispatch") or {}).get("moe") or {}
@@ -3704,7 +3749,7 @@ async def _run_forge_gemm_tuning(
     *,
     session_dir: Path,
 ) -> HandlerResult:
-    """Deterministic GEMM tuning via forge-gemm-tune CLI.
+    """Deterministic GEMM tuning via the ``kernelforge gemm-tune`` CLI.
 
     Supports bf16/fp8/fp4 + sglang/vllm. Only micro-benchmarks;
     returns recommended_env for Hyperloom E2E validation.
@@ -3720,15 +3765,19 @@ async def _run_forge_gemm_tuning(
 
     state = SharedState.load_or_init(session_dir)
 
-    if not _forge_gemm_tune_available():
-        forge_path = os.environ.get("FORGE_GEMM_TUNE_PATH", "")
+    # Importing kernelforge.cli is deliberately isolated in a subprocess, but
+    # that subprocess may still take until the bounded timeout to fail. Keep the
+    # synchronous probe off the orchestrator reactor.
+    if not await asyncio.to_thread(_forge_gemm_tune_available):
         return {
             "status": "failed",
             "error_class": "forge_gemm_tune_not_found",
             "error": (
-                "forge-gemm-tune CLI not found. Install via "
-                "'pip install -e <path>/forge_gemm_tune' or set FORGE_GEMM_TUNE_PATH."
-                f" (checked: FORGE_GEMM_TUNE_PATH={forge_path!r})"
+                "forge-gemm-tune is not runnable in this interpreter: "
+                f"'{sys.executable} -m kernelforge.cli gemm-tune --help' failed. "
+                "kernelforge ships with this distribution, so this means a "
+                "partial install: reinstall with 'pip install -e .[forge]'."
+                f" (interpreter: {sys.executable!r})"
             ),
             "backend": "forge",
         }
@@ -3951,7 +4000,7 @@ async def _run_forge_gemm_tuning(
     input_json = workspace / "forge_gemm_tuning_input.json"
     input_json.write_text(json.dumps(input_payload, indent=2, sort_keys=True), encoding="utf-8")
     cmd = [
-        "python3",
+        sys.executable,
         str(_kernel_agent_tool_path("forge_gemm_tuning.py")),
         "--input-json",
         str(input_json),
@@ -4160,7 +4209,7 @@ def _persist_forge_gemm_csv_durably(extra_envs: dict, *, model_path: str, sessio
             base_sha=None,
             rel_paths=rel_paths,
             dest_dir=Path(session_dir) / "optimization_stack" / "src" / f"forge_gemm_{slug}",
-            provenance="forge_gemm_tune",
+            provenance="kernelforge.gemm_tune",
             extra={
                 "env_keys": [env_key for env_key, _, _ in pending],
                 "model": slug,
@@ -4350,13 +4399,13 @@ _FORGE_FUSION_RESULT_RE = re.compile(r"FORGE_FUSION_RESULT_BEGIN\s*\n(.*?)\nFORG
 def _forge_fusion_available() -> bool:
     """Check that KernelForge's fusion pipeline is importable.
 
-    Probes the subpackage rather than ``kernel_agents``: a KernelForge predating
-    the fusion absorption would satisfy the parent import and only fail once the
-    subprocess rejected ``forge-fuse``. PATH is not consulted because the tool is
-    invoked through ``sys.executable -m``.
+    Probes the subpackage rather than ``kernelforge``: an installation
+    predating the fusion absorption would satisfy the parent import and only
+    fail once the subprocess rejected ``forge-fuse``. PATH is not consulted
+    because the tool is invoked through ``sys.executable -m``.
     """
     try:
-        return importlib.util.find_spec("kernel_agents.fusion") is not None
+        return importlib.util.find_spec("kernelforge.fusion") is not None
     except (ModuleNotFoundError, ValueError):
         return False
 
@@ -4835,20 +4884,34 @@ def _forge_loop_constant(module: str, name: str, fallback: float) -> float:
 
     A local copy of the number drifts the moment upstream changes it, and the
     lane then plans against a budget the campaign will not honour.
+
+    The fallback is logged rather than taken silently. KernelForge now ships in
+    this distribution, so a failed import means a renamed module or a broken
+    install, not an optional dependency -- and the symptom otherwise is a
+    campaign quietly planned against the wrong wall-clock budget, which no run
+    ever reports.
     """
     try:
         return float(getattr(importlib.import_module(module), name))
-    except (ImportError, AttributeError, TypeError, ValueError):
+    except (ImportError, AttributeError, TypeError, ValueError) as exc:
+        log.warning(
+            "forge-loop constant %s.%s unreadable (%s); planning against the fallback %s. "
+            "KernelForge ships with Hyperloom, so this is a rename or a broken install.",
+            module,
+            name,
+            exc,
+            fallback,
+        )
         return fallback
 
 
 # Session time held back for the E2E integrate round plus reporting.
 _COLLECTIVE_BUDGET_RESERVE_MIN = 45.0
-_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernel_agents.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
+_COLLECTIVE_PREP_GRACE_SEC = int(_forge_loop_constant("kernelforge.loop.task_preparer", "PREPARE_MAX_WALL_SEC", 3000))
 # Wrapper grace to export the patch and restore the repository.
 _COLLECTIVE_FINALIZE_GRACE_SEC = 300
 # forge-loop rejects a campaign shorter than its own minimum.
-_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernel_agents.cli", "MIN_MAX_HOURS", 1.0) * 3600)
+_COLLECTIVE_MIN_CAMPAIGN_SEC = int(_forge_loop_constant("kernelforge.cli", "MIN_MAX_HOURS", 1.0) * 3600)
 # Mirrors forge_collective.DEFAULT_TIMEOUT_SEC for a session with no deadline.
 _COLLECTIVE_UNBOUNDED_WRAPPER_SEC = 14400
 
@@ -5763,8 +5826,9 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Priority: env ``KERNEL_OPT_BACKEND_BUDGET_MIN`` > payload ``budget_minutes``
     > :data:`_DEFAULT_BACKEND_BUDGET_MINUTES`. The env wins because the payload
     value is LLM-authored from a prompt template, so an operator raising the
-    budget must not be silently overridden by it. forge-loop reserves half this
-    window for finalize, so 60 leaves only ~30 min of actual iteration.
+    budget must not be silently overridden by it. The rewrite-route floor is
+    applied in all cases: an operator who tunes the budget down for an unrelated
+    reason still cannot silently disable the route they opted into.
 
     Args:
         payload (dict): Request payload carrying an optional ``budget_minutes``.
@@ -5772,6 +5836,7 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
+    floor = _rewrite_route_budget_floor_minutes()
     raw = os.environ.get("KERNEL_OPT_BACKEND_BUDGET_MIN", "").strip()
     if raw:
         try:
@@ -5779,8 +5844,29 @@ def _optimization_budget_minutes(payload: dict) -> float:
         except ValueError:
             forced = 0.0
         if forced > 0:
-            return forced
-    return float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
+            return max(forced, floor)
+    budget = float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
+    return max(budget, floor)
+
+
+def _rewrite_route_budget_floor_minutes() -> float:
+    """Minutes the FlyDSL rewrite route needs, or 0 when it is not opted into.
+
+    Below its own minimum the route declines every candidate as
+    ``budget_insufficient`` and falls back to forge-loop without saying so, so a
+    budget tuned down for an unrelated reason would switch the route off
+    silently. Raising the floor only for a run that opted in leaves every other
+    run's budget untouched.
+
+    Returns:
+        float: The floor in minutes, or ``0.0`` when the route is disabled.
+    """
+    from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import (
+        MIN_BUDGET_SEC,
+        rewrite_enabled,
+    )
+
+    return MIN_BUDGET_SEC / 60.0 if rewrite_enabled() else 0.0
 
 
 def _optimization_wrapper_timeout_sec(payload: dict) -> int:

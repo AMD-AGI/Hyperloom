@@ -171,8 +171,10 @@ async def run_specialist_rebench(
         "ok": ok,
         "status": rb.status,
         "output_throughput": getattr(rb, "output_throughput", None),
-        "ttft_ms": getattr(rb, "ttft_ms", None),
-        "itl_ms": getattr(rb, "itl_ms", None),
+        # ``VariantResult`` names these ``ttft_mean_ms`` / ``tpot_mean_ms``;
+        # the emitted keys stay ``ttft_ms`` / ``itl_ms`` for the collectors.
+        "ttft_ms": rb.ttft_mean_ms,
+        "itl_ms": rb.tpot_mean_ms,
         "workspace": str(getattr(rb, "workspace", "") or ""),
         "port": resolved_port,
         "gpu_ids": gpu_ids,

@@ -9,7 +9,7 @@ Display-only: this does NOT rewrite the ``kernel_category`` /
 ``tracelens_category`` fields in ``kernel_candidates.json`` / ``kernel_roofline.json``,
 which downstream GEAK skill-routing consumes with its own taxonomy.
 
-Kept dependency-free (stdlib only) so both routes can import it freely.
+Kept dependency-free (stdlib only) so it can be imported freely.
 """
 
 from __future__ import annotations

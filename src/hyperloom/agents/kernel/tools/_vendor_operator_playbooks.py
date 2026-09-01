@@ -28,7 +28,6 @@ import copy
 import functools
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any
 
@@ -192,14 +191,16 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     downstream tooling (``kernel_optimization.py``'s CLI, in particular)
     still gates on a non-empty, path-shaped ``source_file`` before it will
     dispatch to a backend at all. Point that field at the task bundle's
-    ``kernel_anchor`` file instead of leaving it empty -- resolved to an
-    absolute path under ``$FORGE_PATH`` when that's set (regardless of
-    whether the file exists on this host yet), else an absolute path under a
-    fixed, obviously-synthetic root so the value is still path-shaped (it
-    survives ``looks_like_source_path`` even when this analysis runs on a
-    host without the KernelForge checkout) without ever being a bare
-    relative string a later ``Path(...).resolve()`` could reinterpret
-    against an unrelated CWD.
+    ``kernel_anchor`` file instead of leaving it empty.
+
+    The bundle now ships inside the installed ``kernelforge`` package, so the
+    resolved path is a real file on this host rather than a placeholder. The
+    previous fallback -- an absolute path under a synthetic
+    ``/nonexistent-forge-path`` root -- existed only to keep the value
+    path-shaped when no checkout was around; it dressed "the env var is unset"
+    up as "the file is missing", which is a different and much quieter failure.
+    An operator substituting a bundle points ``$KERNELFORGE_PROJECT_ROOT`` at a
+    tree holding it; :func:`resource_path` honours that ahead of the package.
 
     Args:
         playbook: A matched playbook entry (as returned by
@@ -217,16 +218,10 @@ def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     if not anchor:
         return ""
     relative = f"{bundle}/{anchor}" if bundle else anchor
-    forge_root = (os.environ.get("FORGE_PATH") or "").strip()
-    if forge_root:
-        candidate = Path(forge_root) / relative
-        # Returned even when the file isn't there yet: this analysis host
-        # may lack the KernelForge checkout the apply stage will actually
-        # run against, but the path must still be absolute and anchored at
-        # a real, known root rather than silently falling through to a
-        # bare relative string.
-        return str(candidate)
-    # FORGE_PATH unset: still shape-check as path-like (needed to clear
-    # looks_like_source_path) without letting a bare relative string survive
-    # to be misresolved against an unrelated CWD later in the pipeline.
-    return str(Path("/nonexistent-forge-path") / relative)
+    # The bundle is packaged, so this resolves to a real file. ``missing_ok``
+    # still yields an absolute, package-anchored path for a bundle this
+    # installation does not carry, rather than a bare relative string that a
+    # later ``Path(...).resolve()`` would reinterpret against some other CWD.
+    from kernelforge.resources import default_project_root, resource_path
+
+    return str(resource_path(relative, default_project_root(), missing_ok=True))

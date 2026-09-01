@@ -25,16 +25,16 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping, Sequence
 
 import yaml
 
 from hyperloom.common.env import is_truthy
+from hyperloom.common.fs_utils import is_network_fs
 from hyperloom.common.env_safety import redact_secret_values, scrub_benchmark_process_env
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ...framework.paths import resolve_session_framework_root
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import heartbeat_while_output_flows, report_progress
 from ...phases import machine_state as _phase_state
@@ -266,6 +266,38 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     if saw_pure_weak and not blob_has_oom and not blob_has_non_recoverable:
         return True
     return False
+
+
+# Startup-time "the GPUs are already occupied" refusals. The server raises these
+# BEFORE loading weights, so they are distinct from a mid-run OOM: the fix is to
+# free VRAM held by somebody else, not to shrink the workload.
+_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
+    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less
+    # than desired GPU memory utilization (0.95, 273.59 GiB). Decrease GPU
+    # memory utilization or reduce GPU memory used by other processes."
+    "on startup is less than desired gpu memory utilization",
+    "reduce gpu memory used by other processes",
+    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
+    "not enough memory. please try to increase --mem-fraction-static",
+)
+
+
+def _is_insufficient_gpu_memory(*texts: str) -> bool:
+    """True when a server refused to boot because VRAM was already occupied.
+
+    Distinguishes "another process is squatting on the GPUs" from a genuine
+    workload OOM. The former is recoverable by reaping the squatter and
+    retrying; the latter is not, so a naked retry only burns attempts.
+
+    Args:
+        *texts: Log / stdout / stderr blobs to scan.
+
+    Returns:
+        ``True`` when a startup-time GPU-preoccupied refusal is detected,
+        else ``False``.
+    """
+    blob = "\n".join(t for t in texts if t).lower()
+    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
 
 
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
@@ -751,87 +783,6 @@ def _is_double_run_accuracy_handoff(
     return _WARMUP_ROUND_DIR in Path(source).parts
 
 
-# Filesystem types that can be revoked / unmounted mid-run (e.g. a wekafs/NFS
-# mount flap), where a process whose cwd lives on such a mount sees relative-path
-# writes ENOENT. Such FS types trigger local mirroring of the InferenceX
-# checkout (the server's cwd for its cuda-graph pickle dump).
-_NETWORK_FS_TYPES = frozenset(
-    {
-        "nfs",
-        "nfs4",
-        "cifs",
-        "smb3",
-        "lustre",
-        "glusterfs",
-        "ceph",
-        "fuse.weka",
-        "wekafs",
-        "wekafsgw",
-        "fuse.juicefs",
-        "fuse.s3fs",
-        "fuse.sshfs",
-        "9p",
-    }
-)
-
-
-def _path_fstype(path: str) -> str:
-    """Return the filesystem type backing ``path`` per ``/proc/mounts``.
-
-    Picks the longest mountpoint that is a prefix of the resolved path.
-    Returns ``""`` when it cannot be determined (non-Linux, unreadable
-    ``/proc/mounts``, ...), which callers treat as "assume local".
-
-    Args:
-        path: Filesystem path whose backing mount type is resolved.
-
-    Returns:
-        The filesystem type backing ``path``, or ``""`` when it cannot be
-        determined.
-    """
-    try:
-        rp = os.path.realpath(path)
-    except OSError:
-        return ""
-    best_mp = ""
-    best_type = ""
-    try:
-        with open("/proc/mounts", encoding="utf-8") as fh:
-            for line in fh:
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                # /proc/mounts octal-escapes spaces in the mountpoint.
-                try:
-                    mp = parts[1].encode("latin-1").decode("unicode_escape")
-                except (UnicodeDecodeError, UnicodeEncodeError):
-                    mp = parts[1]
-                fstype = parts[2]
-                norm = mp.rstrip("/") or "/"
-                if norm == "/":
-                    is_under = True  # root matches everything (lowest priority)
-                else:
-                    is_under = rp == norm or rp.startswith(norm + "/")
-                if is_under and len(norm) >= len(best_mp):
-                    best_mp = norm
-                    best_type = fstype
-    except OSError:
-        return ""
-    return best_type
-
-
-def _is_network_fs(path: str) -> bool:
-    """True when ``path`` is backed by a revocable network filesystem.
-
-    Args:
-        path: Filesystem path to classify.
-
-    Returns:
-        ``True`` when ``path`` lives on a known network filesystem type.
-    """
-    return _path_fstype(path).lower() in _NETWORK_FS_TYPES
-
-
 def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     """Mirror an InferenceX checkout onto stable local disk.
 
@@ -872,7 +823,7 @@ def _ensure_local_inferencex(src: str, *, mirror_key: str = "") -> str:
     ):
         return src
     try:
-        if not _is_network_fs(src):
+        if not is_network_fs(src):
             return src
     except Exception:  # noqa: BLE001 — detection is best-effort
         return src
@@ -954,6 +905,30 @@ def _git_head_sha(repo_path: str) -> str:
     try:
         result = subprocess.run(
             ["git", *safe_directory_args(["rev-parse", "HEAD"], cwd=repo_path)],
+            cwd=repo_path,
+            capture_output=True,
+            timeout=5,
+            check=True,
+        )
+        return result.stdout.decode().strip()
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+        return ""
+
+
+def _git_toplevel(repo_path: str) -> str:
+    """Return the work-tree root of ``repo_path``, or ``""`` when it is not in one.
+
+    A git-produced diff names paths from the work-tree root, and ``git apply``
+    resolves them the same way -- silently ignoring any that fall outside the
+    directory it runs in. So a recorded root that is a subdirectory of the
+    checkout has to be lifted to the root before applying, or the apply reports
+    success having written nothing.
+    """
+    if not repo_path:
+        return ""
+    try:
+        result = subprocess.run(
+            ["git", *safe_directory_args(["rev-parse", "--show-toplevel"], cwd=repo_path)],
             cwd=repo_path,
             capture_output=True,
             timeout=5,
@@ -1189,60 +1164,6 @@ def _verify_three_way_clean(
     return True, ""
 
 
-def _patch_texts_from_warm_params(params: dict[str, Any]) -> list[str]:
-    """Collect readable diff text from warm-replay patch payloads."""
-    patch_texts: list[str] = []
-    for patch in params.get("patches") or []:
-        if not isinstance(patch, dict):
-            continue
-        content = str(patch.get("patch_content") or "")
-        patch_ref = str(patch.get("patch_ref") or "")
-        if not content and patch_ref:
-            try:
-                content = Path(patch_ref).read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                content = ""
-        if content:
-            patch_texts.append(content)
-    return patch_texts
-
-
-def _resolve_recipe_patch_target(params: dict[str, Any]) -> str:
-    """Return the framework root whose tree holds the warm-replay patch targets.
-
-    A Recipe records the root each patch was applied into. Records written before
-    that field existed carry none, and only those fall back to probing the
-    patch text against the allowlist.
-    """
-    if not params.get("patches"):
-        return ""
-    from ...framework.paths import resolve_source_file_allowlist
-    from .integrate_patch import _resolve_framework_root, allowlisted_explicit_root
-
-    recorded = {
-        str(entry.get("framework_root") or "").strip()
-        for entry in params["patches"]
-        if isinstance(entry, dict) and str(entry.get("framework_root") or "").strip()
-    }
-    if len(recorded) == 1:
-        sole = recorded.pop()
-        allowed = allowlisted_explicit_root(sole, allowlist=resolve_source_file_allowlist())
-        if allowed is not None:
-            return str(allowed)
-        reason = f"recorded apply root {sole!r} is not usable"
-    elif recorded:
-        reason = f"patches record {len(recorded)} apply roots"
-    else:
-        reason = "no recorded apply root"
-
-    log.info("warm replay: %s; resolving from patch targets", reason)
-    root = _resolve_framework_root(
-        resolve_session_framework_root() or None,
-        patch_texts=_patch_texts_from_warm_params(params),
-    )
-    return str(root or "")
-
-
 def _revert_warm_patch_state(
     target_repo: str,
     *,
@@ -1259,6 +1180,51 @@ def _revert_warm_patch_state(
     return _revert_patches(target_repo, pre_sha, snapshot_manifest)
 
 
+#: The per-tree fields that leave this module. ``use_nogit`` stays behind: it
+#: describes how the apply ran, and the restore reads the channel off whether
+#: backups are present.
+_WARM_TREE_FIELDS = ("root", "pre_sha", "snapshot_manifest", "nogit_backups")
+
+
+def _warm_tree_records(
+    trees: Mapping[str, Mapping[str, Any]],
+    order: Sequence[str],
+) -> list[dict[str, Any]]:
+    """Return one JSON-safe record per touched tree, in apply order.
+
+    These are persisted into session state and read back by prelude to promote
+    or restore, so they carry only what a restore needs.
+    """
+    return [{field: trees[root][field] for field in _WARM_TREE_FIELDS} for root in order if root in trees]
+
+
+def _revert_warm_patch_trees(trees: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+    """Restore every tree that was snapshotted, reporting the combined outcome.
+
+    A tree with neither a snapshot nor backups was never written to, so it is
+    skipped rather than counted as a failed restore.
+    """
+    errors: list[str] = []
+    restored: list[str] = []
+    for tree in trees:
+        root = str(tree.get("root") or "")
+        backups = list(tree.get("nogit_backups") or [])
+        manifest = tree.get("snapshot_manifest")
+        if not backups and not manifest:
+            continue
+        outcome = _revert_warm_patch_state(
+            root,
+            pre_sha=str(tree.get("pre_sha") or ""),
+            snapshot_manifest=manifest,
+            nogit_backups=backups,
+        )
+        if outcome.get("ok"):
+            restored.append(root)
+            continue
+        errors.extend(f"{root}:{error}" for error in (outcome.get("errors") or ["restore_failed"]))
+    return {"ok": not errors, "errors": errors, "restored": restored}
+
+
 def _apply_warm_patches(
     params: dict[str, Any],
     target_repo: str,
@@ -1266,24 +1232,37 @@ def _apply_warm_patches(
     *,
     before_mutation: Any = None,
 ) -> list[dict[str, str]] | dict[str, Any]:
-    """Apply warm-replay code patches to the Session's active framework root.
+    """Apply warm-replay code patches, each into the checkout it was taken from.
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
-    patch_ref). Applies each patch via ``git apply`` when the target is a git
-    work-tree, otherwise via the shared nogit ``patch`` CLI path used by
-    integrate_patch.
+    patch_ref). An entry's ``framework_root`` is the checkout the KEEP was
+    applied into when it was recorded, and it is where that overlay goes, so a
+    Recipe whose KEEPs came from different trees -- a framework patch and,
+    separately, a data file under another root -- replays against each of them.
+
+    ``target_repo`` is only a fallback for an entry that records no root of its
+    own. The current-contract prelude never produces such an entry (it skips a
+    replay whose overlays are not all rooted), so on that path ``target_repo``
+    is always empty; it stays a parameter for direct callers and tests that
+    apply a rootless patch list against one explicit repo.
+
+    Applies each patch via ``git apply`` when its tree is a git work-tree,
+    otherwise via the shared nogit ``patch`` CLI path used by integrate_patch.
 
     Legacy patch lists return the list of successfully applied patch metadata
     dicts (best-effort skip semantics). Current-contract timelines set
     ``required_patch_timeline`` and fail closed: the patches are sequential, the
-    first failure stops the sequence and restores the starting tree, and the
-    return is a structured result dict describing the failure.
+    first failure stops the sequence and restores every tree it had reached, and
+    the return is a structured result dict describing the failure.
     """
     patches = params.get("patches") or []
     required_timeline = bool(params.get("required_patch_timeline"))
     if not patches:
         return []
-    if not target_repo:
+    # The recorded root is the tree the gain was measured on, so it outranks the
+    # locally resolved one rather than being checked against it.
+    patch_roots = [str((patch or {}).get("framework_root") or "").strip() or target_repo for patch in patches]
+    if not any(patch_roots):
         if required_timeline:
             return {
                 "required": True,
@@ -1302,32 +1281,66 @@ def _apply_warm_patches(
     patch_log_dir.mkdir(parents=True, exist_ok=True)
     from ._nogit_patch import _apply_patch_no_git, _is_git_tree
 
-    target_path = Path(target_repo)
-    git_tree = _is_git_tree(target_path)
-    pre_sha = _git_head_sha(target_repo) if git_tree else ""
-    # prelude promotes a required timeline's tree only against a pre_sha and a
-    # git snapshot manifest. nogit produces neither, so serving this path from it
-    # turned a successful replay into validated_recipe_checkout_incomplete --
-    # worse than the fast failure it replaced. Refuse up front, as before; nogit
-    # serves the legacy list, where nothing downstream needs a sha.
-    if required_timeline and not pre_sha:
-        return {
-            "required": True,
-            "status": "failed",
-            "patches": [],
-            "applied": [],
-            "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-            "failure": "missing_git_head",
-            "pre_sha": "",
-            "target_repo": target_repo,
-            "rolled_back": False,
+    # Two recorded roots inside one checkout are one tree: a git diff's paths are
+    # work-tree-root relative, so both resolve there and applying them
+    # separately would ignore whatever falls outside the narrower one.
+    for idx, root in enumerate(patch_roots):
+        if root and (toplevel := _git_toplevel(root)) and Path(toplevel).is_dir():
+            patch_roots[idx] = toplevel
+    # Ordered by first use so the primary tree stays the one ``target_repo``
+    # named, which is what the single-tree result fields report.
+    tree_order: list[str] = list(dict.fromkeys(root for root in patch_roots if root))
+    trees: dict[str, dict[str, Any]] = {}
+    for root in tree_order:
+        if not Path(root).is_dir():
+            if required_timeline:
+                return {
+                    "required": True,
+                    "status": "failed",
+                    "patches": [],
+                    "applied": [],
+                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                    "failure": "apply_root_absent",
+                    "pre_sha": "",
+                    "target_repo": root,
+                    "rolled_back": True,
+                }
+            continue
+        git_tree = _is_git_tree(Path(root))
+        pre_sha = _git_head_sha(root) if git_tree else ""
+        # prelude promotes a required timeline's tree only against a pre_sha and
+        # a git snapshot manifest. nogit produces neither, so serving this path
+        # from it turned a successful replay into
+        # validated_recipe_checkout_incomplete -- worse than the fast failure it
+        # replaced. Refuse up front, as before; nogit serves the legacy list,
+        # where nothing downstream needs a sha.
+        if required_timeline and not pre_sha:
+            return {
+                "required": True,
+                "status": "failed",
+                "patches": [],
+                "applied": [],
+                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                "failure": "missing_git_head",
+                "pre_sha": "",
+                "target_repo": root,
+                "rolled_back": False,
+            }
+        trees[root] = {
+            "root": root,
+            "pre_sha": pre_sha,
+            "use_nogit": not git_tree or not pre_sha,
+            "snapshot_manifest": None,
+            "nogit_backups": [],
         }
-    use_nogit = not git_tree or not pre_sha
-    nogit_backups: list[dict[str, Any]] = []
+    tree_order = [root for root in tree_order if root in trees]
+    if not tree_order:
+        return []
     from ...specialists.patch_safety import is_unified_diff, patch_escapes_tree
 
+    primary = trees[tree_order[0]]
     resolved_contents: dict[int, str] = {}
-    snapshot_contents: list[str] = []
+    snapshot_contents: dict[str, list[str]] = {root: [] for root in tree_order}
     for idx, patch in enumerate(patches):
         patch_file = str(patch.get("patch_file") or "")
         content = str(patch.get("patch_content") or "")
@@ -1358,22 +1371,35 @@ def _apply_warm_patches(
                     "applied": [],
                     "failed_ref": patch_file,
                     "failure": reason,
-                    "pre_sha": pre_sha,
-                    "target_repo": target_repo,
+                    "pre_sha": primary["pre_sha"],
+                    "target_repo": primary["root"],
                     "rolled_back": False,
                 }
             continue
+        root = patch_roots[idx]
+        if root not in trees:
+            continue
         resolved_contents[idx] = content
-        snapshot_contents.append(content)
-    snapshot_manifest: dict[str, Any] | None = None
-    if snapshot_contents and not use_nogit:
+        snapshot_contents[root].append(content)
+
+    # Every tree is snapshotted before any of them is written to, so each
+    # snapshot holds pristine content. Nested roots -- /sglang and
+    # /sglang/python/sglang both being recorded -- can then snapshot the same
+    # file twice, and restoring either still lands on pristine.
+    for position, root in enumerate(tree_order):
+        tree = trees[root]
+        if tree["use_nogit"] or not snapshot_contents[root]:
+            continue
         try:
-            snapshot_manifest = _create_patch_snapshot(
-                target_repo,
-                snapshot_contents,
-                output_dir,
+            # _create_patch_snapshot owns one fixed sub-directory per output dir
+            # and clears it, so trees past the first are given their own.
+            tree["snapshot_manifest"] = _create_patch_snapshot(
+                root,
+                snapshot_contents[root],
+                output_dir if position == 0 else output_dir / "warm_patch_trees" / f"{position:02d}",
             )
         except (OSError, ValueError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+            restore = _revert_warm_patch_trees(trees.values())
             if required_timeline:
                 return {
                     "required": True,
@@ -1382,9 +1408,10 @@ def _apply_warm_patches(
                     "applied": [],
                     "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
                     "failure": f"snapshot_failed:{type(exc).__name__}",
-                    "pre_sha": pre_sha,
-                    "target_repo": target_repo,
-                    "rolled_back": False,
+                    "pre_sha": primary["pre_sha"],
+                    "target_repo": primary["root"],
+                    "trees": _warm_tree_records(trees, tree_order),
+                    "rolled_back": bool(restore.get("ok")),
                 }
             log.warning(
                 "baseline_executor: skipping legacy warm patches because the "
@@ -1392,22 +1419,25 @@ def _apply_warm_patches(
                 exc,
             )
             return []
-        if snapshot_manifest is not None:
-            params["_warm_patch_snapshot_manifest"] = snapshot_manifest
-            if before_mutation is not None and not bool(before_mutation(snapshot_manifest)):
-                return {
-                    "required": required_timeline,
-                    "status": "failed",
-                    "patches": [],
-                    "applied": [],
-                    "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
-                    "failure": "pending_state_persist_failed",
-                    "pre_sha": pre_sha,
-                    "target_repo": target_repo,
-                    "snapshot_manifest": snapshot_manifest,
-                    "rollback": {"ok": True, "errors": []},
-                    "rolled_back": True,
-                }
+    snapshot_manifest = primary["snapshot_manifest"]
+    if any(tree["snapshot_manifest"] for tree in trees.values()):
+        params["_warm_patch_trees"] = _warm_tree_records(trees, tree_order)
+        params["_warm_patch_snapshot_manifest"] = snapshot_manifest
+        if before_mutation is not None and not bool(before_mutation(_warm_tree_records(trees, tree_order))):
+            return {
+                "required": required_timeline,
+                "status": "failed",
+                "patches": [],
+                "applied": [],
+                "failed_ref": str((patches[0] or {}).get("patch_file") or ""),
+                "failure": "pending_state_persist_failed",
+                "pre_sha": primary["pre_sha"],
+                "target_repo": primary["root"],
+                "snapshot_manifest": snapshot_manifest,
+                "trees": _warm_tree_records(trees, tree_order),
+                "rollback": {"ok": True, "errors": []},
+                "rolled_back": True,
+            }
     failed_ref = ""
     failure = ""
 
@@ -1419,6 +1449,18 @@ def _apply_warm_patches(
             "patch_ref": patch_file,
             "timeline_index": patch.get("timeline_index", idx),
         }
+        tree = trees.get(patch_roots[idx])
+        if tree is None:
+            status.update(status="failed", reason="apply_root_absent")
+            statuses.append(status)
+            continue
+        # The patch goes into its own recorded tree, so these are per patch
+        # rather than fixed for the whole sequence.
+        target_repo = tree["root"]
+        target_path = Path(target_repo)
+        use_nogit = tree["use_nogit"]
+        nogit_backups = tree["nogit_backups"]
+        status["target_repo"] = target_repo
 
         if not patch_content and not patch_ref:
             log.warning(
@@ -1601,17 +1643,19 @@ def _apply_warm_patches(
         status["status"] = method
         statuses.append(status)
 
-    if nogit_backups:
-        params["_warm_patch_nogit_backups"] = nogit_backups
+    records = _warm_tree_records(trees, tree_order)
+    combined_backups = [backup for root in tree_order for backup in trees[root]["nogit_backups"]]
+    if combined_backups:
+        params["_warm_patch_nogit_backups"] = combined_backups
+    if any(tree["snapshot_manifest"] for tree in trees.values()):
+        params["_warm_patch_trees"] = records
 
     if required_timeline:
         if failed_ref:
-            restore = _revert_warm_patch_state(
-                target_repo,
-                pre_sha=pre_sha,
-                snapshot_manifest=snapshot_manifest,
-                nogit_backups=nogit_backups,
-            )
+            # One overlay failing voids the whole replay, and the sequence may
+            # already have written to trees before this one, so every tree is
+            # restored rather than just the one that failed.
+            restore = _revert_warm_patch_trees(trees.values())
             return {
                 "required": True,
                 "status": "failed",
@@ -1619,9 +1663,10 @@ def _apply_warm_patches(
                 "applied": applied,
                 "failed_ref": failed_ref,
                 "failure": failure,
-                "pre_sha": pre_sha,
-                "target_repo": target_repo,
-                "snapshot_manifest": snapshot_manifest,
+                "pre_sha": primary["pre_sha"],
+                "target_repo": primary["root"],
+                "snapshot_manifest": primary["snapshot_manifest"],
+                "trees": records,
                 "rolled_back": bool(restore.get("ok")),
                 "rollback": restore,
             }
@@ -1631,12 +1676,60 @@ def _apply_warm_patches(
             "patches": statuses,
             "applied": applied,
             "failed_ref": "",
-            "pre_sha": pre_sha,
-            "target_repo": target_repo,
-            "snapshot_manifest": snapshot_manifest,
+            "pre_sha": primary["pre_sha"],
+            "target_repo": primary["root"],
+            "snapshot_manifest": primary["snapshot_manifest"],
+            "trees": records,
             "rolled_back": False,
         }
     return applied
+
+
+def _stamp_warm_patch_trees(
+    result: dict[str, Any],
+    patch_application: Mapping[str, Any],
+    pre_sha: str,
+) -> None:
+    """Record which trees this round patched, for prelude to promote or restore.
+
+    ``warm_patch_trees`` is the authority. The singular fields describe the
+    primary tree only, and stay because a resumed run may be read by a prelude
+    that predates the list.
+    """
+    trees = list(patch_application.get("trees") or [])
+    primary = trees[0] if trees else {}
+    target = str(patch_application.get("target_repo") or primary.get("root") or "")
+    result["warm_patch_result"] = dict(patch_application)
+    result["warm_patch_trees"] = trees
+    result["warm_patch_pre_sha"] = str(primary.get("pre_sha") or pre_sha)
+    result["warm_patch_target"] = target
+    result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest") or primary.get(
+        "snapshot_manifest"
+    )
+    result["warm_patch_canonical_target"] = target
+
+
+def _revert_legacy_warm_patch_trees(
+    params: Mapping[str, Any],
+    pre_sha: str,
+) -> dict[str, Any]:
+    """Undo a legacy (non-required) apply so nothing leaks into the next task.
+
+    The legacy path returns a plain list, so the trees it touched are read back
+    off ``params``; a record written before that existed leaves only the single
+    target's state to restore.
+    """
+    if trees := list(params.get("_warm_patch_trees") or []):
+        return _revert_warm_patch_trees(trees)
+    backups = list(params.get("_warm_patch_nogit_backups") or [])
+    if not pre_sha and not backups:
+        return {"ok": True, "errors": [], "restored": []}
+    return _revert_warm_patch_state(
+        "",
+        pre_sha=pre_sha,
+        snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
+        nogit_backups=backups,
+    )
 
 
 def _rollback_warm_kernel_apply_results(
@@ -2911,11 +3004,10 @@ class BaselineExecutor:
         effective_inferencex_path = _ensure_local_inferencex(ix_env, mirror_key=str(output_dir)) if ix_env else ""
 
         # Warm patches are prepared after config/runtime preflight, immediately
-        # before the single final benchmark.
-        # Explore/Framework Recipe patches target the framework checkout, not
-        # the InferenceX benchmark harness. The Session's explicitly selected
-        # root is the sole authority, matching Kernel Recipe replay.
-        patch_target = _resolve_recipe_patch_target(params)
+        # before the single final benchmark. Each overlay names the checkout it
+        # was recorded against and the apply loop places it there, so nothing is
+        # resolved for the set as a whole -- there is no single target repo, and
+        # a tree found by probing would be one the gain was never measured on.
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""
@@ -3100,18 +3192,24 @@ class BaselineExecutor:
                 )
             return stopped_result
 
-        before_apply_sha = _git_head_sha(patch_target) if patch_target else ""
+        # No single pre-apply sha: each overlay's own tree records its pre_sha,
+        # so the singular field is only a fallback for a legacy reader.
+        before_apply_sha = ""
 
-        def _persist_recipe_snapshot(manifest: dict[str, Any]) -> bool:
+        def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
             if live_shared_state is None:
                 return True
             pending = dict(getattr(live_shared_state, "warm_replay_pending", {}) or {})
+            primary = tree_records[0] if tree_records else {}
             pending.update(
                 {
                     "status": "preparing_required_recipe",
-                    "recipe_patch_target": patch_target,
-                    "recipe_patch_pre_sha": before_apply_sha,
-                    "recipe_patch_snapshot_manifest": manifest,
+                    # The trees are the authority; the singular fields describe
+                    # the primary one so a resumed legacy reader still finds it.
+                    "recipe_patch_trees": tree_records,
+                    "recipe_patch_target": str(primary.get("root") or ""),
+                    "recipe_patch_pre_sha": str(primary.get("pre_sha") or before_apply_sha),
+                    "recipe_patch_snapshot_manifest": primary.get("snapshot_manifest"),
                 }
             )
             live_shared_state.warm_replay_pending = pending
@@ -3125,7 +3223,13 @@ class BaselineExecutor:
                 return False
             return True
 
-        if params.get("patches") and not patch_target:
+        # An overlay recording its own root needs no resolved target, so this
+        # only refuses when nothing names a tree at all.
+        if params.get("patches") and not any(
+            str((entry or {}).get("framework_root") or "").strip()
+            for entry in params["patches"]
+            if isinstance(entry, dict)
+        ):
             patch_application = {
                 "status": "failed",
                 "failure": "missing_target_repo",
@@ -3135,7 +3239,7 @@ class BaselineExecutor:
         else:
             patch_application = _apply_warm_patches(
                 params,
-                patch_target,
+                "",
                 output_dir,
                 before_mutation=_persist_recipe_snapshot,
             )
@@ -3203,7 +3307,8 @@ class BaselineExecutor:
                 pending.update(
                     {
                         "status": "benchmarking",
-                        "recipe_patch_target": patch_target,
+                        "recipe_patch_trees": list(patch_application.get("trees") or []),
+                        "recipe_patch_target": str(patch_application.get("target_repo") or ""),
                         "recipe_patch_pre_sha": _pre_patch_sha,
                         "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
                         "recipe_patch_statuses": list(patch_application.get("patches") or []),
@@ -3265,28 +3370,15 @@ class BaselineExecutor:
                 if applied_patches:
                     result["warm_patches_applied"] = list(applied_patches)
                 if isinstance(patch_application, dict):
-                    result["warm_patch_result"] = patch_application
-                    result["warm_patch_pre_sha"] = _pre_patch_sha
-                    result["warm_patch_target"] = patch_target
-                    result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
-                    result["warm_patch_canonical_target"] = patch_target
+                    _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
                     result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return result
             finally:
                 # A required timeline's tree is promoted by prelude after this
                 # returns, so it must stay patched; reverting here handed prelude
                 # a clean tree and silently lost the replay.
-                if (
-                    applied_patches
-                    and not isinstance(patch_application, dict)
-                    and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
-                ):
-                    _revert_warm_patch_state(
-                        patch_target,
-                        pre_sha=_pre_patch_sha,
-                        snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
-                        nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
-                    )
+                if applied_patches and not isinstance(patch_application, dict):
+                    _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -3363,11 +3455,7 @@ class BaselineExecutor:
                 if applied_patches:
                     warmup_result["warm_patches_applied"] = list(applied_patches)
                 if isinstance(patch_application, dict):
-                    warmup_result["warm_patch_result"] = patch_application
-                    warmup_result["warm_patch_pre_sha"] = _pre_patch_sha
-                    warmup_result["warm_patch_target"] = patch_target
-                    warmup_result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
-                    warmup_result["warm_patch_canonical_target"] = patch_target
+                    _stamp_warm_patch_trees(warmup_result, patch_application, _pre_patch_sha)
                     warmup_result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
@@ -3415,7 +3503,7 @@ class BaselineExecutor:
 
             # Round 2 (measured): re-attach to the hot server (client only).
             # Warm re-attach is intentional — all comparison points (baseline,
-            # explore decision, stack_rebench, and their grading anchor) are
+            # explore decision and their grading anchor) are
             # measured with a warm prefix cache, keeping them mutually
             # comparable. Carryover is config-dependent (tracks KV-block
             # capacity) and is not a uniform offset.
@@ -3447,11 +3535,7 @@ class BaselineExecutor:
             if applied_patches:
                 result["warm_patches_applied"] = list(applied_patches)
             if isinstance(patch_application, dict):
-                result["warm_patch_result"] = patch_application
-                result["warm_patch_pre_sha"] = _pre_patch_sha
-                result["warm_patch_target"] = patch_target
-                result["warm_patch_snapshot_manifest"] = patch_application.get("snapshot_manifest")
-                result["warm_patch_canonical_target"] = patch_target
+                _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
                 result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
             if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took
@@ -3588,17 +3672,8 @@ class BaselineExecutor:
             # subsequent tasks that reuse the same InferenceX checkout. A
             # required timeline is exempt: prelude promotes that tree after this
             # returns and needs it still patched.
-            if (
-                applied_patches
-                and not isinstance(patch_application, dict)
-                and (_pre_patch_sha or params.get("_warm_patch_nogit_backups"))
-            ):
-                _revert_warm_patch_state(
-                    patch_target,
-                    pre_sha=_pre_patch_sha,
-                    snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
-                    nogit_backups=list(params.get("_warm_patch_nogit_backups") or []),
-                )
+            if applied_patches and not isinstance(patch_application, dict):
+                _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
             if bench_lease is not None:
                 bench_lease.close()
 
@@ -3790,7 +3865,7 @@ class BaselineExecutor:
         """Whether baseline double-run is enabled.
 
         Public CLI/env controls are intentionally unsupported. The session
-        default is on so EXPLORE warm-decision compares hot candidates against a
+        default is on so the warm decision compares hot candidates against a
         hot baseline. Internal callers may pass
         ``task.params["baseline_double_run"]`` for focused tests/debug runs, or
         set the session state directly.

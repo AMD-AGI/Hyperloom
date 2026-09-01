@@ -17,7 +17,7 @@ patch *files*; this action produces *outcomes*.
 
 ## When to delegate
 
-* Phase is `EXPLORE` or `FRAMEWORK_AGENT` (per `PHASE_ALLOWED_ACTIONS` in
+* Phase is `FRAMEWORK_AGENT` (per `PHASE_ALLOWED_ACTIONS` in
   `src/hyperloom/orchestrator/phases/machine_state.py`).
 * A specialist task has emitted `specialist_done.patches_written` with
   at least one patch path inside its worktree.

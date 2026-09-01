@@ -21,7 +21,55 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 from ...session.paths import is_path_within
 
 
+_FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
+_KERNEL_PHASES = frozenset({"KERNEL_AGENT"})
+_AUTHORING_TASK_KINDS = frozenset(
+    {
+        "explore_apply_retry",
+        "framework_authoring",
+        "framework_local_explore",
+    }
+)
+
+
 # Shared helpers
+def _mapping(value: Any) -> dict[str, Any]:
+    """Return ``value`` when it is a dict, otherwise an empty mapping."""
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    """Keep only dictionary rows from a list-shaped value."""
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def _first(*values: Any) -> Any:
+    """Return the first value that is neither ``None`` nor an empty string."""
+    return next((value for value in values if value is not None and value != ""), None)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """Coerce conventional boolean spellings without accepting arbitrary numbers."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "passed", "succeeded"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "failed"}:
+            return False
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    """Normalize a list-like value to non-empty strings."""
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value if item not in (None, "")]
+
+
 def _load_json_safe(
     path: Path | None,
     warnings: list[str],
@@ -314,6 +362,29 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
             return default
         cur = cur[k]
     return cur if cur is not None else default
+
+
+def _operation_task_id(operation: Any) -> str:
+    """Return the orchestrator task id a recorded operation was run under.
+
+    Producers stamp it in one of three places depending on which recorder
+    entry point they went through, so all three are consulted before giving
+    up. Empty string when the operation carries none.
+
+    Args:
+        operation (Any): One recorded-operation mapping.
+
+    Returns:
+        str: The task id, or ``""`` when the operation does not carry one.
+    """
+    return str(
+        _first(
+            _safe_get(operation, "extensions", "task_id"),
+            _safe_get(operation, "outputs", "task_id"),
+            _safe_get(operation, "metadata", "extras", "task_id"),
+        )
+        or ""
+    )
 
 
 def _parse_iso_unix(ts: Any) -> float | None:

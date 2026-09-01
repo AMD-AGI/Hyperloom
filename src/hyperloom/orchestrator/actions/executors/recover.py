@@ -477,7 +477,20 @@ class RecoverExecutor:
 recover_executor = RecoverExecutor()
 
 
+def probe_gpu_free_mb() -> list[dict[str, Any]]:
+    """Per-GPU free VRAM, for callers that need the probe without the action.
+
+    Blocking (shells out to ``rocm-smi``); call via ``asyncio.to_thread``.
+
+    Returns:
+        list[dict[str, Any]]: One entry per visible GPU, or ``[]`` when the
+        probe is unavailable.
+    """
+    return recover_executor._probe_gpu_free_mb()
+
+
 __all__ = [
     "RecoverExecutor",
+    "probe_gpu_free_mb",
     "recover_executor",
 ]

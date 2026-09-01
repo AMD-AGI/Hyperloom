@@ -69,12 +69,12 @@ __all__ = [
 #
 # Tradeoff (intentional behavior change vs the retired op_to_source.json): the
 # curated map marked its ~56 ``aiter_ck`` entries ``patchable: true`` and routed
-# them to the ck-fellow backend. Resolving from the device symbol alone, we
-# cannot recover that per-entry ck-fellow ownership, so a CK instantiation is
-# classified non-patchable and no longer reaches ``forge_submit._resolve_fellow``
-# ck-fellow branch. This is deliberate: the symbol-based finder trades that
+# them to the ck backend. Resolving from the device symbol alone, we
+# cannot recover that per-entry ck ownership, so a CK instantiation is
+# classified non-patchable and no longer reaches ``forge_submit._resolve_kernel_backend``
+# ck branch. This is deliberate: the symbol-based finder trades that
 # hand-maintained CK routing (which could not generalize across framework
-# versions) for coverage that self-heals. Restoring CK -> ck-fellow routing
+# versions) for coverage that self-heals. Restoring CK -> ck routing
 # would require a structured, symbol-derivable CK classifier and is left as a
 # separately reviewable follow-up rather than a static map.
 _CK_DEMANGLED_RE = re.compile(r"(?:^|[^A-Za-z0-9_])ck(?:_tile)?::")

@@ -19,7 +19,7 @@ def _reset_config_cache() -> None:
     forge_submit._reset_knowledge_config_cache()
 
 
-def _avoid_unrelated_fellow_setup(monkeypatch: pytest.MonkeyPatch) -> None:
+def _avoid_unrelated_kernel_backend_setup(monkeypatch: pytest.MonkeyPatch) -> None:
     import _llm_stability_env
 
     monkeypatch.setattr(_llm_stability_env, "apply_llm_stability_env", lambda env: None)
@@ -29,7 +29,7 @@ def _avoid_unrelated_fellow_setup(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_local_child_env_strips_remote_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "/data/knowledge")
     monkeypatch.setenv("GBRAIN_BASE_URL", "https://ambient.invalid")
@@ -45,7 +45,7 @@ def test_local_child_env_strips_remote_credentials(
         "KB_STORE_TOKEN": "kb-secret",
         "KERNELFORGE_GBRAIN_ENABLED": "true",
     }
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KNOWLEDGE_LOCAL_ROOT"] == "/data/knowledge"
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
@@ -93,7 +93,7 @@ def test_the_card_is_resolved_from_the_candidate_when_the_environment_is_silent(
 def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "unchanged/root")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
@@ -107,7 +107,7 @@ def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
         "KB_STORE_TOKEN": "token",
         "KERNELFORGE_GBRAIN_ENABLED": "true",
     }
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "remote"
     assert env["KNOWLEDGE_LOCAL_ROOT"] == "unchanged/root"
     assert env["KB_STORE_URL"] == "https://kb.test"
@@ -118,7 +118,7 @@ def test_remote_child_env_forwards_kb_store_alone_when_gbrain_is_absent(
 def test_remote_child_env_strips_parent_gbrain_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "unchanged/root")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
@@ -133,7 +133,7 @@ def test_remote_child_env_strips_parent_gbrain_credentials(
         "GBRAIN_BASE_URL": "https://gbrain.test",
         "GBRAIN_TOKEN": "gbrain-token",
     }
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
     assert env["KB_STORE_URL"] == "https://kb.test"
     assert "GBRAIN_BASE_URL" not in env
     assert "GBRAIN_TOKEN" not in env
@@ -144,7 +144,7 @@ def test_remote_child_env_missing_kb_store_credentials_degrades_once(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "/unused")
     monkeypatch.setenv("KB_STORE_URL", "https://kb.test")
@@ -155,8 +155,8 @@ def test_remote_child_env_missing_kb_store_credentials_degrades_once(
         "KB_STORE_URL": "https://kb.test",
     }
     with caplog.at_level("WARNING"):
-        forge_submit._apply_fellow_env(env)
-        forge_submit._apply_fellow_env(env)
+        forge_submit._apply_kernel_backend_env(env)
+        forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
     assert "KB_STORE_URL" not in env
@@ -168,7 +168,7 @@ def test_malformed_mode_hot_path_is_cached_without_mutating_process_env(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "malformed")
     monkeypatch.setenv("GBRAIN_TOKEN", "ambient-secret")
     process_mode = dict(forge_submit.os.environ)
@@ -176,8 +176,8 @@ def test_malformed_mode_hot_path_is_cached_without_mutating_process_env(
     second = dict(first)
 
     with caplog.at_level("WARNING"):
-        forge_submit._apply_fellow_env(first)
-        forge_submit._apply_fellow_env(second)
+        forge_submit._apply_kernel_backend_env(first)
+        forge_submit._apply_kernel_backend_env(second)
 
     assert first["KNOWLEDGE_STORE_MODE"] == second["KNOWLEDGE_STORE_MODE"] == "local"
     assert "GBRAIN_TOKEN" not in first
@@ -189,7 +189,7 @@ def test_malformed_mode_hot_path_is_cached_without_mutating_process_env(
 def test_unset_mode_defaults_local_and_uses_user_data_path(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.delenv("KNOWLEDGE_STORE_MODE", raising=False)
     monkeypatch.delenv("KNOWLEDGE_LOCAL_ROOT", raising=False)
     monkeypatch.setenv("USER_DATA_PATH", "/data/user")
@@ -200,7 +200,7 @@ def test_unset_mode_defaults_local_and_uses_user_data_path(
         "GBRAIN_BASE_URL": "https://ambient.invalid",
         "GBRAIN_TOKEN": "secret",
     }
-    forge_submit._apply_fellow_env(env)
+    forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KNOWLEDGE_LOCAL_ROOT"] == "/data/user/knowledge"
     assert "GBRAIN_BASE_URL" not in env
@@ -210,7 +210,7 @@ def test_unset_mode_defaults_local_and_uses_user_data_path(
 def test_child_env_cannot_seed_process_config_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _avoid_unrelated_fellow_setup(monkeypatch)
+    _avoid_unrelated_kernel_backend_setup(monkeypatch)
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
     monkeypatch.setenv("KNOWLEDGE_LOCAL_ROOT", "/process/knowledge")
     monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
@@ -222,7 +222,7 @@ def test_child_env_cannot_seed_process_config_cache(
         "KB_STORE_TOKEN": "child-secret",
     }
 
-    forge_submit._apply_fellow_env(child)
+    forge_submit._apply_kernel_backend_env(child)
     cached = forge_submit._knowledge_config_for_forge()
 
     assert cached.mode.value == "local"

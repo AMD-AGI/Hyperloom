@@ -22,6 +22,7 @@ resolver resolves those lazily via ``ast`` (vLLM ships thousands of ``.py``).
 
 from __future__ import annotations
 
+import ast
 import getpass
 import json
 import logging
@@ -76,6 +77,73 @@ def is_editable_source(path: str | None, kernel_kind: str | None = None) -> bool
             return False
         return True
     return False
+
+
+# --- Triton .py AST pinning -------------------------------------------------
+# Triton decorators marking a device-kernel def (``@triton.jit`` / ``@jit`` and
+# the autotune/heuristics wrappers that sit on top of a jit'd kernel).
+_TRITON_DECORATORS = frozenset({"jit", "autotune", "heuristics"})
+
+
+def _is_triton_kernel_def(node: ast.AST) -> bool:
+    """Return whether an AST function node carries a Triton kernel decorator."""
+    for dec in getattr(node, "decorator_list", []):
+        target = dec.func if isinstance(dec, ast.Call) else dec
+        name = getattr(target, "attr", None) or getattr(target, "id", None)
+        if name in _TRITON_DECORATORS:
+            return True
+    return False
+
+
+def _normalize_symbol(symbol: str) -> str:
+    """Reduce a device kernel symbol to a bare identifier core for matching.
+
+    Triton device symbols often wrap the ``@triton.jit`` function name with a
+    leading ``triton_``/``_`` prefix and a trailing autotune/hash suffix
+    (e.g. ``_fwd_kernel_0d1d2``). Strip the common decorations so a fuzzy match
+    against the def name has a chance.
+    """
+    core = re.sub(r"[^0-9A-Za-z_].*$", "", str(symbol or "").strip())
+    core = re.sub(r"_+\d[\dA-Za-z]*$", "", core)  # drop trailing autotune/hash suffix
+    return core.strip("_").lower()
+
+
+def triton_def_line(py_path: str, *, func: str = "", symbol: str = "", require_name_match: bool = False) -> int | None:
+    """Find a Triton kernel's ``def`` line in a ``.py`` via AST (no import).
+
+    Matching precedence: (1) exact ``func`` name; (2) a ``@triton.jit`` def whose
+    name matches the normalized device ``symbol`` (exact then substring); (3) the
+    sole ``@triton.jit`` def when unambiguous and ``require_name_match`` is ``False``.
+    """
+    try:
+        tree = ast.parse(Path(py_path).read_text(encoding="utf-8"))
+    except (OSError, SyntaxError, UnicodeDecodeError, ValueError):
+        return None
+
+    jit_defs: dict[str, int] = {}
+    all_defs: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_defs.setdefault(node.name, node.lineno)
+            if _is_triton_kernel_def(node):
+                jit_defs.setdefault(node.name, node.lineno)
+
+    if func and func in all_defs:
+        return all_defs[func]
+
+    core = _normalize_symbol(symbol)
+    if core:
+        for name, line in jit_defs.items():
+            if name.lower() == core:
+                return line
+        for name, line in jit_defs.items():
+            low = name.lower()
+            if core in low or low in core:
+                return line
+
+    if not require_name_match and len(jit_defs) == 1:
+        return next(iter(jit_defs.values()))
+    return None
 
 
 # --- kernel-definition scanning ---------------------------------------------
@@ -341,4 +409,4 @@ if __name__ == "__main__":
     raise SystemExit(_main())
 
 
-__all__ = ["SourceIndex", "build_index", "is_editable_source", "load_or_build"]
+__all__ = ["SourceIndex", "build_index", "is_editable_source", "load_or_build", "triton_def_line"]

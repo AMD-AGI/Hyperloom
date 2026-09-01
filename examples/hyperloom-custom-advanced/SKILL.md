@@ -35,6 +35,13 @@ In docker mode:
   framework must come from the image. Do **not** use `--skip-base-check`.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
+### Prior workload cleanup (required)
+
+Before any replacement launch after a failed or abandoned demo run (`docker run`,
+`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
+gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
+skip the user-approval step (#1314).
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
@@ -103,7 +110,7 @@ Collect these required values:
   `MAX_MODEL_LEN` / `PROFILE_OSL`.
 - Objective and budget: `MAX_HOURS` plus `TARGET_GAIN`.
 - Optional phase budget percentages for `PRELUDE`, `FRAMEWORK_AGENT`,
-  `EXPLORE`, `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
+  `KERNEL_AGENT`, `SWEEP`, and `CLOSE`.
 
 ## Default Values
 
@@ -139,26 +146,25 @@ resolved values in the launch plan before starting the optimizer.
 - Phase budget percentages default to:
   - `PHASE_BUDGET_PRELUDE_PCT=0.03`: startup, preflight, baseline setup, and
     initial orchestration.
-  - `PHASE_BUDGET_FRAMEWORK_PCT=0.20`: framework-agent work, including source
-    patching or framework-side exploration.
-  - `PHASE_BUDGET_EXPLORE_PCT=0.35`: serving-parameter exploration and
-    benchmark validation.
-  - `PHASE_BUDGET_KERNEL_PCT=0.28`: kernel-agent TraceLens/GEAK/native-kernel
+  - `PHASE_BUDGET_FRAMEWORK_PCT=0.40`: the optimisation phase — serving-parameter
+    search and source/upstream landing, with benchmark validation.
+  - `PHASE_BUDGET_KERNEL_PCT=0.50`: kernel-agent TraceLens/GEAK/native-kernel
     optimization work.
-  - `PHASE_BUDGET_SWEEP_PCT=0.12`: concurrency sweep and final throughput
+  - `PHASE_BUDGET_SWEEP_PCT=0.05`: concurrency sweep and final throughput
     validation around the best candidate.
   - `PHASE_BUDGET_CLOSE_PCT=0.02`: final report, state closeout, and summary
     generation.
-- Phase toggles default to enabled: kernel enabled, explore enabled, framework
-  agent enabled, roofline enabled, and concurrency sweep enabled.
+- Phase toggles default to enabled: kernel, framework agent, framework local
+  exploration, roofline, and concurrency sweep.
 
 Collect these optional advanced values:
 
-- Phase toggles: `--no-kernel`, `--no-explore`, `--no-framework-agent`,
-  `--no-enable-conc-sweep`, `--no-enable-roofline`.
+- Phase toggles: `--no-kernel`, `--no-framework-agent`,
+  `--no-framework-local-explore`, `--no-enable-conc-sweep`,
+  `--no-enable-roofline`.
 - Phase budget percentages:
   `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,
-  `PHASE_BUDGET_EXPLORE_PCT`, `PHASE_BUDGET_KERNEL_PCT`,
+  `PHASE_BUDGET_KERNEL_PCT`,
   `PHASE_BUDGET_SWEEP_PCT`, and `PHASE_BUDGET_CLOSE_PCT`.
   Explain what each phase does before asking. Accept only values where
   `0 < pct <= 1`; leave a value unset to use the optimizer default.
@@ -174,8 +180,13 @@ Guardrails:
   pass explicit CLI flags in the optimize command.
 - Omit `--gpu-type` unless the user explicitly chooses a hint; otherwise let
   Hyperloom auto-detect from ROCm/system info.
-- Warn the user when both `--no-explore` and `--no-kernel` are selected; that
-  collapses the run mostly to baseline and sweep validation.
+- `--no-framework-agent` skips the entire OPTIMIZE phase (PRELUDE goes straight
+  to KERNEL_AGENT), dropping both of its arms: upstream-PR landing and local
+  source authoring. Warn before applying it; combined with `--no-kernel` it
+  leaves only baseline and sweep validation.
+- `--no-framework-local-explore` keeps OPTIMIZE but drops only its local
+  authoring arm, so the phase exits after three empty upstream discoveries
+  instead of authoring a patch from live source. No effect under diff-only mode.
 - Phase budget percentages are caps, not guaranteed time usage. A phase may end
   earlier, and disabled work phases have their share redistributed by the
   optimizer.
@@ -283,7 +294,6 @@ export MAX_HOURS="${MAX_HOURS:-8}"
 export TARGET_GAIN="${TARGET_GAIN:-30}"
 export PHASE_BUDGET_PRELUDE_PCT="${PHASE_BUDGET_PRELUDE_PCT:-}"
 export PHASE_BUDGET_FRAMEWORK_PCT="${PHASE_BUDGET_FRAMEWORK_PCT:-}"
-export PHASE_BUDGET_EXPLORE_PCT="${PHASE_BUDGET_EXPLORE_PCT:-}"
 export PHASE_BUDGET_KERNEL_PCT="${PHASE_BUDGET_KERNEL_PCT:-}"
 export PHASE_BUDGET_SWEEP_PCT="${PHASE_BUDGET_SWEEP_PCT:-}"
 export PHASE_BUDGET_CLOSE_PCT="${PHASE_BUDGET_CLOSE_PCT:-}"
@@ -318,13 +328,12 @@ OPT_FLAGS=(
 [ -n "${CONC_SWEEP_TOTAL_BUDGET_SEC:-}" ] && OPT_FLAGS+=(--conc-sweep-total-budget-sec "$CONC_SWEEP_TOTAL_BUDGET_SEC")
 [ -n "${PHASE_BUDGET_PRELUDE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-prelude-pct "$PHASE_BUDGET_PRELUDE_PCT")
 [ -n "${PHASE_BUDGET_FRAMEWORK_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-framework-pct "$PHASE_BUDGET_FRAMEWORK_PCT")
-[ -n "${PHASE_BUDGET_EXPLORE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-explore-pct "$PHASE_BUDGET_EXPLORE_PCT")
 [ -n "${PHASE_BUDGET_KERNEL_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-kernel-pct "$PHASE_BUDGET_KERNEL_PCT")
 [ -n "${PHASE_BUDGET_SWEEP_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-sweep-pct "$PHASE_BUDGET_SWEEP_PCT")
 [ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
-[ "${NO_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-explore)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
+[ "${NO_FRAMEWORK_LOCAL_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-local-explore)
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)
 

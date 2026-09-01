@@ -81,12 +81,17 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "final":              { /* §6  Final state — SaFE contract core */ },
   "phase_timeline":     [ /* §7  PhaseEvent[] */ ],
   "capability_summary": { /* §8  Capability cards */ },
+  "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
   "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
+  "metadata":           { /* additive V6 metadata and launch configuration */ },
+  "outcome":            { /* additive V6 terminal result */ },
+  "timeline":           [ /* additive V6 ordered stage events */ ],
+  "close":              { /* additive V6 close-stage result */ },
 
   "warnings":           [ /* string[] — non-fatal collector warnings */ ],
   "source_files":       { /* §17 SourceFiles — raw artefact paths */ },
@@ -95,9 +100,8 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
      Consumers MUST tolerate their absence (total=False TypedDict). */
   "model_info":                  { /* model architecture summary */ },
   "phase_segments":              [ /* per-phase segment records */ ],
-  "explore_search":              { /* EXPLORE dedup ledger */ },
+  "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
-  "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
   "kernel_roofline":             { /* kernel roofline snapshot */ },
   "kernel_optimization_summary": { /* kernel-opt rollup */ },
@@ -116,6 +120,13 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
 
 The `session` (SessionMeta) section also carries `user_data_path` and a
 `recovery` sub-object in addition to the fields documented in §3.
+
+The additive V6 surface is identified by
+`metadata.versions.schema_version = "hyperloom.session_breakdown.v6.0"` while
+the existing top-level V5 contract remains unchanged. Startup source events are
+stored in execution order under `reports/sbd_v6/timeline/`; writer failures are
+reported through `metadata.warnings` rather than being indistinguishable from a
+stage that never ran.
 
 All sections use the `total=False` TypedDict convention — every field
 is optional. Consumers should expect partial documents when a session
@@ -320,23 +331,28 @@ than disappeared and are reachable through `adopted_attempt_id`:
 `summary_by_agent`; the gain belonging to no adopted step is
 `validation.unattributed_gain_pct` rather than a bucket inside a breakdown.
 
-When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
-preserves the available `donor_canonical_id`, `donor_model`,
-`donor_session_id`, `donor_family_tags`, `donor_gain_pct`, and
-`donor_breakdown_link`. Fields absent from the source recipe remain absent
-rather than being inferred.
+The Recipe KB touchpoints are recorded as ordered `timeline` events rather
+than a standalone `kb_provenance` section (removed in the V5→V6 migration):
+`warm_start` (which identity was requested and what the KB returned),
+`warm_replay` (whether replaying a prior recipe reproduced its gain), and
+`kb_write_back` (whether this session's own recipe reached the KB Store).
 
-`kb_provenance.warm_replay` additionally records what the replay was judged
-on, whether it passed or failed. A replayed recipe is evidence from another
-session on another machine, so reproducing its throughput says nothing about
-whether it still computes correctly here.
+When Warm Replay uses a donor recipe, `timeline[type=warm_replay].ext.donor`
+preserves the available `canonical_id`, `model`, `session_id`, `gain_pct`, and
+`breakdown_link`. Fields absent from the source recipe remain absent rather
+than being inferred.
+
+`timeline[type=warm_replay].ext.accuracy` records what the replay was judged
+on, and whether it passed. A replayed recipe is evidence from another session
+on another machine, so reproducing its throughput says nothing about whether it
+still computes correctly here.
 
 | Field | Type | Description |
 |---|---|---|
-| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay_accuracy` `0.0`) from a replay nothing checked (`eval_ran` false, `replay_accuracy` `null`). |
-| `replay_accuracy` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
-| `baseline_accuracy` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
-| `eval_error` | string \| null | Why no score could be read. Distinguishes a contract with the eval switched off, an eval that produced an unreadable file, and a results file carrying no metric this parser knows. |
+| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay` `0.0`) from a replay nothing checked (`eval_ran` false, `replay` `null`). |
+| `replay` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
+| `baseline` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
+| `passed` | bool \| null | Whether the replay cleared the accuracy gate. `null` when no verdict could be reached (no eval ran). |
 
 A replay whose accuracy could not be measured is still promoted — a failed
 measurement is not evidence the config broke the model — so `eval_ran` is what
@@ -463,6 +479,12 @@ For the kernel lanes (`geak`, `forge`) these counts are not interchangeable:
 - `reverts` — kernels integrate rejected (end-to-end regression).
 - `attempts` — **invocation rows**, not distinct kernels: how many tries the
   lane made. Deliberately a different unit from `keeps`.
+
+GEAK e2e runs do not always create the native
+`kernel-agent/runs/*/optimization_attempts.jsonl` layout. In that case the
+summary falls back to the normalized top-level `geak` section: a real route is
+reported as at least one attempt, and a promoted `geak_e2e` stack entry is
+reported as kept instead of `not_attempted`.
 
 The `specialist` row uses `keeps` / `attempts` differently: see
 `CapabilitySummary` in `schema.py`.

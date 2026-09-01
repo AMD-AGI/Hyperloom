@@ -227,7 +227,7 @@ from hyperloom.inference_optimizer.protocol.intent import (
 )
 from hyperloom.orchestrator.phases.machine_state import (
     PHASE_ALLOWED_ACTIONS,
-    PHASE_EXPLORE,
+    PHASE_FRAMEWORK_AGENT,
 )
 from hyperloom.orchestrator.policy.gate import (
     PolicyDenied,
@@ -299,7 +299,7 @@ def test_request_with_analysis_kind_is_denied(gate, action_name):
 # Supporting infrastructure parity
 def test_phase_explore_allowlist_drops_legacy_actions():
     """The EXPLORE allowlist contains only the canonical action set."""
-    assert PHASE_ALLOWED_ACTIONS[PHASE_EXPLORE] == frozenset(
+    assert PHASE_ALLOWED_ACTIONS[PHASE_FRAMEWORK_AGENT] == frozenset(
         {
             "explore",
             "specialist",

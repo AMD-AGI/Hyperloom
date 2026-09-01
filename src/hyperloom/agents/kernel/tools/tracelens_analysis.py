@@ -65,6 +65,10 @@ try:
 except ImportError:
     _native_operation_key = None
 
+# Unguarded like the other sibling imports below: a fallback here would silently
+# turn name normalization into the identity and mis-key every kernel lookup.
+from _task_group_contract import _strip_dispatch_decoration
+
 try:
     import aiter.jit.core as _aiter_jit_core  # type: ignore[import-untyped]
 except Exception:
@@ -216,6 +220,16 @@ except ImportError:  # flat import (standalone: tools/ on sys.path)
     except ImportError:
         _kernel_source_index = None  # type: ignore[assignment]
         _active_finder = None  # type: ignore[assignment]
+
+# Owns the only AST reading of what a Triton kernel definition looks like, which
+# source_type_for needs to tell a Triton ``.py`` from any other Python file.
+try:  # package import (TraceLens route / tests)
+    from .kernel_source_index import triton_def_line as _triton_def_line
+except ImportError:  # flat import (standalone: tools/ on sys.path)
+    try:
+        from kernel_source_index import triton_def_line as _triton_def_line  # type: ignore[no-redef]
+    except ImportError:
+        _triton_def_line = None  # type: ignore[assignment]
 
 _ACTIVE_FINDER_METHOD = getattr(_KSC, "METHOD_ACTIVE_FINDER", "active_finder")
 
@@ -1670,6 +1684,28 @@ def _looks_like_flydsl_source(source_file: str) -> bool:
     return any(marker in head for marker in _FLYDSL_SOURCE_MARKERS)
 
 
+def _defines_traced_triton_kernel(name: str, source_file: str) -> bool:
+    """Whether ``source_file`` defines the Triton kernel ``name`` was traced from.
+
+    A device symbol carries no language and frameworks import Triton through a
+    shim, so both signals the name-based check reads are absent. Resolve the
+    symbol to a ``@triton.jit`` def instead.
+
+    Args:
+        name: Kernel/symbol name as the trace reports it.
+        source_file: Resolved source path.
+
+    Returns:
+        ``True`` when a ``@triton.jit`` def in ``source_file`` matches ``name``.
+    """
+    if _triton_def_line is None or not source_file or not source_file.endswith(".py"):
+        return False
+    for keyword in _candidate_keywords(name):
+        if _triton_def_line(source_file, symbol=keyword, require_name_match=True) is not None:
+            return True
+    return False
+
+
 _FLYDSL_PSEUDO_OP_NAME_MARKERS = (
     "pseudo_op::moe_flydsl_",
     "pseudo_op::flydsl_",
@@ -1700,8 +1736,12 @@ def source_type_for(name: str, source_file: str) -> str:
         return "hip_cpp"
     if "triton" in lower_name and source_file.endswith(".py"):
         return "triton"
+    # Ahead of the Triton proof: a FlyDSL kernel may import Triton for its own
+    # reference path, and the FlyDSL identity is the one its consumers act on.
     if _looks_like_flydsl_source(source_file):
         return "flydsl"
+    if _defines_traced_triton_kernel(name, source_file):
+        return "triton"
     if source_file.endswith(".py"):
         return "python"
     if "hipblas" in lower_name or "rocblas" in lower_name:
@@ -2263,37 +2303,11 @@ _TYPE_BLOCKLIST = {
 
 
 def _normalize_profiler_op_name(name: str) -> str:
-    """Strip graph-capture / synthetic wrappers from a TraceLens op symbol.
-
-    Peels off, in order: a leading ``<launcher>->`` capture wrapper, a leading
-    C++ return-type token, a trailing ``(... Op)`` annotation, and a trailing
-    ``.kd`` HSA code-object suffix. Already-clean names pass through unchanged.
-
-    Args:
-        name: The raw TraceLens op symbol to normalize.
-
-    Returns:
-        The normalized op symbol with capture wrappers, leading return-type
-        tokens, trailing op annotations and ``.kd`` suffixes removed.
-    """
-    s = (name or "").strip()
-    if not s:
+    """Strip graph-capture / synthetic wrappers; return the original if stripping empties it."""
+    original = (name or "").strip()
+    if not original:
         return ""
-    # Leading graph-launch capture wrapper: ``hipGraphLaunch->`` / ``cudaGraphLaunch->``.
-    s = re.sub(r"^[A-Za-z][A-Za-z0-9_]*->", "", s).strip()
-    # Leading C++ return-type token before the symbol (only relevant when there
-    # is no ``::`` namespace to slice on later).
-    s = re.sub(
-        r"^(?:void|bool|int|unsigned|long|short|char|float|double|size_t)\s+",
-        "",
-        s,
-    ).strip()
-    # Trailing display annotation such as ``(Synthetic Op)``.
-    s = re.sub(r"\s*\([^()]*\bOp\)\s*$", "", s).strip()
-    # Trailing ``.kd`` HSA code-object suffix.
-    if s.endswith(".kd"):
-        s = s[:-3].strip()
-    return s or (name or "").strip()
+    return _strip_dispatch_decoration(original) or original
 
 
 def _candidate_keywords(name: str) -> list[str]:
@@ -2338,7 +2352,7 @@ def _candidate_keywords(name: str) -> list[str]:
     seen: set[str] = set()
     raw: list[str] = []
     for tok in tokens:
-        tok = tok.strip("_")
+        tok = tok.rstrip("_")
         if not tok or tok in seen:
             continue
         if tok in _TYPE_BLOCKLIST:
@@ -2494,6 +2508,95 @@ def _compound_subwindow_keywords(name: str) -> list[str]:
     return out[:6]
 
 
+def _composed_name_prefix_keywords(name: str) -> list[str]:
+    """Leading snake_case prefixes of a name assembled at runtime.
+
+    The mirror image of ``_compound_subwindow_keywords``. That one handles a
+    profiler prefix glued onto a real symbol, so it drops leading segments. A
+    name built by an f-string has the opposite shape: the head is literal in
+    source and the tail is interpolated, as in aiter's
+    ``f"mfma_moe1_silu_mul_a{a_dtype}_w{b_dtype}_{out_s}"``, which no search for
+    the launched name ``mfma_moe1_silu_mul_afp8_wfp8_bf16_...`` can ever match.
+    So this drops trailing segments instead, longest (most specific) first.
+
+    Args:
+        name: The runtime kernel name.
+
+    Returns:
+        Progressively shorter leading snake_case prefixes (longest first),
+        capped at eight.
+    """
+    cleaned = _strip_template_args(_normalize_profiler_op_name(name))
+    if "::" in cleaned:
+        cleaned = cleaned.split("::")[-1]
+    segs = [s for s in cleaned.split("_") if s]
+    if len(segs) < 3:
+        return []
+    out: list[str] = []
+    # Anchored at the start, dropping trailing segments one at a time. The full
+    # name is skipped: the primary pass already searched it.
+    for end in range(len(segs) - 1, 1, -1):
+        window = "_".join(segs[:end])
+        if len(window) >= 6 and not window.isdigit():
+            out.append(window)
+    # The SHORTEST prefixes are the ones that can match, because everything the
+    # f-string interpolated sits at the tail -- the reverse of the sub-window
+    # pass, where the longest window is the likely hit. So the budget is spent
+    # on the head of the name, still tried longest-first so the most specific
+    # match wins.
+    return out[-8:]
+
+
+def _longest_literal_prefix_len(path: Path, name: str) -> int:
+    """How much of ``name``'s head appears verbatim in ``path``.
+
+    Two kernels built by neighbouring f-strings share a short prefix, so the
+    keyword that found them cannot tell them apart -- aiter's
+    ``mfma_moe2_a{a_dtype}...`` and ``mfma_moe2_{in_dtype}...`` both answer to
+    ``mfma_moe2``. The file that spells out more of the launched name is the one
+    that built it, and it is measured in characters rather than segments
+    because the interpolation cuts mid-segment.
+
+    Args:
+        path: Candidate source file.
+        name: The runtime kernel name.
+
+    Returns:
+        Length of the longest prefix of ``name`` found in the file, or 0.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    low = text.lower()
+    target = _strip_template_args(_normalize_profiler_op_name(name)).lower()
+    if "::" in target:
+        target = target.split("::")[-1]
+    lo, hi = 6, len(target)
+    if hi < lo or target[:lo] not in low:
+        return 0
+    result = lo
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if target[:mid] in low:
+            result = mid
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return result
+
+
+def _prefer_composing_file(name: str, hits: list[Path]) -> list[Path]:
+    """Rank by literal prefix length; return ``[]`` when no hit scores above zero."""
+    scored = sorted(
+        _rank_paths(hits),
+        key=lambda h: -_longest_literal_prefix_len(h, name),
+    )
+    if not scored or _longest_literal_prefix_len(scored[0], name) == 0:
+        return []
+    return scored
+
+
 def _file_defines_symbol(path: Path, keyword: str) -> bool:
     """True when ``path`` *defines* ``keyword`` (vs merely mentioning it).
 
@@ -2510,16 +2613,23 @@ def _file_defines_symbol(path: Path, keyword: str) -> bool:
         ``True`` when the file defines the symbol; ``False`` on read errors or
         when it only mentions it.
     """
-    kw = re.escape(keyword)
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    patterns = (
-        r"\bdef\s+" + kw + r"\b",  # Python (incl. @triton.jit) def
-        r"\b" + kw + r"\s*=",  # kernel bound to a module-level name
-        r"__global__[^\n;{]*\b" + kw + r"\b",  # CUDA/HIP global kernel
-    )
+    # \b cannot anchor between "_" and a letter, so a bare \bkw\b never matches
+    # def _kw. Search the underscore spelling too.
+    kw = re.escape(keyword)
+    candidates = [kw] if keyword.startswith("_") else [kw, r"_" + kw]
+    patterns: list[str] = []
+    for sym in candidates:
+        patterns.extend(
+            [
+                r"\bdef\s+" + sym + r"\b",  # Python / @triton.jit
+                r"\b" + sym + r"\s*=",  # module-level assignment
+                r"__global__[^\n;{]*" + sym + r"\b",  # CUDA/HIP
+            ]
+        )
     return any(re.search(p, text) for p in patterns)
 
 
@@ -2534,7 +2644,7 @@ def _prefer_symbol_definition(keyword: str, hits: list[Path]) -> list[Path]:
         The ranked paths, preferring files that define ``keyword``.
     """
     definers = [h for h in hits if _file_defines_symbol(h, keyword)]
-    return _rank_paths(definers) if definers else _rank_paths(hits)
+    return _rank_paths(definers, keyword=keyword) if definers else _rank_paths(hits, keyword=keyword)
 
 
 # Bare HIP/CUDA launch APIs. TraceLens emits these as standalone rows when it
@@ -2585,7 +2695,11 @@ def locate_source_via_grep(name: str) -> str:
     if is_runtime_api_name(name):
         return ""
     tried: set[str] = set()
-    # Primary pass: keyword extraction + ranking.
+    # Primary pass: keyword extraction + ranking. A file that DEFINES the symbol
+    # outranks one that merely mentions it, the same rule the fallback pass below
+    # applies: a package __init__ that re-exports the kernel scores well on path
+    # shape alone and would otherwise be handed to a backend as the kernel source.
+    # _prefer_symbol_definition degrades to plain ranking when nothing defines it.
     for keyword in _candidate_keywords(name):
         if not keyword or keyword in tried:
             continue
@@ -2594,8 +2708,7 @@ def locate_source_via_grep(name: str) -> str:
         for root in kernel_search_roots():
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
-            ranked = _rank_paths(hits, keyword=keyword)
-            return str(ranked[0])
+            return str(_prefer_symbol_definition(keyword, hits)[0])
     # Fallback pass: trailing sub-windows of a compound/profiler-wrapped symbol
     # whose full identifier never appears verbatim in source. Prefer the file
     # that defines the embedded function over dispatch shims.
@@ -2608,6 +2721,21 @@ def locate_source_via_grep(name: str) -> str:
             hits.extend(_grep_for_keyword(keyword, Path(root)))
         if hits:
             return str(_prefer_symbol_definition(keyword, hits)[0])
+    # Last pass: the name was assembled by an f-string, so only its head is
+    # literal in source and both passes above searched text that is never
+    # written down. Ranked by how much of the name a file spells out, because
+    # the shortest prefixes are shared by sibling kernels in sibling files.
+    for keyword in _composed_name_prefix_keywords(name):
+        if not keyword or keyword in tried:
+            continue
+        tried.add(keyword)
+        hits = []
+        for root in kernel_search_roots():
+            hits.extend(_grep_for_keyword(keyword, Path(root)))
+        if hits:
+            ranked = _prefer_composing_file(name, hits)
+            if ranked:
+                return str(ranked[0])
     return ""
 
 
@@ -5025,10 +5153,6 @@ def _finalize_candidates(
         # unresolved dispatch. An in-dict non-rewritable verdict is authoritative,
         # so we keep its .py launcher as context and do NOT grep/promote.
         if res is None or res.status == "unresolved":
-            # A trace frame proves only where Python launched the device kernel;
-            # it does not prove that the same file defines the kernel. Keep the
-            # frame as evidence, then require grep to corroborate the file before
-            # promoting its line/function metadata to source attribution.
             frame = None
             trace_source = ""
             if not item.get("source_file"):
@@ -5379,8 +5503,7 @@ def build_notes(candidate: dict[str, Any]) -> str:
 
 
 #: Mirrors of the registry, used only when that package is not importable
-#: (standalone invocation). Kept identical to the bypass route's copies; tests
-#: assert every one of them against the registry.
+#: (standalone invocation); tests assert every one of them against the registry.
 _STANDALONE_SCRIPTABLE = frozenset({"xdit", "custom"})
 _STANDALONE_DENOISER_CONFIG = frozenset({"xdit"})
 
@@ -5542,7 +5665,7 @@ def run_command(
 # TRACELENS_REF). Overridable via env so a run can pin its own SHA.
 _TRACELENS_REPO_DEFAULT = "https://github.com/AMD-AGI/TraceLens.git"
 # Head of release/hyperloom_integration_v1.0.
-_TRACELENS_REF_DEFAULT = "14eb554fab0363d9d827727f642a5523f2a50fd7"
+_TRACELENS_REF_DEFAULT = "a59a9c165bb64c7c416fd7cf79149803d552e43c"
 
 
 def _default_tracelens_root() -> Path:
@@ -5816,9 +5939,9 @@ def _kernel_roofline_row(candidate: dict[str, Any]) -> dict[str, Any]:
         "recommended_actions": list(candidate.get("recommended_actions") or []),
         "reusable_native_kernel": bool(candidate.get("reusable_native_kernel")),
         "rocprof_roofline": candidate.get("rocprof_roofline"),
-        # Contract alignment (F6): emit the shared roofline_source provenance enum
-        # so both routes carry it. TraceLens rows come from its per-op perf model
-        # (analytical) when that model produced numbers, else placeholder.
+        # Contract alignment (F6): emit the roofline_source provenance enum.
+        # TraceLens rows come from its per-op perf model (analytical) when that
+        # model produced numbers, else placeholder.
         "roofline_source": _RL_ANALYTICAL
         if any(
             candidate.get(k) is not None
@@ -6888,7 +7011,7 @@ def write_reports(
             from _denoise_steps import count_profiler_steps, resolve_perstep_divisor  # noqa: WPS433
 
             # Per-step divisor: an operator-declared count wins over the one
-            # inferred from the trace, matching the bypass route.
+            # inferred from the trace.
             _num_steps = resolve_perstep_divisor(
                 requested_steps=int(getattr(args, "num_denoise_steps", 0) or 0),
                 inferred_steps=count_profiler_steps(getattr(args, "trace_input", "") or ""),
@@ -7794,7 +7917,7 @@ def main() -> int:
                     f"using {cli_trace_path.name} for perf report",
                 )
 
-            # Discover capture_folder (shared by both routes).
+            # Discover capture_folder.
             trace_input_path = Path(args.trace_input).expanduser().resolve()
             capture_folder: Path | None = (
                 Path(args.capture_folder).expanduser().resolve()

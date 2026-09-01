@@ -3966,6 +3966,59 @@ def test_normalize_operation_key_strips_templates():
     assert normalize_operation_key("<all>") == "<all>"
 
 
+def test_operation_key_drops_launch_decoration_for_both_source_kinds():
+    """One kernel reached through two launch APIs is one operator.
+
+    The launch API, the C return type and the synthetic-op suffix describe how a
+    trace saw the dispatch, so keeping them splits a single kernel into one task
+    group per launch path and ports its source once per group.
+    """
+    normalize_operation_key = task_group_contract.normalize_operation_key
+    native_operation_key = task_group_contract.native_operation_key
+
+    graph = "hipGraphLaunch->_mxfp8_linear_kernel (Synthetic Op)"
+    module = "hipModuleLaunchKernel->_mxfp8_linear_kernel (Synthetic Op)"
+    for key in (normalize_operation_key, native_operation_key):
+        assert key(graph) == "_mxfp8_linear_kernel"
+        assert key(module) == key(graph)
+    # Distinct kernels behind the same launch API stay distinct.
+    assert normalize_operation_key("hipGraphLaunch->_first_kernel (Synthetic Op)") != normalize_operation_key(
+        "hipGraphLaunch->_second_kernel (Synthetic Op)"
+    )
+    # Demangling stays native-only and still runs after the shared cleanup.
+    assert native_operation_key("void _ZN4vllm11some_kernelEv (Synthetic Op)") == "vllm::some_kernel"
+
+
+def test_py_task_group_merges_launch_paths_of_one_kernel():
+    """Two launch paths of one Triton kernel aggregate into a single group."""
+    source = str(Path(__file__).resolve())
+    rows = [
+        {
+            "kernel_id": "k001",
+            "name": "hipGraphLaunch->_mxfp8_linear_kernel (Synthetic Op)",
+            "source_file": source,
+            "reusable_native_kernel": True,
+            "gpu_pct": 6.637,
+            "duration_us": 84817.0,
+            "call_count": 7440,
+        },
+        {
+            "kernel_id": "k002",
+            "name": "hipModuleLaunchKernel->_mxfp8_linear_kernel (Synthetic Op)",
+            "source_file": source,
+            "reusable_native_kernel": True,
+            "gpu_pct": 2.12,
+            "duration_us": 27152.0,
+            "call_count": 126,
+        },
+    ]
+    groups = tla.build_task_groups(rows)
+    assert len(groups) == 1
+    assert groups[0]["kernel_ids"] == ["k001", "k002"]
+    assert groups[0]["operation_key"] == "_mxfp8_linear_kernel"
+    assert groups[0]["aggregate_call_count"] == 7566
+
+
 def test_is_native_source_detects_device_extensions():
     """Native C/C++/HIP/CUDA suffixes are recognized (case-insensitive);
     Python and unrelated files are not."""

@@ -418,11 +418,16 @@ def test_derive_journal_outcome_patch_failures_are_no_promote():
         assert out == OUTCOME_NO_PROMOTE, status
 
 
-def test_derive_journal_outcome_framework_agent_follows_status():
-    assert derive_journal_outcome("framework_agent", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
-    assert derive_journal_outcome("framework_agent", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
+def test_derive_journal_outcome_integrate_patch_follows_status():
+    """The patch kind reads the executor's verdict, not the promotable flag.
+
+    ``promotable=True`` on a reverted patch is what the flag says about the
+    task settling cleanly; the status is what says whether the patch stayed.
+    """
+    assert derive_journal_outcome("integrate_patch", {"status": "kept"}, promotable=True) == OUTCOME_KEEP
+    assert derive_journal_outcome("integrate_patch", {"status": "reverted"}, promotable=True) == OUTCOME_REVERT
     assert (
-        derive_journal_outcome("framework_agent", {"status": "no_result_failed"}, promotable=False)
+        derive_journal_outcome("integrate_patch", {"status": "no_result_failed"}, promotable=False)
         == OUTCOME_NO_PROMOTE
     )
 

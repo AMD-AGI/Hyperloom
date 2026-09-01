@@ -728,6 +728,49 @@ def test_build_vllm_cmd_includes_ray_backend():
     assert "--enforce-eager" in cmd
 
 
+def _kv_transfer_config(cmd: list[str]) -> dict:
+    return json.loads(cmd[cmd.index("--kv-transfer-config") + 1])
+
+
+def test_build_vllm_cmd_kv_transfer_config_escapes_quotes():
+    lm = _load_script_module("lm_test_vllm_kv_quote", "launch_multinode.py")
+    connector = 'Nixl"Connector'
+    cmd = lm._build_vllm_cmd(
+        model="/m",
+        tp=8,
+        extra_args=[],
+        pd_role="prefill",
+        pd_transfer_backend=connector,
+        pd_kv_rank=0,
+        pd_kv_parallel_size=2,
+    )
+    cfg = _kv_transfer_config(cmd)
+    assert cfg["kv_connector"] == connector
+    assert cfg["kv_role"] == "kv_producer"
+    assert cfg["kv_rank"] == 0
+    assert cfg["kv_parallel_size"] == 2
+    assert cfg["kv_buffer_device"] == "cuda"
+    assert set(cfg) == {
+        "kv_connector",
+        "kv_role",
+        "kv_rank",
+        "kv_parallel_size",
+        "kv_buffer_device",
+    }
+
+
+def test_build_vllm_cmd_kv_transfer_config_defaults_and_roles():
+    lm = _load_script_module("lm_test_vllm_kv_roles", "launch_multinode.py")
+    prefill = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="prefill")
+    decode = lm._build_vllm_cmd(model="/m", tp=8, extra_args=[], pd_role="decode")
+    pcfg = _kv_transfer_config(prefill)
+    dcfg = _kv_transfer_config(decode)
+    assert pcfg["kv_connector"] == "NixlConnector"
+    assert pcfg["kv_role"] == "kv_producer"
+    assert dcfg["kv_connector"] == "NixlConnector"
+    assert dcfg["kv_role"] == "kv_consumer"
+
+
 def test_subprocess_env_prepends_venv_bin(monkeypatch):
     lm = _load_script_module("lm_test_env", "launch_multinode.py")
     monkeypatch.setenv("PATH", "/usr/bin:/bin")

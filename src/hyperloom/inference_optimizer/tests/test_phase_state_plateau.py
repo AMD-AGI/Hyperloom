@@ -26,7 +26,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     compute_next_phase,
     compute_plateau_explore,
     compute_plateau_kernel,
-    exit_normal_explore,
+    exit_normal_optimize,
     exit_normal_kernel,
     is_valid_escalate_hint,
     is_valid_stop_reason,
@@ -259,7 +259,6 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state = SharedState(session_id="t")
     state.params_no_promote_streak = 4
-    state.explore_specialist_dispatched_count = 3
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
@@ -274,7 +273,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.reset_per_cycle_plateau_state()
 
     assert state.params_no_promote_streak == 0
-    assert state.explore_specialist_dispatched_count == 0
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0
@@ -287,10 +285,10 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0
 
 
-def test_exit_normal_explore_exits_on_plateau():
-    """A bare EXPLORE plateau signal advances to the next lever."""
+def test_exit_normal_optimize_exits_on_plateau():
+    """Both arms dry advances to the next lever."""
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -301,16 +299,18 @@ def test_exit_normal_explore_exits_on_plateau():
         pending_escalate_hint="",
         stop_reason="",
         plateau_overrides={},
+        # Both arms must be dry before the merged phase may leave.
+        framework_agent_phase_done=True,
     )
-    out = exit_normal_explore(state)
+    out = exit_normal_optimize(state)
     assert out is not None
-    assert out[0] == "explore_no_more_leverage"
+    assert out[0] == "optimize_no_more_leverage"
 
 
-def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
-    """``skip_to_kernel`` hint forces ``plateau_explore`` even when the real signals disagree."""
+def test_exit_normal_optimize_skip_to_kernel_hint_short_circuits():
+    """A ``skip_to_kernel`` hint exits even when the arms' own signals disagree."""
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -319,8 +319,8 @@ def test_exit_normal_explore_skip_to_kernel_hint_short_circuits():
         pending_escalate_hint=ESCALATE_HINT_SKIP_TO_KERNEL,
         stop_reason="",
     )
-    out = exit_normal_explore(state)
-    assert out is not None and out[0] == "plateau_explore"
+    out = exit_normal_optimize(state)
+    assert out is not None and out[0] == "optimize_no_more_leverage"
     assert out[1]["evidence"] == "llm_escalation"
 
 
@@ -365,7 +365,7 @@ def test_exit_normal_kernel_after_gemm_does_not_exit():
 
 def test_compute_next_phase_skip_to_close_routes_to_close():
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -405,22 +405,22 @@ def _skip_to_sweep_state(phase: str) -> SimpleNamespace:
     )
 
 
-def test_exit_normal_explore_skip_to_sweep_is_non_terminal():
+def test_exit_normal_optimize_skip_to_sweep_is_non_terminal():
     # skip_to_sweep exhausts the explore lever, non-terminal.
-    out = exit_normal_explore(_skip_to_sweep_state("EXPLORE"))
+    out = exit_normal_optimize(_skip_to_sweep_state("FRAMEWORK_AGENT"))
     assert out is not None
     reason, evidence = out
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == ESCALATE_HINT_SKIP_TO_SWEEP
 
 
 def test_compute_next_phase_skip_to_sweep_from_explore_routes_to_kernel():
     # Exhausted explore leverage switches lever EXPLORE -> KERNEL, non-terminal.
-    out = compute_next_phase(_skip_to_sweep_state("EXPLORE"), kernel_enabled=True)
+    out = compute_next_phase(_skip_to_sweep_state("FRAMEWORK_AGENT"), kernel_enabled=True)
     assert out is not None
     target, reason, evidence = out
     assert target == PHASE_KERNEL_AGENT
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("terminal") is not True
 
 
@@ -558,27 +558,27 @@ def test_kernel_skip_to_sweep_ignores_rejected_or_integrated_attempts():
 
 def test_apply_escalate_budget_bump_lifts_phase_within_cap():
     out = apply_escalate_budget_bump(
-        {"EXPLORE": 0.60},
-        phase="EXPLORE",
+        {"FRAMEWORK_AGENT": 0.60},
+        phase="FRAMEWORK_AGENT",
     )
-    assert out["EXPLORE"] == pytest.approx(
+    assert out["FRAMEWORK_AGENT"] == pytest.approx(
         0.60 + ESCALATE_HINT_BUDGET_BUMP_DELTA,
     )
 
 
 def test_apply_escalate_budget_bump_clamps_to_cap():
     out = apply_escalate_budget_bump(
-        {"EXPLORE": 0.95},
-        phase="EXPLORE",
+        {"FRAMEWORK_AGENT": 0.95},
+        phase="FRAMEWORK_AGENT",
     )
-    assert out["EXPLORE"] == ESCALATE_HINT_BUDGET_BUMP_CAP
+    assert out["FRAMEWORK_AGENT"] == ESCALATE_HINT_BUDGET_BUMP_CAP
 
 
 def test_apply_escalate_budget_bump_ignores_unknown_phase():
-    inp = {"EXPLORE": 0.60}
+    inp = {"FRAMEWORK_AGENT": 0.60}
     out = apply_escalate_budget_bump(inp, phase="NOT_A_PHASE")
     # No bump; returns a normalised copy with all known phases populated.
-    assert out["EXPLORE"] == 0.60
+    assert out["FRAMEWORK_AGENT"] == 0.60
 
 
 def test_set_pending_escalate_hint_accepts_vocab():
@@ -691,9 +691,9 @@ def test_stop_reason_vocab_has_v08_additions():
 
 
 def test_compute_next_phase_advances_on_plateau():
-    """When the EXPLORE plateau judge fires, compute_next_phase routes to KERNEL_AGENT."""
+    """When both arms report dry, compute_next_phase routes to KERNEL_AGENT."""
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -707,10 +707,11 @@ def test_compute_next_phase_advances_on_plateau():
         pending_escalate_hint="",
         stop_reason="",
         plateau_overrides={},
+        framework_agent_phase_done=True,
     )
     target, reason, _ = compute_next_phase(state, kernel_enabled=True)
     assert target == "KERNEL_AGENT"
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     triggered, _ = compute_plateau_explore(state)
     assert triggered is True
 
@@ -718,7 +719,7 @@ def test_compute_next_phase_advances_on_plateau():
 def test_compute_next_phase_honors_explore_plateau_overrides():
     """CLI plateau overrides control the actual phase transition."""
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase="FRAMEWORK_AGENT",
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -734,12 +735,13 @@ def test_compute_next_phase_honors_explore_plateau_overrides():
         pending_escalate_hint="",
         stop_reason="",
         plateau_overrides={"explore_empty_streak": 3},
+        framework_agent_phase_done=True,
     )
 
     target, reason, evidence = compute_next_phase(state, kernel_enabled=True)
 
     assert target == "KERNEL_AGENT"
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     assert evidence["empty_streak_threshold"] == 3
 
 
@@ -769,7 +771,7 @@ def test_collect_phase_breakdown_buckets_by_phase():
         ],
         "phase_history": [
             {"to_phase": "PRELUDE", "ts_unix": 0.0, "reason": "phase_entered"},
-            {"to_phase": "EXPLORE", "ts_unix": 50.0, "reason": "prelude_done"},
+            {"to_phase": "FRAMEWORK_AGENT", "ts_unix": 50.0, "reason": "prelude_done"},
             {"to_phase": "KERNEL_AGENT", "ts_unix": 200.0, "reason": "plateau_explore"},
             {"to_phase": "SWEEP", "ts_unix": 400.0, "reason": "plateau_kernel"},
         ],
@@ -781,8 +783,11 @@ def test_collect_phase_breakdown_buckets_by_phase():
     }
     out = collect_attribution(state, [], [], [])
     pb = out["phase_breakdown"]
+    # The KEEP landed inside FRAMEWORK_AGENT, but it moved a config lever, so
+    # it belongs to the config bucket rather than the upstream-PR one.
     assert pb["explore"]["total_gain_pct"] == 5.0
     assert pb["explore"]["by_domain"]["serving_specialist"] == 5.0
+    assert pb["framework"]["total_gain_pct"] == 0.0
     assert pb["kernel_agent"]["total_gain_pct"] == 7.5
     assert pb["kernel_agent"]["by_kernel_id"]["fmoe_fp8"] == 7.5
     assert pb["prelude"]["total_gain_pct"] == 0.0
@@ -826,7 +831,7 @@ def test_collect_phase_breakdown_skips_zero_or_negative_deltas():
             {"action": "explore", "delta_pct": None, "ts_unix": 110.0},
         ],
         "phase_history": [
-            {"to_phase": "EXPLORE", "ts_unix": 0.0, "reason": "prelude_done"},
+            {"to_phase": "FRAMEWORK_AGENT", "ts_unix": 0.0, "reason": "prelude_done"},
         ],
     }
     out = collect_attribution(state, [], [], [])

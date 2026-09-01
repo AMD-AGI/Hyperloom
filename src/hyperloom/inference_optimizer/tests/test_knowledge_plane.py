@@ -33,14 +33,15 @@ def test_plane_enabled_pr_returns_mcp_url():
 
 
 @pytest.mark.asyncio
-async def test_on_enter_explore_runs_without_plane(tmp_path: Path):
+async def test_on_enter_the_optimisation_phase_runs_without_plane(tmp_path: Path):
     """plane=None must not raise."""
     from hyperloom.orchestrator.loop.coordinator import Coordinator
 
     coord = Coordinator.__new__(Coordinator)
     coord.knowledge_plane = None
     coord.shared_state = _make_bare_shared_state()
-    await coord._on_enter_explore(from_phase="PRELUDE")
+    coord.session_dir = tmp_path
+    await coord._on_enter_framework(from_phase="PRELUDE")
 
 
 def _make_bare_shared_state():
@@ -106,93 +107,6 @@ def test_bootstrap_marker_records_ir3_auto_degrade(tmp_path: Path, monkeypatch):
     payload = json.loads(pr_monitor_status_json(tmp_path).read_text())
     assert payload["enabled"] is False
     assert "ir3_auto" in payload.get("status_text", "")
-
-
-def test_collect_kb_provenance_surfaces_pr_monitor_disabled_warning(tmp_path: Path):
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
-
-    marker = pr_monitor_status_json(tmp_path)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(json.dumps({"enabled": False, "reachable": False, "mcp_url": "", "status_text": "disabled"}))
-    warnings_list: list = []
-    collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=warnings_list)
-    assert "pr_monitor:disabled" in warnings_list
-
-
-def test_collect_kb_provenance_no_warning_when_plane_healthy(tmp_path: Path):
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session.session_paths import pr_monitor_status_json
-
-    marker = pr_monitor_status_json(tmp_path)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    marker.write_text(
-        json.dumps({"enabled": True, "reachable": True, "mcp_url": "http://pr.test/mcp/", "status_text": "ok"})
-    )
-    warnings_list: list = []
-    collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=warnings_list)
-    assert not any(w.startswith("pr_monitor:") for w in warnings_list)
-
-
-def test_collect_kb_provenance_no_warning_when_marker_missing(tmp_path: Path):
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-
-    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
-    assert out["recipe_snapshot_reads"]["count"] == 0
-    assert out["recipe_snapshot_reads"]["hits"] == 0
-
-
-def test_collect_kb_provenance_attributes_recipe_reads_per_source(
-    tmp_path: Path,
-):
-    """Composite per-path provenance is aggregated into by_source / best_config_by_source."""
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
-
-    audit = recipe_snapshot_audit_jsonl(tmp_path)
-    audit.parent.mkdir(parents=True, exist_ok=True)
-    audit.write_text(
-        "\n".join(
-            json.dumps(r)
-            for r in [
-                {
-                    "method": "get_recipe",
-                    "remote": "composite",
-                    "resolution": "remote",
-                    "hit": True,
-                    "result": {"sources": ["gbrain", "recipe_kb"], "best_config_source": "gbrain"},
-                },
-                {
-                    "method": "get_recipe",
-                    "remote": "composite",
-                    "resolution": "remote",
-                    "hit": True,
-                    "result": {"sources": ["recipe_kb"], "best_config_source": "recipe_kb"},
-                },
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    out = collect_kb_provenance(tmp_path, state={}, manifest={}, warnings=[])
-    rs = out["recipe_snapshot_reads"]
-    assert rs["by_source"] == {"gbrain": 1, "recipe_kb": 2}
-    assert rs["best_config_by_source"] == {"gbrain": 1, "recipe_kb": 1}
-
-
-def test_collect_kb_provenance_surfaces_warm_start_recipe_source(
-    tmp_path: Path,
-):
-    """The applied warm recipe's KB path is surfaced from the WarmStartContext source tag."""
-    from hyperloom.inference_optimizer.breakdown.collectors import collect_kb_provenance
-
-    state = {
-        "warm_start_recipe": {"raw": "{}", "tier": "exact", "recipe": {}},
-        "warm_start_context": {"match": {"source": "recipe_kb"}},
-    }
-    out = collect_kb_provenance(tmp_path, state=state, manifest={}, warnings=[])
-    assert out["warm_start_recipe_source"] == "recipe_kb"
 
 
 def _parse_optimize_args(extra: list[str]) -> argparse.Namespace:

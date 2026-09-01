@@ -433,7 +433,7 @@ def _should_use_codex_runner() -> bool:
     An OpenAI-only deployment has no Claude credentials to drive the Claude
     Agent SDK, so the Codex runner is the only one that can execute. The shape
     test itself belongs to :mod:`hyperloom.common.llm_config`, so this cannot
-    disagree with backend selection or the forge fellow.
+    disagree with backend selection or the forge kernel_backend.
     """
     from hyperloom.common import llm_config  # local import: keep module import-light
 
@@ -1643,9 +1643,9 @@ def aggregate_by_source_function(
         if not root.is_dir():
             root = None
 
-    # Both TraceLens routes use the same versioned identity builder. Operation
-    # normalization keeps different kernels in one source separate while
-    # template/shape instances of one operator merge.
+    # Versioned identity builder. Operation normalization keeps different
+    # kernels in one source separate while template/shape instances of one
+    # operator merge.
     groups: dict[str, dict[str, Any]] = {}
     for cand in candidates:
         if not isinstance(cand, dict):

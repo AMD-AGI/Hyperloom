@@ -6,7 +6,7 @@
 A *reference recipe* is an operator-supplied launch script (local path or URL).
 The optimizer lifts its **static, fully-resolved** server flags plus the
 ``export`` lines the denylist allows, and uses them as the lowest-priority base
-for the baseline server args (EXPLORE can still override). The shell is never
+for the baseline server args (the optimisation phase can still override). The shell is never
 executed — anything dynamic (``$VARS``: TP/CONC/ISL/OSL/model/port) is skipped,
 because the optimizer's normal env seeding already owns those.
 """

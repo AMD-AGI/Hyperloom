@@ -369,24 +369,6 @@ async def test_promote_explore_with_winner(coord: Coordinator) -> None:
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_kept(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    await coord._promote_to_shared_state(
-        "framework_agent",
-        {
-            "status": "kept",
-            "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
-            "batch_id": "b1",
-            "delta_pct": 5.0,
-            "output_throughput": 840.0,
-            "workspace": "/tmp/ws",
-        },
-    )
-    assert isinstance(coord.shared_state.framework_agent_phase_progress, list)
-    assert coord.shared_state.framework_agent_phase_progress[-1]["kept"] is True
-
-
-# -- _compose_prompt -------------------------------------------------------
 @pytest.mark.asyncio
 async def test_compose_prompt_orchestration_with_time_budget(coord: Coordinator) -> None:
     coord._run_started_monotonic = time.monotonic() - 60.0
@@ -584,7 +566,7 @@ async def test_escalate_skip_to_close_suppressed_pre_enablement(coord: Coordinat
 @pytest.mark.asyncio
 async def test_escalate_skip_to_close_allowed_after_enablement(coord: Coordinator) -> None:
     """skip_to_close is honored once a baseline exists (guard no longer active)."""
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.baseline_tput = 1234.0
     coord.shared_state.enablement.succeeded = True
     await coord._handle_escalate_strategy_change(
