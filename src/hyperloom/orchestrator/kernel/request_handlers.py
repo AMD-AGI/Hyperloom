@@ -8002,6 +8002,25 @@ async def integrate_handler(
     baseline_executor = BaselineExecutor(session_dir=session_dir)
     from ..state.shared_state import SharedState
 
+    # Read-only, and only to learn whether this session is AgentX. A strict load
+    # that raises here lands AFTER the kernel patch has been applied, so a
+    # truncated or concurrently-written state.json would throw away work that
+    # already succeeded -- to answer an advisory question. Fall back to the env
+    # signal instead: ``agentx_active(None)`` consults HYPERLOOM_AGENTX, which is
+    # the same answer in every case except a run resumed into a shell that lost
+    # the variable, and there the cost is the un-raised timeout we had before.
+    try:
+        _state_for_mode = SharedState.load_or_init(session_dir)
+    except Exception as exc:  # noqa: BLE001 - advisory read, never fatal
+        log.warning(
+            "integrate: could not read session state to detect the benchmark mode "
+            "(%s: %s); falling back to the HYPERLOOM_AGENTX env signal. The applied "
+            "patch is unaffected.",
+            type(exc).__name__,
+            exc,
+        )
+        _state_for_mode = None
+
     rebaseline_timeout_sec = _agentx_rebaseline_timeout(
         _cold_start_rebaseline_timeout(
             _integrate_rebaseline_timeout_sec(
@@ -8009,7 +8028,7 @@ async def integrate_handler(
                 default_timeout_sec=baseline_executor.default_timeout_sec,
             )
         ),
-        shared_state=SharedState.load_or_init(session_dir),
+        shared_state=_state_for_mode,
     )
     fake_task = Task(
         task_id=fake_task_id,

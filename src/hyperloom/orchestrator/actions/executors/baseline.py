@@ -696,6 +696,21 @@ _AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WA
 # cap that is too small kills a round that would have finished.
 AGENTX_CANON_WARMUP_CONC = 8
 
+# Seen (warning, scaling) payloads, so a conc sweep does not reprint them once
+# per rung per arm. Both lines below are derivation commentary: the FIRST one is
+# the diagnosis, the fiftieth is noise that buries the per-variant progress the
+# same session is emitting. Keyed on the formatted payload rather than on a bare
+# flag, so a configuration that actually changes still speaks up.
+_AGENTX_SAID: set[tuple] = set()
+
+
+def _say_once(emit, key: tuple) -> None:
+    """Call ``emit`` the first time this exact payload appears in the process."""
+    if key in _AGENTX_SAID:
+        return
+    _AGENTX_SAID.add(key)
+    emit()
+
 
 def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
     """Read a positive integer from ``src``; 0 when unset or unusable.
@@ -787,16 +802,19 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
     if conc <= anchor:
         return grace
     scaled = (grace * conc) // anchor
-    log.info(
-        "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
-        "(warmup work is linear in CONC; the grace is declared as measured at "
-        "CONC=%d via AGENTX_WARMUP_GRACE_CONC). The floor only raises the bound -- "
-        "an over-large one costs a longer wait on a hung round, an under-sized one "
-        "kills a warmup that would have finished.",
-        grace,
-        scaled,
-        conc,
-        anchor,
+    _say_once(
+        lambda: log.info(
+            "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
+            "(warmup work is linear in CONC; the grace is declared as measured at "
+            "CONC=%d via AGENTX_WARMUP_GRACE_CONC). The floor only raises the bound -- "
+            "an over-large one costs a longer wait on a hung round, an under-sized one "
+            "kills a warmup that would have finished.",
+            grace,
+            scaled,
+            conc,
+            anchor,
+        ),
+        ("grace-scaled", grace, scaled, conc, anchor),
     )
     return scaled
 
@@ -849,18 +867,21 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
             # whole cap before profiling starts. Nothing here can tell such a
             # model apart, so say so rather than let the round be killed
             # mid-warmup by a cap nobody chose.
-            log.warning(
-                "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
-                "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
-                "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
-                "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
-                "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
-                "at concurrency=64 measured warmup alone taking ~12075s. Raise "
-                "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
-                "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
-                overhead,
-                _AGENTX_NON_WARMUP_OVERHEAD_SEC,
-                AGENTX_CANON_WARMUP_GRACE_SEC,
+            _say_once(
+                lambda: log.warning(
+                    "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
+                    "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
+                    "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
+                    "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
+                    "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
+                    "at concurrency=64 measured warmup alone taking ~12075s. Raise "
+                    "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
+                    "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
+                    overhead,
+                    _AGENTX_NON_WARMUP_OVERHEAD_SEC,
+                    AGENTX_CANON_WARMUP_GRACE_SEC,
+                ),
+                ("untuned-overhead", overhead),
             )
     duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
     total = duration + overhead

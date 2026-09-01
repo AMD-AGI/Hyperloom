@@ -272,15 +272,24 @@ def compose_server_args(
     """
     mode = str(args_mode or "append").strip().lower()
     if mode == "replace":
+        raw = merge_server_args(base_extra_args, variant_extra_args)
         pruned_base = remove_server_args(base_extra_args, remove_args)
         pruned_variant = remove_server_args(variant_extra_args, remove_args)
         composed = merge_server_args(pruned_base, pruned_variant)
     else:
         combined_base = merge_server_args(inherited_args, base_extra_args)
+        raw = merge_server_args(combined_base, variant_extra_args)
         pruned = remove_server_args(combined_base, remove_args)
         composed = merge_server_args(pruned, variant_extra_args)
     result = strip_benchmark_harness_flags(composed)
-    _warn_on_damaged_json_values(composed, result)
+    # Compare against the RAW inputs, not against ``composed``. The tripwire
+    # exists to catch a lossy round trip inside ``remove_server_args`` -- and
+    # ``composed`` is already that function's output, so damage done there makes
+    # the "before" side unparseable too, ``healthy_before`` False, and the
+    # tripwire silent on exactly the failure it was written for. The one or two
+    # earlier removal calls are inside the window now. Flags the removal specs
+    # deliberately dropped are not reported: the loop walks what survived.
+    _warn_on_damaged_json_values(raw, result)
     return result
 
 

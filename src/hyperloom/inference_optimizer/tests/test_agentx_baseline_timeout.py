@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import baseline as _baseline
 from hyperloom.orchestrator.actions.executors.baseline import (
     AGENTX_BASELINE_OVERHEAD_SEC,
     AGENTX_CANON_WARMUP_CONC,
@@ -42,6 +43,10 @@ _COLD_CORPUS_SEC = 840  # the client's own "4-14 min" upper bound
 
 
 def _clear(monkeypatch):
+    # The derivation logs each distinct payload once per process so a conc sweep
+    # cannot reprint them per rung. Tests that assert on those lines have to start
+    # from an empty ledger or the second one to use the same inputs sees nothing.
+    _baseline._AGENTX_SAID.clear()
     for k in (
         "HYPERLOOM_AGENTX",
         "AGENTX_DURATION",
@@ -507,3 +512,31 @@ def test_an_exponent_form_whole_number_is_accepted(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "1e3")
     assert agentx_warmup_grace_conc() == 1000
+
+
+def test_the_derivation_logs_do_not_repeat_per_rung(monkeypatch, caplog):
+    """A 8-rung, 2-arm sweep must not print the same eight-line warning 16 times.
+
+    The per-variant progress this PR added is what an operator reads to see the
+    ladder advance; drowning it in a constant is a regression in exactly the
+    thing the logs were added for.
+    """
+    _clear(monkeypatch)
+    with caplog.at_level("INFO"):
+        for _ in range(16):
+            agentx_baseline_timeout_sec()
+    untuned = [r for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
+    assert len(untuned) == 1, f"warned {len(untuned)} times"
+
+
+def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
+    """Deduping on the payload, not on a bare flag: new numbers are new news."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    with caplog.at_level("INFO"):
+        monkeypatch.setenv("CONC", "16")
+        agentx_warmup_grace_sec()
+        monkeypatch.setenv("CONC", "32")
+        agentx_warmup_grace_sec()
+    scaled = [r for r in caplog.records if "scaling the warmup share" in r.getMessage()]
+    assert len(scaled) == 2, [r.getMessage() for r in scaled]
