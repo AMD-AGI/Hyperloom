@@ -1039,6 +1039,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # died mid-step goes stale instead of muting the guard for the next run.
     kernel_inline_step_seen_unix: float = 0.0
 
+    # Which macro cycle's kernel nomination pass has run to completion. A kernel
+    # a nominator looked at and passed over leaves no ledger row, so it stays
+    # "untried" forever and the phase-pending predicate never goes quiet. Stored
+    # as the cycle rather than a bare flag so the next cycle retires it without
+    # anyone having to clear it.
+    kernel_auto_pass_cycle: int | None = None
+
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
 

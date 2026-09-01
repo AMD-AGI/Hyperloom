@@ -1858,6 +1858,36 @@ def collective_integration_pending(state: Any) -> bool:
     return kept and cleanup != "complete"
 
 
+def kernel_auto_pass_complete(state: Any) -> bool:
+    """Whether a nomination pass already ran to completion this macro cycle.
+
+    Stored with the cycle it belongs to rather than as a bare flag, so entering
+    the next cycle retires it without anyone having to remember to clear it.
+
+    Args:
+        state: Shared state carrying the marker and the current cycle.
+
+    Returns:
+        True when this cycle's pass is done.
+    """
+    marker = getattr(state, "kernel_auto_pass_cycle", None)
+    if marker is None:
+        return False
+    try:
+        return int(marker) == int(getattr(state, "macro_cycle", 0) or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def mark_kernel_auto_pass_complete(state: Any) -> None:
+    """Record that this cycle's nomination pass finished, whatever it selected.
+
+    Called for an empty selection too: "nobody wanted anything" is a completed
+    pass, and it is exactly the case the phase used to hang on.
+    """
+    state.kernel_auto_pass_cycle = int(getattr(state, "macro_cycle", 0) or 0)
+
+
 def kernel_work_pending(state: Any) -> bool:
     """Return True while KERNEL has work that can still affect validated gain.
 
@@ -1900,13 +1930,19 @@ def kernel_work_pending(state: Any) -> bool:
         # Optional capability probe; treat a failure as 'not available'.
         pass
 
-    try:
-        untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
-        if callable(untried_hot) and bool(untried_hot()):
-            return True
-    except Exception:
-        # Optional capability probe; treat a failure as 'not available'.
-        pass
+    # A kernel a nominator looked at and passed over leaves no ledger row, is
+    # not rejected, and shares no source with anything integrated -- so it stays
+    # "untried" forever and this predicate never goes quiet. Once a pass has run
+    # to completion for the cycle, its verdict is what counts: a still-untried
+    # kernel means nobody wants it, not that work is outstanding.
+    if not kernel_auto_pass_complete(state):
+        try:
+            untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
+            if callable(untried_hot) and bool(untried_hot()):
+                return True
+        except Exception:
+            # Optional capability probe; treat a failure as 'not available'.
+            pass
 
     rejected = {str(x) for x in (getattr(state, "rejected_kernel_ids", None) or [])}
     integrated_entries: list[dict[str, Any]] = []

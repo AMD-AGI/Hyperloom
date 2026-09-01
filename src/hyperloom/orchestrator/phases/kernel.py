@@ -3613,6 +3613,13 @@ class KernelPhase(PhaseHandler):
                 "error_class": exc.__class__.__name__,
                 "error": repr(exc),
             }
+        finally:
+            # Recorded even for an empty selection or a failure: the phase-exit
+            # predicate hangs on kernels nobody claimed, and a pass that ran is
+            # the only thing that can answer for them.
+            from .machine_state import mark_kernel_auto_pass_complete
+
+            mark_kernel_auto_pass_complete(self.shared_state)
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
