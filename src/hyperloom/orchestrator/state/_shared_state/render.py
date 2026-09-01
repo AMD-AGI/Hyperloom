@@ -208,9 +208,8 @@ class _RenderMixin:
 
         phase = (self.phase or "").strip().upper() or "UNSET"
         elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
-        # ``remaining`` is charged against every entry of this phase, so showing
-        # only the current entry's elapsed time next to it reads as a
-        # contradiction on a re-entered phase: "elapsed_sec=0 remaining_sec=0".
+        # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+        # A re-entered phase needs both to be legible.
         cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
         budget_pct_for_phase = budget.get(phase, 0.0)

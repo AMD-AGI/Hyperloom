@@ -59,6 +59,23 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 # an optimization that never happened.
 _GEAK_RESIDUAL_MIN_RATIO = 1.001
 
+# How many times a session re-runs forge-fusion after it aborted on
+# infrastructure (no git workspace, harness could not be authored). Such a run
+# judged nothing, so reporting it as a result would be wrong and it has to stay
+# retryable -- but the causes do not all heal mid-session, and a retry re-runs
+# LLM discovery before failing in the same place. Two is one free recovery from
+# a transient cause plus the original attempt.
+MAX_FUSION_INFRA_RETRIES = 2
+
+
+def _as_int(value: object) -> int:
+    """Read a counter that round-tripped through JSON, defaulting to 0."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact
@@ -3609,8 +3626,9 @@ class KernelPhase(PhaseHandler):
         """Gate the forge-fusion step in KERNEL entry.
 
         Runs only when: not disabled by ``HYPERLOOM_SKIP_FUSION``, the framework is
-        fusion-eligible (sglang/vllm), a decode trace exists to discover from, and no
-        fusion already succeeded this session (idempotent re-entry).
+        fusion-eligible (sglang/vllm), a decode trace exists to discover from, no
+        fusion already succeeded this session (idempotent re-entry), and forge-fusion
+        has not spent its retries aborting on infrastructure.
         """
         import os
 
@@ -3626,6 +3644,24 @@ class KernelPhase(PhaseHandler):
         last = getattr(self.shared_state, "last_fusion", None)
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
             return False
+        if isinstance(last, dict) and last.get("infrastructure_abort"):
+            # An abort judged nothing, so it must stay retryable -- but not
+            # forever. ``no_git_workspace`` does not heal mid-session, and every
+            # retry re-runs LLM discovery before failing in the same place, so an
+            # uncapped retry spends gateway budget to relearn the same answer.
+            #
+            # Capping is not the old bug returning: the record still reads
+            # ``failed`` with an ``error_class``, so the run is reported as
+            # infrastructure that gave up, not as "this model has no fusion
+            # opportunity".
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            if spent >= MAX_FUSION_INFRA_RETRIES:
+                log.info(
+                    "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
+                    spent,
+                    last.get("error_class") or "unknown",
+                )
+                return False
         return True
 
     async def _maybe_run_forge_fusion_before_kernel_opt(self) -> None:
@@ -4262,6 +4298,16 @@ class KernelPhase(PhaseHandler):
         for the real e2e re-baseline / adopt decision.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        if isinstance(result, dict) and result.get("infrastructure_abort"):
+            # Counted on the session, not on the record: ``last_fusion`` is
+            # replaced by every run, so a timeout or a handler crash landing
+            # between two aborts would carry no count forward and hand the cap
+            # back a clean slate on every other entry.
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            try:
+                self.shared_state.fusion_infra_aborts = spent + 1
+            except Exception:  # noqa: BLE001 - state shape tolerant, as below
+                pass
         try:
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)

@@ -912,6 +912,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # so resume does not rerun a completed fusion loop or lose the adoption audit.
     last_fusion: dict[str, Any] = field(default_factory=dict)
     last_fusion_integrate: dict[str, Any] = field(default_factory=dict)
+    # How many times forge-fusion aborted on infrastructure this session, so KERNEL
+    # entry can stop re-arming a cause that does not heal. Counted here rather than
+    # inside ``last_fusion`` because that record is replaced by every run: an
+    # unrelated failure landing between two aborts would carry no count forward and
+    # silently reset the cap. Monotonic -- every outcome that would justify a reset
+    # already stops the gate on its own.
+    fusion_infra_aborts: int = 0
     # Most recent collective campaign and capped integration audit.
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)

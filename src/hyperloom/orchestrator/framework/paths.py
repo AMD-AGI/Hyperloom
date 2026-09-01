@@ -21,9 +21,8 @@ import re
 import site
 import sys
 import sysconfig
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, NamedTuple
 
 #: Framework-agnostic way to name the source tree a session may patch. Accepted in
 #: addition to ``<FRAMEWORK>_REPO_PATH`` / ``<FRAMEWORK>_DIR``, which keep
@@ -645,222 +644,6 @@ def summarise_framework_root_discovery(roots: str) -> str:
     return " ".join(parts)
 
 
-_WARM_REPLAY_FRAMEWORK_ROOT_TOKENS: tuple[str, ...] = ("sglang", "vllm")
-_WARM_REPLAY_KERNEL_ROOT_TOKENS: tuple[str, ...] = (
-    "aiter",
-    "aiter_meta",
-    "rocm",
-    "flydsl",
-)
-_WARM_REPLAY_FRAMEWORK_STATIC_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/sglang/",
-    "/sgl-workspace/vllm/",
-)
-_WARM_REPLAY_KERNEL_STATIC_ROOTS: tuple[str, ...] = (
-    "/sgl-workspace/aiter/",
-    _AITER_META_CSRC_ROOT,
-    *_ROCM_HIP_SOURCE_ROOTS,
-    *_FLYDSL_DEFAULT_ROOTS,
-)
-
-
-_WARM_REPLAY_PATCH_PATH_KEYS: tuple[str, ...] = (
-    "patch_ref",
-    "patch_path",
-    "patch_file",
-)
-
-
-class WarmReplayRootResolution(NamedTuple):
-    """Result of resolving one warm-replay patch apply root."""
-
-    root: str
-    source: str
-    reason: str
-    allowlist: tuple[str, ...]
-
-
-class WarmReplayPatchSource(NamedTuple):
-    """One warm-replay patch, as a file on disk and/or an inline diff."""
-
-    path: Path | None
-    content: str
-
-
-def warm_replay_patch_sources(
-    entries: Iterable[Any] | None = None,
-    patch_paths: Sequence[Path] | None = None,
-) -> tuple[WarmReplayPatchSource, ...]:
-    """Collect patch files and inline diffs from warm-replay patch entries.
-
-    Args:
-        entries: Warm-recipe patch rows, each naming a file and/or an inline
-            diff. Rows carrying neither are skipped.
-        patch_paths: Additional patch files with no row of their own.
-
-    Returns:
-        One source per usable patch, entries first.
-    """
-    sources: list[WarmReplayPatchSource] = []
-    for entry in entries or ():
-        if not isinstance(entry, dict):
-            continue
-        path: Path | None = None
-        for key in _WARM_REPLAY_PATCH_PATH_KEYS:
-            raw = str(entry.get(key) or "").strip()
-            if raw:
-                path = Path(raw)
-                break
-        content = str(entry.get("patch_content") or "")
-        if path is None and not content.strip():
-            continue
-        sources.append(WarmReplayPatchSource(path=path, content=content))
-    sources.extend(
-        WarmReplayPatchSource(path=Path(str(path)), content="") for path in (patch_paths or ()) if str(path).strip()
-    )
-    return tuple(sources)
-
-
-def _root_path_matches_tokens(root: str, tokens: tuple[str, ...]) -> bool:
-    normalized = root.lower().rstrip("/")
-    return any(f"/{token}/" in f"{normalized}/" for token in tokens)
-
-
-def _filter_roots_by_tokens(
-    roots: Sequence[str],
-    tokens: tuple[str, ...],
-) -> tuple[str, ...]:
-    return tuple(root for root in roots if root and _root_path_matches_tokens(root, tokens))
-
-
-def _warm_replay_framework_patch_roots() -> tuple[str, ...]:
-    """Return sglang/vllm roots warm-replay framework patches may target."""
-    return _merge_roots(
-        _WARM_REPLAY_FRAMEWORK_STATIC_ROOTS,
-        _filter_roots_by_tokens(
-            _discover_installed_framework_roots(),
-            _WARM_REPLAY_FRAMEWORK_ROOT_TOKENS,
-        ),
-    )
-
-
-def _warm_replay_kernel_patch_roots() -> tuple[str, ...]:
-    """Return aiter/ROCm/FlyDSL roots warm-replay kernel patches may target."""
-    return _merge_roots(
-        _WARM_REPLAY_KERNEL_STATIC_ROOTS,
-        _filter_roots_by_tokens(
-            _discover_installed_framework_roots(),
-            _WARM_REPLAY_KERNEL_ROOT_TOKENS,
-        ),
-    )
-
-
-def _patch_source_diff(source: WarmReplayPatchSource) -> str:
-    """Return the diff text used for target matching, or ``""`` when unavailable.
-
-    An entry may carry its diff inline instead of on disk, so a ``patch_*`` ref
-    that names no local file is not by itself evidence against a root.
-    Falls back to the inline content on any I/O error so a deleted previous-session
-    patch does not abort the caller (consistent with the is_file() fallback above).
-    """
-    if source.path is None or not source.path.is_file():
-        return source.content
-    try:
-        return source.path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return source.content
-
-
-def _resolve_warm_replay_patch_root(
-    *,
-    patch_sources: Sequence[WarmReplayPatchSource],
-    allowlist: tuple[str, ...],
-    missing_patch_reason: str,
-    missing_allowlist_reason: str,
-    explicit_root: str | None = None,
-) -> WarmReplayRootResolution:
-    from hyperloom.orchestrator.specialists.patch_safety import (
-        resolve_patch_apply_root,
-    )
-
-    diffs = [diff for diff in (_patch_source_diff(source) for source in patch_sources) if diff.strip()]
-    candidate_roots = tuple(Path(candidate.rstrip("/")) for candidate in allowlist)
-    from_env = bool(explicit_root)
-    resolution = resolve_patch_apply_root(
-        diffs,
-        explicit_root=Path(explicit_root.rstrip("/")) if explicit_root else None,
-        candidate_roots=candidate_roots,
-    )
-    # The declared root is preferred, not mandatory: a session pointed at one
-    # framework can still hold a replayable patch for a sibling tree.
-    if resolution.root is None and resolution.reason == "explicit_root_target_mismatch":
-        from_env = False
-        resolution = resolve_patch_apply_root(
-            diffs,
-            explicit_root=None,
-            candidate_roots=candidate_roots,
-        )
-    if resolution.root is not None:
-        return WarmReplayRootResolution(
-            root=_normalize_root(str(resolution.root)),
-            source="env" if from_env else "allowlist",
-            reason="",
-            allowlist=() if from_env else allowlist,
-        )
-    reason = {
-        "patch_content_missing": missing_patch_reason,
-        # Only these two are about the allowlist: nothing offered, nothing
-        # matched. Any other reason keeps its own wording, which names a fault
-        # the allowlist message would misdirect from.
-        "no_candidate_roots": missing_allowlist_reason,
-        "no_matching_root": missing_allowlist_reason,
-    }.get(resolution.reason, resolution.reason)
-    return WarmReplayRootResolution(
-        root="",
-        source="",
-        reason=reason,
-        allowlist=allowlist,
-    )
-
-
-def resolve_warm_replay_framework_root(
-    *,
-    patch_paths: Sequence[Path] | None = None,
-    patch_entries: Iterable[Any] | None = None,
-) -> WarmReplayRootResolution:
-    """Resolve the framework patch root for warm replay (env first, then allowlist)."""
-    return _resolve_warm_replay_patch_root(
-        patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
-        allowlist=_warm_replay_framework_patch_roots(),
-        missing_patch_reason="warm_replay_patch_content_missing",
-        missing_allowlist_reason="framework_patch_root_not_in_allowlist",
-        explicit_root=resolve_session_framework_root() or None,
-    )
-
-
-def resolve_warm_replay_kernel_root(
-    *,
-    patch_paths: Sequence[Path] | None = None,
-    patch_entries: Iterable[Any] | None = None,
-    precomputed_allowlist: tuple[str, ...] | None = None,
-) -> WarmReplayRootResolution:
-    """Resolve the kernel patch root from the kernel-specific allowlist.
-
-    Args:
-        patch_paths: Patch file paths to resolve.
-        patch_entries: KB plan entry dicts to resolve.
-        precomputed_allowlist: Pre-resolved allowlist tuple, used to avoid
-            re-running the filesystem discovery when the caller iterates many
-            entries. When absent, the allowlist is computed fresh.
-    """
-    return _resolve_warm_replay_patch_root(
-        patch_sources=warm_replay_patch_sources(patch_entries, patch_paths),
-        allowlist=precomputed_allowlist if precomputed_allowlist is not None else _warm_replay_kernel_patch_roots(),
-        missing_patch_reason="active_kernel_patch_root_missing",
-        missing_allowlist_reason="kernel_patch_root_not_in_allowlist",
-    )
-
-
 # A profile trace names a frame as ``<path>(<line>): <function>``. The suffix is
 # not part of the path and the path is relative to the tree being profiled.
 _TRACE_FRAME_SUFFIX = re.compile(r"\(\d+\)\s*:.*$")
@@ -936,8 +719,6 @@ def source_file_candidates(value: str) -> tuple[str, ...]:
 
 __all__ = [
     "FRAMEWORK_SOURCE_PACKAGES",
-    "WarmReplayPatchSource",
-    "WarmReplayRootResolution",
     "probe_framework_source_roots_for_env",
     "resolve_framework_tree",
     "resolve_kernel_search_roots",
@@ -945,10 +726,7 @@ __all__ = [
     "resolve_rocm_hip_source_roots",
     "resolve_session_framework_root",
     "resolve_source_file_allowlist",
-    "resolve_warm_replay_framework_root",
-    "resolve_warm_replay_kernel_root",
     "resolved_within",
     "source_file_candidates",
     "summarise_framework_root_discovery",
-    "warm_replay_patch_sources",
 ]

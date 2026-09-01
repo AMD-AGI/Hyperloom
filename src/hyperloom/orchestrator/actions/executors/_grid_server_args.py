@@ -100,6 +100,17 @@ def merge_server_args(*parts: str | None) -> str:
     return " ".join(str(p).strip() for p in parts if str(p or "").strip())
 
 
+def _unquote_token(token: str) -> str:
+    """Drop one layer of matching shell quotes from a non-POSIX-split token.
+
+    The removal specs are still POSIX-split, so they arrive unquoted; this puts
+    both sides of a pair comparison in the same shape.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
@@ -108,12 +119,20 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     token shape; ``"--foo bar"`` removes the exact flag/value pair. Unknown /
     unparseable inputs are left untouched rather than guessed.
     """
-    args = str(server_args or "").strip()
+    # Compact the JSON values first, then split without POSIX quote processing.
+    # Compacting leaves every JSON value as one whitespace-free word, so the
+    # non-POSIX split keeps it whole AND keeps its inner double quotes, which
+    # the POSIX split eats (``{"a":"b"}`` -> ``{a:b}``, rejected by vLLM's
+    # ``json.loads`` at boot). Re-quoting afterwards cannot recover every value:
+    # _repair_unquoted_json has to guess where the quotes went, and atom's
+    # ``--online_quant_config`` wildcards (``*.mlp.gate``) fall outside that
+    # guess, so they reached the server unparseable.
+    args = _reserialize_json_blobs(str(server_args or "").strip())
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
     try:
-        tokens = shlex.split(args)
+        tokens = shlex.split(args, posix=False)
     except ValueError:
         return args
 
@@ -148,12 +167,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
         if flag and "=" in tok:
             _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, value) in remove_pairs:
+            if _flag in remove_flags or (_flag, _unquote_token(value)) in remove_pairs:
                 i += 1
                 continue
         if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
             value = tokens[i + 1]
-            if flag in remove_flags or (flag, value) in remove_pairs:
+            if flag in remove_flags or (flag, _unquote_token(value)) in remove_pairs:
                 i += 2
                 continue
         if flag and flag in remove_flags:
@@ -161,11 +180,9 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    # ``shlex.split`` above strips the inner double quotes of any JSON-valued
-    # flag (``--compilation-config {"cudagraph_mode":"FULL"}`` ->
-    # ``{cudagraph_mode:FULL}``); re-quote/compact the JSON blobs so removal
-    # never corrupts a sibling flag that vLLM parses with ``json.loads``.
-    return _reserialize_json_blobs(" ".join(out))
+    # No re-serialisation on the way out: the non-POSIX split kept every token
+    # byte-for-byte, so re-joining the survivors cannot corrupt a sibling flag.
+    return " ".join(out)
 
 
 # Serving-ineligible harness flags. Enroll here; compose_server_args strips them
