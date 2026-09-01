@@ -1054,11 +1054,13 @@ def build_kernel_optimization_summary(
         by_kernel.append(_render_collective_attempt_row(collective_attempt, category))
 
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
+    dispatch_skip = dict(getattr(state, "last_kernel_opt_dispatch_skip", {}) or {})
     top_takeaways = _build_top_takeaways(
         counts=counts,
         by_kernel=by_kernel,
         rejection_breakdown=rejection_breakdown,
         failure_reason_breakdown=failure_reason_breakdown,
+        dispatch_skip=dispatch_skip,
     )
 
     return {
@@ -1072,7 +1074,7 @@ def build_kernel_optimization_summary(
         "unattempted_reason_breakdown": unattempted_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
         # Non-failure breadcrumb for a wholesale dispatch skip; {} otherwise.
-        "dispatch_skip_reason": dict(getattr(state, "last_kernel_opt_dispatch_skip", {}) or {}),
+        "dispatch_skip_reason": dispatch_skip,
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
@@ -1302,6 +1304,7 @@ def _build_top_takeaways(
     by_kernel: list[dict[str, Any]],
     rejection_breakdown: dict[str, int],
     failure_reason_breakdown: dict[str, int],
+    dispatch_skip: dict[str, Any] | None = None,
 ) -> list[str]:
     """Deterministic 2-4 sentence summary, no LLM.
 
@@ -1310,6 +1313,8 @@ def _build_top_takeaways(
         by_kernel: The per-kernel summary rows.
         rejection_breakdown: Counts of rejection reasons.
         failure_reason_breakdown: Counts of failure modes.
+        dispatch_skip: The recorded wholesale dispatch-skip breadcrumb, used to
+            name the reason instead of guessing at it.
 
     Returns:
         A list of takeaway sentences.
@@ -1325,9 +1330,19 @@ def _build_top_takeaways(
             f"{integrated} of {attempted} attempted kernels reached KEEP and integrated; {rejected} were rejected."
         )
     else:
-        out.append(
-            "No kernels were attempted in this session (check if kernel_opt was disabled or no candidates qualified)."
-        )
+        # The reason is recorded, so state it. Guessing between "disabled" and
+        # "nothing qualified" left the third case -- the candidate table was
+        # never produced, so nothing was ever asked -- unrepresented, and a
+        # reader with every bucket at zero concluded the workload had no
+        # headroom.
+        skip_reason = str((dispatch_skip or {}).get("reason") or "")
+        if skip_reason:
+            out.append(f"No kernels were attempted in this session: kernel_opt was never dispatched ({skip_reason}).")
+        else:
+            out.append(
+                "No kernels were attempted in this session "
+                "(check if kernel_opt was disabled or no candidates qualified)."
+            )
 
     ladder_all = failure_reason_breakdown.get("ladder_all_failed", 0)
     if ladder_all >= 1:

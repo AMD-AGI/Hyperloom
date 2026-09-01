@@ -67,6 +67,17 @@ _GEAK_RESIDUAL_MIN_RATIO = 1.001
 # a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
+# Why KERNEL entry dispatched no kernel_opt at all, recorded on
+# ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
+# ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
+# unattempted buckets, which only ever count kernels the candidate table
+# listed: an absent table leaves every bucket at zero, which reads as "this
+# workload had nothing worth optimising" rather than "nothing was ever asked".
+KERNEL_OPT_SKIP_DISABLED = "auto_kernel_opt_disabled"
+KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE = "no_candidate_table"
+KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS = "no_untried_hot_kernels"
+KERNEL_OPT_SKIP_NO_CANDIDATES_PATH = "no_candidates_path"
+
 
 def _as_int(value: object) -> int:
     """Read a counter that round-tripped through JSON, defaulting to 0."""
@@ -3553,6 +3564,66 @@ class KernelPhase(PhaseHandler):
         await self._maybe_run_collective_before_kernel_opt()
         if self._kernel_opt_work_remains():
             await self._run_kernel_opt_entry_batch()
+        else:
+            self._record_kernel_opt_dispatch_skip(self._kernel_opt_dispatch_skip_reason())
+
+    def _kernel_opt_dispatch_skip_reason(self) -> str:
+        """Name why the phase is declining to dispatch kernel_opt itself.
+
+        Separates the three states :meth:`_kernel_opt_work_remains` collapses
+        into one ``False``: the feature is off, no candidate table was ever
+        produced, or the table's hot kernels have all been tried.
+
+        Returns:
+            str: One of ``auto_kernel_opt_disabled`` /
+                ``no_candidate_table`` / ``no_untried_hot_kernels``.
+        """
+        state = self.shared_state
+        if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
+            return KERNEL_OPT_SKIP_DISABLED
+        cached = getattr(state, "last_trace_analyze", None)
+        if not isinstance(cached, dict) or not cached:
+            return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
+        return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
+
+    def _record_kernel_opt_dispatch_skip(self, reason: str) -> None:
+        """Record why KERNEL entry skipped the whole kernel_opt batch.
+
+        The summary's unattempted buckets each mean "the candidate table listed
+        this kernel and nobody tried it", so a run whose table never
+        materialised counts zero in every bucket and reads as "nothing here was
+        worth optimising". Both skip paths return before ``run_optimization``
+        is called, so ``record_kernel_opt`` -- this field's other writer --
+        never runs to say otherwise.
+
+        The evidence fields carry the state the decision was made on, so the
+        report answers "why was the table empty" without a state.json dig.
+
+        Args:
+            reason: One of the ``KERNEL_OPT_SKIP_*`` reason codes.
+        """
+        state = self.shared_state
+        cached = getattr(state, "last_trace_analyze", None)
+        cached = cached if isinstance(cached, dict) else {}
+        try:
+            streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
+        except (TypeError, ValueError):
+            streak = 0
+        state.last_kernel_opt_dispatch_skip = {
+            "reason": reason,
+            "candidates_path": str(cached.get("candidates_path") or ""),
+            "trace_analyze_empty": not cached,
+            "profile_trace": str(getattr(state, "last_profile_trace", "") or ""),
+            "profile_status": str(getattr(state, "last_profile_status", "") or ""),
+            "roofline_failure_streak": streak,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+        log.info(
+            "KERNEL entry: no kernel_opt dispatch (reason=%s, trace_analyze_empty=%s, roofline_failure_streak=%d)",
+            reason,
+            not cached,
+            streak,
+        )
 
     def _kernel_opt_work_remains(self) -> bool:
         """Whether KERNEL entry should dispatch source-level kernel_opt itself.
@@ -3581,6 +3652,7 @@ class KernelPhase(PhaseHandler):
         candidates_path = str(cached.get("candidates_path") or "")
         if not candidates_path:
             log.info("KERNEL entry: skip kernel_opt; no candidates_path")
+            self._record_kernel_opt_dispatch_skip(KERNEL_OPT_SKIP_NO_CANDIDATES_PATH)
             return
         log.info(
             "KERNEL entry: dispatching the source-level kernel_opt batch",

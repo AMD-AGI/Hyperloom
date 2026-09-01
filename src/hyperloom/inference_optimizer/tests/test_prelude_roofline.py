@@ -431,6 +431,81 @@ async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: 
     assert dispatched == 0
 
 
+@pytest.mark.asyncio
+async def test_kernel_entry_records_why_it_dispatched_nothing(coord: Coordinator, monkeypatch):
+    """A wholesale dispatch skip has to name itself.
+
+    ``untried_hot_reusable_kernels`` reads the candidate table, so a session
+    whose trace_analyze never landed one takes this path -- and left no trace of
+    having done so. The summary's unattempted buckets only count kernels the
+    table listed, so all six stayed at zero and a 28-hour run with no candidate
+    table read exactly like a workload with no headroom.
+    """
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    coord.shared_state.last_trace_analyze = {}
+    coord.shared_state.roofline_failure_streak = 3
+
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+
+    skip = coord.shared_state.last_kernel_opt_dispatch_skip
+    assert skip.get("reason") == "no_candidate_table", (
+        "an absent candidate table must be named; without it the summary "
+        "reports six zero buckets and reads as 'nothing worth optimising'"
+    )
+    assert skip.get("trace_analyze_empty") is True
+    assert skip.get("roofline_failure_streak") == 3
+    assert skip.get("ts")
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_separates_an_empty_table_from_a_spent_one(coord: Coordinator, monkeypatch):
+    """A table whose kernels were all tried is not the same as no table."""
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
+    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
+    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
+    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
+
+    async def _skip_reprofile() -> None:
+        return None
+
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
+    # A snapshot exists; the dispatch floor is what declines it.
+    coord.shared_state.last_trace_analyze = {
+        "candidates_path": "/tmp/kernel_candidates.json",
+        "kernel_roofline_top15": [],
+    }
+
+    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+
+    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_untried_hot_kernels"
+
+
+@pytest.mark.asyncio
+async def test_kernel_entry_records_a_snapshot_without_a_candidates_artifact(
+    coord: Coordinator,
+    monkeypatch,
+):
+    """The batch's own guard is a third distinct state worth naming."""
+    monkeypatch.setattr(
+        coord.phase_kernel.shared_state,
+        "last_trace_analyze",
+        {"kernel_roofline_top15": [{"kernel_id": "k001"}]},
+        raising=False,
+    )
+
+    await coord.phase_kernel._run_kernel_opt_entry_batch()
+
+    assert coord.shared_state.last_kernel_opt_dispatch_skip.get("reason") == "no_candidates_path"
+
+
 def test_a_trace_recorded_with_task_params_is_not_stale(coord: Coordinator):
     """The two writers of ``last_profile_workload`` disagree by construction.
 
