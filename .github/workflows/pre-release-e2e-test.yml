@@ -25,7 +25,9 @@ name: Pre-release E2E test
 # Variables (non-secret): PRE_E2E_SAFE_API_BASE, PRE_E2E_SAFE_WORKSPACE_ID,
 #   PRE_E2E_AUTHORING_IMAGE, PRE_E2E_NFS_ROOT, PRE_E2E_MODEL_3H_PATH,
 #   PRE_E2E_MODEL_12H_PATH, PRE_E2E_CLAUDE_MODEL, PRE_E2E_CLAUDE_CLI_VERSION,
-#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_SAFE_INSECURE.
+#   (optional) PRE_E2E_ANTHROPIC_BASE_URL, PRE_E2E_SAFE_INSECURE,
+#   PRE_E2E_SAFE_CACERT (path to a CA bundle on the runner; takes precedence over
+#   PRE_E2E_SAFE_INSECURE, which defaults to 1 and skips certificate verification).
 #   PRE_E2E_ANTHROPIC_CUSTOM_HEADERS is NOT required: when a gateway base URL is set,
 #   the bootstrap defaults the AMD APIM header to
 #   `Ocp-Apim-Subscription-Key: ${ANTHROPIC_API_KEY}` (the value is just the key,
@@ -267,6 +269,10 @@ jobs:
       SAFE_API_BASE: ${{ vars.PRE_E2E_SAFE_API_BASE }}
       SAFE_API_KEY: ${{ secrets.PRE_E2E_SAFE_API_KEY }}          # ADMIN token (privileged pod)
       SAFE_WORKSPACE_ID: ${{ vars.PRE_E2E_SAFE_WORKSPACE_ID }}
+      # A CA bundle wins over skip-verify (same precedence as ci-e2e / forge-e2e). Unset
+      # leaves today's behaviour untouched; setting it is how this stops sending an admin
+      # token over an unverified connection, which is what SAFE_INSECURE=1 does.
+      SAFE_CACERT: ${{ vars.PRE_E2E_SAFE_CACERT }}
       SAFE_INSECURE: ${{ vars.PRE_E2E_SAFE_INSECURE || '1' }}
       AUTHORING_IMAGE: ${{ vars.PRE_E2E_AUTHORING_IMAGE }}
       # models + agent

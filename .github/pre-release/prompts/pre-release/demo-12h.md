@@ -8,8 +8,10 @@ its exact default flags.
 
 ## Flags
 
-- **OVERRIDE:** use `--target-gain 100` (NOT the skill's default of 50). This shapes
-  optimize prompts only; the poll gate judges PASS/FAIL from `stop_reason`, not gain.
+- **OVERRIDE:** use `--target-gain 100` (NOT the skill's default of 50). It is set out of
+  reach on purpose: the run must not converge early on the skill's own target, so the full
+  phase sequence gets exercised. This shapes optimize prompts only; the poll gate judges
+  PASS/FAIL from `stop_reason`, not gain, so 100 is not a performance goal to chase.
 - Keep every other required flag exactly as the skill defines them:
 
   ```
