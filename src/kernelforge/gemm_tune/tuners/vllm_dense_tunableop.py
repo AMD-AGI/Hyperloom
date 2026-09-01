@@ -13,6 +13,7 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
 from .base import BaseTuner, TuneResult
 from ..utils import TUNER_ENV_VARS, run_subprocess
@@ -34,6 +35,37 @@ _TUNABLEOP_OP_BY_PRECISION = {
     "float16": "GemmTunableOp_Half_TN",
     "bfloat16": "GemmTunableOp_BFloat16_TN",
 }
+
+# The activation dtype aiter logs per lookup, which the demand parser carries
+# through as ``shape["dtype"]``. This is the authoritative record type for a
+# shape: a checkpoint's ``precision`` describes how the WEIGHTS are stored, not
+# what the dense GEMM runs in. On a Quark MX-FP4 checkpoint every one of the
+# 21056 dense lookups in a real serving log is ``dtype='torch.bfloat16'``, so
+# keying off ``ctx.precision`` alone found no record type and discarded the
+# whole demand file.
+_TUNABLEOP_OP_BY_DTYPE = {
+    "bfloat16": "GemmTunableOp_BFloat16_TN",
+    "bf16": "GemmTunableOp_BFloat16_TN",
+    "float16": "GemmTunableOp_Half_TN",
+    "half": "GemmTunableOp_Half_TN",
+    "fp16": "GemmTunableOp_Half_TN",
+}
+
+
+def _tunableop_op_for_dtype(raw: Any) -> str | None:
+    """Map a logged torch dtype to a TunableOp record type, or ``None``.
+
+    Accepts the ``torch.`` prefix and surrounding quotes as they appear in the
+    serving log. Unknown dtypes (fp8, fp4, int4, ...) return ``None`` rather
+    than being coerced to a floating-point record type: TunableOp keys on the
+    record type, so guessing would tune a shape the runtime never asks for.
+    """
+    text = str(raw or "").strip().strip("\"'").lower()
+    if not text:
+        return None
+    if text.startswith("torch."):
+        text = text[len("torch.") :]
+    return _TUNABLEOP_OP_BY_DTYPE.get(text)
 
 # Demand can list thousands of distinct keys; TunableOp times each one against
 # every hipBLASLt solution, so the whole run would be spent on one tuner.
@@ -281,23 +313,39 @@ class VllmDenseTunableopTuner(BaseTuner):
         if not shapes:
             return None
 
+        # Per-shape dtype first, ctx.precision only as a fallback for shapes the
+        # demand parser recorded without one. A checkpoint precision that has no
+        # record type (mxfp4, fp8) is no longer fatal on its own -- the shapes
+        # carry the dtype the GEMM actually ran in.
         precision = str(getattr(self.ctx, "precision", "") or "bf16").lower()
-        op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
-        if op is None:
-            log.warning(
-                "%s: no TunableOp record type for precision %r, so demand cannot be turned into an input file",
-                self.name,
-                precision,
-            )
-            return None
+        fallback_op = _TUNABLEOP_OP_BY_PRECISION.get(precision)
 
         lines = []
+        unsupported: dict[str, int] = {}
         for shape in shapes:
             try:
                 m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
             except (KeyError, TypeError, ValueError):
                 continue
+            op = _tunableop_op_for_dtype(shape.get("dtype") or shape.get("otype")) or fallback_op
+            if op is None:
+                label = str(shape.get("dtype") or shape.get("otype") or f"precision={precision}")
+                unsupported[label] = unsupported.get(label, 0) + 1
+                continue
             lines.append(tunableop_untuned_line(m, n, k, op))
+        if unsupported:
+            detail = ", ".join(f"{k} x{v}" for k, v in sorted(unsupported.items()))
+            log.warning(
+                "%s: %d demand shape(s) skipped, no TunableOp record type for %s",
+                self.name,
+                sum(unsupported.values()),
+                detail,
+            )
+            if not lines:
+                # Every shape was an unsupported dtype. The demand file was read
+                # and understood, so this is "nothing here for this tuner", not
+                # a missing input; run() reports it as skipped.
+                self._demand_skip_reason = f"no TunableOp record type for {detail}"
         if not lines:
             return None
 
@@ -322,8 +370,21 @@ class VllmDenseTunableopTuner(BaseTuner):
             return self.ctx.shapes_json
         return self._input_from_demand()
 
+    # Set by _input_from_demand when the demand file parsed fine but carried no
+    # shape this tuner has a record type for. Distinguishes "nothing to do" from
+    # "the input never arrived".
+    _demand_skip_reason: str = ""
+
     def run(self) -> TuneResult:
         input_file = self._resolve_input()
+        if input_file is None and self._demand_skip_reason:
+            log.info("%s: skipped -- %s", self.name, self._demand_skip_reason)
+            return TuneResult(
+                tuner_name=self.name,
+                status="skipped",
+                error=self._demand_skip_reason,
+                error_class="unsupported_precision",
+            )
         if input_file is None:
             # Say which sources were offered and why none produced a file. The
             # bare "No valid input file found" cost a real run: the router had
