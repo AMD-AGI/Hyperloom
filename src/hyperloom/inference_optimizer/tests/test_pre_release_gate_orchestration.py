@@ -356,6 +356,29 @@ def test_an_unreachable_api_is_not_mistaken_for_a_missing_phase(poll_script: str
     assert err.strip(), "curl's diagnosis must be kept, not sent to /dev/null"
 
 
+def test_nothing_is_dispatched_before_the_staged_artifacts_are_checked(workflow: dict) -> None:
+    """`reuse` skips the build job, so the wheel/bootstrap/prompts may not be there at all.
+
+    In-pod the wheel check sits behind an apt and an npm install, and a failed leg's pod
+    (with its stdout) is deleted, so the whole set fails slowly and says nothing useful.
+    """
+    steps = workflow["jobs"]["run"]["steps"]
+    names = [s.get("name") or s.get("uses") or "" for s in steps]
+    verify = next(i for i, n in enumerate(names) if n.startswith("Verify the staged"))
+    dispatch = next(i for i, n in enumerate(names) if n.startswith("Dispatch"))
+    assert verify < dispatch, "the check must gate dispatch, not follow it"
+    body = steps[verify]["run"]
+    assert "manifest.json" in body
+    assert "hyperloom_inference_optimizer-*.whl" in body
+    assert "bootstrap-pre-release.sh" in body
+    for prompt in ("demo-3h", "demo-12h", "setup-baremetal-vllm", "setup-docker-sglang"):
+        assert prompt in body
+    assert "exit 1" in body
+    # A reused version carries that build's scripts, not this branch's; say so.
+    assert "git_sha" in body
+    assert 'if [ -n "${REUSE:-}" ]; then' in body
+
+
 def test_a_manual_run_still_gets_per_leg_checks(workflow: dict, poll_script: str) -> None:
     """An empty SHA silently disabled every status and the report, with nothing logged."""
     sha = workflow["jobs"]["run"]["env"]["GH_STATUS_SHA"]

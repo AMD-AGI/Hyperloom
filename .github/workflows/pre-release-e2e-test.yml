@@ -322,6 +322,57 @@ jobs:
           command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
           echo "DISPATCH_MAP=${RUNNER_TEMP}/pre_release_dispatch.json" >> "$GITHUB_ENV"
 
+      - name: Verify the staged wheel, bootstrap and prompts
+        # The pods read all three off NFS, so anything missing is only discovered inside
+        # them -- and only AFTER the pod has been scheduled, the ROCm image pulled, jq
+        # apt-installed and the Claude CLI npm-installed, because the wheel check sits
+        # behind those in bootstrap's entry. All 8 legs then report the same
+        # "state.json missing (workload phase=Failed)", which names none of this, and SaFE
+        # deletes a failed leg's pod (with its stdout) before anyone can look. `reuse`
+        # skips the build job that publishes them, so it is the way to arrive here with
+        # nothing staged: a wrong version string, or a cleaned-up NFS dir. Cost of
+        # checking: four stats, no GPU claimed.
+        env:
+          NFS_ROOT: ${{ vars.PRE_E2E_NFS_ROOT }}
+          REUSE: ${{ needs.resolve.outputs.reuse }}
+        run: |
+          set -euo pipefail
+          : "${NFS_ROOT:?PRE_RELEASE_NFS_ROOT var is required}"
+          wheel_dir="${NFS_ROOT%/}/wheels/${CI_VERSION}"
+          boot_dir="${NFS_ROOT%/}/bootstrap/${CI_VERSION}"
+          missing=""
+          [ -f "$wheel_dir/manifest.json" ] || missing="${missing}\n  - $wheel_dir/manifest.json"
+          ls "$wheel_dir"/hyperloom_inference_optimizer-*.whl >/dev/null 2>&1 \
+            || missing="${missing}\n  - a wheel in $wheel_dir"
+          [ -f "$boot_dir/bootstrap-pre-release.sh" ] || missing="${missing}\n  - $boot_dir/bootstrap-pre-release.sh"
+          for p in demo-3h demo-12h setup-baremetal-vllm setup-baremetal-sglang \
+                   setup-docker-vllm setup-docker-sglang; do
+            [ -f "$boot_dir/prompts/pre-release/${p}.md" ] \
+              || missing="${missing}\n  - $boot_dir/prompts/pre-release/${p}.md"
+          done
+          if [ -n "$missing" ]; then
+            {
+              echo "❌ **Nothing to run:** \`CI_VERSION=${CI_VERSION}\` is not staged on NFS."
+              echo ""
+              echo "Missing:"
+              printf '%b\n' "$missing"
+            } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}" >&2
+            exit 1
+          fi
+          # A reused version brings that build's bootstrap and prompts with it, not this
+          # branch's -- the build job that would restage them is skipped. Say whose code
+          # is about to run, so "I reused a wheel to test my script change" cannot pass
+          # silently on the old script.
+          if [ -n "${REUSE:-}" ]; then
+            sha="$(jq -r '.git_sha // "unknown"' "$wheel_dir/manifest.json")"
+            rid="$(jq -r '.github_run_id // "unknown"' "$wheel_dir/manifest.json")"
+            {
+              echo "♻️ Reusing \`${CI_VERSION}\`: the pods will run the bootstrap and prompts"
+              echo "staged by run \`${rid}\` from commit \`${sha}\`, NOT this branch's copies."
+            } | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+          fi
+          echo "staged wheel + bootstrap + 6 prompts present for $CI_VERSION"
+
       - name: Dispatch SaFE Authoring workloads
         run: |
           chmod +x .github/scripts/pre-release-e2e-dispatch.sh
