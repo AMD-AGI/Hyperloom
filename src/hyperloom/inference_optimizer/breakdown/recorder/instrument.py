@@ -4199,7 +4199,7 @@ def record_singleton_section(
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
-        if section.startswith("kb_") or section in {"warm_replay", "kb_provenance"}:
+        if section.startswith("kb_") or section in {"warm_replay"}:
             operation_id = _stable_id(
                 "op",
                 section,

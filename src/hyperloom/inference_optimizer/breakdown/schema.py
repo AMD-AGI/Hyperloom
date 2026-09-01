@@ -1460,129 +1460,6 @@ class PhaseSegment(TypedDict, total=False):
     elapsed_seconds: float | None
 
 
-# KB Provenance — RecipeKB / PR Monitor integration
-class KBQueueStats(TypedDict, total=False):
-    """Depth statistics for the on-disk KB write queues.
-
-    Attributes:
-        pending_lines (int): Current depth of ``.kb_pending.ndjson``.
-        flushed_bookmarks (int): Drain-bookmark rows in ``.kb_flushed.ndjson``.
-        dead_letter_lines (int): Rows in ``.kb_dead_letter.ndjson``.
-    """
-
-    pending_lines: int  # current depth of .kb_pending.ndjson
-    flushed_bookmarks: int  # rows in .kb_flushed.ndjson (drain bookmarks)
-    dead_letter_lines: int  # rows in .kb_dead_letter.ndjson
-
-
-class KBFlusherStatus(TypedDict, total=False):
-    """``kb_provenance.flusher_status``: boot marker merged with a live pid probe."""
-
-    enabled: bool  # cli flag (false when --no-kb-flusher or --degraded-kb)
-    spawned: bool  # daemon was actually subprocess.Popen'd this boot
-    alive: bool  # live pid probe at breakdown emit time
-    pid: int | None
-    interval_sec: float
-    batch_size: int
-    reason: str  # boot-time spawn decision text
-    ts: str  # iso UTC of the boot marker
-    pid_path: str  # absolute path to .kb_flusher.pid
-
-
-class WarmReplayOutcome(TypedDict, total=False):
-    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields.
-
-    ``eval_ran`` / ``replay_accuracy`` / ``baseline_accuracy`` are recorded on
-    every replay that reached a throughput measurement, not only on rejection:
-    a config that was checked and passed is a different record from one that
-    was never checked. ``eval_ran`` is what separates "the model scored 0.0"
-    from "no score exists", which are otherwise both a null accuracy.
-
-    A measurement that fails never stops the run. The replay is admitted and
-    ``eval_error`` carries why no score could be read, so an unjudged promotion
-    is visible after the fact rather than silently indistinguishable from a
-    judged one.
-    """
-
-    status: str
-    expected_gain_pct: float
-    actual_gain_pct: float
-    throughput_after: float
-    eval_ran: bool
-    eval_error: str | None
-    replay_accuracy: float | None
-    baseline_accuracy: float | None
-    warm_recipe_tier: str
-    warm_recipe_conf: float
-    config_source: str
-    config_donor_tier: str
-    donor_canonical_id: str
-    donor_model: str
-    donor_session_id: str
-    donor_family_tags: list[str]
-    donor_gain_pct: float
-    donor_breakdown_link: str
-    replay_task_id: str
-    error_class: str
-    reason: str
-
-
-class KBProvenance(TypedDict, total=False):
-    """Recipe KB integration audit for the session.
-
-    Covers warm-start context seeded from the KB, the warm-replay outcome,
-    queue depth, and the flusher daemon status.
-
-    Attributes:
-        recipe_kb_session_id (str): Recipe KB session id.
-        warm_start_ts (str): ISO UTC timestamp of warm start.
-        warm_start_recipe_seen (bool): Whether a warm recipe was seen.
-        warm_start_recipe_tier (str): Tier of the seen warm recipe.
-        warm_start_recipe_source (str): KB path that supplied the applied
-            warm recipe (e.g. ``kb-store`` / ``recipe_kb``); empty when none.
-        warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
-        warm_start_lesson_count (int): Number of lessons injected at warm start.
-        warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
-        warm_replay_attempted (bool): Whether a warm replay was attempted.
-        warm_history_injected (bool): Whether warm history was injected.
-        recipe_finalize (dict[str, Any]): Terminal Recipe publication outcome.
-        recipe_finalize_status (str): Persisted publication lifecycle state.
-        recipe_finalize_attempts (int): Number of idempotent finalize attempts.
-        stack_fingerprint (dict[str, str]): Fingerprint of the optimization stack.
-        queue (KBQueueStats): Depth stats for the KB write queues.
-        audit_tail_count (int): Number of audit-tail entries.
-        audit_status_counts (dict[str, int]): Audit entries counted by status.
-        flusher_status (KBFlusherStatus): KB flusher daemon lifecycle marker.
-        kb_degraded_reason (str): KB soft-degrade reason (None / ``explicit_flag`` /
-            ``ir3_auto``).
-        pr_degraded_reason (str): PR Monitor soft-degrade reason (None /
-            ``explicit_flag`` / ``ir3_auto``).
-    """
-
-    recipe_kb_session_id: str
-    warm_start_ts: str
-    warm_start_recipe_seen: bool
-    warm_start_recipe_tier: str
-    # Which KB path (e.g. "kb-store" / "recipe_kb") supplied the applied warm recipe.
-    warm_start_recipe_source: str
-    warm_start_pitfall_count: int
-    warm_start_lesson_count: int
-    warm_replay: WarmReplayOutcome
-    warm_replay_attempted: bool
-    warm_history_injected: bool
-    recipe_finalize: dict[str, Any]
-    recipe_finalize_status: str
-    recipe_finalize_attempts: int
-    stack_fingerprint: dict[str, str]
-    queue: KBQueueStats
-    audit_tail_count: int
-    audit_status_counts: dict[str, int]
-    flusher_status: KBFlusherStatus
-    # Soft-degrade audit: None / "explicit_flag" / "ir3_auto".
-    kb_degraded_reason: str
-    pr_degraded_reason: str
-
-
 # specialist_runs section
 class SpecialistDomainBreakdown(TypedDict, total=False):
     """Per-domain attribution for one ``specialist_rounds`` entry."""
@@ -1623,7 +1500,7 @@ class SpecialistRound(TypedDict, total=False):
 
 # critic_robustness.kb_writes_summary sub-block
 class CriticKBWritesSummary(TypedDict, total=False):
-    """Summary of critic-agent ``commit-review`` outputs (Coordinator proxies these into ``kb_provenance``)."""
+    """Summary of critic-agent ``commit-review`` outputs."""
 
     total: int
     by_verdict: dict[str, int]  # APPROVE / REJECT / REDIRECT / ADVISE / NEEDS_REVIEW (upper-cased critic verdicts)
@@ -3307,7 +3184,6 @@ class SessionBreakdown(TypedDict, total=False):
         optimizations (Optimizations): Canonical adopted-optimization read
             model spanning Warm Replay, Explore, Framework Agent, and Kernel
             Agent.
-        kb_provenance (KBProvenance): Recipe KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
@@ -3346,7 +3222,6 @@ class SessionBreakdown(TypedDict, total=False):
     telemetry: Telemetry
     # Single downstream read model for every formally adopted optimization.
     optimizations: Optimizations
-    kb_provenance: KBProvenance  # Recipe KB audit
     specialist_runs: list[SpecialistRound]
     # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
@@ -3441,8 +3316,6 @@ __all__ = [
     "Integrity",
     "IntegrityFieldStatus",
     "IntegrityStatus",
-    "KBProvenance",
-    "KBQueueStats",
     "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
