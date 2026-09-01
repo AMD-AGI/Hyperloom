@@ -36,6 +36,9 @@ _UNPACKAGED_ASSETS = (
     # Container image build context: the Dockerfile clones the repo and the
     # scripts hardcode /opt/Hyperloom, so they are only used from a checkout.
     "hyperloom/inference_optimizer/assets/quick-start/*",
+    # The gemm-tune subpackage's own docs describe the source tree (how to run
+    # the tuner from a checkout), not the installed package.
+    "kernelforge/gemm_tune/*.md",
 )
 
 try:  # tomllib is stdlib from 3.11; the ``ci`` extra pins tomli for 3.10.

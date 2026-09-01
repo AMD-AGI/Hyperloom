@@ -53,7 +53,7 @@ def _pending(payload: dict) -> PendingProposal:
     return PendingProposal(
         proposal_msg_id="m-fpr",
         from_agent="coordinator",
-        action_name="framework_agent",
+        action_name="integrate_patch",
         predicted_gain_pct=0.0,
         payload=payload,
     )
@@ -67,10 +67,10 @@ async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
         audit={"recommended_next_step": "direct_framework"},
         audit_step="direct_framework",
     )
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
     pl = pendings[0].payload
-    assert pl["action_name"] == "framework_agent"
+    assert pl["action_name"] == "integrate_patch"
     assert pl["framework_agent_candidate_id"] == _CANDIDATE["candidate_id"]
     assert pl["audit_step"] == "direct_framework"
     assert pl["candidate"]["pr_url"] == _CANDIDATE["pr_url"]
@@ -80,7 +80,7 @@ async def test_submit_registers_pending_proposal(coord: Coordinator) -> None:
 async def test_submit_is_idempotent_per_candidate(coord: Coordinator) -> None:
     await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
     await coord._submit_framework_agent_candidate_for_review(dict(_CANDIDATE), audit_step="direct_framework")
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 
 
@@ -159,7 +159,7 @@ async def test_enqueued_task_rides_the_decaying_keep_curve(coord: Coordinator) -
     coord.shared_state.macro_cycle = 2
     await coord.phase_framework._enqueue_framework_agent_task(dict(_CANDIDATE))
 
-    queued = [t for t in await coord.tasks.queued() if t.kind == "framework_agent"]
+    queued = [t for t in await coord.tasks.queued() if t.kind == "integrate_patch"]
     assert len(queued) == 1
     assert queued[0].params["keep_threshold_pct"] == pytest.approx(decaying_keep_threshold_pct(2))
 
@@ -180,6 +180,9 @@ async def test_approve_verdict_materializes(coord: Coordinator, monkeypatch) -> 
     coord.state.pending_proposals[pending.proposal_msg_id] = pending
     await coord._handle_single_verdict(source="critic", pending=pending, verdict="approve", reasoning="ok")
     assert len(raw) == 1
+    # The dispatched task carries no specialist task id, so the verdict has to
+    # be filed under the candidate for the executor and PolicyGate to find it.
+    assert coord.shared_state.get_specialist_patch_verdict(_CANDIDATE["candidate_id"]) == "approve"
 
 
 @pytest.mark.asyncio

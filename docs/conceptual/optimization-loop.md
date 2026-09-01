@@ -2,7 +2,7 @@
 myst:
     html_meta:
         "description": "Understand the Hyperloom optimization loop: runtime contracts, phase order (PRELUDE through CLOSE), orchestration model, feedback loops, and session artifacts."
-        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
+        "keywords": "Hyperloom, optimization loop, PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, CLOSE, orchestration, session artifacts, AMD GPU, ROCm, LLM inference, PolicyGate, enablement, targeted build, escalation ladder, runnable gate"
 ---
 # Hyperloom optimization loop
 
@@ -13,7 +13,7 @@ PolicyGate, and session artifacts are the source of truth. This optimization
 loop runs alongside the agentic kernel optimizer.
 
 ```{image} ../images/Hyperloom_optimization_loop.png
-:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
+:alt: Hyperloom optimization loop: the phase chain PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT, SWEEP, and CLOSE, where SWEEP can cycle_reloop back to FRAMEWORK_AGENT while budget and leverage remain. Cross-cutting roles — Orchestration, Critic, Robustness, and PolicyGate — govern every write, which flows emit_intent to Critic review to accuracy gate to PolicyGate to runtime state.
 :class: hl-lightbox-trigger
 ```
 
@@ -68,11 +68,11 @@ observable session artifacts and subprocess JSON bridges are.
 The Coordinator advances through the live phase chain:
 
 ```text
-PRELUDE -> FRAMEWORK_AGENT -> EXPLORE -> KERNEL_AGENT -> SWEEP -> CLOSE
+PRELUDE -> FRAMEWORK_AGENT -> KERNEL_AGENT -> SWEEP -> CLOSE
 ```
 
 Cyclic macro-cycling is always enabled. After SWEEP, the Coordinator can
-`cycle_reloop` back to `FRAMEWORK_AGENT` / `EXPLORE` for another pass while
+`cycle_reloop` back to `FRAMEWORK_AGENT` for another pass while
 budget and leverage remain. The effective minimum remaining budget to justify
 opening a new cycle scales with session length (capped at the 3-hour absolute
 floor), so shorter sessions can also reloop when they have proportionally
@@ -104,24 +104,32 @@ PRELUDE establishes the session baseline:
 `model_class` is supplied by the launcher or derived once from model
 metadata at boot. There is no separate live `classify` action.
 
-## FRAMEWORK_AGENT
+## FRAMEWORK_AGENT — the optimisation phase
 
-When enabled, the `FRAMEWORK_AGENT` phase (framework enablement) is managed
-by the Coordinator. It covers discovery/ranking/audit through `fa phase-discover`,
-plus authoring-specialist dispatch (`framework_agent_authoring_enabled` is on by
-default), enablement repair, and Critic review of each candidate — discovery is
-one integration among several, not the only one.
+One phase, two levers worked in parallel:
 
-For each candidate:
+- **Configuration** — the `explore` action runs server-argument and
+  environment grids through the canonical `explore_search` ledger. Nothing on
+  disk changes, so a revert is a non-composition.
+- **Source and upstream** — `integrate_patch` lands every patch, and
+  `patch_source` says where the diff came from: `specialist_authored` for one
+  a specialist wrote, `upstream_pr` for a diff fetched from an upstream PR
+  that a `candidate_discovery_specialist` found, ranked and judged. Both
+  serialise on the `workspace_mutation` lane: one landing at a time,
+  independent of how fast proposals arrive.
 
-1. The framework-agent returns candidate metadata and diff information,
-2. The Critic reviews the candidate before apply,
-3. The framework-agent executor applies, benchmarks, and either keeps or
-   reverts the candidate,
-4. Progress is recorded in `SharedState` and later surfaced in
-   `session_breakdown.json`.
+`specialist` serves both levers — investigation, patch authoring, and
+candidate discovery are all dispatches of the one specialist action.
 
-The LLM doesn't own a separate framework role in the current runtime.
+The phase advances to KERNEL_AGENT only when **both** levers are dry
+(`optimize_no_more_leverage`). Either arm going quiet raises
+`switch_bottleneck` so the next macro-cycle steers off this bottleneck,
+without abandoning the lever that is still paying. It also exits when its
+phase budget is spent, and at the absolute phase cap.
+
+After each KEEP the runtime revalidates the full stack end to end, so the
+reported `cumulative_gain_validated` always comes from a measurement taken
+with every accepted change applied.
 
 ### Enablement escalation ladder
 
@@ -210,29 +218,6 @@ breakdown's `installed_versions` map (`source_pr_url`); see the
 - **Crash / resume.** An in-flight build is tracked by a durable sentinel,
   so a crash or resume reclaims the running build or cleans up the orphaned
   one rather than leaking it.
-
-## EXPLORE
-
-EXPLORE searches configuration and source-patch levers through the
-canonical `explore` ledger:
-
-- `explore` runs server-argument and environment variants.
-- `specialist` delegates targeted research or patch proposals. A single
-  unified specialist covers single-domain, cross-domain (`scope=domains`),
-  and free-form (`scope=freeform`) investigations through its dispatch dials
-  (`scope` / `mode` / `bench` / `lane`). Specialist is also available in
-  FRAMEWORK_AGENT and KERNEL_AGENT so source-level failures can go straight
-  to investigation without waiting for a reloop.
-- `integrate_patch` applies Critic-reviewed specialist patches and
-  benchmarks them.
-
-The old `backends` and `params` action names are compatibility aliases
-for archived reporting only. New sessions write the merged
-`explore_search` ledger.
-
-After each KEEP, the runtime revalidates the full stack end to end, so
-the reported `cumulative_gain_validated` always comes from a measurement
-taken with every accepted change applied.
 
 ## KERNEL_AGENT
 

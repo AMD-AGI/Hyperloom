@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tools"))
 
 from tracelens_analysis import (  # noqa: E402
+    _defines_traced_triton_kernel,
     _flydsl_kernel_params,
     _flydsl_reusable_roots,
     _looks_like_flydsl_source,
@@ -73,6 +74,51 @@ class TestFlyDSLClassification(unittest.TestCase):
         """Triton classification has priority when both signals exist."""
         path = self._write("import triton\nimport triton.language as tl\n@triton.jit\ndef k(): pass\n")
         self.assertEqual(source_type_for("triton_kernel", path), "triton")
+
+    def test_shim_imported_triton_kernel_classified_by_definition(self) -> None:
+        """A device-symbol name and a shim import still classify as Triton."""
+        path = self._write(
+            "from vllm.triton_utils import tl, triton\n"
+            "\n"
+            "@triton.jit\n"
+            "def _gqa_sparse_decode_kernel(q_ptr, o_ptr, BLOCK: tl.constexpr):\n"
+            "    pass\n"
+        )
+        name = "hipModuleLaunchKernel->_gqa_sparse_decode_kernel (Synthetic Op)"
+        self.assertTrue(_defines_traced_triton_kernel(name, path))
+        self.assertEqual(source_type_for(name, path), "triton")
+
+    def test_flydsl_source_keeps_identity_when_it_also_uses_triton(self) -> None:
+        """FlyDSL stays FlyDSL even when the file carries a Triton reference path."""
+        path = self._write(
+            "import flydsl.compiler as flyc\n"
+            "import triton\n"
+            "\n"
+            "@triton.jit\n"
+            "def _ref_kernel(x): pass\n"
+            "\n"
+            "@flyc.kernel\n"
+            "def k(x): pass\n"
+        )
+        self.assertEqual(source_type_for("_ref_kernel", path), "flydsl")
+
+    def test_python_without_a_triton_def_is_not_claimed(self) -> None:
+        """A plain def matching the traced name proves nothing about Triton."""
+        path = self._write("import torch\ndef _my_kernel(a): return a\n")
+        self.assertFalse(_defines_traced_triton_kernel("_my_kernel", path))
+        self.assertEqual(source_type_for("_my_kernel", path), "python")
+
+    def test_unmatched_symbol_among_several_triton_defs_is_not_claimed(self) -> None:
+        """Several Triton defs and no name match leaves the kernel unproven."""
+        path = self._write(
+            "import triton\n@triton.jit\ndef _first_kernel(x): pass\n@triton.jit\ndef _second_kernel(x): pass\n"
+        )
+        self.assertFalse(_defines_traced_triton_kernel("_absent_kernel", path))
+        self.assertEqual(source_type_for("_absent_kernel", path), "python")
+
+    def test_missing_source_is_not_claimed(self) -> None:
+        self.assertFalse(_defines_traced_triton_kernel("_k", ""))
+        self.assertFalse(_defines_traced_triton_kernel("_k", "/nonexistent/path.py"))
 
     def test_hip_extension_wins_over_flydsl(self) -> None:
         """``.cu`` / ``.cuh`` files keep ``hip_cpp`` regardless of name."""

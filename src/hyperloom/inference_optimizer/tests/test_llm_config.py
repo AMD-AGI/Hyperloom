@@ -194,7 +194,7 @@ _SUBSCRIPTION_HEADER = "Ocp-Apim-Subscription-Key"
 
 # ---- credential-shape predicates ----
 def test_shape_predicates_classify_all_three_deployments():
-    """One shape test for backend selection, the TraceLens runner and the fellow."""
+    """One shape test for backend selection, the TraceLens runner and the kernel_backend."""
     assert is_anthropic_only(_ANTHROPIC_ONLY_ENV)
     assert not is_openai_only(_ANTHROPIC_ONLY_ENV)
 
@@ -227,7 +227,7 @@ def test_any_openai_variable_alone_marks_that_side_configured(key):
 def test_shape_predicates_ignore_the_retired_deepseek_variables():
     """DeepSeek is migrated onto the standard pair, so it is not a third side.
 
-    The forge fellow used to read these directly and would therefore disagree
+    The forge kernel backend used to read these directly and would therefore disagree
     with backend selection about a legacy-only configuration.
     """
     legacy = {_LEGACY_KEY: "dk", "DEEPSEEK_BASE_URL": "https://api.deepseek.com"}
@@ -235,7 +235,7 @@ def test_shape_predicates_ignore_the_retired_deepseek_variables():
     assert not has_openai_side(legacy)
     assert not is_anthropic_only(legacy)
     # With DeepSeek ignored, an OpenAI side alongside it is still openai-only --
-    # the fellow previously read these keys and answered False here.
+    # the kernel backend previously read these keys and answered False here.
     assert is_openai_only({**legacy, **_CODEX_ONLY_ENV})
 
 

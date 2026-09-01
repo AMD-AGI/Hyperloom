@@ -1209,12 +1209,15 @@ async def test_static_context_override_wins_over_manifest(
         runtime_caller_factory=lambda: fake_caller,
         static_context={"model": "explicit-m", "framework": "vllm", "gpu_type": "mi355x"},
     )
+    backend.set_trace_context(tick=8, phase="FRAMEWORK_AGENT", macro_cycle=3)
     await backend.run("prompt")
     request = json.loads((fake_session_dir / "critic-workdir" / "000000" / "request.json").read_text(encoding="utf-8"))
     assert request["context"] == {
         "model": "explicit-m",
         "framework": "vllm",
         "gpu_type": "mi355x",
+        "phase": "FRAMEWORK_AGENT",
+        "macro_cycle": 3,
     }
 
 

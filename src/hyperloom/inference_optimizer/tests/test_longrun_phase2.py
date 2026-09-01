@@ -27,12 +27,16 @@ def _plateaued_explore_state(
     started_hours_ago: float = 0.5,
     top_bottleneck: str = "MoE_fused",
 ) -> SharedState:
-    """EXPLORE state satisfying compute_plateau_explore (no winners + enough
-    trailing empty specialist rounds) with budget remaining."""
+    """Optimisation-phase state with both arms dry and budget remaining.
+
+    Config arm: no winners and enough trailing empty specialist rounds.
+    Source arm: ``framework_agent_phase_done``. The merged phase leaves only
+    when both report dry, so a config-only plateau would keep it open.
+    """
     now = datetime.now(timezone.utc)
     st = SharedState(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         start_ts=(now - timedelta(hours=started_hours_ago)).isoformat(),
         phase_started_unix=(now - timedelta(hours=started_hours_ago)).timestamp(),
         max_minutes=max_minutes,
@@ -44,28 +48,29 @@ def _plateaued_explore_state(
     st.specialist_rounds = [
         {"proposals_total": 0, "proposals_kept": 0} for _ in range(ps.DEFAULT_PLATEAU_EXPLORE_EMPTY_STREAK)
     ]
+    st.framework_agent_phase_done = True
     if top_bottleneck:
         st.roofline_snapshots = [{"snapshot_id": 1, "top_bottleneck": top_bottleneck}]
     return st
 
 
 # plateau → actionable
-def test_explore_plateau_is_actionable():
+def test_both_arms_dry_is_actionable():
     st = _plateaued_explore_state()
-    out = ps.exit_normal_explore(st)
+    out = ps.exit_normal_optimize(st)
     assert out is not None
     reason, evidence = out
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
     assert evidence.get("plateau") is True
 
 
-def test_compute_next_phase_plateau_routes_explore_to_kernel():
+def test_compute_next_phase_plateau_routes_optimize_to_kernel():
     st = _plateaued_explore_state()
     target, reason, evidence = ps.compute_next_phase(st)
-    # Exhausted explore leverage switches lever to KERNEL.
+    # Exhausted optimisation leverage switches lever to KERNEL.
     assert target == ps.PHASE_KERNEL_AGENT
-    assert reason == "explore_no_more_leverage"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("switch_bottleneck") is True
 
 
@@ -107,11 +112,12 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
     st.macro_cycle = src.macro_cycle
     st.explore_search = src.explore_search
     st.specialist_rounds = src.specialist_rounds
+    st.framework_agent_phase_done = src.framework_agent_phase_done
     st.roofline_snapshots = src.roofline_snapshots
 
     await c._advance_phase_if_needed()
 
-    # Exhausted explore leverage switches lever to KERNEL.
+    # Exhausted optimisation leverage switches lever to KERNEL.
     assert st.phase == ps.PHASE_KERNEL_AGENT
     assert st.pending_bottleneck_switch is True
     assert st.last_cycle_bottleneck == "MoE_fused"
@@ -121,7 +127,7 @@ async def test_coordinator_marks_bottleneck_switch_on_plateau(cyclic_coordinator
 def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.macro_cycle = 2
     st.mark_bottleneck_switch(prev_bottleneck="MoE_fused")
     # A roofline whose dominant direction is comm.
@@ -144,7 +150,7 @@ def test_redirect_advisory_renders_with_suggested_domain(cyclic_coordinator):
 def test_redirect_advisory_renders_for_saturation_without_plateau(cyclic_coordinator):
     c = cyclic_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.macro_cycle = 3
     st.saturated_directions = {
         "kernel_switch_specialist": {

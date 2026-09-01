@@ -39,7 +39,7 @@ No PolicyGate path runs for the RESPONSE because it's written directly through
 | Request kind | Handler | Entry point |
 |---|---|---|
 | `trace_analyze` | `trace_analyze_handler` | TraceLens `tracelens_analysis.py` |
-| `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or forge-gemm-tune |
+| `run_gemm_tuning` | `run_gemm_tuning_handler` | GEAK or kernelforge gemm-tune |
 | `run_collective` | `run_collective_handler` | forge-collective (collective rewrite) |
 | `run_optimization` | `run_optimization_handler` | GEAK or Forge per-kernel |
 | `integrate` | `integrate_handler` | patch → re-baseline → KEEP/REVERT |
@@ -252,7 +252,12 @@ Required env vars:
 | `ANTHROPIC_BASE_URL` | operator | Anthropic-side endpoint (point it at your gateway) |
 | `TRACELENS_ROOT` | `install.sh` (operator can override) | TraceLens checkout; installer clones to `.cache/TraceLens` by default |
 | `KERNEL_OPT_BACKEND_ORDER` | code default `geak` when unset; bare-metal installer and Slurm launchers export `${KERNEL_OPT_BACKEND_ORDER:-geak}` | Set to exactly `forge` to enable per-kernel Forge |
-| `FORGE_PATH` | operator | KernelForge checkout root; required whenever forge is enabled. `forge_submit.py` resolves the `kernel_agents` package from it and locates the vendor-playbook task bundles under it |
+
+Forge needs **no path variable**. It ships inside the Hyperloom wheel, so the
+`FORGE_PATH` that used to be required here is removed and nothing reads it. The
+optional dev override is `KERNELFORGE_PROJECT_ROOT` (a writable root whose
+resource subtrees take precedence over the packaged copies); see
+[environment variables](environment-variables.md).
 
 Optional:
 

@@ -338,6 +338,15 @@ def build(
     )
     geak_invocations = _pick("geak_invocations", geak_c)
     forge_invocations = _pick("forge_invocations", forge_c)
+    geak = _pick(
+        "geak",
+        _safe_collect(
+            "geak",
+            lambda: collectors.collect_geak(sd, state, warnings),
+            warnings,
+            default={},
+        ),
+    )
     capability_summary = _safe_collect(
         "capability_summary",
         lambda: collectors.collect_capability_summary(
@@ -345,6 +354,7 @@ def build(
             geak_invocations,
             warnings,
             forge_invocations,
+            geak,
         ),
         warnings,
     )
@@ -412,6 +422,32 @@ def build(
             state=state,
             warnings=warnings,
         )
+    geak_capability = capability_summary.get("geak") if isinstance(capability_summary, dict) else {}
+    # Same predicate the capability-summary fallback ran on. A private copy here
+    # would go quiet exactly when the two computations had drifted apart, which
+    # is the disagreement these warnings exist to catch.
+    geak_promoted, geak_has_route_evidence = collectors.geak_route_evidence(state, geak)
+    if geak_has_route_evidence and isinstance(geak_capability, dict):
+        if geak_capability.get("status") == "not_attempted":
+            warnings.append(
+                "geak consistency: GEAK produced route evidence but capability_summary.geak is not_attempted"
+            )
+        kernel_summary = (
+            ((optimizations.get("summary_by_source") or {}).get("kernel_agent") or {})
+            if isinstance(optimizations, dict)
+            else {}
+        )
+        geak_backend = (kernel_summary.get("by_backend") or {}).get("geak") or {}
+        geak_gain = geak_backend.get("total_gain_pct")
+        # A keep the ledger deliberately declined to sum already explains the
+        # zero, and says so in its own warning. Firing here too would report a
+        # gap in the accounting where the accounting is working as designed.
+        geak_withheld = int(geak_backend.get("non_attributable_keeps") or 0) > 0
+        if geak_promoted and not geak_withheld and not (isinstance(geak_gain, (int, float)) and geak_gain > 0):
+            warnings.append(
+                "geak consistency: a promoted geak_e2e stack entry has no positive gain in "
+                "optimizations.summary_by_source.kernel_agent.by_backend.geak"
+            )
     kb_provenance = _pick(
         "kb_provenance",
         _safe_collect(
@@ -560,6 +596,51 @@ def build(
         warnings,
         default={},
     )
+    v6_warnings = list(warnings)
+    timeline = _safe_collect(
+        "timeline",
+        lambda: collectors.collect_v6_timeline(
+            sd,
+            v6_warnings,
+            state=state,
+            recorded_operations=recorded_operations,
+            critic_iterations=(
+                critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
+            ),
+        ),
+        v6_warnings,
+        default=[],
+    )
+    outcome = _safe_collect(
+        "outcome",
+        lambda: collectors.collect_v6_outcome(
+            session=session_section,
+            baseline=baseline,
+            final=final,
+            optimizations=optimizations,
+            state=state,
+            timeline=timeline,
+        ),
+        v6_warnings,
+        default={},
+    )
+    metadata = _safe_collect(
+        "metadata",
+        lambda: collectors.collect_v6_metadata(
+            exported_at_utc=exported_at,
+            session=session_section,
+            workload=workload,
+            model_info=model_info,
+            langfuse=langfuse,
+            versions=versions,
+            state=state,
+            warnings=v6_warnings,
+        ),
+        v6_warnings,
+        default={},
+    )
+    if isinstance(metadata, dict):
+        metadata["warnings"] = list(v6_warnings)
 
     breakdown = {
         "schema_version": schema_version,
@@ -578,6 +659,10 @@ def build(
         # v1 readers use flat ``phase_timeline``, v2 prefer ``phase_segments``.
         "phase_segments": phase_segments,
         "capability_summary": capability_summary,
+        # GEAK route diagnostics and accepted artifacts. This is independent
+        # from the canonical optimization ledger and remains useful on failed
+        # or incomplete runs that produced no adoption.
+        "geak": geak,
         "kernel_lifecycle": kernel_lifecycle,
         # Collective lane audit trail; survives a campaign the E2E gate rejected,
         # which never reaches ``optimizations``.
@@ -619,6 +704,10 @@ def build(
         "versions": versions,
         # Enablement attempt-runtime observability; {} → hidden.
         "enablement": enablement,
+        "metadata": metadata,
+        "outcome": outcome,
+        "timeline": timeline,
+        "close": {},
         "warnings": warnings,
         "source_files": source_files,
     }
