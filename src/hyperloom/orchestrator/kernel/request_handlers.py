@@ -47,6 +47,7 @@ from hyperloom.orchestrator.roles.agent_role import (
 
 from ..actions.stop_attribution import stopped_by_the_run_class
 from .lane_budget import gemm_per_tuner_timeout_sec
+from .patch_landing import bundle_belongs_to
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -1407,8 +1408,25 @@ def _fill_integrate_defaults_from_state(
 
 
 def _fill_integrate_snapshot_from_bundle(resolved: dict, bundle: Any) -> None:
-    """Backfill integrate inputs from a recorded multi-file artifact bundle."""
+    """Backfill integrate inputs from a recorded multi-file artifact bundle.
+
+    A bundle is bound to the sibling that produced it by ``integration_id``. When
+    the caller already resolved this integrate from a specific pending record
+    (i.e. ``resolved`` carries an ``integration_id``), a bundle stamped with a
+    *different* id belongs to another sibling of the same nomination round and
+    must not be merged in: doing so would land one sibling's multi-file write
+    set under a second sibling's integrate. Under the one-patch era every
+    kernel_id had exactly one bundle so this never arose; the fallbacks keyed on
+    ``kernel_id`` (``last_kernel_opt`` / per-kernel ledger) now route several
+    bundles through the same kernel_id, so the guard is load-bearing.
+
+    A bundle with no ``integration_id`` of its own predates the contract and is
+    accepted as before -- there is no id to disagree with.
+    """
     if not isinstance(bundle, dict) or bundle.get("type") != "patch_snapshot":
+        return
+    if not bundle_belongs_to(bundle, resolved.get("integration_id")):
+        # Cross-sibling bundle -- refuse rather than silently mixing write sets.
         return
     if not resolved.get("snapshot_dir") and bundle.get("snapshot_dir"):
         resolved["snapshot_dir"] = str(bundle["snapshot_dir"])
