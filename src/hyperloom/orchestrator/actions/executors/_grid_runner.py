@@ -690,9 +690,14 @@ def _build_variant_yaml(
         # second time: a session at CONC=32 with a 3600s anchor exports
         # 14400s, and re-scaling that for a CONC=128 variant yields 230400s
         # instead of the correct 57600s.
+        # AGENTX_WARMUP_GRACE_CONC travels with the grace: it declares which
+        # concurrency that grace was measured at, and dropping it here would
+        # silently re-anchor the variant to the repo default while the baseline
+        # used the operator's.
         _variant_grace = agentx_warmup_grace_sec(
             {
                 "AGENTX_WARMUP_GRACE_PERIOD": os.environ.get("AGENTX_WARMUP_GRACE_PERIOD", ""),
+                "AGENTX_WARMUP_GRACE_CONC": os.environ.get("AGENTX_WARMUP_GRACE_CONC", ""),
                 "CONC": str(envs.get("CONC", "")),
             }
         )

@@ -451,7 +451,7 @@ def test_a_scriptable_framework_gets_no_grace_either(monkeypatch):
 # --- a sweep variant's warmup bound must follow ITS concurrency ----------------
 
 
-def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="3600"):
+def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="3600", grace_conc=None):
     """Materialize one grid variant and hand back the envs it will run with."""
     import yaml
 
@@ -464,6 +464,10 @@ def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="
     monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", anchor)
     monkeypatch.setenv("CONC", str(session_conc))
+    if grace_conc is None:
+        monkeypatch.delenv("AGENTX_WARMUP_GRACE_CONC", raising=False)
+    else:
+        monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(grace_conc))
 
     base = tmp_path / "base.yaml"
     base.write_text(
@@ -544,3 +548,33 @@ def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):
     envs = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert "AGENTX_WARMUP_GRACE_PERIOD" not in envs
     assert envs["CONC"] == "128"
+
+
+def test_a_variant_honours_the_declared_grace_anchor(monkeypatch, tmp_path):
+    """The anchor travels with the grace into the variant re-derivation.
+
+    Dropping it there would re-anchor the variant to the repo default while the
+    baseline used the operator's -- two rounds of one session disagreeing about
+    what the same number means.
+    """
+    envs = _variant_envs(
+        monkeypatch,
+        tmp_path,
+        session_conc=16,
+        variant_conc=64,
+        anchor="14400",
+        grace_conc=16,
+    )
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(14400 * 64 // 16)
+
+
+def test_a_variant_at_the_declared_anchor_is_untouched(monkeypatch, tmp_path):
+    envs = _variant_envs(
+        monkeypatch,
+        tmp_path,
+        session_conc=16,
+        variant_conc=16,
+        anchor="14400",
+        grace_conc=16,
+    )
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "14400"

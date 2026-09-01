@@ -649,25 +649,48 @@ _AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WA
 # mid-warmup -- the exact failure this module's cap-raise exists to prevent, just
 # moved one axis over. So the warmup share carries a CONC-scaled FLOOR.
 #
-# Anchored at 8 rather than at a value invented for the purpose: 8 is the lowest
-# concurrency at which this repo has a measured Kimi-K3 agentic warmup, and the
-# official ladder starts at 4, so at or below it the derivation is unchanged and
-# every previously-validated round keeps its exact cap. The floor only ever
-# RAISES the cap. That asymmetry is deliberate: a cap that is too large costs
-# nothing but a longer wait on a genuinely hung round (and the session budget
-# clamps it anyway via ``session_clamped_timeout_sec``), while a cap that is too
-# small kills a round that would have finished.
+# A ratio needs BOTH concurrencies, so the grace has to say which one it was
+# measured at. This is the default answer, not the only one: 8 is the lowest
+# concurrency this repo has a measured agentic warmup for, so defaulting to it
+# leaves every previously-validated round with its exact cap. But an operator
+# who measured at some other concurrency declares that via
+# ``AGENTX_WARMUP_GRACE_CONC`` instead of hand-converting their measurement into
+# an 8-anchored number -- which is what a hardcoded anchor forces, and which
+# silently doubles a conc=16 measurement.
+#
+# The floor only ever RAISES the cap. That asymmetry is deliberate: a cap that is
+# too large costs nothing but a longer wait on a genuinely hung round (and the
+# session budget clamps it anyway via ``session_clamped_timeout_sec``), while a
+# cap that is too small kills a round that would have finished.
 AGENTX_CANON_WARMUP_CONC = 8
 
 
-def _agentx_conc(src: "Mapping[str, str]") -> int:
-    """Concurrency for the round, from CONC; 0 when unset/unparseable."""
-    raw = (src.get("CONC") or "").strip()
+def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
+    """Read a positive integer from ``src``; 0 when unset or unusable."""
+    raw = (src.get(name) or "").strip()
     try:
         value = int(raw)
     except ValueError:
         return 0
     return value if value > 0 else 0
+
+
+def _agentx_conc(src: "Mapping[str, str]") -> int:
+    """Concurrency for the round, from CONC; 0 when unset/unparseable."""
+    return _agentx_positive_int(src, "CONC")
+
+
+def agentx_warmup_grace_conc(env: "Mapping[str, str] | None" = None) -> int:
+    """The concurrency ``AGENTX_WARMUP_GRACE_PERIOD`` was measured at.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The declared anchor, or the repo default when unset/unusable.
+    """
+    src = os.environ if env is None else env
+    return _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC") or AGENTX_CANON_WARMUP_CONC
 
 
 def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
@@ -703,23 +726,25 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
     if grace <= 0:
         grace = AGENTX_CANON_WARMUP_GRACE_SEC
     # The client's warmup is linear in CONC by construction (per-lane requests x
-    # CONC lanes), but the grace knob is a flat number, so a grace chosen at one
-    # concurrency under-budgets every higher one. Scale, never shrink, and stay
-    # identity at or below the anchor so previously-validated rounds keep their
-    # exact bound.
+    # CONC lanes), but the grace knob is a flat number, so a grace measured at
+    # one concurrency under-budgets every higher one. Scale, never shrink, and
+    # stay identity at or below the anchor so previously-validated rounds keep
+    # their exact bound.
+    anchor = agentx_warmup_grace_conc(src)
     conc = _agentx_conc(src)
-    if conc <= AGENTX_CANON_WARMUP_CONC:
+    if conc <= anchor:
         return grace
-    scaled = (grace * conc) // AGENTX_CANON_WARMUP_CONC
+    scaled = (grace * conc) // anchor
     log.info(
         "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
-        "(warmup work is linear in CONC; anchor CONC=%d). The floor only raises the "
-        "bound -- an over-large one costs a longer wait on a hung round, an "
-        "under-sized one kills a warmup that would have finished.",
+        "(warmup work is linear in CONC; the grace is declared as measured at "
+        "CONC=%d via AGENTX_WARMUP_GRACE_CONC). The floor only raises the bound -- "
+        "an over-large one costs a longer wait on a hung round, an under-sized one "
+        "kills a warmup that would have finished.",
         grace,
         scaled,
         conc,
-        AGENTX_CANON_WARMUP_CONC,
+        anchor,
     )
     return scaled
 

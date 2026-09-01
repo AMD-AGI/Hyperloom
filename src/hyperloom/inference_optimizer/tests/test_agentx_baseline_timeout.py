@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BASELINE_DEFAULT_TIMEOUT_SEC,
     BaselineExecutor,
     agentx_baseline_timeout_sec,
+    agentx_warmup_grace_conc,
     agentx_warmup_grace_sec,
 )
 
@@ -50,6 +51,7 @@ def _clear(monkeypatch):
         # An inherited CONC would silently scale the warmup share and make every
         # cap assertion below concurrency-dependent.
         "CONC",
+        "AGENTX_WARMUP_GRACE_CONC",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -368,3 +370,76 @@ def test_the_grace_never_shrinks(monkeypatch):
     for conc in (1, 2, 4, 8, 9, 16, 32, 64, 128):
         monkeypatch.setenv("CONC", str(conc))
         assert agentx_warmup_grace_sec() >= 3600
+
+
+# --- the grace declares which concurrency it was measured at -------------------
+
+
+def test_the_anchor_defaults_to_the_repo_measurement(monkeypatch):
+    """Unset means "8", which is where this repo's measurements start."""
+    _clear(monkeypatch)
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
+def test_an_unusable_anchor_falls_back_rather_than_dividing_by_it(monkeypatch, bad):
+    """A zero or garbage anchor must not reach the division."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+    assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+
+
+def test_a_grace_measured_at_a_higher_conc_is_not_double_counted(monkeypatch):
+    """The defect a hardcoded anchor causes, stated as a test.
+
+    An operator who measured 14400s of warmup at CONC=16 and says so must get
+    14400s back at CONC=16 -- not 28800s, which is what an 8-anchored scaler
+    silently produces and what forced the operator to hand-convert instead.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_sec() == 14400
+
+
+def test_the_declared_anchor_drives_the_ratio(monkeypatch):
+    """Both numbers, not one: 14400s at CONC=16 doubles at CONC=32."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 28800
+
+
+def test_below_the_declared_anchor_the_grace_is_untouched(monkeypatch):
+    """Identity holds at the anchor the operator declared, not at a fixed 8."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    for conc in (2, 4, 8, 16):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() == 14400
+
+
+def test_declaring_the_default_anchor_changes_nothing(monkeypatch):
+    """Explicit 8 and unset must be the same derivation, not two code paths."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    implicit = agentx_warmup_grace_sec()
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
+    assert agentx_warmup_grace_sec() == implicit
+
+
+def test_the_cap_follows_the_declared_anchor_too(monkeypatch):
+    """The subprocess cap and the client bound stay one number under any anchor."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "32")
+    non_warmup = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + non_warmup + 28800

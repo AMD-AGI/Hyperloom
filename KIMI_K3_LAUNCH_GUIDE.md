@@ -175,19 +175,27 @@ even finishes (distinct from the aiperf-level failure above), the cap is
 derived — reach for the input, not the answer:
 
 ```bash
-export AGENTX_WARMUP_GRACE_PERIOD=3600      # the warmup share, anchored at CONC=8
+export AGENTX_WARMUP_GRACE_PERIOD=3600      # warmup seconds you MEASURED
+export AGENTX_WARMUP_GRACE_CONC=8           # the concurrency you measured it at
 ```
 
-`agentx_baseline_timeout_sec()` in `orchestrator/actions/executors/baseline.py`
-builds the cap as `AGENTX_DURATION + non-warmup overhead + warmup share`, and
-scales the warmup share by `CONC / 8` — warmup is per-lane requests × CONC
-lanes, so it is linear in concurrency by construction. At CONC=32 a 3600s
-anchor becomes a 14400s warmup share and a 23400s cap; at or below CONC=8 the
-derivation is unchanged.
+Give the two numbers as a pair. `agentx_baseline_timeout_sec()` in
+`orchestrator/actions/executors/baseline.py` builds the cap as
+`AGENTX_DURATION + non-warmup overhead + warmup share`, and scales the warmup
+share by `CONC / AGENTX_WARMUP_GRACE_CONC` — warmup is per-lane requests × CONC
+lanes, so it is linear in concurrency by construction. A 3600s grace declared at
+CONC=8 becomes a 14400s warmup share and a 23400s cap at CONC=32; at or below the
+declared anchor the grace is passed through unchanged.
 
-Anchor the grace at the **CONC=8** measurement (~3000s of warmup), not at a
-number you tuned for a higher concurrency — the floor multiplies whatever you
-give it, so handing it an already-conc-16-sized value double-counts.
+`AGENTX_WARMUP_GRACE_CONC` defaults to 8, which is where this repo's
+measurements start. **Declare it whenever you measured somewhere else.** It is a
+ratio, so it needs both numbers: a 14400s grace measured at CONC=16 and handed
+over without the anchor is read as an 8-anchored number and silently doubled.
+Declaring the anchor is what lets you enter the number you actually measured
+instead of hand-converting it.
+
+The same pair is used for the client's `--warmup-grace-period`, which is what
+actually stops the warmup, so the cap and the client cannot disagree.
 
 `AGENTX_BASELINE_TIMEOUT_SEC` pins the cap outright and short-circuits all of
 the above. Use it only when you want a fixed number, and be aware it disables
