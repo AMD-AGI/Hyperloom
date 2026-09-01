@@ -131,14 +131,15 @@ def test_system_specialist_mentions_kfd_and_rocm_smi():
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
 
-def test_pr_intel_specialist_mentions_cross_repo_research():
-    text = _build("pr_intel_specialist")
+def test_candidate_discovery_specialist_mentions_find_rank_judge():
+    text = _build("candidate_discovery_specialist")
     for marker in (
-        "pr_intel_specialist",
-        "cross-repo",
+        "candidate_discovery_specialist",
         "mcp__pr_monitor",
-        "ROCm/aiter",
-        "do NOT propose source patches",
+        "already_present",
+        "not_applicable",
+        "worth_a_bench",
+        "you do not apply or benchmark",
     ):
         assert marker.lower() in text.lower(), f"missing {marker!r}"
 
@@ -1072,11 +1073,9 @@ def test_research_lane_capacity_is_core_state_field():
 # --------------------------------------------------------------------------- #
 # Read-only specialists never receive the patch-authoring contract
 # --------------------------------------------------------------------------- #
-READONLY_DOMAIN_KEYS = (
-    "research_scout_specialist",
-    "static_recon_specialist",
-    "pr_intel_specialist",
-)
+# Derived from the property under test: a research-mode domain is exactly one
+# the registry declares as such, so a new one is covered without an edit here.
+READONLY_DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS if d.default_mode == "research"))
 
 # Every phrase that promises patch authoring, a worktree, or a GPU. A
 # research-mode dispatch is leased none of them.
@@ -1130,7 +1129,7 @@ def test_cross_domain_research_dispatch_drops_patch_deliverable():
     _, user = build_specialist_prompts(
         SpecialistPromptInputs(
             task_id="task-domains-ro",
-            domain=get_domain("pr_intel_specialist"),
+            domain=get_domain("candidate_discovery_specialist"),
             max_turns=4,
             scope="domains",
             mode="research",

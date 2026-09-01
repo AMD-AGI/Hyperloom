@@ -247,8 +247,8 @@ def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
     assert coord._journal_entry_phase() == "UNKNOWN"
-    coord.shared_state.phase = "explore"
-    assert coord._journal_entry_phase() == "EXPLORE"
+    coord.shared_state.phase = "framework_agent"
+    assert coord._journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
@@ -258,7 +258,7 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     assert coord._source_session_id() == coord.session_dir.name
 
 
-def test_kernel_and_explore_enabled(coord: Coordinator) -> None:
+def test_kernel_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
     assert coord._kernel_enabled() is True
     coord.shared_state.kernel_enabled = False
@@ -569,57 +569,32 @@ def test_unprocessed_framework_agent_candidates(coord: Coordinator) -> None:
     assert [c["candidate_id"] for c in out] == ["c2", "c3"]
 
 
-def test_match_framework_agent_candidate_by_id_and_pr_number(coord: Coordinator) -> None:
-    cands = [
-        {"candidate_id": "https://github.com/o/r/pull/12", "pr_url": "https://github.com/o/r/pull/12", "pr_number": 12},
-        {"candidate_id": "https://github.com/o/r/pull/34", "ref": "PR:34", "pr_number": 34},
-    ]
-    # exact candidate_id
-    assert coord._match_framework_agent_candidate("https://github.com/o/r/pull/12", cands)["pr_number"] == 12
-    # ref match
-    assert coord._match_framework_agent_candidate("PR:34", cands)["pr_number"] == 34
-    # bare PR number fallback
-    assert coord._match_framework_agent_candidate("34", cands)["pr_number"] == 34
-    assert coord._match_framework_agent_candidate("999", cands) is None
-    assert coord._match_framework_agent_candidate("", cands) is None
+def test_select_next_framework_agent_candidate_takes_discovery_order(coord: Coordinator) -> None:
+    """Selection is linear: the discovery specialist already ranked the batch.
 
-
-async def test_select_best_framework_agent_candidate_falls_back_to_linear(coord: Coordinator, monkeypatch) -> None:
-    """With the ranker client unavailable, selection degrades to discovery order."""
+    Re-ranking here would overrule a judgement made with the gap and the
+    tried-ledger in view, using less context than the specialist had.
+    """
     ss = coord.shared_state
     ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
     ss.framework_agent_phase_progress = []
-    # Force the ranker client to be unavailable.
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_ranker_client", lambda: None)
-    chosen = await coord._select_best_framework_agent_candidate()
-    assert chosen == {"candidate_id": "c1"}
+    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c1"}
 
 
-async def test_select_best_framework_agent_candidate_single(coord: Coordinator) -> None:
-    """A single unprocessed candidate is returned without invoking the ranker."""
+def test_select_next_framework_agent_candidate_skips_processed(coord: Coordinator) -> None:
+    """A candidate with a terminal progress row is never handed out again."""
     ss = coord.shared_state
-    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "only"}]}]
-    ss.framework_agent_phase_progress = []
-    chosen = await coord._select_best_framework_agent_candidate()
-    assert chosen == {"candidate_id": "only"}
+    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}]}]
+    ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
+    assert coord._select_next_framework_agent_candidate() == {"candidate_id": "c2"}
 
 
-async def test_select_best_framework_agent_candidate_uses_ranker_choice(coord: Coordinator, monkeypatch) -> None:
-    """When the ranker returns a candidate, it is used over discovery order."""
+def test_select_next_framework_agent_candidate_none_when_all_processed(coord: Coordinator) -> None:
+    """An exhausted pool returns None -- the pump's signal to look for more."""
     ss = coord.shared_state
-    # Arm off so the ranking set is exactly the discovered PR candidates.
-    ss.framework_local_explore_enabled = False
-    ss.framework_agent_batches = [
-        {"candidates": [{"candidate_id": "c1"}, {"candidate_id": "c2"}, {"candidate_id": "c3"}]}
-    ]
-    ss.framework_agent_phase_progress = []
-
-    async def _fake_rank(cands):
-        return cands[-1]  # pick the last → c3
-
-    monkeypatch.setattr(coord.phase_framework, "_rank_framework_agent_candidates_llm", _fake_rank)
-    chosen = await coord._select_best_framework_agent_candidate()
-    assert chosen == {"candidate_id": "c3"}
+    ss.framework_agent_batches = [{"candidates": [{"candidate_id": "c1"}]}]
+    ss.framework_agent_phase_progress = [{"candidate_id": "c1", "status": "reverted"}]
+    assert coord._select_next_framework_agent_candidate() is None
 
 
 def test_framework_known_candidate_ids(coord: Coordinator) -> None:

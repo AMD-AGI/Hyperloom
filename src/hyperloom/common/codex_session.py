@@ -11,7 +11,7 @@ management and usage accounting instead of hand-rolling a tool-calling loop.
 persistent role; :func:`run_codex_turn` is the one-shot form for a caller
 whose work is a single turn.
 
-The SDK plumbing follows ``kernel_agents.agent_backends.codex.CodexBackend``,
+The SDK plumbing follows ``kernelforge.agent_backends.codex.CodexBackend``,
 but that class cannot be reused: its workspace guard requires the session cwd
 to be a git worktree and enforces KernelForge's benchmark-file protection.
 Hyperloom's Codex sessions run against plain output directories, so only the

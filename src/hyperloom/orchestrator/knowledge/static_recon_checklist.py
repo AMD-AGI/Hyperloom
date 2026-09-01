@@ -17,7 +17,7 @@ Each :class:`ChecklistEntry` describes one known "bridge opportunity":
 - ``detect`` — what to grep for and how to confirm the path is disabled.
 - ``consequence`` — what regression the disabled path causes.
 - ``bridge`` — advisory sketch of the fix.
-- ``domain_hint`` — which EXPLORE specialist domain should pick up the gap.
+- ``domain_hint`` — which specialist domain should pick up the gap.
 - ``evidence`` — provenance (PR / session) the pattern was distilled from.
 
 A small, hand-curated starter set keyed to validated findings.
@@ -40,7 +40,7 @@ class ChecklistEntry:
         detect: Grep target + confirmation instruction handed to the specialist.
         consequence: The regression caused while the path stays disabled.
         bridge: Advisory sketch of the fix.
-        domain_hint: EXPLORE specialist domain to route the seeded gap to.
+        domain_hint: Specialist domain to route the seeded gap to.
         source_dirs: Source subdirectories to point the specialist at (relative
             to a framework source root); rendered as ``source_hint_directories``.
         evidence: Provenance refs (PR / session) the pattern was distilled from.

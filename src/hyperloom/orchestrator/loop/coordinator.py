@@ -109,9 +109,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     }
 )
 
-# Default per-repo candidate cap for ``fa phase-discover`` (FRAMEWORK).
-DEFAULT_FRAMEWORK_MAX_CANDIDATES: int = 8
-
 
 def _extract_enablement_launch_log(result_payload: dict[str, Any] | None) -> str:
     """Extract launch/traceback text from a failed baseline result payload.
@@ -147,7 +144,7 @@ def _resolvable_artifacts_from_done(
 ) -> list[dict[str, Any]]:
     """Return ``artifacts_written`` entries whose ``source`` file exists on disk.
 
-    A FRAMEWORK/EXPLORE specialist may deliver a non-diff tuned artifact via
+    A FRAMEWORK_AGENT specialist may deliver a non-diff tuned artifact via
     ``artifacts_written`` instead of a source patch; it flows through the
     ``integrate_patch`` artifact-install channel. This is the shared routable
     signal used by both the autosubmit and empty-outcome bridges: an artifact is
@@ -286,7 +283,7 @@ def _framework_config_levers_from_done(
     return {}
 
 
-# Hard-trigger thresholds: EXPLORE rounds a domain may go without a specialist
+# Hard-trigger thresholds: optimisation rounds a domain may go without a specialist
 # dispatch / a KEEP before the Coordinator force-dispatches one.
 FORCE_STALLED_SPECIALIST_ROUNDS: int = 8
 FORCE_STALLED_KEEP_ROUNDS: int = 12
@@ -567,6 +564,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "phase_kernel": ("phases.kernel", "KernelPhase"),
         "phase_explore": ("phases.explore", "ExplorePhase"),
         "phase_framework": ("phases.framework", "FrameworkPhase"),
+        "gpu_lanes": ("gpu_lanes", "GpuLanes"),
+        "enablement_params": ("enablement.params", "EnablementParams"),
+        "enablement_lane": ("enablement.lane", "EnablementLane"),
+        "enablement_build": ("enablement.build", "EnablementBuild"),
+        "enablement_revalidation": ("enablement.revalidation", "EnablementRevalidation"),
         "router": ("loop.intent_router", "IntentRouter"),
         "maintenance": ("loop.maintenance", "MaintenanceCollaborator"),
         "build_lifecycle": ("loop.build_lifecycle", "BuildLifecycleCollaborator"),
@@ -929,7 +931,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_ensure_phase_initialised": "phase_machine",
         "_ensure_recipe_kb_t0_anchored": "phase_machine",
         "_kernel_enabled": "phase_machine",
-        "_explore_enabled": "phase_machine",
+        "_optimize_enabled": "phase_machine",
         "_advance_phase_if_needed": "phase_machine",
         "_on_phase_entered": "phase_machine",
         "_reseed_orch_prompt_for_phase": "phase_machine",
@@ -1023,7 +1025,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_apply_macro_cycle_reloop": "phase_explore",
         "_run_cycle_soft_restart": "phase_explore",
         "_restart_inference_servers": "phase_explore",
-        "_on_enter_explore": "phase_explore",
+        "_on_cycle_start_reprofile": "phase_explore",
         "_maybe_force_stalled_domain_specialist": "phase_explore",
         "_seed_gaps_from_research_hints": "phase_explore",
         "_fan_out_specialist_wave": "phase_explore",
@@ -1044,32 +1046,27 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_on_enter_framework": "phase_framework",
         "_pump_framework_agent_phase": "phase_framework",
         "_framework_agent_authoring_inflight": "phase_framework",
-        "_framework_agent_audit_skip_confident": "phase_framework",
-        "_framework_agent_roots_have_git": "phase_framework",
-        "_audit_framework_agent_candidate": "phase_framework",
-        "_framework_agent_audit_seed_lines": "phase_framework",
-        "_record_framework_agent_audit_skip": "phase_framework",
         "_enqueue_framework_agent_authoring_specialist": "phase_framework",
-        "_coerce_needs_gpu": "phase_framework",
-        "_framework_gpu_params": "phase_framework",
-        "_framework_authoring_lanes_ttl": "phase_framework",
-        "_build_enablement_specialist_params": "phase_framework",
-        "_read_enablement_source_context": "phase_framework",
-        "_derive_checkpoint_weight_facts": "phase_framework",
-        "_discover_enablement_candidate_refs": "phase_framework",
-        "_maybe_enqueue_enablement_specialist": "phase_framework",
-        "_maybe_record_enablement_human_review": "phase_framework",
-        "_enablement_in_flight": "phase_framework",
-        "_maybe_rearm_enablement": "phase_framework",
-        "_maybe_escalate_to_targeted_build": "phase_framework",
-        "_maybe_enqueue_specialist_requested_build": "phase_framework",
-        "_maybe_route_build_outcomes": "phase_framework",
-        "_route_succeeded_build": "phase_framework",
-        "_route_failed_build": "phase_framework",
-        "_build_routing_record": "phase_framework",
-        "_note_build_routed": "phase_framework",
-        "_build_probe_was_cancelled": "phase_framework",
-        "_enqueue_build_launch_probe": "phase_framework",
+        "_coerce_needs_gpu": "gpu_lanes",
+        "_framework_gpu_params": "gpu_lanes",
+        "_framework_authoring_lanes_ttl": "gpu_lanes",
+        "_build_enablement_specialist_params": "enablement_params",
+        "_read_enablement_source_context": "enablement_params",
+        "_derive_checkpoint_weight_facts": "enablement_params",
+        "_discover_enablement_candidate_refs": "enablement_params",
+        "_maybe_enqueue_enablement_specialist": "enablement_lane",
+        "_maybe_record_enablement_human_review": "enablement_lane",
+        "_enablement_in_flight": "enablement_lane",
+        "_maybe_rearm_enablement": "enablement_lane",
+        "_maybe_escalate_to_targeted_build": "enablement_build",
+        "_maybe_enqueue_specialist_requested_build": "enablement_build",
+        "_maybe_route_build_outcomes": "enablement_build",
+        "_route_succeeded_build": "enablement_build",
+        "_route_failed_build": "enablement_build",
+        "_build_routing_record": "enablement_build",
+        "_note_build_routed": "enablement_build",
+        "_build_probe_was_cancelled": "enablement_build",
+        "_enqueue_build_launch_probe": "enablement_build",
         "_maybe_rearm_authored_lane": "phase_framework",
         "_enqueue_author_specialist": "phase_framework",
         "_drain_apply_fail_retry_pending": "phase_framework",
@@ -1077,18 +1074,11 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_framework_processed_candidate_keys": "phase_framework",
         "_unprocessed_framework_agent_candidates": "phase_framework",
         "_select_next_framework_agent_candidate": "phase_framework",
-        "_select_best_framework_agent_candidate": "phase_framework",
-        "_rank_framework_agent_candidates_llm": "phase_framework",
-        "_match_framework_agent_candidate": "phase_framework",
-        "_framework_agent_ranker_model": "phase_framework",
-        "_framework_agent_ranker_client": "phase_framework",
         "_framework_known_candidate_ids": "phase_framework",
         "_framework_tried_refs": "phase_framework",
         "_build_framework_working_memory": "phase_framework",
-        "_render_framework_memory_for_prompt": "phase_framework",
         "_framework_agent_discover_repo_urls": "phase_framework",
         "_record_framework_agent_phase_done": "phase_framework",
-        "_discover_next_framework_batch": "phase_framework",
         "_enqueue_framework_agent_task": "phase_framework",
         "_collect_framework_agent_candidate_priors": "phase_framework",
         "_submit_framework_agent_candidate_for_review": "phase_framework",
@@ -1097,30 +1087,18 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_record_framework_agent_critic_denied": "phase_framework",
         "_maybe_reauthor_from_critic_feedback": "phase_framework",
         "_pump_framework_agent_phase_safely": "phase_framework",
-        "_pump_enablement_safely": "phase_framework",
-        "_maybe_enqueue_enablement_baseline_revalidation": "phase_framework",
-        "_open_revalidation_row": "phase_framework",
-        "_open_row_past_spent_generations": "phase_framework",
+        "_pump_enablement_safely": "enablement_lane",
+        "_maybe_enqueue_enablement_baseline_revalidation": "enablement_revalidation",
+        "_open_revalidation_row": "enablement_revalidation",
+        "_open_row_past_spent_generations": "enablement_revalidation",
         "_record_framework_agent_authored_outcome": "phase_framework",
         "_recover_framework_agent_authoring_outcome": "phase_framework",
         "_record_framework_agent_authoring_empty_outcome": "phase_framework",
         "_record_framework_agent_dispatch_failure": "phase_framework",
-        "_framework_agent_repo_url_origin_framework": "phase_framework",
-        "_build_framework_config_grid": "phase_framework",
-        "_framework_config_explore_params": "phase_framework",
-        "_run_framework_config_exploration": "phase_framework",
-        "_framework_config_exploration_inflight": "phase_framework",
-        "_framework_config_max_rounds": "phase_framework",
-        "_finish_framework_config_lane": "phase_framework",
-        "_framework_config_generation_context_lines": "phase_framework",
-        "_dispatch_framework_config_generation_specialist": "phase_framework",
-        "_framework_config_generation_inflight": "phase_framework",
-        "_framework_config_grid_from_proposals": "phase_framework",
-        "_ingest_framework_config_generation": "phase_framework",
-        "_start_framework_config_generation": "phase_framework",
-        "_framework_config_lane_should_engage": "phase_framework",
-        "_maybe_hold_for_framework_config_lane": "phase_framework",
-        "_record_framework_config_exploration_result": "phase_framework",
+        "_maybe_enqueue_candidate_discovery": "phase_framework",
+        "_candidate_discovery_inflight": "phase_framework",
+        "_ingest_candidate_discovery": "phase_framework",
+        "_candidates_from_discovery_proposals": "phase_framework",
         "_orchestration_conversational": "conversation",
         "_orchestration_context_tools_mounted": "conversation",
         "_orchestration_needs_seed": "conversation",
@@ -1311,6 +1289,41 @@ class Coordinator(metaclass=_CoordinatorMeta):
         from ..phases.framework import FrameworkPhase
 
         return self._collaborator("_phase_framework", FrameworkPhase)
+
+    @property
+    def gpu_lanes(self):
+        """GPU-lease params and lane resolution, shared by both dispatchers."""
+        from ..gpu_lanes import GpuLanes
+
+        return self._collaborator("_gpu_lanes", GpuLanes)
+
+    @property
+    def enablement_params(self):
+        """Enablement authoring-specialist request construction."""
+        from ..enablement.params import EnablementParams
+
+        return self._collaborator("_enablement_params", EnablementParams)
+
+    @property
+    def enablement_lane(self):
+        """Enablement round admission / in-flight / re-arm."""
+        from ..enablement.lane import EnablementLane
+
+        return self._collaborator("_enablement_lane", EnablementLane)
+
+    @property
+    def enablement_build(self):
+        """Off-loop compiled-build escalation and outcome routing."""
+        from ..enablement.build import EnablementBuild
+
+        return self._collaborator("_enablement_build", EnablementBuild)
+
+    @property
+    def enablement_revalidation(self):
+        """Genuine-baseline revalidation of a kept enablement round."""
+        from ..enablement.revalidation import EnablementRevalidation
+
+        return self._collaborator("_enablement_revalidation", EnablementRevalidation)
 
     @property
     def conversation(self):
@@ -2011,6 +2024,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _set_trace_ctx(
                     tick=int(self.shared_state.tick or 0),
                     phase=(self.shared_state.phase or "") or None,
+                    macro_cycle=int(self.shared_state.macro_cycle or 0),
                 )
             except Exception:  # noqa: BLE001
                 pass
@@ -2248,7 +2262,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
 
     # Phases whose long, serially-drained GPU grids must not starve the
     # per-phase cyclic budget exit. PRELUDE/SWEEP/CLOSE/RECOVER drain normally.
-    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"EXPLORE", "KERNEL_AGENT", "FRAMEWORK_AGENT"})
+    _BUDGET_GATED_DISPATCH_PHASES: frozenset[str] = frozenset({"FRAMEWORK_AGENT", "KERNEL_AGENT"})
 
     # Fact-write surface — journal + direct KB lesson/pitfall/recipe writes.
     PITFALL_REGRESS_THRESHOLD_PCT: float = -5.0  # gain_pct ≤ this → pitfall

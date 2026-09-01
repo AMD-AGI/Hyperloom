@@ -312,7 +312,8 @@ def test_manifest_versions_a_framework_installed_in_its_own_venv(monkeypatch, tm
     info.mkdir(parents=True)
     (info / "METADATA").write_text("Metadata-Version: 2.4\nName: vllm\nVersion: 0.27.1+rocm723\n", encoding="utf-8")
     monkeypatch.delenv("VLLM_VERSION", raising=False)
-    monkeypatch.setenv("VLLM_VENV_ROOT", str(venv_root))
+    monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK", "vllm")
+    monkeypatch.setenv("HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON", str(venv_root / "bin" / "python"))
     m = mf.build_manifest(Path("/tmp/sd"))
     assert m["stack_fingerprint"]["vllm"] == "0.27.1+rocm723"
 

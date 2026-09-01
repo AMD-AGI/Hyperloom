@@ -31,7 +31,6 @@ def test_phase_names_are_monotonic():
     assert phase_state.PHASE_NAMES == (
         "PRELUDE",
         "FRAMEWORK_AGENT",
-        "EXPLORE",
         "KERNEL_AGENT",
         "SWEEP",
         "CLOSE",
@@ -47,19 +46,19 @@ def test_allowed_actions_disjoint_phases():
         allowed = phase_state.PHASE_ALLOWED_ACTIONS[phase]
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
-    assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "kernel_opt" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
-    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["EXPLORE"]
+    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 
 def test_is_action_allowed_in_phase_handles_unknowns():
     assert phase_state.is_action_allowed_in_phase("baseline", "PRELUDE")
-    assert not phase_state.is_action_allowed_in_phase("baseline", "EXPLORE")
+    assert not phase_state.is_action_allowed_in_phase("baseline", "FRAMEWORK_AGENT")
     # Unknown phase → deny by default.
     assert not phase_state.is_action_allowed_in_phase("baseline", "UNKNOWN")
     assert not phase_state.is_action_allowed_in_phase("baseline", "")
@@ -83,15 +82,13 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
         assert "recover" in allowed
         assert "recover" not in proposable
     # The advertised analysis / framework names are never proposable.
-    explore = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["EXPLORE"]
-    assert "roofline" not in explore
-    assert "profile" not in explore
-    assert "explore" in explore and "specialist" in explore
-    framework = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
-    assert "framework" not in framework
-    assert "integrate_patch" in framework
-    # Investigation reaches the two mid-chain phases but not the wind-down ones.
-    assert "specialist" in framework
+    # The merged phase proposes both arms' levers and neither arm's analysis.
+    optimize = phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["FRAMEWORK_AGENT"]
+    assert "roofline" not in optimize
+    assert "profile" not in optimize
+    assert "framework" not in optimize
+    assert {"explore", "integrate_patch", "specialist"} <= optimize
+    framework = optimize
     assert "specialist" in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["KERNEL_AGENT"]
     assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["SWEEP"]
     assert "specialist" not in phase_state.PHASE_LLM_PROPOSABLE_ACTIONS["CLOSE"]
@@ -99,10 +96,10 @@ def test_llm_proposable_set_drops_coordinator_internal_actions():
 
 def test_is_action_llm_proposable_in_phase_handles_unknowns():
     assert phase_state.is_action_llm_proposable_in_phase("baseline", "PRELUDE")
-    assert phase_state.is_action_llm_proposable_in_phase("explore", "EXPLORE")
+    assert phase_state.is_action_llm_proposable_in_phase("explore", "FRAMEWORK_AGENT")
     # roofline lives in the allowlist but is never LLM-proposable.
-    assert phase_state.is_action_allowed_in_phase("roofline", "EXPLORE")
-    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "EXPLORE")
+    assert phase_state.is_action_allowed_in_phase("roofline", "FRAMEWORK_AGENT")
+    assert not phase_state.is_action_llm_proposable_in_phase("roofline", "FRAMEWORK_AGENT")
     assert not phase_state.is_action_llm_proposable_in_phase("framework_agent", "FRAMEWORK_AGENT")
     # Unknown phase / empty action → deny by default.
     assert not phase_state.is_action_llm_proposable_in_phase("baseline", "UNKNOWN")
@@ -113,49 +110,47 @@ def test_is_action_llm_proposable_in_phase_handles_unknowns():
     assert "roofline" not in explore and "profile" not in explore
 
 
-def test_phase_exit_reasons_includes_required_vocab():
-    for reason in (
-        "prelude_done",
-        "plateau_explore",
-        "plateau_kernel",
-        "explore_phase_budget_exhausted",
-        "kernel_phase_budget_exhausted",
-        "explore_budget_cap",
-        "kernel_budget_cap",
-        "sweep_budget_cap",
-        "sweep_done",
-        "conc_sweep_done",
-        "conc_sweep_failed",
-        "sweep_budget_exhausted",
-        "kernel_phase_aborted_no_trace",
-        "explore_force_exit_low_budget",
-        "explore_no_more_leverage",
-        "kernel_no_more_leverage",
-        "framework_agent_phase_done",
-        "framework_agent_plateau",
-        "framework_agent_budget_cap",
-        "cycle_reloop",
-        "global_converged",
-        "robustness_escalated",
-        "target_reached",
-        "time_exhausted",
-        "time_exhausted_during_prelude",
-        "user_stop_requested",
-        "recipe_kb_t0_failed",
-        "recipe_kb_drain_failed",
-        "recipe_kb_commit_failed",
-        "prelude_baseline_failed",
-        "prelude_policy_loop",
-        "policy_loop",
-        "crash_threshold_exceeded",
-        "baseline_failed",
-        "emergency",
-        "max_ticks",
-        "signal",
-        "no_kernel_skipped",
-        "phase_entered",
-    ):
+def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
+    """The closed vocabulary must actually close over what the rules emit.
+
+    Restating the frozenset here would only assert that a copy matches its
+    original. What matters is that no exit rule can hand PolicyGate a reason it
+    will then reject, stranding the transition.
+    """
+    import itertools
+
+    rules = (
+        phase_state.exit_normal_prelude,
+        phase_state.exit_normal_optimize,
+        phase_state.exit_normal_kernel,
+        phase_state.exit_normal_sweep,
+    )
+    # A spread of states wide enough to reach each rule's branches.
+    states = [
+        SharedState(),
+        SharedState(baseline_tput=1234.5),
+        SharedState(baseline_tput=1234.5, framework_agent_phase_done=True),
+        SharedState(baseline_tput=1234.5, phase_budget_pct={p: 0.01 for p in phase_state.PHASE_NAMES}),
+    ]
+    seen = set()
+    for rule, state in itertools.product(rules, states):
+        try:
+            out = rule(state)
+        except TypeError:
+            continue  # rule needs kwargs this sweep does not supply
+        if out is None:
+            continue
+        reason = out[0]
+        seen.add(reason)
         assert phase_state.is_valid_phase_exit_reason(reason), reason
+    assert seen, "no exit rule fired; this guard would pass vacuously"
+
+
+def test_phase_exit_reason_vocabulary_is_closed():
+    assert not phase_state.is_valid_phase_exit_reason("totally_invented")
+    assert not phase_state.is_valid_phase_exit_reason("")
+    # Stripped before comparison, so a stray newline in a history row still matches.
+    assert phase_state.is_valid_phase_exit_reason("  prelude_done \n")
 
 
 def test_stop_reason_vocab_includes_v06_and_v08():
@@ -191,8 +186,8 @@ def test_set_stop_reason_keeps_baseline_arg_error(tmp_path):
 def test_normalize_budget_pct_falls_back_to_defaults():
     out = phase_state.normalize_budget_pct(None)
     assert out == phase_state.DEFAULT_PHASE_BUDGET_PCT
-    out = phase_state.normalize_budget_pct({"EXPLORE": 0.5, "BOGUS": 0.9})
-    assert out["EXPLORE"] == 0.5
+    out = phase_state.normalize_budget_pct({"FRAMEWORK_AGENT": 0.5, "BOGUS": 0.9})
+    assert out["FRAMEWORK_AGENT"] == 0.5
     assert out["PRELUDE"] == phase_state.DEFAULT_PHASE_BUDGET_PCT["PRELUDE"]
     assert "BOGUS" not in out
 
@@ -436,10 +431,10 @@ def test_exit_terminal_prelude_after_three_baseline_failures():
     assert out is not None and out[0] == "prelude_baseline_failed"
 
 
-def test_exit_normal_explore_uses_budget_exhaustion():
-    # Elapsed exceeds budget; IR-6 force-exit disabled to isolate the budget path.
+def test_exit_normal_optimize_uses_budget_exhaustion():
+    # Elapsed exceeds the phase budget.
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1.0,
         max_minutes=10,  # 600s total; 60% explore budget = 360s
         phase_budget_pct={},
@@ -448,16 +443,13 @@ def test_exit_normal_explore_uses_budget_exhaustion():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
-        state,
-        force_exit_budget_pct=0.0,
-    )
-    assert out is not None and out[0] == "explore_phase_budget_exhausted"
+    out = phase_state.exit_normal_optimize(state)
+    assert out is not None and out[0] == "optimize_phase_budget_exhausted"
 
 
 def test_compute_next_phase_no_kernel_skips_kernel_phase():
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -465,7 +457,7 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
         pending_escalate_hint="skip_to_kernel",
         explore_search={},
         # At least one specialist round this cycle, required for skip_to_kernel
-        # to fire at all (see test_exit_normal_explore_skip_to_kernel_*).
+        # to fire at all (see test_exit_normal_optimize_skip_to_kernel_*).
         specialist_rounds=[{"proposals_total": 1, "proposals_kept": 0}],
         optimization_stack=[{"action": "explore"}],
     )
@@ -474,10 +466,10 @@ def test_compute_next_phase_no_kernel_skips_kernel_phase():
     next_phase, reason, evidence = out
     assert next_phase == "SWEEP"
     assert reason == "no_kernel_skipped"
-    assert evidence.get("passed_through_reason") == "plateau_explore"
+    assert evidence.get("passed_through_reason") == "optimize_no_more_leverage"
 
 
-def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
+def test_exit_normal_optimize_skip_to_kernel_requires_a_tested_round():
     """A skip_to_kernel hint must not end EXPLORE with zero validated work.
 
     Reproduces the cumulative_gain_validated=0.00% session: the hint arrived
@@ -485,7 +477,7 @@ def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
     be honored until one actually has.
     """
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -496,16 +488,13 @@ def test_exit_normal_explore_skip_to_kernel_requires_a_tested_round():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
-        state,
-        force_exit_budget_pct=0.0,
-    )
+    out = phase_state.exit_normal_optimize(state)
     assert out is None
 
 
-def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
+def test_exit_normal_optimize_skip_to_kernel_fires_once_a_round_ran():
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1_000_000.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -516,19 +505,16 @@ def test_exit_normal_explore_skip_to_kernel_fires_once_a_round_ran():
         optimization_stack=[{"action": "explore"}],
         _now_unix=lambda: 1_000_000.0,
     )
-    out = phase_state.exit_normal_explore(
-        state,
-        force_exit_budget_pct=0.0,
-    )
+    out = phase_state.exit_normal_optimize(state)
     assert out is not None
     reason, evidence = out
-    assert reason == "plateau_explore"
+    assert reason == "optimize_no_more_leverage"
     assert evidence.get("hint") == "skip_to_kernel"
 
 
 def test_compute_next_phase_terminal_overrides_phase():
     state = SimpleNamespace(
-        phase="EXPLORE",
+        phase=phase_state.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=0.0,
         max_minutes=0,
         phase_budget_pct={},
@@ -568,13 +554,13 @@ def test_record_phase_transition_writes_row_and_updates_phase():
     assert row["from_phase"] == "" and row["to_phase"] == "PRELUDE"
     # History is append-only.
     row2 = s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={"baseline_tput": 100.0},
         ts="2026-05-19T00:01:00+00:00",
         ts_unix=1747600060.0,
     )
-    assert s.phase == "EXPLORE"
+    assert s.phase == phase_state.PHASE_FRAMEWORK_AGENT
     assert len(s.phase_history) == 2
     assert s.phase_history[-1] == row2
     assert row2["from_phase"] == "PRELUDE"
@@ -583,7 +569,7 @@ def test_record_phase_transition_writes_row_and_updates_phase():
 def test_explore_elapsed_accumulates_completed_and_live_segments():
     s = SharedState()
     s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="phase_entered",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
@@ -591,7 +577,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
     )
     s.record_phase_transition(
         to_phase="KERNEL_AGENT",
-        reason="explore_done",
+        reason="optimize_no_more_leverage",
         evidence={},
         ts="2026-05-19T00:02:00+00:00",
         ts_unix=220.0,
@@ -600,7 +586,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
     assert phase_state.explore_elapsed_seconds(s, now_unix=300.0) == 120.0
 
     s.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="sweep_reloop",
         evidence={},
         ts="2026-05-19T00:03:00+00:00",
@@ -612,7 +598,7 @@ def test_explore_elapsed_accumulates_completed_and_live_segments():
 def test_langfuse_status_includes_explore_runtime_and_kb_hit():
     s = SharedState()
     s.start_ts = "2026-05-19T00:00:00+00:00"
-    s.phase = "EXPLORE"
+    s.phase = phase_state.PHASE_FRAMEWORK_AGENT
     s.phase_started_unix = 100.0
     s.explore_elapsed_accum_s = 120.0
     s.warm_start_context = {"status": "hit"}
@@ -647,7 +633,7 @@ def test_legacy_resume_keeps_explore_runtime_unknown():
 
     s.record_phase_transition(
         to_phase="KERNEL_AGENT",
-        reason="explore_done",
+        reason="optimize_no_more_leverage",
         evidence={},
         ts="2026-05-19T00:02:00+00:00",
         ts_unix=220.0,
@@ -772,7 +758,7 @@ def test_policy_gate_denies_kernel_request_in_explore():
     """A kernel_agent-owned REQUEST in EXPLORE is denied by R1."""
     state = SharedState()
     state.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
@@ -802,7 +788,7 @@ def test_policy_gate_gates_apply_patch_alias_like_integrate():
     # R1; the alias must be denied with the same rule.
     state = SharedState()
     state.record_phase_transition(
-        to_phase="EXPLORE",
+        to_phase=phase_state.PHASE_FRAMEWORK_AGENT,
         reason="prelude_done",
         evidence={},
         ts="2026-05-19T00:00:00+00:00",
@@ -971,31 +957,44 @@ def test_coordinator_init_writes_phase_prelude_for_fresh_session(coordinator_wit
     row = c.shared_state.phase_history[0]
     assert row["to_phase"] == "PRELUDE"
     assert row["reason"] == "phase_entered"
-    # FRAMEWORK 0.20, EXPLORE 0.35, PRELUDE 0.03; budgets sum to 1.0.
-    assert c.shared_state.phase_budget_pct["FRAMEWORK_AGENT"] == 0.20
-    assert c.shared_state.phase_budget_pct["EXPLORE"] == 0.35
-    assert c.shared_state.phase_budget_pct["PRELUDE"] == 0.03
+    # A fresh session starts on the defaults rather than an empty split.
+    assert c.shared_state.phase_budget_pct == dict(phase_state.DEFAULT_PHASE_BUDGET_PCT)
+
+
+def test_a_session_recorded_at_an_unknown_phase_refuses_to_resume(coordinator_with_mocks):
+    """A phase this build does not have was written by a build whose machine differed.
+
+    Treating it as a fresh start re-runs PRELUDE on top of a session that
+    already has a baseline, a KEPT stack and hours of measurement, and the
+    numbers of the two builds end up in one report.
+    """
+    c = coordinator_with_mocks
+    c.shared_state.phase = "EXPLORE"
+
+    with pytest.raises(RuntimeError) as excinfo:
+        c._ensure_phase_initialised()
+
+    assert "EXPLORE" in str(excinfo.value)
+    assert c.shared_state.phase == "EXPLORE"
 
 
 @pytest.mark.asyncio
-async def test_coordinator_advances_to_explore_when_baseline_present(
+async def test_coordinator_advances_to_the_optimize_phase_when_baseline_present(
     coordinator_with_mocks,
     session_dir,
 ):
     c = coordinator_with_mocks
     try:
-        # Skip FRAMEWORK to exercise the PRELUDE→EXPLORE contract.
-        c.shared_state.framework_agent_phase_enabled = False
         # Simulate baseline KEEP to trigger prelude_done.
         c.shared_state.baseline_tput = 1500.0
         c.shared_state.save(session_dir)
         await c.tick(1)
-        assert c.shared_state.phase == "EXPLORE"
-        # 2 rows: PRELUDE entry + PRELUDE→EXPLORE.
+        assert c.shared_state.phase == phase_state.PHASE_FRAMEWORK_AGENT
+        # 2 rows: PRELUDE entry + PRELUDE -> the optimisation phase.
         assert len(c.shared_state.phase_history) == 2
         last = c.shared_state.phase_history[-1]
         assert last["from_phase"] == "PRELUDE"
-        assert last["to_phase"] == "EXPLORE"
+        assert last["to_phase"] == phase_state.PHASE_FRAMEWORK_AGENT
         assert last["reason"] == "prelude_done"
     finally:
         await c.stop()

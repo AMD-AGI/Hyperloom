@@ -139,11 +139,12 @@ the absence of priors as *unknown*, not as *no contradicting prior*:
   the strict class demands, so blocking them on missing benchmark
   evidence creates a circular deadlock.
 - For **`framework_op`** proposals (`baseline` / `target_analysis` /
-  `recover` / `report` / `session_breakdown` / `framework_agent`): approve
-  by default; Critic is not a useful gatekeeper for framework-level
-  operations. (`framework_agent` is the FRAMEWORK_AGENT candidate pre-screen
-  gate; the candidate's actual code/config landing is later re-reviewed
-  as a strict `integrate_patch` `patch_landing` proposal.)
+  `recover` / `report` / `session_breakdown`): approve by default; Critic is
+  not a useful gatekeeper for framework-level operations. An upstream-PR
+  pre-screen also routes here — an `integrate_patch` proposal carrying a
+  top-level `framework_agent_candidate_id` and no `patches` — and the
+  candidate's actual code/config landing is later re-reviewed as a strict
+  `integrate_patch` `patch_landing` proposal.
 
 ## Action Classes
 
@@ -154,7 +155,7 @@ Every proposal in `judge_bundle.proposals` is classified into one of:
 | `patch_landing` | `integrate`, `integrate_patch`, `apply_patch` (production promotion) | Strict — comparable before/after benchmark + accuracy gate + active-path proof + rollback. Critic is the last gate before `optimization_stack` / `framework_source_roots` mutates. |
 | `enablement_landing` | `integrate` / `integrate_patch` / `apply_patch` tagged `params.enablement` or `params.framework_agent_authoring` | Structural — same bar as `evidence_producer` (provenance + in-phase + no contradicting KB prior). The patch makes the model **run correctly** (runnability, or the accuracy floor for eval-origin — not throughput): boot-origin is dispatched *before* any usable baseline, and eval-origin booted but missed the accuracy floor. A throughput before/after is impossible/irrelevant by construction; rollback is guaranteed by the enablement integrate executor (`git apply` + `git reset --hard` on REVERT) plus the downstream runnable-decision gate (which additionally re-runs the accuracy eval for eval-origin). **Default approve when KB priors are silent.** |
 | `evidence_producer` | `explore`, `specialist`, `sweep`, `profile`, `roofline`, `kernel_opt` | Structural — provenance non-empty (specialist or default_grid), action in current phase's allowed set, no contradicting KB prior. **Default approve when KB priors are silent.** |
-| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`, `framework_agent` | None — approve by default; Critic is not a useful gatekeeper here. (`framework_agent` = FRAMEWORK_AGENT candidate pre-screen; landing is re-reviewed strictly as `integrate_patch`.) |
+| `framework_op` | `baseline`, `target_analysis`, `recover`, `report`, `session_breakdown`; plus an `integrate_patch` carrying `framework_agent_candidate_id` and no `patches` (the upstream-PR pre-screen) | None — approve by default; Critic is not a useful gatekeeper here. A pre-screen's landing is re-reviewed strictly as `integrate_patch`. |
 
 Unknown action names fall through to `evidence_producer` (cold-start
 safe). The exact list lives in
@@ -256,10 +257,9 @@ the action will produce.
 
 Return `approve` by default. Critic is not a useful gatekeeper for
 `baseline` / `target_analysis` / `recover` / `report` /
-`session_breakdown` / `framework_agent`. Only emit a non-`approve` verdict
-when the proposal is structurally malformed (missing required params,
-wrong phase, etc.). For `framework_agent` (the FRAMEWORK_AGENT candidate
-pre-screen) a `reject` means "do not spend a GPU bench on this
+`session_breakdown`. Only emit a non-`approve` verdict when the proposal is
+structurally malformed (missing required params, wrong phase, etc.). For an
+upstream-PR pre-screen a `reject` means "do not spend a GPU bench on this
 candidate"; the candidate's eventual patch/config landing is re-reviewed
 strictly as an `integrate_patch` proposal.
 

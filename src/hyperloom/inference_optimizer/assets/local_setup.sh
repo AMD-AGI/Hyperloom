@@ -4,10 +4,17 @@
 
 # Local Mode bootstrap for a fresh Hyperloom checkout.
 #
-# Scope: clone the PRIVATE KernelForge repo and write local-setup.env.sh
-# (exports FORGE_PATH). Open-source deps (Magpie / InferenceX / TraceLens) are
-# owned by install.sh; bare-metal invokes this only when the kernel backend
-# order includes forge.
+# Scope: write local-setup.env.sh, the env file every later step sources
+# (REPO_ROOT / USER_DATA_PATH / HYPERLOOM_RUNTIME_DIR / HYPERLOOM_DEPS_ROOT /
+# HYPERLOOM_CACHE_DIR). Open-source deps (Magpie / InferenceX / TraceLens) are
+# owned by install.sh.
+#
+# It used to also clone the private KernelForge repo and export $FORGE_PATH,
+# because the forge kernel backend lived in that separate checkout. forge now
+# ships inside this distribution as the `kernelforge` package, so there is
+# nothing to clone and nothing left to point at: no code reads $FORGE_PATH any
+# more, and it is not on env_safety's forwarding allowlist either. The dev
+# override that replaced it is $KERNELFORGE_PROJECT_ROOT.
 
 set -euo pipefail
 
@@ -35,28 +42,23 @@ if [ -z "${_user_data_was_set}" ]; then
   echo "[install WARN] USER_DATA_PATH not set; defaulting to ${USER_DATA_PATH}. Set USER_DATA_PATH to persist artifacts under your data root." >&2
 fi
 HYPERLOOM_RUNTIME_DIR="${HYPERLOOM_RUNTIME_DIR:-${USER_DATA_PATH}/runtime}"
-# Pod-local base for the private KernelForge checkout. Keep it decoupled from
+# Pod-local base for dependency checkouts. Keep it decoupled from
 # USER_DATA_PATH so shared (WekaFS) workspaces never collocate pod checkouts.
 HYPERLOOM_DEPS_ROOT="${HYPERLOOM_DEPS_ROOT:-${HYPERLOOM_CACHE_DIR:-${REPO_ROOT}/.cache}}"
 _open_source_root="${HYPERLOOM_DEPS_ROOT}"
 LOCAL_SETUP_ENV="${LOCAL_SETUP_ENV:-${HYPERLOOM_RUNTIME_DIR}/local-setup.env.sh}"
 
-# Only the private KernelForge repo is cloned here; open-source deps
-# (Magpie / InferenceX / TraceLens) are owned by install.sh.
-KERNEL_FORGE_REPO="${KERNEL_FORGE_REPO:-https://github.com/AMD-AGI/KernelForge.git}"
-
 usage() {
   cat <<'EOF'
 Usage: src/hyperloom/inference_optimizer/assets/local_setup.sh [options]
 
-Clones the private KernelForge checkout and writes a local env file exporting
-FORGE_PATH. Open-source deps (Magpie / InferenceX / TraceLens) are installed by
-install.sh, not here. Bare-metal installs call this only when the kernel backend
-order includes forge.
+Writes the local env file every later step sources. Open-source deps
+(Magpie / InferenceX / TraceLens) are installed by install.sh, not here; the
+forge kernel backend ships in this distribution and needs no checkout.
 
 Options:
-  --dry-run             Print planned actions without cloning or writing
-  --check-only          Verify existing dependency checkouts, do not write env
+  --dry-run             Print planned actions without writing
+  --check-only          Do not write the env file
   --deps-root PATH      Directory for dependency checkouts
   --user-data-path PATH Writable artifact root; defaults to $USER_DATA_PATH or /workspace/hyperloom
   --session-dir PATH    Alias for --user-data-path (backward compatible)
@@ -64,8 +66,7 @@ Options:
   -h, --help            Show this help
 
 Advanced env overrides:
-  REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV,
-  FORGE_PATH, KERNEL_FORGE_REPO
+  REPO_ROOT, USER_DATA_PATH, HYPERLOOM_DEPS_ROOT, LOCAL_SETUP_ENV
 EOF
 }
 
@@ -103,96 +104,12 @@ log() { echo "[local-setup] $*"; }
 warn() { echo "[local-setup WARN] $*" >&2; }
 die() { echo "[local-setup ERROR] $*" >&2; exit 1; }
 
-run() {
-  log "$*"
-  if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
-    "$@"
-  fi
-}
-
 shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
 write_export() {
   printf 'export %s=%s\n' "$1" "$(shell_quote "$2")"
-}
-
-ensure_git_available() {
-  if ! command -v git >/dev/null 2>&1; then
-    die "git is required to clone Hyperloom dependency repositories"
-  fi
-}
-
-clone_or_update() {
-  local name="$1"
-  local repo="$2"
-  local dest="$3"
-  local ref="${4:-}"
-
-  if [ -d "${dest}/.git" ]; then
-    if [ "$CHECK_ONLY" -eq 1 ]; then
-      log "${name}: existing checkout ${dest}"
-      return 0
-    fi
-    if [ -n "$ref" ]; then
-      # Realign to $ref via the shallow SHA-aware fetch used by
-      # src/hyperloom/agents/kernel/scripts/install.sh (ensure_tracelens): `fetch origin <ref>`
-      # + detached FETCH_HEAD checkout works for both a branch name and a raw
-      # commit SHA on a real (shallow) GitHub remote, unlike `checkout <sha>`
-      # which needs the object already present locally (#722 / PR#789).
-      run git -C "$dest" fetch --depth 1 origin "$ref"
-      run git -C "$dest" checkout -q FETCH_HEAD
-    else
-      run git -C "$dest" fetch --all --tags --prune
-    fi
-    return 0
-  fi
-
-  if [ -e "$dest" ]; then
-    die "${name} destination exists but is not a git checkout: ${dest}"
-  fi
-  if [ "$CHECK_ONLY" -eq 1 ]; then
-    die "${name} checkout missing: ${dest}"
-  fi
-
-  log "${name}: clone ${repo} -> ${dest}"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "would: git clone ${repo} ${dest}${ref:+ (checkout ${ref})}"
-    return 0
-  fi
-  mkdir -p "$(dirname "$dest")"
-  if ! run git clone "$repo" "$dest"; then
-    return 1
-  fi
-  if [ -n "$ref" ]; then
-    run git -C "$dest" checkout "$ref"
-  fi
-  return 0
-}
-
-resolve_forge() {
-  if [ -n "${FORGE_PATH:-}" ]; then
-    [ -d "$FORGE_PATH" ] || die "FORGE_PATH is set but does not exist: ${FORGE_PATH}"
-    export FORGE_PATH
-    log "FORGE_PATH: using existing ${FORGE_PATH}"
-    return 0
-  fi
-
-  # KernelForge is a separate repo cloned only for the opt-in forge kernel
-  # backend. Treat the clone as best-effort: when it is unavailable (no access
-  # or not yet public), warn and continue so the rest of local setup still
-  # succeeds. The default backend order is geak, which does not require
-  # KernelForge; forge is opt-in via KERNEL_OPT_BACKEND_ORDER=forge.
-  local root="${_open_source_root}/KernelForge"
-  if clone_or_update "KernelForge" "$KERNEL_FORGE_REPO" "$root" ""; then
-    FORGE_PATH="${FORGE_PATH:-$root}"
-    export FORGE_PATH
-    log "FORGE_PATH: ${FORGE_PATH}"
-  else
-    warn "KernelForge checkout unavailable (${KERNEL_FORGE_REPO}); skipping forge backend setup."
-    warn "The forge kernel backend (KERNEL_OPT_BACKEND_ORDER=forge) will be unavailable; the default 'geak' backend does not require KernelForge."
-  fi
 }
 
 write_local_env() {
@@ -215,9 +132,6 @@ write_local_env() {
     # --deps-root / HYPERLOOM_DEPS_ROOT override would leave those consumers on
     # the $REPO_ROOT/.cache default and mis-classify managed vs override (#722).
     write_export HYPERLOOM_CACHE_DIR "$_open_source_root"
-    if [ -n "${FORGE_PATH:-}" ]; then
-      write_export FORGE_PATH "$FORGE_PATH"
-    fi
   } > "$LOCAL_SETUP_ENV"
   chmod 600 "$LOCAL_SETUP_ENV"
   log "wrote ${LOCAL_SETUP_ENV}"
@@ -269,8 +183,6 @@ main() {
     mkdir -p "$HYPERLOOM_DEPS_ROOT" "$HYPERLOOM_RUNTIME_DIR"
   fi
 
-  ensure_git_available
-  resolve_forge
   write_local_env
 
   if [ "$PRINT_NEXT_STEPS" -eq 1 ]; then

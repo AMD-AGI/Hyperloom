@@ -93,7 +93,7 @@ def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> st
 
     The shape test itself belongs to :mod:`hyperloom.common.llm_config`, so this
     cannot disagree with backend selection, the TraceLens runner or the forge
-    fellow.
+    kernel_backend.
 
     Args:
         env: Environment mapping to read; defaults to ``os.environ``.

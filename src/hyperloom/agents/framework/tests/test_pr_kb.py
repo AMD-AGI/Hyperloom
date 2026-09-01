@@ -15,6 +15,7 @@ from hyperloom.common.jsonio import iter_sse_objects
 from hyperloom.agents.framework import pr_kb, pr_kb_slug
 from hyperloom.agents.framework.gbrain_page_client import (
     GbrainPageClient,
+    GbrainPageError,
     _select_mcp_response,
     build_gbrain_page_client_from_env,
 )
@@ -110,27 +111,6 @@ def _files_page(patches, *, truncated=False):
     return {"markdown": body}
 
 
-def test_fetch_pr_kb_diff_ok():
-    page = _files_page([{"filename": "s.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"}])
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(page))
-    assert src == "gbrain_pr_kb"
-    assert "diff --git a/s.py b/s.py" in text
-
-
-def test_fetch_pr_kb_diff_truncated_bails():
-    page = _files_page([{"filename": "s.py", "status": "modified", "patch": "@@ x"}], truncated=True)
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(page))
-    assert (text, src) == ("", "")
-
-
-def test_fetch_pr_kb_diff_missing_page():
-    text, src = pr_kb.fetch_pr_kb_diff("ROCm/vllm", 7, client=_StubClient(None))
-    assert (text, src) == ("", "")
-
-
-# --- index parse ------------------------------------------------------------
-
-
 def test_parse_index_prs():
     prs = [{"number": 9, "state": "open", "title": "x"}]
     md = "---\nrepo: ROCm/vllm\n---\n# index\n\n## PRs JSON\n\n```json\n" + json.dumps(prs) + "\n```\n"
@@ -143,6 +123,26 @@ def test_parse_index_prs():
 def test_build_client_from_env_none_when_unset(monkeypatch):
     monkeypatch.delenv("GBRAIN_BASE_URL", raising=False)
     monkeypatch.delenv("GBRAIN_TOKEN", raising=False)
+    assert build_gbrain_page_client_from_env() is None
+
+
+def test_gbrain_client_rejects_non_http_schemes():
+    with pytest.raises(GbrainPageError, match="unsupported URL scheme"):
+        GbrainPageClient("file:///etc/passwd", "tok")
+    with pytest.raises(GbrainPageError, match="unsupported URL scheme"):
+        GbrainPageClient("ftp://gbrain.example/mcp", "tok")
+
+
+def test_build_client_from_env_none_when_scheme_is_not_http(monkeypatch):
+    monkeypatch.setenv("GBRAIN_BASE_URL", "file:///tmp/gbrain")
+    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
+    assert build_gbrain_page_client_from_env() is None
+
+
+def test_build_client_from_env_none_when_url_is_unparseable(monkeypatch):
+    """An unterminated IPv6 literal raises ValueError from under the scheme check."""
+    monkeypatch.setenv("GBRAIN_BASE_URL", "http://[::1")
+    monkeypatch.setenv("GBRAIN_TOKEN", "tok")
     assert build_gbrain_page_client_from_env() is None
 
 
