@@ -131,11 +131,43 @@ trap cleanup EXIT INT TERM
 # without this the two disagree by 180x. Exported per framework because the knob
 # name is framework-specific, and only when the operator has not pinned one.
 _KEEPALIVE_S="${AGENTX_HTTP_KEEP_ALIVE_S:-900}"
-case "${FRAMEWORK:-}${BUILTIN}" in
-  *vllm*) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
-  *sglang*) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+# Decide from BUILTIN, not from a concatenation. Matching against
+# "${FRAMEWORK}${BUILTIN}" glued the two together, so FRAMEWORK=vllm with
+# BUILTIN=sglang_mi300x.sh formed "vllmsglang_mi300x.sh", hit the *vllm* arm
+# first, and left SGLang on its 5s default -- while this very line went on to
+# report 900s. The server then closed the connection mid-warmup and the round
+# died as "root AgentX warmup request failed", with the log actively denying the
+# cause. BUILTIN is the script that actually boots, so it is the authority;
+# FRAMEWORK is only a fallback for a script name that carries no framework, and
+# a disagreement between them is worth saying out loud rather than resolving
+# silently in either direction.
+_ka_target=""
+case "$BUILTIN" in
+  *vllm*) _ka_target=vllm ;;
+  *sglang*) _ka_target=sglang ;;
+  *)
+    case "${FRAMEWORK:-}" in
+      *vllm*) _ka_target=vllm ;;
+      *sglang*) _ka_target=sglang ;;
+    esac
+    ;;
 esac
-log "server keep-alive: ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
+case "${FRAMEWORK:-}" in
+  "") ;;
+  *"$_ka_target"*) ;;
+  *)
+    [ -n "$_ka_target" ] && log "WARN FRAMEWORK=${FRAMEWORK} disagrees with the server script ${BUILTIN}; keep-alive follows the script"
+    ;;
+esac
+case "$_ka_target" in
+  vllm) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+  sglang) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+esac
+if [ -n "$_ka_target" ]; then
+  log "server keep-alive: ${_ka_target} ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
+else
+  log "WARN no keep-alive knob for server script ${BUILTIN}; server idle timeout left at its default while the client tolerates ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms"
+fi
 
 log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
 MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
@@ -258,6 +290,10 @@ _require_decimal() {  # _require_decimal NAME VALUE -- digits with one optional 
 }
 _require_uint AGENTX_WARMUP_REQUESTS_PER_LANE "$WARMLANE"
 _require_uint AGENTX_WARMUP_GRACE_PERIOD "$WARMGRACE"
+# DURATION is read above (before these helpers exist) but validated here, since
+# it reaches the same `$(( ))` in the profile-delay clamp and the same numeric
+# `[ ]` comparison in the canonical check below.
+_require_uint AGENTX_DURATION "$DURATION"
 
 # Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
 # whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
@@ -468,6 +504,16 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # the upstream profile it lands squarely inside setup and captures nothing.
   PWARM="${AGENTX_PROFILE_WARMUP_S:-2700}"
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
+  # Both reach `$(( ))` and `[ -gt ]` below, and neither construct fails the way
+  # you want under `set -euo pipefail`. A non-integer inside `$(( ))` aborts the
+  # whole round (so AGENTX_PROFILE_WINDOW_S="20.5" kills a run that was minutes
+  # from its measurement window); a non-integer in `[ -gt ]` makes test exit 2,
+  # which `set -e` exempts because it is an `if` condition, so the clamp silently
+  # does not fire and the capture lands after the round ended -- no trace, and
+  # the "exceeds the safe bound" line never printed. Those are exactly the two
+  # failure modes the comment above describes, so validate before either runs.
+  _require_uint AGENTX_PROFILE_WARMUP_S "$PWARM"
+  _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   # The delay is a blind wall clock: it does not know which phase aiperf is in,
   # and the two ways to get it wrong are NOT symmetric. Opening late is fatal --
   # aiperf exits, the branch below only logs a warning, and the round produces no

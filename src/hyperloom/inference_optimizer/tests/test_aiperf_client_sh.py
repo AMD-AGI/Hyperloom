@@ -905,3 +905,80 @@ def test_server_keep_alive_uses_the_frameworks_own_knob(tmp_path):
     env = _server_env(tmp_path, marker)
     assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
     assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_keep_alive_follows_the_server_script_not_a_concatenation(tmp_path):
+    """The exact mismatch that reached production.
+
+    ``BUILTIN`` defaults to ``${FRAMEWORK}_${GPU}.sh``, so the two can only
+    disagree through AGENTX_SERVER_SCRIPT -- which is precisely how it happens
+    in the field: a stale FRAMEWORK reaches the client through persisted state
+    while the operator pins the script explicitly.
+
+    The arm used to be chosen by matching ``"${FRAMEWORK}${BUILTIN}"``, so a
+    stale FRAMEWORK=vllm alongside BUILTIN=sglang_mi300x.sh formed
+    ``"vllmsglang_mi300x.sh"``, matched ``*vllm*`` first, and exported the vllm
+    knob -- leaving SGLang on its 5s default while the log reported 900s. The
+    server then closed the socket mid-warmup and the round died as a terminal
+    warmup failure, with the one diagnostic line actively denying the cause.
+
+    BUILTIN is the script that actually boots, so it decides.
+    """
+    marker = tmp_path / "mix.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="vllm",
+        AGENTX_SERVER_SCRIPT="sglang_mi300x.sh",
+        AGENTX_TEST_SERVER_MARKER=str(marker),
+    )
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
+    """Resolving it silently in either direction hides a misconfigured round."""
+    marker = tmp_path / "warn.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="vllm",
+        AGENTX_SERVER_SCRIPT="sglang_mi300x.sh",
+        AGENTX_TEST_SERVER_MARKER=str(marker),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "disagrees with the server script" in (r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize(
+    "knob,value",
+    [
+        ("AGENTX_PROFILE_WINDOW_S", "20.5"),
+        ("AGENTX_PROFILE_WARMUP_S", "2700s"),
+        ("AGENTX_PROFILE_WARMUP_S", "abc"),
+        ("AGENTX_DURATION", "3600.0"),
+    ],
+)
+def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, knob, value):
+    """Both downstream constructs mishandle a non-integer, in opposite directions.
+
+    ``$(( ))`` aborts the whole round under ``set -e`` -- minutes from the
+    measurement window -- while ``[ -gt ]`` exits 2, which ``set -e`` exempts as
+    an ``if`` condition, so the clamp silently does not fire and the capture
+    lands after the round ended: no trace, and the "exceeds the safe bound"
+    warning never printed. Reject at the door instead, with the knob named.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, PROFILE="1", **{knob: value})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert knob in (r.stdout + r.stderr)
