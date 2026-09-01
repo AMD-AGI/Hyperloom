@@ -5,18 +5,27 @@ SPDX-License-Identifier: MIT
 
 # Copilot code-review instructions (Hyperloom)
 
-Advisory review. Flag **only** what static gates can't. Ruff,
-CodeQL, bandit/pylint/mypy already cover style — do not duplicate them. If a finding
-would be caught by ruff or CodeQL, stay silent.
+Advisory review. Flag only what static gates can't. 
 
 ## What to review for
 
-- **PR focus**: the diff does one thing. If it bundles unrelated changes, say so.
+- **Correctness / semantic edge cases**: null/empty/boundary inputs, off-by-one,
+  unhandled `None`, silent truncation, a branch that returns the wrong default.
+- **Duplication / parallel routes**: a second implementation of something that already
+  exists. Point to the existing one and ask to extend it.
+- **Failure-hiding error handling**: a `try`/fallback that swallows an error and returns
+  a default or `None`, so the caller can't tell success from silent failure.
+- **Concurrency**: missing/incorrect `await`, races on shared state, unawaited tasks,
+  blocking calls on the event loop.
+- **Unused abstraction**: a flag, strategy, or generic helper added for a single caller,
+  or a parameter always passed the same value.
+- **Contract & cache invariants**: a change that silently alters an external contract 
+  or breaks a documented rule.
+- **PR focus**: the PR addresses one aspect. If it bundles unrelated changes, say so.
 - **Fix-around instead of fix-upstream**: a local workaround for what is really a
-  GEAK/Magpie/TraceLens/framework defect. Ask for the upstream ticket.
+  GEAK/Magpie/TraceLens/framework defect.
 - **Debt growth**: a new feature flag / env toggle used to route around a design
   problem, or a new suppression without a stated reason.
-
 
 ## What NOT to flag
 
@@ -37,9 +46,3 @@ would be caught by ruff or CodeQL, stay silent.
 - **Architectural correctness.** Does the change respect the system's boundaries and
   control flow? Flag a diff that bypasses an established pipeline, reaches around the owning layer, 
   moves a responsibility to the wrong module, or reintroduces a retired/forbidden construct.
-  The authoritative invariants live in `AGENTs.md` and the path-scoped instruction
-  files — treat a violation of them as a correctness bug, not a style preference.
-- If nothing rises to a real design or correctness concern, leave no comments.
-
-Architecture-specific invariants live in path-scoped files under
-[`.github/instructions/`](instructions/) and fire only on the relevant files.
