@@ -20,7 +20,7 @@ rejected replay has already rolled its material back.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from hyperloom.common.jsonio import read_jsonl
 
@@ -38,6 +38,14 @@ from .collectors._common import (
     _string_list,
     _to_float as _optional_float,
     _to_int as _optional_int,
+)
+from .schema import (
+    V6KBWriteBackExt,
+    V6WarmReplayApplied,
+    V6WarmReplayExt,
+    V6WarmStartExt,
+    V6WarmStartMatched,
+    V6WarmStartReads,
 )
 
 
@@ -107,7 +115,7 @@ def _warm_start_origin(recipe: dict[str, Any]) -> dict[str, Any] | None:
     return {"session_id": session_id or None, "gain_pct": gain}
 
 
-def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> dict[str, Any] | None:
+def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> V6WarmStartReads | None:
     """Per-source attribution of this session's Recipe KB reads.
 
     Read back from the recipe-snapshot audit log: how each T0 lookup resolved,
@@ -180,7 +188,7 @@ def collect_warm_start_event(
 
     match = _mapping(context.get("match"))
     matched_id = str(_first(match.get("canonical_id"), recipe.get("canonical_id")) or "")
-    ext: dict[str, Any] = {
+    ext: V6WarmStartExt = {
         "requested": {
             "canonical_id": _requested_canonical_id(state, matched_id),
             "scope": _scope(state),
@@ -194,8 +202,9 @@ def collect_warm_start_event(
     if status == "matched":
         lessons = state.get("warm_start_lessons")
         pitfalls = state.get("warm_start_pitfalls")
-        matched: dict[str, Any] = {
-            "match_type": "exact" if tier.lower() in _EXACT_TIERS else "degraded",
+        match_type: Literal["exact", "degraded"] = "exact" if tier.lower() in _EXACT_TIERS else "degraded"
+        matched: V6WarmStartMatched = {
+            "match_type": match_type,
             "tier": tier,
             "confidence": _optional_float(_first(warm.get("confidence"), match.get("confidence"))),
             "source": str(match.get("source") or ""),
@@ -343,7 +352,7 @@ def _replay_stack_entry(state: dict[str, Any]) -> dict[str, Any]:
     )
 
 
-def _replay_applied(state: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any] | None:
+def _replay_applied(state: dict[str, Any], outcome: dict[str, Any]) -> V6WarmReplayApplied | None:
     """What was running when the replay reproduced its gain.
 
     One merged configuration, not a per-column split: the columns are applied
@@ -358,7 +367,7 @@ def _replay_applied(state: dict[str, Any], outcome: dict[str, Any]) -> dict[str,
     kernel_replay = _mapping(entry.get("kernel_replay"))
     if not (args or envs or patches or kernel):
         return None
-    applied: dict[str, Any] = {
+    applied: V6WarmReplayApplied = {
         "config": {"extra_server_args": args, "extra_envs": envs},
         # Ref order is replay order; the separate timeline column is retired.
         "patch": patches,
@@ -386,7 +395,7 @@ def collect_warm_replay_event(state: dict[str, Any]) -> dict[str, Any] | None:
     after = _optional_float(outcome.get("throughput_after"))
     gain = _optional_float(outcome.get("actual_gain_pct"))
 
-    ext: dict[str, Any] = {
+    ext: V6WarmReplayExt = {
         "raw_status": raw_status,
         "tier": str(outcome.get("warm_recipe_tier") or "") or None,
         "confidence": _optional_float(outcome.get("warm_recipe_conf")),
@@ -479,9 +488,13 @@ _WRITE_BACK_REASONS: tuple[tuple[str, str], ...] = (
     ("degraded_kb", "kb_disabled"),
     ("not configured", "kb_disabled"),
     ("no_recipe_backend", "kb_disabled"),
-    ("agentx", "agentx_blocked"),
     ("configuration:", "configuration_failed"),
     ("remoterecipevalidationerror", "bundle_build_failed"),
+    # ``agentx`` is a short, collision-prone needle -- it appears inside
+    # exception class names such as ``configuration:AgentXConfigError`` -- so it
+    # stays last: the more specific rules above claim their reasons first, and
+    # ``_bucket`` is first-match-wins.
+    ("agentx", "agentx_blocked"),
 )
 _WRITE_BACK_STATUS = {"written": "written", "skipped": "skipped", "disabled": "skipped"}
 
@@ -530,7 +543,7 @@ def collect_kb_write_back_event(
     )
 
     current_best = _mapping(state.get("current_best"))
-    ext: dict[str, Any] = {
+    ext: V6KBWriteBackExt = {
         "backend": str(outcome.get("backend") or "") or None,
         "canonical_id": str(outcome.get("canonical_id") or "") or None,
         "session_id": str(outcome.get("session_id") or "") or None,

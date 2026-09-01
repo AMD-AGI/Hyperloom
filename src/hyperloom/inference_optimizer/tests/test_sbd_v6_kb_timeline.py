@@ -469,6 +469,10 @@ def test_kb_write_back_counts_the_local_queue_depth(tmp_path: Path):
         ("disabled", "KB_STORE_URL/TOKEN not configured", "skipped", "kb_disabled"),
         ("skipped", "agentx", "skipped", "agentx_blocked"),
         ("failed", "configuration:KeyError", "failed", "configuration_failed"),
+        # ``agentx`` is a substring of the class name but must not shadow the
+        # more specific ``configuration:`` / ``RemoteRecipeValidationError`` rules.
+        ("failed", "configuration:AgentXConfigError", "failed", "configuration_failed"),
+        ("failed", "RemoteRecipeValidationError: agentx path", "failed", "bundle_build_failed"),
         ("failed", "RemoteRecipeValidationError", "failed", "bundle_build_failed"),
         ("failed", "KBStoreError", "failed", "transport_failed"),
     ],

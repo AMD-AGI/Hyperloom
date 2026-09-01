@@ -681,8 +681,8 @@ def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
     """Compute the path to ``.kb_dead_letter.ndjson``, the permanent-failure rows.
 
     Holds rows that failed permanently (HTTP 4xx business-logic rejects).
-    Surfaced in preflight queue output and breakdown ``kb_provenance`` line
-    counts; no in-repo robustness alert is wired to it.
+    Surfaced in preflight queue output and the ``kb_write_back`` timeline
+    event's queue depth; no in-repo robustness alert is wired to it.
 
     Args:
         session_dir (Path): The session root directory.
@@ -696,10 +696,11 @@ def recipe_kb_dead_letter_ndjson(session_dir: Path) -> Path:
 
 def recipe_kb_audit_jsonl(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_kb/.kb_audit.jsonl`` — reserved append-only audit
-    slot for Recipe KB CLI invocations; no producer writes it today, so
-    ``breakdown.kb_provenance.audit_tail_count`` / ``audit_status_counts`` stay
-    empty. The live KB audit channel is :func:`recipe_snapshot_audit_jsonl`,
-    written via ``RecipeKB.audit_hook`` in ``cli/kb.py``.
+    slot for Recipe KB CLI invocations; no producer writes it today and no
+    breakdown section reads it (the former ``kb_provenance`` audit counts were
+    dropped in the V5→V6 migration). The live KB audit channel is
+    :func:`recipe_snapshot_audit_jsonl`, written via ``RecipeKB.audit_hook`` in
+    ``cli/kb.py``.
 
     Args:
         session_dir: The session root directory.
@@ -741,7 +742,9 @@ def recipe_snapshot_audit_jsonl(session_dir: Path) -> Path:
 
 def pr_monitor_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_kb/.pr_monitor_status.json`` — boot-time PR Monitor
-    reachability snapshot; breakdown reads it for pr_monitor:* warnings.
+    reachability snapshot. Written by ``cli/kb.py``; the breakdown reader that
+    surfaced ``pr_monitor:*`` warnings was removed in the V5→V6 migration, so
+    nothing in-repo consumes it today.
 
     Schema: ``{enabled, reachable, mcp_url, status_text}``.
 
@@ -757,9 +760,9 @@ def pr_monitor_status_json(session_dir: Path) -> Path:
 def recipe_kb_flusher_pid(session_dir: Path) -> Path:
     """Compute the path to ``.kb_flusher.pid``, the flusher daemon pid file.
 
-    Probed by the breakdown telemetry collector (``_collect_flusher_status``),
-    which reads the first line and ``os.kill(pid, 0)``s it to set
-    ``kb_provenance.flusher_status.alive``. No in-repo component writes it.
+    The breakdown flusher-status probe that read this (``_collect_flusher_status``)
+    was removed in the V5→V6 migration, so nothing in-repo consumes it today; no
+    in-repo component writes it either.
 
     Args:
         session_dir (Path): The session root directory.
@@ -773,8 +776,8 @@ def recipe_kb_flusher_pid(session_dir: Path) -> Path:
 
 def recipe_kb_flusher_status_json(session_dir: Path) -> Path:
     """``<sd>/runtime/recipe_kb/.kb_flusher_status.json`` — boot-time flusher
-    spawn decision; merged with the live pid check for
-    kb_provenance.flusher_status.
+    spawn decision. The breakdown ``kb_provenance.flusher_status`` reader that
+    consumed it was removed in the V5→V6 migration.
 
     Schema: ``{enabled, spawned, pid, interval_sec, batch_size, reason, ts}``.
 

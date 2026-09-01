@@ -4927,6 +4927,11 @@ class WritebackCollaborator:
             **dict(getattr(state, "warm_replay_outcome", {}) or {}),
             "status": "failed",
             "reason": "interrupted_combined_validation_rolled_back",
+            # This terminal branch never runs ``_promote_warm_replay``, which is
+            # what normally stamps ``settled_at``; stamp it here so the SBD
+            # warm_replay event reports the real span instead of collapsing its
+            # end_time back onto ``enqueued_at`` (a zero-duration replay).
+            "settled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "kernel": {
                 "status": "reverted",
                 "reason": "interrupted_combined_validation",
