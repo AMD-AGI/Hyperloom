@@ -39,26 +39,28 @@
 /src/hyperloom/agents/critic/                                   @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/                                   @AMD-AGI/SaFE
 
-# TraceLens Agent (agent-driven analysis route + agent-output sanitizer)
+# TraceLens Agent integration
 /src/hyperloom/agents/kernel/tools/tracelens_analysis.py        @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/tracelens_skill_runner.py    @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/inference_optimizer/tracelens_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
 /docs/components/tracelens.md                                   @tsrikris @devalshahamd @AMD-AGI/SaFE
 
 # Benchmarking
-/src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
 
-# Magpie integration glue
+# Magpie integration
 /src/hyperloom/orchestrator/actions/executors/profile.py           @devalshahamd @haofrank @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/roofline.py          @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/benchmark_backend.py @devalshahamd @haofrank @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py   @haofrank @AMD-AGI/SaFE
 
-# Post-TraceLens -> GEAK processing layer + glue
-/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+# Post-TraceLens to GEAK processing layer
 /src/hyperloom/agents/kernel/tools/source_resolver.py           @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/kernel_source_index.py       @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+
+# GEAK integration
 /src/hyperloom/agents/kernel/tools/backends/geak_runner.py      @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
