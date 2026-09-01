@@ -50,6 +50,44 @@ _GPU_RECLAIM_SETTLE_S = 20.0
 _AUTO_COMPUTE_BOUND_ENV = "HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND"
 
 
+async def _reap_session_orphans(session_dir: Path | str) -> list[int]:
+    """Reap this session's own orphaned serving processes. Never raises.
+
+    Thin wrapper over :func:`reap_orphaned_servers` with the two guards every
+    caller on the profile path wants:
+
+    * An unresolved ``session_dir`` is refused. ``_resolve_session_dir`` falls
+      back to ``Path(".")`` when ``ctx.extra`` carries no ``session_dir``; that
+      fallback was harmless while it only picked a directory to read, but this
+      helper decides who gets signalled, so a cwd-relative ``./runs`` must not
+      become a target.
+    * Failures are swallowed. Reaping is an optimisation; it must not mask the
+      profile error that triggered it.
+
+    The reap itself is scoped to pidfiles this session wrote and gated on a
+    cmdline match, so a co-located session's server is never touched, and on
+    multi-node (where the servers live in remote pods) it finds nothing rather
+    than signalling a neighbouring tenant's process.
+
+    Args:
+        session_dir: Session directory whose ``runs/`` subtree owns the pidfiles.
+
+    Returns:
+        list[int]: The pids that were signalled, or ``[]``.
+    """
+    from ._server_lifecycle import reap_orphaned_servers
+
+    resolved = Path(session_dir)
+    if resolved == Path("."):
+        log.debug("roofline: no session_dir resolved; skipping orphan reap")
+        return []
+    try:
+        return await asyncio.to_thread(reap_orphaned_servers, resolved)
+    except Exception:  # noqa: BLE001 — best-effort
+        log.debug("roofline: orphan reap failed", exc_info=True)
+        return []
+
+
 async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> None:
     """Free GPUs held by an orphaned server before the next profile attempt.
 
@@ -58,51 +96,39 @@ async def _reclaim_gpus_for_retry(session_dir: Path | str, *, attempt: int) -> N
     on every attempt — three refusals inside three minutes, all against a
     squatter that is still very much alive.
 
-    Two best-effort stages, cheapest first:
+    Reclaiming is deliberately limited to this session's own orphans
+    (:func:`_reap_session_orphans`): ``explore`` boots variant servers with
+    ``cleanup=false`` to keep them hot and tears them down in a ``finally``
+    that never runs if the driver dies first, which is the whole of the
+    observed failure. A wider sweep — pgrep the box for ``vllm.entrypoints`` /
+    ``EngineCore`` and signal whatever matches — is deliberately NOT done here:
+    it has no way to tell an untracked orphan of ours from a co-located
+    session's live server or, on multi-node, from another tenant sharing the
+    node, and nothing in the evidence needs it.
 
-    1. ``reap_orphaned_servers`` on this session's own ``runs/`` pidfiles. This
-       is cmdline-gated and scoped to pidfiles this session wrote, so it cannot
-       touch a co-located session. It is the common case: ``explore`` boots
-       variant servers with ``cleanup=false`` to keep them hot, and its
-       ``finally`` teardown never runs if the driver dies first.
-    2. ``kill_stale_gpu_owners`` — recover's soft-cleanup stage, for a squatter
-       whose pidfile is already gone.
-
-    Never raises: reclaiming is an optimisation on the retry path, and a failure
-    here must not mask the underlying profile error.
+    Never raises: a failure here must not mask the underlying profile error.
 
     Args:
         session_dir: Session directory whose ``runs/`` subtree owns the pidfiles.
         attempt: The attempt that just failed, for log correlation.
     """
-    from ._server_lifecycle import reap_orphaned_servers
-    from .recover import kill_stale_gpu_owners, probe_gpu_free_mb
+    from .recover import probe_gpu_free_mb
 
-    try:
-        reaped = await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
-    except Exception:  # noqa: BLE001 — best-effort
-        log.debug("roofline: orphan reap failed", exc_info=True)
-        reaped = []
-    try:
-        killed = await asyncio.to_thread(kill_stale_gpu_owners)
-    except Exception:  # noqa: BLE001 — best-effort
-        log.debug("roofline: stale-owner cleanup failed", exc_info=True)
-        killed = []
+    reaped = await _reap_session_orphans(session_dir)
 
-    if not reaped and not killed:
+    if not reaped:
         log.warning(
             "roofline: attempt %d hit insufficient GPU memory but found no "
-            "reclaimable owner; the VRAM belongs to something outside this "
-            "session and retrying will not help",
+            "orphan of this session holding it; the VRAM belongs to something "
+            "outside this session and retrying will not help",
             attempt,
         )
         return
 
     log.warning(
-        "roofline: attempt %d hit insufficient GPU memory; reaped=%s killed=%s; settling %.0fs before retry",
+        "roofline: attempt %d hit insufficient GPU memory; reaped=%s; settling %.0fs before retry",
         attempt,
         reaped,
-        [p.get("pid") for p in killed],
         _GPU_RECLAIM_SETTLE_S,
     )
     await asyncio.sleep(_GPU_RECLAIM_SETTLE_S)
@@ -417,21 +443,17 @@ class RooflineExecutor:
         # which resource_lock declares mutually exclusive with
         # ``benchmark_lane`` / ``server_lifecycle`` / ``gpu_research_lane``. No
         # task in this session may legitimately be holding a server while we
-        # run, so any surviving pidfile is by definition an orphan. The reap is
-        # additionally scoped to this session's own ``runs/`` pidfiles and gated
-        # on a cmdline match, so a co-located session is never touched.
-        from ._server_lifecycle import reap_orphaned_servers
-
-        try:
-            _pre_reaped = await asyncio.to_thread(reap_orphaned_servers, Path(session_dir))
-            if _pre_reaped:
-                log.warning(
-                    "roofline: preflight reaped %d orphaned server pid(s) before profiling: %s",
-                    len(_pre_reaped),
-                    _pre_reaped,
-                )
-        except Exception:  # noqa: BLE001 — best-effort
-            log.debug("roofline: preflight orphan reap failed", exc_info=True)
+        # run, so any surviving pidfile is by definition an orphan. The lane
+        # lease is session-scoped, but so is the reap: it only ever reads this
+        # session's own ``runs/`` pidfiles and only signals a pid whose cmdline
+        # still matches, so a co-located session is out of reach either way.
+        _pre_reaped = await _reap_session_orphans(session_dir)
+        if _pre_reaped:
+            log.warning(
+                "roofline: preflight reaped %d orphaned server pid(s) before profiling: %s",
+                len(_pre_reaped),
+                _pre_reaped,
+            )
 
         for attempt in range(1, _PROFILE_MAX_ATTEMPTS + 1):
             profile_ctx = self._wrap_profile_ctx(
@@ -462,6 +484,12 @@ class RooflineExecutor:
                         eager_flag,
                     )
                 elif attempt < _PROFILE_MAX_ATTEMPTS and _is_insufficient_gpu_memory(last_error):
+                    # Only ``repr(exc)`` is available on this branch — there is
+                    # no result dict to pull ``err_text`` / the server-log tail
+                    # from. The refusal string lives in ``server.log``, so a
+                    # boot refusal almost always arrives as a failure dict (see
+                    # below) rather than as a raise; this is the belt to that
+                    # branch's braces, not the load-bearing path.
                     await _reclaim_gpus_for_retry(session_dir, attempt=attempt)
                 continue
             if not isinstance(profile_result, dict):

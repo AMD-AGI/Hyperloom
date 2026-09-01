@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-from __future__ import annotations
-
 """Regression tests for the GPU-preflight failure seen on Kimi-K3.
 
 Session ``Kimi-K3/20260830T162217Z-8e8fbee2`` burned five roofline attempts and
@@ -17,11 +15,14 @@ three were guaranteed to fail.
 Hermetic: no GPU, no subprocess, no network.
 """
 
+from __future__ import annotations
+
 import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
 
+from hyperloom.orchestrator.actions.executors import recover as rc
 from hyperloom.orchestrator.actions.executors import roofline as rf
 from hyperloom.orchestrator.actions.executors.baseline import (
     _is_cuda_graph_capture_failure,
@@ -75,8 +76,8 @@ def test_disjoint_from_the_cuda_graph_classifier():
 # --------------------------------------------------------------------------
 
 
-def _patch_reclaim(*, reaped, killed, probe=None):
-    """Patch the three blocking helpers plus the settle sleep."""
+def _patch_reclaim(*, reaped, probe=None):
+    """Patch the two blocking helpers plus the settle sleep."""
     slept: list[float] = []
 
     async def fake_sleep(secs):
@@ -89,10 +90,6 @@ def _patch_reclaim(*, reaped, killed, probe=None):
             return_value=reaped,
         ),
         patch(
-            "hyperloom.orchestrator.actions.executors.recover.kill_stale_gpu_owners",
-            return_value=killed,
-        ),
-        patch(
             "hyperloom.orchestrator.actions.executors.recover.probe_gpu_free_mb",
             return_value=probe if probe is not None else [{"gpu_id": 0, "free_mb": 280000.0}],
         ),
@@ -101,36 +98,56 @@ def _patch_reclaim(*, reaped, killed, probe=None):
 
 
 def test_reclaim_reaps_orphans_and_settles_before_retry(tmp_path):
-    slept, p_reap, p_kill, p_probe, p_sleep = _patch_reclaim(reaped=[30933], killed=[])
-    with p_reap as reap, p_kill as kill, p_probe as probe, p_sleep:
+    slept, p_reap, p_probe, p_sleep = _patch_reclaim(reaped=[30933])
+    with p_reap as reap, p_probe as probe, p_sleep:
         asyncio.run(rf._reclaim_gpus_for_retry(tmp_path, attempt=1))
     reap.assert_called_once_with(Path(tmp_path))
-    kill.assert_called_once_with()
     probe.assert_called_once_with()
     # A SIGKILLed server's VRAM is not returned instantly, so the retry waits.
-    assert slept == [rf._GPU_RECLAIM_SETTLE_S]
-
-
-def test_reclaim_falls_back_to_killing_stale_owners(tmp_path):
-    # The squatter's pidfile is already gone -- recover's soft cleanup is the
-    # only thing left that can free the cards.
-    slept, p_reap, p_kill, p_probe, p_sleep = _patch_reclaim(
-        reaped=[], killed=[{"pid": 30933, "cmd": "VLLM::EngineCore", "signal": "KILL"}]
-    )
-    with p_reap, p_kill as kill, p_probe, p_sleep:
-        asyncio.run(rf._reclaim_gpus_for_retry(tmp_path, attempt=2))
-    kill.assert_called_once_with()
     assert slept == [rf._GPU_RECLAIM_SETTLE_S]
 
 
 def test_reclaim_does_not_settle_when_nothing_was_reclaimed(tmp_path):
     # The VRAM belongs to something outside this session: sleeping 20 s would
     # only delay a failure that is already certain.
-    slept, p_reap, p_kill, p_probe, p_sleep = _patch_reclaim(reaped=[], killed=[])
-    with p_reap, p_kill, p_probe as probe, p_sleep:
+    slept, p_reap, p_probe, p_sleep = _patch_reclaim(reaped=[])
+    with p_reap, p_probe as probe, p_sleep:
         asyncio.run(rf._reclaim_gpus_for_retry(tmp_path, attempt=1))
     assert slept == []
     probe.assert_not_called()
+
+
+def test_reclaim_never_sweeps_the_whole_box_for_gpu_owners(tmp_path):
+    # recover's ``_kill_stale_owners`` pgreps the machine for vllm / EngineCore /
+    # Magpie and signals every match. It has no staleness test at all, so it
+    # cannot tell an untracked orphan of ours from a co-located session's live
+    # server -- and on multi-node the local cards belong to another tenant
+    # entirely (recover guards that stage behind _is_multi_node_sandbox, a guard
+    # that lives in __call__ and would be bypassed by calling the stage direct).
+    # Reclaiming must stay inside this session's own pidfiles.
+    slept, p_reap, p_probe, p_sleep = _patch_reclaim(reaped=[])
+    with (
+        p_reap,
+        p_probe,
+        p_sleep,
+        patch.object(rc.recover_executor, "_kill_stale_owners") as kill,
+        patch.object(rc.recover_executor, "_discover_stale_pids") as discover,
+    ):
+        asyncio.run(rf._reclaim_gpus_for_retry(tmp_path, attempt=1))
+    kill.assert_not_called()
+    discover.assert_not_called()
+    assert not hasattr(rc, "kill_stale_gpu_owners")
+
+
+def test_reclaim_refuses_an_unresolved_session_dir():
+    # _resolve_session_dir falls back to Path(".") when ctx.extra carries no
+    # session_dir. Harmless while it only chose a directory to read; this path
+    # decides who gets signalled, so cwd-relative ./runs must not be a target.
+    slept, p_reap, p_probe, p_sleep = _patch_reclaim(reaped=[30933])
+    with p_reap as reap, p_probe, p_sleep:
+        asyncio.run(rf._reclaim_gpus_for_retry(Path("."), attempt=1))
+    reap.assert_not_called()
+    assert slept == []
 
 
 def test_reclaim_never_raises_when_the_helpers_blow_up(tmp_path):
@@ -142,7 +159,7 @@ def test_reclaim_never_raises_when_the_helpers_blow_up(tmp_path):
             side_effect=OSError("proc gone"),
         ),
         patch(
-            "hyperloom.orchestrator.actions.executors.recover.kill_stale_gpu_owners",
+            "hyperloom.orchestrator.actions.executors.recover.probe_gpu_free_mb",
             side_effect=RuntimeError("rocm-smi missing"),
         ),
     ):
