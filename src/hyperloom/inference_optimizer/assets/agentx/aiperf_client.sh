@@ -32,6 +32,9 @@
 #   AGENTX_HTTP_TCP_USER_TIMEOUT (no-TCP-progress bound in ms; default 900000,
 #     matching upstream's long-context recipes -- aiperf's stock 30s aborts
 #     live connections while the server is prefill-bound),
+#   AGENTX_HTTP_KEEP_ALIVE_S (server-side idle timeout in s; default 900 -- the
+#     other half of AGENTX_HTTP_TCP_USER_TIMEOUT. Exported as the framework's
+#     own knob before the server boots; see the keep-alive note below),
 #   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
 #   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
 #     from $MAX_MODEL_LEN -- see the replay-context note below),
@@ -106,6 +109,33 @@ cleanup() {
 # then returns nonzero, set -e aborts here and the EXIT trap still fires (the
 # port fallback reaps a server booted without a recorded pid) — no leak window.
 trap cleanup EXIT INT TERM
+
+# ── Server-side keep-alive: the other half of AGENTX_HTTP_TCP_USER_TIMEOUT ────
+# AIPerf pins ONE pooled keep-alive connection per agentic session and reuses it
+# across that session's turns. The inter-turn gap in an agentic replay is a
+# model think-time, not a client delay, and routinely exceeds a serving
+# framework's default idle timeout -- vLLM's is 5s (envs.py:
+# ``VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``). When the gap crosses it the server
+# closes the socket exactly as the client reuses it, and aiohttp surfaces
+# ServerDisconnectedError. AIPerf escalates that to a TERMINAL warmup failure:
+# "A root AgentX warmup request failed, so profiling was not started" -- against
+# a completely healthy server, with no error anywhere in the server log.
+#
+# Measured here on a conc=16 K3 round: the server logged an orderly
+# "Application shutdown complete" while warmup sat at 64/177, and the only
+# symptom was a burst of ServerDisconnectedError on the client. Upstream hit the
+# same failure (InferenceX #2371 aborted a c4 arm ~15 min in) and fixes it by
+# raising the SERVER idle timeout to match the client's tolerance.
+#
+# The client half already ships above as AIPERF_HTTP_TCP_USER_TIMEOUT (900s);
+# without this the two disagree by 180x. Exported per framework because the knob
+# name is framework-specific, and only when the operator has not pinned one.
+_KEEPALIVE_S="${AGENTX_HTTP_KEEP_ALIVE_S:-900}"
+case "${FRAMEWORK:-}${BUILTIN}" in
+  *vllm*) export VLLM_HTTP_TIMEOUT_KEEP_ALIVE="${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+  *sglang*) export SGLANG_TIMEOUT_KEEP_ALIVE="${SGLANG_TIMEOUT_KEEP_ALIVE:-$_KEEPALIVE_S}" ;;
+esac
+log "server keep-alive: ${_KEEPALIVE_S}s (client tcp-user-timeout ${AGENTX_HTTP_TCP_USER_TIMEOUT:-900000}ms)"
 
 log "delegating server boot -> ${BUILTIN} (PROFILE=${PROFILE:-0})"
 MAGPIE_RUN_PHASE=server MAGPIE_SERVER_PID_FILE="$PIDFILE" \
@@ -193,6 +223,42 @@ CANON_WARMUP_GRACE=1800
 WARMLANE="${AGENTX_WARMUP_REQUESTS_PER_LANE:-$CANON_WARMUP_PER_LANE}"
 WARMGRACE="${AGENTX_WARMUP_GRACE_PERIOD:-$CANON_WARMUP_GRACE}"
 
+# Validate every measurement-defining knob BEFORE it reaches a comparison, an
+# arithmetic expansion, or an awk program. Three concrete failures this closes,
+# all of them in knobs the orchestrator forwards verbatim from its own env:
+#
+#   * ``[ "$WARMLANE" -lt N ]`` with a non-integer ("1.5", "0x2") makes ``[``
+#     exit 2. On the left of ``&&`` that status is exempt from ``set -e``, so the
+#     non-canonical guard silently does not fire and an illegal configuration is
+#     stamped submission_valid=true -- exactly the hole the guard exists to plug.
+#   * a non-integer WARMGRACE reaches the ``$(( ))`` in the PROFILE branch and,
+#     under ``set -euo pipefail``, aborts a round that was otherwise complete.
+#   * FRT is interpolated into an awk PROGRAM BODY below. Unvalidated, a value
+#     like ``system("...")`` is executed by awk. Fixed both ways: passed as an
+#     awk -v variable (never as program text) AND rejected here.
+#
+# Fail loud rather than coerce: these values define what was measured, and this
+# file's whole contract is that a deviation can never be mistaken for a
+# leaderboard run. A typo must stop the round, not silently become canonical.
+_require_uint() {  # _require_uint NAME VALUE
+  case "$2" in
+    "" | *[!0-9]*)
+      log "ERROR: $1 must be a non-negative integer, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+_require_decimal() {  # _require_decimal NAME VALUE -- digits with one optional dot
+  case "$2" in
+    "" | *[!0-9.]* | *.*.*)
+      log "ERROR: $1 must be a decimal number, got '$2'"
+      exit 2
+      ;;
+  esac
+}
+_require_uint AGENTX_WARMUP_REQUESTS_PER_LANE "$WARMLANE"
+_require_uint AGENTX_WARMUP_GRACE_PERIOD "$WARMGRACE"
+
 # Per-trajectory-tree idle cap. NOT the same thing as the scenario's 10s
 # whole-system cap, and NOT scenario-locked -- upstream passes it explicitly
 # alongside the scenario. Without it a trace carrying a 20-minute recorded idle
@@ -252,6 +318,7 @@ AIPERF="${AIPERF_BIN:-aiperf}"
 # ratio and the default cannot drift apart.
 CANON_FRT=0.10
 FRT="${AGENTX_FAILED_REQUEST_THRESHOLD:-$CANON_FRT}"
+_require_decimal AGENTX_FAILED_REQUEST_THRESHOLD "$FRT"
 
 # ── Non-canonical workloads may run, but may never be submittable ────────────
 # The scenario enforces a 900s duration floor, so a shortened AGENTX_DURATION is
@@ -318,7 +385,13 @@ NONCANON=()
 # submission_valid=true. Only a *larger* ratio deviates; tightening it below
 # canonical measures a strictly cleaner run. Compared with awk because the
 # ratio is a decimal, which `-lt` cannot handle.
-if awk "BEGIN{exit !(($FRT) > ($CANON_FRT))}" 2>/dev/null; then
+# -v, never string interpolation: the value is DATA to awk, so it can never be
+# read as program text. Interpolating it made any caller that can set an
+# AGENTX_* env var (the switch forwards them verbatim) able to run arbitrary
+# commands inside the container via ``system("...")`` -- and, because the
+# injected program returned a status of its own, the non-canonical guard below
+# also silently failed to fire.
+if awk -v f="$FRT" -v c="$CANON_FRT" 'BEGIN{exit !(f > c)}' 2>/dev/null; then
   NONCANON+=("failed_request_threshold=${FRT}(canonical ${CANON_FRT})")
 fi
 

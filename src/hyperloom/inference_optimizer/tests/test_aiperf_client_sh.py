@@ -32,8 +32,17 @@ def _write_exec(path: Path, content: str):
 def _fake_builtin(write_pid: bool) -> str:
     # Emulates the builtin MAGPIE_RUN_PHASE=server phase: (optionally) record a
     # tearable bg pid, then return. Only the server phase is exercised.
+    # Also dumps the keep-alive env it inherited, so a test can assert what the
+    # client exported BEFORE the server booted. Defaults to /dev/null so every
+    # pre-existing test is unaffected.
     pid_line = 'sleep 300 & echo $! > "$MAGPIE_SERVER_PID_FILE"\n' if write_pid else ": no pid written\n"
-    return "#!/usr/bin/env bash\nset -e\n" + pid_line + "exit 0\n"
+    dump = (
+        "{\n"
+        '  echo "VLLM_HTTP_TIMEOUT_KEEP_ALIVE=${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '  echo "SGLANG_TIMEOUT_KEEP_ALIVE=${SGLANG_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '} > "${AGENTX_TEST_SERVER_MARKER:-/dev/null}"\n'
+    )
+    return "#!/usr/bin/env bash\nset -e\n" + dump + pid_line + "exit 0\n"
 
 
 _FAKE_AIPERF = r"""#!/usr/bin/env bash
@@ -779,3 +788,120 @@ def test_canonical_failed_request_threshold_is_not_flagged(tmp_path):
         out = _result(res)
         assert not out["submission_invalid_reasons"], spelling
         assert out["submission_valid"] is not False, spelling
+
+
+def test_failed_request_threshold_cannot_inject_awk_code(tmp_path):
+    """FRT reaches an awk program; it must be DATA, never program text.
+
+    ``awk "BEGIN{exit !(($FRT) > ($CANON_FRT))}"`` interpolates the value into
+    the program body, so ``AGENTX_FAILED_REQUEST_THRESHOLD='system("...")'``
+    executes inside the container. The switch forwards every AGENTX_* key from
+    the orchestrator's environment verbatim, so anything that can write a config
+    or recipe gets command execution. Worse, the injected program supplies its
+    own exit status, so the non-canonical guard silently stops firing too.
+    """
+    canary = tmp_path / "pwned.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_FAILED_REQUEST_THRESHOLD=f'system("touch {canary}")',
+    )
+    assert not canary.exists(), "awk executed injected code"
+    # And it must be rejected outright rather than silently treated as canonical.
+    assert r.returncode != 0
+    assert not res.joinpath("inferencex_result.json").exists()
+
+
+@pytest.mark.parametrize(
+    "knob,value",
+    [
+        ("AGENTX_WARMUP_REQUESTS_PER_LANE", "1.5"),
+        ("AGENTX_WARMUP_REQUESTS_PER_LANE", "0x2"),
+        ("AGENTX_WARMUP_GRACE_PERIOD", "1.5"),
+        ("AGENTX_WARMUP_GRACE_PERIOD", "abc"),
+        ("AGENTX_FAILED_REQUEST_THRESHOLD", "0.1.2"),
+    ],
+)
+def test_non_integer_measurement_knobs_fail_loud(tmp_path, knob, value):
+    """A malformed measurement-defining knob must stop the round, not be stamped.
+
+    ``[ "$WARMLANE" -lt N ]`` exits 2 on a non-integer, and on the left of ``&&``
+    that status is exempt from ``set -e``: the guard silently does not fire and
+    NONCANON stays empty, so an illegal configuration comes back
+    submission_valid=true. A non-integer grace additionally reaches the ``$(( ))``
+    in the PROFILE branch and aborts an otherwise-complete round there instead.
+    """
+    base = tmp_path / f"{knob}_{value}".replace(".", "_").replace("/", "_")
+    base.mkdir()
+    bench, bind, res = _sandbox(base)
+    r = _run(bench, bind, res, tmp_path, **{knob: value})
+    assert r.returncode != 0, f"{knob}={value} was accepted"
+    assert not res.joinpath("inferencex_result.json").exists()
+
+
+def _server_env(tmp_path, marker: Path) -> dict[str, str]:
+    """Parse the keep-alive env the fake builtin server phase inherited."""
+    return dict(line.split("=", 1) for line in marker.read_text(encoding="utf-8").splitlines() if "=" in line)
+
+
+def test_server_keep_alive_defaults_to_the_client_tolerance(tmp_path):
+    """The server idle timeout must be raised before the server boots.
+
+    Regression: AIPerf pins one pooled keep-alive connection per agentic session
+    and reuses it across turns. vLLM's default idle timeout is 5s
+    (``envs.py: VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``) while the client is
+    already given 900s via AIPERF_HTTP_TCP_USER_TIMEOUT -- a 180x disagreement.
+    An inter-turn think-time past 5s lets the server close the socket exactly as
+    the client reuses it; aiohttp raises ServerDisconnectedError and AIPerf
+    escalates it to a terminal warmup failure against a healthy server. Measured
+    on a conc=16 K3 round: orderly "Application shutdown complete" at warmup
+    64/177, no error in the server log at all.
+    """
+    marker = tmp_path / "srv.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_TEST_SERVER_MARKER=str(marker))
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "900"
+    # A vllm run must not carry the sglang spelling.
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_server_keep_alive_is_operator_overridable(tmp_path):
+    """AGENTX_HTTP_KEEP_ALIVE_S sets it; an explicit framework knob wins outright."""
+    marker = tmp_path / "knob.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_TEST_SERVER_MARKER=str(marker), AGENTX_HTTP_KEEP_ALIVE_S="120")
+    assert r.returncode == 0, r.stderr
+    assert _server_env(tmp_path, marker)["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "120"
+
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    marker2 = tmp_path / "pinned.txt"
+    bench, bind, res = _sandbox(pinned)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_TEST_SERVER_MARKER=str(marker2),
+        AGENTX_HTTP_KEEP_ALIVE_S="120",
+        VLLM_HTTP_TIMEOUT_KEEP_ALIVE="77",
+    )
+    assert r.returncode == 0, r.stderr
+    assert _server_env(tmp_path, marker2)["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "77"
+
+
+def test_server_keep_alive_uses_the_frameworks_own_knob(tmp_path):
+    """sglang names it differently; exporting the vllm spelling would be a no-op."""
+    marker = tmp_path / "sg.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK="sglang", AGENTX_TEST_SERVER_MARKER=str(marker))
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "UNSET"
