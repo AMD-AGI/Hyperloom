@@ -50,6 +50,11 @@ POLL_INTERVAL_S="${POLL_INTERVAL_S:-120}"
 GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-52200}"
 MAX_CRASHES="${MAX_CRASHES:-0}"
 LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
+API_ERR_FILE="${API_ERR_FILE:-${DISPATCH_MAP}.api_err}"
+# Consecutive polls in which EVERY workload query failed. A poll that cannot reach the
+# API learns nothing from waiting, so give up rather than hold 8 GPUs and the only
+# self-hosted runner until GLOBAL_TIMEOUT_S. Default ~20min at POLL_INTERVAL_S=120.
+API_FAIL_ABORT="${API_FAIL_ABORT:-10}"
 # This run's dispatch tag, written by dispatch beside the map. Pods stamp it into their
 # session pin; an untagged/foreign pin is a leftover from an earlier run on these paths.
 RUN_TAG="${RUN_TAG:-$(cat "${DISPATCH_MAP}.version_tag" 2>/dev/null || true)}"
@@ -266,10 +271,20 @@ done_count() {
   echo "$n"
 }
 
-workload_phase() { # workloadId -> phase string
-  local wid="$1" detail
-  detail="$(curl -sS "${tls[@]}" "$API/$wid" "${auth[@]}" 2>/dev/null || true)"
-  printf '%s' "$detail" | jq -r '.phase // "Unknown"' 2>/dev/null || echo Unknown
+# workloadId -> phase string, or __APIERR__ when the query itself did not answer.
+# Discarding curl's stderr here used to make an unreachable or unauthorized API
+# indistinguishable from a workload that simply had no phase yet: every leg read
+# `Unknown`, which is not terminal, so the poll waited out GLOBAL_TIMEOUT_S with nothing
+# in the log to say why. The error text goes to $API_ERR_FILE for the caller to report
+# once per tick; this runs inside a command substitution, so it cannot count anything.
+workload_phase() {
+  local wid="$1" body code
+  body="$(curl -sS "${tls[@]}" -w $'\n%{http_code}' "$API/$wid" "${auth[@]}" 2>"$API_ERR_FILE")" || true
+  code="$(printf '%s' "$body" | tail -n1)"
+  case "$code" in
+    2*) printf '%s' "$body" | sed '$d' | jq -r '.phase // "Unknown"' 2>/dev/null || echo Unknown ;;
+    *)  printf '%s' "__APIERR__ (HTTP ${code:-none})" ;;
+  esac
 }
 
 # Resolve a leg's session dir. Bootstrap writes the pinned session dir to
@@ -368,6 +383,8 @@ start_s="$(date +%s)"
 fail_seen=0   # has any leg reached a FAIL verdict? -> the gate is already decided
 gate_fail_announced=0
 superseded=0  # a newer workflow run is queued -> release runner without stopping pods
+api_dead=0    # the API has been unreachable for API_FAIL_ABORT consecutive polls
+api_fail_streak=0
 while :; do
   if superseded_by_newer_run; then
     mark_superseded_and_exit_poll
@@ -375,10 +392,13 @@ while :; do
   fi
   pending=0
   changed=0   # did any leg reach a verdict this tick? -> refresh the sticky comment
+  api_err=0; api_queried=0
   for leg in "${LEGS[@]}"; do
     [ -n "${VERDICT[$leg]}" ] && continue
     wid="${WID[$leg]}"
     wphase="$(workload_phase "$wid")"
+    api_queried=$(( api_queried + 1 ))
+    case "$wphase" in __APIERR__*) api_err=$(( api_err + 1 )) ;; esac
     res="$(judge_leg "$leg" "$wphase")"
     verdict="${res%%|*}"; detail="${res#*|}"
     if [ "$verdict" = "PASS" ]; then
@@ -402,6 +422,34 @@ while :; do
       changed=1; fail_seen=1
     fi
   done
+
+  # Report an API outage once per tick rather than once per leg, and stop waiting on one
+  # that is total: state.json still comes off NFS, so a leg that exits cleanly is judged
+  # either way -- what an unreachable API costs is the ability to tell a zombie leg from
+  # a slow one, which is exactly what the remaining wait would have been for.
+  if [ "$api_err" -gt 0 ] && [ "$api_err" -eq "$api_queried" ]; then
+    api_fail_streak=$(( api_fail_streak + 1 ))
+    api_err_text="$(tr '\r\n' '  ' < "$API_ERR_FILE" 2>/dev/null | head -c 300 || true)"
+    echo "WARN: all $api_queried workload queries failed (streak ${api_fail_streak}/${API_FAIL_ABORT}): ${api_err_text:-no stderr from curl}" >&2
+    if [ "$api_fail_streak" -ge "$API_FAIL_ABORT" ]; then
+      api_dead=1
+      summary ""
+      summary "❌ **SaFE API unreachable** for ${api_fail_streak} consecutive polls — abandoning the wait instead of holding the runner to the ${GLOBAL_TIMEOUT_S}s timeout."
+      summary ""
+      summary "\`\`\`"
+      summary "${api_err_text:-no stderr from curl}"
+      summary "\`\`\`"
+      for leg in "${LEGS[@]}"; do
+        [ -n "${VERDICT[$leg]}" ] && continue
+        VERDICT["$leg"]="FAIL|SaFE API unreachable for ${api_fail_streak} polls"
+        post_status "$leg" error "SaFE API unreachable"
+      done
+      break
+    fi
+  else
+    [ "$api_fail_streak" -gt 0 ] && echo "[poll] workload queries recovered after ${api_fail_streak} failed poll(s)"
+    api_fail_streak=0
+  fi
 
   # A leg finished this tick -> refresh the single sticky report comment (point C).
   [ "$changed" -eq 1 ] && report_upsert "$(report_body Running "$(done_count)" "${#LEGS[@]}")"

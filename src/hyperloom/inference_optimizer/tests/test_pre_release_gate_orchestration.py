@@ -322,6 +322,50 @@ def test_a_manual_run_is_always_full_scope(workflow: dict, tmp_path: Path) -> No
     assert got["tasks"] == ""
 
 
+# ---- an unreachable API must not read as "no phase yet" ----
+
+
+def _workload_phase(poll_script: str, tmp_path: Path, api: str) -> tuple[str, str]:
+    """Run the real workload_phase() against `api`; return (stdout, captured curl stderr)."""
+    lines = poll_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("workload_phase() {"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    fn = "\n".join(lines[start : end + 1])
+    err_file = tmp_path / "api_err"
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'set -euo pipefail\nAPI="$1"; API_ERR_FILE="$2"; tls=(); auth=()\n{fn}\nworkload_phase wid-1',
+            "_",
+            api,
+            str(err_file),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout, err_file.read_text(encoding="utf-8") if err_file.is_file() else ""
+
+
+def test_an_unreachable_api_is_not_mistaken_for_a_missing_phase(poll_script: str, tmp_path: Path) -> None:
+    """`Unknown` is not terminal, so swallowing the error waited out the global timeout."""
+    # Port 1 on loopback refuses instantly -- no network egress, no timeout to wait on.
+    out, err = _workload_phase(poll_script, tmp_path, "https://127.0.0.1:1")
+    assert out.startswith("__APIERR__"), out
+    assert err.strip(), "curl's diagnosis must be kept, not sent to /dev/null"
+
+
+def test_the_poll_gives_up_on_a_total_api_outage(poll_script: str) -> None:
+    """Waiting out 14h holds 8 GPUs to learn nothing the first failed poll did not say."""
+    assert 'API_FAIL_ABORT="${API_FAIL_ABORT:-10}"' in poll_script
+    assert 'case "$wphase" in __APIERR__*) api_err=$(( api_err + 1 )) ;; esac' in poll_script
+    # Only a TOTAL outage counts: one leg's workload going missing must not abort the run.
+    assert '[ "$api_err" -gt 0 ] && [ "$api_err" -eq "$api_queried" ]' in poll_script
+    assert 'VERDICT["$leg"]="FAIL|SaFE API unreachable' in poll_script
+    assert "api_fail_streak=0" in poll_script
+
+
 # ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ----
 # A reused CI_VERSION (workflow_dispatch reuse_ci_version, or a job re-run) puts this run
 # on the paths a finished run already wrote. Verdicts are recorded once and never revisited
