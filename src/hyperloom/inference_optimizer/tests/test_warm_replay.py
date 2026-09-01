@@ -49,6 +49,7 @@ class _StubSharedState:
     cumulative_gain_validated_ts: str = ""
     cumulative_gain_validated_stack_len: int = 0
     current_best: dict = field(default_factory=dict)
+    baseline_perf: dict | None = None
     tick: int = 0
     phase: str = "PRELUDE"
     conc: int = 64
@@ -59,10 +60,17 @@ class _StubSharedState:
     def save(self, *args, **kwargs):  # noqa: D401 — stub
         pass
 
-    def append_stack_gain_entry(self, *, action, variant_name, new_tput, extra_server_args="", ts=None):
-        from hyperloom.common.gain_math import gain_pct
+    def append_stack_gain_entry(
+        self, *, action, variant_name, new_tput, extra_server_args="", ts=None, candidate=None
+    ):
+        from hyperloom.common.perf_metric import session_gain_from_measurement
 
-        entry_gain_pct = gain_pct(float(new_tput or 0.0), float(self.baseline_tput or 0.0))
+        entry_gain_pct, _used = session_gain_from_measurement(
+            float(new_tput or 0.0),
+            state=self,
+            candidate=candidate,
+            base_tput=float(self.baseline_tput or 0.0),
+        )
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
 
@@ -1102,6 +1110,115 @@ def test_promote_warm_replay_adopts_on_any_positive_gain(tmp_path):
     assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
 
 
+def test_promote_warm_replay_composite_adopts_flat_output_input_lift(tmp_path, monkeypatch):
+    """Flag on: +20% input / flat output reproduces; the old tput bar would have drifted."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    baseline_perf = {
+        "output_throughput": 600.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_perf = dict(baseline_perf)
+    coord.shared_state.current_best = {"action": "baseline", "tput": 600.0, **baseline_perf}
+    coord.shared_state.warm_replay_outcome = {
+        "status": "in_flight",
+        "expected_gain_pct": 25.0,
+        "warm_recipe_tier": "exact",
+    }
+    result = {
+        "status": "succeeded",
+        "output_throughput": 600.0,
+        "input_throughput": 12000.0,
+        "intvty_p90": 700.0,
+    }
+    coord._promote_warm_replay(
+        result,
+        task=_StubTask(
+            params={
+                "extra_server_args": "--attention-backend AITER",
+                "baseline_tput_anchor": 600.0,
+            }
+        ),
+    )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert outcome["used_composite"] is True
+    # S = 0.55 * 20% input = 11%; output did not move.
+    assert outcome["actual_gain_pct"] == pytest.approx(11.0)
+    assert outcome["throughput_after"] == 600.0
+    assert outcome.get("below_historical_reproduce_pct") is not True
+    assert coord.shared_state.current_best["action"] == "replay_warm_recipe"
+    assert coord.shared_state.current_best["tput"] == 600.0
+    assert coord.shared_state.current_best["input_throughput"] == 12000.0
+    assert len(coord.shared_state.optimization_stack) == 1
+    assert coord.shared_state.gain_per_stack_entry == [pytest.approx(11.0)]
+    assert coord.shared_state.cumulative_gain_validated == pytest.approx(11.0)
+
+
+def test_promote_warm_replay_composite_combined_contract_uses_score_bar(tmp_path, monkeypatch):
+    """Flag on + combined 1% bar: the same flat-output input lift still clears KEEP."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    baseline_perf = {
+        "output_throughput": 600.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_perf = dict(baseline_perf)
+    coord.shared_state.current_best = {"action": "baseline", "tput": 600.0, **baseline_perf}
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 0.0}
+    coord._promote_warm_replay(
+        {
+            "status": "succeeded",
+            "output_throughput": 600.0,
+            "input_throughput": 12000.0,
+            "intvty_p90": 700.0,
+        },
+        task=_StubTask(
+            params={
+                "extra_server_args": "--current",
+                "baseline_tput_anchor": 600.0,
+                "combined_current_contract": True,
+                "combined_keep_threshold_pct": 1.0,
+            }
+        ),
+    )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "reproduced"
+    assert outcome["used_composite"] is True
+    assert outcome["actual_gain_pct"] == pytest.approx(11.0)
+
+
+def test_promote_warm_replay_composite_falls_back_without_triple(tmp_path, monkeypatch):
+    """Flag on but no intvty: still the output-tput path, so flat output is drift."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
+    coord.shared_state.baseline_perf = {
+        "output_throughput": 600.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    coord.shared_state.warm_replay_outcome = {"status": "in_flight", "expected_gain_pct": 25.0}
+    coord._promote_warm_replay(
+        {"status": "succeeded", "output_throughput": 600.0, "input_throughput": 12000.0},
+        task=_StubTask(
+            params={
+                "extra_server_args": "--attention-backend AITER",
+                "baseline_tput_anchor": 600.0,
+            }
+        ),
+    )
+
+    outcome = coord.shared_state.warm_replay_outcome
+    assert outcome["status"] == "drift"
+    assert outcome["used_composite"] is False
+    assert outcome["actual_gain_pct"] == 0.0
+    assert coord.shared_state.optimization_stack == []
+
+
 def test_promote_warm_replay_no_gain_is_drift(tmp_path):
     """Zero or negative measured gain → ``drift``, no stack push."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
@@ -1763,7 +1880,7 @@ async def test_warm_replay_falls_back_to_flat_gain_pct_for_arbor_seed(tmp_path):
 
 
 def test_promote_warm_replay_cumulative_gain_uses_tput_ratio(tmp_path):
-    """Cumulative gain after warm-replay = (tput / baseline_tput - 1) × 100, the authoritative formula."""
+    """Flag off: cumulative gain after warm-replay is (tput / baseline_tput - 1) × 100."""
     coord = _make_coord(tmp_path, warm_start_recipe=_warm_recipe_t1())
     coord.shared_state.warm_replay_outcome = {
         "status": "in_flight",

@@ -4,15 +4,17 @@
 """Shared full-stack rebench step.
 
 Re-benches a variant layered on the current stack and compares it against a
-stability floor (``base_tput * (1 + threshold%)``). Used by the explore ledger
-(post-KEEP confirmation) and by integrate_patch (KEEP gate for patches).
+stability floor. Throughput mode uses ``base_tput * (1 + threshold%)``.
+Composite mode (flag on, serving, full triples) uses the same 0.5% threshold
+on incremental *S*. Used by the explore ledger (post-KEEP confirmation) and
+by integrate_patch (KEEP gate for patches).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from ..stop_attribution import stopped_by_the_run_class
 from ._grid_runner import GridVariant, run_grid
@@ -43,10 +45,18 @@ class StackRebenchResult:
     # did not happen" apart from "the confirmation failed": :attr:`stable` is
     # ``False`` for both, and only one of them is evidence about the variant.
     error_class: str = ""
+    input_throughput: float | None = None
+    intvty_p90: float | None = None
+    tpot_p90_ms: float | None = None
+    stable_gain_pct: float | None = None
+    used_composite: bool = False
+    _stable: bool | None = field(default=None, repr=False)
 
     @property
     def stable(self) -> bool:
-        """True when the measured throughput cleared the stability floor."""
+        """True when the confirmation cleared the stability floor."""
+        if self._stable is not None:
+            return self._stable
         return self.tput is not None and self.tput >= self.stable_floor
 
 
@@ -72,6 +82,9 @@ async def measure_stack_rebench(
     serving_lease: Any = None,
     session_deadline_sec: float | None = None,
     variant_expected_sec: float | None = None,
+    framework: str | None = None,
+    anchor_perf: Mapping[str, Any] | None = None,
+    baseline_perf: Mapping[str, Any] | None = None,
 ) -> StackRebenchResult:
     """Run ``variant`` once on the stack and grade it against the floor.
 
@@ -117,10 +130,22 @@ async def measure_stack_rebench(
     workspace: str | None = None
     warnings: list[str] = []
     error_class = ""
+    input_throughput: float | None = None
+    intvty_p90: float | None = None
+    tpot_p90_ms: float | None = None
     if rb is not None and rb.status == "succeeded":
         tput = rb.output_throughput
         workspace = rb.workspace
         warnings = list(rb.nonfatal_warnings)
+        raw_in = getattr(rb, "input_throughput", None)
+        raw_intv = getattr(rb, "intvty_p90", None)
+        raw_tpot = getattr(rb, "tpot_p90_ms", None)
+        if isinstance(raw_in, (int, float)) and float(raw_in) > 0:
+            input_throughput = float(raw_in)
+        if isinstance(raw_intv, (int, float)) and float(raw_intv) > 0:
+            intvty_p90 = float(raw_intv)
+        if isinstance(raw_tpot, (int, float)) and float(raw_tpot) > 0:
+            tpot_p90_ms = float(raw_tpot)
     elif rb is not None and stopped_by_the_run_class(getattr(rb, "error_class", "")) is not None:
         error_class = rb.error_class
         warnings.append(f"stack_rebench_skipped:{error_class}")
@@ -128,13 +153,45 @@ async def measure_stack_rebench(
         warnings.append(f"stack_rebench_failed:{(rb.error or '')[-120:]}")
     else:
         warnings.append("stack_rebench_no_result")
-    stable_floor = base_tput * (1.0 + stable_threshold_pct / 100.0)
+    stable_floor = base_tput * (1.0 + stable_threshold_pct / 100.0) if base_tput > 0 else 0.0
+    used_composite = False
+    stable_gain_pct: float | None = None
+    if tput is None:
+        stable_flag = False
+    else:
+        from hyperloom.common.perf_metric import (
+            composite_grading_enabled,
+            perf_snapshot_from_mapping,
+            score_gain_pct,
+        )
+
+        cand = perf_snapshot_from_mapping(
+            {
+                "output_throughput": tput,
+                "input_throughput": input_throughput,
+                "intvty_p90": intvty_p90,
+                "tpot_p90_ms": tpot_p90_ms,
+            }
+        )
+        if composite_grading_enabled(framework) and cand and baseline_perf and anchor_perf:
+            used_composite = True
+            graded = score_gain_pct(cand, anchor_perf, baseline_perf)
+            stable_gain_pct = 0.0 if graded is None else float(graded)
+            stable_flag = stable_gain_pct >= float(stable_threshold_pct)
+        else:
+            stable_flag = tput >= stable_floor
     return StackRebenchResult(
         tput=tput,
         workspace=workspace,
         warnings=warnings,
         stable_floor=stable_floor,
         error_class=error_class,
+        input_throughput=input_throughput,
+        intvty_p90=intvty_p90,
+        tpot_p90_ms=tpot_p90_ms,
+        stable_gain_pct=stable_gain_pct,
+        used_composite=used_composite,
+        _stable=stable_flag,
     )
 
 

@@ -86,7 +86,14 @@ def _write_baseline_yaml(path: Path) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0, accuracy: float | None = None) -> Path:
+def _fake_workspace(
+    slot: Path,
+    *,
+    tput: float = 800.0,
+    accuracy: float | None = None,
+    input_throughput: float | None = None,
+    intvty_p90: float | None = None,
+) -> Path:
     workspace = slot / "benchmark_sglang_smoke"
     workspace.mkdir(parents=True, exist_ok=True)
     if accuracy is not None:
@@ -115,6 +122,17 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0, accuracy: float | None =
             }
         )
     )
+    if input_throughput is not None or intvty_p90 is not None:
+        (workspace / "inferencex_result.json").write_text(
+            json.dumps(
+                {
+                    "output_throughput": tput,
+                    "input_throughput": input_throughput,
+                    "intvty_p90_tok_s_user": intvty_p90,
+                }
+            ),
+            encoding="utf-8",
+        )
     return workspace
 
 
@@ -286,6 +304,70 @@ async def test_integrate_handler_keep_decision(session_dir, tmp_path):
     assert res["gain_pct"] == pytest.approx((900 - 800) / 800 * 100)
     assert "report_path" in res
     assert "workspace" in res
+
+
+@pytest.mark.asyncio
+async def test_integrate_handler_keep_uses_composite_metric(
+    session_dir,
+    tmp_path,
+    monkeypatch,
+):
+    """Flag on: input-only lift KEEPs even when output tput is flat."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    base_yaml = tmp_path / "base.yaml"
+    _write_baseline_yaml(base_yaml)
+    baseline_perf = {
+        "output_throughput": 800.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    state = SharedState.load_or_init(session_dir)
+    state.framework = "sglang"
+    state.baseline_tput = 800.0
+    state.baseline_perf = dict(baseline_perf)
+    state.current_best = {
+        "action": "baseline",
+        "tput": 800.0,
+        **baseline_perf,
+    }
+    state.save(session_dir)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(
+            slot,
+            tput=800.0,
+            input_throughput=12000.0,
+            intvty_p90=700.0,
+        )
+        return subprocess.CompletedProcess(
+            args=cmd,
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+    target, patch_file = _write_patch_pair(tmp_path)
+    payload = {
+        "base_tput": 800.0,
+        "config_path": str(base_yaml),
+        "kernel_id": "k_composite",
+        "patch_path": str(patch_file),
+        "target_file": str(target),
+        "allow_unknown_target": True,
+        "skip_rebuild": True,
+        "framework": "sglang",
+    }
+    with patch("hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill", side_effect=_fake_run):
+        res = await krh.integrate_handler(payload, session_dir=session_dir)
+
+    assert res["status"] == "ok"
+    assert res["decision"] == "KEEP"
+    assert res["new_tput"] == 800.0
+    assert res["gain_pct"] > 1.0
+    assert res["input_throughput"] == pytest.approx(12000.0)
+    assert res["intvty_p90"] == pytest.approx(700.0)
 
 
 @pytest.mark.asyncio

@@ -97,7 +97,13 @@ def _write_baseline_yaml(path: Path) -> None:
         yaml.safe_dump(cfg, f)
 
 
-def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
+def _fake_workspace(
+    slot: Path,
+    *,
+    tput: float = 800.0,
+    input_throughput: float | None = None,
+    intvty_p90: float | None = None,
+) -> Path:
     workspace = slot / "benchmark_sglang_20260519_001122"
     workspace.mkdir(parents=True)
     (workspace / "benchmark_report.json").write_text(
@@ -120,6 +126,16 @@ def _fake_workspace(slot: Path, *, tput: float = 800.0) -> Path:
             }
         )
     )
+    if input_throughput is not None or intvty_p90 is not None:
+        (workspace / "inferencex_result.json").write_text(
+            json.dumps(
+                {
+                    "output_throughput": tput,
+                    "input_throughput": input_throughput,
+                    "intvty_p90_tok_s_user": intvty_p90,
+                }
+            )
+        )
     return workspace
 
 
@@ -1435,6 +1451,68 @@ async def test_explore_executor_stack_rebench_evicts_unstable_keep(
     assert ledger["tested"][fp]["outcome"] == "KEEP_UNSTABLE"
     rejected_reasons = {r["reason"] for r in ledger["rejected"]}
     assert "stack_unstable" in rejected_reasons
+
+
+@pytest.mark.asyncio
+async def test_explore_stack_rebench_confirms_composite_keep(
+    sub_agent_runner,
+    tmp_path,
+    monkeypatch,
+):
+    """Flag on: round-2 0.5% floor is *S*, so a flat-output input lift stays KEEP."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    sub, tr, _ = sub_agent_runner
+    baseline_perf = {
+        "output_throughput": 800.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    state = SharedState()
+    state.framework = "sglang"
+    state.baseline_tput = 800.0
+    state.baseline_perf = dict(baseline_perf)
+    state.current_best = {"action": "baseline", "tput": 800.0, **baseline_perf}
+    sub.shared_state = state
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=800.0, input_throughput=12000.0, intvty_p90=700.0)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-composite-rebench"),
+            "base_tput": 800.0,
+            "grid": [
+                {
+                    "name": "input_lift",
+                    "extra_args": "--input-lift",
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+            "stack_stable_threshold_pct": 0.5,
+        },
+        idempotency_key="ex-composite-rebench",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    out = res.result
+    assert {w["name"] for w in out["winners"]} == {"input_lift"}
+    assert out["keep_unstable_in_stack"] == []
+    assert out["winners"][0]["gain_pct"] > 1.0
+    assert out["winners"][0]["tput"] == 800.0
 
 
 def test_default_keep_and_stack_stable_thresholds():

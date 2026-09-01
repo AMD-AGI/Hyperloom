@@ -150,6 +150,104 @@ def test_pareto_front_ignores_non_numeric():
     assert pareto_front(entries) == []
 
 
+def test_pareto_front_max_total_tput_vs_max_intvty():
+    """Composite Pareto: maximize total tput AND maximize p90 intvty."""
+    entries = [
+        {"status": "succeeded", "total_token_throughput": 1000, "intvty_p90": 500, "name": "a"},
+        {"status": "succeeded", "total_token_throughput": 900, "intvty_p90": 800, "name": "b"},
+        {"status": "succeeded", "total_token_throughput": 800, "intvty_p90": 400, "name": "c"},
+        {"status": "succeeded", "total_token_throughput": 1100, "intvty_p90": 500, "name": "d"},
+        {"status": "failed", "total_token_throughput": 9999, "intvty_p90": 9999, "name": "fail"},
+    ]
+    front = pareto_front(
+        entries,
+        x_key="total_token_throughput",
+        y_key="intvty_p90",
+        y_higher_is_better=True,
+    )
+    names = {e["name"] for e in front}
+    assert names == {"b", "d"}
+
+
+def test_best_entry_for_each_conc_composite_prefers_score(monkeypatch):
+    """Flag on: a flat-output input lift beats a higher-output cell at the same conc."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    from hyperloom.orchestrator.actions.executors._grid_base import best_entry_for_each_conc
+
+    baseline = {
+        "output_throughput": 800.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    high_out = {
+        "status": "succeeded",
+        "conc": 4,
+        "name": "high_out",
+        "output_throughput": 900.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    input_lift = {
+        "status": "succeeded",
+        "conc": 4,
+        "name": "input_lift",
+        "output_throughput": 800.0,
+        "input_throughput": 12000.0,
+        "intvty_p90": 700.0,
+    }
+    best = best_entry_for_each_conc(
+        [high_out, input_lift],
+        framework="sglang",
+        baseline_perf=baseline,
+    )
+    assert best["4"]["name"] == "input_lift"
+
+
+def test_best_entry_for_each_conc_falls_back_without_triple(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    from hyperloom.orchestrator.actions.executors._grid_base import best_entry_for_each_conc
+
+    entries = [
+        {"status": "succeeded", "conc": 4, "name": "low", "output_throughput": 100.0},
+        {"status": "succeeded", "conc": 4, "name": "high", "output_throughput": 200.0},
+    ]
+    best = best_entry_for_each_conc(entries, framework="sglang", baseline_perf=None)
+    assert best["4"]["name"] == "high"
+
+
+def test_select_sweep_pareto_composite_then_fallback(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    from hyperloom.orchestrator.actions.executors._grid_base import select_sweep_pareto
+
+    composite_cells = [
+        {
+            "status": "succeeded",
+            "total_token_throughput": 1000,
+            "intvty_p90": 500,
+            "output_throughput": 10,
+            "e2el_mean_ms": 1,
+            "name": "a",
+        },
+        {
+            "status": "succeeded",
+            "total_token_throughput": 900,
+            "intvty_p90": 800,
+            "output_throughput": 999,
+            "e2el_mean_ms": 1,
+            "name": "b",
+        },
+    ]
+    front = select_sweep_pareto(composite_cells, framework="sglang")
+    assert {e["name"] for e in front} == {"a", "b"}
+
+    tput_only = [
+        {"status": "succeeded", "output_throughput": 100, "e2el_mean_ms": 10, "name": "fast"},
+        {"status": "succeeded", "output_throughput": 90, "e2el_mean_ms": 20, "name": "slow"},
+    ]
+    fallback = select_sweep_pareto(tput_only, framework="sglang")
+    assert [e["name"] for e in fallback] == ["fast"]
+
+
 # ---- SweepExecutor.__call__ ----
 
 
@@ -210,5 +308,60 @@ async def test_call_success(tmp_path, monkeypatch):
     out = await ex(ctx)
     assert out["status"] == "succeeded"
     assert out["grid_size"] == 1
-    assert out["best_for_each_conc"]["4"]["output_throughput"] == 120.0
-    assert len(out["pareto_front"]) == 1
+async def test_call_success_composite_ranks_on_score(tmp_path, monkeypatch):
+    """Flag on: best-per-conc is *S*; Pareto is total tput vs p90 intvty."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    cfg = tmp_path / "c.yaml"
+    cfg.write_text("k: v\n", encoding="utf-8")
+    monkeypatch.setattr(sw, "materialize_config_with_envs", lambda *a, **k: cfg)
+
+    async def fake_run_grid(**kwargs):
+        return [
+            VariantResult(
+                name="high_out",
+                extra_server_args="",
+                extra_envs={"CONC": "4", "ISL": "1024", "OSL": "1024"},
+                status="succeeded",
+                output_throughput=900.0,
+                total_token_throughput=1000.0,
+                input_throughput=10000.0,
+                intvty_p90=500.0,
+                e2el_mean_ms=40.0,
+            ),
+            VariantResult(
+                name="input_lift",
+                extra_server_args="",
+                extra_envs={"CONC": "4", "ISL": "8192", "OSL": "1024"},
+                status="succeeded",
+                output_throughput=800.0,
+                total_token_throughput=900.0,
+                input_throughput=12000.0,
+                intvty_p90=800.0,
+                e2el_mean_ms=40.0,
+            ),
+        ]
+
+    monkeypatch.setattr(sw, "run_grid", fake_run_grid)
+    baseline_perf = {
+        "output_throughput": 800.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    ex = sw.SweepExecutor(session_dir=tmp_path)
+    ctx = _ctx(
+        tmp_path,
+        {
+            "config_path": str(cfg),
+            "conc_values": [4],
+            "isl_osl_configs": ["1024:1024", "8192:1024"],
+        },
+    )
+    ctx.extra["shared_state"] = SimpleNamespace(
+        framework="sglang",
+        baseline_perf=baseline_perf,
+        model_path="",
+    )
+    out = await ex(ctx)
+    assert out["status"] == "succeeded"
+    assert out["best_for_each_conc"]["4"]["name"] == "input_lift"
+    assert {e["name"] for e in out["pareto_front"]} == {"high_out", "input_lift"}

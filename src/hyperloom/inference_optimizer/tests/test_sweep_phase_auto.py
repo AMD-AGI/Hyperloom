@@ -224,7 +224,9 @@ def test_pending_keep_kernel_ids_do_not_retry_needs_review():
     assert state.next_pending_keep_kernel_id() == "k001"
 
 
-def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_status: str = "ok"):
+def _patch_stack_validation_internals(
+    monkeypatch, *, new_tput: float, revert_status: str = "ok", bench: dict | None = None
+):
     """Stub apply/revert/bench so the real stack-validation decision path runs."""
     import hyperloom.orchestrator.kernel.request_handlers as krh
     import hyperloom.orchestrator.actions.executors.baseline as baseline_mod
@@ -243,11 +245,14 @@ def _patch_stack_validation_internals(monkeypatch, *, new_tput: float, revert_st
             self.session_dir = session_dir
 
         async def __call__(self, ctx):
-            return {
+            payload = {
                 "output_throughput": new_tput,
                 "report_path": "/tmp/report",
                 "workspace": "/tmp/workspace",
             }
+            if bench:
+                payload.update(bench)
+            return payload
 
     monkeypatch.setattr(krh, "_maybe_apply_kernel_patch", _fake_apply)
     monkeypatch.setattr(krh, "_maybe_revert_kernel_patch", _fake_revert)
@@ -347,6 +352,42 @@ async def test_stack_validation_keeps_on_positive_increment_over_current_best(
     assert result["decision"] == "KEEP"
     assert result["gain_pct"] == pytest.approx(12.0)
     assert result["stack_incremental_gain_pct"] == pytest.approx(1.8181818, rel=1e-3)
+    assert result["revert_result"]["status"] == "skipped"
+
+
+@pytest.mark.asyncio
+async def test_stack_validation_keep_uses_composite_metric(tmp_path: Path, monkeypatch):
+    """Flag on: input-only lift KEEPs the leftover stack even when output tput is flat."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    c = _stack_validation_coordinator(tmp_path)
+    c.shared_state.framework = "sglang"
+    c.shared_state.baseline_perf = dict(baseline_perf)
+    c.shared_state.current_best = {
+        "action": "integrate",
+        "tput": 110.0,
+        "kernel_id": "k_prev",
+        "output_throughput": 110.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    stack = c._stack_entries_for_validation(["k001", "k004"])
+    _patch_stack_validation_internals(
+        monkeypatch,
+        new_tput=110.0,
+        bench={"input_throughput": 12000.0, "intvty_p90": 700.0},
+    )
+
+    result = await c._run_kernel_stack_validation_e2e(stack)
+
+    assert result["decision"] == "KEEP"
+    assert result["new_tput"] == 110.0
+    assert result["stack_incremental_gain_pct"] > 1.0
+    assert result["input_throughput"] == pytest.approx(12000.0)
     assert result["revert_result"]["status"] == "skipped"
 
 

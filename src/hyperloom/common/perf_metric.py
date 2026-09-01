@@ -127,23 +127,6 @@ def composite_score(
     return w_in * d_in + w_intv * d_intv + w_out * d_out
 
 
-def passes_intvty_gate(
-    candidate: Mapping[str, float],
-    anchor: Mapping[str, float],
-    *,
-    noise_pct: float | None = None,
-) -> bool:
-    """Hard gate: intvty p90 must not regress beyond the noise band."""
-    _n_in, n_intv, _n_out = parse_noise_pct()
-    floor_pct = float(noise_pct if noise_pct is not None else n_intv)
-    anchor_intv = float(anchor.get("intvty_p90") or 0.0)
-    cand_intv = float(candidate.get("intvty_p90") or 0.0)
-    if anchor_intv <= 0 or cand_intv <= 0:
-        return True
-    min_allowed = anchor_intv * (1.0 - floor_pct / 100.0)
-    return cand_intv >= min_allowed
-
-
 def score_gain_pct(
     candidate: Mapping[str, float],
     anchor: Mapping[str, float],
@@ -159,6 +142,103 @@ def score_gain_pct(
     return (cand_score - anchor_score) / anchor_score * 100.0
 
 
+def keep_gain_pct(
+    candidate: Mapping[str, Any] | None,
+    *,
+    state: Any = None,
+    framework: str | None = None,
+    base_tput: float | None = None,
+) -> tuple[float | None, bool]:
+    """KEEP gain percent, using the composite score when the flag and triples are present.
+
+    Returns:
+        ``(gain_pct, used_composite)``. Composite ``gain_pct`` is ``None`` when
+        *S* did not improve (same meaning as :func:`score_gain_pct`). Output-tput
+        fallback uses :func:`hyperloom.common.gain_math.gain_pct`.
+    """
+    from hyperloom.common.gain_math import gain_pct as tput_gain_pct
+
+    fw = framework or (getattr(state, "framework", None) if state is not None else None)
+    cand_snap = perf_snapshot_from_mapping(candidate)
+    baseline = resolve_baseline_perf(state)
+    if composite_grading_enabled(fw) and cand_snap and baseline:
+        anchor = perf_snapshot_from_mapping(getattr(state, "current_best", None) if state is not None else None)
+        return score_gain_pct(cand_snap, anchor or baseline, baseline), True
+    new_tput: float | None = None
+    if isinstance(candidate, Mapping):
+        raw = candidate.get("output_throughput", candidate.get("tput", candidate.get("new_tput")))
+        if isinstance(raw, (int, float)):
+            new_tput = float(raw)
+    return tput_gain_pct(new_tput, float(base_tput or 0.0)), False
+
+
+def session_gain_pct(
+    candidate: Mapping[str, Any] | None,
+    *,
+    state: Any = None,
+    framework: str | None = None,
+    base_tput: float | None = None,
+) -> tuple[float | None, bool]:
+    """Session-total gain percent vs the session baseline (not vs ``current_best``).
+
+    Composite ``gain_pct`` is ``S * 100`` (including ``0.0`` when no axis
+    improved). KEEP incremental grading is :func:`keep_gain_pct`.
+    """
+    from hyperloom.common.gain_math import gain_pct as tput_gain_pct
+
+    fw = framework or (getattr(state, "framework", None) if state is not None else None)
+    cand_snap = perf_snapshot_from_mapping(candidate)
+    baseline = resolve_baseline_perf(state)
+    if composite_grading_enabled(fw) and cand_snap and baseline:
+        return composite_score(cand_snap, baseline) * 100.0, True
+    new_tput: float | None = None
+    if isinstance(candidate, Mapping):
+        raw = candidate.get("output_throughput", candidate.get("tput", candidate.get("new_tput")))
+        if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            new_tput = float(raw)
+    bt = base_tput
+    if bt is None and state is not None:
+        bt = getattr(state, "baseline_tput", None)
+    return tput_gain_pct(new_tput, float(bt or 0.0)), False
+
+
+def session_gain_from_measurement(
+    new_tput: float,
+    *,
+    state: Any = None,
+    candidate: Mapping[str, Any] | None = None,
+    base_tput: float | None = None,
+) -> tuple[float | None, bool]:
+    """Session gain for a measured output tput, filling axes from *candidate* then ``current_best``."""
+    mapping: dict[str, Any] = {}
+    cb = getattr(state, "current_best", None) if state is not None else None
+    if isinstance(cb, Mapping):
+        mapping.update(cb)
+    if isinstance(candidate, Mapping):
+        mapping.update(candidate)
+    mapping["tput"] = float(new_tput)
+    mapping["output_throughput"] = float(new_tput)
+    return session_gain_pct(mapping, state=state, base_tput=base_tput)
+
+
+def perf_axes_from_mapping(source: Mapping[str, Any] | None) -> dict[str, float]:
+    """Positive input / intvty / output / tpot fields for stack-lift payloads."""
+    if not isinstance(source, Mapping):
+        return {}
+    out: dict[str, float] = {}
+    for key in ("input_throughput", "intvty_p90", "tpot_p90_ms", "output_throughput"):
+        val = source.get(key)
+        if isinstance(val, (int, float)) and float(val) > 0:
+            out[key] = float(val)
+    if "output_throughput" not in out:
+        tput = source.get("tput", source.get("new_tput"))
+        if isinstance(tput, (int, float)) and float(tput) > 0:
+            out["output_throughput"] = float(tput)
+    if "output_throughput" in out:
+        out["tput"] = out["output_throughput"]
+    return out
+
+
 def resolve_grading_anchor_score(state: Any) -> float:
     """Composite score of the config candidates are composed on (0 before any lift)."""
     cb = getattr(state, "current_best", None)
@@ -170,18 +250,46 @@ def resolve_grading_anchor_score(state: Any) -> float:
     return 0.0
 
 
+def session_composite_score(state: Any) -> float | None:
+    """Composite score *S* of ``current_best`` vs the session baseline, or None."""
+    fw = getattr(state, "framework", None) if state is not None else None
+    if not composite_grading_enabled(fw):
+        return None
+    baseline = resolve_baseline_perf(state)
+    snap = perf_snapshot_from_mapping(getattr(state, "current_best", None) if state is not None else None)
+    if baseline is None or snap is None:
+        return None
+    return composite_score(snap, baseline)
+
+
+def composite_watermark_levels(state: Any) -> tuple[float, float] | None:
+    """``(1+S_now, 1+S_last_snapshot)`` for the 10% roofline watermark, or None."""
+    score = session_composite_score(state)
+    if score is None:
+        return None
+    last_s = getattr(state, "last_roofline_score", None) if state is not None else None
+    if not isinstance(last_s, (int, float)) or isinstance(last_s, bool):
+        last_s = 0.0
+    return 1.0 + float(score), 1.0 + float(last_s)
+
+
 __all__ = [
     "COMPOSITE_V1",
     "composite_grading_enabled",
     "composite_metric_enabled",
     "composite_score",
+    "composite_watermark_levels",
     "delta_improvement",
+    "keep_gain_pct",
     "noise_adjusted_delta",
     "parse_noise_pct",
     "parse_weights",
-    "passes_intvty_gate",
+    "perf_axes_from_mapping",
     "perf_snapshot_from_mapping",
     "resolve_baseline_perf",
     "resolve_grading_anchor_score",
     "score_gain_pct",
+    "session_composite_score",
+    "session_gain_from_measurement",
+    "session_gain_pct",
 ]

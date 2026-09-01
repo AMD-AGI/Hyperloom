@@ -483,16 +483,41 @@ class KernelStackPhase(PhaseHandler):
                 new_tput = 0.0
                 gain_pct = -100.0
                 incremental_gain_pct = -100.0
+                perf_axes: dict[str, float] = {}
             else:
+                from hyperloom.common.perf_metric import keep_gain_pct, perf_axes_from_mapping
+
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
-                # The stack is applied on top of current_best, so the KEEP
-                # decision uses the incremental gain over current_best, not the
-                # total gain over the original baseline.
+                # The stack is applied on top of current_best. KEEP is that
+                # incremental gain: composite *S* when the flag and triples are
+                # present, otherwise output-tput % vs the live tput anchor.
                 decision_base = resolve_grading_anchor_tput(self.shared_state)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
-                gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
-                incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
-                decision = "KEEP" if incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT else "REVERT"
+                tput_gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
+                tput_incremental = (
+                    (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
+                )
+                framework = str(getattr(self.shared_state, "framework", "") or "")
+                graded, used_composite = keep_gain_pct(
+                    bench_result if isinstance(bench_result, dict) else None,
+                    state=self.shared_state,
+                    framework=framework,
+                    base_tput=decision_base,
+                )
+                if used_composite:
+                    incremental_gain_pct = 0.0 if graded is None else float(graded)
+                    gain_pct = incremental_gain_pct
+                else:
+                    incremental_gain_pct = tput_incremental
+                    gain_pct = tput_gain_pct
+                decision = (
+                    "KEEP"
+                    if incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                    else "REVERT"
+                )
+                perf_axes = perf_axes_from_mapping(
+                    bench_result if isinstance(bench_result, dict) else None
+                )
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):
@@ -541,6 +566,7 @@ class KernelStackPhase(PhaseHandler):
                 }
 
             result = {
+                **perf_axes,
                 "status": top_status,
                 "decision": decision,
                 "patch_cleanup_status": cs,
@@ -550,6 +576,8 @@ class KernelStackPhase(PhaseHandler):
                 "target_file": "+".join(str(e.get("target_file") or "") for e in entries),
                 "base_tput": float(self.shared_state.baseline_tput or 0.0),
                 "new_tput": new_tput,
+                "output_throughput": new_tput,
+                "tput": new_tput,
                 "gain_pct": gain_pct,
                 "stack_incremental_gain_pct": incremental_gain_pct,
                 "stack_incremental_keep_threshold_pct": (KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT),

@@ -2028,7 +2028,19 @@ class PreludePhase(PhaseHandler):
         # nothing about whether it still computes correctly here.
         if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
-        measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
+        from hyperloom.common.perf_metric import keep_gain_pct, perf_axes_from_mapping
+
+        tput_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
+        graded, used_composite = keep_gain_pct(
+            result,
+            state=state,
+            framework=str(getattr(state, "framework", "") or ""),
+            base_tput=baseline_tput,
+        )
+        # Flag on + full triples: grade the same *S* KEEP other serving
+        # surfaces use. Otherwise the historical output-tput % vs this
+        # session's baseline. ``None`` means *S* did not improve.
+        measured_gain = (0.0 if graded is None else float(graded)) if used_composite else tput_gain
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
         combined_current_contract = bool(decision_params.get("combined_current_contract"))
@@ -2054,9 +2066,12 @@ class PreludePhase(PhaseHandler):
         outcome["actual_gain_pct"] = round(measured_gain, 3)
         outcome["throughput_after"] = tput
         outcome["keep_threshold_pct"] = keep_threshold
+        outcome["used_composite"] = used_composite
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce
-            if measured_gain > 0 and measured_gain < historical_bar:
+            # Donor ``expected_gain_pct`` is an output-tput claim, so this
+            # advisory flag stays on tput even when KEEP graded *S*.
+            if tput_gain > 0 and tput_gain < historical_bar:
                 outcome["below_historical_reproduce_pct"] = True
                 outcome["historical_reproduce_bar_pct"] = round(
                     historical_bar,
@@ -2189,6 +2204,7 @@ class PreludePhase(PhaseHandler):
                 "replay_warm_recipe",
                 float(single_round_tput),
                 {
+                    **perf_axes_from_mapping(result),
                     "name": "warm_replay",
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
@@ -2217,8 +2233,9 @@ class PreludePhase(PhaseHandler):
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(single_round_tput)
             log.info(
-                "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
+                "warm-replay REPRODUCED: %s=+%.2f%% (expected=+%.2f%%, "
                 "min_required=+%.2f%%); pushed warm_replay onto stack",
+                "composite gain" if used_composite else "throughput delta",
                 measured_gain,
                 expected_gain,
                 expected_gain * min_reproduce if expected_gain > 0 else 0.0,
@@ -2256,9 +2273,11 @@ class PreludePhase(PhaseHandler):
             }
             outcome["kernel"] = dict(kernel_outcome)
             outcome["status"] = "drift"
-            outcome["reason"] = f"measured {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
+            metric = "composite gain" if used_composite else "throughput delta"
+            outcome["reason"] = f"{metric} {measured_gain:+.2f}% below keep threshold {keep_threshold:+.2f}%"
             log.info(
-                "warm-replay DRIFT: measured=%+.2f%% threshold=%+.2f%%",
+                "warm-replay DRIFT: %s=%+.2f%% threshold=%+.2f%%",
+                metric,
                 measured_gain,
                 keep_threshold,
             )

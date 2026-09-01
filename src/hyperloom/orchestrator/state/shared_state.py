@@ -26,6 +26,7 @@ Fields::
                                 per-writer detail (variant_name, extra_server_args,
                                 extra_envs, workspace, latency means)
     cumulative_gain_validated float — % over baseline at the last full-stack rebench
+                                (output-tput % , or composite *S* × 100 when the flag is on)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -695,8 +696,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
     # Index-aligned with ``optimization_stack``: per-entry incremental gain pct; missing => None.
     gain_per_stack_entry: list[float | None] = field(default_factory=list)
-    # Total gain over ``baseline_tput``, stamped only from a measurement taken
+    # Total gain over the session baseline, stamped only from a measurement taken
     # with the whole stack applied; standalone validate_stack denied by PolicyGate.
+    # Flag off: ``(tput - baseline_tput) / baseline_tput * 100``. Flag on +
+    # full triple: composite score *S* × 100.
     cumulative_gain_validated: float = 0.0
     cumulative_gain_validated_ts: str = ""
     # ``optimization_stack`` length at last successful inline rebench; longer => new KEEPs need validation.
@@ -712,8 +715,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # main-flow rebench; kept OUT of current_best / optimization_stack / the
     # headline gain until validated. Cleared once promoted from a measured rebench.
     geak_pending: dict[str, Any] = field(default_factory=dict)
-    # Tput watermark for gain-driven roofline refresh; Coordinator re-enqueues at a compound 10% step.
+    # Tput (or 1+S when the composite flag is on) watermark for gain-driven
+    # roofline refresh; Coordinator re-enqueues at a compound 10% step.
     last_roofline_tput: float = 0.0
+    # *S* at the last successful roofline; None until a composite-capable
+    # snapshot has been stamped (PRELUDE / resume treat None as 0).
+    last_roofline_score: float | None = None
     stop_reason: str = ""
     # When the session first stopped, and therefore its end time for
     # consumers. Stamped by the first ``set_stop_reason`` write and left alone
@@ -3676,8 +3683,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         new_tput: float,
         extra_server_args: str = "",
         ts: str | None = None,
+        candidate: Mapping[str, Any] | None = None,
     ) -> float | None:
-        """Mirror an optimization_stack append into gain_per_stack_entry; computes ``(new_tput-baseline_tput)/baseline_tput*100`` and appends. Returns gain_pct (None when baseline_tput is 0 or new_tput non-positive).
+        """Mirror an optimization_stack append into gain_per_stack_entry.
+
+        Flag off: ``(new_tput-baseline_tput)/baseline_tput*100``. Flag on with
+        a full triple: ``S * 100`` vs the session baseline. Returns gain_pct
+        (None when baseline_tput is 0 or new_tput non-positive on the tput path).
 
         Args:
             action (str): The action that produced the stack entry.
@@ -3685,10 +3697,13 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             new_tput (float): The measured throughput for the entry.
             extra_server_args (str): The extra server args for the entry.
             ts (str | None): Optional ISO timestamp for the entry.
+            candidate (Mapping | None): Perf axes for the entry when known
+                (used for composite session accounting).
 
         Returns:
-            float | None: The computed incremental gain pct, or ``None`` when
-                ``baseline_tput`` is 0 or ``new_tput`` is non-positive.
+            float | None: The computed session-total gain pct, or ``None`` when
+                ``baseline_tput`` is 0 or ``new_tput`` is non-positive on the
+                output-tput path.
         """
         try:
             base = float(self.baseline_tput or 0.0)
@@ -3698,11 +3713,31 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             tput = float(new_tput or 0.0)
         except (TypeError, ValueError):
             tput = 0.0
-        from hyperloom.common.gain_math import gain_pct
+        from hyperloom.common.perf_metric import session_gain_from_measurement
 
-        entry_gain_pct = gain_pct(tput, base)
+        entry_gain_pct, _used = session_gain_from_measurement(
+            tput,
+            state=self,
+            candidate=candidate,
+            base_tput=base,
+        )
         self.gain_per_stack_entry.append(entry_gain_pct)
         return entry_gain_pct
+
+    def stamp_roofline_watermark(self, tput: float | None = None) -> None:
+        """Re-anchor the 10% roofline watermark after a successful snapshot.
+
+        Writes ``last_roofline_tput`` when ``tput`` is positive. When the
+        composite flag is on and the session has a full triple, also stamps
+        ``last_roofline_score`` to the current *S*.
+        """
+        if isinstance(tput, (int, float)) and not isinstance(tput, bool) and float(tput) > 0:
+            self.last_roofline_tput = float(tput)
+        from hyperloom.common.perf_metric import session_composite_score
+
+        score = session_composite_score(self)
+        if score is not None:
+            self.last_roofline_score = float(score)
 
     # Time-budget helpers (consumed by Coordinator._compose_prompt)
     def elapsed_minutes(self, *, now: datetime | None = None) -> float:

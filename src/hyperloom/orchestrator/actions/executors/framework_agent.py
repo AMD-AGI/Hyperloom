@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from hyperloom.common.env import is_truthy
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import keep_gain_pct, perf_axes_from_mapping
 from hyperloom.common.url_safety import require_http_url
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ._accuracy_gate import (
@@ -826,9 +827,22 @@ class FrameworkAgentExecutor:
             params.get("keep_threshold_pct", self.keep_threshold_pct),
         )
         new_tput = bench_result.get("output_throughput")
-        delta_pct: float | None = None
+        tput_delta_pct: float | None = None
         if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
-            delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+            tput_delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+        shared_state = extra.get("shared_state") or extra.get("state")
+        framework = str(params.get("framework") or getattr(shared_state, "framework", "") or "")
+        graded, used_composite = keep_gain_pct(
+            bench_result,
+            state=shared_state,
+            framework=framework,
+            base_tput=base_tput,
+        )
+        if used_composite:
+            delta_pct = 0.0 if graded is None else float(graded)
+        else:
+            delta_pct = tput_delta_pct
+        perf_axes = perf_axes_from_mapping(bench_result)
 
         accuracy_pass = gate_evidence.get("accuracy_pass")
         # Source patches require the accuracy gate for a KEEP: a measured
@@ -869,7 +883,7 @@ class FrameworkAgentExecutor:
                 await self._write_kb_record(
                     candidate=candidate,
                     outcome=outcome,
-                    tps_delta_pct=float(delta_pct or 0.0),
+                    tps_delta_pct=float(tput_delta_pct or 0.0),
                     patch_path=str(applied[0]) if applied else "",
                     extra=extra,
                     accuracy_delta_pct=acc_delta_pct,
@@ -884,7 +898,8 @@ class FrameworkAgentExecutor:
             if delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
-                reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
+                metric = "composite gain" if used_composite else "throughput delta"
+                reasons.append(f"{metric} {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
             # Distinguish "accuracy required but unevaluated" (None, not a
@@ -898,12 +913,14 @@ class FrameworkAgentExecutor:
                 stash_state,
                 stash_note,
                 {
+                    **perf_axes,
                     "status": revert_status,
                     "candidate": candidate,
                     "batch_id": batch_id,
                     "patches_applied": [],
                     "patches_reverted": [str(p) for p in reverted],
                     "output_throughput": new_tput,
+                    "tput": new_tput,
                     "delta_pct": delta_pct,
                     "accuracy_pass": accuracy_pass,
                     "base_tput": base_tput,
@@ -931,6 +948,7 @@ class FrameworkAgentExecutor:
                     stash_state,
                     stash_note,
                     {
+                        **perf_axes,
                         "status": "apply_failed",
                         "error_class": "keep_commit_failed",
                         "error": commit_err or "git commit failed",
@@ -939,6 +957,7 @@ class FrameworkAgentExecutor:
                         "patches_applied": [],
                         "patches_reverted": [str(p) for p in reverted],
                         "output_throughput": new_tput,
+                        "tput": new_tput,
                         "delta_pct": delta_pct,
                         "accuracy_pass": accuracy_pass,
                         "base_tput": base_tput,
@@ -955,19 +974,24 @@ class FrameworkAgentExecutor:
             stash_state,
             stash_note,
             {
+                **perf_axes,
                 "status": "kept",
                 "candidate": candidate,
                 "batch_id": batch_id,
                 "patches_applied": [str(p) for p in applied],
                 "patches_reverted": [],
                 "output_throughput": new_tput,
+                "tput": new_tput,
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
                 "keep_threshold_pct": keep_threshold_pct,
                 "keep_commit_sha": keep_sha,
                 "patch_source_mode": patch_source_mode,
-                "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+                "reason": (
+                    f"{'composite gain' if used_composite else 'throughput delta'} "
+                    f"{delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
+                ),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
             },
@@ -1205,6 +1229,9 @@ class FrameworkAgentExecutor:
                 "name": r.name,
                 "status": r.status,
                 "output_throughput": getattr(r, "output_throughput", None),
+                "input_throughput": getattr(r, "input_throughput", None),
+                "intvty_p90": getattr(r, "intvty_p90", None),
+                "tpot_p90_ms": getattr(r, "tpot_p90_ms", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
                 "result_dir": str(getattr(r, "result_dir", "")),

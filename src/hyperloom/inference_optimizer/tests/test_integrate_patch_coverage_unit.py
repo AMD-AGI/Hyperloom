@@ -421,6 +421,70 @@ async def test_keep_path(tmp_path, monkeypatch):
     assert (repo / "src.py").read_text().endswith("return 2\n")
 
 
+@pytest.mark.asyncio
+async def test_keep_path_uses_composite_metric(tmp_path, monkeypatch):
+    """Flag on: input-only lift KEEPs even when output tput is flat."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    session = tmp_path / "s"
+    session.mkdir()
+    repo = tmp_path / "fw"
+    _init_git_repo(repo)
+    _write_workspace(session, "spec")
+
+    class _SS:
+        framework = "sglang"
+        baseline_tput = 100.0
+        baseline_perf = {
+            "output_throughput": 100.0,
+            "input_throughput": 10000.0,
+            "intvty_p90": 700.0,
+        }
+        current_best = {
+            "action": "baseline",
+            "tput": 100.0,
+            "output_throughput": 100.0,
+            "input_throughput": 10000.0,
+            "intvty_p90": 700.0,
+        }
+        baseline_accuracy = 0.0
+
+        def get_specialist_patch_verdict(self, tid):
+            return "approve"
+
+    ex = IntegratePatchExecutor(session_dir=session)
+    monkeypatch.setattr(
+        IntegratePatchExecutor,
+        "_bench_patch",
+        _stub_bench(
+            {
+                "output_throughput": 100.0,
+                "input_throughput": 12000.0,
+                "intvty_p90": 700.0,
+                "status": "succeeded",
+            },
+            {"accuracy_pass": None},
+        ),
+    )
+    res = await ex(
+        _make_ctx(
+            "t",
+            {
+                "specialist_task_id": "spec",
+                "framework_source_root": str(repo),
+                "base_tput": 100.0,
+                "enable_stack_rebench": False,
+                "framework": "sglang",
+            },
+            extra={"shared_state": _SS()},
+        )
+    )
+    assert res["status"] == "kept"
+    assert res["output_throughput"] == 100.0
+    assert res["delta_pct"] > 1.0
+    assert res["input_throughput"] == pytest.approx(12000.0)
+    assert "composite gain" in res["reason"]
+
+
 def _stub_confirm(result: dict):
     async def _c(self, **kwargs):
         return result
@@ -526,6 +590,54 @@ async def test_rebench_the_run_stopped_is_not_reported_as_a_failed_measurement(t
     assert result.error_class == error_class
     assert result.warnings == [f"stack_rebench_skipped:{error_class}"]
     assert not any("stack_rebench_failed" in w for w in result.warnings)
+
+
+@pytest.mark.asyncio
+async def test_measure_stack_rebench_composite_floor_ignores_flat_tput(tmp_path, monkeypatch):
+    """Flag on: +20% input / flat output clears the 0.5% *S* floor."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    from unittest.mock import patch
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
+    from hyperloom.orchestrator.actions.executors import _stack_rebench as sr
+
+    baseline = {
+        "output_throughput": 800.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    measured = VariantResult(
+        name="v",
+        extra_server_args="",
+        extra_envs={},
+        status="succeeded",
+        output_throughput=800.0,
+        input_throughput=12000.0,
+        intvty_p90=700.0,
+        workspace=str(tmp_path / "ws"),
+    )
+
+    async def _fake_run_grid(**_kwargs):
+        return [measured]
+
+    with patch.object(sr, "run_grid", new=_fake_run_grid):
+        result = await sr.measure_stack_rebench(
+            config_path=tmp_path / "base.yaml",
+            base_extra_args="",
+            variant=GridVariant("v"),
+            base_tput=800.0,
+            stable_threshold_pct=0.5,
+            output_slot=tmp_path / "slot",
+            variant_timeout_sec=600,
+            framework="sglang",
+            anchor_perf=baseline,
+            baseline_perf=baseline,
+        )
+
+    assert result.used_composite is True
+    assert result.stable is True
+    assert result.tput == 800.0
+    assert result.stable_gain_pct is not None and result.stable_gain_pct > 0.5
 
 
 @pytest.mark.asyncio

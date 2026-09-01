@@ -30,6 +30,13 @@ from ..state.optimization_journal import (
 )
 from ..state.task_registry import TERMINAL_STATES
 from ..bus.message_bus import Message
+from hyperloom.common.perf_metric import (
+    composite_grading_enabled,
+    composite_score,
+    perf_axes_from_mapping,
+    perf_snapshot_from_mapping,
+    resolve_baseline_perf,
+)
 from ..loop.coordinator_helpers import (
     _GEAK_MEASUREMENT_DIVERGENCE_WARN_PCT,
     _MAX_ROOFLINE_FAILURE_RETRIES,
@@ -378,7 +385,7 @@ class KernelPhase(PhaseHandler):
             after != before or snapshots_after != snapshots_before or snapshot_id_after != snapshot_id_before
         )
         if after > 0 and snapshot_landed:
-            self.shared_state.last_roofline_tput = after
+            self.shared_state.stamp_roofline_watermark(after)
             self.shared_state.last_profile_status = "succeeded"
             # Record the workload (incl. serving_config) that this trace reflects;
             # _profile_config_changed derives the config signature from it, so
@@ -1499,22 +1506,44 @@ class KernelPhase(PhaseHandler):
             return
         if measured <= 0:
             return
-        # KEEP guard (aligns GEAK with forge / integrate_patch): a measured
+        # KEEP guard (aligns GEAK with forge / integrate_handler): a measured
         # rebench that does not beat the current best must NOT overwrite the
         # headline / stack / gain. Backstops every promote entry point (2a, 2b,
         # crash-recovery) so a low-but-valid measurement can never lower best.
         cb_now = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
         cb_tput = cb_now.get("tput")
-        if isinstance(cb_tput, (int, float)) and cb_tput > 0 and measured <= float(cb_tput):
+        framework = str(getattr(self.shared_state, "framework", "") or "")
+        baseline_perf = resolve_baseline_perf(self.shared_state)
+        cand_snap = perf_snapshot_from_mapping(
+            {
+                "output_throughput": measured,
+                "input_throughput": result.get("input_throughput"),
+                "intvty_p90": result.get("intvty_p90"),
+                "tpot_p90_ms": result.get("tpot_p90_ms"),
+            }
+        )
+        anchor_snap = perf_snapshot_from_mapping(cb_now) or baseline_perf
+        composite_keep = bool(
+            composite_grading_enabled(framework)
+            and cand_snap is not None
+            and anchor_snap is not None
+            and baseline_perf is not None
+        )
+        if composite_keep:
+            beats_best = composite_score(cand_snap, baseline_perf) > composite_score(anchor_snap, baseline_perf)
+        else:
+            beats_best = not (isinstance(cb_tput, (int, float)) and cb_tput > 0 and measured <= float(cb_tput))
+        if not beats_best:
+            cb_tput_f = float(cb_tput) if isinstance(cb_tput, (int, float)) else 0.0
             log.info(
                 "geak promote skipped: measured %.3f did not beat current_best %.3f",
                 measured,
-                float(cb_tput),
+                cb_tput_f,
             )
             self._reject_geak_kernel_journey(
                 result,
                 measured_tput=measured,
-                current_best_tput=float(cb_tput),
+                current_best_tput=cb_tput_f,
                 provenance="geak_promote_rejected",
             )
             try:
@@ -1525,7 +1554,7 @@ class KernelPhase(PhaseHandler):
                     "decision": "REJECTED",
                     "reason": "rebench_did_not_beat_current_best",
                     "measured_tput": measured,
-                    "current_best_tput": float(cb_tput),
+                    "current_best_tput": cb_tput_f,
                 }
                 instrument.record_geak_operation(
                     self.session_dir,
@@ -1559,6 +1588,7 @@ class KernelPhase(PhaseHandler):
                 "ttft_mean_ms": result.get("ttft_ms"),
                 "tpot_mean_ms": result.get("tpot_ms"),
                 "workspace": result.get("eval_dir"),
+                **perf_axes_from_mapping({**result, "output_throughput": measured, "tput": measured}),
             },
             entry_extra=self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded),
         )
@@ -3233,7 +3263,7 @@ class KernelPhase(PhaseHandler):
                         applied.get("detail"),
                     )
 
-            if decision == "KEEP" and new_tput > running_tput and not apply_blockers:
+            if decision == "KEEP" and not apply_blockers:
                 stacked_envs.update(env)
                 running_tput = new_tput
                 kept.append(
@@ -3259,6 +3289,7 @@ class KernelPhase(PhaseHandler):
                         "extra_envs": dict(env),
                         "source_phase": "KERNEL_AGENT",
                         "workspace": result.get("workspace"),
+                        **perf_axes_from_mapping(integrate_verdict),
                     },
                     entry_extra={
                         "tuned_file": adopted_tuned_file,
@@ -4019,6 +4050,7 @@ class KernelPhase(PhaseHandler):
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_collective",
                 "workspace": integrate_result.get("workspace"),
+                **perf_axes_from_mapping(integrate_result),
             },
             entry_extra={
                 "backend": "forge",
@@ -4267,6 +4299,7 @@ class KernelPhase(PhaseHandler):
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_fusion",
                 "workspace": integrate_result.get("workspace"),
+                **perf_axes_from_mapping(integrate_result),
             },
             entry_extra={
                 "backend": "forge",
@@ -4285,18 +4318,31 @@ class KernelPhase(PhaseHandler):
             )
 
     def _current_tput_from_validated_gain(self) -> float:
-        """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).
+        """Return the live measured tput used for watermark math.
+
+        Prefers ``current_best`` output tok/s. Flag-off fallback reconstructs
+        from ``baseline_tput * (1 + cumulative_gain_validated/100)``. Composite
+        ``cumulative_gain_validated`` is *S* and must not be inverted.
 
         Returns:
-            The projected current throughput, or ``0.0`` when the baseline is
-            unknown.
+            The measured/projected current throughput, or ``0.0`` when unknown.
         """
         state = self.shared_state
+        cb = getattr(state, "current_best", None)
+        if isinstance(cb, dict):
+            for key in ("output_throughput", "tput"):
+                raw = cb.get(key)
+                if isinstance(raw, (int, float)) and not isinstance(raw, bool) and float(raw) > 0:
+                    return float(raw)
         try:
             base = float(state.baseline_tput or 0.0)
         except (TypeError, ValueError):
             base = 0.0
         if base <= 0:
+            return 0.0
+        from hyperloom.common.perf_metric import composite_grading_enabled
+
+        if composite_grading_enabled(str(getattr(state, "framework", "") or "") or None):
             return 0.0
         try:
             gain = float(state.cumulative_gain_validated or 0.0)
@@ -4318,14 +4364,32 @@ class KernelPhase(PhaseHandler):
                 return tput
         return 0.0
 
+    def _roofline_watermark_levels(self, last_rl: float) -> tuple[float, float]:
+        """Comparable ``(current, last)`` pair for the 10% roofline watermark.
+
+        Flag on with a full triple: ``(1+S_now, 1+S_at_last_snapshot)``.
+        Otherwise output tok/s vs ``last_rl``.
+        """
+        from hyperloom.common.perf_metric import composite_watermark_levels
+
+        levels = composite_watermark_levels(self.shared_state)
+        if levels is not None:
+            return levels
+        return self._current_tput_from_validated_gain(), last_rl
+
     def _needs_roofline_for_watermark(self) -> bool:
-        """True iff projected tput crossed the watermark over ``last_roofline_tput`` (False until PRELUDE roofline ran, or while auto_roofline_pending_task_id is in-flight).
+        """True iff the comparable watermark crossed over the last snapshot.
+
+        Flag off: projected output tput vs ``last_roofline_tput``. Flag on
+        with a full triple: ``(1+S)`` vs ``(1+last_roofline_score)``. False
+        until PRELUDE roofline ran, or while auto_roofline_pending_task_id is
+        in-flight.
 
         Returns:
-            ``True`` when a fresh roofline is warranted because projected tput
-            crossed the watermark ratio; ``False`` otherwise (including the
-            bootstrap and in-flight re-arm guards, and once the failure streak
-            has exhausted ``_MAX_ROOFLINE_FAILURE_RETRIES``).
+            ``True`` when a fresh roofline is warranted because the comparable
+            quantity crossed the watermark ratio; ``False`` otherwise
+            (including the bootstrap and in-flight re-arm guards, and once the
+            failure streak has exhausted ``_MAX_ROOFLINE_FAILURE_RETRIES``).
         """
         state = self.shared_state
         try:
@@ -4349,10 +4413,10 @@ class KernelPhase(PhaseHandler):
                 last_rl = 0.0
             if last_rl <= 0:
                 return False
-        cur = self._current_tput_from_validated_gain()
-        if cur <= 0:
+        cur, last = self._roofline_watermark_levels(last_rl)
+        if cur <= 0 or last <= 0:
             return False
-        return cur / last_rl >= _resolve_roofline_watermark_ratio()
+        return cur / last >= _resolve_roofline_watermark_ratio()
 
     async def _release_finished_roofline_gate(self) -> None:
         """Drop an in-flight marker that names a roofline which already finished.
@@ -4405,12 +4469,17 @@ class KernelPhase(PhaseHandler):
             )
             return False
         self.shared_state.auto_roofline_pending_task_id = task.task_id
+        try:
+            last_rl = float(self.shared_state.last_roofline_tput or 0.0)
+        except (TypeError, ValueError):
+            last_rl = 0.0
+        cur, last = self._roofline_watermark_levels(last_rl)
         log.info(
             "watermark-roofline (%s): enqueued task=%s (cur=%.2f, last_roofline=%.2f, ratio>=%.2f)",
             reason,
             task.task_id,
-            self._current_tput_from_validated_gain(),
-            float(self.shared_state.last_roofline_tput or 0.0),
+            cur,
+            last,
             self._ROOFLINE_WATERMARK_RATIO,
         )
         return True

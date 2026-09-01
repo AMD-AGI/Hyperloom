@@ -325,6 +325,9 @@ class VariantResult:
             "ttft_mean_ms": self.ttft_mean_ms,
             "e2el_mean_ms": self.e2el_mean_ms,
             "tpot_mean_ms": self.tpot_mean_ms,
+            "input_throughput": self.input_throughput,
+            "tpot_p90_ms": self.tpot_p90_ms,
+            "intvty_p90": self.intvty_p90,
             "workspace": self.workspace,
             "report_path": self.report_path,
             "raw_result_path": self.raw_result_path,
@@ -340,42 +343,150 @@ class VariantResult:
         }
 
 
+def _numeric(value: Any) -> float | None:
+    """Return a finite number, excluding bool (a subclass of int)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def pareto_front(
     entries: list[dict[str, Any]],
     *,
     latency_key: str = "e2el_mean_ms",
+    x_key: str = "output_throughput",
+    y_key: str | None = None,
+    y_higher_is_better: bool = False,
 ) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max ``output_throughput``, min *latency_key*).
+    """Naive O(N²) Pareto on two axes.
+
+    Default (flag off): maximize ``output_throughput``, minimize *latency_key*
+    (native sweep: ``e2el_mean_ms``; GEAK sweep: ``ttft_mean_ms``).
+
+    Composite Pareto: maximize ``total_token_throughput`` and maximize
+    ``intvty_p90`` (pass ``y_higher_is_better=True``).
 
     Args:
-        entries (list[dict[str, Any]]): Sweep result entries to filter.
-        latency_key (str): Which latency metric to minimize. The native sweep
-            reads ``e2el_mean_ms``; the GEAK sweep reads ``ttft_mean_ms``
-            because ``bench_summary.json`` carries no e2el.
+        entries: Sweep result entries to filter.
+        latency_key: Minimize axis when *y_key* is omitted (backward compatible).
+        x_key: Maximize axis.
+        y_key: Second axis; defaults to *latency_key*.
+        y_higher_is_better: When True, maximize *y_key*; when False, minimize it.
 
     Returns:
-        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
+        The non-dominated subset of succeeded entries that have both axes.
     """
+    y = latency_key if y_key is None else y_key
+
+    def _y_at_least(other: float, cand: float) -> bool:
+        return other >= cand if y_higher_is_better else other <= cand
+
+    def _y_strictly_better(other: float, cand: float) -> bool:
+        return other > cand if y_higher_is_better else other < cand
+
     succ = [
         e
         for e in entries
-        if e["status"] == "succeeded"
-        and isinstance(e.get("output_throughput"), (int, float))
-        and isinstance(e.get(latency_key), (int, float))
+        if e.get("status") == "succeeded"
+        and _numeric(e.get(x_key)) is not None
+        and _numeric(e.get(y)) is not None
     ]
     front: list[dict[str, Any]] = []
     for cand in succ:
+        cand_x = _numeric(cand.get(x_key))
+        cand_y = _numeric(cand.get(y))
+        if cand_x is None or cand_y is None:
+            continue
         dominated = False
         for other in succ:
             if other is cand:
                 continue
+            other_x = _numeric(other.get(x_key))
+            other_y = _numeric(other.get(y))
+            if other_x is None or other_y is None:
+                continue
             if (
-                other["output_throughput"] >= cand["output_throughput"]
-                and other[latency_key] <= cand[latency_key]
-                and (other["output_throughput"] > cand["output_throughput"] or other[latency_key] < cand[latency_key])
+                other_x >= cand_x
+                and _y_at_least(other_y, cand_y)
+                and (other_x > cand_x or _y_strictly_better(other_y, cand_y))
             ):
                 dominated = True
                 break
         if not dominated:
             front.append(cand)
     return front
+
+
+def select_sweep_pareto(
+    entries: list[dict[str, Any]],
+    *,
+    framework: str | None = None,
+    fallback_latency_key: str = "e2el_mean_ms",
+) -> list[dict[str, Any]]:
+    """Pareto for a sweep grid: composite axes when the flag is on, else tput/latency.
+
+    Flag on: max total token throughput vs max p90 intvty. If no cell has both
+    axes, fall back to output-tput vs *fallback_latency_key*.
+    """
+    from hyperloom.common.perf_metric import composite_grading_enabled
+
+    if composite_grading_enabled(framework):
+        front = pareto_front(
+            entries,
+            x_key="total_token_throughput",
+            y_key="intvty_p90",
+            y_higher_is_better=True,
+        )
+        if front:
+            return front
+    return pareto_front(entries, latency_key=fallback_latency_key)
+
+
+def best_entry_for_each_conc(
+    entries: list[dict[str, Any]],
+    *,
+    framework: str | None = None,
+    state: Any = None,
+    baseline_perf: Any = None,
+) -> dict[str, dict[str, Any]]:
+    """Best succeeded cell per concurrency.
+
+    Flag on with a baseline triple: highest composite *S*. Cells missing a
+    triple do not compete on *S*; if a conc has no scored cell, fall back to
+    highest output throughput. Flag off: highest output throughput.
+    """
+    from hyperloom.common.perf_metric import (
+        composite_grading_enabled,
+        composite_score,
+        perf_snapshot_from_mapping,
+        resolve_baseline_perf,
+    )
+
+    baseline = baseline_perf or resolve_baseline_perf(state)
+    use_composite = composite_grading_enabled(framework) and bool(baseline)
+    scored: dict[str, tuple[float, dict[str, Any]]] = {}
+    tput_best: dict[str, dict[str, Any]] = {}
+    for e in entries:
+        if e.get("status") != "succeeded":
+            continue
+        conc = str(e.get("conc"))
+        tput = _numeric(e.get("output_throughput"))
+        if tput is not None:
+            cur = tput_best.get(conc)
+            cur_tput = _numeric(cur.get("output_throughput")) if cur is not None else None
+            if cur is None or cur_tput is None or tput > cur_tput:
+                tput_best[conc] = e
+        if use_composite and baseline is not None:
+            snap = perf_snapshot_from_mapping(e)
+            if snap is None:
+                continue
+            score = composite_score(snap, baseline)
+            prev = scored.get(conc)
+            if prev is None or score > prev[0]:
+                scored[conc] = (score, e)
+    if use_composite:
+        out: dict[str, dict[str, Any]] = {}
+        for conc in set(scored) | set(tput_best):
+            out[conc] = scored[conc][1] if conc in scored else tput_best[conc]
+        return out
+    return tput_best

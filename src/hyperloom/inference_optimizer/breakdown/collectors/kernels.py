@@ -1024,6 +1024,10 @@ def _load_conc_variant_point(variant_dir: Path, *, arm: str, conc: int) -> dict[
             "output_throughput": tput_f,
             "request_throughput": data.get("request_throughput"),
             "total_token_throughput": data.get("total_token_throughput"),
+            "input_throughput": _to_float(data.get("input_throughput")),
+            "intvty_p90": _to_float(data.get("intvty_p90"))
+            or _to_float(data.get("intvty_p90_tok_s_user")),
+            "tpot_p90_ms": _to_float(data.get("tpot_p90_ms")),
             "raw_result_path": _rel(
                 result_path,
                 variant_dir.parents[2] if len(variant_dir.parents) >= 3 else variant_dir,
@@ -1042,6 +1046,9 @@ def _recover_conc_sweep_summary_from_runs(
     warnings: list[str],
 ) -> dict[str, Any]:
     """Recover a conc_sweep summary from raw run workspaces when the report is stale."""
+    from hyperloom.common.perf_metric import composite_grading_enabled
+
+    use_composite = composite_grading_enabled()
     runs_dir = session_dir / "runs" / "conc_sweep"
     if not runs_dir.exists():
         return {}
@@ -1072,7 +1079,9 @@ def _recover_conc_sweep_summary_from_runs(
             continue
         baseline_points.sort(key=lambda p: p["conc"])
         optimized_points.sort(key=lambda p: p["conc"])
-        comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
+        comparison, summary = conc_pair_comparison(
+            baseline_points, optimized_points, use_composite=use_composite
+        )
         pairs = int(summary.get("successful_pairs") or 0)
         payload = {
             "schema_version": "recovered-v1",

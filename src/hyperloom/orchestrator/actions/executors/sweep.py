@@ -21,7 +21,11 @@ Result::
     sweep_grid:    [{conc, isl, osl, output_throughput, ttft_mean_ms,
                     e2el_mean_ms, status, workspace, error}]
     pareto_front:  subset of sweep_grid that's not dominated
-    best_for_each_conc: dict[conc → entry with highest tput]
+                   (output tput vs e2el, or total tput vs p90 intvty when
+                   HYPERLOOM_PERF_METRIC=composite_v1)
+    best_for_each_conc: dict[conc → best cell]
+                        (highest output tput, or highest composite *S* when
+                        the flag is on)
 """
 
 from __future__ import annotations
@@ -34,7 +38,7 @@ from typing import Any
 from hyperloom.common.coerce import to_int
 from hyperloom.common.model_paths import resolve_session_model_path
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
-from ._grid_base import pareto_front
+from ._grid_base import best_entry_for_each_conc, select_sweep_pareto
 from ._grid_runner import (
     GridVariant,
     VariantResult,
@@ -218,11 +222,13 @@ class SweepExecutor:
                 ``workspace``.
         """
         params = ctx.task.params or {}
+        extra = getattr(ctx, "extra", None) or {}
+        shared_state = extra.get("shared_state") or extra.get("state")
+        framework = str(getattr(shared_state, "framework", "") or "") if shared_state is not None else ""
         # GEAK reuse path: sweep the optimized server via GEAK's own bench_e2e.sh
         # + the already-built overlay.
         ps_result = params.get("geak_result") or {}
         if ps_result.get("bench_script") and ps_result.get("status") == "ok":
-            extra = getattr(ctx, "extra", None) or {}
             output_root = Path(
                 params.get("output_dir")
                 or extra.get("workspace")
@@ -236,13 +242,13 @@ class SweepExecutor:
                 isl_osl_configs=list(params.get("isl_osl_configs") or self.default_isl_osl_configs),
                 output_root=output_root,
                 variant_timeout_sec=int(params.get("variant_timeout_sec", self.variant_timeout_sec)),
+                framework=framework,
+                state=shared_state,
             )
 
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
         if not config_path.exists():
             return {"status": "failed", "error_class": "missing_config", "error": f"config not found: {config_path}"}
-        extra = getattr(ctx, "extra", None) or {}
-        shared_state = extra.get("shared_state") or extra.get("state")
         output_root = Path(
             params.get("output_dir") or extra.get("workspace") or runs_dir(self.session_dir, "sweep", ctx.task.task_id)
         )
@@ -364,20 +370,12 @@ class SweepExecutor:
         # Surface skipped combos so the grid stays complete; they never enter
         # Pareto / best selections.
         entries.extend(skipped_variants)
-        front = pareto_front(entries)
-
-        # Best per CONC.
-        best_for_each_conc: dict[int, dict[str, Any]] = {}
-        for e in entries:
-            if e["status"] != "succeeded":
-                continue
-            cur = best_for_each_conc.get(e["conc"])
-            if cur is None or (
-                isinstance(e.get("output_throughput"), (int, float))
-                and isinstance(cur.get("output_throughput"), (int, float))
-                and e["output_throughput"] > cur["output_throughput"]
-            ):
-                best_for_each_conc[e["conc"]] = e
+        front = select_sweep_pareto(entries, framework=framework)
+        best_for_each_conc = best_entry_for_each_conc(
+            entries,
+            framework=framework,
+            state=shared_state,
+        )
 
         successful_entries = [e for e in entries if e.get("status") == "succeeded"]
 
@@ -386,7 +384,7 @@ class SweepExecutor:
             "grid_size": len(entries),
             "sweep_grid": entries,
             "pareto_front": front,
-            "best_for_each_conc": {str(k): v for k, v in best_for_each_conc.items()},
+            "best_for_each_conc": best_for_each_conc,
             "workspace": output_root.as_posix(),
         }
 

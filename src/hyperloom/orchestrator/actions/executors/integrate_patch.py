@@ -21,6 +21,7 @@ from typing import Any
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import keep_gain_pct, perf_axes_from_mapping
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.gpu_types import amd_gpu_dispatch_identity
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
@@ -3053,9 +3054,21 @@ class IntegratePatchExecutor:
             )
 
         new_tput = bench_result.get("output_throughput")
-        delta_pct = None
+        tput_delta_pct = None
         if isinstance(new_tput, (int, float)) and new_tput > 0 and base_tput > 0:
-            delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+            tput_delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+        framework = str(params.get("framework") or getattr(shared_state, "framework", "") or "")
+        graded, used_composite = keep_gain_pct(
+            bench_result,
+            state=shared_state,
+            framework=framework,
+            base_tput=base_tput,
+        )
+        if used_composite:
+            delta_pct = 0.0 if graded is None else float(graded)
+        else:
+            delta_pct = tput_delta_pct
+        perf_axes = perf_axes_from_mapping(bench_result)
 
         accuracy_pass: bool | None = gate_evidence.get("accuracy_pass")
         fw_authored = bool(params.get("framework_agent_authoring") or params.get("framework_agent_candidate_id"))
@@ -3143,7 +3156,7 @@ class IntegratePatchExecutor:
                 await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
                     outcome=kb_outcome,
-                    tps_delta_pct=float(delta_pct or 0.0),
+                    tps_delta_pct=float(tput_delta_pct or 0.0),
                     extra=extra,
                     accuracy_delta_pct=acc_delta_pct,
                     config_fingerprint=cfg_fingerprint,
@@ -3221,7 +3234,8 @@ class IntegratePatchExecutor:
             if delta_pct is None:
                 reasons.append("no measurable throughput")
             elif delta_pct < keep_threshold_pct:
-                reasons.append(f"throughput delta {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
+                metric = "composite gain" if used_composite else "throughput delta"
+                reasons.append(f"{metric} {delta_pct:+.2f}% < keep_threshold {keep_threshold_pct:.2f}%")
             if acc_block and acc_reason:
                 reasons.append(acc_reason)
             _probe_reason = eval_probe_summary(gate_evidence.get("eval_probe"))
@@ -3234,7 +3248,7 @@ class IntegratePatchExecutor:
             await self._maybe_write_framework_kb_record(
                 done_payload=done_payload,
                 outcome="reverted_smoke_fail",
-                tps_delta_pct=float(delta_pct or 0.0),
+                tps_delta_pct=float(tput_delta_pct or 0.0),
                 extra=extra,
                 accuracy_delta_pct=acc_delta_pct,
                 config_fingerprint=cfg_fingerprint,
@@ -3271,6 +3285,7 @@ class IntegratePatchExecutor:
                 base_tput=base_tput,
                 session_deadline_sec=session_deadline_sec,
                 variant_expected_sec=variant_expected_sec,
+                shared_state=shared_state,
             )
             rb_acc_block, rb_acc_reason, _rb_degraded = accuracy_keep_block(
                 confirm["accuracy_pass"],
@@ -3282,9 +3297,17 @@ class IntegratePatchExecutor:
                 reverted = self._revert_patches(framework_root, applied)
                 reasons = []
                 if not confirm["stable"]:
-                    reasons.append(
-                        f"stack rebench {confirm['tput']} below stability floor {confirm['stable_floor']:.2f}"
-                    )
+                    if confirm.get("used_composite"):
+                        gain = confirm.get("stable_gain_pct")
+                        reasons.append(
+                            f"stack rebench composite gain "
+                            f"{0.0 if gain is None else float(gain):+.2f}% "
+                            f"below stability floor {self._rebench_stable_threshold_pct(params):.2f}%"
+                        )
+                    else:
+                        reasons.append(
+                            f"stack rebench {confirm['tput']} below stability floor {confirm['stable_floor']:.2f}"
+                        )
                 if confirm["accuracy_pass"] is False:
                     reasons.append("accuracy regression on rebench")
                 elif rb_acc_block and rb_acc_reason:
@@ -3297,7 +3320,7 @@ class IntegratePatchExecutor:
                 await self._maybe_write_framework_kb_record(
                     done_payload=done_payload,
                     outcome="reverted_smoke_fail",
-                    tps_delta_pct=float(delta_pct or 0.0),
+                    tps_delta_pct=float(tput_delta_pct or 0.0),
                     extra=extra,
                     accuracy_delta_pct=acc_delta_pct,
                     config_fingerprint=cfg_fingerprint,
@@ -3326,14 +3349,16 @@ class IntegratePatchExecutor:
                 )
             if isinstance(confirm["tput"], (int, float)) and confirm["tput"] > 0:
                 new_tput = confirm["tput"]
-                delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+                tput_delta_pct = (float(new_tput) - base_tput) / base_tput * 100.0
+                if not used_composite:
+                    delta_pct = tput_delta_pct
             if confirm["accuracy_pass"] is not None:
                 accuracy_pass = confirm["accuracy_pass"]
 
         await self._maybe_write_framework_kb_record(
             done_payload=done_payload,
             outcome="integrated",
-            tps_delta_pct=float(delta_pct or 0.0),
+            tps_delta_pct=float(tput_delta_pct or 0.0),
             extra=extra,
             accuracy_delta_pct=acc_delta_pct,
             config_fingerprint=cfg_fingerprint,
@@ -3431,6 +3456,7 @@ class IntegratePatchExecutor:
             stash_state,
             stash_note,
             {
+                **perf_axes,
                 "status": "kept",
                 "specialist_task_id": specialist_task_id,
                 # Proposal ownership must survive delegated-result persistence
@@ -3448,11 +3474,15 @@ class IntegratePatchExecutor:
                 "extra_server_args_applied": extra_server_args_applied,
                 "extra_envs_applied": extra_envs_applied,
                 "output_throughput": new_tput,
+                "tput": new_tput,
                 "delta_pct": delta_pct,
                 "accuracy_pass": accuracy_pass,
                 "base_tput": base_tput,
                 "keep_threshold_pct": keep_threshold_pct,
-                "reason": (f"throughput delta {delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"),
+                "reason": (
+                    f"{'composite gain' if used_composite else 'throughput delta'} "
+                    f"{delta_pct:+.2f}% >= {keep_threshold_pct:.2f}%"
+                ),
                 "bench_result": bench_result,
                 "workspace": str(output_root),
                 "source_snapshot": source_snapshot_dir,
@@ -4251,6 +4281,9 @@ class IntegratePatchExecutor:
                 "name": r.name,
                 "status": r.status,
                 "output_throughput": getattr(r, "output_throughput", None),
+                "input_throughput": getattr(r, "input_throughput", None),
+                "intvty_p90": getattr(r, "intvty_p90", None),
+                "tpot_p90_ms": getattr(r, "tpot_p90_ms", None),
                 "ttft_ms": getattr(r, "ttft_ms", None),
                 "itl_ms": getattr(r, "itl_ms", None),
                 # Benchmark dir; ``_grade_accuracy`` locates accuracy artifacts here.
@@ -4414,6 +4447,7 @@ class IntegratePatchExecutor:
         base_tput: float,
         session_deadline_sec: float | None = None,
         variant_expected_sec: float | None = None,
+        shared_state: Any = None,
     ) -> dict[str, Any]:
         """Re-bench the patched stack once more and re-grade throughput + accuracy.
 
@@ -4457,6 +4491,15 @@ class IntegratePatchExecutor:
         _rt_rb = params.get("runtime_override")
         if isinstance(_rt_rb, dict) and _rt_rb:
             variant.runtime_override = dict(_rt_rb)
+        from hyperloom.common.perf_metric import perf_snapshot_from_mapping, resolve_baseline_perf
+
+        framework = str(params.get("framework") or getattr(shared_state, "framework", "") or "")
+        baseline_perf = resolve_baseline_perf(shared_state) if shared_state is not None else None
+        anchor_perf = (
+            perf_snapshot_from_mapping(getattr(shared_state, "current_best", None)) or baseline_perf
+            if shared_state is not None
+            else None
+        )
         rebench = await measure_stack_rebench(
             config_path=config_path,
             base_extra_args=base_extra_args,
@@ -4473,6 +4516,9 @@ class IntegratePatchExecutor:
             base_args_mode=str(params.get("base_args_mode") or "append"),
             session_deadline_sec=session_deadline_sec,
             variant_expected_sec=variant_expected_sec,
+            framework=framework,
+            anchor_perf=anchor_perf,
+            baseline_perf=baseline_perf,
         )
         return self._graded_rebench(rebench, params=params, override_result_dir=override_result_dir)
 
@@ -4533,6 +4579,11 @@ class IntegratePatchExecutor:
             "warnings": rebench.warnings,
             "stable_floor": rebench.stable_floor,
             "accuracy_pass": accuracy_pass,
+            "input_throughput": rebench.input_throughput,
+            "intvty_p90": rebench.intvty_p90,
+            "tpot_p90_ms": rebench.tpot_p90_ms,
+            "stable_gain_pct": rebench.stable_gain_pct,
+            "used_composite": rebench.used_composite,
         }
 
 

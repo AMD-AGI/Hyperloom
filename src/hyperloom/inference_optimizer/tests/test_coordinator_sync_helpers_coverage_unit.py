@@ -281,6 +281,71 @@ def test_current_tput_from_validated_gain(coord: Coordinator) -> None:
     assert coord._current_tput_from_validated_gain() == pytest.approx(110.0)
 
 
+def test_current_tput_from_validated_gain_prefers_current_best(coord: Coordinator) -> None:
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.cumulative_gain_validated = 50.0
+    coord.shared_state.current_best = {"tput": 105.0}
+    assert coord._current_tput_from_validated_gain() == pytest.approx(105.0)
+
+
+def test_current_tput_from_validated_gain_does_not_invert_composite(
+    coord: Coordinator, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    coord.shared_state.framework = "sglang"
+    coord.shared_state.baseline_tput = 100.0
+    coord.shared_state.cumulative_gain_validated = 11.0
+    coord.shared_state.current_best = {}
+    assert coord._current_tput_from_validated_gain() == 0.0
+
+
+def test_update_cumulative_gain_validated_uses_composite(coord: Coordinator, monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    ss = coord.shared_state
+    ss.framework = "sglang"
+    ss.baseline_tput = 100.0
+    ss.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 1000.0,
+        "intvty_p90": 50.0,
+    }
+    ss.current_best = {
+        "tput": 100.0,
+        "output_throughput": 100.0,
+        "input_throughput": 1200.0,
+        "intvty_p90": 50.0,
+    }
+    ss.optimization_stack = [{}]
+    coord._update_cumulative_gain_validated(100.0)
+    assert ss.cumulative_gain_validated == pytest.approx(11.0)
+
+
+def test_append_stack_gain_entry_uses_composite(monkeypatch) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    s = SharedState()
+    s.framework = "sglang"
+    s.baseline_tput = 100.0
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 1000.0,
+        "intvty_p90": 50.0,
+    }
+    gain = s.append_stack_gain_entry(
+        action="explore",
+        variant_name="v1",
+        new_tput=100.0,
+        candidate={
+            "output_throughput": 100.0,
+            "input_throughput": 1200.0,
+            "intvty_p90": 50.0,
+        },
+    )
+    assert gain == pytest.approx(11.0)
+    assert s.gain_per_stack_entry == [pytest.approx(11.0)]
+
+
 def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
     ss = coord.shared_state
     # pending roofline -> never re-arm
@@ -296,6 +361,88 @@ def test_needs_roofline_for_watermark_guards(coord: Coordinator) -> None:
     ss.baseline_tput = 100.0
     ss.cumulative_gain_validated = 50.0
     assert coord._needs_roofline_for_watermark() is True
+
+
+def _composite_watermark_state(ss, *, input_scale: float = 1.0, output_scale: float = 1.0):
+    ss.framework = "sglang"
+    ss.last_roofline_tput = 100.0
+    ss.last_roofline_score = None
+    ss.baseline_tput = 100.0
+    ss.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 1000.0,
+        "intvty_p90": 50.0,
+    }
+    ss.current_best = {
+        "tput": 100.0 * output_scale,
+        "output_throughput": 100.0 * output_scale,
+        "input_throughput": 1000.0 * input_scale,
+        "intvty_p90": 50.0,
+    }
+
+
+def test_needs_roofline_for_watermark_composite_input_step(
+    coord: Coordinator, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    ss = coord.shared_state
+    _composite_watermark_state(ss, input_scale=1.20)
+    assert coord._needs_roofline_for_watermark() is True
+    ss.last_roofline_score = 0.11
+    assert coord._needs_roofline_for_watermark() is False
+
+
+def test_needs_roofline_for_watermark_composite_does_not_invert_s(
+    coord: Coordinator, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    ss = coord.shared_state
+    _composite_watermark_state(ss)
+    ss.cumulative_gain_validated = 50.0
+    assert coord._needs_roofline_for_watermark() is False
+
+
+def test_needs_roofline_for_watermark_composite_output_only_does_not_fire(
+    coord: Coordinator, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    ss = coord.shared_state
+    _composite_watermark_state(ss, output_scale=1.20)
+    assert coord._needs_roofline_for_watermark() is False
+
+
+def test_needs_roofline_for_watermark_composite_missing_triple_uses_tput(
+    coord: Coordinator, monkeypatch
+) -> None:
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    ss = coord.shared_state
+    ss.framework = "sglang"
+    ss.last_roofline_tput = 100.0
+    ss.baseline_tput = 100.0
+    ss.current_best = {"tput": 120.0}
+    assert coord._needs_roofline_for_watermark() is True
+
+
+def test_stamp_roofline_watermark_records_composite_score(monkeypatch) -> None:
+    from hyperloom.orchestrator.state.shared_state import SharedState
+
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    s = SharedState()
+    s.framework = "sglang"
+    s.baseline_perf = {
+        "output_throughput": 100.0,
+        "input_throughput": 1000.0,
+        "intvty_p90": 50.0,
+    }
+    s.current_best = {
+        "tput": 100.0,
+        "output_throughput": 100.0,
+        "input_throughput": 1200.0,
+        "intvty_p90": 50.0,
+    }
+    s.stamp_roofline_watermark(100.0)
+    assert s.last_roofline_tput == 100.0
+    assert s.last_roofline_score == pytest.approx(0.11)
 
 
 # -- gap extraction --------------------------------------------------------

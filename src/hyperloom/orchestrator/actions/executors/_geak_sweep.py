@@ -23,7 +23,7 @@ from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
-from ._grid_base import pareto_front
+from ._grid_base import best_entry_for_each_conc, select_sweep_pareto
 
 log = logging.getLogger(__name__)
 
@@ -90,6 +90,8 @@ async def sweep_via_geak(
     variant_timeout_sec: int,
     repeats: int = 3,
     pin_num_prompts: bool = False,
+    framework: str | None = None,
+    state: Any = None,
 ) -> dict[str, Any]:
     """Run a CONC × (ISL, OSL) sweep on the GEAK-optimized server.
 
@@ -214,6 +216,15 @@ async def sweep_via_geak(
                 ttft = summ.get("ttft_ms_median")
                 tpot = summ.get("tpot_ms_median")
                 e2el = summ.get("e2el_ms_median")
+                total_tput = summ.get("total_token_throughput")
+                if total_tput is None:
+                    total_tput = summ.get("total_throughput_tok_s_median")
+                intvty = summ.get("intvty_p90_tok_s_user")
+                if intvty is None:
+                    intvty = summ.get("intvty_p90")
+                input_tput = summ.get("input_throughput")
+                if input_tput is None:
+                    input_tput = summ.get("input_throughput_tok_s_median")
                 if proc.returncode == 0 and isinstance(tput, (int, float)) and tput > 0:
                     succeeded = True
                     entry.update(
@@ -224,6 +235,12 @@ async def sweep_via_geak(
                             "tpot_mean_ms": tpot,
                         }
                     )
+                    if isinstance(total_tput, (int, float)) and total_tput > 0:
+                        entry["total_token_throughput"] = float(total_tput)
+                    if isinstance(intvty, (int, float)) and intvty > 0:
+                        entry["intvty_p90"] = float(intvty)
+                    if isinstance(input_tput, (int, float)) and input_tput > 0:
+                        entry["input_throughput"] = float(input_tput)
                 else:
                     err = (proc.stderr or "")[-500:] or "no throughput"
                     entry.update({"status": "failed", "error": err})
@@ -248,17 +265,16 @@ async def sweep_via_geak(
             )
             entries.append(entry)
 
-    front = pareto_front(entries, latency_key="ttft_mean_ms")
-    best_for_each_conc: dict[str, dict[str, Any]] = {}
-    for e in entries:
-        if e["status"] != "succeeded":
-            continue
-        cur = best_for_each_conc.get(str(e["conc"]))
-        if cur is None or (
-            isinstance(e.get("output_throughput"), (int, float))
-            and e["output_throughput"] > cur.get("output_throughput", 0)
-        ):
-            best_for_each_conc[str(e["conc"])] = e
+    front = select_sweep_pareto(
+        entries,
+        framework=framework,
+        fallback_latency_key="ttft_mean_ms",
+    )
+    best_for_each_conc = best_entry_for_each_conc(
+        entries,
+        framework=framework,
+        state=state,
+    )
 
     succeeded = [e for e in entries if e["status"] == "succeeded"]
     return {

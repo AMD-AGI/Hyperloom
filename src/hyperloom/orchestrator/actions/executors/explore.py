@@ -40,7 +40,6 @@ from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.perf_metric import (
     composite_grading_enabled,
-    passes_intvty_gate,
     perf_snapshot_from_mapping,
     resolve_baseline_perf,
     score_gain_pct,
@@ -1537,19 +1536,14 @@ class ExploreExecutor:
                     )
                     gain: float | None
                     if use_composite and baseline_perf and running_base_perf and cand_snap:
-                        if not passes_intvty_gate(cand_snap, running_base_perf):
-                            gain = None
+                        gain = score_gain_pct(cand_snap, running_base_perf, baseline_perf)
+                        outcome = "FAILED"
+                        reason = ""
+                        if r.status != "succeeded" or gain is None:
+                            reason = (r.error or "")[-1200:] or "no_measurement"
+                        elif gain < keep_threshold_pct:
                             outcome = "REVERT"
-                            reason = "intvty_regression"
-                        else:
-                            gain = score_gain_pct(cand_snap, running_base_perf, baseline_perf)
-                            outcome = "FAILED"
-                            reason = ""
-                            if r.status != "succeeded" or gain is None:
-                                reason = (r.error or "")[-1200:] or "no_measurement"
-                            elif gain < keep_threshold_pct:
-                                outcome = "REVERT"
-                                reason = "gain_below_threshold"
+                            reason = "gain_below_threshold"
                     else:
                         gain = gain_pct(r.output_throughput, running_base_tput)
                         outcome = "FAILED"
@@ -1771,6 +1765,9 @@ class ExploreExecutor:
                                 serving_lease=variant_lease,
                                 session_deadline_sec=session_deadline_sec,
                                 variant_expected_sec=decision_expected_sec,
+                                framework=framework,
+                                anchor_perf=running_base_perf,
+                                baseline_perf=baseline_perf,
                             )
                             # A confirmation the run stopped is not a failed
                             # confirmation: grading it would evict a variant as
@@ -1790,16 +1787,27 @@ class ExploreExecutor:
                             stable_floor = rebench.stable_floor
                             # Rebench missed the stability floor: evict as REVERT.
                             if not rebench.stable:
-                                log.warning(
-                                    "explore: variant %s KEEP -> KEEP_UNSTABLE "
-                                    "(stack_rebench_tput=%s vs stable_floor=%.2f "
-                                    "with running_base_tput=%.2f * (1+%.2f%%))",
-                                    gv.name,
-                                    stack_rebench_tput,
-                                    stable_floor,
-                                    running_base_tput,
-                                    stack_stable_threshold_pct,
-                                )
+                                if rebench.used_composite:
+                                    log.warning(
+                                        "explore: variant %s KEEP -> KEEP_UNSTABLE "
+                                        "(composite gain=%s vs floor=%.2f%%)",
+                                        gv.name,
+                                        f"{rebench.stable_gain_pct:.2f}%"
+                                        if rebench.stable_gain_pct is not None
+                                        else "n/a",
+                                        stack_stable_threshold_pct,
+                                    )
+                                else:
+                                    log.warning(
+                                        "explore: variant %s KEEP -> KEEP_UNSTABLE "
+                                        "(stack_rebench_tput=%s vs stable_floor=%.2f "
+                                        "with running_base_tput=%.2f * (1+%.2f%%))",
+                                        gv.name,
+                                        stack_rebench_tput,
+                                        stable_floor,
+                                        running_base_tput,
+                                        stack_stable_threshold_pct,
+                                    )
                                 round_tested[fp]["outcome"] = "KEEP_UNSTABLE"
                                 round_tested[fp]["stack_rebench_tput"] = stack_rebench_tput
                                 round_tested[fp]["stack_rebench_workspace"] = stack_rebench_workspace
@@ -1833,17 +1841,34 @@ class ExploreExecutor:
                                 in_batch_keeps.pop()
                                 continue
                             else:
-                                # Stable — the warm round-2 tput is the headline;
-                                # recompute gain from it and fold the variant onto
-                                # the stack.
-                                gain = gain_pct(stack_rebench_tput, running_base_tput)
+                                # Stable — the warm round-2 measurement is the
+                                # headline. Recompute gain with the same metric
+                                # round 1 used (composite *S* or output tput).
+                                if rebench.used_composite and rebench.stable_gain_pct is not None:
+                                    gain = float(rebench.stable_gain_pct)
+                                else:
+                                    gain = gain_pct(stack_rebench_tput, running_base_tput)
                                 stack_extra_args = next_effective_args if persist_effective_args else next_stack_args
                                 stack_extra_envs = next_envs
                                 stack_remove_args = list(run_remove_args)
                                 stack_unset_envs = list(run_unset_envs)
                                 stack_base_args_mode = "replace" if persist_effective_args else "append"
                                 running_base_tput = stack_rebench_tput
-                                if use_composite and cand_snap:
+                                rb_snap = perf_snapshot_from_mapping(
+                                    {
+                                        "output_throughput": stack_rebench_tput,
+                                        "input_throughput": rebench.input_throughput,
+                                        "intvty_p90": rebench.intvty_p90,
+                                        "tpot_p90_ms": rebench.tpot_p90_ms,
+                                    }
+                                )
+                                if use_composite and rb_snap:
+                                    running_base_perf = rb_snap
+                                    keep_entry["input_throughput"] = rb_snap["input_throughput"]
+                                    keep_entry["intvty_p90"] = rb_snap["intvty_p90"]
+                                    if "tpot_p90_ms" in rb_snap:
+                                        keep_entry["tpot_p90_ms"] = rb_snap["tpot_p90_ms"]
+                                elif use_composite and cand_snap:
                                     running_base_perf = cand_snap
                                 keep_entry["gain_pct"] = gain
                                 keep_entry["tput"] = stack_rebench_tput

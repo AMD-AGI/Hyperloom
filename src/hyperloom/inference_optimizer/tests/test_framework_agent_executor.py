@@ -361,6 +361,67 @@ async def test_executor_keep_when_delta_above_threshold(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_executor_keep_uses_composite_metric(tmp_path: Path, monkeypatch):
+    """Flag on: input-only lift KEEPs even when output tput is flat."""
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    session_dir = tmp_path / "session"
+    session_dir.mkdir()
+    repo = tmp_path / "framework"
+    init_git_repo(repo)
+    patch_path = tmp_path / "p.patch"
+    patch_path.write_text(_VALID_PATCH, encoding="utf-8")
+
+    baseline_perf = {
+        "output_throughput": 1000.0,
+        "input_throughput": 10000.0,
+        "intvty_p90": 700.0,
+    }
+    state = SimpleNamespace(
+        framework="sglang",
+        baseline_tput=1000.0,
+        baseline_perf=dict(baseline_perf),
+        current_best={"action": "baseline", "tput": 1000.0, **baseline_perf},
+        baseline_accuracy=0.0,
+    )
+
+    executor = FrameworkAgentExecutor(session_dir=session_dir)
+
+    async def fake_bench(self, *, params, output_root, slug, **_kwargs):  # noqa: ARG001
+        return (
+            {
+                "status": "succeeded",
+                "output_throughput": 1000.0,
+                "input_throughput": 12000.0,
+                "intvty_p90": 700.0,
+            },
+            {"accuracy_pass": None},
+        )
+
+    ctx = _make_ctx(
+        "t-fp-composite",
+        {
+            "candidate": _make_candidate(),
+            "patches": [str(patch_path)],
+            "framework_source_root": str(repo),
+            "base_tput": 1000.0,
+            "keep_threshold_pct": 1.0,
+            "framework": "sglang",
+        },
+        extra={"shared_state": state},
+    )
+    with patch.object(FrameworkAgentExecutor, "_bench_candidate", new=fake_bench):
+        result = await executor(ctx)
+
+    assert result["status"] == "kept"
+    assert result["output_throughput"] == 1000.0
+    assert result["delta_pct"] > 1.0
+    assert result["input_throughput"] == pytest.approx(12000.0)
+    assert "composite gain" in result["reason"]
+
+
+@pytest.mark.asyncio
 async def test_bench_is_bounded_by_the_session_budget(tmp_path: Path):
     """The candidate bench is handed the session budget, as the other arms are.
 

@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
+from hyperloom.common.perf_metric import perf_axes_from_mapping
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_owner_phase,
@@ -505,7 +506,10 @@ class WritebackCollaborator:
 
         Call only when ``baseline_tput > 0`` and ``new_tput`` is a positive
         measured throughput.  The caller remains responsible for any surrounding
-        guard (e.g. ``if self.shared_state.baseline_tput > 0``).
+        guard (e.g. ``if self.shared_state.baseline_tput > 0``). Flag-on
+        serving runs with a full triple store ``S * 100`` vs the session
+        baseline; otherwise this is still
+        ``(new_tput - baseline_tput) / baseline_tput * 100``.
 
         Args:
             new_tput: The newly measured throughput to promote as the validated
@@ -518,7 +522,14 @@ class WritebackCollaborator:
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
-        validated_gain = (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+        from hyperloom.common.perf_metric import session_gain_from_measurement
+
+        gain, _used = session_gain_from_measurement(
+            float(new_tput),
+            state=self.shared_state,
+            base_tput=self.shared_state.baseline_tput,
+        )
+        validated_gain = float(gain if gain is not None else 0.0)
         ts = str(ts or datetime.now(timezone.utc).isoformat())
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts
@@ -576,6 +587,7 @@ class WritebackCollaborator:
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
                 "workspace": result.get("workspace"),
+                **perf_axes_from_mapping(result),
             },
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
             entry_extra={
@@ -2576,7 +2588,6 @@ class WritebackCollaborator:
         from hyperloom.common.perf_metric import (
             composite_grading_enabled,
             composite_score,
-            passes_intvty_gate,
             perf_snapshot_from_mapping,
             resolve_baseline_perf,
         )
@@ -2587,15 +2598,6 @@ class WritebackCollaborator:
         cand_snap = perf_snapshot_from_mapping(bv) if isinstance(bv, dict) else None
         anchor_snap = perf_snapshot_from_mapping(previous) or baseline_perf
         if use_composite and cand_snap and anchor_snap:
-            if not passes_intvty_gate(cand_snap, anchor_snap):
-                log.info(
-                    "current_best held: %s winner failed intvty gate "
-                    "(anchor intvty=%.1f candidate intvty=%.1f)",
-                    task_kind,
-                    float(anchor_snap.get("intvty_p90") or 0.0),
-                    float(cand_snap.get("intvty_p90") or 0.0),
-                )
-                return False
             cand_score = composite_score(cand_snap, baseline_perf)
             anchor_score = composite_score(anchor_snap, baseline_perf)
             if cand_score <= anchor_score:
@@ -2799,6 +2801,7 @@ class WritebackCollaborator:
                     variant_name=variant_name,
                     new_tput=best_tput,
                     extra_server_args=full_args,
+                    candidate=bv if isinstance(bv, dict) else None,
                 )
 
         # Merge envs: start from previous stack top envs so source-layer KEEPs
@@ -3482,11 +3485,12 @@ class WritebackCollaborator:
             audit_extras["framework_rewrite_evidence"] = evidence_path
             audit_extras["framework_rewrite_candidate_count"] = result.get("framework_rewrite_candidate_count")
             changed = True
-        # On a successful profile, re-anchor last_roofline_tput and clear the pending field.
+        # On a successful profile, re-anchor last_roofline_tput (and *S*)
+        # and clear the pending field.
         if profile_status == "succeeded":
             anchor_tput = self._current_tput_from_validated_gain()
             if anchor_tput > 0:
-                self.shared_state.last_roofline_tput = float(anchor_tput)
+                self.shared_state.stamp_roofline_watermark(anchor_tput)
                 changed = True
         if task is not None and self.shared_state.auto_roofline_pending_task_id == task.task_id:
             self.shared_state.auto_roofline_pending_task_id = ""
@@ -3537,9 +3541,10 @@ class WritebackCollaborator:
             # Reset the roofline failure streak on a successful snapshot.
             if hasattr(self.shared_state, "roofline_failure_streak"):
                 self.shared_state.roofline_failure_streak = 0
-            # Re-anchor the 10% watermark step on the projected current tput --
-            # but only for a roofline that actually produced an analysis. The
-            # anchor is what stops the watermark firing again until throughput
+            # Re-anchor the 10% watermark step on the projected current tput
+            # (and *S* when the composite flag is on) -- but only for a
+            # roofline that actually produced an analysis. The anchor is what
+            # stops the watermark firing again until the comparable quantity
             # climbs another 10%, so anchoring on an empty one buys a whole
             # cycle of silence for a snapshot that says nothing: the specialist
             # keeps reading "(none)" while the anchor insists a roofline was
@@ -3548,7 +3553,7 @@ class WritebackCollaborator:
             if str((self.shared_state.last_trace_analyze or {}).get("analysis_md_text") or ""):
                 anchor_tput = self._current_tput_from_validated_gain()
                 if anchor_tput > 0:
-                    self.shared_state.last_roofline_tput = float(anchor_tput)
+                    self.shared_state.stamp_roofline_watermark(anchor_tput)
             else:
                 log.warning(
                     "roofline %s produced no analysis; leaving the watermark "
@@ -4095,6 +4100,7 @@ class WritebackCollaborator:
                 # Durable source-layer handles so current_best stays relaunchable
                 # and reproducible in the GEAK baseline.
                 **_source_layer_handles(result),
+                **perf_axes_from_mapping(result),
             }
             if source_phase:
                 lift["source_phase"] = source_phase
@@ -4276,6 +4282,7 @@ class WritebackCollaborator:
                 # if writeback runs after the state machine has advanced.
                 "source_phase": "FRAMEWORK_AGENT",
                 "provenance": "framework_agent",
+                **perf_axes_from_mapping(result),
             }
             lifted = self._lift_to_current_best(_FRAMEWORK_STACK_ACTION, float(new_tput), lift)
             if lifted and self.shared_state.baseline_tput > 0:
@@ -5454,6 +5461,8 @@ class WritebackCollaborator:
             # Single-point validated replay pins the headline protocol (num_prompts
             # etc.) so it is protocol-identical to the reported result.
             pin_num_prompts=True,
+            framework=str(getattr(self.shared_state, "framework", "") or ""),
+            state=self.shared_state,
         )
         if str(res.get("status") or "") == "succeeded" and geak_sp > 1.0:
             # Rebench-first: write the headline from the GEAK-harness MEASURED

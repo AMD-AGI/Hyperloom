@@ -8049,8 +8049,11 @@ async def integrate_handler(
 
     new_tput = float(bench_result.get("output_throughput") or 0.0)
     from hyperloom.common.gain_math import gain_pct_or_zero, incremental_gain_pct
+    from hyperloom.common.perf_metric import keep_gain_pct
 
-    gain_pct = gain_pct_or_zero(new_tput, base_tput)
+    tput_gain_pct = gain_pct_or_zero(new_tput, base_tput)
+    gain_pct = tput_gain_pct
+    used_composite = False
     stack_positive_keep = False
     stack_incremental_gain_pct: float | None = None
     try:
@@ -8059,21 +8062,44 @@ async def integrate_handler(
         state = SharedState.load_or_init(session_dir)
         current_best = state.current_best or {}
         current_best_tput = float(current_best.get("tput") or 0.0)
-        if current_best_tput > 0:
-            stack_incremental_gain_pct = incremental_gain_pct(new_tput, current_best_tput)
+        framework = str(payload.get("framework") or getattr(state, "framework", "") or "")
+        graded, used_composite = keep_gain_pct(
+            bench_result,
+            state=state,
+            framework=framework,
+            base_tput=base_tput,
+        )
+        if used_composite:
+            gain_pct = 0.0 if graded is None else float(graded)
+            stack_incremental_gain_pct = gain_pct
+        else:
+            gain_pct = tput_gain_pct
+            if current_best_tput > 0:
+                stack_incremental_gain_pct = incremental_gain_pct(new_tput, current_best_tput)
         stack_positive_keep = (
             bool(state.optimization_stack)
             and str(current_best.get("action") or "") == "integrate"
-            and current_best_tput > 0
+            and stack_incremental_gain_pct is not None
             and stack_incremental_gain_pct >= STACK_INCREMENTAL_KEEP_THRESHOLD_PCT
         )
+        if not used_composite:
+            stack_positive_keep = stack_positive_keep and current_best_tput > 0
     except Exception:  # noqa: BLE001 - fall back to the original threshold
         stack_positive_keep = False
-    decision = (
-        "KEEP"
-        if (gain_pct > keep_threshold_pct or stack_positive_keep)
-        else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
-    )
+        used_composite = False
+        gain_pct = tput_gain_pct
+    if used_composite:
+        decision = (
+            "KEEP"
+            if (gain_pct > keep_threshold_pct or stack_positive_keep)
+            else ("REVERT" if gain_pct <= 0.0 else "NEEDS_REVIEW")
+        )
+    else:
+        decision = (
+            "KEEP"
+            if (gain_pct > keep_threshold_pct or stack_positive_keep)
+            else ("REVERT" if gain_pct < -keep_threshold_pct else "NEEDS_REVIEW")
+        )
 
     # Accuracy gate: a kernel patch only KEEPs if it also holds accuracy. Graded
     # ONLY for a candidate that already cleared the throughput bar, so a
@@ -8182,6 +8208,9 @@ async def integrate_handler(
         "base_tput": base_tput,
         "new_tput": new_tput,
         "gain_pct": gain_pct,
+        "input_throughput": bench_result.get("input_throughput"),
+        "intvty_p90": bench_result.get("intvty_p90"),
+        "tpot_p90_ms": bench_result.get("tpot_p90_ms"),
         "report_path": bench_result.get("report_path"),
         "workspace": bench_result.get("workspace"),
         "extra_server_args": extra_args,

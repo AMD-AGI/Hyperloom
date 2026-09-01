@@ -118,7 +118,12 @@ class _RatioObjective(Objective):
 
 @dataclass
 class TargetGainObjective(_RatioObjective):
-    """Reach ``target_gain_pct`` % over baseline_tput (progress = cumulative_gain_validated / target, capped at 1.0)."""
+    """Reach ``target_gain_pct`` % over the session baseline.
+
+    Progress is ``cumulative_gain_validated / target``, capped at 1.0.
+    That validated figure is output-tput % by default, or composite *S* × 100
+    when ``HYPERLOOM_PERF_METRIC=composite_v1``.
+    """
 
     target_gain_pct: float
 

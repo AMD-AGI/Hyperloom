@@ -123,6 +123,9 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
         "total_token_throughput": v.total_token_throughput,
+        "input_throughput": v.input_throughput,
+        "intvty_p90": v.intvty_p90,
+        "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -134,6 +137,13 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "workspace": v.workspace,
         "report_path": v.report_path,
     }
+
+
+def _conc_pair_use_composite(state: SharedState) -> bool:
+    """True when conc-sweep pairing should rank on composite score *S*."""
+    from hyperloom.common.perf_metric import composite_grading_enabled
+
+    return composite_grading_enabled(str(getattr(state, "framework", "") or "") or None)
 
 
 def _budget_limited_without_valid_pair(
@@ -175,6 +185,9 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "output_throughput",
         "request_throughput",
         "total_token_throughput",
+        "input_throughput",
+        "intvty_p90",
+        "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",
@@ -1092,7 +1105,9 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
         b_pts.sort(key=lambda p: p["conc"])
         o_pts.sort(key=lambda p: p["conc"])
 
-        comparison, summary = conc_pair_comparison(b_pts, o_pts)
+        comparison, summary = conc_pair_comparison(
+            b_pts, o_pts, use_composite=_conc_pair_use_composite(state)
+        )
         p: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "status": "in_progress" if partial else "unknown",
@@ -1379,7 +1394,11 @@ async def run_conc_sweep(
     baseline_points.sort(key=lambda p: p["conc"])
     optimized_points.sort(key=lambda p: p["conc"])
 
-    comparison, summary = conc_pair_comparison(baseline_points, optimized_points)
+    comparison, summary = conc_pair_comparison(
+        baseline_points,
+        optimized_points,
+        use_composite=_conc_pair_use_composite(state),
+    )
     budget_limited_no_pair = _budget_limited_without_valid_pair(
         budget_exhausted=budget_exhausted,
         summary=summary,

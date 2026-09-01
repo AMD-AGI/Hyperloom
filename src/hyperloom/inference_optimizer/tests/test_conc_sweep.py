@@ -176,6 +176,72 @@ def test_build_comparison_mismatched_concs_outer_join():
     assert summary["successful_pairs"] == 1
 
 
+def test_build_comparison_flag_off_ignores_input_lift():
+    """Default ranking stays output-tput even when triples are present."""
+    baseline = [
+        {
+            "conc": 1,
+            "output_throughput": 100.0,
+            "input_throughput": 1000.0,
+            "intvty_p90": 50.0,
+            "status": "succeeded",
+        }
+    ]
+    optimized = [
+        {
+            "conc": 1,
+            "output_throughput": 100.0,
+            "input_throughput": 1200.0,
+            "intvty_p90": 50.0,
+            "status": "succeeded",
+        }
+    ]
+    rows, summary = _build_comparison(baseline, optimized)
+    assert rows[0]["speedup"] == pytest.approx(1.0)
+    assert rows[0]["used_composite"] is False
+    assert summary["metric"] == "output_throughput"
+
+
+def test_build_comparison_composite_uses_score():
+    """Flag-on pairing: flat output + 20% input lift is S=0.11 (speedup 1.11)."""
+    baseline = [
+        {
+            "conc": 1,
+            "output_throughput": 100.0,
+            "input_throughput": 1000.0,
+            "intvty_p90": 50.0,
+            "status": "succeeded",
+        }
+    ]
+    optimized = [
+        {
+            "conc": 1,
+            "output_throughput": 100.0,
+            "input_throughput": 1200.0,
+            "intvty_p90": 50.0,
+            "status": "succeeded",
+        }
+    ]
+    rows, summary = _build_comparison(baseline, optimized, use_composite=True)
+    assert rows[0]["speedup"] == pytest.approx(1.11)
+    assert rows[0]["delta_pct"] == pytest.approx(11.0)
+    assert rows[0]["used_composite"] is True
+    assert summary["metric"] == "composite_v1"
+    assert summary["best_speedup"] == pytest.approx(1.11)
+
+
+def test_build_comparison_composite_falls_back_without_triple():
+    """Missing triple on either arm falls back to output-tput ratio."""
+    rows, summary = _build_comparison(
+        [{"conc": 1, "output_throughput": 100.0, "status": "succeeded"}],
+        [{"conc": 1, "output_throughput": 130.0, "status": "succeeded"}],
+        use_composite=True,
+    )
+    assert rows[0]["speedup"] == pytest.approx(1.30)
+    assert rows[0]["used_composite"] is False
+    assert summary["metric"] == "composite_v1"
+
+
 # Skip paths
 @pytest.mark.parametrize(
     "override, reason",
@@ -358,6 +424,58 @@ def test_run_conc_sweep_happy_path_writes_reports(
     # final.json is owned by report.py at CLOSE; conc_sweep must not touch it.
     final_json_path = session_dir / "reports" / "final.json"
     assert not final_json_path.exists()
+
+
+def test_run_conc_sweep_composite_uses_score(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch,
+):
+    """Flag on + full triples: per-conc ranking uses *S*, not output-tput ratio."""
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+    state.framework = "sglang"
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        out: list[VariantResult] = []
+        for v in grid:
+            vr = _fake_variant(v.name, throughput=100.0, envs=v.extra_envs)
+            if v.name.startswith("baseline_"):
+                vr.input_throughput = 1000.0
+                vr.intvty_p90 = 50.0
+            else:
+                vr.input_throughput = 1200.0
+                vr.intvty_p90 = 50.0
+            out.append(vr)
+        return out
+
+    with (
+        patch(
+            "hyperloom.orchestrator.kernel.conc_sweep.run_grid",
+            side_effect=_fake_run_grid,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs",
+            side_effect=_fake_materialize,
+        ),
+    ):
+        payload = asyncio.run(
+            run_conc_sweep(
+                state,
+                session_dir,
+                concs=[1, 4],
+            )
+        )
+
+    assert payload["status"] == "succeeded"
+    assert payload["summary"]["metric"] == "composite_v1"
+    assert payload["summary"]["best_speedup"] == pytest.approx(1.11)
+    for row in payload["comparison"]:
+        assert row["used_composite"] is True
+        assert row["speedup"] == pytest.approx(1.11)
+        assert row["delta_pct"] == pytest.approx(11.0)
+        assert row["baseline_tput"] == pytest.approx(100.0)
+        assert row["optimized_tput"] == pytest.approx(100.0)
 
 
 def test_run_conc_sweep_canonicalizes_gpu_type_to_runner(

@@ -1011,6 +1011,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
         "_run_kernel_opt_entry_batch": "phase_kernel",
         "_current_tput_from_validated_gain": "phase_kernel",
         "_last_measured_roofline_tput": "phase_kernel",
+        "_roofline_watermark_levels": "phase_kernel",
         "_needs_roofline_for_watermark": "phase_kernel",
         "_maybe_enqueue_watermark_roofline": "phase_kernel",
         "_cached_kernel_request": "phase_kernel",
