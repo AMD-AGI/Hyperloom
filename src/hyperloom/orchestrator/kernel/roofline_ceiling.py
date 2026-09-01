@@ -724,6 +724,17 @@ class ModelMeta:
     moe_hidden_size: int = 0
     vocab_size: int = 0
     num_attention_heads: int = 0
+    # How the decoder stack splits between routed-expert FFN layers and plain
+    # dense FFN layers. Real MoE checkpoints are not MoE all the way down:
+    # DeepSeek/GLM run the first ``first_k_dense_replace`` layers as dense FFN,
+    # and Qwen can mark individual layers dense via ``mlp_only_layers``.
+    # Multiplying the MoE op by every layer overstates the largest term in the
+    # breakdown, and dropping the dense FFN entirely loses a real one.
+    # Both default to 0, meaning "not derived": the PerfModel then falls back to
+    # the previous all-or-nothing behaviour, so a hand-built ``ModelMeta`` keeps
+    # working. ``load_model_meta`` fills them from the HF config.
+    moe_layers: int = 0
+    dense_ffn_layers: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -864,6 +875,61 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     return 0
 
 
+def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: int) -> tuple[int, int]:
+    """Split the decoder stack into ``(moe_layers, dense_ffn_layers)``.
+
+    A MoE checkpoint is rarely MoE in every layer. The three mechanisms in the
+    wild:
+
+    * ``first_k_dense_replace`` (DeepSeek, GLM, Kimi) -- the first K layers run
+      a plain dense FFN. GLM-5.3-Flash sets 1, DeepSeek-V3 sets 3.
+    * ``moe_layer_freq`` -- either a per-layer 0/1 list, or an int stride
+      applied after the dense prefix. ``decoder_sparse_step`` is Qwen's name
+      for the same stride.
+    * ``mlp_only_layers`` (Qwen) -- explicit indices that stay dense.
+
+    Anything unrecognised degrades to "every layer after the dense prefix is
+    MoE", which is the common case and matches the previous behaviour when the
+    prefix is 0.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+        num_layers: ``num_hidden_layers``.
+        num_experts: Routed expert count; ``<= 0`` means the model is dense.
+
+    Returns:
+        ``(moe_layers, dense_ffn_layers)``, summing to ``num_layers``.
+    """
+    if num_layers <= 0:
+        return 0, 0
+    if num_experts <= 0:
+        return 0, num_layers
+
+    freq = cfg.get("moe_layer_freq")
+    if isinstance(freq, (list, tuple)) and len(freq) == num_layers:
+        moe = sum(1 for v in freq if v)
+        return moe, num_layers - moe
+
+    first_dense = int(cfg.get("first_k_dense_replace") or 0)
+    first_dense = max(0, min(first_dense, num_layers))
+
+    stride = 1
+    for raw in (freq, cfg.get("decoder_sparse_step")):
+        if isinstance(raw, bool):
+            continue
+        if isinstance(raw, int) and raw > 0:
+            stride = raw
+            break
+
+    dense_only = {int(i) for i in (cfg.get("mlp_only_layers") or []) if isinstance(i, int)}
+    moe = sum(
+        1
+        for i in range(first_dense, num_layers)
+        if (i - first_dense) % stride == 0 and i not in dense_only
+    )
+    return moe, num_layers - moe
+
+
 def _compute_expert_decomposition(
     cfg: dict[str, Any],
     *,
@@ -901,8 +967,16 @@ def _compute_expert_decomposition(
     expert_bpe = expert_dtype_bytes if expert_dtype_bytes > 0 else dtype_bytes
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
+    # Only the MoE layers hold expert weights. Charging every layer for them
+    # inflates ``total_expert_bytes``, which both overstates the per-token
+    # active bytes and pushes borderline checkpoints over the
+    # ``>= weight_bytes`` safe-degrade that drops the MoE from the ceiling
+    # altogether.
+    moe_layers, _dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
+    if moe_layers <= 0:
+        return int(weight_bytes), 0, 0, 0
     expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * expert_bpe
-    total_expert_bytes = int(num_layers * expert_bytes_per_layer)
+    total_expert_bytes = int(moe_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
         # Degrading a MoE model to dense drops the largest op from the
         # breakdown entirely, so say so: the usual cause is an over-large
@@ -990,6 +1064,9 @@ def load_model_meta(
         dtype_bytes=dtype_bytes,
         expert_dtype_bytes=expert_dtype_bytes,
     )
+    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(
+        cfg, int(cfg.get("num_hidden_layers") or 0), num_experts
+    )
     intermediate_size = int(cfg.get("intermediate_size") or 0)
     moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
     if num_experts > 0 and moe_intermediate_size <= 0:
@@ -1011,6 +1088,8 @@ def load_model_meta(
         moe_hidden_size=(_derive_moe_hidden_size(cfg) if num_experts > 0 else 0),
         vocab_size=int(cfg.get("vocab_size") or 0),
         num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        moe_layers=n_moe_layers,
+        dense_ffn_layers=n_dense_ffn_layers,
     )
 
 
@@ -2084,12 +2163,22 @@ def compute_roofline_from_perfmodel(
         ("v_proj", hidden, kv_out, n_layers),
         ("o_proj", q_out, hidden, n_layers),
     ]
-    # Dense FFN: add gate/up/down. MoE FFN is added inside _forward.
-    if ffn and not (meta.num_experts > 0 and meta.moe_intermediate_size > 0):
+    is_moe = meta.num_experts > 0 and meta.moe_intermediate_size > 0
+    # A MoE checkpoint still runs a dense FFN in its ``first_k_dense_replace``
+    # prefix, so the two are not mutually exclusive: gate/up/down repeat over
+    # the dense layers and the MoE op over the MoE layers. Attention and SDPA
+    # stay at n_layers -- every layer has those.
+    if is_moe:
+        n_moe_layers = meta.moe_layers or n_layers
+        n_dense_ffn_layers = meta.dense_ffn_layers
+    else:
+        n_moe_layers = 0
+        n_dense_ffn_layers = meta.dense_ffn_layers or n_layers
+    if ffn and n_dense_ffn_layers > 0:
         linears += [
-            ("gate_proj", hidden, ffn, n_layers),
-            ("up_proj", hidden, ffn, n_layers),
-            ("down_proj", ffn, hidden, n_layers),
+            ("gate_proj", hidden, ffn, n_dense_ffn_layers),
+            ("up_proj", hidden, ffn, n_dense_ffn_layers),
+            ("down_proj", ffn, hidden, n_dense_ffn_layers),
         ]
     if vocab:
         linears.append(("lm_head", hidden, vocab, 1))
@@ -2146,7 +2235,7 @@ def compute_roofline_from_perfmodel(
                 )
             )
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
-        if meta.num_experts > 0 and meta.moe_intermediate_size > 0:
+        if is_moe and n_moe_layers > 0:
             # Latent-MoE decoders run the experts below the residual width.
             moe_hidden = meta.moe_hidden_size or hidden
             fl_moe = _fused_moe_flops(M, moe_hidden, meta.moe_intermediate_size, meta.experts_per_tok)
@@ -2160,16 +2249,16 @@ def compute_roofline_from_perfmodel(
                 act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
-            total_t += t_moe * n_layers
-            total_mem_t += t_mem_moe * n_layers
-            total_cmp_t += t_cmp_moe * n_layers
+            total_t += t_moe * n_moe_layers
+            total_mem_t += t_mem_moe * n_moe_layers
+            total_cmp_t += t_cmp_moe * n_moe_layers
             op_rows.append(
                 OpBreakdown(
                     name="moe_fused",
-                    flops=fl_moe * n_layers,
-                    bytes_moved=by_moe * n_layers,
+                    flops=fl_moe * n_moe_layers,
+                    bytes_moved=by_moe * n_moe_layers,
                     ai=(fl_moe / by_moe if by_moe else 0.0),
-                    time_s=t_moe * n_layers,
+                    time_s=t_moe * n_moe_layers,
                     bound=side_moe,
                     pct_time=0.0,
                 )
