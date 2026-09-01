@@ -307,8 +307,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     cfg = request.primus_cortex
     if cfg is None:
         raise SourceConfigError(
-            "search_modes contains 'primus_cortex' but no primus_cortex "
-            "block was provided (nor KB_STORE_URL env var)"
+            "search_modes contains 'primus_cortex' but no primus_cortex block was provided (nor KB_STORE_URL env var)"
         )
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)

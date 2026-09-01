@@ -26,7 +26,7 @@ def _avoid_unrelated_kernel_backend_setup(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(forge_submit.shutil, "which", lambda _name: None)
 
 
-def test_local_child_env_strips_remote_credentials(
+def test_local_child_env_keeps_pr_service_url_without_recipe_token(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _avoid_unrelated_kernel_backend_setup(monkeypatch)
@@ -51,7 +51,7 @@ def test_local_child_env_strips_remote_credentials(
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
     assert "GBRAIN_BASE_URL" not in env
     assert "GBRAIN_TOKEN" not in env
-    assert "KB_STORE_URL" not in env
+    assert env["KB_STORE_URL"] == "https://ambient-kb.invalid"
     assert "KB_STORE_TOKEN" not in env
 
 
