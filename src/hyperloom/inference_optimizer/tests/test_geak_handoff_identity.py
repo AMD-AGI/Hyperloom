@@ -235,10 +235,11 @@ async def test_handoff_marks_declared_only_identity_without_faking_observation(
     await coord._run_geak_kernel_phase(from_phase="KERNEL")
 
     handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
-    assert handoff["same_config_reference_status"] == "verified"
+    assert handoff["same_config_reference_status"] == "unverified"
     assert handoff["same_config_reference_verification_status"] == "verified_declared_only"
     assert handoff["same_config_reference_observed_identity"] == ""
     assert handoff["measurement_evidence"]["requested_server_args"] == "--mem-fraction-static 0.8"
+    assert handoff["orchestrator_best_tput_same_config"] == 0.0
 
 
 @pytest.mark.asyncio
@@ -348,6 +349,65 @@ def test_sglang_server_args_fallback_records_declared_resolved_config(
     assert resolved["context_length"] == 8192
 
 
+def test_sglang_server_args_fallback_contains_parser_system_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeServerArgs:
+        @classmethod
+        def add_cli_args(cls, parser):
+            parser.add_argument("--tp-size", type=int)
+
+    sglang = ModuleType("sglang")
+    srt = ModuleType("sglang.srt")
+    server_args = ModuleType("sglang.srt.server_args")
+    server_args.ServerArgs = FakeServerArgs
+    monkeypatch.setitem(sys.modules, "sglang", sglang)
+    monkeypatch.setitem(sys.modules, "sglang.srt", srt)
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", server_args)
+
+    assert (
+        WritebackCollaborator._resolved_sglang_server_config(
+            {"framework": "sglang", "requested_server_args": "--tp-size not-an-integer"}
+        )
+        == {}
+    )
+
+
+def test_empty_observed_identity_reparses_measurement_log(tmp_path: Path) -> None:
+    server_log = tmp_path / "server.log"
+    server_log.write_text(
+        "server_args=ServerArgs(model_path='/models/qwen', tp_size=8, context_length=8192)\n",
+        encoding="utf-8",
+    )
+    identity = WritebackCollaborator._measurement_observed_server_identity(
+        {
+            "server_log_path": str(server_log),
+            "launch_evidence": {"framework": "sglang", "observed_server_identity": {}},
+        }
+    )
+
+    assert identity == {"context_length": 8192, "model_path": "/models/qwen", "tp_size": 8}
+
+
+def test_env_spec_does_not_probe_measurement_workspace_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    state = _verified_current_best(tmp_path)
+    workspace = tmp_path / "measurement" / "benchmark"
+    workspace.mkdir(parents=True)
+    (workspace.parent / "server.log").write_text(
+        "+ python -m sglang.launch_server --model-path /wrong --speculative-algorithm NEXTN\n",
+        encoding="utf-8",
+    )
+    state.current_best["measurement"] = {
+        "tput": 1403.43,
+        "benchmark_workspace": str(workspace),
+    }
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    spec = _writeback(tmp_path, state).build_env_spec()
+
+    assert spec["config"]["server_launch_flags"] == ""
+
+
 def test_archived_sglang_server_args_log_yields_stable_observed_identity(tmp_path: Path) -> None:
     log = tmp_path / "server.log"
     log.write_text(
@@ -372,6 +432,20 @@ def test_archived_sglang_server_args_log_yields_stable_observed_identity(tmp_pat
         "prefill_attention_backend": "fa3",
         "tp_size": 8,
         "trust_remote_code": False,
+    }
+
+
+def test_archived_sglang_server_args_after_legacy_line_cap_is_observed(tmp_path: Path) -> None:
+    log = tmp_path / "server.log"
+    log.write_text(
+        "".join(f"startup noise {index}\n" for index in range(300))
+        + "server_args=ServerArgs(model_path='/models/qwen', tp_size=8)\n",
+        encoding="utf-8",
+    )
+
+    assert _observed_sglang_server_identity_from_log(str(log)) == {
+        "model_path": "/models/qwen",
+        "tp_size": 8,
     }
 
 

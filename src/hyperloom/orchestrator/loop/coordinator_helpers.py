@@ -1744,7 +1744,7 @@ def _launch_argv_from_log(path: str, marker: str) -> str:
 
 _SGLANG_SERVER_ARGS_LOG_RE = re.compile(r"\bserver_args\s*=\s*ServerArgs\s*\(")
 _SGLANG_SERVER_ARGS_MAX_CHARS = 512 * 1024
-_SGLANG_SERVER_ARGS_MAX_LINES = 256
+_SGLANG_SERVER_ARGS_MAX_LINES = 2048
 _SGLANG_SERVER_ARGS_MAX_FIELDS = 2048
 _SGLANG_OBSERVED_IDENTITY_FIELDS = frozenset(
     {
@@ -1832,27 +1832,37 @@ def _observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     """
     chunks: list[str] = []
     remaining = _SGLANG_SERVER_ARGS_MAX_CHARS
+    scanned_lines = 0
+    parsed = ""
     try:
         with open(path, encoding="utf-8", errors="replace") as fh:
             for _ in range(_SGLANG_SERVER_ARGS_MAX_LINES):
                 line = fh.readline()
                 if not line:
                     break
+                scanned_lines += 1
                 if len(line) > remaining:
                     line = line[:remaining]
                 remaining -= len(line)
-                if remaining < 0:
-                    break
                 if chunks or _SGLANG_SERVER_ARGS_LOG_RE.search(line):
                     chunks.append(line)
                     parsed = _extract_balanced_server_args("".join(chunks))
                     if parsed:
                         break
+                if remaining <= 0:
+                    break
     except OSError:
         return {}
     text = "".join(chunks)
-    content = _extract_balanced_server_args(text)
+    content = parsed or _extract_balanced_server_args(text)
     if not content or len(content) > _SGLANG_SERVER_ARGS_MAX_CHARS:
+        if scanned_lines >= _SGLANG_SERVER_ARGS_MAX_LINES or remaining <= 0:
+            log.debug(
+                "sglang observed identity unavailable after scanning bounded log %s (lines=%d chars_remaining=%d)",
+                path,
+                scanned_lines,
+                remaining,
+            )
         return {}
     try:
         call = ast.parse(f"_ServerArgs({content})", mode="eval").body
@@ -1868,71 +1878,3 @@ def _observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     except (SyntaxError, ValueError, TypeError):
         return {}
     return {key: values[key] for key in sorted(values)}
-
-
-def _scrape_resolved_launch_flags(session_dir: Any, backend: str, target_tput: float = 0.0) -> str:
-    """Recover the orchestrator's FULL resolved server-launch flags from logs.
-
-    The complete record of what the engine ran with is the launched argv,
-    echoed into each benchmark's ``server.log`` / ``benchmark_stderr.log``.
-    Selection is by throughput, not recency: find the benchmark whose measured
-    ``output_throughput`` equals ``target_tput`` and scrape its sibling server
-    log. Falls back to the most recent clean launch when no throughput match
-    exists (or ``target_tput<=0``).
-
-    Args:
-        session_dir: The run's session directory (root of ``runs/``).
-        backend: Serving backend ("sglang" | "vllm" | …).
-        target_tput: ``current_best`` throughput to match a benchmark by.
-
-    Returns:
-        The resolved engine-knob flag string (run-specific + profiling stripped),
-        or ``""`` when no argv is found (consumer keeps its adapter defaults).
-    """
-    marker = _LAUNCH_ARGV_MARKERS.get(str(backend or "").strip().lower())
-    if not marker:
-        return ""
-    try:
-        import glob as _glob
-
-        runs_root = Path(session_dir) / "runs"
-        # Throughput-matched selection: find the benchmark whose
-        # inferencex_result.json output_throughput == target_tput, scrape its
-        # sibling server log.
-        if target_tput and target_tput > 0:
-            best_path, best_err = "", 1e9
-            for rp in _glob.glob(str(runs_root / "**" / "inferencex_result.json"), recursive=True):
-                if "geak" in rp or "_baseline_source_overlay" in rp:
-                    continue
-                try:
-                    tp = float((json.loads(Path(rp).read_text(encoding="utf-8")) or {}).get("output_throughput") or 0.0)
-                except (OSError, json.JSONDecodeError, TypeError, ValueError):
-                    continue
-                if tp <= 0:
-                    continue
-                err = abs(tp - target_tput) / target_tput
-                if err < best_err:
-                    best_err, best_path = err, rp
-            if best_path and best_err <= 0.005:  # within 0.5% => same measurement
-                bench_dir = Path(best_path).parent
-                for name in ("server.log", "benchmark_stderr.log"):
-                    flags = _launch_argv_from_log(str(bench_dir / name), marker)
-                    if flags:
-                        return flags
-        # Fallback: most recent clean (non-profiling) launch across the run.
-        candidates: list[tuple[float, str]] = []
-        for name in ("server.log", "benchmark_stderr.log"):
-            for p in _glob.glob(str(runs_root / "**" / name), recursive=True):
-                if "geak" in p or "_baseline_source_overlay" in p:
-                    continue
-                try:
-                    candidates.append((os.path.getmtime(p), p))
-                except OSError:
-                    continue
-        for _, path in sorted(candidates, reverse=True):
-            flags = _launch_argv_from_log(path, marker)
-            if flags:
-                return flags
-    except Exception:  # noqa: BLE001 — best-effort; absence => adapter default
-        return ""
-    return ""

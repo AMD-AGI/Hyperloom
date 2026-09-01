@@ -52,6 +52,7 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up
 # in: how a sentinel returncode reads back, how a round's cap is clamped to the
@@ -300,84 +301,18 @@ def _attach_baseline_launch_evidence(
     ``current_best`` and becomes the GEAK handoff reference.
     """
     from ._grid_runner import _measurement_server_log_path
-    from ._grid_server_args import server_args_env_name
 
     workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
     actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
     result["server_log_path"] = actual_log or ""
-
-    benchmark: dict[str, Any] = {}
-    try:
-        parsed = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-        if isinstance(parsed, dict):
-            raw = parsed.get("benchmark")
-            benchmark = raw if isinstance(raw, dict) else {}
-    except (OSError, yaml.YAMLError):
-        log.debug(
-            "baseline_executor: failed to read launch-evidence config; using empty declared config",
-            exc_info=True,
-        )
-
-    args_env = server_args_env_name(framework)
-    envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
-    requested_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
-    requested_args = str(envs.get(args_env) or "").strip()
-    recipe_digest = ""
-    try:
-        recipe_digest = f"sha256:{hashlib.sha256(config_path.read_bytes()).hexdigest()}"
-    except OSError:
-        log.debug(
-            "baseline_executor: failed to compute launch-evidence recipe digest for %s",
-            config_path,
-            exc_info=True,
-        )
-
-    observed_flags = ""
-    observed_server_identity: dict[str, Any] = {}
-    if actual_log:
-        try:
-            from ...loop.coordinator_helpers import (
-                _LAUNCH_ARGV_MARKERS,
-                _launch_argv_from_log,
-                _observed_sglang_server_identity_from_log,
-            )
-
-            marker = _LAUNCH_ARGV_MARKERS.get(framework)
-            observed_flags = _launch_argv_from_log(actual_log, marker) if marker else ""
-            if not observed_flags and framework == "sglang":
-                observed_server_identity = _observed_sglang_server_identity_from_log(actual_log)
-        except Exception:  # noqa: BLE001 - evidence must not alter a valid baseline
-            observed_flags = ""
-            observed_server_identity = {}
-
-    evidence: dict[str, Any] = {
-        "schema_version": 1,
-        "materialized_config_path": str(config_path),
-        "recipe_digest": recipe_digest,
-        "framework": framework,
-        "model_path": str(benchmark.get("model") or ""),
-        "requested_server_args": requested_args,
-        "requested_server_flags": requested_args,
-        "requested_server_env": requested_env,
-        "actual_server_log_path": actual_log or "",
-        "observed_server_launch_flags": observed_flags,
-        "observed_server_identity": observed_server_identity,
-        "warm_reuse": {
-            "reused_ready_server": bool(actual_log and "warmup_round" in Path(actual_log).parts),
-            "provenance": "warmup_round"
-            if actual_log and "warmup_round" in Path(actual_log).parts
-            else "fresh_or_unobserved",
-            "source_server_log_path": actual_log or "",
-        },
-    }
+    evidence = build_launch_evidence(
+        config_path=config_path,
+        actual_server_log=actual_log,
+        framework=framework,
+        slot=output_dir,
+    )
     result["launch_evidence"] = evidence
-    try:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        evidence_path = output_dir / "launch_evidence.json"
-        evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
-        result["launch_evidence_path"] = str(evidence_path)
-    except OSError as exc:
-        log.warning("baseline_executor: failed to persist launch evidence in %s: %s", output_dir, exc)
+    result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:

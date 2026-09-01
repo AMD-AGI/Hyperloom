@@ -83,6 +83,10 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
         }
         (out / "bench_summary.json").write_text(json.dumps(summary), encoding="utf-8")
         (out / "env.json").write_text(json.dumps({"NUM_PROMPTS": env.get("NUM_PROMPTS")}), encoding="utf-8")
+        (out / "server.log").write_text(
+            "server_args=ServerArgs(model_path='/models/x', tp_size=1, context_length=4096)\n",
+            encoding="utf-8",
+        )
         return subprocess.CompletedProcess(_cmd, 0, "", "")
 
     monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
@@ -110,6 +114,57 @@ async def test_sweep_via_geak_uses_validated_regimes_and_pins_num_prompts(
     out_dir = tmp_path / "sweep" / "variant_0_conc1_isl16_osl16"
     env = json.loads((out_dir / "env.json").read_text(encoding="utf-8"))
     assert env["NUM_PROMPTS"] == "64"
+    evidence = result["promotion_measurement"]["launch_evidence"]
+    assert result["promotion_measurement"]["server_log_path"] == str(out_dir / "server.log")
+    assert evidence["actual_server_log_path"] == str(out_dir / "server.log")
+    assert evidence["observed_server_identity"] == {
+        "context_length": 4096,
+        "model_path": "/models/x",
+        "tp_size": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_sweep_via_geak_prefers_executable_final_launch_script(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2a runs the GEAK final script without changing its single-point protocol."""
+    bench = _bench_script(tmp_path)
+    final = tmp_path / "final_launch.sh"
+    final.write_text("#!/usr/bin/env bash\n", encoding="utf-8")
+    final.chmod(0o755)
+    monkeypatch.setenv("MODEL_PATH", "/models/x")
+    captured: dict[str, Any] = {}
+
+    def _fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        out = Path(command[2])
+        (out / "bench_summary.json").write_text(
+            json.dumps({"output_throughput_tok_s_median": 200.0}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(_geak_sweep.subprocess, "run", _fake_run)
+    result = await sweep_via_geak(
+        result={
+            "bench_script": str(bench),
+            "final_launch_script": str(final),
+            "accepted_config": {},
+        },
+        conc_values=[1],
+        isl_osl_configs=["16:16"],
+        output_root=tmp_path / "sweep",
+        variant_timeout_sec=30,
+        repeats=3,
+    )
+
+    out_dir = tmp_path / "sweep" / "variant_0_conc1_isl16_osl16"
+    assert result["replay_mode"] == "final_launch_script"
+    assert captured["command"] == ["bash", str(final), str(out_dir)]
+    assert captured["env"]["REPLICAS"] == "3"
 
 
 @pytest.mark.asyncio

@@ -771,14 +771,14 @@ class KernelPhase(PhaseHandler):
         if identity_matches and (observed_flags or observed_server_identity):
             reference_verification_status = "verified_observed"
         elif identity_matches and (
-            launch_evidence.get("requested_server_args") is not None
-            or launch_evidence.get("requested_server_env") is not None
-            or launch_evidence.get("recipe_digest")
+            str(launch_evidence.get("requested_server_args") or "").strip()
+            or bool(launch_evidence.get("requested_server_env"))
+            or str(launch_evidence.get("recipe_digest") or "").strip()
         ):
             reference_verification_status = "verified_declared_only"
         else:
             reference_verification_status = "unverified"
-        reference_verified = reference_verification_status != "unverified"
+        reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
         if not observed_identity and identity_matches and observed_flags:
             observed_payload = json.dumps(
@@ -1537,6 +1537,7 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         provenance: str = "geak_e2e_promote",
         overlay_loaded: bool | None = None,
+        measurement_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
@@ -1612,19 +1613,31 @@ class KernelPhase(PhaseHandler):
             return
         accepted_flags, parsed_envs = self._parse_geak_accepted_config(result)
 
+        promotion_measurement = {
+            "name": "geak_e2e",
+            "candidate_extra_server_args": accepted_flags,
+            "extra_envs": dict(parsed_envs),
+            "final_overlay": result.get("final_overlay") or "",
+            "source_phase": "KERNEL_AGENT",
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            "workspace": result.get("eval_dir"),
+        }
+        if isinstance(measurement_provenance, Mapping):
+            for key in (
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+                "workspace",
+                "single_workspace",
+            ):
+                value = measurement_provenance.get(key)
+                if value not in (None, "", {}):
+                    promotion_measurement[key] = value
         self._lift_to_current_best(
             "geak_e2e",
             measured,
-            {
-                "name": "geak_e2e",
-                "candidate_extra_server_args": accepted_flags,
-                "extra_envs": dict(parsed_envs),
-                "final_overlay": result.get("final_overlay") or "",
-                "source_phase": "KERNEL_AGENT",
-                "ttft_mean_ms": result.get("ttft_ms"),
-                "tpot_mean_ms": result.get("tpot_ms"),
-                "workspace": result.get("eval_dir"),
-            },
+            promotion_measurement,
             entry_extra=self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded),
         )
 

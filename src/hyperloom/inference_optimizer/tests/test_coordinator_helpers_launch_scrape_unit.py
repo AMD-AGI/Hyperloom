@@ -1,15 +1,10 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit coverage for the launch-flag / config-blob helpers in
-``coordinator_helpers`` that back the GEAK handoff and resume/revalidation
-paths: ``_split_env_and_flags``, ``_geak_sweep_measured_tput``,
-``_split_launch_flags``, ``_launch_argv_from_log``, and
-``_scrape_resolved_launch_flags``."""
+"""Unit coverage for launch-flag and config-blob helper primitives."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hyperloom.orchestrator.loop import coordinator_helpers as ch
@@ -155,95 +150,3 @@ def test_launch_argv_from_log_falls_back_to_double_dash_scan(
     )
     flags = ch._launch_argv_from_log(str(log), "vllm")
     assert "--mem-fraction-static 0.9" in flags
-
-
-# ── _scrape_resolved_launch_flags ─────────────────────────────────────────
-
-
-def _write_bench(runs_root: Path, name: str, tput: float | None, marker: str = "launch_server") -> Path:
-    bench_dir = runs_root / name
-    bench_dir.mkdir(parents=True)
-    if tput is not None:
-        (bench_dir / "inferencex_result.json").write_text(json.dumps({"output_throughput": tput}), encoding="utf-8")
-    (bench_dir / "server.log").write_text(
-        f"+ python3 -m sglang.{marker} --model-path /models/x --tensor-parallel-size 8 --chunked-prefill-size 2048\n",
-        encoding="utf-8",
-    )
-    return bench_dir
-
-
-def test_scrape_resolved_launch_flags_unknown_backend_returns_empty(
-    tmp_path: Path,
-) -> None:
-    assert ch._scrape_resolved_launch_flags(tmp_path, "unknown-backend", 100.0) == ""
-
-
-def test_scrape_resolved_launch_flags_matches_by_throughput(tmp_path: Path) -> None:
-    runs_root = tmp_path / "runs"
-    _write_bench(runs_root, "winner", 123.4)
-    _write_bench(runs_root, "loser", 50.0)
-
-    flags = ch._scrape_resolved_launch_flags(tmp_path, "sglang", 123.4)
-    assert flags == "--chunked-prefill-size 2048"
-
-
-def test_scrape_resolved_launch_flags_skips_geak_and_overlay_dirs(
-    tmp_path: Path,
-) -> None:
-    runs_root = tmp_path / "runs"
-    # A "geak"-tagged dir matches the throughput but must be excluded from both
-    # the throughput-match and the recency fallback scan.
-    _write_bench(runs_root, "geak_replay", 200.0)
-
-    flags = ch._scrape_resolved_launch_flags(tmp_path, "sglang", 200.0)
-    assert flags == ""
-
-
-def test_scrape_resolved_launch_flags_prefers_matched_over_other_runs(
-    tmp_path: Path,
-) -> None:
-    runs_root = tmp_path / "runs"
-    # The geak dir matches but is excluded; the orchestrator run dir is scraped.
-    _write_bench(runs_root, "geak_replay", 200.0)
-    real_dir = _write_bench(runs_root, "orchestrator_run", 200.0)
-    (real_dir / "server.log").write_text(
-        "+ python3 -m sglang.launch_server --model-path /models/x --chunked-prefill-size 8192\n",
-        encoding="utf-8",
-    )
-
-    flags = ch._scrape_resolved_launch_flags(tmp_path, "sglang", 200.0)
-    assert flags == "--chunked-prefill-size 8192"
-
-
-def test_scrape_resolved_launch_flags_falls_back_to_most_recent(
-    tmp_path: Path,
-) -> None:
-    runs_root = tmp_path / "runs"
-    _write_bench(runs_root, "only_run", 999.0)
-
-    # target_tput<=0 => skip throughput matching, use the recency fallback.
-    flags = ch._scrape_resolved_launch_flags(tmp_path, "sglang", 0.0)
-    assert flags == "--chunked-prefill-size 2048"
-
-
-def test_scrape_resolved_launch_flags_no_runs_dir_returns_empty(
-    tmp_path: Path,
-) -> None:
-    assert ch._scrape_resolved_launch_flags(tmp_path, "sglang", 100.0) == ""
-
-
-def test_scrape_resolved_launch_flags_tolerates_corrupt_result_json(
-    tmp_path: Path,
-) -> None:
-    runs_root = tmp_path / "runs"
-    bench_dir = runs_root / "corrupt"
-    bench_dir.mkdir(parents=True)
-    (bench_dir / "inferencex_result.json").write_text("{not-json", encoding="utf-8")
-    (bench_dir / "server.log").write_text(
-        "+ python3 -m sglang.launch_server --model-path /models/x --chunked-prefill-size 4096\n",
-        encoding="utf-8",
-    )
-
-    # The corrupt result is skipped; the recency scan finds the same log's flags.
-    flags = ch._scrape_resolved_launch_flags(tmp_path, "sglang", 55.0)
-    assert flags == "--chunked-prefill-size 4096"

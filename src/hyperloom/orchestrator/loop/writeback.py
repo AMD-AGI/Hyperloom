@@ -3753,6 +3753,14 @@ class WritebackCollaborator:
                     # Write the headline from the measured orchestrator-harness
                     # rebench: lift current_best + optimization_stack + the
                     # validated gain and clear geak_pending.
+                    rebench_measurement = (
+                        best_winner
+                        if isinstance(best_winner, Mapping)
+                        else next(
+                            (winner for winner in winners if isinstance(winner, Mapping)),
+                            None,
+                        )
+                    )
                     self._promote_geak_from_candidate(
                         ps,
                         measured_tput=float(measured),
@@ -3760,6 +3768,7 @@ class WritebackCollaborator:
                         # Only an overlay that was dispatched AND still matches
                         # its manifest proves a kernel was in the measurement.
                         overlay_loaded=bool(expected_overlay) and overlay_loaded,
+                        measurement_provenance=rebench_measurement,
                     )
                 elif decision == "no_material":
                     # No material GEAK product; the rebench beating current_best
@@ -4396,7 +4405,7 @@ class WritebackCollaborator:
             workspace = str(measurement.get(key) or "").strip()
             if workspace:
                 root = Path(workspace)
-                paths.extend((str(root / "server.log"), str(root.parent / "server.log")))
+                paths.append(str(root / "server.log"))
         for path in dict.fromkeys(path for path in paths if path):
             flags = _launch_argv_from_log(path, marker)
             if flags:
@@ -4426,8 +4435,7 @@ class WritebackCollaborator:
             if model_path and not any(token == "--model-path" or token.startswith("--model-path=") for token in tokens):
                 tokens = ["--model-path", model_path, *tokens]
             namespace, _unknown = parser.parse_known_args(tokens)
-            resolved = ServerArgs(**vars(namespace))
-        except Exception:  # noqa: BLE001 - version-dependent optional evidence
+        except (Exception, SystemExit):  # noqa: BLE001 - optional declared-only evidence
             return {}
         fields = (
             "model_path",
@@ -4452,7 +4460,7 @@ class WritebackCollaborator:
         )
         out: dict[str, Any] = {}
         for field_name in fields:
-            value = getattr(resolved, field_name, None)
+            value = getattr(namespace, field_name, None)
             if isinstance(value, (str, int, float, bool)) or value is None:
                 out[field_name] = value
         return out
@@ -4463,7 +4471,7 @@ class WritebackCollaborator:
         evidence = measurement.get("launch_evidence")
         if isinstance(evidence, Mapping):
             identity = evidence.get("observed_server_identity")
-            if isinstance(identity, Mapping):
+            if isinstance(identity, Mapping) and identity:
                 return {str(key): value for key, value in sorted(identity.items())}
         if str((evidence or {}).get("framework") if isinstance(evidence, Mapping) else "").lower() != "sglang":
             return {}
@@ -4515,9 +4523,9 @@ class WritebackCollaborator:
         if observed or observed_server_identity:
             return "verified_observed"
         if isinstance(evidence, Mapping) and (
-            evidence.get("requested_server_args") is not None
-            or evidence.get("requested_server_env") is not None
-            or evidence.get("recipe_digest")
+            str(evidence.get("requested_server_args") or "").strip()
+            or bool(evidence.get("requested_server_env"))
+            or str(evidence.get("recipe_digest") or "").strip()
         ):
             return "verified_declared_only"
         return "unverified"
@@ -4528,28 +4536,19 @@ class WritebackCollaborator:
         if not isinstance(cb, dict):
             return
         evidence = evidence if isinstance(evidence, Mapping) else {}
-        launch_evidence = evidence.get("stack_rebench_launch_evidence") or evidence.get("launch_evidence") or {}
+        launch_evidence = evidence.get("launch_evidence") or {}
         launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
         measurement = {
             "schema_version": 2,
             "tput": float(cb.get("tput") or 0.0),
             "benchmark_workspace": str(
-                evidence.get("stack_rebench_workspace")
-                or evidence.get("workspace")
-                or evidence.get("single_workspace")
-                or cb.get("workspace")
-                or ""
+                evidence.get("workspace") or evidence.get("single_workspace") or cb.get("workspace") or ""
             ),
             "server_log_path": str(
-                evidence.get("stack_rebench_server_log_path")
-                or evidence.get("server_log_path")
-                or launch_evidence.get("actual_server_log_path")
-                or ""
+                evidence.get("server_log_path") or launch_evidence.get("actual_server_log_path") or ""
             ),
             "launch_evidence": launch_evidence,
-            "launch_evidence_path": str(
-                evidence.get("stack_rebench_launch_evidence_path") or evidence.get("launch_evidence_path") or ""
-            ),
+            "launch_evidence_path": str(evidence.get("launch_evidence_path") or ""),
         }
         measurement["resolved_server_launch_flags"] = self._measurement_launch_flags(measurement)
         observed_server_identity = self._measurement_observed_server_identity(measurement)
@@ -4559,9 +4558,12 @@ class WritebackCollaborator:
         measurement["resolved_server_config"] = observed_server_identity or self._resolved_sglang_server_config(
             launch_evidence
         )
-        cb["measurement"] = measurement
-        self.shared_state.current_best_measurement = measurement
-        declared_identity = str(self.build_env_spec()["launch_identity"])
+        declared_identity = str(
+            self.build_env_spec(
+                measurement=measurement,
+                server_launch_flags=measurement["resolved_server_launch_flags"],
+            )["launch_identity"]
+        )
         measurement["launch_identity"] = declared_identity  # Legacy alias.
         measurement["declared_launch_identity"] = declared_identity
         measurement["observed_launch_identity"] = self._observed_launch_identity(
@@ -4573,6 +4575,10 @@ class WritebackCollaborator:
             expected_identity=declared_identity,
             measurement=measurement,
         )
+        # Do not publish a partial measurement. All parsing and identity
+        # preparation above is local; these paired assignments are the commit.
+        cb["measurement"] = measurement
+        self.shared_state.current_best_measurement = measurement
 
     def _current_best_launch_config(self) -> dict[str, Any]:
         """The launch config ``current_best`` was measured on.
@@ -4600,7 +4606,12 @@ class WritebackCollaborator:
             "final_overlay": str(cb.get("final_overlay") or "").strip(),
         }
 
-    def build_env_spec(self) -> dict[str, Any]:
+    def build_env_spec(
+        self,
+        *,
+        measurement: Mapping[str, Any] | None = None,
+        server_launch_flags: str | None = None,
+    ) -> dict[str, Any]:
         """Fully-reproducible descriptor of ``current_best``'s launch environment.
 
         Layers, in the order a consumer must apply them to reconstruct the exact
@@ -4659,13 +4670,15 @@ class WritebackCollaborator:
         # ``extra_server_args``/``extra_envs`` remain the current_best delta.
         # Full engine flags must come from the same promoted measurement, not a
         # search over historical benchmarks with a similar throughput.
-        state_measurement = getattr(self.shared_state, "current_best_measurement", None)
-        measurement = (
-            state_measurement
-            if isinstance(state_measurement, Mapping) and state_measurement
-            else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
-        )
-        server_launch_flags = self._measurement_launch_flags(measurement)
+        if not isinstance(measurement, Mapping):
+            state_measurement = getattr(self.shared_state, "current_best_measurement", None)
+            measurement = (
+                state_measurement
+                if isinstance(state_measurement, Mapping) and state_measurement
+                else (cb.get("measurement") if isinstance(cb.get("measurement"), Mapping) else {})
+            )
+        if server_launch_flags is None:
+            server_launch_flags = self._measurement_launch_flags(measurement)
         env_spec = {
             "schema_version": 1,
             "config": {
@@ -5645,6 +5658,9 @@ class WritebackCollaborator:
                 measured_tput=measured,
                 provenance="geak_same_harness_geak",
                 overlay_loaded=overlay_loaded_2a,
+                measurement_provenance=(
+                    res.get("promotion_measurement") if isinstance(res.get("promotion_measurement"), Mapping) else res
+                ),
             )
             base = float(self.shared_state.baseline_tput or 0.0)
             gain_out = ((measured - base) / base * 100.0) if base > 0 else 0.0

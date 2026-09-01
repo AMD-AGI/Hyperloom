@@ -153,6 +153,28 @@ def test_grid_runner_emits_expected_error_class_labels():
     assert not missing, f"missing error_class labels in run_grid: {missing}"
 
 
+def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
+    """A refused launch has an abort marker, not a measurement evidence record."""
+    output_root = tmp_path / "runs"
+    result = _grid_runner.VariantResult(
+        name="unsupported",
+        extra_server_args="--unsupported",
+        extra_envs={},
+        status="failed",
+        error_class="capability_unsupported",
+    )
+
+    _grid_runner._attach_grid_launch_evidence(
+        [result],
+        grid=[_grid_runner.GridVariant("unsupported")],
+        output_root=output_root,
+        caller_reused_ready_server=False,
+    )
+
+    assert result.launch_evidence == {}
+    assert not (output_root / "variant_00_unsupported" / "launch_evidence.json").exists()
+
+
 def test_variant_result_carries_error_class_field():
     vr = _grid_runner.VariantResult(
         name="x",

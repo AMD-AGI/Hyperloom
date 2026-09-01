@@ -11,7 +11,6 @@ returns the winners.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -68,6 +67,7 @@ from ._inferencex_patcher import (
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -2689,7 +2689,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=nonzero_error,
                     error_class="magpie_nonzero_after_valid_measurement",
-                    server_log_path=_existing_log_path(server_log),
+                    server_log_path=None,
                     note=variant.note,
                 )
             )
@@ -2718,7 +2718,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
-                server_log_path=_existing_log_path(server_log) or _existing_log_path(workspace / "server.log"),
+                server_log_path=None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
@@ -2839,95 +2839,36 @@ def _attach_grid_launch_evidence(
     """Persist declared and observed launch evidence for each grid result.
 
     Results stay backward-compatible: the new fields are additive, and a
-    pre-materialization failure receives an explicit unverified evidence
-    object. Evidence lives in the variant slot, never in an external rescue
-    directory.
+    skipped pre-materialization result produces no evidence. Evidence lives in
+    the variant slot, never in an external rescue directory.
     """
     for idx, result in enumerate(results):
         if idx >= len(grid):
             break
+        # A skipped variant never launched a measurement. Do not materialize a
+        # synthetic evidence directory whose warm-reuse metadata could later be
+        # mistaken for an observed launch.
+        if result.status == "skipped" or result.error_class in {
+            "capability_unsupported",
+            "yaml_build_error",
+            "warmup_yaml_build_error",
+        }:
+            continue
         slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
         config_path = slot / "config.yaml"
         workspace = Path(result.workspace) if result.workspace else None
         primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
         actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
         result.server_log_path = actual_log
-
-        benchmark: dict[str, Any] = {}
-        try:
-            if config_path.is_file():
-                parsed = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
-                if isinstance(parsed, dict):
-                    raw = parsed.get("benchmark")
-                    benchmark = raw if isinstance(raw, dict) else {}
-        except (OSError, yaml.YAMLError):
-            benchmark = {}
-
-        envs = benchmark.get("envs") if isinstance(benchmark.get("envs"), dict) else {}
-        framework = str(benchmark.get("framework") or os.environ.get("FRAMEWORK") or "sglang").strip().lower()
-        args_env = server_args_env_name(framework)
-        requested_env = {str(key): str(value) for key, value in envs.items() if str(key) != args_env}
-        requested_args = str(envs.get(args_env) or "").strip()
-        recipe_digest = ""
-        try:
-            if config_path.is_file():
-                recipe_digest = f"sha256:{hashlib.sha256(config_path.read_bytes()).hexdigest()}"
-        except OSError:
-            log.debug(
-                "grid_runner: failed to compute launch-evidence recipe digest for %s",
-                config_path,
-                exc_info=True,
-            )
-        observed_flags = ""
-        observed_server_identity: dict[str, Any] = {}
-        if actual_log:
-            try:
-                from ...loop.coordinator_helpers import (
-                    _LAUNCH_ARGV_MARKERS,
-                    _launch_argv_from_log,
-                    _observed_sglang_server_identity_from_log,
-                )
-
-                marker = _LAUNCH_ARGV_MARKERS.get(framework)
-                observed_flags = _launch_argv_from_log(actual_log, marker) if marker else ""
-                if not observed_flags and framework == "sglang":
-                    observed_server_identity = _observed_sglang_server_identity_from_log(actual_log)
-            except Exception:  # noqa: BLE001 - evidence collection must not alter the result
-                observed_flags = ""
-                observed_server_identity = {}
-        warmup_prefix = str(slot / "warmup_round")
-        reused = bool(caller_reused_ready_server or (actual_log and str(actual_log).startswith(warmup_prefix + os.sep)))
-        evidence: dict[str, Any] = {
-            "schema_version": 1,
-            "materialized_config_path": str(config_path) if config_path.is_file() else "",
-            "recipe_digest": recipe_digest,
-            "framework": framework,
-            "model_path": str(benchmark.get("model") or ""),
-            "requested_server_args": requested_args,
-            # Alias makes the CLI-oriented meaning explicit for consumers.
-            "requested_server_flags": requested_args,
-            "requested_server_env": requested_env,
-            "actual_server_log_path": actual_log or "",
-            "observed_server_launch_flags": observed_flags,
-            "observed_server_identity": observed_server_identity,
-            "warm_reuse": {
-                "reused_ready_server": reused,
-                "provenance": (
-                    "warmup_round"
-                    if actual_log and str(actual_log).startswith(warmup_prefix + os.sep)
-                    else ("caller_ready_server" if caller_reused_ready_server else "fresh_or_unobserved")
-                ),
-                "source_server_log_path": actual_log or "",
-            },
-        }
+        evidence = build_launch_evidence(
+            config_path=config_path,
+            actual_server_log=actual_log,
+            framework=os.environ.get("FRAMEWORK", ""),
+            slot=slot,
+            caller_reused_ready_server=caller_reused_ready_server,
+        )
         result.launch_evidence = evidence
-        try:
-            slot.mkdir(parents=True, exist_ok=True)
-            evidence_path = slot / "launch_evidence.json"
-            evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True), encoding="utf-8")
-            result.launch_evidence_path = str(evidence_path)
-        except OSError as exc:
-            log.warning("grid_runner: failed to persist launch evidence in %s: %s", slot, exc)
+        result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
 
 
 def _safe(name: str) -> str:
