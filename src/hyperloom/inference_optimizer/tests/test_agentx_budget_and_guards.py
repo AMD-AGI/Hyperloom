@@ -446,3 +446,101 @@ def test_a_scriptable_framework_gets_no_grace_either(monkeypatch):
     bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
     apply_agentx_switch(bench)
     assert "envs" not in bench
+
+
+# --- a sweep variant's warmup bound must follow ITS concurrency ----------------
+
+
+def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="3600"):
+    """Materialize one grid variant and hand back the envs it will run with."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        GridVariant,
+        _build_variant_yaml,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", anchor)
+    monkeypatch.setenv("CONC", str(session_conc))
+
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/m/x", "timeout_seconds": 7200, "envs": {}}}),
+        encoding="utf-8",
+    )
+    variant = GridVariant(
+        name="v0",
+        extra_server_args="",
+        extra_envs={"CONC": str(variant_conc)},
+    )
+    out = tmp_path / "v0"
+    out.mkdir(exist_ok=True)
+    cfg_path = _build_variant_yaml(base, "", variant, output_subdir=out)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return cfg["benchmark"]["envs"]
+
+
+def test_a_sweep_variant_gets_a_bound_sized_for_its_own_conc(monkeypatch, tmp_path):
+    """The ladder walks 256..2 while the session sits at one value.
+
+    apply_agentx_switch runs during the config rebuild, BEFORE the variant's
+    extra_envs are merged, so the grace it exports is scaled by the session
+    concurrency. A CONC=128 variant was being handed a bound sized for the
+    session's CONC=8 -- and the client's --warmup-grace-period is what actually
+    stops the warmup, so that variant's warmup ends mid-corpus.
+    """
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128)
+    assert envs["CONC"] == "128"
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
+
+
+def test_the_variant_bound_is_not_scaled_twice(monkeypatch, tmp_path):
+    """Re-derive from the OPERATOR's anchor, not from the already-scaled export.
+
+    A session at CONC=32 exports 14400s from a 3600s anchor. Feeding that back
+    through the scaler for a CONC=128 variant would yield 230400s instead of
+    57600s -- an order of magnitude of dead wait on a hung round.
+    """
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=128)
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
+
+
+def test_a_low_conc_variant_keeps_the_larger_session_bound(monkeypatch, tmp_path):
+    """Only ever upward: a bound already paid for is not taken back.
+
+    A CONC=2 variant needs less warmup than the session's CONC=32 bound covers,
+    but shrinking it buys nothing (the round ends when the corpus drains) and
+    risks cutting a warmup that was going to finish.
+    """
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2)
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 32 // 8)
+
+
+def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):
+    """AgentX off: a synthetic variant's env must carry no warmup grace at all."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        GridVariant,
+        _build_variant_yaml,
+    )
+
+    _off(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "8")
+
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/m/x", "timeout_seconds": 7200, "envs": {}}}),
+        encoding="utf-8",
+    )
+    out = tmp_path / "v0"
+    out.mkdir(exist_ok=True)
+    cfg_path = _build_variant_yaml(
+        base, "", GridVariant(name="v0", extra_server_args="", extra_envs={"CONC": "128"}), output_subdir=out
+    )
+    envs = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert "AGENTX_WARMUP_GRACE_PERIOD" not in envs
+    assert envs["CONC"] == "128"

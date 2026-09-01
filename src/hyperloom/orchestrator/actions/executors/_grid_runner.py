@@ -666,6 +666,52 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # The variant's own CONC only exists as of the line above, and the AgentX
+    # warmup grace has to be derived from it -- ``apply_agentx_switch`` ran
+    # during the rebuild, before this merge, so what it exported was scaled by
+    # the SESSION concurrency (``cli`` writes ``--conc`` into os.environ). For a
+    # conc sweep that is the wrong number by construction: the ladder walks
+    # 256..2 while the session sits at one value, so a CONC=128 variant was
+    # being handed a bound sized for CONC=8. Re-derive from the merged env, and
+    # only ever upward -- an operator or reference env that already asked for
+    # more keeps it.
+    #
+    # AgentX-only: gated on ``agentx_enabled()``, and nothing writes
+    # AGENTX_WARMUP_GRACE_PERIOD into a synthetic variant's env in the first
+    # place, so the default grid never enters this branch.
+    from ._workload_envs import agentx_enabled
+
+    if agentx_enabled() and str(envs.get("CONC", "")).strip():
+        from .baseline import agentx_warmup_grace_sec
+
+        # The OPERATOR's anchor plus the VARIANT's concurrency -- never the
+        # value already sitting in ``envs``. That one has been scaled once
+        # (by the session CONC), and feeding it back in would scale it a
+        # second time: a session at CONC=32 with a 3600s anchor exports
+        # 14400s, and re-scaling that for a CONC=128 variant yields 230400s
+        # instead of the correct 57600s.
+        _variant_grace = agentx_warmup_grace_sec(
+            {
+                "AGENTX_WARMUP_GRACE_PERIOD": os.environ.get("AGENTX_WARMUP_GRACE_PERIOD", ""),
+                "CONC": str(envs.get("CONC", "")),
+            }
+        )
+        _prev_grace = str(envs.get("AGENTX_WARMUP_GRACE_PERIOD", "")).strip()
+        try:
+            _prev_val = int(_prev_grace)
+        except ValueError:
+            _prev_val = 0
+        if _variant_grace > _prev_val:
+            envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_variant_grace)
+            log.info(
+                "grid: variant %s runs at CONC=%s, so its warmup grace is re-derived "
+                "%ss -> %ds. The switch that exported the first value ran before this "
+                "variant's CONC existed, and the client's --warmup-grace-period is what "
+                "actually stops the warmup.",
+                variant.name,
+                _prev_grace or "unset",
+                _variant_grace,
+            )
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.
