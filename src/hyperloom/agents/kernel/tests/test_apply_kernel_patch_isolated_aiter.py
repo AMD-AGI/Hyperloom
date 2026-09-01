@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -1036,6 +1037,124 @@ def test_runtime_jit_rejects_unverified_cache_invalidation(
     assert result["status"] == "failed"
     assert result["error_class"] == "aiter_jit_invalidation_failed"
     assert target.read_text(encoding="utf-8") == original
+
+
+def test_verify_cpp_itfs_rebuilt_skips_non_cpp_itfs_target(akp):
+    """The gate is a strict no-op off the cpp_itfs path (record has no
+    ``is_cpp_itfs`` key, or a falsy invalidation record was passed through)."""
+    assert akp.verify_cpp_itfs_rebuilt({"status": "skipped"}) == {
+        "verified": True,
+        "status": "skipped",
+        "reason": "non-cpp_itfs target",
+    }
+    assert akp.verify_cpp_itfs_rebuilt({}) == {
+        "verified": True,
+        "status": "skipped",
+        "reason": "non-cpp_itfs target",
+    }
+    assert akp.verify_cpp_itfs_rebuilt(None) == {
+        "verified": True,
+        "status": "skipped",
+        "reason": "non-cpp_itfs target",
+    }
+
+
+def test_verify_cpp_itfs_rebuilt_stale_when_build_dir_absent(akp, tmp_path):
+    missing = tmp_path / "build"
+
+    result = akp.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(missing),
+            "invalidated_unix": 1000.0,
+            "module_names": ["mha_fwd"],
+        }
+    )
+
+    assert result["verified"] is False
+    assert result["status"] == "stale"
+    assert "build dir absent" in result["reason"]
+
+
+def test_verify_cpp_itfs_rebuilt_stale_when_lib_so_predates_invalidation(akp, tmp_path):
+    build_dir = tmp_path / "build"
+    module_dir = build_dir / "mha_fwd_abc123"
+    module_dir.mkdir(parents=True)
+    lib_so = module_dir / "lib.so"
+    lib_so.write_text("stale binary", encoding="utf-8")
+    since = 10_000.0
+    # More than the 1s slack older than the invalidation timestamp.
+    os.utime(lib_so, (since - 5.0, since - 5.0))
+
+    result = akp.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(build_dir),
+            "invalidated_unix": since,
+            "module_names": ["mha_fwd"],
+        }
+    )
+
+    assert result["verified"] is False
+    assert result["status"] == "stale"
+    assert "no freshly-built cpp_itfs lib.so" in result["reason"]
+    assert result["build_dir"] == str(build_dir)
+    assert result["module_names"] == ["mha_fwd"]
+
+
+def test_verify_cpp_itfs_rebuilt_ok_when_fresh_lib_so_matches_module_name(akp, tmp_path):
+    build_dir = tmp_path / "build"
+    fresh_dir = build_dir / "mha_fwd_abc123"
+    fresh_dir.mkdir(parents=True)
+    fresh_so = fresh_dir / "lib.so"
+    fresh_so.write_text("rebuilt binary", encoding="utf-8")
+    since = 10_000.0
+    os.utime(fresh_so, (since + 2.0, since + 2.0))
+    # An unrelated module's lib.so is also fresh but must be excluded by the
+    # module-name-scoped glob, proving the check doesn't just check "any"
+    # lib.so exists.
+    other_dir = build_dir / "unrelated_xyz"
+    other_dir.mkdir(parents=True)
+    other_so = other_dir / "lib.so"
+    other_so.write_text("other binary", encoding="utf-8")
+    os.utime(other_so, (since + 2.0, since + 2.0))
+
+    result = akp.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(build_dir),
+            "invalidated_unix": since,
+            "module_names": ["mha_fwd"],
+        }
+    )
+
+    assert result == {
+        "verified": True,
+        "status": "ok",
+        "fresh_lib_so": [str(fresh_so)],
+    }
+
+
+def test_verify_cpp_itfs_rebuilt_falls_back_to_wildcard_without_module_names(akp, tmp_path):
+    build_dir = tmp_path / "build"
+    fresh_dir = build_dir / "anything_here"
+    fresh_dir.mkdir(parents=True)
+    fresh_so = fresh_dir / "lib.so"
+    fresh_so.write_text("rebuilt binary", encoding="utf-8")
+    since = 10_000.0
+    os.utime(fresh_so, (since, since))
+
+    result = akp.verify_cpp_itfs_rebuilt(
+        {
+            "is_cpp_itfs": True,
+            "build_dir": str(build_dir),
+            "invalidated_unix": since,
+            "module_names": [],
+        }
+    )
+
+    assert result["verified"] is True
+    assert result["fresh_lib_so"] == [str(fresh_so)]
 
 
 def test_multinode_runtime_jit_is_invalidated_on_every_pod(
