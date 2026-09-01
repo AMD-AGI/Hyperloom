@@ -356,6 +356,18 @@ def test_an_unreachable_api_is_not_mistaken_for_a_missing_phase(poll_script: str
     assert err.strip(), "curl's diagnosis must be kept, not sent to /dev/null"
 
 
+def test_a_manual_run_still_gets_per_leg_checks(workflow: dict, poll_script: str) -> None:
+    """An empty SHA silently disabled every status and the report, with nothing logged."""
+    sha = workflow["jobs"]["run"]["env"]["GH_STATUS_SHA"]
+    assert "github.event.pull_request.head.sha" in sha
+    assert "github.sha" in sha, "workflow_dispatch has no pull_request object"
+    # The gates that a missing SHA short-circuits, including the report's PR lookup that
+    # only becomes reachable once the SHA is populated.
+    assert "gh_status_on || return 0" in poll_script
+    assert "statuses/${GH_STATUS_SHA}" in poll_script
+    assert "commits/${GH_STATUS_SHA}/pulls" in poll_script
+
+
 def test_the_gpu_assignment_is_the_leg_order_not_a_second_copy_of_it(
     dispatch_script: str, bootstrap_script: str
 ) -> None:

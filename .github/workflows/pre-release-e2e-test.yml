@@ -299,8 +299,14 @@ jobs:
       GH_STATUS_REPO: ${{ github.repository }}
       # On pull_request, github.sha is the ephemeral merge commit; per-leg commit
       # statuses must land on the PR HEAD sha so they surface on the PR checks tab.
-      GH_STATUS_SHA: ${{ github.event.pull_request.head.sha }}
-      # PR number is known directly from the event -- no commit->PR reverse lookup.
+      # workflow_dispatch carries no pull_request object, so without the fallback the
+      # SHA was empty and every status/report call returned early without a word --
+      # leaving the entry point most likely to be used at release time with no checks
+      # at all. github.sha is the dispatched ref's real commit, which statuses can
+      # attach to, and it also revives the poll's commit->PR lookup for the report.
+      GH_STATUS_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      # Known directly from a pull_request event; empty on dispatch, where the poll
+      # falls back to resolving the PR from the commit.
       PR_NUMBER: ${{ github.event.pull_request.number }}
       HEAD_REF: ${{ github.head_ref }}
       GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
