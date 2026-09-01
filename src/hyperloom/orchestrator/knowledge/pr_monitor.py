@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-
-# MCP URL passed to specialist LLM backends. Empty means PR Monitor MCP is not
-# advertised; the CLI overrides it from --pr-monitor-mcp-url, which itself
-# defaults to $PRIMUS_CORTEX_PR_API + '/mcp/'.
-DEFAULT_PR_MONITOR_MCP_URL: str = ""
+from hyperloom.common.pr_monitor_urls import (
+    pr_monitor_base_url,
+    pr_monitor_mcp_url,
+    pr_monitor_rest_url,
+)
 
 
 @dataclass
@@ -46,6 +46,8 @@ class PRMonitorClient:
 
 
 __all__ = [
-    "DEFAULT_PR_MONITOR_MCP_URL",
     "PRMonitorClient",
+    "pr_monitor_base_url",
+    "pr_monitor_mcp_url",
+    "pr_monitor_rest_url",
 ]

@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -514,10 +513,13 @@ class EnablementParams(CoordinatorCollaborator):
         from hyperloom.agents.framework.enablement_ops import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
+        from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
-        # Only search primus_cortex when its URL is configured.
-        primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
+        # The PR query service is co-hosted by KB Store.
+        plane = getattr(self, "knowledge_plane", None)
+        pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
+        primus_url = pr_monitor_base_url() if pr_enabled else ""
         if primus_url:
             search_modes = ["primus_cortex", "github"]
             primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}

@@ -3059,11 +3059,6 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
-    env.pop("PR_MONITOR_URL", None)
-    pr_url = (getattr(args, "pr_monitor_url", None) or "").strip().rstrip("/")
-    if pr_url:
-        probe_base = pr_url if pr_url.endswith("/v1") else pr_url + "/v1"
-        env["PR_MONITOR_URL"] = probe_base
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 

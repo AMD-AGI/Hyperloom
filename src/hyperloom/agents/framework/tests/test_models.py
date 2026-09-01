@@ -124,6 +124,15 @@ def test_explore_request_minimal() -> None:
     assert r.gap_description == ""
 
 
+def test_explore_request_derives_pr_monitor_from_kb_store(monkeypatch) -> None:
+    monkeypatch.setenv("KB_STORE_URL", "https://kb.example/knowledge-base")
+
+    request = ExploreRequest.from_dict(_minimal_request_dict())
+
+    assert request.primus_cortex is not None
+    assert request.primus_cortex.base_url == "https://kb.example/knowledge-base/pr-monitor"
+
+
 def test_explore_request_requires_framework_and_repo_url() -> None:
     """from_dict rejects missing framework / repo_url."""
     with pytest.raises(ValueError, match="framework"):

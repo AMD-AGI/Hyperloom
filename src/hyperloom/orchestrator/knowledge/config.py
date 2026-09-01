@@ -76,7 +76,9 @@ class KnowledgeConfig:
         return cls(
             mode=mode,
             local_root=local_root,
-            kb_store_url=kb_store_url if mode is KnowledgeStoreMode.REMOTE else "",
+            # The URL also hosts PR Monitor and is therefore useful in local
+            # Recipe mode; only the Recipe bearer token is mode-specific.
+            kb_store_url=kb_store_url,
             kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
         )
 
@@ -95,7 +97,10 @@ class KnowledgeConfig:
             env["KB_STORE_URL"] = self.kb_store_url
             env["KB_STORE_TOKEN"] = self.kb_store_token
         else:
-            env.pop("KB_STORE_URL", None)
+            if self.kb_store_url:
+                env["KB_STORE_URL"] = self.kb_store_url
+            else:
+                env.pop("KB_STORE_URL", None)
             env.pop("KB_STORE_TOKEN", None)
         # GBrain credentials are used by the Framework PR client but must
         # never cross into the KernelForge child.

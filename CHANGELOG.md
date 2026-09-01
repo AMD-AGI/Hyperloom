@@ -7,6 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
+  `${KB_STORE_URL}/pr-monitor/v1` and MCP
+  `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,
+  KernelForge priors, IR-3, and specialist tools. The independent
+  `PRIMUS_CORTEX_PR_API`, `--pr-monitor-url`, and `--pr-monitor-mcp-url`
+  configuration paths are removed.
+
 - **A published Recipe now carries three columns instead of five.**
   `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
   `config`/`patch`/`kernel`, each owned end to end by one SDK facade

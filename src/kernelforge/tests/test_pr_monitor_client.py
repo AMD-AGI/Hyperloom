@@ -56,7 +56,7 @@ def _install(monkeypatch, handler):
 
 
 def test_normalize_base_url_tolerates_version_suffix(monkeypatch):
-    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
     assert normalize_base_url("https://host/pr-monitor") == "https://host/pr-monitor"
     assert normalize_base_url("https://host/pr-monitor/") == "https://host/pr-monitor"
     assert normalize_base_url("https://host/pr-monitor/v1") == "https://host/pr-monitor"
@@ -64,8 +64,15 @@ def test_normalize_base_url_tolerates_version_suffix(monkeypatch):
 
 
 def test_normalize_base_url_reads_env(monkeypatch):
-    monkeypatch.setenv("PRIMUS_CORTEX_PR_API", "https://env-host/pr-monitor/v1")
-    assert normalize_base_url() == "https://env-host/pr-monitor"
+    monkeypatch.setenv("KB_STORE_URL", "https://env-host/knowledge-base")
+    assert normalize_base_url() == "https://env-host/knowledge-base/pr-monitor"
+
+
+def test_client_requires_kb_store_url(monkeypatch):
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    client = PRMonitorClient()
+    with pytest.raises(PRMonitorError, match="KB_STORE_URL"):
+        client.get("/repos")
 
 
 def test_base_url_property_exposes_the_normalized_root():

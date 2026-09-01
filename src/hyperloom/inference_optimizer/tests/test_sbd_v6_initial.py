@@ -761,7 +761,7 @@ def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_pat
 
     monkeypatch.setattr(preflight, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(preflight.subprocess, "run", lambda *_args, **_kwargs: None)
-    args = argparse.Namespace(degraded_kb=False, degraded_pr=False, pr_monitor_url="")
+    args = argparse.Namespace(degraded_kb=False, degraded_pr=False)
 
     outcome = preflight._run_ir3_preflight(args)
 

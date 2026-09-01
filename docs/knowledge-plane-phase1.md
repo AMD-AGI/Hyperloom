@@ -8,9 +8,9 @@ orphan: true
 # KnowledgePlane phase 1
 
 Phase 1 puts Recipe KB and the KernelForge knowledge control-plane behind one
-Hyperloom `KnowledgePlane`. PR Monitor remains available through its existing
-gating path, but is not moved into the new local/remote data plane. Framework
-Doc, GEMM tuning, Read A, and Read C are unchanged.
+Hyperloom `KnowledgePlane`. PR Monitor is co-hosted by KB Store: one
+`KB_STORE_URL` supplies the Recipe API, PR REST API, and specialist MCP
+endpoint. Framework Doc, GEMM tuning, Read A, and Read C are unchanged.
 
 ## Configuration
 
@@ -18,7 +18,7 @@ Doc, GEMM tuning, Read A, and Read C are unchanged.
 | --- | --- |
 | `KNOWLEDGE_STORE_MODE` | `local` or `remote`; unset defaults to `local` |
 | `KNOWLEDGE_LOCAL_ROOT` | Local knowledge root. Defaults to `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` |
-| `KB_STORE_URL` | Required only in `remote` mode |
+| `KB_STORE_URL` | KB Service endpoint. Required for Recipe access in `remote` mode and for PR Monitor in either mode; PR REST and MCP are derived as `/pr-monitor/v1` and `/pr-monitor/mcp/`. |
 | `KB_STORE_TOKEN` | Required only in `remote` mode |
 | `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` | Optional GBrain credentials for Framework PR capabilities |
 
@@ -30,8 +30,15 @@ This is a breaking mode cutover. Recipe remote mode now requires `KB_STORE_URL`
 and `KB_STORE_TOKEN`. GBrain credentials do not satisfy or select Recipe remote
 mode.
 
-Local mode is local-only. Remote mode writes one final Recipe session to KB
-Store at CLOSE; neither mode performs an inline mirror or dual write.
+Local Recipe mode is local-only. Remote Recipe mode writes one final Recipe
+session to KB Store at CLOSE; neither mode performs an inline mirror or dual
+write.
+
+PR Monitor configuration is orthogonal to Recipe storage mode. When
+`KB_STORE_URL` is present and `--degraded-pr` is absent, Framework discovery,
+KernelForge PR priors, IR-3, and specialist tools all use its co-hosted PR
+surface. The former independent PR endpoint flags and Cortex endpoint variable
+are unsupported.
 
 The older `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` inputs remain a
 deprecated compatibility path when `KNOWLEDGE_LOCAL_ROOT` is absent.

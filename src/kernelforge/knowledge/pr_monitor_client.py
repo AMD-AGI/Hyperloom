@@ -18,9 +18,9 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-log = logging.getLogger(__name__)
+from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
-DEFAULT_BASE_URL = "https://global.primus-safe.amd.com/pr-monitor"
+log = logging.getLogger(__name__)
 
 # Self-imposed ceiling: no query may ask for more than one bounded first page.
 BOUNDED_PAGE_LIMIT = 50
@@ -51,7 +51,7 @@ class FetchOutcome:
 
 def normalize_base_url(raw: str = "") -> str:
     """Return the service root without a trailing ``/v1``."""
-    base = (raw or os.environ.get("PRIMUS_CORTEX_PR_API", "") or DEFAULT_BASE_URL).strip()
+    base = (raw or pr_monitor_base_url()).strip()
     base = base.rstrip("/")
     if base.endswith("/v1"):
         base = base[: -len("/v1")].rstrip("/")
@@ -98,6 +98,8 @@ class PRMonitorClient:
 
     def _url(self, path: str, params: dict[str, Any] | None = None) -> str:
         """Build one absolute ``/v1`` URL, dropping parameters left as None."""
+        if not self._base:
+            raise PRMonitorError("KB_STORE_URL is required when PR Monitor knowledge is enabled")
         url = f"{self._base}/v1{path}"
         if params:
             query = {k: v for k, v in params.items() if v is not None}

@@ -161,10 +161,12 @@ def test_a_remote_child_without_gbrain_is_told_so_rather_than_left_guessing() ->
     assert "GBRAIN_TOKEN" not in child
 
 
-def test_a_local_child_reaches_for_neither_backend() -> None:
+def test_a_local_child_keeps_pr_service_url_without_recipe_token() -> None:
     local = KnowledgeConfig.from_env(
         {
             "KNOWLEDGE_STORE_MODE": "local",
+            "KB_STORE_URL": "https://kb.test",
+            "KB_STORE_TOKEN": "must-not-cross",
             "GBRAIN_BASE_URL": "https://gbrain.test",
             "GBRAIN_TOKEN": "gbrain-token",
         }
@@ -177,7 +179,7 @@ def test_a_local_child_reaches_for_neither_backend() -> None:
         "GBRAIN_TOKEN": "gbrain-token",
     }
     local.apply_to_child_env(child)
-    assert "KB_STORE_URL" not in child
+    assert child["KB_STORE_URL"] == "https://kb.test"
     assert "KB_STORE_TOKEN" not in child
     assert "GBRAIN_BASE_URL" not in child
     assert "GBRAIN_TOKEN" not in child

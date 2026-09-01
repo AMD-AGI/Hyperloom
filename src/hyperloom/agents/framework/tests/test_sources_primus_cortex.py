@@ -85,7 +85,7 @@ def test_list_perf_prs_parses_items_list(monkeypatch) -> None:
 
 
 def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
-    """Operator-provided PRIMUS_CORTEX_PR_API may already include /v1."""
+    """The KB Store-derived PR Monitor URL may already include /v1."""
     seen: dict[str, str] = {}
     body = json.dumps({"items": [{"number": 1, "title": "a", "html_url": "u1"}]}).encode("utf-8")
 
@@ -96,11 +96,11 @@ def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
     _install_urlopen(monkeypatch, handler)
     pc.list_perf_prs(
         "https://github.com/sgl-project/sglang.git",
-        base_url="https://global.primus-safe.amd.com/pr-monitor/v1",
+        base_url="https://global.primus-safe.amd.com/knowledge-base/pr-monitor/v1",
         limit=1,
     )
     assert "/v1/v1/" not in seen["url"]
-    assert seen["url"].startswith("https://global.primus-safe.amd.com/pr-monitor/v1/repos/")
+    assert seen["url"].startswith("https://global.primus-safe.amd.com/knowledge-base/pr-monitor/v1/repos/")
 
 
 def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:

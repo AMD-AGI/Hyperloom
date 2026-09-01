@@ -11,14 +11,12 @@ primus_cortex hard-failing and GitHub best-effort).
 
 from __future__ import annotations
 
-import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-
-PRIMUS_CORTEX_ENV_VAR = "PRIMUS_CORTEX_PR_API"
+from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
 
 @dataclass(frozen=True)
@@ -474,7 +472,7 @@ class ExploreRequest:
         if isinstance(primus_raw, dict):
             primus_cortex = PrimusCortexConfig.from_dict(primus_raw)
         elif primus_raw is None:
-            env_base_url = os.environ.get(PRIMUS_CORTEX_ENV_VAR, "").strip()
+            env_base_url = pr_monitor_base_url()
             primus_cortex = PrimusCortexConfig(base_url=env_base_url) if env_base_url else None
         else:
             raise ValueError("primus_cortex must be an object when present")

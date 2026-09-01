@@ -12,10 +12,7 @@ from typing import Any
 from .config import KnowledgeConfig, KnowledgeStoreMode
 from .kernel_experience_bridge import KernelExperienceBridge
 
-from .pr_monitor import (
-    DEFAULT_PR_MONITOR_MCP_URL,
-    PRMonitorClient,
-)
+from .pr_monitor import PRMonitorClient
 
 
 log = logging.getLogger(__name__)
@@ -30,7 +27,7 @@ class KnowledgePlane:
     """
 
     pr_monitor: PRMonitorClient | None = None
-    pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL
+    pr_monitor_mcp_url: str = ""
     recipe_kb: Any = None
     config: KnowledgeConfig | None = None
     kernel_experience: KernelExperienceBridge | None = None
@@ -41,7 +38,7 @@ class KnowledgePlane:
         cls,
         *,
         pr_monitor: PRMonitorClient | None = None,
-        pr_monitor_mcp_url: str = DEFAULT_PR_MONITOR_MCP_URL,
+        pr_monitor_mcp_url: str = "",
         recipe_kb: Any = None,
         config: KnowledgeConfig | None = None,
         kb_disabled: bool = False,
@@ -59,7 +56,7 @@ class KnowledgePlane:
         resolved = config or KnowledgeConfig.from_env()
         return cls(
             pr_monitor=pr_monitor,
-            pr_monitor_mcp_url=(pr_monitor_mcp_url or DEFAULT_PR_MONITOR_MCP_URL).strip(),
+            pr_monitor_mcp_url=(pr_monitor_mcp_url or "").strip(),
             recipe_kb=recipe_kb,
             config=resolved,
             kernel_experience=(None if kb_disabled else KernelExperienceBridge(resolved)),
