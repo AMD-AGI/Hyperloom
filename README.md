@@ -1,3 +1,6 @@
+# ROCm Hyperloom-RX9000series
+This fork is intended to explore the reworking of Hyperloom's core functions and optimizations to localized inference on RX 9000 series cards. While the original Readme will remain intact as a fork, all updates for this specific fork will be added to the front of the original description.
+
 # ROCm Hyperloom
 
 [![Tests](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml/badge.svg)](https://github.com/AMD-AGI/Hyperloom/actions/workflows/tests-coverage.yml)
