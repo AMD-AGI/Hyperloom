@@ -202,24 +202,39 @@ def _delay_of(tmp_path: Path, monkeypatch, envs: dict, *, r: str | None = None) 
     return int(json.loads(body["PROFILE_EXTRA_BODY"])["start_step"])
 
 
-def test_delay_is_clamped_to_the_steady_state_arrival_point(tmp_path, monkeypatch):
+def test_delay_is_clamped_to_the_off_crest_steady_state_point(tmp_path, monkeypatch):
     # The Kimi-K3 configuration. Unclamped this is 1024*2*3 - 64 = 6080
     # iterations, ~407 s of uninterrupted decode at the measured 67 ms TPOT.
-    # Steady state arrives after one mean request lifetime: 1024*2/2 = 1024.
-    assert _delay_of(tmp_path, monkeypatch, {"CONC": 64, "ISL": 8192, "OSL": 1024}) == 1024
+    # 1.5 * E[L] = 1.5 * (1024*2/2) = 1536, ~103 s.
+    assert _delay_of(tmp_path, monkeypatch, {"CONC": 64, "ISL": 8192, "OSL": 1024}) == 1536
 
 
 def test_clamp_tracks_the_random_range_ratio(tmp_path, monkeypatch):
-    # ceil(1024 * 1.5 / 2) = 768, not the unclamped 4544.
+    # E[L] = 1024*1.5/2 = 768; 1.5x that is 1152, not the unclamped 4544.
     delay = _delay_of(tmp_path, monkeypatch, {"CONC": 32, "ISL": 256, "OSL": 1024}, r="0.5")
-    assert delay == 768
+    assert delay == 1152
+
+
+def test_clamp_lands_between_retirement_waves(tmp_path, monkeypatch):
+    """At R=1 every request decodes exactly OSL tokens, so the first cohort
+    retires and is re-admitted in a burst every E[L] iterations. The capture
+    must not start on one of those crests, or the window is prefill-heavy
+    instead of the pure-decode full-batch regime every healthy capture shows.
+    """
+    osl = 1024
+    delay = _delay_of(tmp_path, monkeypatch, {"CONC": 64, "ISL": 8192, "OSL": osl})
+    mean_lifetime = osl * 2 // 2  # E[L] at R=1
+    assert delay % mean_lifetime != 0, "capture starts on a retirement-wave crest"
+    # Comfortably past batch saturation, which completes at max TTFT
+    # (~475 iterations on Kimi-K3) -- not one whole lifetime.
+    assert delay > mean_lifetime
 
 
 def test_clamp_never_raises_a_delay_that_was_already_short(tmp_path, monkeypatch):
-    # OSL=64: the formula gives 64*2*3 - 64 = 320, above the arrival point of
-    # 64, so it clamps DOWN. The clamp must never push a delay up.
+    # OSL=64: the formula gives 64*2*3 - 64 = 320, above the off-crest point of
+    # ceil(64*2*3/4) = 96, so it clamps DOWN. The clamp must never push a delay up.
     delay = _delay_of(tmp_path, monkeypatch, {"CONC": 32, "ISL": 64, "OSL": 64})
-    assert delay == 64
+    assert delay == 96
     assert delay <= int(64 * 2 * 3 - 128 / 2)
 
 
@@ -228,3 +243,6 @@ def test_clamped_delay_is_always_below_the_unclamped_formula(tmp_path, monkeypat
     delay = _delay_of(tmp_path, monkeypatch, {"CONC": 32, "ISL": 256, "OSL": osl})
     unclamped = max(0, int(osl * 2 * 3 - 128 / 2))
     assert 0 < delay <= unclamped
+    # The clamp is 1.5x the mean request lifetime, i.e. 1/4 of the raw formula's
+    # 6x, so the uninterrupted-decode requirement drops ~4x.
+    assert delay == osl * 3 // 2
