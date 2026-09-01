@@ -1056,52 +1056,12 @@ def materialize_config_with_envs(
         delay_iters = int(osl_val * (r_val + 1) * 3 - max_iters / 2)
         if delay_iters < 0:
             delay_iters = 0
-        # Clamp the delay to the first point that is both steady AND off-crest.
-        #
-        # Every profile config ships RANDOM_RANGE_RATIO=1, and the client draws
-        # output lengths from [OSL*R, OSL] -- at R=1 that is a single point, so
-        # with --ignore-eos every request decodes EXACTLY OSL tokens. Nothing
-        # retires early, so steady state is not reached by a cohort draining
-        # gradually; it is reached when the batch saturates, i.e. once the last
-        # of the first CONC requests clears prefill. That is the max TTFT
-        # (~32 s p99 on Kimi-K3, ~475 iterations at a 67 ms TPOT) -- far short
-        # of the 6080 iterations the 3x multiplier asks for.
-        #
-        # A constant output length does leave the run periodic: the first cohort
-        # retires one mean lifetime E[L] = OSL*(1+R)/2 after admission and is
-        # replaced by a matching burst of prefills, and that wave repeats with
-        # period E[L] (damping as each generation's spread widens). Landing the
-        # capture on a crest -- any integer multiple of E[L] -- would bias the
-        # window prefill-heavy. Every healthy capture in the session corpus is
-        # instead pure decode at full batch (``prefill_0 ... decode_32 bs64
-        # conc64``, 763 decode_only / 576 mixed chunks), which is what the
-        # KERNEL agent has been optimizing against; moving the capture onto a
-        # crest would silently change that regime.
-        #
-        # So take 1.5*E[L]: past batch saturation by ~3x, and phased between the
-        # first and second retirement waves. At the 1024/1024 defaults that is
-        # 1536 iterations (~103 s) instead of 6080 (~407 s) -- every one of which
-        # must be served without interruption before the profiler records its
-        # first event, because a worker death or a 500-storm anywhere inside the
-        # window yields a zero-byte trace and no diagnostic. 4x less exposure.
-        steady_delay = math.ceil(safe_osl * (1.0 + r_val) * 3.0 / 4.0)
-        if delay_iters > steady_delay:
-            log.info(
-                "profile delay_iterations %d exceeds the off-crest steady-state "
-                "point of %d iterations (1.5x the mean request lifetime); "
-                "clamping so the capture does not depend on %dx the required "
-                "uninterrupted decode window.",
-                delay_iters,
-                steady_delay,
-                max(1, delay_iters // max(1, steady_delay)),
-            )
-            delay_iters = steady_delay
         # The iteration-based delay assumes the client streams a predictable
         # number of decode steps before steady state. The AgentX client instead
         # brackets a WALL-CLOCK window with /start_profile and /stop_profile, so
-        # an iteration delay computed from the placeholder OSL (1024 steps at the
-        # 1024/1024 defaults, post-clamp) is never reached inside that window and
-        # the trace comes back empty. Hand the delay to the client and keep only the
+        # an iteration delay computed from the placeholder OSL (6080 steps at the
+        # 1024/1024 defaults) is never reached inside that window and the trace
+        # comes back empty. Hand the delay to the client and keep only the
         # capture bound, which is what stops the worker accumulating events in
         # host RAM until the OOM killer arrives.
         if agentx_enabled():

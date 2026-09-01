@@ -431,13 +431,10 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     tmp_path,
     monkeypatch,
 ):
-    """vLLM: OSL=1024, CONC=32, R unset → capture capped at 128, delay=1536.
+    """vLLM: OSL=1024, CONC=32, R unset → capture capped at 128, delay=6080.
 
-    Capture is the serialization-safe cap (default 128). The warmup formula
-    OSL*(R+1)*3 - max_iters/2 = 1024*2*3 - 64 = 6080 is then clamped to
-    1.5*E[L] = OSL*(R+1)*3/4 = 1536 -- past batch saturation, and phased
-    between the retirement waves a constant output length produces -- so the
-    capture does not require 4x the necessary uninterrupted decode window.
+    Capture is the serialization-safe cap (default 128); delay keeps the
+    warmup formula OSL*(R+1)*3 - max_iters/2 = 1024*2*3 - 64 = 6080.
     """
     import yaml
 
@@ -446,7 +443,7 @@ def test_materialize_profile_window_vllm_skill_formula_default_R(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
 
 
@@ -463,10 +460,9 @@ def test_materialize_profile_window_vllm_skill_formula_explicit_R(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     envs = rendered["benchmark"]["envs"]
-    # R=0.5: max capped at 128; the formula gives 1024*1.5*3 - 64 = 4544, clamped
-    # to 1.5*E[L] = ceil(1024 * 1.5 * 3 / 4) = 1152.
+    # R=0.5: max capped at 128; delay = 1024 * 1.5 * 3 - 128/2 = 4608 - 64 = 4544.
     extra = envs["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1152" in extra, extra
+    assert "--profiler-config.delay_iterations 4544" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # And R must round-trip into the YAML as a float, not stringified-int.
     assert envs["RANDOM_RANGE_RATIO"] == 0.5
@@ -511,7 +507,7 @@ def test_materialize_profile_bounds_survive_a_replacing_candidate(
         args_mode="replace",
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     # The frontend profiler tracks no iterations, so it has to come back too.
     assert "--profiler-config.ignore_frontend True" in extra, extra
@@ -539,7 +535,7 @@ def test_materialize_profile_bounds_survive_an_extra_envs_override(
         extra_envs={"EXTRA_VLLM_ARGS": "--quantization fp8"},
     )
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--quantization fp8" in extra, extra
 
@@ -756,7 +752,7 @@ def test_materialize_profile_restore_accepts_a_bound_that_already_holds(
         tmp_path,
         extra_envs={
             "EXTRA_VLLM_ARGS": (
-                "--profiler-config.delay_iterations 1536 "
+                "--profiler-config.delay_iterations 6080 "
                 "--profiler-config.max_iterations 64 "
                 "--profiler-config.ignore_frontend True "
                 "--profiler-config.capture_torch_profiler True "
@@ -865,8 +861,8 @@ def test_materialize_profile_window_sglang_skill_formula(
     out = _materialize_config_with_envs(src, tmp_path)
     rendered = yaml.safe_load(out.read_text())
     body = json.loads(rendered["benchmark"]["envs"]["PROFILE_EXTRA_BODY"])
-    # max capped at 128; 1024*2*3 - 64 = 6080 clamped to 1.5*E[L] = 1536.
-    assert body["start_step"] == 1536
+    # max capped at 128; delay = 1024 * 2 * 3 - 128/2 = 6080.
+    assert body["start_step"] == 6080
     assert body["num_steps"] == 128
 
 
@@ -906,15 +902,15 @@ def test_materialize_profile_num_prompts_covers_steady_state_window(
     tmp_path,
     monkeypatch,
 ):
-    """OSL=1024 / CONC=32 / R=1 → delay+max = 1664 iters ⇒ NUM_PROMPTS=104."""
+    """OSL=1024 / CONC=32 / R=1 → delay+max = 6208 iters ⇒ NUM_PROMPTS=388."""
     import yaml
 
     _clear_workload_env(monkeypatch)
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # delay=1536, max=128 → required=1664; ceil(1664*32/1024)=52; *2 = 104.
-    assert envs["NUM_PROMPTS"] == 104, envs.get("NUM_PROMPTS")
+    # delay=6080, max=128 → required=6208; floor(6208*32/1024)=194; *2 = 388.
+    assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
@@ -928,9 +924,8 @@ def test_materialize_profile_num_prompts_floors_at_conc_for_tiny_osl(
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 64, "OSL": 64})
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # max=128, delay=min(64*2*3-64, ceil(64*2*3/4))=96, required=224;
-    # 224*32/64=112; *2=224.
-    assert envs["NUM_PROMPTS"] == 224, envs.get("NUM_PROMPTS")
+    # max=128, delay=64*2*3-64=320, required=448; 448*32/64=224; *2=448.
+    assert envs["NUM_PROMPTS"] == 448, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_profile_force_overrides_user_num_prompts(
@@ -951,8 +946,8 @@ def test_materialize_profile_force_overrides_user_num_prompts(
     )
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
-    # Hyperloom-computed 72 must win over the caller's 32.
-    assert envs["NUM_PROMPTS"] == 104, envs.get("NUM_PROMPTS")
+    # Hyperloom-computed 388 must win over the caller's 32.
+    assert envs["NUM_PROMPTS"] == 388, envs.get("NUM_PROMPTS")
 
 
 def test_materialize_non_profile_keeps_legacy_seq_cost_factor(
@@ -1021,7 +1016,7 @@ def test_materialize_profile_vllm_injects_tracelens_flags_when_patched(
     src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "--profiler-config.max_iterations 128" in extra, extra
     assert "--profiler-config.capture_torch_profiler True" in extra, extra
     assert "--profiler-config.detailed_trace_annotation True" in extra, extra
@@ -1044,7 +1039,7 @@ def test_materialize_profile_vllm_omits_tracelens_flags_when_patch_fails(
     out = _materialize_config_with_envs(src, tmp_path)
     envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
     extra = envs["EXTRA_VLLM_ARGS"]
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     assert "capture_torch_profiler" not in extra, extra
     assert "detailed_trace_annotation" not in extra, extra
     assert envs["HYPERLOOM_TRACELENS_PATCH_STATUS"] == "unavailable"
@@ -1213,7 +1208,7 @@ def test_materialize_profile_kill_switch_skips_patcher_entirely(
     out = _materialize_config_with_envs(src, tmp_path)
     extra = yaml.safe_load(out.read_text())["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
     # Safe profiler flags still present.
-    assert "--profiler-config.delay_iterations 1536" in extra, extra
+    assert "--profiler-config.delay_iterations 6080" in extra, extra
     # TraceLens-only flags absent.
     assert "detailed_trace_annotation" not in extra, extra
     # Patchers never invoked.

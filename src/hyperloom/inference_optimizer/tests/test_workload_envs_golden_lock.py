@@ -104,9 +104,9 @@ benchmark:
     OSL: 1024
     TP: 1
     ROCR_VISIBLE_DEVICES: '0'
-    PROFILE_EXTRA_BODY: '{"start_step": 1536, "num_steps": 128, "shape_discovery":
+    PROFILE_EXTRA_BODY: '{"start_step": 6080, "num_steps": 128, "shape_discovery":
       true, "detailed_annotations": true}'
-    NUM_PROMPTS: 208
+    NUM_PROMPTS: 776
     NUM_WARMUPS: 8
     AITER_LOG_TUNED_CONFIG: '1'
     EXTRA_SGLANG_ARGS: --watchdog-timeout 1800
