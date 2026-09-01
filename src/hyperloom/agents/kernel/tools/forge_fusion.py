@@ -245,6 +245,19 @@ def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.Compl
         raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
 
 
+def _attempted(loop: dict[str, Any]) -> bool:
+    """Whether ``fusion_loop`` reports at least one completed attempt.
+
+    Read defensively: the count crosses a repository boundary, and a non-numeric
+    value must not read as "attempted" -- that would drop the run back into the
+    ``complete``/``no_improvement`` shape this guards against.
+    """
+    try:
+        return int(loop.get("attempts") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     """Map forge-fusion's ``fusion_manifest.json`` -> Hyperloom result contract."""
     result: dict[str, Any] = {
@@ -310,37 +323,42 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         )
         return result
 
-    aborted = str(loop.get("termination_reason") or "").strip()
-    if aborted in INFRA_ABORT_REASONS and not kept and not (loop.get("attempts") or 0):
-        # Discovery finished and named a recipe; only the harness-authoring turn
-        # died, so the loop never got to judge anything. The default no-KEEP shape
-        # below would report that as ``complete``/``no_improvement`` -- an outage
-        # recorded as an optimization result, AND ``complete`` satisfies the
-        # KERNEL-entry idempotency gate (``_fusion_required_before_kernel_opt``),
-        # so one abort would skip fusion for the whole remaining session even
-        # though every later entry could have retried it. Same reasoning, and the
-        # same retryable shape, as the LLM outage above.
+    aborted = str(loop.get("termination_reason") or "").strip().lower()
+    if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
+        # The loop stopped on infrastructure, not on a judgement about the kernel:
+        # the harness-authoring turn failed, or there was no git workspace to
+        # author in. Discovery had already run, so a recipe is named in the
+        # manifest; nothing ever got to measure it.
         #
-        # Guarded on ``not kept`` and on the loop never having attempted, so this
-        # can never discard a measured fusion: with zero attempts there is no
-        # measurement to discard.
+        # The default no-KEEP shape below would report that as
+        # ``complete``/``no_improvement`` -- an outage recorded as an optimization
+        # result, AND ``complete`` satisfies the KERNEL-entry idempotency gate
+        # (``_fusion_required_before_kernel_opt``), so one abort would skip fusion
+        # for the whole remaining session even though every later entry could have
+        # retried it. Same reasoning, and the same retryable shape, as the LLM
+        # outage above.
         #
-        # ``located_env_flag`` is diagnostic only. The recipe was never validated,
-        # so it must not enter ``env_flags``, whose contract is "flags this run
-        # confirmed"; naming it here is what makes the retry cheap and the failure
-        # legible without dressing a guess up as a measurement.
+        # Guarded on ``not kept`` and ``not compile_pass`` so a measured result is
+        # never discarded. The attempt count is a weaker signal than it looks:
+        # KernelForge's abort handler builds a fresh ``LoopResult`` whose history
+        # is empty, so ``attempts`` reads 0 even when earlier recipes ran full
+        # campaigns. It is kept as a cheap filter for the ordinary case, but the
+        # load-bearing guards are the two above -- they are what a real
+        # measurement would set.
         #
         # ``result`` still carries its failed/REVERT/not-kept defaults from above,
-        # so only the abort's identity has to be added.
+        # so only the abort's identity has to be added. The located recipe rides
+        # in the message rather than in ``env_flags``: nothing measured it, and
+        # ``env_flags`` means "flags this run confirmed".
         located = str((m.get("fusion") or {}).get("env_flag") or "")
         result.update(
             {
                 "verdict": m.get("verdict"),
                 "error_class": aborted,
-                "located_env_flag": located,
                 "error": (
-                    f"forge-fusion aborted before any attempt ({aborted}); "
-                    f"recipe already located: {located or 'unknown'}"
+                    f"forge-fusion aborted on infrastructure ({aborted}); "
+                    f"the loop reported no completed attempts and no result. "
+                    f"Recipe located by discovery: {located or 'unknown'}"
                 )[:1500],
             }
         )

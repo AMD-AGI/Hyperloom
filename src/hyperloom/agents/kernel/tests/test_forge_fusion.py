@@ -721,9 +721,8 @@ def test_normalize_manifest_reports_a_harness_author_abort_as_infrastructure(tmp
     assert result["requires_e2e_validation"] is False
     assert result["error_class"] == "harness_author_failed"
     assert "harness_author_failed" in result["error"]
-    # The located recipe is carried for the retry, but not as a confirmed flag:
+    # The located recipe is named for the operator, but never as a confirmed flag:
     # nothing measured it, and ``env_flags`` means "flags this run confirmed".
-    assert result["located_env_flag"] == "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE"
     assert "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE" in result["error"]
     assert result["env_flags"] == {}
     assert result["baseline_env_flags"] == {}
@@ -755,11 +754,9 @@ def test_a_missing_git_workspace_abort_takes_the_same_path(tmp_path):
     """
     output_dir = tmp_path / "out"
     output_dir.mkdir()
-    # attempts absent rather than 0: that abort path builds its LoopResult
-    # without ever setting the counter.
-    manifest = _aborted_manifest("no_git_workspace")
-    del manifest["fusion_loop"]["attempts"]
-    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_aborted_manifest("no_git_workspace")), encoding="utf-8"
+    )
 
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
 
@@ -821,22 +818,62 @@ def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
     assert result["micro_decision"] == "no_improvement"
     assert result["env_flags"] == {"QWEN3_FUSED_QK_NORM_ROPE_KVCACHE": "1"}
     assert "error_class" not in result
-    assert "located_env_flag" not in result
 
 
-def test_an_abort_reason_is_matched_tolerantly(tmp_path):
-    """Matching must not fail open: a stray space would fall back to the
+@pytest.mark.parametrize("reason", ["  harness_author_failed  ", "Harness_Author_Failed", "NO_GIT_WORKSPACE"])
+def test_an_abort_reason_is_matched_tolerantly(tmp_path, reason):
+    """Matching must not fail open: stray case or spacing would fall back to the
     no_improvement mapping, i.e. straight back into the bug this prevents."""
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     (output_dir / "fusion_manifest.json").write_text(
-        json.dumps(_aborted_manifest("  harness_author_failed  ")), encoding="utf-8"
+        json.dumps(_aborted_manifest(reason)), encoding="utf-8"
     )
 
     result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
 
-    assert result["error_class"] == "harness_author_failed"
+    assert result["error_class"] == reason.strip().lower()
     assert result["status"] == "failed"
+
+
+@pytest.mark.parametrize("attempts", ["0", None, "", "not-a-number"])
+def test_a_non_numeric_attempt_count_does_not_fail_open(tmp_path, attempts):
+    """``attempts`` crosses a repo boundary, so its type is not guaranteed.
+
+    Reading it truthily would make the string ``"0"`` count as an attempt and drop
+    the run back into ``complete``/``no_improvement`` -- the bug this prevents.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _aborted_manifest("harness_author_failed", attempts=attempts)
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "harness_author_failed"
+
+
+def test_an_abort_never_discards_a_measured_compile_pass(tmp_path):
+    """A compile-pass claim is a real serving A/B, however the loop ended.
+
+    ``fusion_loop`` and ``compile_pass`` are documented as mutually exclusive, but
+    that invariant lives in another repository -- the same reason the KEEP path
+    below verifies its artifacts rather than assuming them. Firing the abort
+    branch here would throw away a measurement and mark a concluded run retryable.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _aborted_manifest("harness_author_failed")
+    manifest["compile_pass"] = {"kept": False, "speedup": 0.98, "flag": "SGLANG_ENABLE_X"}
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "complete"
+    assert result["serving_speedup"] == 0.98
+    assert result["compile_pass_flag"] == "SGLANG_ENABLE_X"
+    assert "error_class" not in result
 
 
 def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
