@@ -536,7 +536,9 @@ class TestE2EValidationFailsOpen:
     """
 
     def _phase(self, tmp_path, validate):
-        from types import SimpleNamespace
+        from types import MethodType, SimpleNamespace
+
+        from hyperloom.orchestrator.phases.kernel import KernelPhase
 
         recorded: list[dict] = []
         saved: list[object] = []
@@ -544,13 +546,22 @@ class TestE2EValidationFailsOpen:
             record_gemm_tuning=recorded.append,
             save=saved.append,
             macro_cycle=0,
+            gemm_tuning_attempts=[],
+            last_gemm_tuning=None,
         )
-        return SimpleNamespace(
+        phase = SimpleNamespace(
             session_dir=tmp_path,
             shared_state=state,
             _sync_profile_state_after_gemm_roofline=lambda _r: None,
             _validate_gemm_tuning_e2e=validate,
-        ), recorded
+        )
+        # ``record_gemm_tuning`` stores a shallow copy, so the neutralising
+        # rewrites on the exception path only reach state (and result.json)
+        # through these two. Bind the real implementations rather than stubbing
+        # them out, so the test covers what actually runs.
+        for name in ("_replace_latest_gemm_tuning_attempt", "_writeback_gemm_result_json"):
+            setattr(phase, name, MethodType(getattr(KernelPhase, name), phase))
+        return phase, recorded
 
     @pytest.mark.asyncio
     async def test_exception_is_recorded_as_a_fault_not_raised(self, tmp_path):
