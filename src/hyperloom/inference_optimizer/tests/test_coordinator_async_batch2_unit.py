@@ -125,7 +125,7 @@ async def test_resume_retains_pending_recipe_target_without_manifest(
     await coord.writeback._resume_recover_pending_warm_replay(report)
 
     assert coord.shared_state.warm_replay_pending["status"] == "rollback_failed"
-    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:missing_snapshot_manifest"]
+    assert coord.shared_state.warm_replay_pending["rollback_errors"] == ["recipe:/mirror:missing_snapshot_manifest"]
     assert report["warnings"][0]["kind"] == "resume_warm_rollback_failed"
     assert report["fixes"] == []
     assert kernel_restores == [{"manifest_path": "/tmp/kernel"}]
@@ -1551,24 +1551,6 @@ async def test_promote_explore_discovered_flags_and_bad_winner(
 
 
 @pytest.mark.asyncio
-async def test_promote_framework_updates_batch_max_gain(coord: Coordinator) -> None:
-    coord.shared_state.baseline_tput = 800.0
-    coord.shared_state.framework_agent_batches = [
-        {"batch_id": "b1", "max_gain_pct_observed_in_batch": 1.0},
-    ]
-    await coord._promote_to_shared_state(
-        "framework_agent",
-        {
-            "status": "kept",
-            "candidate": {"candidate_id": "c1", "pr_url": "http://x/1"},
-            "batch_id": "b1",
-            "delta_pct": 7.0,
-            "output_throughput": 856.0,
-        },
-    )
-    assert coord.shared_state.framework_agent_batches[0]["max_gain_pct_observed_in_batch"] == 7.0
-
-
 @pytest.mark.asyncio
 async def test_promote_sweep_chains_conc_sweep(coord: Coordinator) -> None:
     coord.shared_state.conc_sweep_enabled = True
@@ -1807,18 +1789,51 @@ async def test_record_fact_per_task_writes_pitfall(coord: Coordinator, monkeypat
 
 # -- _plateau_advisory_block (triggered) ------------------------------------
 @pytest.mark.asyncio
-async def test_plateau_advisory_explore_triggered(coord: Coordinator, monkeypatch) -> None:
+async def test_plateau_advisory_reports_the_config_arm_alone_as_not_a_plateau(coord: Coordinator, monkeypatch) -> None:
+    """One dry arm is not a plateau: the phase stays open on the other lever."""
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = ps.PHASE_EXPLORE
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     monkeypatch.setattr(
         ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
     )
+    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (False, {}))
     out = coord._plateau_advisory_block()
-    assert "EXPLORE plateau detected" in out
-    # Cyclic mode footer states the deterministic EXPLORE→KERNEL advance.
-    assert "advances EXPLORE" in out and "KERNEL_AGENT" in out
-    assert "informational" not in out
+    assert "OPTIMIZE config arm plateaued" in out
+    assert "Only one arm is dry" in out
+
+
+@pytest.mark.asyncio
+async def test_plateau_advisory_reports_the_source_arm_alone_as_not_a_plateau(coord: Coordinator, monkeypatch) -> None:
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
+    monkeypatch.setattr(ps, "compute_plateau_explore", lambda *a, **k: (False, {}))
+    monkeypatch.setattr(
+        ps,
+        "source_arm_plateaued",
+        lambda *a, **k: (True, {"source_consecutive_no_keep": 3, "source_candidates_exhausted": True}),
+    )
+    out = coord._plateau_advisory_block()
+    assert "OPTIMIZE source arm plateaued" in out
+    assert "Only one arm is dry" in out
+
+
+@pytest.mark.asyncio
+async def test_plateau_advisory_both_arms_dry_states_the_advance(coord: Coordinator, monkeypatch) -> None:
+    """Both arms dry is the condition the phase actually leaves on."""
+    import hyperloom.orchestrator.phases.machine_state as ps
+
+    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
+    monkeypatch.setattr(
+        ps, "compute_plateau_explore", lambda *a, **k: (True, {"recent_keep_gain_pct": 0.1, "empty_streak": 3})
+    )
+    monkeypatch.setattr(ps, "source_arm_plateaued", lambda *a, **k: (True, {"source_consecutive_no_keep": 3}))
+    out = coord._plateau_advisory_block()
+    assert "OPTIMIZE config arm plateaued" in out
+    assert "OPTIMIZE source arm plateaued" in out
+    assert "Only one arm is dry" not in out
+    assert "KERNEL_AGENT" in out
 
 
 @pytest.mark.asyncio
@@ -1832,17 +1847,6 @@ async def test_plateau_advisory_kernel_triggered(coord: Coordinator, monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_plateau_advisory_framework_triggered(coord: Coordinator, monkeypatch) -> None:
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
-    monkeypatch.setattr(
-        ps, "compute_plateau_framework_agent", lambda *a, **k: (True, {"lookback": 3, "batch_max_gains": [0.1]})
-    )
-    out = coord._plateau_advisory_block()
-    assert "FRAMEWORK_AGENT plateau detected" in out
-
-
 # -- _record_specialist_result ----------------------------------------------
 @pytest.mark.asyncio
 async def test_record_specialist_result_with_proposals(coord: Coordinator) -> None:
@@ -2045,8 +2049,8 @@ async def test_handle_intent_routes_rare_types(coord: Coordinator, monkeypatch) 
 async def test_advance_phase_noop_when_already_there(coord: Coordinator, monkeypatch) -> None:
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "EXPLORE"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "x", {}))
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
+    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "x", {}))
 
     async def _scout():
         return None
@@ -2061,7 +2065,9 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 
     coord.shared_state.phase = "PRELUDE"
     monkeypatch.setattr(
-        ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "robustness_escalated", {"evidence": "llm_escalation"})
+        ps,
+        "compute_next_phase",
+        lambda *a, **k: ("FRAMEWORK_AGENT", "robustness_escalated", {"evidence": "llm_escalation"}),
     )
 
     async def _entered(*, from_phase, to_phase):
@@ -2069,7 +2075,7 @@ async def test_advance_phase_escalation_transition(coord: Coordinator, monkeypat
 
     monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
     await coord._advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "EXPLORE"
+    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
 
 
 @pytest.mark.asyncio
@@ -2091,38 +2097,17 @@ async def test_advance_phase_terminal_sets_stop_reason(coord: Coordinator, monke
 
 
 @pytest.mark.asyncio
-async def test_advance_phase_hint_survives_transition_toward_explore(coord: Coordinator, monkeypatch) -> None:
-    """A skip_to_kernel hint set during FRAMEWORK_AGENT must survive an unrelated
-    FRAMEWORK_AGENT -> EXPLORE transition, since exit_normal_explore (the hint's
-    only consumer) only ever checks it once the phase is EXPLORE.
-    """
-    import hyperloom.orchestrator.phases.machine_state as ps
+async def test_advance_phase_hint_survives_arrival_at_its_consumer(coord: Coordinator, monkeypatch) -> None:
+    """A hint set during PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT.
 
-    coord.shared_state.phase = "FRAMEWORK_AGENT"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("EXPLORE", "framework_phase_done", {}))
-
-    async def _entered(*, from_phase, to_phase):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "EXPLORE"
-    assert coord.shared_state.pending_escalate_hint == "skip_to_kernel"
-
-
-@pytest.mark.asyncio
-async def test_advance_phase_hint_survives_transition_toward_framework_agent(coord: Coordinator, monkeypatch) -> None:
-    """The same survival requirement, one hop earlier: a hint set during
-    PRELUDE must survive PRELUDE -> FRAMEWORK_AGENT, since EXPLORE (the hint's
-    only consumer) is still ahead whenever explore is enabled. Discarding here
-    is the FRAMEWORK_AGENT -> EXPLORE bug moved one phase upstream.
+    ``exit_normal_optimize`` is the hint's only consumer and it runs in
+    FRAMEWORK_AGENT, so discarding on the transition that arrives there drops
+    the hint on the doorstep of the rule that reads it.
     """
     import hyperloom.orchestrator.phases.machine_state as ps
 
     coord.shared_state.phase = "PRELUDE"
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    coord.shared_state.explore_enabled = True
     monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
 
     async def _entered(*, from_phase, to_phase):
@@ -2135,35 +2120,10 @@ async def test_advance_phase_hint_survives_transition_toward_framework_agent(coo
 
 
 @pytest.mark.asyncio
-async def test_advance_phase_hint_discarded_toward_framework_agent_when_explore_disabled(
-    coord: Coordinator, monkeypatch
-) -> None:
-    """When explore is disabled for the session, FRAMEWORK_AGENT is not a step
-    on the way to EXPLORE -- it never runs -- so a hint riding there is
-    genuinely stale and must still be discarded, not preserved forever.
-    """
-    import hyperloom.orchestrator.phases.machine_state as ps
-
-    coord.shared_state.phase = "PRELUDE"
-    coord.shared_state.pending_escalate_hint = "skip_to_kernel"
-    coord.shared_state.explore_enabled = False
-    monkeypatch.setattr(ps, "compute_next_phase", lambda *a, **k: ("FRAMEWORK_AGENT", "prelude_done", {}))
-
-    async def _entered(*, from_phase, to_phase):
-        return None
-
-    monkeypatch.setattr(coord.phase_machine, "_on_phase_entered", _entered)
-    await coord._advance_phase_if_needed()
-    assert (coord.shared_state.phase or "").upper() == "FRAMEWORK_AGENT"
-    assert coord.shared_state.pending_escalate_hint == ""
-    assert coord.shared_state.last_discarded_escalate_hint == "skip_to_kernel"
-
-
-@pytest.mark.asyncio
-async def test_advance_phase_hint_discarded_when_not_headed_to_explore(coord: Coordinator, monkeypatch) -> None:
-    """A pending hint is genuinely stale once the transition target isn't
-    EXPLORE -- it can never reach exit_normal_explore's check again -- so this
-    is the one case the unrelated-transition cleanup should still clear it.
+async def test_advance_phase_hint_discarded_when_not_headed_to_its_consumer(coord: Coordinator, monkeypatch) -> None:
+    """A pending hint is genuinely stale once the target is not the phase whose
+    exit rule reads it -- it can never reach that check again -- so this is the
+    one case the unrelated-transition cleanup should still clear it.
 
     A discard is not a consumption: it must land in last_discarded_escalate_hint,
     not last_consumed_escalate_hint, which specifically means "this hint drove
@@ -2194,7 +2154,7 @@ async def test_advance_phase_hint_consumed_when_it_drove_the_transition(coord: C
     """
     import hyperloom.orchestrator.phases.machine_state as ps
 
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     coord.shared_state.pending_escalate_hint = "skip_to_kernel"
     monkeypatch.setattr(
         ps,
@@ -2596,7 +2556,7 @@ def _enter_framework(coord: Coordinator) -> None:
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_wrong_phase_noop(coord: Coordinator) -> None:
-    coord.shared_state.phase = "EXPLORE"
+    coord.shared_state.phase = "FRAMEWORK_AGENT"
     await coord._pump_framework_agent_phase()
 
 
@@ -2623,14 +2583,10 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
     # (the enabled arm pivots to local exploration instead — covered separately).
     coord.shared_state.framework_local_explore_enabled = False
     coord.shared_state.framework_agent_discover_failures = 0
-    # Prime the streak so this final empty discovery flips phase done.
-    coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT - 1
+    # Discovery has spent its retry budget, so the upstream lane declines and
+    # the tick reaches the terminal rung.
+    coord.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
     monkeypatch.setattr(coord.phase_framework, "_select_next_framework_agent_candidate", lambda: None)
-
-    async def _disc():
-        return False
-
-    monkeypatch.setattr(coord.phase_framework, "_discover_next_framework_batch", _disc)
     monkeypatch.setattr(coord.phase_framework, "_record_framework_agent_phase_done", lambda **k: None)
     await coord._pump_framework_agent_phase()
     assert coord.shared_state.framework_agent_phase_done is True
@@ -2638,29 +2594,29 @@ async def test_pump_framework_agent_discover_empty_marks_done(coord: Coordinator
 
 @pytest.mark.asyncio
 async def test_pump_framework_agent_submits_candidate_proposal(coord: Coordinator, monkeypatch) -> None:
-    """The pump submits the candidate as a ``framework_agent`` proposal (async gate) instead of enqueuing inline."""
+    """The pump submits the candidate as a proposal instead of enqueuing inline."""
     _enter_framework(coord)
-
-    async def _select():
-        return {"candidate_id": "c1", "pr_url": "https://example.com/pr/1", "batch_id": "b1"}
-
-    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
-
-    async def _audit(cand):
-        return {"recommended_next_step": "direct_framework"}
-
-    monkeypatch.setattr(coord.phase_framework, "_audit_framework_agent_candidate", _audit)
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_roots_have_git", lambda: True)
+    candidate = {
+        "candidate_id": "c1",
+        "pr_url": "https://example.com/pr/1",
+        "batch_id": "b1",
+        "route": "direct_framework",
+    }
+    monkeypatch.setattr(
+        coord.phase_framework,
+        "_select_next_framework_agent_candidate",
+        lambda: candidate,
+    )
 
     await coord._pump_framework_agent_phase()
 
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
     payload = pendings[0].payload
     assert payload["framework_agent_candidate_id"] == "c1"
     assert payload["audit_step"] == "direct_framework"
     queued = await coord.tasks.queued()
-    assert not [t for t in queued if getattr(t, "kind", "") == "framework_agent"]
+    assert not [t for t in queued if getattr(t, "kind", "") == "integrate_patch"]
 
 
 @pytest.mark.asyncio
@@ -2668,20 +2624,16 @@ async def test_pump_framework_agent_dedup_does_not_resubmit(coord: Coordinator, 
     """A candidate already awaiting its verdict is not re-submitted on the next tick."""
     _enter_framework(coord)
 
-    async def _select():
-        return {"candidate_id": "c1", "batch_id": "b1"}
-
-    monkeypatch.setattr(coord.phase_framework, "_select_best_framework_agent_candidate", _select)
-
-    async def _audit(cand):
-        return {"recommended_next_step": "direct_framework"}
-
-    monkeypatch.setattr(coord.phase_framework, "_audit_framework_agent_candidate", _audit)
-    monkeypatch.setattr(coord.phase_framework, "_framework_agent_roots_have_git", lambda: True)
+    candidate = {"candidate_id": "c1", "batch_id": "b1", "route": "direct_framework"}
+    monkeypatch.setattr(
+        coord.phase_framework,
+        "_select_next_framework_agent_candidate",
+        lambda: candidate,
+    )
 
     await coord._pump_framework_agent_phase()
     await coord._pump_framework_agent_phase()
-    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "framework_agent"]
+    pendings = [p for p in coord.state.pending_proposals.values() if p.action_name == "integrate_patch"]
     assert len(pendings) == 1
 
 
@@ -2693,7 +2645,7 @@ async def test_framework_agent_reject_records_critic_denied(coord: Coordinator) 
     pending = PendingProposal(
         proposal_msg_id="m1",
         from_agent="coordinator",
-        action_name="framework_agent",
+        action_name="integrate_patch",
         predicted_gain_pct=0.0,
         payload={"framework_agent_candidate_id": "c1", "batch_id": "b1"},
     )
@@ -2722,7 +2674,7 @@ async def test_framework_agent_approve_routes_to_enqueue(coord: Coordinator, mon
     pending = PendingProposal(
         proposal_msg_id="m2",
         from_agent="coordinator",
-        action_name="framework_agent",
+        action_name="integrate_patch",
         predicted_gain_pct=0.0,
         payload={
             "framework_agent_candidate_id": "c2",

@@ -92,6 +92,7 @@ def test_build_params_actionable_failure_tags_enablement(monkeypatch):
     params = Coordinator._build_enablement_specialist_params(fake, _MISSING_ARCH_LOG)
     assert params is not None
     assert params["domain"] == "enablement_specialist"
+    assert params["source_phase"] == "ENABLEMENT"
     # Reuses FRAMEWORK authoring machinery + tags the objective.
     assert params["framework_agent_authoring"] is True
     assert params["enablement"] is True
@@ -305,9 +306,9 @@ def _enqueue_self(**state_kw):
     # Admission on the session wall-clock is exercised in test_coordinator_runtime
     # against a real coordinator; here nothing is ever denied for want of budget.
     fake._time_budget_denial_for_action = lambda _action: None
-    from hyperloom.orchestrator.phases.framework import FrameworkPhase
+    from hyperloom.orchestrator.enablement.lane import EnablementLane
 
-    fake._enablement_in_flight = types.MethodType(FrameworkPhase._enablement_in_flight, fake)
+    fake._enablement_in_flight = types.MethodType(EnablementLane._enablement_in_flight, fake)
     # _enablement_in_flight reads the coordinator's ephemeral pending_proposals.
     fake.state = types.SimpleNamespace(pending_proposals={})
     return fake

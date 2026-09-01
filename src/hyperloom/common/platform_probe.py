@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.gpu_partition import published_shape
 from hyperloom.common.provenance import detect_gfx_arch, detect_stack_fingerprint
 
 log = logging.getLogger(__name__)
@@ -251,6 +252,15 @@ def platform_fingerprint(
                 "gfx_arch": detect_gfx_arch(os.environ, gpu_type=gpu_type, probe=False) or "unknown",
                 "amdgpu_driver": read_kernel_file("/sys/module/amdgpu/version") or "unknown",
             }
+            # The card's compute-partition shape, when this session established
+            # one. Recorded for the same reason NPS is: it changes what the
+            # numbers mean, and without it two runs of the same configuration on
+            # the same card in SPX and in CPX are indistinguishable in the
+            # history. Read from the env the launch published rather than probed,
+            # so this stays subprocess-free on the crash path.
+            partition = published_shape()
+            if partition:
+                record["gpu"]["compute_partition"] = partition
         except Exception:  # noqa: BLE001 - one degraded field, not a dropped record
             log.warning("platform fingerprint: GPU block unreadable", exc_info=True)
             record["gpu"] = {"status": "error"}

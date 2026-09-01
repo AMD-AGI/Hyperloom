@@ -7,7 +7,7 @@ The Coordinator's ``_compose_prompt`` emits blocks separated by ``=== X ===``
 headers. For the robustness role the expected blocks are:
 
     === Phase ===
-    phase     : EXPLORE
+    phase     : FRAMEWORK_AGENT
     ...
 
     === Shared session state ===
@@ -19,7 +19,7 @@ headers. For the robustness role the expected blocks are:
 
     === Phase budget telemetry ===
       PRELUDE: elapsed=123s cap=456s used=27%
-      EXPLORE: elapsed=789s cap=unlimited used=0%
+      FRAMEWORK_AGENT: elapsed=789s cap=unlimited used=0%
 
     === Conversation progress ===
     ticks_without_progress=3 threshold=12 severity=ok last_progress_tick=45
@@ -123,7 +123,7 @@ class PhaseBudgetRow:
     """One parsed row from the ``=== Phase budget telemetry ===`` block.
 
     Attributes:
-        phase (str): Phase name in upper-case (e.g. ``"EXPLORE"``).
+        phase (str): Phase name in upper-case (e.g. ``"FRAMEWORK_AGENT"``).
         elapsed_sec (int): Seconds elapsed in this phase.
         cap_sec (int): Budget cap in seconds; ``-1`` when unlimited.
         used_pct (float): Fraction of budget consumed (0–100). Meaningful

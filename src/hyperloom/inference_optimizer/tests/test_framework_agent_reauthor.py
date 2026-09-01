@@ -63,7 +63,7 @@ def _framework_agent_pending() -> PendingProposal:
     return PendingProposal(
         proposal_msg_id="m-fpr",
         from_agent="coordinator",
-        action_name="framework_agent",
+        action_name="integrate_patch",
         predicted_gain_pct=0.0,
         payload={
             "candidate": dict(_CANDIDATE),

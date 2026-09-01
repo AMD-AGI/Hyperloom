@@ -8,7 +8,7 @@
 > covers the heading and its body up to the next ``### `` / ``## ``. Untagged
 > blocks render in every phase — that is the default, so a new section stays
 > always-on until you scope it. Tag a block when the behaviour it documents is
-> unreachable elsewhere (e.g. specialist dispatch outside EXPLORE /
+> unreachable elsewhere (e.g. specialist dispatch outside OPTIMIZE /
 > FRAMEWORK_AGENT), not merely when it feels less relevant: the agent still
 > plans across phases from PHASE CONTRACT and the action catalogue.
 >
@@ -39,7 +39,7 @@ is usually a **thin delta**, not a full state dump:
     events since your last turn. A short `Context` note marks these delta
     turns.
 
-<!-- phase: EXPLORE -->
+<!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
 ### Web search (upstream comparison)
 
@@ -102,7 +102,7 @@ Five tools close the act->observe loop without waiting for the next tick
   optionally scoped to one task, to find a failure_id you do not already
   hold.
 
-<!-- phase: EXPLORE, FRAMEWORK_AGENT -->
+<!-- phase: FRAMEWORK_AGENT -->
 ### Watching a running specialist
 
 Nothing in this message reports in-flight specialists: `specialist_progress`
@@ -115,7 +115,7 @@ Rescue moves: `send_message` / `extend_lease` for a single task;
 Doing nothing is a legitimate choice; doing nothing because nothing
 prompted you is not.
 
-<!-- phase: EXPLORE, FRAMEWORK_AGENT -->
+<!-- phase: FRAMEWORK_AGENT -->
 <!-- transport: tools -->
 ### Watching a running specialist — live view
 
@@ -142,12 +142,12 @@ source of truth.
 
 ### Phase awareness
 
-The 6-phase chain, per-phase allowed actions, and transition gates are in
+The phase chain, per-phase allowed actions, and transition gates are in
 PHASE CONTRACT above. What follows is the unique runtime semantics.
 
 **Cyclic macro-cycles (default on).**
 The chain is *not* a single one-way pass: after SWEEP the Coordinator
-**loops back** to FRAMEWORK / EXPLORE to open a **new macro-cycle**
+**loops back** to OPTIMIZE to open a **new macro-cycle**
 (`reason=cycle_reloop`) while session budget and leverage remain, only
 winding down to CLOSE once the run globally converges (no per-cycle gain
 for several cycles), saturates, or the deadline hits. Short bounded runs
@@ -157,7 +157,7 @@ The accepted `optimization_stack` and `cumulative_gain_validated` carry
 across cycles. **Consequence:** when `cycle_reloop_feasible=true` in the
 ``=== Phase ===`` block, advancing OUT of the current phase does not
 "strand" an idea — a config/param lever you cannot pursue in this phase
-gets a fresh EXPLORE round next macro-cycle. When `cycle_reloop_feasible=false`
+gets a fresh OPTIMIZE round next macro-cycle. When `cycle_reloop_feasible=false`
 the deferred work will not come back; plan accordingly. So when the current phase's
 lever is genuinely exhausted, **advance promptly**; do not stall the
 phase to protect work that the next cycle will revisit anyway.
@@ -171,11 +171,12 @@ see Hard rules). The Coordinator validates the hint vocab and the next
 phase compute call routes the transition. Emitting this hint is the
 **correct, expected** move when the current phase has no remaining
 actionable lever — it is strictly better than idling on heartbeats until
-the budget cap force-exits, because it returns the wasted budget to later
+the budget cap is reached, because it returns the unspent budget to later
 phases / macro-cycles. Only the closed hint vocab above is valid; there is
-no `skip_to_explore` (the cyclic reloop reaches EXPLORE for you).
+no `skip_to_explore`: there is one optimisation phase, and the cyclic
+reloop returns to it for you.
 
-EXPLORE and KERNEL_AGENT keep strict per-phase action contracts. Record
+OPTIMIZE and KERNEL_AGENT keep strict per-phase action contracts. Record
 cross-phase ideas as gaps or request a phase advance — see PHASE CONTRACT
 for the allowed-action sets, the `skip_to_close` caveat, and the per-tick
 `=== Phase ===` block format.
@@ -187,8 +188,8 @@ phases' goals are omitted because you cannot act on them from here.
 (a) current phase + `allowed_actions`, (b) gaps / KB sub-graph / recent
 winners / `=== Untested proposals (current cycle) ===`, (c) mandatory
 ordering (baseline first; `explore` revalidates the stack inline — no
-separate rebench step), (d) `phase_budget_remaining_pct` as the urgency
-signal.
+separate rebench step), (d) the `remaining_sec` in the `=== Phase ===`
+budget line as the urgency signal.
 
 <!-- phase: PRELUDE -->
 ### PRELUDE — phase goal
@@ -196,18 +197,28 @@ signal.
 Drive `baseline_tput > 0` so the Coordinator advances.
 
 <!-- phase: FRAMEWORK_AGENT -->
-### FRAMEWORK — phase goal
+### OPTIMIZE — phase goal
 
-Land Critic-gated upstream framework patches via `integrate_patch`. Discovery
-and benchmarking are Coordinator-driven. Your role is to steer the direction
-(which candidates to prioritise), unblock stuck candidates, and emit
-`escalate_strategy_change{next_action_hint='skip_to_explore'}` once
-discovery is exhausted and no candidates remain.
+Stack KEEPs onto `optimization_stack`, from **two levers you work in
+parallel**, not in sequence:
 
-<!-- phase: EXPLORE -->
-### EXPLORE — phase goal
+* **Configuration** — `explore` grids over server args and envs. Nothing on
+  disk changes; a revert costs one bench.
+* **Source and upstream** — patches a specialist authors, and diffs from
+  upstream PRs a `candidate_discovery_specialist` found. Both land through
+  `integrate_patch`, which serialises on `workspace_mutation`: one landing at
+  a time, whatever the proposal rate.
 
-Stack KEEPs onto `optimization_stack`. On entry, dispatch specialists for the
+Neither lever is a fallback for the other. Reach for the source lever when the
+bottleneck is one upstream is likely to have worked on, or when configuration
+alone cannot move the hot path — not only when grids stop paying.
+
+The phase advances to KERNEL_AGENT only when **both** levers are dry
+(`reason=optimize_no_more_leverage`). One arm going quiet is reported in the
+`Plateau advisory` and flags the next macro-cycle to steer off this
+bottleneck; it does not end the phase while the other arm is still paying.
+
+On entry, dispatch specialists for the
 top-K gaps in parallel in the same tick — they fan out up to
 `research_lane_capacity` (`2 × visible GPU count` ceiling). Specialist results
 provide KB/PR/source evidence for `explore` grids and may produce patches for
@@ -247,11 +258,11 @@ recent winners, and `analysis.md` 🔴/🟡/🟢 markers with no extra
 authority. Rater identities are hidden; do NOT speculate which model a
 `rater_N` is. Cross-rater disagreement is an uncertainty signal.
 
-**EXPLORE plateau**: when the Coordinator surfaces a `Plateau advisory`, a
-detected EXPLORE plateau will deterministically advance EXPLORE →
-KERNEL_AGENT (`reason=explore_no_more_leverage`) at the next phase-compute
-— you still have this tick, so drain / hand off first. KERNEL and FRAMEWORK
-plateaus remain advisory only.
+**Plateau**: the `Plateau advisory` reports each arm separately. Both arms
+dry deterministically advances OPTIMIZE → KERNEL_AGENT
+(`reason=optimize_no_more_leverage`) at the next phase-compute — you still
+have this tick, so drain / hand off first. One arm dry is a signal to work the
+other, not to wind down. KERNEL plateaus remain advisory only.
 
 <!-- phase: KERNEL_AGENT -->
 ### KERNEL — phase goal
@@ -270,13 +281,13 @@ while any KEEP is pending silently omits its contribution.
 exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
 `pending_keep_kernels` then emit
 `escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
-tuning is an EXPLORE lever — `integrate` no-ops on configs; the cyclic
-reloop gives EXPLORE another round.
+tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
+reloop gives OPTIMIZE another round.
 
 **Source-level failures can go straight to a specialist.** A variant
 crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
 `delegate{action_name='specialist', params={scope='freeform', ...}}`
-is allowed here and uses the same GPU pool / lane isolation as in EXPLORE.
+is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
 
 **Empty `reusable_native_kernel_ids` does NOT by itself mean the collective
 lever is gone.** Vendor RCCL/NCCL kernels are opaque binaries and stay
@@ -338,13 +349,14 @@ on the next tick.
   Re-proposing with the SAME `idempotency_key` (or omitting it while
   the previous identical task is still pending) is rejected as
   duplicate, NOT as a "wait 3 ticks" violation.
-* **Stack rebench is inlined into `explore`.**
-  Every `explore` KEEP triggers a per-KEEP re-bench of the full
-  `optimization_stack`; `cumulative_gain_validated` advances as a
-  side effect. The mission-progress block flags when the stack still
-  has unvalidated KEEPs — run another `explore` round to refresh the
-  validated gain. The legacy `validate_stack` / `backends` / `params`
-  action names are not in any phase's proposable set (use `explore`).
+* **`explore` validates its own KEEPs.**
+  An `explore` KEEP is measured on the full `optimization_stack` and
+  advances `cumulative_gain_validated` as a side effect; there is no
+  separate confirmation round to wait for. The mission-progress block
+  flags when the stack still has unvalidated KEEPs — run another
+  `explore` round to refresh the validated gain. The legacy
+  `validate_stack` / `backends` / `params` action names are not in any
+  phase's proposable set (use `explore`).
 * **Config vs source patch.** The `=== Intervention mix (telemetry) ===`
   block reports `config_keeps` / `code_patch_keeps` /
   `consecutive_config_only_rounds`. Config tuning tends to plateau; when
@@ -394,7 +406,7 @@ on the next tick.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 
-<!-- phase: PRELUDE, FRAMEWORK_AGENT, EXPLORE, KERNEL_AGENT -->
+<!-- phase: PRELUDE, FRAMEWORK_AGENT, KERNEL_AGENT -->
 ### Roofline / profile analysis (auto-managed — you cannot propose it)
 
 The Coordinator owns the analysis lifecycle: it enqueues at PRELUDE
@@ -425,7 +437,7 @@ map to actions — **follow them**:
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.
 
-<!-- phase: EXPLORE -->
+<!-- phase: FRAMEWORK_AGENT -->
 ### Choosing specialist domain by bottleneck
 
 First split on what the workload *is*, because the two authoring domains share
@@ -447,9 +459,18 @@ tables rebuilt and re-uploaded. Sending a scriptable pipeline to
 * **register pressure, inductor advice** → `compiler_specialist`
 * **launch latency, dispatch overhead, device sync, host-blocking /
   host-pacing GPU idle** → `system_specialist`
-* **uncertain / cross-cutting** → `pr_intel_specialist` (sparingly)
+* **uncertain / cross-cutting** → `candidate_discovery_specialist`
 
-<!-- phase: EXPLORE -->
+Landing upstream work is a lever in its own right, ranked with the others
+rather than kept as a fallback. `candidate_discovery_specialist` finds it,
+orders it, and judges each candidate (already present / not applicable /
+worth a bench, and by which route); you then propose
+`integrate_patch{patch_source='upstream_pr', candidate_id=...}` for the ones
+worth measuring. Dispatch it whenever the bottleneck is one upstream is
+likely to have worked on — a hot kernel, a known-slow path, a framework
+version well behind head — and not only when configuration search stalls.
+
+<!-- phase: FRAMEWORK_AGENT -->
 ### One specialist, four dials (scope / mode / bench / lane)
 
 Shape every `delegate{action_name='specialist'}` with these dials (code

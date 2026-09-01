@@ -815,7 +815,7 @@ def test_ensure_python_sdks_installs_missing_openai_codex(monkeypatch, capsys):
     """Both agent runtimes are provisioned: a missing codex SDK is installed too.
 
     Without it an OpenAI-only deployment reaches the TraceLens skill runner and the
-    forge fellow with no runtime to execute them.
+    forge kernel backend with no runtime to execute them.
     """
     runner = _RecordingRun(
         [

@@ -70,7 +70,8 @@ from ._inferencex_patcher import (
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
-    _VARIANT_TIMEOUT_SEC_DEFAULT as _VARIANT_TIMEOUT_SEC_DEFAULT,
+    DEFAULT_VARIANT_TIMEOUT_SEC as DEFAULT_VARIANT_TIMEOUT_SEC,
+    DEFAULT_KEEP_THRESHOLD_PCT as DEFAULT_KEEP_THRESHOLD_PCT,
     GridVariant as GridVariant,
     coerce_extra_envs as coerce_extra_envs,
     VariantResult as VariantResult,
@@ -1386,7 +1387,7 @@ async def run_grid(
     grid: list[GridVariant],
     output_root: Path,
     magpie_python: str | None = None,
-    variant_timeout_sec: int = _VARIANT_TIMEOUT_SEC_DEFAULT,
+    variant_timeout_sec: int = DEFAULT_VARIANT_TIMEOUT_SEC,
     keep_going_on_failure: bool = True,
     model_path: str | None = None,
     gpu_type: str | None = None,

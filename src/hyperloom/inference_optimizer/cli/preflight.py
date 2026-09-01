@@ -15,6 +15,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -34,7 +35,12 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
-from hyperloom.common.provenance import detect_gfx_arch
+from hyperloom.common.provenance import (
+    RESOLVED_FRAMEWORK_ENV,
+    RESOLVED_FRAMEWORK_PYTHON_ENV,
+    detect_gfx_arch,
+)
+from hyperloom.common.timeutil import now_iso
 
 from .credentials import (
     _is_stale_proxy_url,
@@ -122,7 +128,7 @@ def _provider_only_mode() -> str:
     return ""
 
 
-def _normalize_legacy_deepseek_env() -> None:
+def _normalize_legacy_deepseek_env() -> dict[str, Any]:
     """Rewrite a retired ``DEEPSEEK_*`` configuration into the standard variables.
 
     DeepSeek serves the Anthropic protocol on ``/anthropic`` and the OpenAI
@@ -131,6 +137,8 @@ def _normalize_legacy_deepseek_env() -> None:
     the only place in the runtime that reads the retired variables; everything
     downstream sees just the two protocol sides.
     """
+    before = dict(os.environ)
+    had_legacy_config = any(os.environ.get(key) for key in LEGACY_DEEPSEEK_ENV_KEYS)
     updates = deepseek_compat_env()
     if updates:
         for key, value in updates.items():
@@ -142,9 +150,25 @@ def _normalize_legacy_deepseek_env() -> None:
     # A gateway that serves only its own models supplies the model ids too.
     # Exported (not just resolved) so subprocesses, GEAKv4 and the kernel-agent
     # installer inherit them instead of falling back to an AMD Claude id.
-    for key, value in provider_model_defaults().items():
+    model_defaults = provider_model_defaults()
+    for key, value in model_defaults.items():
         os.environ[key] = value
         print(f"Preflight: {key} <unset> -> {value} (implied by the configured gateway)")
+    changed = sorted(key for key in {*updates, *model_defaults} if before.get(key) != os.environ.get(key))
+    if changed:
+        status = "applied"
+        skip_reason = None
+    elif had_legacy_config or updates or model_defaults:
+        status = "already_present"
+        skip_reason = None
+    else:
+        status = "skipped"
+        skip_reason = "legacy_env_absent"
+    return {
+        "status": status,
+        "skip_reason": skip_reason,
+        "detail": {"keys_set": changed},
+    }
 
 
 def _restore_provider_only_mode(provider_mode: str, snapshot: dict[str, str | None]) -> None:
@@ -196,16 +220,20 @@ def _is_placeholder_tracelens_path(value: str) -> bool:
     return False
 
 
-def _load_dotenv_fallback() -> None:
+def _load_dotenv_fallback() -> dict[str, Any]:
     """Source missing vars from ``$REPO_ROOT/.env``; env always wins (no-clobber).
 
     Always parses ``.env`` and loads any key not already present in the
     environment, regardless of whether LLM credentials are already set (so
-    operational vars like ``TRACELENS_ROOT`` / ``FORGE_PATH`` are also picked up).
+    operational vars like ``TRACELENS_ROOT`` / ``GEAK_ROOT`` are also picked up).
     """
     env_file = _resolve_dotenv_file()
     if env_file is None:
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "dotenv_missing",
+            "detail": {"vars_loaded": 0, "source": None},
+        }
     parsed: dict[str, str] = {}
     loaded = 0
     for raw in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
@@ -238,6 +266,11 @@ def _load_dotenv_fallback() -> None:
             loaded += 1
     if loaded:
         print(f"Preflight: loaded {loaded} missing var(s) from {env_file} (env wins)")
+    return {
+        "status": "applied" if loaded else "already_present",
+        "skip_reason": None,
+        "detail": {"vars_loaded": loaded, "source": str(env_file)},
+    }
 
 
 def _prepend_path(var: str, entry: str) -> None:
@@ -304,12 +337,13 @@ def _parse_env_assignments(text: str) -> dict[str, str]:
     return out
 
 
-def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> None:
+def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -> list[str]:
     """Overwrite invalid inherited path-class vars with the env file's value.
 
     Only fires when the inherited value is unset/non-existent AND the file value
     points at an existing dir; a valid inherited value keeps env-wins semantics.
     """
+    corrected: list[str] = []
     for key in _KERNEL_AGENT_PATH_VARS:
         file_val = file_vars.get(key)
         if not file_val or not Path(file_val).is_dir():
@@ -324,9 +358,11 @@ def _correct_kernel_agent_path_vars(file_vars: dict[str, str], env_path: Path) -
             file=sys.stderr,
         )
         os.environ[key] = file_val
+        corrected.append(key)
+    return corrected
 
 
-def _load_kernel_agent_env_fallback() -> None:
+def _load_kernel_agent_env_fallback() -> dict[str, Any]:
     """Auto-source the installer-written kernel-agent env file
     (``$KERNEL_AGENT_ENV`` or ``$USER_DATA_PATH/runtime/kernel-agent.env.sh``).
 
@@ -346,14 +382,26 @@ def _load_kernel_agent_env_fallback() -> None:
         # Root is set: no bootstrap, but still correct invalid path vars from the
         # env file when resolvable.
         if not candidate:
-            return
+            return {
+                "status": "already_present",
+                "skip_reason": None,
+                "detail": {"vars_loaded": 0, "env_file": None},
+            }
         env_path = Path(candidate)
         if not env_path.is_file():
-            return
+            return {
+                "status": "already_present",
+                "skip_reason": None,
+                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
+            }
         try:
             text = env_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
-            return
+            return {
+                "status": "already_present",
+                "skip_reason": None,
+                "detail": {"vars_loaded": 0, "env_file": str(env_path)},
+            }
         file_vars, dropped_file_vars = filter_untrusted_env_mapping(
             _parse_env_assignments(text),
             allow_predicate=is_allowed_kernel_agent_env_key,
@@ -363,8 +411,16 @@ def _load_kernel_agent_env_fallback() -> None:
                 f"Preflight: WARNING — ignoring unsupported kernel-agent env key {key} from {env_path}",
                 file=sys.stderr,
             )
-        _correct_kernel_agent_path_vars(file_vars, env_path)
-        return
+        corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
+        return {
+            "status": "applied" if corrected else "already_present",
+            "skip_reason": None,
+            "detail": {
+                "vars_loaded": 0,
+                "env_file": str(env_path),
+                "corrected_keys": corrected,
+            },
+        }
 
     if not candidate:
         print(
@@ -415,7 +471,7 @@ def _load_kernel_agent_env_fallback() -> None:
         if key not in os.environ:
             os.environ[key] = value
             loaded += 1
-    _correct_kernel_agent_path_vars(file_vars, env_path)
+    corrected = _correct_kernel_agent_path_vars(file_vars, env_path)
     if "HYPERLOOM_KERNEL_AGENT_ROOT" not in os.environ:
         print(
             f"Preflight: ERROR — sourced {env_path} ({loaded} vars) but "
@@ -430,9 +486,18 @@ def _load_kernel_agent_env_fallback() -> None:
         f"{env_path} (env wins, HYPERLOOM_KERNEL_AGENT_ROOT="
         f"{os.environ['HYPERLOOM_KERNEL_AGENT_ROOT']})"
     )
+    return {
+        "status": "applied" if loaded or corrected else "already_present",
+        "skip_reason": None,
+        "detail": {
+            "vars_loaded": loaded,
+            "env_file": str(env_path),
+            "corrected_keys": corrected,
+        },
+    }
 
 
-def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
+def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install runtime-imported Python SDKs using the same interpreter that imports them.
 
     Avoids first-tick BackendError after baseline burns wall time; same-interpreter install avoids
@@ -447,13 +512,15 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
     # Both agent runtimes ship by default: Hyperloom routes every LLM interaction
     # through one of them, and a deployment may be Anthropic-only, OpenAI-only, or
     # both. Omitting openai_codex leaves the TraceLens skill runner and the forge
-    # fellow unable to start on an OpenAI-only gateway.
+    # kernel backend unable to start on an OpenAI-only gateway.
     candidates = (
         ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
         ("openai_codex", "openai-codex>=0.144"),
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )
+    installed: list[str] = []
+    already_present: list[str] = []
     for module_name, pip_spec in candidates:
         check = subprocess.run(
             [python_exe, "-c", f"import {module_name}"],
@@ -461,6 +528,7 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
         )
         if check.returncode == 0:
             print(f"Preflight: {module_name} OK")
+            already_present.append(pip_spec)
             continue
         print(f"Preflight: {module_name} not importable, installing {pip_spec} ...")
         subprocess.run(
@@ -468,6 +536,17 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> None:
             check=True,
         )
         print(f"Preflight: installed {pip_spec}")
+        installed.append(pip_spec)
+    return {
+        "status": "applied" if installed else "already_present",
+        "skip_reason": None,
+        "target": ",".join(spec for _, spec in candidates),
+        "interpreter": python_exe,
+        "detail": {
+            "installed": installed,
+            "already_present": already_present,
+        },
+    }
 
 
 _RAY_VERSION = "2.44.1"
@@ -544,7 +623,7 @@ def _ray_smoke(python_exe: str) -> subprocess.CompletedProcess:
     )
 
 
-def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
+def _ensure_ray(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install Ray using the interpreter that will import it.
 
     Ray is used broadly (multi-node scheduling, kernel/profile/recover
@@ -563,7 +642,15 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
     check = _ray_smoke(python_exe)
     if check.returncode == 0:
         print("Preflight: ray OK")
-        return
+        return {
+            "status": "already_present",
+            "skip_reason": None,
+            "target": "ray",
+            "interpreter": python_exe,
+            "spec": _RAY_INSTALL_SPEC,
+            "version_after": _RAY_VERSION,
+            "message": None,
+        }
     reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip().splitlines()[-1]
     print(f"Preflight: ray/click invalid ({reason}), installing {_RAY_INSTALL_SPEC} + {_CLICK_INSTALL_SPEC} ...")
     subprocess.run(
@@ -575,6 +662,15 @@ def _ensure_ray(python_exe: str, pip_extra: list[str]) -> None:
         reason = (check.stderr or check.stdout or "unknown Ray smoke failure").strip()
         raise RuntimeError(f"Ray install completed but smoke test still failed: {reason}")
     print("Preflight: ray installed OK")
+    return {
+        "status": "applied",
+        "skip_reason": None,
+        "target": "ray",
+        "interpreter": python_exe,
+        "spec": _RAY_INSTALL_SPEC,
+        "version_after": _RAY_VERSION,
+        "message": reason,
+    }
 
 
 # InferenceX benchmark_serving client-side deps. Mirrors the ``_BENCH_SERVING_DEPS``
@@ -593,7 +689,7 @@ _BENCH_SERVING_DEPS = (
 )
 
 
-def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
+def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Probe-then-install the InferenceX benchmark_serving client deps in python_exe.
 
     ``assets/install.sh:ensure_bench_serving_deps`` installs these into the
@@ -623,16 +719,32 @@ def _ensure_bench_serving_deps(python_exe: str, pip_extra: list[str]) -> None:
         missing = [line.strip() for line in (result.stdout or "").splitlines() if line.strip()]
     if not missing:
         print("Preflight: benchmark_serving client deps OK")
-        return
+        return {
+            "status": "already_present",
+            "skip_reason": None,
+            "target": "benchmark_serving client deps",
+            "interpreter": python_exe,
+            "detail": {"installed": [], "already_present": mods},
+        }
     print(f"Preflight: installing benchmark_serving client deps: {' '.join(missing)} ...")
     subprocess.run(
         [python_exe, "-m", "pip", "install", "--quiet", "--no-cache-dir", *pip_extra, *missing],
         check=True,
     )
     print("Preflight: benchmark_serving client deps installed OK")
+    return {
+        "status": "applied",
+        "skip_reason": None,
+        "target": "benchmark_serving client deps",
+        "interpreter": python_exe,
+        "detail": {
+            "installed": missing,
+            "already_present": [module for module in mods if module not in missing],
+        },
+    }
 
 
-def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
+def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> dict[str, Any]:
     """Install the selected framework's declared runtime deps into python_exe.
 
     Resolution mirrors the CLI's own order (``--framework`` > ``$FRAMEWORK`` >
@@ -657,8 +769,29 @@ def _ensure_framework_deps(args, python_exe: str, pip_extra: list[str]) -> None:
     # Frameworks that ship no manifest are the common case; stay quiet unless
     # the manifest actually asked for something or was partly rejected.
     if outcome.skipped_reason and not (outcome.refused or outcome.invalid):
-        return
-    framework_deps.report(outcome, prefix="Preflight: framework deps")
+        status = "skipped"
+    else:
+        framework_deps.report(outcome, prefix="Preflight: framework deps")
+        if outcome.failed or outcome.refused or outcome.invalid:
+            status = "warned"
+        elif outcome.installed:
+            status = "applied"
+        else:
+            status = "already_present"
+    return {
+        "status": status,
+        "skip_reason": outcome.skipped_reason or None,
+        "target": framework,
+        "interpreter": python_exe,
+        "detail": {
+            "manifest": str(outcome.manifest) if outcome.manifest is not None else None,
+            "installed": list(outcome.installed),
+            "already_present": list(outcome.already_present),
+            "refused": list(outcome.refused),
+            "invalid": list(outcome.invalid),
+            "failed": list(outcome.failed),
+        },
+    }
 
 
 # Escape hatch for the serving-framework gate below, mirroring
@@ -909,7 +1042,7 @@ def _resolve_framework_build(framework: str, interpreters: list[str]) -> tuple[s
     return inconclusive or refuted or (None, missing)
 
 
-def _check_serving_framework(args, benchmark_python: str) -> None:
+def _check_serving_framework(args, benchmark_python: str) -> dict[str, Any]:
     """Fail fast when the selected serving framework is not importable here.
 
     The optimizer patches and rebuilds framework code in place, so the package
@@ -933,41 +1066,94 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
     ).strip().lower() or framework_registry.DEFAULT_FRAMEWORK
 
     if framework_registry.is_scriptable(framework):
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "scriptable_framework",
+            "target": framework,
+        }
     if os.environ.get(SKIP_FRAMEWORK_CHECK_ENV, "").strip():
         print(f"Preflight: {SKIP_FRAMEWORK_CHECK_ENV} set; skipping the {framework} importability check")
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "skip_framework_check_env",
+            "target": framework,
+        }
     remote_base_url = os.environ.get("BENCHMARK_BASE_URL", "").strip()
     if remote_base_url:
         print(f"Preflight: BENCHMARK_BASE_URL={remote_base_url}; skipping the local {framework} check (remote server)")
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "remote_benchmark_url",
+            "target": framework,
+        }
 
     from hyperloom.inference_optimizer.multi_node._internal.external_state import external_service_url
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
 
     if is_multi_node() and external_service_url():
         print(f"Preflight: external multi-node mode; skipping the local {framework} check (serving is on remote pods)")
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "external_multi_node",
+            "target": framework,
+        }
 
     interpreters = _framework_probe_interpreters(framework, benchmark_python)
     found, probe = _resolve_framework_build(framework, interpreters)
+    # Publish the interpreter this scan resolved to, so consumers that would
+    # otherwise re-derive it from installer-written host state read the probed
+    # answer instead. ``$VLLM_VENV_ROOT`` leads the candidate list above, but
+    # only this scan establishes whether the tree it names still holds the
+    # framework -- the variable itself is never cleared.
+    #
+    # The framework goes with it: this scan answers for one framework only, and
+    # ``sglang`` is the default, so an unlabelled interpreter would be read as
+    # the vLLM answer on every SGLang session and report "unknown" for a vLLM
+    # this process can see.
+    #
+    # Only a refuted build is withheld -- it is provably the wrong one. A
+    # ROCm-probe timeout is not: ``_resolve_framework_build`` has already
+    # located the distribution under the candidate (``_framework_importable``
+    # answers with ``find_spec``) before probing the build at all, and the check
+    # below keeps serving with it after a warning. Reading a version wants the
+    # ``dist-info`` metadata, which does not require the package to import.
+    if found and probe.verdict is not False:
+        os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] = found
+        os.environ[RESOLVED_FRAMEWORK_ENV] = framework
     evidence = _rocm_evidence(framework)
     if found and probe.verdict is True:
         print(f"Preflight: {framework} importable ({found}); {evidence} confirms a ROCm build")
-        return
+        return {
+            "status": "applied",
+            "skip_reason": None,
+            "target": framework,
+            "detail": {"probe_interpreter": found, "rocm_verified": True},
+        }
     if found and probe.verdict is None:
         print(
             f"Preflight: WARNING — {framework} is importable ({found}) but could not verify a ROCm build "
             f"via {evidence}{_probe_detail_block(probe.detail)}"
         )
-        return
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "target": framework,
+            "message": probe.detail or "ROCm build could not be verified",
+            "detail": {"probe_interpreter": found, "rocm_verified": None},
+        }
     if not found and probe.timed_out:
         # A timeout proves nothing, so blocking here would fail a merely slow host.
         print(
             f"Preflight: WARNING — the {framework} probe timed out; proceeding without verifying it"
             f"{_probe_detail_block(probe.detail)}"
         )
-        return
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "target": framework,
+            "message": probe.detail or "framework probe timed out",
+            "detail": {"probe_interpreter": None, "rocm_verified": None},
+        }
 
     # Every path below stops the run, so it needs a remedy that works. Both of
     # them name --install-framework, which setup rejects outside its own set.
@@ -984,7 +1170,13 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             "existing checkout on this host. Continuing; the benchmark will fail if it\n"
             f"genuinely needs {framework} here."
         )
-        return
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "target": framework,
+            "message": probe.detail or "framework availability could not be verified",
+            "detail": {"probe_interpreter": found, "rocm_verified": probe.verdict},
+        }
 
     if found:
         print(
@@ -996,7 +1188,7 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
             f"To proceed anyway, set {SKIP_FRAMEWORK_CHECK_ENV}=1.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        raise SystemExit(2)
 
     if _in_container():
         remedy = (
@@ -1027,7 +1219,7 @@ def _check_serving_framework(args, benchmark_python: str) -> None:
         "for a local run that is expected to serve from somewhere unprobed.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
 
 # RUN_EVAL values that disable the accuracy gate (mirrors _workload_envs).
@@ -1183,7 +1375,12 @@ def _resolved_eval_disabled(args: argparse.Namespace) -> bool:
     return bool(state.get("eval_disabled"))
 
 
-def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled: bool = False) -> None:
+def _ensure_lm_eval_dep(
+    python_exe: str,
+    pip_extra: list[str],
+    *,
+    eval_disabled: bool = False,
+) -> dict[str, Any]:
     """Probe-then-install ``lm_eval`` in python_exe when the accuracy gate is on.
 
     ``install.sh`` defers ``lm_eval`` to InferenceX's ``benchmark_lib.sh`` runtime
@@ -1221,12 +1418,30 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled:
     from hyperloom.orchestrator.actions.executors._multi_node_env import is_multi_node
 
     if not is_multi_node():
-        return  # single-node: InferenceX installs lm_eval itself, see above
+        return {
+            "status": "skipped",
+            "skip_reason": "single_node_runtime_install",
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+            "message": "single-node InferenceX installs lm_eval on first use",
+        }
     if eval_disabled:
-        return  # --no-eval: no eval anywhere, so the harness is never loaded
+        return {
+            "status": "skipped",
+            "skip_reason": "eval_disabled",
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+            "message": "accuracy evaluation is disabled",
+        }
     run_eval = os.environ.get("RUN_EVAL")
     if run_eval is not None and run_eval.strip().lower() in _RUN_EVAL_FALSE_VALUES:
-        return  # accuracy gate disabled; lm_eval not required
+        return {
+            "status": "skipped",
+            "skip_reason": "eval_disabled",
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+            "message": f"RUN_EVAL={run_eval}",
+        }
     missing = _probe_missing_lm_eval_deps(python_exe)
     if missing is None:
         # Absence is unproven, so installing would be a guess that could replace
@@ -1234,15 +1449,32 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled:
         # already breaks the benchmark far more loudly than a missing accuracy
         # gate would, so this warns and changes nothing.
         print("Preflight: WARNING — cannot run the lm_eval probe; leaving the interpreter untouched")
-        return
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+            "message": "lm_eval dependency probe could not run",
+        }
     if not missing:
         print("Preflight: lm_eval[api] OK")
-        return
+        return {
+            "status": "already_present",
+            "skip_reason": None,
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+        }
     if "lm_eval" in missing:
         print(f"Preflight: installing lm_eval[api]@{_LM_EVAL_PINNED_REF[:12]} (accuracy gate) ...")
         _install_pinned_lm_eval(python_exe, pip_extra)
         print("Preflight: lm_eval[api] installed OK")
-        return
+        return {
+            "status": "applied",
+            "skip_reason": None,
+            "target": "lm_eval[api]",
+            "interpreter": python_exe,
+            "detail": {"installed": list(missing)},
+        }
     # The image already ships lm_eval. Install only the absent extra so pip
     # cannot resolve a different lm_eval build over the one baked in, which
     # would silently swap out a version the image pinned on purpose -- the same
@@ -1264,6 +1496,13 @@ def _ensure_lm_eval_dep(python_exe: str, pip_extra: list[str], *, eval_disabled:
         check=True,
     )
     print(f"Preflight: {' '.join(targets)} installed OK")
+    return {
+        "status": "applied",
+        "skip_reason": None,
+        "target": "lm_eval[api]",
+        "interpreter": python_exe,
+        "detail": {"installed": list(targets)},
+    }
 
 
 def _unset_hip_visible_devices() -> None:
@@ -1283,7 +1522,7 @@ def _unset_hip_visible_devices() -> None:
     )
 
 
-def _check_gpu_visibility() -> None:
+def _check_gpu_visibility() -> dict[str, Any]:
     """Best-effort informational check of visible GPU count vs ``$TP`` (silent when rocm-smi is absent).
 
     Skipped in external multi-node mode: there the server runs on remote GPU
@@ -1302,7 +1541,11 @@ def _check_gpu_visibility() -> None:
 
     if is_multi_node() and external_service_url():
         print("Preflight: external multi-node mode; skipping local GPU visibility check (GPUs are on remote pods)")
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "external_multi_node",
+            "detail": {"visible": None, "tp_requested": None, "warn": None},
+        }
     try:
         proc = subprocess.run(
             ["rocm-smi", "--showid"],
@@ -1311,9 +1554,17 @@ def _check_gpu_visibility() -> None:
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "rocm_smi_unavailable",
+            "detail": {"visible": None, "tp_requested": None, "warn": None},
+        }
     if proc.returncode != 0:
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "rocm_smi_failed",
+            "detail": {"visible": None, "tp_requested": None, "warn": None},
+        }
     # rocm-smi --showid emits multiple GPU[ lines per GPU; deduplicate by GPU index.
     visible_indices: set[str] = set()
     for line in (proc.stdout or "").splitlines():
@@ -1328,24 +1579,40 @@ def _check_gpu_visibility() -> None:
     except ValueError:
         wanted = 1
     if visible == 0:
-        print("Preflight: WARNING — rocm-smi sees 0 GPUs; benchmark will fail")
-        return
+        warning = "rocm-smi sees 0 GPUs; benchmark will fail"
+        print(f"Preflight: WARNING — {warning}")
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "detail": {"visible": visible, "tp_requested": wanted, "warn": warning},
+        }
     if wanted > visible:
-        print(
-            f"Preflight: WARNING — TP={wanted} but rocm-smi sees {visible} "
-            f"GPU(s); sglang/vllm may fail to load weights. Lower TP or "
-            f"adjust ROCR_VISIBLE_DEVICES."
-        )
+        warning = f"TP={wanted} but rocm-smi sees {visible} GPU(s); sglang/vllm may fail to load weights"
+        print(f"Preflight: WARNING — {warning}. Lower TP or adjust ROCR_VISIBLE_DEVICES.")
+        return {
+            "status": "warned",
+            "skip_reason": None,
+            "detail": {"visible": visible, "tp_requested": wanted, "warn": warning},
+        }
+    return {
+        "status": "applied",
+        "skip_reason": None,
+        "detail": {"visible": visible, "tp_requested": wanted, "warn": None},
+    }
 
 
-def _check_shm_disk() -> None:
+def _check_shm_disk() -> dict[str, Any]:
     """Warn (not fail-fast) on tight ``/dev/shm`` (vLLM/NCCL IPC needs headroom)."""
     try:
         usage = shutil.disk_usage("/dev/shm")  # nosec B108 - mountpoint probe, not temp file creation.
     except (FileNotFoundError, OSError):
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "shm_unavailable",
+            "detail": {"shm_free_gib": None, "min_gib": 16},
+        }
+    free_gb = usage.free / (1024**3)
     if usage.free < _DEV_SHM_MIN_FREE_BYTES:
-        free_gb = usage.free / (1024**3)
         total_gb = usage.total / (1024**3)
         print(
             f"Preflight: WARNING — /dev/shm has {free_gb:.1f} GiB free of "
@@ -1353,6 +1620,11 @@ def _check_shm_disk() -> None:
             f"NCCL shm segments may collide with stale entries; if the "
             f"first server launch hangs >5min, clear /dev/shm/{{vllm,nccl,cuda}}*"
         )
+    return {
+        "status": "warned" if usage.free < _DEV_SHM_MIN_FREE_BYTES else "applied",
+        "skip_reason": None,
+        "detail": {"shm_free_gib": round(free_gb, 1), "min_gib": 16},
+    }
 
 
 def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
@@ -1383,7 +1655,7 @@ def _check_gfx_arch_resolvable(gpu_type: str | None = None) -> None:
     )
 
 
-def _check_platform_tuning() -> None:
+def _check_platform_tuning() -> dict[str, Any]:
     """Record host CPU tuning state and warn on settings that skew results.
 
     Within one session every trial runs on this same node, so host tuning
@@ -1411,7 +1683,11 @@ def _check_platform_tuning() -> None:
     """
     plat = probe_cpu_platform()
     if plat is None:
-        return  # Not Linux sysfs, or a container without it; stay silent.
+        return {
+            "status": "skipped",
+            "skip_reason": "platform_probe_unavailable",
+            "detail": {"smt": None, "governor": "unknown", "cpb": None},
+        }
 
     print(
         f"Preflight: platform [{socket.gethostname()}] — SMT {plat.smt or '?'}, "
@@ -1429,6 +1705,16 @@ def _check_platform_tuning() -> None:
             "Preflight: WARNING — Core Performance Boost is disabled; CPU-side "
             "work (sampling, scheduling, tokenization) will run below rated clocks"
         )
+    warned = plat.governor not in ("performance", "unknown") or plat.boost == "off"
+    return {
+        "status": "warned" if warned else "applied",
+        "skip_reason": None,
+        "detail": {
+            "smt": plat.smt,
+            "governor": plat.governor,
+            "cpb": {"on": True, "off": False}.get(plat.boost),
+        },
+    }
 
 
 _TRACELENS_REQUIRED_CLIS: tuple[str, ...] = ("TraceLens_generate_perf_report_pytorch_inference",)
@@ -1455,7 +1741,7 @@ def _tracelens_required_at_preflight(no_kernel: bool, enable_roofline: bool) -> 
     return not (no_kernel and not enable_roofline)
 
 
-def _check_tracelens_cli() -> None:
+def _check_tracelens_cli() -> dict[str, Any]:
     """Hard-gate TraceLens CLI presence — abort before Coordinator starts (SKILL IR-2).
 
     Pod-local /opt/venv/bin/TraceLens_* console_scripts don't persist across pod restarts, so install.sh
@@ -1464,7 +1750,12 @@ def _check_tracelens_cli() -> None:
     """
     missing = [name for name in _TRACELENS_REQUIRED_CLIS if shutil.which(name) is None]
     if not missing:
-        return
+        return {
+            "status": "applied",
+            "skip_reason": None,
+            "target": "TraceLens",
+            "message": None,
+        }
     session_dir = str(_workspace_root_resolve())
     print(
         f"ERROR: TraceLens CLI(s) not on PATH: {missing}. The pod-local "
@@ -1479,10 +1770,10 @@ def _check_tracelens_cli() -> None:
         f"then retry `python -m hyperloom.inference_optimizer.cli optimize`. Refusing to start.",
         file=sys.stderr,
     )
-    sys.exit(2)
+    raise SystemExit(2)
 
 
-def _check_tracelens_root_exists() -> None:
+def _check_tracelens_root_exists() -> dict[str, Any]:
     """Hard-gate an explicitly set ``TRACELENS_ROOT`` at preflight.
 
     An operator-supplied TRACELENS_ROOT that points at a missing checkout (stale
@@ -1491,7 +1782,11 @@ def _check_tracelens_root_exists() -> None:
     """
     override = os.environ.get("TRACELENS_ROOT")
     if not override or Path(override).is_dir():
-        return
+        return {
+            "status": "applied",
+            "skip_reason": None,
+            "target": "TRACELENS_ROOT",
+        }
     print(
         f"ERROR: TRACELENS_ROOT={override} does not point at an existing "
         f"TraceLens checkout. It was likely inherited from a stale shell or an "
@@ -1522,7 +1817,7 @@ def _emit_preflight_diagnostics(
     magpie_python: str,
     anthropic_base_url: str | None,
     args: argparse.Namespace | None = None,
-) -> None:
+) -> dict[str, Any]:
     """One canonical, grep-friendly diagnostics block at the end of preflight.
 
     Args:
@@ -1580,13 +1875,40 @@ def _emit_preflight_diagnostics(
         print(f"  pr_degraded_reason  = {pr_reason}")
 
     # Surface Recipe KB offline-queue state; dead-letter pile-up signals a cold start.
+    queue_status: dict[str, Any]
+    diagnostics_status = "applied"
+    diagnostics_message: str | None = None
     try:
-        _print_recipe_kb_queue_status()
+        queue_status = _print_recipe_kb_queue_status()
     except Exception as exc:  # noqa: BLE001 — defensive
         print(f"  recipe_kb_queue     = <probe_failed: {exc!r}>")
+        queue_status = {
+            "pending": None,
+            "dead_letter": None,
+            "flushed": None,
+            "root": None,
+        }
+        diagnostics_status = "warned"
+        diagnostics_message = f"recipe KB queue probe failed: {exc!r}"
+    return {
+        "status": diagnostics_status,
+        "skip_reason": None,
+        "message": diagnostics_message,
+        "detail": {
+            "asset_root": str(asset_root()),
+            "session_dir": str(_session_dir_resolve()),
+            "magpie_python": magpie_python,
+            "inferencex_path": os.environ.get("INFERENCEX_PATH") or None,
+            "aiter_jit_cache": dict(probe),
+            "recipe_kb_queue": queue_status,
+            "cold_start_timeout_sec": int(cold_cap) if str(cold_cap).isdigit() else cold_cap,
+            "warm_timeout_sec": BASELINE_DEFAULT_TIMEOUT_SEC,
+            "anthropic_base_url": anthropic_base_url,
+        },
+    }
 
 
-def _print_recipe_kb_queue_status() -> None:
+def _print_recipe_kb_queue_status() -> dict[str, Any]:
     """Emit a one-line summary of the Recipe KB offline NDJSON queue (dead-letter = permanent-reject signal).
 
     Note:
@@ -1631,6 +1953,12 @@ def _print_recipe_kb_queue_status() -> None:
             f"Specialists for affected anchors will start cold "
             f"(no priors). See {dead}."
         )
+    return {
+        "pending": p_n,
+        "dead_letter": d_n,
+        "flushed": f_n,
+        "root": str(pending.parent),
+    }
 
 
 _INFERENCEX_REPO_DEFAULT = "https://github.com/SemiAnalysisAI/InferenceX.git"
@@ -1907,6 +2235,200 @@ def _clone_inferencex(dest: Path) -> str | None:
         return None
 
 
+def _begin_install_event(args: argparse.Namespace | None) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "type": "install",
+        "kind": "install",
+        "status": "succeeded",
+        "start_time": now_iso(timespec="seconds"),
+        "end_time": "",
+        "ext": {
+            "run_kind": "resume" if bool(getattr(args, "resume_from", None)) else "fresh",
+            "hard_fail_step_id": None,
+            "runtime_snapshot": {},
+            "steps": [],
+        },
+    }
+    try:
+        from ..session.sbd_v6 import set_pending_install_event
+
+        set_pending_install_event(args, event)
+    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+        log.warning("failed to initialize SBD V6 install event", exc_info=True)
+    return event
+
+
+def _record_install_step(
+    event: dict[str, Any],
+    *,
+    step_id: str,
+    category: str,
+    status: str,
+    skip_reason: str | None = None,
+    message: str | None = None,
+    **fields: Any,
+) -> None:
+    step: dict[str, Any] = {
+        "step_id": step_id,
+        "category": category,
+        "status": status,
+        "skip_reason": skip_reason,
+    }
+    if message is not None:
+        step["message"] = message
+    step.update(fields)
+    event["ext"]["steps"].append(step)
+
+
+def _fail_install_step(
+    event: dict[str, Any],
+    *,
+    step_id: str,
+    category: str,
+    exc: BaseException,
+) -> None:
+    failure_fields: dict[str, Any] = {}
+    if isinstance(exc, SystemExit):
+        failure_fields["detail"] = {"exit_code": exc.code}
+    _record_install_step(
+        event,
+        step_id=step_id,
+        category=category,
+        status="failed",
+        message=str(exc) or type(exc).__name__,
+        error_class=type(exc).__name__,
+        **failure_fields,
+    )
+    event["status"] = "failed"
+    event["end_time"] = now_iso(timespec="seconds")
+    event["ext"]["hard_fail_step_id"] = step_id
+
+
+def _mark_pending_install_event_failed(
+    args: argparse.Namespace | None,
+    exc: BaseException,
+) -> dict[str, Any] | None:
+    """Mark an unwrapped preflight exception on the pending install event."""
+    try:
+        from ..session.sbd_v6 import pending_install_event
+
+        event = pending_install_event(args)
+        if event is None:
+            event = _begin_install_event(args)
+        if str(event.get("status") or "") != "failed":
+            _fail_install_step(
+                event,
+                step_id="unhandled_preflight",
+                category="check",
+                exc=exc,
+            )
+        return event
+    except Exception:  # noqa: BLE001 — never replace the original preflight failure
+        log.warning("failed to finalize SBD V6 install failure", exc_info=True)
+        return None
+
+
+def _run_install_step(
+    event: dict[str, Any],
+    *,
+    step_id: str,
+    category: str,
+    action: Callable[[], Any],
+    success_status: str = "applied",
+    **success_fields: Any,
+) -> Any:
+    try:
+        result = action()
+    except BaseException as exc:
+        try:
+            _fail_install_step(event, step_id=step_id, category=category, exc=exc)
+        except Exception:  # noqa: BLE001 — preserve the original preflight exception
+            log.warning("failed to record SBD V6 install-step failure", exc_info=True)
+        raise
+    try:
+        outcome = dict(result) if isinstance(result, dict) else {}
+        status = str(outcome.pop("status", success_status) or success_status)
+        skip_reason = outcome.pop("skip_reason", None)
+        message = outcome.pop("message", None)
+        fields = {**success_fields, **outcome}
+        _record_install_step(
+            event,
+            step_id=step_id,
+            category=category,
+            status=status,
+            skip_reason=skip_reason,
+            message=message,
+            **fields,
+        )
+    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+        log.warning("failed to record SBD V6 install step", exc_info=True)
+    return result
+
+
+def _resolved_provider_mode(resolved_urls: tuple[str, str] | None) -> str | None:
+    anthropic_url, openai_url = resolved_urls or ("", "")
+    if anthropic_url and openai_url:
+        return "mixed"
+    if anthropic_url:
+        return "anthropic"
+    if openai_url:
+        return "openai"
+    return None
+
+
+def _finish_install_event(
+    event: dict[str, Any],
+    *,
+    args: argparse.Namespace | None,
+    benchmark_backend: str,
+    benchmark_python: str,
+    magpie_python: str,
+    inferencex_path: str,
+    resolved_urls: tuple[str, str] | None,
+) -> None:
+    no_kernel = bool(getattr(args, "no_kernel", False)) if args is not None else False
+    enable_roofline = bool(getattr(args, "enable_roofline", True)) if args is not None else True
+    tracelens_required = _tracelens_required_at_preflight(no_kernel, enable_roofline)
+    event["ext"]["runtime_snapshot"] = {
+        "benchmark_backend": benchmark_backend,
+        "benchmark_interpreter": benchmark_python,
+        "magpie_python": magpie_python,
+        "inferencex_path": inferencex_path,
+        "magpie_path": os.environ.get("MAGPIE_PATH") or None,
+        "tracelens_required": tracelens_required,
+        "tracelens_route_hint": "agent" if not no_kernel else ("bypass" if enable_roofline else None),
+        "provider_mode": _resolved_provider_mode(resolved_urls),
+    }
+    statuses = {str(step.get("status") or "") for step in event["ext"]["steps"]}
+    if "failed" in statuses:
+        event["status"] = "failed"
+    elif "warned" in statuses:
+        event["status"] = "degraded"
+    elif statuses and statuses == {"skipped"}:
+        event["status"] = "skipped"
+    else:
+        event["status"] = "succeeded"
+    event["end_time"] = now_iso(timespec="seconds")
+
+
+def _persist_install_event(args: argparse.Namespace | None, session_dir: Path) -> None:
+    """Persist the pre-session install trace without changing launch behavior."""
+    from ..session.sbd_v6 import persist_pending_install_event, record_write_warning
+
+    try:
+        path = persist_pending_install_event(args, session_dir)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("failed to persist SBD V6 install event", exc_info=True)
+        if not record_write_warning(session_dir, component="install.event", exc=exc):
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+        return
+    if path is None:
+        exc = RuntimeError("pending install event is unavailable")
+        log.warning("failed to persist SBD V6 install event: %s", exc)
+        if not record_write_warning(session_dir, component="install.event", exc=exc):
+            log.debug("failed to persist SBD V6 install-event write warning", exc_info=True)
+
+
 def _preflight(
     args: argparse.Namespace | None = None,
 ) -> tuple[str, str] | None:
@@ -1924,25 +2446,69 @@ def _preflight(
         tuple[str, str] | None: ``(anthropic_base_url, openai_base_url)``, or
             ``None`` when neither base URL is configured.
     """
-    _load_dotenv_fallback()
+    install_event = _begin_install_event(args)
+    _run_install_step(
+        install_event,
+        step_id="load_dotenv",
+        category="normalize",
+        action=_load_dotenv_fallback,
+    )
     # ``.env`` is operator configuration, so both the single-provider intent and
     # the restore baseline are taken after it loads. Only what the installer env
     # file injects on top is undone below.
     provider_mode = _provider_only_mode()
     provider_snapshot = {key: os.environ.get(key) for key in (*_PROVIDER_FALLBACK_KEYS, *_ANTHROPIC_FALLBACK_KEYS)}
-    _load_kernel_agent_env_fallback()
+    _run_install_step(
+        install_event,
+        step_id="load_kernel_agent_env",
+        category="normalize",
+        action=_load_kernel_agent_env_fallback,
+    )
     _derive_runtime_paths()
     _restore_provider_only_mode(provider_mode, provider_snapshot)
-    _normalize_legacy_deepseek_env()
+    _run_install_step(
+        install_event,
+        step_id="normalize_legacy_deepseek_env",
+        category="normalize",
+        action=_normalize_legacy_deepseek_env,
+    )
 
     # Fail fast on missing credentials after the fallback loaders.
-    _validate_credentials()
+    _run_install_step(
+        install_event,
+        step_id="validate_credentials",
+        category="check",
+        action=_validate_credentials,
+        detail={"exit_code": 0},
+    )
 
     # Same timing, same reason: run after the loaders so a withdrawn KB
     # override set in ``.env`` is caught, and before any KB read happens.
     from hyperloom.agents.framework.kb import prepare_kb_environment
 
-    prepare_kb_environment()
+    kb_withdrawn_override = bool(os.environ.get("FRAMEWORK_AGENT_KB_DIR", "").strip())
+    kb_enabled = not bool(getattr(args, "degraded_kb", False)) if args is not None else True
+
+    def _prepare_kb_install_step() -> dict[str, Any]:
+        prepare_kb_environment()
+        return {
+            "status": ("skipped" if not kb_enabled else "warned" if kb_withdrawn_override else "applied"),
+            "skip_reason": "explicit_flag" if not kb_enabled else None,
+            "detail": {
+                "recipe_kb": {
+                    "enabled": kb_enabled,
+                    "reason": "explicit_flag" if not kb_enabled else None,
+                },
+                "kb_withdrawn_override": kb_withdrawn_override,
+            },
+        }
+
+    _run_install_step(
+        install_event,
+        step_id="prepare_kb_environment",
+        category="degrade",
+        action=_prepare_kb_install_step,
+    )
 
     # --- Auth alias export (internal LLM aliases only) ---
     # These aliases feed OpenAI-protocol consumers, so they are filled from the
@@ -1970,7 +2536,8 @@ def _preflight(
         resolve_benchmark_interpreter as _resolve_benchmark_interpreter,
     )
 
-    _magpie_backend_active = _resolve_active_backend_name() == "magpie"
+    benchmark_backend = _resolve_active_backend_name()
+    _magpie_backend_active = benchmark_backend == "magpie"
     # Interpreter used for benchmark-runtime installs (Ray). For bypass this is
     # sys.executable; for Magpie it's the Magpie-importable venv.
     benchmark_python = _resolve_benchmark_interpreter()
@@ -1982,7 +2549,12 @@ def _preflight(
 
     # --- Python SDK auto-install (claude-agent-sdk / openai / httpx) ---
     # Must precede Coordinator import (ClaudeBackend lazy-imports the SDK).
-    _ensure_python_sdks(sys.executable, pip_extra)
+    _run_install_step(
+        install_event,
+        step_id="ensure_python_sdks",
+        category="install",
+        action=lambda: _ensure_python_sdks(sys.executable, pip_extra),
+    )
 
     # --- Resolve Anthropic + OpenAI base URLs (split entrypoints) ---
     # Explicit operator values on each side are preserved; a missing side falls
@@ -2059,40 +2631,84 @@ def _preflight(
 
     # --- ROCm env hygiene + GPU/shm sanity (defensive WARN-only) ---
     _unset_hip_visible_devices()
-    _check_gpu_visibility()
-    _check_shm_disk()
-    _check_platform_tuning()
+    _run_install_step(
+        install_event,
+        step_id="check_gpu_visibility",
+        category="check",
+        action=_check_gpu_visibility,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_shm_disk",
+        category="check",
+        action=_check_shm_disk,
+    )
+    _run_install_step(
+        install_event,
+        step_id="check_platform_tuning",
+        category="check",
+        action=_check_platform_tuning,
+    )
 
     # --- Runtime dep install ---
     # 1. Ray — used broadly (multi-node scheduling, kernel/profile/recover
     # executors), not only by Magpie, so it is installed regardless of backend.
     # Install it with the active backend's interpreter so a bypass-only box
     # gets Ray in its own venv instead of Magpie's.
-    _ensure_ray(benchmark_python, pip_extra)
+    _run_install_step(
+        install_event,
+        step_id="ensure_ray",
+        category="install",
+        action=lambda: _ensure_ray(benchmark_python, pip_extra),
+    )
 
     # 1b. InferenceX benchmark_serving client deps — required by every serving
     # benchmark client launch. install.sh installs these into the install-time
     # $PYTHON, but the bypass runner launches the client with the active
     # benchmark interpreter; ensure them there too so a bypass-only box whose
     # sys.executable differs from /opt/venv can still import the client.
-    _ensure_bench_serving_deps(benchmark_python, pip_extra)
+    _run_install_step(
+        install_event,
+        step_id="ensure_bench_serving_deps",
+        category="install",
+        action=lambda: _ensure_bench_serving_deps(benchmark_python, pip_extra),
+    )
 
     # 1c. lm_eval — GSM8K accuracy gate, multi-node only (the helper gates
     # itself). The multi-node magpie remote-compat client path runs
     # ``python -m lm_eval`` directly, with no InferenceX runtime shim to install
     # the harness, so every RUN_EVAL=true baseline there would otherwise abort
     # with baseline_accuracy_failed.
-    _ensure_lm_eval_dep(benchmark_python, pip_extra, eval_disabled=_resolved_eval_disabled(args))
+    _run_install_step(
+        install_event,
+        step_id="ensure_lm_eval",
+        category="install",
+        action=lambda: _ensure_lm_eval_dep(
+            benchmark_python,
+            pip_extra,
+            eval_disabled=_resolved_eval_disabled(args),
+        ),
+    )
 
     # 1d. Per-framework runtime deps declared in assets/framework_deps/. This is
     # the pass that covers the documented flow: install.sh runs before
     # --framework is known, so its own attempt usually no-ops and a scriptable
     # framework would otherwise reach baseline with nothing installed.
-    _ensure_framework_deps(args, benchmark_python, pip_extra)
+    _run_install_step(
+        install_event,
+        step_id="framework_deps",
+        category="install",
+        action=lambda: _ensure_framework_deps(args, benchmark_python, pip_extra),
+    )
 
     # 1e. The serving framework itself, checked after 1d so everything that could
     # have supplied it has run. Without this the failure surfaces far from its cause.
-    _check_serving_framework(args, benchmark_python)
+    _run_install_step(
+        install_event,
+        step_id="check_serving_framework",
+        category="check",
+        action=lambda: _check_serving_framework(args, benchmark_python),
+    )
 
     # 2. Magpie — the benchmark engine the Magpie backend shells out to.
     # Skipped entirely when the
@@ -2101,41 +2717,70 @@ def _preflight(
     # Magpie-importable venv (via resolve_benchmark_interpreter), so a
     # bypass-only environment never resolves the Magpie venv / /opt/venv.
     magpie_python = benchmark_python
-    if not _magpie_backend_active:
-        print(f"Preflight: benchmark backend is {_resolve_active_backend_name()!r}; skipping Magpie install/import")
-        check = None
-    else:
-        check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
-    if _magpie_backend_active and check is not None and check.returncode != 0:
-        magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
-        magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
-        magpie_spec = os.environ.get(
-            "MAGPIE_PACKAGE_SPEC",
-            f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
+    magpie_installed = False
+    magpie_spec: str | None = None
+    try:
+        if not _magpie_backend_active:
+            print(f"Preflight: benchmark backend is {benchmark_backend!r}; skipping Magpie install/import")
+            check = None
+        else:
+            check = subprocess.run([magpie_python, "-c", "import Magpie"], capture_output=True)
+        if _magpie_backend_active and check is not None and check.returncode != 0:
+            magpie_repo = os.environ.get("MAGPIE_REPO", "https://github.com/AMD-AGI/Magpie.git")
+            magpie_ref = os.environ.get("MAGPIE_REF", "e6833b8183c6c41adf6038252337550876ca0433")
+            magpie_spec = os.environ.get(
+                "MAGPIE_PACKAGE_SPEC",
+                f"magpie-eval @ git+{magpie_repo}@{magpie_ref}",
+            )
+            print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
+            subprocess.run(
+                [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
+                check=True,
+            )
+            magpie_installed = True
+            print("Preflight: Magpie installed OK")
+        if _magpie_backend_active and not os.environ.get("MAGPIE_PATH", "").strip():
+            magpie_root = subprocess.run(
+                [
+                    magpie_python,
+                    "-c",
+                    "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            ).stdout.strip()
+            if magpie_root:
+                os.environ["MAGPIE_PATH"] = magpie_root
+                print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
+    except BaseException as exc:
+        _fail_install_step(
+            install_event,
+            step_id="ensure_magpie",
+            category="install",
+            exc=exc,
         )
-        print(f"Preflight: Magpie not importable; installing {magpie_spec} ...")
-        subprocess.run(
-            [magpie_python, "-m", "pip", "install", "--quiet", *pip_extra, magpie_spec],
-            check=True,
-        )
-        print("Preflight: Magpie installed OK")
-    if _magpie_backend_active and not os.environ.get("MAGPIE_PATH", "").strip():
-        magpie_root = subprocess.run(
-            [
-                magpie_python,
-                "-c",
-                "from pathlib import Path; import Magpie; print(Path(Magpie.__file__).resolve().parent.parent)",
-            ],
-            capture_output=True,
-            text=True,
-            check=True,
-        ).stdout.strip()
-        if magpie_root:
-            os.environ["MAGPIE_PATH"] = magpie_root
-            print(f"Preflight: MAGPIE_PATH resolved from installed package: {magpie_root}")
+        raise
+    _record_install_step(
+        install_event,
+        step_id="ensure_magpie",
+        category="install",
+        status=("skipped" if not _magpie_backend_active else "applied" if magpie_installed else "already_present"),
+        skip_reason=None if _magpie_backend_active else "benchmark_backend_not_magpie",
+        message=(
+            f"installed {magpie_spec}"
+            if magpie_installed
+            else f"benchmark backend is {benchmark_backend!r}"
+            if not _magpie_backend_active
+            else None
+        ),
+        target="magpie-eval",
+        interpreter=magpie_python,
+    )
 
     # 3. InferenceX — required for GSM8K accuracy eval; lm-eval deps auto-install at runtime via benchmark_lib.sh.
     inferencex_path = os.environ.get("INFERENCEX_PATH", "").strip()
+    inferencex_cloned = False
     if not inferencex_path:
         from ..session.paths import (
             magpie_dir as _magpie_default,
@@ -2185,6 +2830,7 @@ def _preflight(
         dest = _open_source_default() / _inferencex_dest_name(_ref)
         print(f"Preflight: no InferenceX checkout at {_ref[:12]}; cloning into {dest} ...")
         inferencex_path = _clone_inferencex(dest)
+        inferencex_cloned = bool(inferencex_path)
         if not (inferencex_path and _inferencex_checkout_ok(inferencex_path)):
             print(
                 "Preflight: ERROR — InferenceX checkout missing and clone "
@@ -2193,7 +2839,14 @@ def _preflight(
                 "src/hyperloom/inference_optimizer/assets/install.sh.",
                 file=sys.stderr,
             )
-            sys.exit(2)
+            exc = SystemExit(2)
+            _fail_install_step(
+                install_event,
+                step_id="clone_inferencex",
+                category="install",
+                exc=exc,
+            )
+            raise exc
     # Guard against a read-only INFERENCEX_PATH: Magpie stages benchmark scripts
     # there, so a non-writable tree fails the run before server boot.
     if not os.access(inferencex_path, os.W_OK):
@@ -2205,10 +2858,32 @@ def _preflight(
             f"Hyperloom clone a fresh one).",
             file=sys.stderr,
         )
-        sys.exit(2)
+        exc = SystemExit(2)
+        _fail_install_step(
+            install_event,
+            step_id="clone_inferencex",
+            category="install",
+            exc=exc,
+        )
+        raise exc
     # Always overwrite (not setdefault): a stale/broken INFERENCEX_PATH must not
     # survive into the child env. The validated value wins.
     os.environ["INFERENCEX_PATH"] = inferencex_path
+    _record_install_step(
+        install_event,
+        step_id="clone_inferencex",
+        category="install",
+        status="applied" if inferencex_cloned else "already_present",
+        skip_reason=None,
+        target="InferenceX",
+        version_after=_inferencex_head_sha(inferencex_path) or None,
+        detail={
+            "ref": os.environ.get("INFERENCEX_REF") or _INFERENCEX_REF_DEFAULT,
+            "dest": inferencex_path,
+            "writable": os.access(inferencex_path, os.W_OK),
+            "exit_code": 0,
+        },
+    )
 
     # --- Magpie/InferenceX eval-concurrency compatibility -------------------
     # Preflight installs Magpie and clones InferenceX itself (above), entirely
@@ -2220,15 +2895,42 @@ def _preflight(
     # flag ("Unknown parameter: --concurrent-requests"), aborting every
     # RUN_EVAL=true baseline before any results*.json exists. Patch the trees we
     # just materialized, now that both paths are known.
-    if _magpie_backend_active:
-        # Trust patch first, mirroring install.sh: the eval-concurrency strip
-        # removes the very `run_eval ... --concurrent-requests` line the legacy
-        # MI300X trust patcher matches on, so the reverse order would leave a
-        # tree permanently unpatchable by that path.
-        _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
-        _ensure_eval_concurrency_compat(os.environ.get("MAGPIE_PATH", ""), inferencex_path)
-
-    _report_inferencex_patch_anchors(inferencex_path)
+    try:
+        if _magpie_backend_active:
+            # Trust patch first, mirroring install.sh: the eval-concurrency strip
+            # removes the very `run_eval ... --concurrent-requests` line the legacy
+            # MI300X trust patcher matches on, so the reverse order would leave a
+            # tree permanently unpatchable by that path.
+            trust_ok = _ensure_client_trust_compat(os.environ.get("MAGPIE_PATH", ""))
+            concurrency_ok = _ensure_eval_concurrency_compat(
+                os.environ.get("MAGPIE_PATH", ""),
+                inferencex_path,
+            )
+        else:
+            trust_ok = True
+            concurrency_ok = True
+        anchors_ok = _report_inferencex_patch_anchors(inferencex_path)
+    except BaseException as exc:
+        _fail_install_step(
+            install_event,
+            step_id="patch_magpie_eval_concurrency",
+            category="patch",
+            exc=exc,
+        )
+        raise
+    patch_ok = trust_ok and concurrency_ok and anchors_ok
+    _record_install_step(
+        install_event,
+        step_id="patch_magpie_eval_concurrency",
+        category="patch",
+        status=("skipped" if not _magpie_backend_active else "applied" if patch_ok else "warned"),
+        skip_reason=None if _magpie_backend_active else "benchmark_backend_not_magpie",
+        detail={
+            "client_trust_compatible": trust_ok,
+            "eval_concurrency_compatible": concurrency_ok,
+            "inferencex_patch_anchors_ok": anchors_ok,
+        },
+    )
 
     # --- node / claude / codex CLI presence (WARN-only) ---
     _check_node_claude_cli()
@@ -2238,10 +2940,20 @@ def _preflight(
     no_kernel = getattr(args, "no_kernel", False) if args else False
     enable_roofline = getattr(args, "enable_roofline", True) if args else True
     if _tracelens_required_at_preflight(no_kernel, enable_roofline):
-        _check_tracelens_cli()
+        _run_install_step(
+            install_event,
+            step_id="check_tracelens_cli",
+            category="check",
+            action=_check_tracelens_cli,
+        )
         # Fail fast on a stale/placeholder TRACELENS_ROOT before the Coordinator
         # starts, rather than ~10h later in trace_analyze.
-        _check_tracelens_root_exists()
+        _run_install_step(
+            install_event,
+            step_id="check_tracelens_root",
+            category="check",
+            action=_check_tracelens_root_exists,
+        )
     else:
         _missing_tl = [n for n in _TRACELENS_REQUIRED_CLIS if shutil.which(n) is None]
         if _missing_tl:
@@ -2249,22 +2961,70 @@ def _preflight(
                 f"Preflight: WARNING — TraceLens CLI(s) not on PATH: {_missing_tl} "
                 f"(skipped; --no-kernel + roofline disabled)"
             )
+        _record_install_step(
+            install_event,
+            step_id="check_tracelens_cli",
+            category="check",
+            status="skipped",
+            skip_reason="no_kernel_and_roofline_disabled",
+            target="TraceLens",
+            message=f"missing CLIs: {_missing_tl}" if _missing_tl else None,
+        )
+        _record_install_step(
+            install_event,
+            step_id="check_tracelens_root",
+            category="check",
+            status="skipped",
+            skip_reason="tracelens_not_required",
+            target="TRACELENS_ROOT",
+        )
 
     # --- IR-3: PR Monitor reachability probe (soft degrade) ---
     if args is not None:
-        _run_ir3_preflight(args)
+        _run_install_step(
+            install_event,
+            step_id="ir3_pr_monitor_probe",
+            category="degrade",
+            action=lambda: _run_ir3_preflight(args),
+        )
+    else:
+        _record_install_step(
+            install_event,
+            step_id="ir3_pr_monitor_probe",
+            category="degrade",
+            status="skipped",
+            skip_reason="args_unavailable",
+        )
 
     # --- Single canonical diagnostics block ---
-    _emit_preflight_diagnostics(
-        magpie_python=magpie_python,
-        anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
-        args=args,
+    _run_install_step(
+        install_event,
+        step_id="diagnostics_snapshot",
+        category="diagnostic",
+        action=lambda: _emit_preflight_diagnostics(
+            magpie_python=magpie_python,
+            anthropic_base_url=(resolved_urls[0] if resolved_urls is not None else None),
+            args=args,
+        ),
     )
+
+    try:
+        _finish_install_event(
+            install_event,
+            args=args,
+            benchmark_backend=benchmark_backend,
+            benchmark_python=benchmark_python,
+            magpie_python=magpie_python,
+            inferencex_path=inferencex_path,
+            resolved_urls=resolved_urls,
+        )
+    except Exception:  # noqa: BLE001 — V6 observability must never change preflight behavior
+        log.warning("failed to finalize SBD V6 install event", exc_info=True)
 
     return resolved_urls
 
 
-def _run_ir3_preflight(args: argparse.Namespace) -> None:
+def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     """IR-3 — PR Monitor reachability probe (soft degrade); never raises/exits.
 
     Recipe KB enablement is controlled by ``--degraded-kb`` (``recipe_kb_enabled``);
@@ -2286,7 +3046,14 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     args.pr_degraded_reason = "explicit_flag" if explicit_pr else None
 
     if explicit_kb and explicit_pr:
-        return
+        return {
+            "status": "skipped",
+            "skip_reason": "explicit_flag",
+            "detail": {
+                "pr_monitor": {"enabled": False, "reason": "explicit_flag"},
+                "marker": None,
+            },
+        }
 
     user_data = _workspace_root_resolve()
     marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
@@ -2330,3 +3097,17 @@ def _run_ir3_preflight(args: argparse.Namespace) -> None:
     if not explicit_pr and not marker.get("pr_reachable", False) and not marker.get("pr_skipped", False):
         args.pr_monitor_enabled = False
         args.pr_degraded_reason = "ir3_auto"
+    enabled = bool(args.pr_monitor_enabled)
+    status = "skipped" if explicit_pr else "applied" if enabled else "warned"
+    event_reason = "explicit_flag" if explicit_pr else "ir3_unreachable" if not enabled else None
+    return {
+        "status": status,
+        "skip_reason": event_reason,
+        "detail": {
+            "pr_monitor": {
+                "enabled": enabled,
+                "reason": event_reason,
+            },
+            "marker": str(marker_path),
+        },
+    }

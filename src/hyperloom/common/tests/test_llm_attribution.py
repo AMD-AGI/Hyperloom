@@ -275,6 +275,219 @@ class TestPublishedPhase:
         assert tags.endswith("phase=KERNEL_AGENT")
 
 
+class TestNestedInjectionRefines:
+    """A child names itself and keeps the ambient fields it cannot restate.
+
+    The spawn sites that need this run *inside* the child -- kernelforge drives
+    the CLI from the forge loop, one process below whoever built its env -- and
+    there the phase and the action are both empty, because one is a module
+    global and the other a context variable. Without inheritance a child that
+    injected would trade them for the component it gained.
+    """
+
+    #: A child environment as it reaches the second process: gateway auth the
+    #: operator set, plus the tag its parent wrote on the way out.
+    def _spawned(self, **parent: str) -> dict[str, str]:
+        """Return a child env carrying a parent's tag, with this process reset."""
+        child = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        llm_attribution.inject_env(
+            child,
+            component="forge",
+            operation="forge_loop",
+            source=_env(),
+            **parent,
+        )
+        # The child is a new interpreter: no published phase, no session id, and
+        # CLAW_SESSION_ID is on no env_safety allowlist so it does not travel.
+        llm_attribution.set_current_phase("")
+        return child
+
+    def _tags(self, child: dict[str, str]) -> str:
+        """The tag value the child would send."""
+        return parse_custom_headers(child[_ANTHROPIC], env={})["x-litellm-tags"]
+
+    def test_child_keeps_the_phase_it_could_not_restate(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        assert "phase=KERNEL_AGENT" in self._tags(child)
+
+    def test_child_keeps_the_session_its_environment_never_carried(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        assert "session=claw-abc" in self._tags(child)
+
+    def test_child_keeps_the_action_it_was_spawned_under(self) -> None:
+        child = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        with llm_attribution.current_action_scope("kernel_opt"):
+            llm_attribution.inject_env(child, component="forge", source=_env())
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        assert "type=kernel_opt" in self._tags(child)
+
+    def test_the_child_names_itself(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        tags = self._tags(child)
+        assert "component=fusion" in tags
+        assert "component=forge" not in tags
+
+    def test_the_parents_purpose_does_not_leak_into_the_child(self) -> None:
+        # Inheriting operation= would label the child's calls with work the
+        # parent was doing, which is worse than saying nothing.
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        assert "operation=" not in self._tags(child)
+
+    def test_the_child_states_its_own_purpose(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", operation="discover", source={_ATTR: "litellm"})
+        assert "operation=discover" in self._tags(child)
+
+    def test_explicit_empty_phase_suppresses_an_inherited_one(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", phase="", source={_ATTR: "litellm"})
+        assert "phase=" not in self._tags(child)
+
+    def test_gateway_auth_and_tag_count_survive_the_nesting(self) -> None:
+        child = self._spawned()
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        assert parse_custom_headers(child[_ANTHROPIC], env={})["Ocp-Apim-Subscription-Key"] == "secret"
+        assert child[_ANTHROPIC].count("x-litellm-tags") == 1
+
+    def test_json_form_is_read_back_without_expanding_its_reference(self) -> None:
+        child = {_ANTHROPIC: json.dumps({"Ocp-Apim-Subscription-Key": "${GATEWAY_KEY}"})}
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        llm_attribution.inject_env(child, component="forge", source=_env())
+        llm_attribution.set_current_phase("")
+        llm_attribution.inject_env(child, component="fusion", source={_ATTR: "litellm"})
+        decoded = json.loads(child[_ANTHROPIC])
+        assert decoded["Ocp-Apim-Subscription-Key"] == "${GATEWAY_KEY}"
+        assert "phase=KERNEL_AGENT" in decoded["x-litellm-tags"]
+
+    def test_nothing_is_inherited_when_no_parent_wrote_a_tag(self) -> None:
+        env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert self._tags(env) == "application=hyperloom,component=fusion"
+
+    def test_an_operator_header_is_not_mistaken_for_a_tag(self) -> None:
+        env = {_ANTHROPIC: "X-Other: application=theirs,phase=THEIRS"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "phase=" not in self._tags(env)
+
+    def test_a_bare_trace_id_alone_is_not_taken_for_a_session(self) -> None:
+        # Nothing is lost by declining it: a tag this module wrote always
+        # carries the combined header, because application is never empty.
+        env = {_ANTHROPIC: "x-litellm-trace-id: operator-trace"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "operator-trace" not in self._tags(env)
+
+    def test_an_inherited_reference_is_never_left_to_be_expanded(self) -> None:
+        # A recovered value is re-rendered into a tag this process sends, and
+        # whoever reads that header next expands ${VAR} -- which would put this
+        # process's gateway secret into a tag the gateway itself logs. Asserted
+        # against the unexpanded setting, since reading it back expands it.
+        env = {_ANTHROPIC: "x-litellm-tags: application=hyperloom,session=${GATEWAY_KEY}"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "${" not in env[_ANTHROPIC]
+
+    def test_the_self_describing_tag_outranks_a_bare_trace_id(self) -> None:
+        # x-litellm-trace-id carries a bare value, so an operator's own tracing
+        # header is indistinguishable from ours; letting it win would make their
+        # trace id the run's session and misjoin every reconciliation.
+        tag = "x-litellm-tags: application=hyperloom,session=real-run"
+        env = {_ANTHROPIC: f"{tag}\nx-litellm-trace-id: operator-trace"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        assert "session=real-run" in self._tags(env)
+        assert "operator-trace" not in self._tags(env)
+
+    def test_an_explicitly_empty_field_suppresses_an_inherited_one(self) -> None:
+        child = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        with llm_attribution.current_action_scope("kernel_opt"):
+            llm_attribution.inject_env(child, component="forge", source=_env())
+        assert "type=kernel_opt" in self._tags(child)
+
+        # Overriding an inherited field is not the same as saying there is none.
+        llm_attribution.inject_env(child, component="fusion", type="", source={_ATTR: "litellm"})
+        assert "type=" not in self._tags(child)
+
+
+class TestSelfInjectionDoesNotAccumulate:
+    """Writing the tag into our own environment must not pin ambient state.
+
+    ``forge_fusion`` injects into ``os.environ`` itself so the CLI it spawns
+    later inherits the tag. That tag then outlives every scope in this process,
+    so reading our own ``phase``/``type`` back out of it would label unrelated
+    later calls with the first action the process happened to run.
+    """
+
+    def _tags(self, env: dict[str, str]) -> str:
+        return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
+
+    def test_a_stale_action_does_not_survive_its_scope(self) -> None:
+        own = dict(_env())
+        with llm_attribution.current_action_scope("kernel_opt"):
+            llm_attribution.inject_env(own, component="forge", source=own)
+        assert "type=kernel_opt" in self._tags(own)
+
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "type=" not in self._tags(own)
+
+    def test_a_stale_phase_does_not_survive_the_transition(self) -> None:
+        own = dict(_env())
+        llm_attribution.set_current_phase("KERNEL_AGENT")
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "phase=KERNEL_AGENT" in self._tags(own)
+
+        llm_attribution.set_current_phase("VALIDATE")
+        llm_attribution.inject_env(own, component="forge", source=own)
+        tags = self._tags(own)
+        assert "phase=VALIDATE" in tags
+        assert "KERNEL_AGENT" not in tags
+
+    def test_the_run_identity_still_survives(self) -> None:
+        # session identifies the run, not this process's state, so it is kept.
+        own = dict(_env())
+        llm_attribution.inject_env(own, component="forge", source=own)
+        assert "session=claw-abc" in self._tags(own)
+
+
+class TestInheritanceReadsBothVariables:
+    """The two header variables are read together, not one instead of the other."""
+
+    def _tags(self, env: dict[str, str]) -> str:
+        return parse_custom_headers(env[_ANTHROPIC], env={})["x-litellm-tags"]
+
+    def test_a_partly_written_variable_does_not_hide_the_other(self) -> None:
+        # Reading only the first variable that parses would drop exactly the
+        # ambient fields inheritance exists to carry.
+        env = {
+            _ANTHROPIC: "x-litellm-tags: application=hyperloom,session=sess-1",
+            _OPENAI: "x-litellm-tags: application=hyperloom,session=sess-1,phase=KERNEL_AGENT,type=kernel_opt",
+        }
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        tags = self._tags(env)
+        assert "phase=KERNEL_AGENT" in tags
+        assert "type=kernel_opt" in tags
+
+
+class TestNoGatewaySelected:
+    """The no-op contract: an unconfigured deployment is not read at all."""
+
+    def test_a_malformed_selection_writes_nothing(self) -> None:
+        env = {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "not-a-preset"})
+        assert env == {_ANTHROPIC: "Ocp-Apim-Subscription-Key: secret"}
+
+    def test_the_json_encoding_survives_an_injection(self) -> None:
+        # One arbiter decides the encoding for both reading and writing, so a
+        # setting stored as JSON is still JSON afterwards.
+        env = {_ANTHROPIC: json.dumps({"Ocp-Apim-Subscription-Key": "secret"})}
+        llm_attribution.inject_env(env, component="fusion", source={_ATTR: "litellm"})
+        decoded = json.loads(env[_ANTHROPIC])
+        assert decoded["Ocp-Apim-Subscription-Key"] == "secret"
+        assert decoded["x-litellm-tags"] == "application=hyperloom,component=fusion"
+
+
 class TestSdkEnvOverlay:
     """claude_agent_sdk merges options.env over the inherited environment."""
 

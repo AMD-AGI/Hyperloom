@@ -31,7 +31,6 @@ import yaml
 
 from hyperloom.orchestrator.actions.executors._accuracy_gate import (
     accuracy_passed,
-    is_high_accuracy_risk,
     parse_eval_results,
 )
 from hyperloom.orchestrator.actions.executors._grid_runner import _run_magpie
@@ -546,9 +545,9 @@ def test_parse_eval_results_keeps_results_when_root_is_warmup_slot(tmp_path):
     assert out.get("accuracy") == pytest.approx(0.77)
 
 
-def test_warm_decision_high_risk_variant_grades_from_warmup_round(tmp_path):
+def test_warm_decision_gated_variant_grades_from_warmup_round(tmp_path):
     """Warm-decision explore runs the decision round with ``RUN_EVAL=false``, so a
-    high-risk variant's only score sits under ``warmup_round/``. The gate must
+    gated variant's only score sits under ``warmup_round/``. The gate must
     grade from it and PASS rather than REVERT as ``accuracy_unavailable``.
     """
     slot = tmp_path / "variant_00_kv"
@@ -556,8 +555,6 @@ def test_warm_decision_high_risk_variant_grades_from_warmup_round(tmp_path):
         slot / "warmup_round" / "Qwen__model" / "results_2026-07-15T09-00-00.000000.json",
         0.9462,
     )
-    # The flag that makes this variant gated in the first place.
-    assert is_high_accuracy_risk(extra_args="--kv-cache-dtype fp8", extra_envs={}) is True
 
     out = parse_eval_results(slot, framework="vllm")
     accuracy = out.get("accuracy")

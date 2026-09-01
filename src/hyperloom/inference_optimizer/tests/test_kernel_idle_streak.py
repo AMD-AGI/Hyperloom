@@ -155,6 +155,49 @@ async def test_running_kernel_task_never_winds_down(kernel_coordinator):
 
 
 @pytest.mark.asyncio
+async def test_inline_kernel_request_never_winds_down(kernel_coordinator):
+    """An ``integrate`` is awaited in the intent router, not queued as a task.
+
+    So the registry probe reports nothing in flight for its whole duration. A
+    real nine-minute ``integrate`` re-baseline accrued the full streak and wound
+    KERNEL down to SWEEP four seconds after it returned, stranding nine selected
+    candidates including the two hottest kernels on the trace.
+    """
+    c = kernel_coordinator
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    _stall_the_ledger(st)
+
+    for _ in range(ps.KERNEL_IDLE_MAX_TICKS * 20):
+        # What the intent router's heartbeat stamps while the handler runs.
+        st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp()
+        await c._advance_phase_if_needed()
+        _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS * 10)
+
+    assert st.phase == ps.PHASE_KERNEL_AGENT
+    assert st.kernel_idle_ticks == 0
+    assert not await c.phase_machine._inflight_kernel_task_ids()
+
+
+@pytest.mark.asyncio
+async def test_orphaned_inline_step_stamp_still_winds_down(kernel_coordinator):
+    """A stamp from a process that died mid-step must not mute the guard."""
+    c = kernel_coordinator
+    st = c.shared_state
+    _arm_kernel_phase(st)
+    _stall_the_ledger(st)
+    st.kernel_inline_step_seen_unix = datetime.now(timezone.utc).timestamp() - ps.KERNEL_INLINE_STEP_STALE_SECONDS - 1.0
+
+    await c._advance_phase_if_needed()
+    for _ in range(ps.KERNEL_IDLE_MAX_TICKS):
+        await c._advance_phase_if_needed()
+    _backdate_streak(st, ps.KERNEL_IDLE_MIN_SECONDS + 1.0)
+    await c._advance_phase_if_needed()
+
+    assert st.phase == ps.PHASE_SWEEP
+
+
+@pytest.mark.asyncio
 async def test_queued_kernel_task_never_winds_down(kernel_coordinator):
     # A task waiting on a resource lane is work the phase is committed to, not
     # dead air; it must hold the phase exactly like a running one.
@@ -203,7 +246,7 @@ async def test_ledger_progress_restarts_the_streak(kernel_coordinator):
 async def test_streak_state_is_cleared_outside_kernel(kernel_coordinator):
     c = kernel_coordinator
     st = c.shared_state
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.kernel_idle_ticks = 9
     st.kernel_progress_fingerprint = "stale"
     st.kernel_idle_since_unix = 1.0

@@ -13,18 +13,12 @@ from hyperloom.orchestrator.prompts.specialist_prompt_builder import (
     _render_measured_impact,
     _format_version_note,
 )
-from hyperloom.orchestrator.specialists.domains import get_domain
+from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS, get_domain
 
 
-_DOMAIN_KEYS = (
-    "serving_specialist",
-    "kernel_switch_specialist",
-    "comm_specialist",
-    "compiler_specialist",
-    "system_specialist",
-    "pr_intel_specialist",
-    "research_scout_specialist",
-)
+# Derived, not copied: a hand-maintained list goes stale silently when a domain
+# is added, and fails en masse when one is removed.
+_DOMAIN_KEYS = tuple(sorted(d.key for d in SPECIALIST_DOMAINS))
 
 
 @pytest.mark.parametrize("domain_key", _DOMAIN_KEYS)

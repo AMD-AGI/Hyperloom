@@ -13,6 +13,7 @@ Field reference:
 * ``layer`` — short human label (analysis layer covered).
 * ``kb_anchor`` — knowledge-domain label for prompt grouping.
 * ``available_in`` — ``"M5"`` / ``"M6"``; both are dispatchable.
+* ``llm_selectable`` — False for a domain only the Coordinator dispatches.
 
 All specialists share the global :data:`PR_QUERY_REPOS` allowlist and query
 the PR Monitor directly via ``mcp__pr_monitor__*`` tools.
@@ -53,6 +54,10 @@ class SpecialistDomain:
     available_in: str = "M6"
     description: str = ""
     default_mode: str = "patch"
+    #: Whether Orchestration may name this domain in a ``delegate``. False for
+    #: the domains the Coordinator dispatches itself. The emit hint and its test
+    #: both derive from this instead of each carrying a copy of the list.
+    llm_selectable: bool = True
 
 
 # Global allowlist of repos specialists may query via mcp__pr_monitor__*.
@@ -122,15 +127,19 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         ),
     ),
     SpecialistDomain(
-        key="pr_intel_specialist",
-        layer="cross-repo PR research",
+        key="candidate_discovery_specialist",
+        layer="upstream candidate discovery / ranking / audit",
         kb_anchor="pr_intelligence",
         available_in="M6",
         default_mode="research",
         description=(
-            "EXPLORE-phase per-gap PR top-up. Surveys PRs across known "
-            "repos and feeds refs to other specialists. Dispatch sparingly "
-            "(one every K rounds)."
+            "Finds upstream work worth landing. Surveys PRs across the "
+            "allowlisted repos for the live bottleneck, ranks what it finds "
+            "against the stack and the already-tried ledger, and judges each "
+            "candidate: already present, not applicable, or worth a bench and "
+            "by which route. Writes candidates to the ledger; Orchestration "
+            "then proposes integrate_patch for the ones it wants. A first-class "
+            "lever alongside configuration search, not an occasional top-up."
         ),
     ),
     SpecialistDomain(
@@ -141,7 +150,7 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
         default_mode="research",
         description=(
             "Read-only research collector dispatched at PRELUDE (and "
-            "periodically during EXPLORE). Surveys reference launch "
+            "periodically during the optimisation phase). Surveys reference launch "
             "scripts, model config.json architecture features, and "
             "cross-framework / NVIDIA PRs+blogs+MLPerf for proven "
             "optimizations, then writes prioritised research_hints with "
@@ -163,12 +172,13 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "predicate (e.g. a CUDA-only *_supported() returning False on "
             "ROCm). Seeded with a curated checklist; emits bridge-patch "
             "candidates as gap seeds. Never benchmarks, applies patches, or "
-            "decides KEEP/REVERT — the EXPLORE freeform specialist authors the "
+            "decides KEEP/REVERT — the freeform specialist authors the "
             "actual patch under the normal KEEP gate."
         ),
     ),
     SpecialistDomain(
         key="enablement_specialist",
+        llm_selectable=False,
         layer="non-runnable or eval-failing (model, backend) enablement / framework + ROCm/HIP bridging",
         kb_anchor="framework",
         available_in="M6",
@@ -209,22 +219,6 @@ SPECIALIST_DOMAINS: tuple[SpecialistDomain, ...] = (
             "a declared manifest so each one can be attributed and composed "
             "independently. Distinct from serving_specialist (request-serving "
             "frameworks) and kernel_switch_specialist (operator kernels)."
-        ),
-    ),
-    SpecialistDomain(
-        key="cross_framework_rewrite_specialist",
-        layer="cross-framework feature port (sglang <-> vllm), rewrite not git-apply",
-        kb_anchor="framework",
-        available_in="M6",
-        description=(
-            "Authoring specialist for cross-framework feature porting (#5-P2). "
-            "Given a source-framework PR diff, symbol-level landing points in "
-            "the TARGET framework, and the target module's current source, it "
-            "re-implements the equivalent feature against the target API into "
-            "an isolated worktree (NEVER git-apply the source diff). Edits are "
-            "confined to the landing points plus their direct dependencies. "
-            "Gated by the same throughput/accuracy double gate as same-framework "
-            "patches; distinct from serving_specialist (same-framework tuning)."
         ),
     ),
 )
