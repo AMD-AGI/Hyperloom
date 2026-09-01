@@ -2271,181 +2271,18 @@ def test_double_run_runtime_anchor_is_full_warmup_round(tmp_path, monkeypatch):
     assert result["measure_round_runtime_sec"] < result["subprocess_runtime_sec"]
 
 
-def test_double_run_pre_start_cleanup_kills_zombie_and_clears_stale_meta(
-    tmp_path,
-    monkeypatch,
-):
-    """When the reuse port is occupied by a zombie (healthy but no metadata),
-    pre-start cleanup must (a) unlink stale pid/json without sending signals to
-    potentially-recycled PIDs, and (b) invoke _kill_stale_servers() to reap the
-    zombie listener."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
-        lambda: 8888,
-    )
+def test_pre_start_cleanup_unlinks_meta_and_kills_unconditionally(tmp_path, monkeypatch):
+    """Pre-start cleanup no longer probes port health: it unconditionally
+    (a) unlinks stale pid/json without sending signals to potentially-recycled
+    PIDs, and (b) invokes _kill_stale_servers() -- Hyperloom's own scheduling
+    (gpu_research_lane, capacity 1) guarantees nothing matching should be
+    alive at this point, so no extra evidence is required before reaping.
 
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with (
-        patch.object(
-            type(executor),
-            "_port_healthy",
-            return_value=True,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=fake_kill,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert kill_calls["n"] == 1
-    assert not (output_dir / "vllm_8888.pid").exists()
-    assert state["calls"] == 2
-    assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
-    warmup_lc = captured[0]["benchmark"]["server_lifecycle"]
-    measure_lc = captured[1]["benchmark"]["server_lifecycle"]
-    assert warmup_lc["cleanup"] is False
-    assert measure_lc["cleanup"] is True
-    assert warmup_lc["pid_dir"] == measure_lc["pid_dir"] == str(output_dir)
-
-
-def test_pre_start_cleanup_no_kill_when_port_free(tmp_path, monkeypatch):
-    """When the port is NOT occupied (no zombie), _kill_stale_servers must
-    NOT fire — avoids killing unrelated servers sharing the pod."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
-        lambda: 8888,
-    )
-
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with (
-        patch.object(
-            type(executor),
-            "_port_healthy",
-            return_value=False,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=fake_kill,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert kill_calls["n"] == 0
-    assert not (output_dir / "vllm_8888.pid").exists()
-    assert state["calls"] == 2
-
-
-def test_pre_start_cleanup_no_kill_when_metadata_existed(tmp_path, monkeypatch):
-    """A healthy port with matching metadata is not a zombie signal.
-
-    The global stale-server reaper must not fire for a likely legitimate
-    server. File preservation is covered by the direct pre-start test below;
-    this full double-run path later removes files in final teardown.
+    Calls the method directly (not through the full executor) so clearing
+    ``PYTEST_CURRENT_TEST`` for this one call can't leak into unrelated code
+    paths (e.g. Ray) that also branch on it.
     """
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-    output_dir.mkdir(parents=True)
-    (output_dir / "vllm_8888.pid").write_text("2147483646")
-    monkeypatch.setattr(
-        "hyperloom.orchestrator.actions.executors._server_lifecycle._pick_free_port",
-        lambda: 8888,
-    )
-    (output_dir / "vllm_8888.json").write_text("{}")
-
-    kill_calls = {"n": 0}
-
-    def fake_kill():
-        kill_calls["n"] += 1
-
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with (
-        patch.object(
-            type(executor),
-            "_port_healthy",
-            return_value=True,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=fake_kill,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert kill_calls["n"] == 0
-    assert state["calls"] == 2
-
-
-def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
-    tmp_path,
-):
-    """Direct guard: do not create port-occupied/no-metadata state."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     output_dir = tmp_path / "ws"
     output_dir.mkdir(parents=True)
     pid_file = output_dir / "vllm_8888.pid"
@@ -2459,99 +2296,124 @@ def test_pre_start_cleanup_preserves_metadata_when_reuse_target_healthy(
     def fake_kill():
         kill_calls["n"] += 1
 
-    with (
-        patch.object(
-            type(executor),
-            "_port_healthy",
-            return_value=True,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=fake_kill,
-        ),
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
+        side_effect=fake_kill,
     ):
-        executor._pre_start_cleanup(
-            pid_dir=output_dir,
-            framework="vllm",
-            port=8888,
+        _run(
+            executor._pre_start_cleanup(
+                pid_dir=output_dir,
+                framework="vllm",
+                port=8888,
+            )
         )
 
-    assert kill_calls["n"] == 0
-    assert pid_file.exists()
-    assert meta_file.exists()
+    assert kill_calls["n"] == 1
+    assert not pid_file.exists()
+    assert not meta_file.exists()
 
 
-def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
-    """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
-    must not abort the run — the double-run proceeds and still succeeds."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
+def test_pre_start_cleanup_skipped_under_pytest(tmp_path):
+    """Direct guard: _kill_stale_servers must NOT fire while
+    ``PYTEST_CURRENT_TEST`` is set (pytest always sets it for a running
+    test), mirroring the same guard on the per-launch preclean in
+    ``_grid_runner.py``. Stale pid/meta files are still unlinked regardless.
+    """
     output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+    pid_file = output_dir / "vllm_8888.pid"
+    meta_file = output_dir / "vllm_8888.json"
+    pid_file.write_text("2147483646")
+    meta_file.write_text("{}")
 
-    def boom():
-        raise RuntimeError("proc scan blew up")
-
-    captured: list = []
-    fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path, baseline_double_run=True)
-    ctx = _make_ctx(
-        {
-            "output_dir": str(output_dir),
-            "timeout_sec": 10,
-            "gpu_type": "mi300x",
-        }
-    )
-
-    with (
-        patch.object(
-            type(executor),
-            "_port_healthy",
-            return_value=True,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=boom,
-        ),
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
-            side_effect=fake_run,
-        ),
-    ):
-        result = _run(executor(ctx))
-
-    assert result["status"] == "succeeded"
-    assert state["calls"] == 2
-
-
-def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
-    """Single-round (double-run disabled) keeps legacy behaviour: the
-    pre-start deep clean is a double-run-only concern and must not fire."""
-    base = tmp_path / "base.yaml"
-    _write_yaml(base, framework="vllm")
-    output_dir = tmp_path / "ws"
-
+    executor = _executor(tmp_path / "base.yaml", tmp_path)
     kill_calls = {"n": 0}
 
     def fake_kill():
         kill_calls["n"] += 1
 
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
+        side_effect=fake_kill,
+    ):
+        _run(
+            executor._pre_start_cleanup(
+                pid_dir=output_dir,
+                framework="vllm",
+                port=8888,
+            )
+        )
+
+    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"
+    assert not pid_file.exists()
+    assert not meta_file.exists()
+
+
+def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypatch):
+    """The pre-start cleanup is best-effort: a raising _kill_stale_servers()
+    must not propagate out of _pre_start_cleanup() itself.
+
+    Calls the method directly (see the "unconditionally" test above for why),
+    with ``_kill_stale_servers`` -- the one piece of real work it does beyond
+    unlinking files -- swapped for a function that raises.
+    """
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    output_dir = tmp_path / "ws"
+    output_dir.mkdir(parents=True)
+
+    def boom():
+        raise RuntimeError("proc scan blew up")
+
+    executor = _executor(tmp_path / "base.yaml", tmp_path)
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
+        side_effect=boom,
+    ):
+        _run(
+            executor._pre_start_cleanup(
+                pid_dir=output_dir,
+                framework="vllm",
+                port=8888,
+            )
+        )
+    # No exception propagated past _pre_start_cleanup: that's the assertion.
+
+
+@pytest.mark.parametrize("baseline_double_run", [True, False])
+def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseline_double_run):
+    """The pre-start deep clean must run exactly once before the round(s)
+    boot, whether this is a double-run or a single round.
+
+    This is the kernel-phase re-baseline path: single-round baselines are
+    the common way the kernel phase re-establishes its baseline, and without
+    this an orphan a prior sweep/explore round's timeout left behind would
+    survive into the baseline attempt and OOM the new server
+    (AMD-AGI/Hyperloom#1354).
+    """
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    cleanup_calls: list[dict] = []
+
+    async def fake_cleanup(**kwargs):
+        cleanup_calls.append(kwargs)
+
     captured: list = []
     fake_run, state = _cold_then_hot_fake_run(captured)
-    executor = _executor(base, tmp_path)
+    executor = _executor(base, tmp_path, baseline_double_run=baseline_double_run)
     ctx = _make_ctx(
         {
             "output_dir": str(output_dir),
             "timeout_sec": 10,
             "gpu_type": "mi300x",
-            "baseline_double_run": False,
+            "baseline_double_run": baseline_double_run,
         }
     )
 
     with (
-        patch(
-            "hyperloom.orchestrator.actions.executors.baseline._kill_stale_servers",
-            side_effect=fake_kill,
-        ),
+        patch.object(type(executor), "_pre_start_cleanup", side_effect=fake_cleanup),
         patch(
             "hyperloom.orchestrator.actions.executors.baseline.run_with_session_kill",
             side_effect=fake_run,
@@ -2560,8 +2422,8 @@ def test_pre_start_cleanup_skipped_when_single_round(tmp_path, monkeypatch):
         result = _run(executor(ctx))
 
     assert result["status"] == "succeeded"
-    assert state["calls"] == 1
-    assert kill_calls["n"] == 0
+    assert len(cleanup_calls) == 1
+    assert state["calls"] == (2 if baseline_double_run else 1)
 
 
 def test_teardown_lifecycle_server_removes_state_files(tmp_path):

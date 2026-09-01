@@ -3397,6 +3397,19 @@ class BaselineExecutor:
             ctx_extra=extra,
         )
         double_run = double_run_requested and lifecycle["eligible"]
+        # Deep-clean any lingering server BEFORE any round boots. Unconditional
+        # (not just double-run): a single-round baseline is the common path
+        # for kernel-phase re-baselining, and it is exactly the server-start
+        # attempt that must not silently OOM against a server a prior
+        # sweep/explore round's timeout left running (setsid'd server
+        # processes escape that round's process-group teardown; see
+        # _grid_runner._kill_stale_servers). Best-effort and idempotent, so
+        # calling it once here up front is safe for both paths.
+        await self._pre_start_cleanup(
+            pid_dir=output_dir,
+            framework=lifecycle["framework"],
+            port=lifecycle["port"],
+        )
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged
             # accuracy round. A single-round fallback must retain the original
@@ -3647,13 +3660,6 @@ class BaselineExecutor:
         # server; task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
-            # Deep-clean zombie listeners + stale pid/meta BEFORE round 1 boots.
-            # Runs once here so round 1's server survives for round 2's re-attach.
-            self._pre_start_cleanup(
-                pid_dir=pid_dir,
-                framework=framework,
-                port=port,
-            )
             # Round 1 (warmup): boot + run, leave running so round 2 can
             # re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
@@ -4235,44 +4241,39 @@ class BaselineExecutor:
             yaml.safe_dump(cfg, f, sort_keys=False)
         return out
 
-    @staticmethod
-    def _port_healthy(port: int, timeout: float = 3.0) -> bool:
-        """Return True when localhost:{port}/health responds HTTP 200.
-
-        Args:
-            port: Local server port to probe.
-            timeout: Per-request timeout in seconds.
-
-        Returns:
-            ``True`` when the health endpoint responds HTTP 200, else
-            ``False``.
-        """
-        import urllib.request
-
-        try:
-            r = urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health",
-                timeout=timeout,
-            )  # nosec B310 - fixed loopback health check.
-            return r.status == 200
-        except Exception:  # noqa: BLE001
-            return False
-
-    def _pre_start_cleanup(
+    async def _pre_start_cleanup(
         self,
         *,
         pid_dir: Path,
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean for the double-run path.
+        """Best-effort startup pre-clean, run once before every baseline round.
 
-        Only acts when there is concrete evidence of a zombie: the reuse
-        port responds to /health but the matching metadata file is absent
-        (the exact "Reuse metadata mismatch" trigger). In that case it
-        calls _kill_stale_servers() to reap the orphan listener. Stale
-        pid/json files are always unlinked (without sending signals to
-        potentially-recycled PIDs). Never raises.
+        Unconditionally reaps any lingering vLLM/SGLang/atom server via
+        _kill_stale_servers(). Hyperloom's own scheduling (``gpu_research_lane``,
+        capacity 1) guarantees at most one server-holding task runs at a time,
+        so nothing matching should still be alive at this point, before this
+        task's own server has even booted. A prior sweep/explore round's
+        timeout can leave one running anyway — its setsid'd server process
+        escapes that round's process-group teardown — and this is the safety
+        net that catches it before the new server OOMs against it
+        (AMD-AGI/Hyperloom#1354).
+
+        This used to gate the scan on a "zombie" heuristic: only fire when the
+        reuse port answered /health but had no matching pid/json metadata.
+        That signal was unreliable in both directions and has been dropped:
+        an eligible server_lifecycle port is a freshly OS-assigned ephemeral
+        port (confirmed free at assignment time), so it always reports
+        unhealthy and the scan would never fire; an ineligible port falls
+        back to a fixed default that can coincide with an unrelated
+        co-tenant's server, so the heuristic could also fire on the wrong
+        target.
+
+        Stale pid/json metadata files are always unlinked first (no signal
+        sent to potentially-recycled PIDs). Skipped under pytest, matching
+        the same guard on the per-launch preclean in ``_grid_runner.py``:
+        real ``/proc`` scanning is unsafe there. Never raises.
 
         Args:
             pid_dir: Directory holding the server pid/metadata files.
@@ -4281,34 +4282,16 @@ class BaselineExecutor:
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
-        pid_file = base / f"{tag}.pid"
-        meta_file = base / f"{tag}.json"
-        meta_exists = meta_file.exists()
-        try:
-            port_healthy = self._port_healthy(port)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start port probe failed (%s); proceeding.",
-                exc,
-            )
-            port_healthy = False
-        if meta_exists and port_healthy:
-            # A healthy reuse target with metadata is not a zombie; keep the
-            # files so Magpie can reattach.
-            return
-        # Unlink stale metadata/pid files only (no signal to possibly-recycled
-        # PIDs).
-        for p in (pid_file, meta_file):
+        for p in (base / f"{tag}.pid", base / f"{tag}.json"):
             try:
                 if p.exists():
                     p.unlink()
             except OSError:
                 pass
-        # Only deep-clean when the port is occupied by a zombie (healthy
-        # endpoint, no metadata), to avoid killing unrelated servers.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
         try:
-            if not meta_exists and port_healthy:
-                _kill_stale_servers()
+            await asyncio.to_thread(_kill_stale_servers)
         except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
             log.warning(
                 "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",

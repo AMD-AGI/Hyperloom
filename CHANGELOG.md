@@ -389,6 +389,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A baseline round no longer OOMs against a server a prior sweep/explore
+  round's timeout left orphaned.** `BaselineExecutor`'s pre-start cleanup
+  ran only on the double-run path, and only when the reuse port answered
+  `/health` with no matching pid/json metadata (a "zombie" heuristic). That
+  heuristic was unreliable either way: an eligible `server_lifecycle` port
+  is a freshly OS-assigned ephemeral port confirmed free at assignment time,
+  so it always reported unhealthy and the cleanup never fired even when a
+  same-port zombie was in fact present; an ineligible port fell back to a
+  fixed default that could coincide with an unrelated co-tenant's server,
+  risking the opposite failure. Pre-start cleanup now runs unconditionally
+  before every baseline round (double-run and single-round alike -- the
+  latter being the common way the kernel phase re-establishes its
+  baseline), reaping any lingering server via the same `_kill_stale_servers()`
+  `/proc` scan already used elsewhere: Hyperloom's own scheduling
+  (`gpu_research_lane`, capacity 1) guarantees at most one server-holding
+  task runs at a time, so nothing matching should be alive at this point
+  regardless of port health. (AMD-AGI/Hyperloom#1354)
 - **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
   derived its demand file only when the serving log carried dense tuned-config
   misses, so a MoE-only model -- or one whose dense tables all hit while
