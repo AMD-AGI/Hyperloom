@@ -355,6 +355,10 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             {
                 "verdict": m.get("verdict"),
                 "error_class": aborted,
+                # Explicit rather than re-deriving the reason set on the consumer
+                # side: the orchestrator bounds how often it re-runs an abort, and
+                # a copied constant there would drift from the one above.
+                "infrastructure_abort": True,
                 "error": (
                     f"forge-fusion aborted on infrastructure ({aborted}); "
                     f"the loop reported no completed attempts and no result. "
