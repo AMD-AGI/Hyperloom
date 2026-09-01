@@ -2017,26 +2017,26 @@ def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> N
     patch_a.write_text("authored_a", encoding="utf-8")
     patch_b.write_text("authored_b", encoding="utf-8")
     sections = _sections(tmp_path)
-    staged_refs = FrameworkAgentKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
+    staged_refs = PatchKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
     staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
-    prior_patch = "framework/overlays/000000/00-replayed.patch"
-    prior_artifact = "framework/artifacts/prior.bin"
+    prior_patch = "patch/overlays/000000/00-replayed.patch"
+    prior_artifact = "patch/artifacts/prior.bin"
     # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
     # Union must keep prior, dedup the overlap, and append staged_ref_b.
     # `if not before and after:` at values.py (discard after when before is
     # non-empty) silently drops staged_ref_b — this shape turns that red.
-    after_patches = list(sections.staged("framework").knowledge.get("patches") or [])
+    after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
     assert after_patches == [staged_ref_a, staged_ref_b]
     value = {
-        "framework": {
+        "patch": {
             "patches": [prior_patch, staged_ref_a],
             "artifacts": [prior_artifact],
         }
     }
     merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
-    assert merged == ["framework"]
-    assert value["framework"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
-    assert value["framework"]["artifacts"] == [prior_artifact]
+    assert merged == ["patch"]
+    assert value["patch"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
+    assert value["patch"]["artifacts"] == [prior_artifact]
 
 
 def test_non_overlay_owner_patch_ref_fails_before_publish(
