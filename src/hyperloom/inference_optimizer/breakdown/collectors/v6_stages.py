@@ -1100,7 +1100,7 @@ def _attempt_source_kind(attempt: dict[str, Any]) -> str:
     name = _lower(attempt.get("name"))
     if "fusion" in producer or "fusion" in name:
         return "fusion"
-    if kind == "kernel_optimization" and "geak" in f"{producer} {backend}":
+    if name == "geak_e2e" or (kind == "kernel_optimization" and "geak" in f"{producer} {backend}"):
         return "geak_e2e"
     return _SOURCE_KIND_BY_ATTEMPT_KIND.get(kind, "kernel_rewrite")
 
@@ -1146,6 +1146,7 @@ def _final_rebench_attempt(
     attempt: dict[str, Any],
     task_id_by_operation: dict[str, str],
     throughput_unit: str,
+    attributed_gain_pct: float | None,
 ) -> dict[str, Any]:
     """Project one ``optimizations.attempts[]`` row into a V6 rebench row."""
     source_kind = _attempt_source_kind(attempt)
@@ -1153,6 +1154,29 @@ def _final_rebench_attempt(
     status = _lower(attempt.get("status"))
     decision = _upper(attempt.get("decision"))
     artifacts = _dict_rows(attempt.get("artifacts"))
+    output_throughput = _to_float(attempt.get("throughput_after"))
+    # Recorder operations use their terminal business word as ``status``. A
+    # rebench that ran cleanly and rejected the candidate is therefore written
+    # as ``reverted`` rather than ``succeeded`` even though it produced the
+    # measurement that made the decision. V6's status answers a different
+    # question -- whether a usable measurement formed -- so a measured REVERT
+    # is a success, while an apply/launch failure that merely defaults its
+    # decision to REVERT remains a failure.
+    measured_revert = (
+        decision == "REVERT"
+        and output_throughput is not None
+        and output_throughput > 0
+        and status not in _SKIPPED_STATUSES
+    )
+    projected_status = (
+        "succeeded"
+        if status in _OK_STATUSES or measured_revert
+        else ("skipped" if status in _SKIPPED_STATUSES else "failed")
+    )
+    # Any non-skipped attempt that failed to form a measurement is a rebench
+    # fault, including legacy rows whose producer wrote the business terminal
+    # word ``reverted`` rather than one of the canonical failure statuses.
+    is_fault = projected_status == "failed"
     return {
         "attempt_id": attempt_id,
         # The projected attempt row drops the task id; it is joined back off
@@ -1162,12 +1186,16 @@ def _final_rebench_attempt(
         "source_kind": source_kind,
         "source_id": str(_first(attempt.get("kernel_id"), attempt.get("name"), attempt_id) or ""),
         "validation_source": _attempt_validation_source(attempt, source_kind),
-        "status": "succeeded" if status in _OK_STATUSES else ("skipped" if status == "skipped" else "failed"),
+        "status": projected_status,
         "base_tput": _to_float(attempt.get("throughput_before")),
-        "output_throughput": _to_float(attempt.get("throughput_after")),
-        # Deliberately the attempt's own local gain: the session-cumulative
-        # figure is a different quantity and lives in ``optimizations``.
-        "gain_pct": _to_float(attempt.get("local_gain_pct")),
+        "output_throughput": output_throughput,
+        # These are deliberately two fields. ``local_gain_pct`` is measured
+        # against this attempt's dynamic input and cannot be summed. The
+        # attributed figure comes from ``optimizations.entries`` and uses the
+        # one session baseline, so it is the additive contribution consumed by
+        # ``outcome.validation.attribution``.
+        "local_gain_pct": _to_float(attempt.get("local_gain_pct")),
+        "attributed_gain_pct": attributed_gain_pct,
         "throughput_unit": throughput_unit,
         "keep_threshold_pct": _to_float(attempt.get("keep_threshold_pct")),
         "accuracy": _attempt_accuracy(attempt),
@@ -1184,11 +1212,11 @@ def _final_rebench_attempt(
         "decision": decision or "FAILED",
         # A REVERT the measurement itself broke is not the same claim as a
         # candidate that measured fairly and did not earn its threshold.
-        "is_fault": status in _FAILED_STATUSES and decision != "REVERT",
+        "is_fault": is_fault,
         "reason": _text(attempt.get("decision_reason")),
         "failure": _failure(
-            None if status not in _FAILED_STATUSES else _lower(attempt.get("decision_source")) or None,
-            attempt.get("decision_reason") if status in _FAILED_STATUSES else None,
+            None if not is_fault else _lower(attempt.get("decision_source")) or None,
+            attempt.get("decision_reason") if is_fault else None,
         ),
         "artifacts": {
             "workspace": _text(
@@ -1202,6 +1230,125 @@ def _final_rebench_attempt(
             ),
         },
     }
+
+
+def _recorded_geak_final_attempts(
+    recorded_operations: list[dict[str, Any]] | None,
+    geak: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Recover GEAK's real final rebench from its recorder operation.
+
+    Older sessions did not write GEAK's final validation as an
+    ``optimizations.attempts[]`` row. The producer instead upserted one
+    ``kernel_optimizer_run`` operation across runner, candidate and
+    final-validation stages; the V5 optimization ledger deliberately excludes
+    that route-level kind. Reading only the ledger thus leaves an old,
+    successfully promoted GEAK candidate with no final rebench and an
+    ``outcome`` of ``NEEDS_REVIEW``.
+
+    The final-validation substep and gate are author-time evidence and contain
+    the authoritative validation tier plus the measured throughput. Shape that
+    operation like a canonical attempt for V6 only, keeping the V5 projection
+    untouched.
+    """
+    attempts: list[dict[str, Any]] = []
+    for operation in recorded_operations or []:
+        if not isinstance(operation, dict):
+            continue
+        if _lower(operation.get("kind")) != "kernel_optimizer_run":
+            continue
+        if "geak" not in {_lower(operation.get("name")), _lower(operation.get("strategy"))}:
+            continue
+
+        final_steps = [
+            row
+            for row in _dict_rows(operation.get("substeps"))
+            if _lower(row.get("kind")) in {"final_validation", "final_validation_failed"}
+        ]
+        final_gates = [
+            row for row in _dict_rows(operation.get("gates")) if _lower(row.get("kind")) == "final_validation"
+        ]
+        if not final_steps and not final_gates:
+            # Runner/candidate evidence is not a final rebench verdict.
+            continue
+
+        step = final_steps[-1] if final_steps else {}
+        gate = final_gates[-1] if final_gates else {}
+        evidence = _mapping(gate.get("evidence"))
+        details = _mapping(evidence.get("details"))
+        measured_tput = _to_float(
+            _first(
+                evidence.get("measured_tput"),
+                details.get("measured_tput"),
+                details.get("output_throughput"),
+            )
+        )
+        step_kind = _lower(step.get("kind"))
+        if step:
+            # A terminal substep is newer and more specific than a route gate.
+            # In particular, never let a stale passed gate turn an explicit
+            # ``final_validation_failed`` step into KEEP.
+            validation_passed = step_kind == "final_validation" and (
+                _optional_bool(_safe_get(step, "metadata", "final_validation")) is True
+                or _lower(step.get("status")) in _OK_STATUSES
+            )
+        else:
+            # Older recorder payloads may have only the final-validation gate.
+            validation_passed = _lower(gate.get("status")) in ({"passed"} | _OK_STATUSES)
+        if validation_passed:
+            decision = "KEEP"
+            status = "succeeded"
+        elif measured_tput is not None and measured_tput > 0:
+            # The candidate was measured and rejected against current_best.
+            decision = "REVERT"
+            status = "succeeded"
+        else:
+            decision = "FAILED"
+            status = "failed"
+
+        validation_source = str(
+            _first(
+                evidence.get("source"),
+                _safe_get(step, "metadata", "validation_source"),
+                "geak_final_validation",
+            )
+            or "geak_final_validation"
+        )
+        report_path = _text(geak.get("report_path"))
+        base_tput = _to_float(_first(details.get("current_best_tput"), details.get("baseline_tput")))
+        local_gain_pct = (
+            (measured_tput - base_tput) / base_tput * 100.0
+            if measured_tput is not None and base_tput is not None and base_tput > 0
+            else None
+        )
+        attempts.append(
+            {
+                "attempt_id": str(operation.get("operation_id") or ""),
+                "agent": str(operation.get("agent") or _KERNEL_AGENT),
+                "producer": "geak",
+                # Reuse the canonical attempt vocabulary so the existing source
+                # classifier and linker can consume the recovered row.
+                "kind": "kernel_optimization",
+                "name": "geak",
+                "phase": str(operation.get("phase") or _KERNEL_PHASE),
+                "macro_cycle": operation.get("macro_cycle"),
+                "backend": "geak",
+                "status": status,
+                "decision": decision,
+                "throughput_before": base_tput,
+                "throughput_after": measured_tput,
+                "local_gain_pct": local_gain_pct,
+                "validation_basis": validation_source,
+                "integrated": decision == "KEEP",
+                "started_at": str(operation.get("started_at") or ""),
+                "ended_at": str(_first(step.get("ended_at"), operation.get("ended_at")) or ""),
+                "decision_source": "geak_final_validation",
+                "decision_reason": _text(_first(details.get("reason"), gate.get("reason"), operation.get("error"))),
+                "gates": _dict_rows(operation.get("gates")),
+                "artifacts": ([{"kind": "benchmark_report", "path": report_path}] if report_path else []),
+            }
+        )
+    return attempts
 
 
 def _kernel_route(state: dict[str, Any], collective: dict[str, Any], lanes: dict[str, list[Any]]) -> str | None:
@@ -1239,9 +1386,10 @@ def project_kernel_events(
     which is authoritative and needs no time reasoning.
 
     ``geak_runs`` is the exception. ``collect_geak`` folds the whole pipeline
-    into one session-scoped record with no cycle on it, so it is attached to
-    the first window and a warning names the ambiguity when there is more than
-    one.
+    into one session-scoped record with no cycle on it. A recorded final
+    validation can resolve that ambiguity with its route ``macro_cycle``;
+    otherwise the record is attached to the first window and warned when
+    there is more than one.
 
     Args:
         state (Any): The V5 ``state.json`` mapping.
@@ -1277,6 +1425,18 @@ def project_kernel_events(
         for row in _dict_rows(optimizations.get("attempts"))
         if _lower(row.get("kind")) in _KERNEL_ATTEMPT_KINDS and _owns_kernel_attempt(row)
     ]
+    # Recover old sessions whose GEAK final rebench exists only on the
+    # route-level ``kernel_optimizer_run`` operation. New sessions have the
+    # canonical ``geak_e2e`` attempt introduced by PR #1340.
+    recorded_geak_attempts = _recorded_geak_final_attempts(recorded_operations, geak)
+    canonical_geak_attempts = [row for row in kernel_attempts if _lower(row.get("name")) == "geak_e2e"]
+    known_attempt_ids = {str(row.get("attempt_id") or "") for row in kernel_attempts}
+    if not canonical_geak_attempts:
+        for attempt in recorded_geak_attempts:
+            attempt_id = str(attempt.get("attempt_id") or "")
+            if attempt_id and attempt_id not in known_attempt_ids:
+                kernel_attempts.append(attempt)
+                known_attempt_ids.add(attempt_id)
     geak_engaged = _optional_bool(geak.get("engaged")) is True or bool(geak.get("status"))
 
     has_evidence = bool(
@@ -1353,8 +1513,27 @@ def project_kernel_events(
         index = _window_index(_first(attempt.get("integration_ts"), attempt.get("ts")), windows)
         lanes_by_window[index]["collective_runs"].append(_collective_run(attempt, warnings))
 
+    cycle_to_index = {int(window.get("cycle") or 0): position for position, window in enumerate(windows)}
+
     if geak_engaged:
-        if len(windows) > 1:
+        geak_attempt_indexes: list[int] = []
+        geak_cycle_evidence = canonical_geak_attempts or recorded_geak_attempts
+        for attempt in geak_cycle_evidence:
+            cycle = _to_int(attempt.get("macro_cycle"))
+            index = cycle_to_index.get(cycle) if cycle is not None else None
+            if index is None:
+                timestamp = _first(attempt.get("ended_at"), attempt.get("started_at"))
+                if timestamp:
+                    index = _window_index(timestamp, windows)
+            if index is not None:
+                geak_attempt_indexes.append(index)
+        geak_window_resolved = (
+            bool(geak_cycle_evidence)
+            and len(geak_attempt_indexes) == len(geak_cycle_evidence)
+            and len(set(geak_attempt_indexes)) == 1
+        )
+        geak_window_index = geak_attempt_indexes[0] if geak_window_resolved else 0
+        if len(windows) > 1 and not geak_window_resolved:
             warnings.append(
                 "v6.timeline.kernel: the GEAK record is session-scoped across "
                 f"{len(windows)} kernel visits; attached to the first"
@@ -1362,7 +1541,7 @@ def project_kernel_events(
         # The verdict on a GEAK candidate is written back onto ``geak_result``
         # rather than onto the run record ``collect_geak`` projects.
         revalidation_status = str(_mapping(state.get("geak_result")).get("revalidation_status") or "")
-        lanes_by_window[0]["geak_runs"].append(_geak_run(geak, revalidation_status))
+        lanes_by_window[geak_window_index]["geak_runs"].append(_geak_run(geak, revalidation_status))
 
     # The kernel each rebench says it was validating, where the producer
     # recorded one. ``source_id`` on the projected row falls back to the
@@ -1374,22 +1553,32 @@ def project_kernel_events(
         if attempt.get("attempt_id") and _lower(attempt.get("kernel_id"))
     }
 
-    cycle_to_index = {int(window.get("cycle") or 0): position for position, window in enumerate(windows)}
+    attributed_gain_by_attempt = {
+        str(entry.get("adopted_attempt_id") or ""): _to_float(entry.get("gain_pct"))
+        for entry in _dict_rows(optimizations.get("entries"))
+        if entry.get("adopted_attempt_id")
+    }
+
     for attempt in kernel_attempts:
         cycle = _to_int(attempt.get("macro_cycle"))
         index = cycle_to_index.get(cycle) if cycle is not None else None
         if index is None:
             index = _window_index(_first(attempt.get("ended_at"), attempt.get("started_at")), windows)
         lanes_by_window[index]["attempts"].append(
-            _final_rebench_attempt(attempt, task_id_by_operation, throughput_unit)
+            _final_rebench_attempt(
+                attempt,
+                task_id_by_operation,
+                throughput_unit,
+                attributed_gain_by_attempt.get(str(attempt.get("attempt_id") or "")),
+            )
         )
 
-    expected_attempts = _to_int(_safe_get(_mapping(kernel_optimization_summary), "totals", "attempted"))
-    if expected_attempts is not None and expected_attempts != len(kernel_attempts):
-        warnings.append(
-            "v6.timeline.kernel: kernel_optimization_summary counts "
-            f"{expected_attempts} attempts but the recorder ledger holds {len(kernel_attempts)}"
-        )
+    # Do not compare this list's length with
+    # ``kernel_optimization_summary.totals.attempted``. The summary counts one
+    # latest micro-level record per kernel plus collective attempts, whereas
+    # this lane contains final rebenches and also admits fusion, GEMM and the
+    # route-level ``geak_e2e`` attempt. A difference is expected and is not
+    # evidence that either recorder stream lost data.
 
     events: list[dict[str, Any]] = []
     for window, lanes, adopted_ids in zip(windows, lanes_by_window, adopted_by_window):
@@ -1512,7 +1701,7 @@ def _link_rebench_attempts(
             )
 
 
-def _settle_pending_outcomes(lanes: dict[str, list[Any]]) -> None:
+def _settle_pending_outcomes(lanes: dict[str, list[Any]], warnings: list[str]) -> None:
     """Let a linked final rebench settle a candidate still awaiting a verdict.
 
     A candidate reports ``NEEDS_REVIEW`` when it was produced but nothing
@@ -1536,11 +1725,27 @@ def _settle_pending_outcomes(lanes: dict[str, list[Any]]) -> None:
             measured = [attempt for attempt in linked if attempt["status"] == "succeeded"]
             if not measured:
                 continue
-            decisions = {_upper(attempt.get("decision")) for attempt in measured}
-            if "KEEP" in decisions:
+            decisions = {decision for attempt in measured if (decision := _upper(attempt.get("decision")))}
+            if decisions == {"KEEP"}:
                 row["outcome"] = "KEEP"
             elif decisions == {"REVERT"}:
                 row["outcome"] = "REVERT"
+            elif decisions:
+                identity = str(
+                    _first(
+                        row.get("rewrite_id"),
+                        row.get("run_id"),
+                        row.get("kernel_id"),
+                        row.get("task_id"),
+                        "unknown",
+                    )
+                    or "unknown"
+                )
+                warnings.append(
+                    "v6.timeline.kernel: linked final rebenches disagree for "
+                    f"{lane_name} {identity} ({', '.join(sorted(decisions))}); "
+                    "outcome left as NEEDS_REVIEW"
+                )
 
 
 def _kernel_event(
@@ -1560,7 +1765,7 @@ def _kernel_event(
     _link_rebench_attempts(lanes, adopted_rewrites, subject_ids, warnings)
     # A candidate left pending by its own producer is settled by the rebench
     # that measured it, now that the links exist.
-    _settle_pending_outcomes(lanes)
+    _settle_pending_outcomes(lanes, warnings)
 
     exit_row = _mapping(window.get("exit_row"))
     evidence = _mapping(exit_row.get("evidence"))

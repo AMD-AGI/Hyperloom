@@ -3007,6 +3007,45 @@ class V6Metadata(TypedDict, total=False):
     warnings: list[str]
 
 
+class V6OutcomeGainBucket(TypedDict, total=False):
+    """Additive, session-baseline-relative gain for one V6 source bucket."""
+
+    total_gain_pct: float | None
+    keep_count: int
+    non_attributable_keep_count: int
+
+
+class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
+    """Kernel gain with its authoritative GEAK and Forge backend split."""
+
+    by_backend: dict[str, V6OutcomeGainBucket]
+
+
+class V6OutcomeAttributionBySource(TypedDict, total=False):
+    """Canonical ledger gain projected onto the V6 stage vocabulary."""
+
+    warm_replay: V6OutcomeGainBucket
+    framework_agent: V6OutcomeGainBucket
+    kernel: V6OutcomeKernelAttribution
+
+
+class V6OutcomeAttribution(TypedDict, total=False):
+    """Availability and additive gain attribution from the canonical ledger."""
+
+    available: bool
+    by_source: V6OutcomeAttributionBySource
+
+
+class V6OutcomeValidation(TypedDict, total=False):
+    """Reconciliation of final measured gain with canonical KEEP entries."""
+
+    attributed_gain_pct: float
+    unattributed_gain_pct: float
+    reconciliation_gap_pct: float | None
+    attribution: V6OutcomeAttribution
+    notes: list[str]
+
+
 class V6Outcome(TypedDict, total=False):
     """V6 session result projection for downstream consumers."""
 
@@ -3015,7 +3054,7 @@ class V6Outcome(TypedDict, total=False):
     stage_reached: str
     baseline: dict[str, Any]
     final: dict[str, Any]
-    validation: dict[str, Any]
+    validation: V6OutcomeValidation
 
 
 class V6TimelineEvent(TypedDict, total=False):
@@ -3249,7 +3288,12 @@ __all__ = [
     "V6MetadataSession",
     "V6MetadataVersions",
     "V6Close",
+    "V6OutcomeAttribution",
+    "V6OutcomeAttributionBySource",
+    "V6OutcomeGainBucket",
+    "V6OutcomeKernelAttribution",
     "V6Outcome",
+    "V6OutcomeValidation",
     "V6TaskConfig",
     "V6TimelineEvent",
     "Workload",

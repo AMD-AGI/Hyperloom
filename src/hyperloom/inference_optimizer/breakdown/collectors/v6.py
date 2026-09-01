@@ -2107,6 +2107,44 @@ def collect_v6_outcome(
     validation = optimizations.get("validation")
     if not isinstance(validation, dict):
         validation = {}
+    summary = optimizations.get("summary_by_source")
+    attribution_available = optimizations.get("available") is not False and isinstance(summary, dict)
+    summary = summary if isinstance(summary, dict) else {}
+
+    def _gain_bucket(*rows: Any, include_non_attributable: bool = False) -> dict[str, Any]:
+        buckets = [row for row in rows if isinstance(row, dict)]
+        result = {
+            "total_gain_pct": (
+                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in buckets), 6)
+                if attribution_available
+                else None
+            ),
+            "keep_count": sum(_optional_int(row.get("keeps")) or 0 for row in buckets),
+        }
+        if include_non_attributable:
+            result["non_attributable_keep_count"] = sum(
+                _optional_int(row.get("non_attributable_keeps")) or 0 for row in buckets
+            )
+        return result
+
+    kernel_summary = _mapping(summary.get("kernel_agent"))
+    kernel_backends = _mapping(kernel_summary.get("by_backend"))
+    attribution = {
+        "available": attribution_available,
+        "by_source": {
+            "warm_replay": _gain_bucket(summary.get("warm_replay")),
+            # V6 folds the old Explore phase into Framework Agent, so its two
+            # V5 ledger buckets are combined at this projection boundary.
+            "framework_agent": _gain_bucket(summary.get("framework_agent"), summary.get("explore")),
+            "kernel": {
+                **_gain_bucket(kernel_summary),
+                "by_backend": {
+                    "geak": _gain_bucket(kernel_backends.get("geak"), include_non_attributable=True),
+                    "forge": _gain_bucket(kernel_backends.get("forge"), include_non_attributable=True),
+                },
+            },
+        },
+    }
     return {
         "stop_reason": stop_reason,
         "status": outcome_status,
@@ -2128,6 +2166,7 @@ def collect_v6_outcome(
             "attributed_gain_pct": validation.get("attributed_total_gain_pct", 0.0),
             "unattributed_gain_pct": validation.get("unattributed_gain_pct", 0.0),
             "reconciliation_gap_pct": validation.get("reconciliation_gap_pct"),
+            "attribution": attribution,
             "notes": list(validation.get("notes") or []),
         },
     }

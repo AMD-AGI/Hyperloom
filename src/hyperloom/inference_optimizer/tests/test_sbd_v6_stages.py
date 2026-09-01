@@ -1119,6 +1119,414 @@ def test_kernel_warns_when_the_session_scoped_geak_record_spans_several_visits(t
 _GEAK_OK = {"engaged": True, "status": "ok", "gain_pct": 8.0, "final_throughput_tok_s": 120.0}
 
 
+def _assembled_optimizations(tmp_path):
+    """Return the canonical optimization projection of recorder output."""
+    from hyperloom.inference_optimizer.breakdown.collectors.optimizations import collect_recorded_optimizations
+    from hyperloom.inference_optimizer.breakdown.recorder import assembler
+
+    assembled = assembler.assemble_parts(tmp_path)
+    warnings: list[str] = []
+    optimizations = collect_recorded_optimizations(
+        "s1",
+        assembled.get("operations") or [],
+        assembled.get("measurements") or [],
+        assembled.get("adoptions") or [],
+        assembled.get("artifacts") or [],
+        [],
+        [],
+        warnings,
+    )
+    return assembled, optimizations, warnings
+
+
+def test_a_recorded_geak_final_validation_reaches_v6_as_a_keep(tmp_path):
+    """GEAK's real final verdict lives on ``kernel_optimizer_run``.
+
+    That route-level operation is intentionally outside V5
+    ``optimizations.attempts``. V6 must recover its final-validation substep
+    rather than relying on a hand-built ``kernel_optimization`` attempt no
+    producer writes.
+    """
+    from hyperloom.inference_optimizer.breakdown.collectors.geak import collect_geak
+    from hyperloom.inference_optimizer.breakdown.recorder import record_geak_operation
+
+    result = {
+        "status": "ok",
+        "baseline_throughput_tok_s": 100.0,
+        "final_throughput_tok_s": 120.0,
+        "throughput_speedup": 1.2,
+        "report_path": "geak/report.json",
+        "accepted_config": {"extra_server_args": "--enable-geak"},
+    }
+    record_geak_operation(tmp_path, stage="runner_result", result=result, status="ok", macro_cycle=0)
+    record_geak_operation(
+        tmp_path,
+        stage="final_validation",
+        result=result,
+        status="succeeded",
+        validated=True,
+        measured_tput=120.0,
+        validation_source="geak_orch_harness",
+        macro_cycle=0,
+    )
+    assembled, optimizations, warnings = _assembled_optimizations(tmp_path)
+    # This is the production mismatch the V6 projector has to bridge.
+    assert optimizations["attempts"] == []
+
+    state = _kernel_state() | {"kernel_optimizer": "geak", "geak_result": result}
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        geak=collect_geak(tmp_path, state, warnings),
+        optimizations=optimizations,
+        recorded_operations=assembled.get("operations") or [],
+    )
+
+    event = _event(timeline, "kernel")
+    attempt = event["ext"]["attempts"][0]
+    run = event["ext"]["geak_runs"][0]
+    assert attempt["source_kind"] == "geak_e2e"
+    assert attempt["status"] == "succeeded"
+    assert attempt["decision"] == "KEEP"
+    assert attempt["output_throughput"] == 120.0
+    assert attempt["validation_source"] == "geak_same_harness"
+    assert run["final_rebench_attempt_ids"] == [attempt["attempt_id"]]
+    assert run["outcome"] == "KEEP"
+
+
+def test_canonical_geak_attempt_outranks_route_fallback_and_carries_both_gains(tmp_path):
+    """PR #1340's attempt is the verdict and ledger identity for new sessions."""
+    warnings: list[str] = []
+    route = {
+        "operation_id": "geak-route-0",
+        "kind": "kernel_optimizer_run",
+        "name": "geak",
+        "strategy": "geak",
+        "agent": "kernel_agent",
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "status": "succeeded",
+        "substeps": [
+            {
+                "kind": "final_validation",
+                "status": "succeeded",
+                "ended_at": "2026-08-27T01:29:00+00:00",
+                "metadata": {"final_validation": True},
+            }
+        ],
+        "gates": [
+            {
+                "kind": "final_validation",
+                "status": "passed",
+                "evidence": {"source": "geak_orch_harness", "measured_tput": 120.0},
+            }
+        ],
+    }
+    canonical = _kernel_attempt(
+        "geak-e2e-0",
+        0,
+        # PR #1340 deliberately allows a GEAK route win to use the GEMM kind
+        # when an AITER_CONFIG_* table is the lever. Its name still makes it a
+        # GEAK final rebench rather than a standalone GEMM-tuning lane.
+        kind="gemm_tuning",
+        name="geak_e2e",
+        backend="geak",
+        producer="coordinator",
+        kernel_id="geak",
+        local_gain_pct=4.0,
+        throughput_before=115.0,
+        throughput_after=120.0,
+        validation_basis="e2e_validation",
+    )
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak=_GEAK_OK,
+        optimizations={
+            "attempts": [canonical],
+            "entries": [{"adopted_attempt_id": "geak-e2e-0", "gain_pct": 5.0}],
+        },
+        recorded_operations=[route],
+        # This report counts per-kernel micro attempts, not final rebenches.
+        # A config-only GEAK route win therefore legitimately adds no row.
+        kernel_optimization_summary={"totals": {"attempted": 0}},
+    )
+
+    event = _event(timeline, "kernel")
+    assert len(event["ext"]["attempts"]) == 1
+    attempt = event["ext"]["attempts"][0]
+    run = event["ext"]["geak_runs"][0]
+    assert attempt["attempt_id"] == "geak-e2e-0"
+    assert attempt["source_kind"] == "geak_e2e"
+    assert attempt["local_gain_pct"] == 4.0
+    assert attempt["attributed_gain_pct"] == 5.0
+    assert run["final_rebench_attempt_ids"] == ["geak-e2e-0"]
+    assert warnings == []
+
+
+def test_a_recorded_geak_measured_rejection_is_a_successful_rebench(tmp_path):
+    """A GEAK candidate can measure cleanly and still lose to current_best."""
+    from hyperloom.inference_optimizer.breakdown.collectors.geak import collect_geak
+    from hyperloom.inference_optimizer.breakdown.recorder import record_geak_operation
+
+    result = {
+        "status": "ok",
+        "baseline_throughput_tok_s": 100.0,
+        "final_throughput_tok_s": 118.0,
+        "throughput_speedup": 1.18,
+        "report_path": "geak/report.json",
+        "revalidation_status": "no_promote",
+        "final_validation": {
+            "decision": "REJECTED",
+            "reason": "rebench_did_not_beat_current_best",
+            "current_best_tput": 125.0,
+        },
+    }
+    record_geak_operation(
+        tmp_path,
+        stage="final_validation_failed",
+        result=result,
+        status="failed",
+        validated=False,
+        measured_tput=118.0,
+        validation_source="geak_promote_rejected",
+        macro_cycle=0,
+    )
+    assembled, optimizations, warnings = _assembled_optimizations(tmp_path)
+    state = _kernel_state() | {"kernel_optimizer": "geak", "geak_result": result}
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        geak=collect_geak(tmp_path, state, warnings),
+        optimizations=optimizations,
+        recorded_operations=assembled.get("operations") or [],
+    )
+
+    event = _event(timeline, "kernel")
+    attempt = event["ext"]["attempts"][0]
+    run = event["ext"]["geak_runs"][0]
+    assert attempt["status"] == "succeeded"
+    assert attempt["decision"] == "REVERT"
+    assert attempt["base_tput"] == 125.0
+    assert attempt["output_throughput"] == 118.0
+    assert attempt["local_gain_pct"] == pytest.approx(-5.6)
+    assert attempt["attributed_gain_pct"] is None
+    assert run["final_rebench_attempt_ids"] == [attempt["attempt_id"]]
+    assert run["outcome"] == "REVERT"
+
+
+def test_a_recorded_geak_failure_without_measurement_is_a_failed_rebench(tmp_path):
+    """A failed launch/benchmark does not adjudicate the pending candidate."""
+    from hyperloom.inference_optimizer.breakdown.collectors.geak import collect_geak
+    from hyperloom.inference_optimizer.breakdown.recorder import record_geak_operation
+
+    result = {
+        "status": "ok",
+        "baseline_throughput_tok_s": 100.0,
+        "final_throughput_tok_s": 118.0,
+        "throughput_speedup": 1.18,
+        "report_path": "geak/report.json",
+        "error": "server failed to launch for final validation",
+    }
+    record_geak_operation(
+        tmp_path,
+        stage="final_validation_failed",
+        result=result,
+        status="failed",
+        validated=False,
+        measured_tput=None,
+        validation_source="geak_orch_harness",
+        macro_cycle=0,
+    )
+    assembled, optimizations, warnings = _assembled_optimizations(tmp_path)
+    state = _kernel_state() | {"kernel_optimizer": "geak", "geak_result": result}
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        geak=collect_geak(tmp_path, state, warnings),
+        optimizations=optimizations,
+        recorded_operations=assembled.get("operations") or [],
+    )
+
+    event = _event(timeline, "kernel")
+    attempt = event["ext"]["attempts"][0]
+    run = event["ext"]["geak_runs"][0]
+    assert attempt["status"] == "failed"
+    assert attempt["decision"] == "FAILED"
+    assert attempt["is_fault"] is True
+    assert attempt["output_throughput"] is None
+    assert run["final_rebench_attempt_ids"] == [attempt["attempt_id"]]
+    assert run["outcome"] == "NEEDS_REVIEW"
+
+
+def test_a_failed_geak_final_step_outranks_a_stale_passed_gate(tmp_path):
+    """Explicit terminal failure cannot be promoted by contradictory old evidence."""
+    warnings: list[str] = []
+    operation = {
+        "operation_id": "geak-route-1",
+        "kind": "kernel_optimizer_run",
+        "name": "geak",
+        "strategy": "geak",
+        "agent": "kernel_agent",
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 0,
+        "status": "failed",
+        "substeps": [
+            {
+                "substep_id": "final-failed",
+                "kind": "final_validation_failed",
+                "status": "failed",
+                "ended_at": "2026-08-27T01:30:00+00:00",
+                "metadata": {"final_validation": False},
+            }
+        ],
+        "gates": [
+            {
+                "gate_id": "stale-final-gate",
+                "kind": "final_validation",
+                "status": "passed",
+                "evidence": {
+                    "source": "geak_orch_harness",
+                    "details": {"measured_tput": 98.0, "current_best_tput": 100.0},
+                },
+            }
+        ],
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak=_GEAK_OK,
+        recorded_operations=[operation],
+    )
+
+    event = _event(timeline, "kernel")
+    attempt = event["ext"]["attempts"][0]
+    run = event["ext"]["geak_runs"][0]
+    assert attempt["status"] == "succeeded"
+    assert attempt["decision"] == "REVERT"
+    assert attempt["output_throughput"] == 98.0
+    assert run["outcome"] == "REVERT"
+
+
+def test_a_recorded_geak_final_validation_places_the_run_on_its_kernel_visit(tmp_path):
+    """The route cycle resolves the otherwise session-scoped GEAK ambiguity."""
+    warnings: list[str] = []
+    operation = {
+        "operation_id": "geak-route-cycle-1",
+        "kind": "kernel_optimizer_run",
+        "name": "geak",
+        "strategy": "geak",
+        "agent": "kernel_agent",
+        "phase": "KERNEL_AGENT",
+        "macro_cycle": 1,
+        "status": "succeeded",
+        "substeps": [
+            {
+                "substep_id": "final-cycle-1",
+                "kind": "final_validation",
+                "status": "succeeded",
+                "ended_at": "2026-08-27T02:30:00+00:00",
+                "metadata": {"final_validation": True},
+            }
+        ],
+        "gates": [
+            {
+                "gate_id": "final-gate-cycle-1",
+                "kind": "final_validation",
+                "status": "passed",
+                "evidence": {"source": "geak_orch_harness", "measured_tput": 120.0},
+            }
+        ],
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state((0, 1)) | {"kernel_optimizer": "geak"},
+        geak=_GEAK_OK,
+        recorded_operations=[operation],
+    )
+
+    events = _events(timeline, "kernel")
+    assert [len(event["ext"]["geak_runs"]) for event in events] == [0, 1]
+    assert [len(event["ext"]["attempts"]) for event in events] == [0, 1]
+    run = events[1]["ext"]["geak_runs"][0]
+    attempt = events[1]["ext"]["attempts"][0]
+    assert run["final_rebench_attempt_ids"] == [attempt["attempt_id"]]
+    assert run["outcome"] == "KEEP"
+    assert not any("session-scoped across" in warning for warning in warnings)
+
+
+def test_a_recorded_measured_revert_is_a_successful_rebench(tmp_path):
+    """``reverted`` is a business result, not a failed measurement."""
+    from hyperloom.inference_optimizer.breakdown.recorder import record_kernel_e2e
+
+    record_kernel_e2e(
+        tmp_path,
+        kernel_id="rmsnorm",
+        integrated=False,
+        e2e_gain_pct=-2.0,
+        validated=False,
+        decision="REVERT",
+        patch_path="kernels/rmsnorm.patch",
+        target_file="layers/rmsnorm.py",
+        result={"base_tput": 100.0, "new_tput": 98.0, "decision_reason": "regressed"},
+    )
+    assembled, optimizations, warnings = _assembled_optimizations(tmp_path)
+    assert optimizations["attempts"][0]["status"] == "reverted"
+
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        kernel_journey=assembled.get("kernel_journey"),
+        optimizations=optimizations,
+        recorded_operations=assembled.get("operations") or [],
+    )
+
+    attempt = _event(timeline, "kernel")["ext"]["attempts"][0]
+    assert attempt["status"] == "succeeded"
+    assert attempt["decision"] == "REVERT"
+    assert attempt["is_fault"] is False
+    assert attempt["base_tput"] == 100.0
+    assert attempt["output_throughput"] == 98.0
+    assert attempt["failure"] == {"error_class": None, "error": None}
+
+
+def test_an_unmeasured_revert_is_a_failed_fault(tmp_path):
+    timeline = collect_v6_timeline(
+        tmp_path,
+        [],
+        state=_kernel_state(),
+        optimizations={
+            "attempts": [
+                _kernel_attempt(
+                    "att-unmeasured-revert",
+                    0,
+                    status="reverted",
+                    decision="REVERT",
+                    throughput_after=None,
+                    decision_source="benchmark",
+                    decision_reason="benchmark produced no usable throughput",
+                )
+            ]
+        },
+    )
+
+    attempt = _event(timeline, "kernel")["ext"]["attempts"][0]
+    assert attempt["status"] == "failed"
+    assert attempt["decision"] == "REVERT"
+    assert attempt["is_fault"] is True
+    assert attempt["failure"] == {
+        "error_class": "benchmark",
+        "error": "benchmark produced no usable throughput",
+    }
+
+
 def test_a_geak_run_the_rebench_reverted_does_not_report_keep(tmp_path):
     """The runner's ``status`` is GEAK's claim, not the session's verdict.
 
@@ -1175,6 +1583,42 @@ def test_an_unadjudicated_geak_run_is_pending_rather_than_kept(tmp_path):
     run = _event(timeline, "kernel")["ext"]["geak_runs"][0]
     assert run["final_rebench_attempt_ids"] == []
     assert run["outcome"] == "NEEDS_REVIEW"
+
+
+@pytest.mark.parametrize("decisions", [("KEEP", "REVERT"), ("REVERT", "KEEP")])
+def test_conflicting_geak_rebenches_remain_pending(tmp_path, decisions):
+    """Contradictory final verdicts must not silently collapse to KEEP."""
+    warnings: list[str] = []
+    attempts = [
+        _kernel_attempt(
+            "geak-rb-1",
+            0,
+            backend="geak",
+            producer="geak",
+            decision=decisions[0],
+            ended_at="2026-08-27T01:20:00+00:00",
+        ),
+        _kernel_attempt(
+            "geak-rb-2",
+            0,
+            backend="geak",
+            producer="geak",
+            decision=decisions[1],
+            ended_at="2026-08-27T01:30:00+00:00",
+        ),
+    ]
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        geak=_GEAK_OK,
+        optimizations={"attempts": attempts},
+    )
+
+    run = _event(timeline, "kernel")["ext"]["geak_runs"][0]
+    assert run["final_rebench_attempt_ids"] == ["geak-rb-1", "geak-rb-2"]
+    assert run["outcome"] == "NEEDS_REVIEW"
+    assert any("linked final rebenches disagree" in warning for warning in warnings)
 
 
 def _fusion_state(**integrate) -> dict:
@@ -1666,6 +2110,82 @@ def test_the_delivered_manifest_describes_the_rebuilt_bundle(tmp_path):
         member = bundle.getinfo(exporter.BREAKDOWN_FILENAME)
     entry = next(row for row in manifest["included_files"] if row["path"] == exporter.BREAKDOWN_FILENAME)
     assert entry["bytes"] == member.file_size
+
+
+# ---------------------------------------------------------------------------
+# outcome
+# ---------------------------------------------------------------------------
+def _v6_outcome(optimizations: dict) -> dict:
+    return v6_collectors.collect_v6_outcome(
+        session={"stop_reason": "target_reached"},
+        baseline={},
+        final={},
+        optimizations=optimizations,
+        state={"phase": "CLOSE"},
+        timeline=[],
+    )
+
+
+def test_outcome_projects_authoritative_gain_by_v6_source_and_kernel_backend():
+    outcome = _v6_outcome(
+        {
+            "available": True,
+            "summary_by_source": {
+                "warm_replay": {"keeps": 1, "total_gain_pct": 1.25},
+                "explore": {"keeps": 2, "total_gain_pct": 2.0},
+                "framework_agent": {"keeps": 1, "total_gain_pct": 0.75},
+                "kernel_agent": {
+                    "keeps": 4,
+                    "total_gain_pct": 5.5,
+                    "by_backend": {
+                        "geak": {"keeps": 2, "total_gain_pct": 4.25, "non_attributable_keeps": 1},
+                        "forge": {"keeps": 1, "total_gain_pct": 1.25, "non_attributable_keeps": 0},
+                    },
+                },
+            },
+            "validation": {
+                "attributed_total_gain_pct": 9.5,
+                "unattributed_gain_pct": 0.5,
+                "reconciliation_gap_pct": 0.5,
+            },
+        }
+    )
+
+    attribution = outcome["validation"]["attribution"]
+    assert attribution == {
+        "available": True,
+        "by_source": {
+            "warm_replay": {"total_gain_pct": 1.25, "keep_count": 1},
+            "framework_agent": {"total_gain_pct": 2.75, "keep_count": 3},
+            "kernel": {
+                "total_gain_pct": 5.5,
+                "keep_count": 4,
+                "by_backend": {
+                    "geak": {
+                        "total_gain_pct": 4.25,
+                        "keep_count": 2,
+                        "non_attributable_keep_count": 1,
+                    },
+                    "forge": {
+                        "total_gain_pct": 1.25,
+                        "keep_count": 1,
+                        "non_attributable_keep_count": 0,
+                    },
+                },
+            },
+        },
+    }
+
+
+def test_outcome_marks_gain_totals_unknown_when_the_canonical_ledger_is_unavailable():
+    attribution = _v6_outcome({"available": False})["validation"]["attribution"]
+
+    assert attribution["available"] is False
+    assert attribution["by_source"]["warm_replay"]["total_gain_pct"] is None
+    assert attribution["by_source"]["framework_agent"]["total_gain_pct"] is None
+    assert attribution["by_source"]["kernel"]["total_gain_pct"] is None
+    assert attribution["by_source"]["kernel"]["by_backend"]["geak"]["total_gain_pct"] is None
+    assert attribution["by_source"]["kernel"]["by_backend"]["forge"]["total_gain_pct"] is None
 
 
 # ---------------------------------------------------------------------------
