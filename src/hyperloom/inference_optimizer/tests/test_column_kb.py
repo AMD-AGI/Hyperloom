@@ -464,7 +464,7 @@ def test_close_carries_overlays_and_provenance_into_the_patch_column(tmp_path: P
 
 def test_close_requires_a_staged_draft(tmp_path: Path) -> None:
     with pytest.raises(RemoteRecipeValidationError, match="staged draft"):
-        build_remote_knowledge(_state([]), tmp_path / "files")
+        build_remote_knowledge(_state([]), tmp_path / "files", sections=None)
 
 
 def test_close_drops_permanently_missing_patch_staging(tmp_path: Path) -> None:

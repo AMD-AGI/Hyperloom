@@ -1098,7 +1098,7 @@ def build_remote_knowledge(
     state: Any,
     files_dir: str | Path,
     *,
-    sections: Any = None,
+    sections: Any,
 ) -> KnowledgeBundle:
     """Construct the final opaque knowledge document and temporary files tree.
 

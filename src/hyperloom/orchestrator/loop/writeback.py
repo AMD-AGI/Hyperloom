@@ -21,6 +21,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     patch_lever_kind,
     patch_owner_phase,
 )
+from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
@@ -412,13 +413,13 @@ class WritebackCollaborator:
         recording it per ref is what lets a Recipe whose KEEPs came from
         different trees stay replayable without anything reconciling them.
         """
-        row = {key: value for key, value in provenance.items() if key != "host_origin"}
-        origin = dict(provenance.get("host_origin") or {})
+        row = {key: value for key, value in provenance.items() if key != HOST_ORIGIN_KEY}
+        origin = dict(provenance.get(HOST_ORIGIN_KEY) or {})
         apply_root = str(origin.pop("apply_root", "") or "").strip()
         if apply_root and refs:
             origin["apply_roots"] = {str(ref): apply_root for ref in refs if str(ref).strip()}
         if origin:
-            row["host_origin"] = origin
+            row[HOST_ORIGIN_KEY] = origin
         return row
 
     def _stage_agent_keep(
@@ -511,7 +512,7 @@ class WritebackCollaborator:
                 # Where this KEEP came from on this host. ``apply_root`` becomes
                 # a per-ref answer once the refs exist; the rest is for reading a
                 # record back that would not replay.
-                "host_origin": {
+                HOST_ORIGIN_KEY: {
                     "apply_root": str(result.get("framework_root") or ""),
                     "snapshot": str(result.get("source_snapshot") or ""),
                     "manifest": str(result.get("source_manifest") or ""),

@@ -1656,7 +1656,6 @@ def _apply_warm_patches(
 def _stamp_warm_patch_trees(
     result: dict[str, Any],
     patch_application: Mapping[str, Any],
-    patch_target: str,
     pre_sha: str,
 ) -> None:
     """Record which trees this round patched, for prelude to promote or restore.
@@ -1667,7 +1666,7 @@ def _stamp_warm_patch_trees(
     """
     trees = list(patch_application.get("trees") or [])
     primary = trees[0] if trees else {}
-    target = str(patch_application.get("target_repo") or primary.get("root") or patch_target)
+    target = str(patch_application.get("target_repo") or primary.get("root") or "")
     result["warm_patch_result"] = dict(patch_application)
     result["warm_patch_trees"] = trees
     result["warm_patch_pre_sha"] = str(primary.get("pre_sha") or pre_sha)
@@ -1680,7 +1679,6 @@ def _stamp_warm_patch_trees(
 
 def _revert_legacy_warm_patch_trees(
     params: Mapping[str, Any],
-    patch_target: str,
     pre_sha: str,
 ) -> dict[str, Any]:
     """Undo a legacy (non-required) apply so nothing leaks into the next task.
@@ -1695,7 +1693,7 @@ def _revert_legacy_warm_patch_trees(
     if not pre_sha and not backups:
         return {"ok": True, "errors": [], "restored": []}
     return _revert_warm_patch_state(
-        patch_target,
+        "",
         pre_sha=pre_sha,
         snapshot_manifest=params.get("_warm_patch_snapshot_manifest"),
         nogit_backups=backups,
@@ -2976,9 +2974,8 @@ class BaselineExecutor:
         # Warm patches are prepared after config/runtime preflight, immediately
         # before the single final benchmark. Each overlay names the checkout it
         # was recorded against and the apply loop places it there, so nothing is
-        # resolved for the set: a tree found by probing is one the gain was
-        # never measured on.
-        patch_target = ""
+        # resolved for the set as a whole -- there is no single target repo, and
+        # a tree found by probing would be one the gain was never measured on.
         patch_application: list[dict[str, str]] | dict[str, Any] = []
         applied_patches: list[dict[str, str]] = []
         _pre_patch_sha = ""
@@ -3163,7 +3160,9 @@ class BaselineExecutor:
                 )
             return stopped_result
 
-        before_apply_sha = _git_head_sha(patch_target) if patch_target else ""
+        # No single pre-apply sha: each overlay's own tree records its pre_sha,
+        # so the singular field is only a fallback for a legacy reader.
+        before_apply_sha = ""
 
         def _persist_recipe_snapshot(tree_records: list[dict[str, Any]]) -> bool:
             if live_shared_state is None:
@@ -3176,7 +3175,7 @@ class BaselineExecutor:
                     # The trees are the authority; the singular fields describe
                     # the primary one so a resumed legacy reader still finds it.
                     "recipe_patch_trees": tree_records,
-                    "recipe_patch_target": str(primary.get("root") or patch_target),
+                    "recipe_patch_target": str(primary.get("root") or ""),
                     "recipe_patch_pre_sha": str(primary.get("pre_sha") or before_apply_sha),
                     "recipe_patch_snapshot_manifest": primary.get("snapshot_manifest"),
                 }
@@ -3196,7 +3195,6 @@ class BaselineExecutor:
         # only refuses when nothing names a tree at all.
         if (
             params.get("patches")
-            and not patch_target
             and not any(
                 str((entry or {}).get("framework_root") or "").strip()
                 for entry in params["patches"]
@@ -3212,7 +3210,7 @@ class BaselineExecutor:
         else:
             patch_application = _apply_warm_patches(
                 params,
-                patch_target,
+                "",
                 output_dir,
                 before_mutation=_persist_recipe_snapshot,
             )
@@ -3281,7 +3279,7 @@ class BaselineExecutor:
                     {
                         "status": "benchmarking",
                         "recipe_patch_trees": list(patch_application.get("trees") or []),
-                        "recipe_patch_target": str(patch_application.get("target_repo") or patch_target),
+                        "recipe_patch_target": str(patch_application.get("target_repo") or ""),
                         "recipe_patch_pre_sha": _pre_patch_sha,
                         "recipe_patch_snapshot_manifest": patch_application.get("snapshot_manifest"),
                         "recipe_patch_statuses": list(patch_application.get("patches") or []),
@@ -3343,7 +3341,7 @@ class BaselineExecutor:
                 if applied_patches:
                     result["warm_patches_applied"] = list(applied_patches)
                 if isinstance(patch_application, dict):
-                    _stamp_warm_patch_trees(result, patch_application, patch_target, _pre_patch_sha)
+                    _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
                     result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return result
             finally:
@@ -3351,7 +3349,7 @@ class BaselineExecutor:
                 # returns, so it must stay patched; reverting here handed prelude
                 # a clean tree and silently lost the replay.
                 if applied_patches and not isinstance(patch_application, dict):
-                    _revert_legacy_warm_patch_trees(params, patch_target, _pre_patch_sha)
+                    _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
                 if bench_lease is not None:
                     bench_lease.close()
 
@@ -3428,7 +3426,7 @@ class BaselineExecutor:
                 if applied_patches:
                     warmup_result["warm_patches_applied"] = list(applied_patches)
                 if isinstance(patch_application, dict):
-                    _stamp_warm_patch_trees(warmup_result, patch_application, patch_target, _pre_patch_sha)
+                    _stamp_warm_patch_trees(warmup_result, patch_application, _pre_patch_sha)
                     warmup_result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
                 return warmup_result
             warmup_tput = warmup_result.get("output_throughput")
@@ -3508,7 +3506,7 @@ class BaselineExecutor:
             if applied_patches:
                 result["warm_patches_applied"] = list(applied_patches)
             if isinstance(patch_application, dict):
-                _stamp_warm_patch_trees(result, patch_application, patch_target, _pre_patch_sha)
+                _stamp_warm_patch_trees(result, patch_application, _pre_patch_sha)
                 result["warm_kernel_apply_results"] = list(params.get("warm_kernel_apply_results") or [])
             if result.get("status") != "succeeded" and result.get("error_class") == SESSION_TIME_EXHAUSTED_CLASS:
                 # The gate before this pass admitted it and the run's clock took
@@ -3646,7 +3644,7 @@ class BaselineExecutor:
             # required timeline is exempt: prelude promotes that tree after this
             # returns and needs it still patched.
             if applied_patches and not isinstance(patch_application, dict):
-                _revert_legacy_warm_patch_trees(params, patch_target, _pre_patch_sha)
+                _revert_legacy_warm_patch_trees(params, _pre_patch_sha)
             if bench_lease is not None:
                 bench_lease.close()
 
