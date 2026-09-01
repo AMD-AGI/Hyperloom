@@ -103,7 +103,8 @@ def _geak_replay_server_log(out_dir: Path) -> str | None:
     try:
         candidates.extend(out_dir.glob("replica_*/attempt_*/server.log"))
     except OSError:
-        pass
+        # Replay-log discovery is best effort; retain the direct log candidate.
+        logging.debug("Unable to enumerate GEAK replica server logs", exc_info=True)
     existing = [path for path in candidates if path.is_file()]
     if not existing:
         return None
