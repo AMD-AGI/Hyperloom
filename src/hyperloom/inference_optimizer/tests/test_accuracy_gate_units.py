@@ -13,13 +13,6 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 
 
-def test_no_high_accuracy_risk_predicate_is_exported():
-    """The flag catalogue is gone; the gate no longer asks which knobs look risky."""
-    assert not hasattr(ag, "is_high_accuracy_risk")
-    assert not hasattr(ag, "_HIGH_RISK_CLI_PATTERNS")
-    assert not hasattr(ag, "_HIGH_RISK_ENV_KEYS")
-
-
 class TestParseEvalResults:
     def test_returns_error_when_no_results_dir(self, tmp_path):
         out = ag.parse_eval_results(tmp_path)

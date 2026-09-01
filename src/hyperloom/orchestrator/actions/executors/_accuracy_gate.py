@@ -3,10 +3,12 @@
 
 """Accuracy gate — GSM8K eval integration for hyperloom.inference_optimizer.
 
-Baseline always runs GSM8K, and so does every variant: bench-eval-bench runs the
-eval on every warmup round regardless, so the score is on disk either way.
-Threshold is ``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT
-otherwise. Kernel patches are handled by kernel-agent.
+Baseline always runs GSM8K, and so does every variant whose round has ``RUN_EVAL``
+on -- the default. The gate reads that score for every variant rather than
+guessing from flag names which ones deserve reading. Threshold is
+``baseline_accuracy - new_accuracy <= 0.05`` (5% tolerance), REVERT otherwise. A
+session that opts out of eval records no baseline accuracy, and that is what
+leaves serving ungated there. Kernel patches are handled by kernel-agent.
 """
 
 from __future__ import annotations
@@ -493,8 +495,8 @@ def accuracy_keep_block(
 # same knob differently (atom's ``--kv_cache_dtype`` never matched
 # ``--kv-cache-dtype``) and a framework-specific knob nobody enrolled (atom's
 # ``--online_quant_config``, which changes numeric precision directly). Since the
-# eval runs on every warmup round regardless, the result is already on disk and
-# the only thing the predicate bought was discarding it.
+# round runs the eval whenever ``RUN_EVAL`` is on, the result is already on disk
+# and the only thing the predicate bought was discarding it.
 
 
 def parse_quality_gate(workspace: Path | str) -> dict[str, Any]:
