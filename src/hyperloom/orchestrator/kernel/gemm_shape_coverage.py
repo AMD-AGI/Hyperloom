@@ -48,14 +48,20 @@ _AITER_SHAPE_MISS_RE = re.compile(
 # none of the 5024 hit lines in a production Qwen3 log, which scored a fully
 # served tuned table as ``no_shape_key_matched`` and reverted it. The trailing
 # ``is tuned`` anchor keeps the lazy ``[^\n]*?`` from spanning an unrelated line.
+# ``found padded_M:`` is on its own sufficient to tell a hit from a miss: a miss
+# line reads "not found tuned config in <table>" and never carries a padded_M.
+# Measured on a real serving log, all 1168 ``found padded_M:`` occurrences were
+# hits and none of the 592 miss lines contained the token. So anchor on it and
+# nothing further -- requiring the trailing ", N:.., K:.. is tuned" would buy no
+# discrimination while dropping any line the log truncated mid-record, and one
+# missed hit is enough to grade a table that was serving as no_shape_key_matched.
 _AITER_SHAPE_HIT_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+), N:\d+, K:\d+ is tuned",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)",
 )
-# The table-qualified form is used only when attributing hits to one candidate.
-# Keep the shape-only pattern above tolerant of logs truncated after ``is tuned``.
+# The table-qualified form is used only when attributing hits to one candidate,
+# so it has to reach the table name; everything between stays unconstrained.
 _AITER_SHAPE_HIT_TABLE_RE = re.compile(
-    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+), "
-    r"N:\d+, K:\d+ is tuned[^\n]*? in (\S+?)\s*,",
+    r"shape is M:(\d+), N:(\d+), K:(\d+)[^\n]*?found padded_M: (\d+)[^\n]*? in (\S+?)\s*,",
 )
 
 Shape = tuple[int, int, int]
@@ -469,22 +475,48 @@ def aiter_log_tuned_config_enabled(envs: dict[str, str]) -> bool:
     return raw not in ("", "0", "false", "no", "off")
 
 
+def _safe_mtime(path: Path) -> float:
+    """Return ``path``'s mtime, or ``0`` when it cannot be read.
+
+    Sorting server logs by mtime races the round that is still writing them, and
+    an ``exists()`` guard does not close the window. Ordering is a heuristic for
+    picking the newest log, so a vanished file is worth sorting last rather than
+    aborting the check that owns it.
+    """
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def integrate_server_logs(
+    session_dir: Path,
+    integrate_name: str = FMOE_INTEGRATE_RUN,
+) -> list[Path]:
+    """Server logs for one integrate run, retries included, oldest first.
+
+    A retried integrate lands in a sibling directory with a ``-2``/``-3``
+    suffix rather than inside the original, so scanning only ``integrate_name``
+    grades the retry on the *first* attempt's log. Seven such retries exist on
+    the fleet, including every faulted post-merge session.
+
+    This is the one implementation: :mod:`hyperloom.orchestrator.phases.kernel`
+    grades dense candidates from the same directories, and when the two copies
+    drifted -- one of them ``exists()``-guarding the mtime, the other not -- a
+    log that vanished mid-scan ordered differently on each side, so the dense
+    and MoE lanes could grade the same session on different attempts.
+    """
+    parent = session_dir / "runs" / "integrate"
+    run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
+    return sorted((log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")), key=_safe_mtime)
+
+
 def read_latest_integrate_server_log(
     session_dir: Path,
     integrate_name: str = FMOE_INTEGRATE_RUN,
 ) -> tuple[Path, str] | None:
-    """Return the newest ``server.log`` under an integrate run, if readable.
-
-    Retries land in ``<integrate_name>-2``/``-3`` siblings rather than inside
-    the original directory, so those are scanned too; otherwise a retried run is
-    judged on the attempt it replaced.
-    """
-    parent = session_dir / "runs" / "integrate"
-    run_dirs = [parent / integrate_name, *sorted(parent.glob(f"{integrate_name}-*"))]
-    logs = sorted(
-        (log_path for run_dir in run_dirs for log_path in run_dir.rglob("server.log")),
-        key=lambda p: p.stat().st_mtime if p.exists() else 0,
-    )
+    """Return the newest ``server.log`` under an integrate run, if readable."""
+    logs = integrate_server_logs(session_dir, integrate_name)
     if not logs:
         return None
     try:

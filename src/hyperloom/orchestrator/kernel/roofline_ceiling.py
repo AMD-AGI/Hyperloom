@@ -171,25 +171,43 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
             return 0.0
         return b / 8.0 if b > 0 else 0.0
 
-    # Wrapper toolkits nest the precision on a weight spec: Quark under
-    # global_quant_config/layer_quant_config, compressed-tensors under
-    # config_groups.*.weights.
-    scopes: list[Any] = [quant_cfg.get("global_quant_config"), quant_cfg]
-    for container in (quant_cfg.get("layer_quant_config"), quant_cfg.get("config_groups")):
-        if isinstance(container, dict):
-            scopes.extend(container.values())
-    for scope in scopes:
+    def _spec_bytes(scope: Any) -> float:
+        """Weight bytes-per-element declared by one quant scope, ``0.0`` if none."""
         if not isinstance(scope, dict):
-            continue
+            return 0.0
         spec = scope.get("weight") or scope.get("weights")
         if not isinstance(spec, dict):
-            continue
+            return 0.0
         tag = str(spec.get("dtype") or spec.get("type") or "").strip().lower()
         if tag in _DTYPE_BYTES:
             return _DTYPE_BYTES[tag]
-        by = _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
-        if by > 0:
-            return by
+        return _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
+
+    # Wrapper toolkits nest the precision on a weight spec: Quark under
+    # global_quant_config, compressed-tensors under config_groups.*.weights.
+    # These two scopes describe the checkpoint as a whole, so either is decisive.
+    for scope in (quant_cfg.get("global_quant_config"), quant_cfg):
+        whole = _spec_bytes(scope)
+        if whole > 0:
+            return whole
+
+    # The per-group containers are different: one entry per layer pattern, and
+    # they need not agree -- a Quark MoE checkpoint routinely stores the routed
+    # experts at fp4 and the attention projections at fp8. Reading whichever
+    # entry the dict happened to yield first declared that precision for the
+    # entire model. Take the value the most groups agree on; ties resolve to the
+    # wider one, because undercounting weight bytes inflates the roofline and
+    # reports a real regression as "already at ceiling".
+    tallies: dict[float, int] = {}
+    for container in (quant_cfg.get("layer_quant_config"), quant_cfg.get("config_groups")):
+        if not isinstance(container, dict):
+            continue
+        for scope in container.values():
+            by = _spec_bytes(scope)
+            if by > 0:
+                tallies[by] = tallies.get(by, 0) + 1
+    if tallies:
+        return max(tallies.items(), key=lambda kv: (kv[1], kv[0]))[0]
     return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
@@ -912,16 +930,26 @@ def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: 
     first_dense = int(cfg.get("first_k_dense_replace") or 0)
     first_dense = max(0, min(first_dense, num_layers))
 
-    stride = 1
-    for raw in (freq, cfg.get("decoder_sparse_step")):
+    # The stride is phased differently by the two upstream implementations, and
+    # both phase it on the ABSOLUTE layer index -- not on the offset from the
+    # dense prefix. DeepSeek/GLM:
+    #     layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
+    # Qwen3-MoE:
+    #     layer_idx not in mlp_only_layers and (layer_idx + 1) % decoder_sparse_step == 0
+    # Re-basing to ``(i - first_dense) % stride`` agreed with neither: for
+    # DeepSeek-V3 (first_k_dense_replace=3) any stride > 1 selected a layer set
+    # shifted by 3, and for Qwen it was off by one in the other direction.
+    stride, phase = 1, "deepseek"
+    for raw, kind in ((freq, "deepseek"), (cfg.get("decoder_sparse_step"), "qwen")):
         if isinstance(raw, bool):
             continue
         if isinstance(raw, int) and raw > 0:
-            stride = raw
+            stride, phase = raw, kind
             break
 
     dense_only = {int(i) for i in (cfg.get("mlp_only_layers") or []) if isinstance(i, int)}
-    moe = sum(1 for i in range(first_dense, num_layers) if (i - first_dense) % stride == 0 and i not in dense_only)
+    offset = 1 if phase == "qwen" else 0
+    moe = sum(1 for i in range(first_dense, num_layers) if (i + offset) % stride == 0 and i not in dense_only)
     return moe, num_layers - moe
 
 

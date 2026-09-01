@@ -51,6 +51,19 @@ class TestTheLayerSplit:
     def test_qwen_spells_the_stride_decoder_sparse_step(self):
         assert _split({"decoder_sparse_step": 2}, 8, 64) == (4, 4)
 
+    def test_the_stride_is_phased_on_the_absolute_layer_index(self):
+        # Both upstreams phase on layer_idx, not on the offset from the dense
+        # prefix. DeepSeek/GLM:
+        #     layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
+        # so with prefix 3 / stride 2 over 8 layers the MoE layers are 4 and 6 --
+        # not 3, 5, 7, which is what re-basing to (i - first_dense) produced.
+        assert _split({"first_k_dense_replace": 3, "moe_layer_freq": 2}, 8, 64) == (2, 6)
+
+    def test_qwen_counts_from_one_not_zero(self):
+        # Qwen3-MoE: (layer_idx + 1) % decoder_sparse_step == 0, so with stride 3
+        # over 8 layers it is 2, 5 -- the shifted-by-one set of 0, 3, 6.
+        assert _split({"decoder_sparse_step": 3}, 8, 64) == (2, 6)
+
     def test_mlp_only_layers_stay_dense(self):
         assert _split({"mlp_only_layers": [0, 1]}, 8, 64) == (6, 2)
 

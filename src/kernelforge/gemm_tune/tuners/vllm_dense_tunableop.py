@@ -328,9 +328,17 @@ class VllmDenseTunableopTuner(BaseTuner):
                 m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
             except (KeyError, TypeError, ValueError):
                 continue
-            op = _tunableop_op_for_dtype(shape.get("dtype") or shape.get("otype")) or fallback_op
+            # The fallback applies only to shapes the demand parser recorded
+            # WITHOUT a dtype. A shape that carries one aiter actually logged is
+            # authoritative: falling back would write, say, an fp8 lookup as a
+            # BFloat16_TN record and tune a shape the runtime never asks for --
+            # the exact coercion this module refuses to do.
+            raw_dtype = shape.get("dtype") or shape.get("otype")
+            op = _tunableop_op_for_dtype(raw_dtype)
+            if op is None and not str(raw_dtype or "").strip():
+                op = fallback_op
             if op is None:
-                label = str(shape.get("dtype") or shape.get("otype") or f"precision={precision}")
+                label = str(raw_dtype or "").strip() or f"precision={precision}"
                 unsupported[label] = unsupported.get(label, 0) + 1
                 continue
             lines.append(tunableop_untuned_line(m, n, k, op))

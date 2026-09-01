@@ -314,6 +314,50 @@ def test_quant_config_weight_bytes_reads_compressed_tensors_bit_widths():
     assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
 
 
+def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
+    """Per-layer groups need not agree, and dict order must not decide.
+
+    A Quark MoE checkpoint stores the routed experts at fp4 and the attention
+    projections at fp8. Returning whichever group iterated first declared that
+    precision for the whole model -- and the answer flipped with dict order.
+    """
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "*.self_attn.q_proj": {"weight": {"dtype": "fp8"}},
+            "*.mlp.experts.*": {"weight": {"dtype": "fp4"}},
+            "*.mlp.experts.down_proj": {"weight": {"dtype": "fp4"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    # Same groups, opposite majority -> opposite answer, from the counts alone.
+    cfg["layer_quant_config"]["*.mlp.experts.*"] = {"weight": {"dtype": "fp8"}}
+    cfg["layer_quant_config"]["*.mlp.experts.down_proj"] = {"weight": {"dtype": "fp8"}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
+    # Undercounting weight bytes raises the roofline and reports a real
+    # regression as "already at ceiling", so a tie resolves upward.
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "a": {"weight": {"dtype": "fp4"}},
+            "b": {"weight": {"dtype": "fp8"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_a_whole_checkpoint_scope_still_outranks_the_per_group_ones():
+    cfg = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": {"dtype": "fp4"}},
+        "layer_quant_config": {"a": {"weight": {"dtype": "fp8"}}, "b": {"weight": {"dtype": "fp8"}}},
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+
+
 @pytest.mark.parametrize("quant_cfg", [None, {}, "fp8", {"quant_method": "unknown-toolkit"}])
 def test_quant_config_weight_bytes_is_silent_without_a_decisive_signal(quant_cfg):
     """No signal returns 0.0 so the caller falls back to the checkpoint dtype."""

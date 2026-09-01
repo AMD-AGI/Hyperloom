@@ -515,12 +515,12 @@ class TestCoverageGateDoesNotBlockOnMissingEvidence:
 
 class TestSafeMtime:
     def test_missing_path_sorts_last_instead_of_raising(self, tmp_path):
-        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
 
         assert _safe_mtime(tmp_path / "gone.log") == 0.0
 
     def test_existing_path_returns_its_mtime(self, tmp_path):
-        from hyperloom.orchestrator.phases.kernel import _safe_mtime
+        from hyperloom.orchestrator.kernel.gemm_shape_coverage import _safe_mtime
 
         path = tmp_path / "server.log"
         path.write_text("x", encoding="utf-8")

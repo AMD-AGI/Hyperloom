@@ -199,8 +199,14 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
 
 #: Env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1). On by
 #: default: forge calls the manifest its preferred dense-shape source, and with
-#: the gate off Hyperloom produced one for nobody. Set to 0/off/false to skip.
+#: the gate off Hyperloom produced one for nobody.
 _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
+#: Values of that env var that mean "off". Same vocabulary this file already
+#: documents for ``--steady-state-mode``, and it has to include the empty string
+#: and ``none``: launchers routinely disable a variable by exporting it empty
+#: rather than unsetting it, and a bare ``{"0","false","no","off"}`` check read
+#: every one of those as "enabled" -- the opposite of what was written.
+_SHAPE_MANIFEST_OFF_VALUES = frozenset({"", "0", "false", "no", "off", "none", "disable", "disabled"})
 #: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
 #: sglang capture shard filename -> ``bs_<batch>`` variant. vLLM instead emits
@@ -323,6 +329,18 @@ def _discover_capture_shards(trace_input: str, capture_folder: str) -> list[tupl
     return out
 
 
+def _shard_order_key(shard: tuple[Path, str, str | None]) -> tuple[int, str, str]:
+    """Total order over capture shards: batch size, then label, then filename.
+
+    Discovery walks directories, so the natural order is filesystem order --
+    fine while every shard was indexed, but the cap turned it into a
+    machine-dependent choice of *which* variants the manifest describes.
+    """
+    _path, label, _mode = shard
+    match = re.search(r"bs_(\d+)", label, re.IGNORECASE)
+    return (int(match.group(1)) if match else 0, label, _path.name)
+
+
 def _build_manifest_provenance(args: argparse.Namespace) -> dict[str, Any]:
     """Provenance block for the TraceShapeManifest.
 
@@ -371,7 +389,8 @@ def _maybe_build_shape_manifest(
 ) -> dict[str, Any]:
     """Optionally build + write the variant-discriminating TraceShapeManifest.
 
-    Built by default; ``HYPERLOOM_TRACE_SHAPE_MANIFEST=0`` returns
+    Built by default; ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` set to any of
+    :data:`_SHAPE_MANIFEST_OFF_VALUES` (including empty) returns
     ``{"status": "disabled"}`` and writes nothing. When enabled, capture shards
     are indexed per
     ``bs_<batch>`` variant; with no capture shards it falls back to an eager
@@ -379,7 +398,7 @@ def _maybe_build_shape_manifest(
     to ``{"status": "error: ..."}`` and is logged to stderr.
     """
     flag = os.environ.get(_SHAPE_MANIFEST_ENV, "1").strip().lower()
-    if flag in {"0", "false", "no", "off"}:
+    if flag in _SHAPE_MANIFEST_OFF_VALUES:
         return {"status": "disabled"}
     try:
         main_trace = analyze.get("trace_file", "") or ""
@@ -390,13 +409,20 @@ def _maybe_build_shape_manifest(
             max_caps = int(raw_caps) if str(raw_caps).strip() else _DEFAULT_MAX_CAPTURES
         except ValueError:
             max_caps = _DEFAULT_MAX_CAPTURES
+        shards.sort(key=_shard_order_key)
         if max_caps > 0 and len(shards) > max_caps:
             print(
                 f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
                 f"(set {_MAX_CAPTURES_ENV}=0 to index all)",
                 file=sys.stderr,
             )
-            shards = shards[:max_caps]
+            # Evenly spaced over the batch-sorted list, not the first N. Discovery
+            # order is directory order, so "first N" both varied between machines
+            # and -- once sorted -- would have kept only the small-batch end,
+            # indexing 64 decode variants and no prefill one. Each dropped shard
+            # costs a full analyze_trace + sha256, which is why the cap exists.
+            step = len(shards) / max_caps
+            shards = [shards[int(i * step)] for i in range(max_caps)]
         capture_variants: list[tuple[str, dict[str, Any]]] = []
         capture_hashes: dict[str, str] = {}
         variant_meta: dict[str, dict[str, Any]] = {}

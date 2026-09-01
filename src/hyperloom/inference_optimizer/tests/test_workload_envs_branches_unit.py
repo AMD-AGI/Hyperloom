@@ -89,7 +89,24 @@ def test_validate_server_args_allows_multi_value_flags():
     """
     args = "--cuda-graph-bs 1 2 4 8 16 24 32 48 64"
     assert validate_server_args_shell_safe(args) == args
-    assert validate_server_args_shell_safe("--a 1 2 --b=3 --c x y z") == "--a 1 2 --b=3 --c x y z"
+    # A flag not on the whitelist still gets its value plus a numeric list, so
+    # an nargs="+" flag nobody has enumerated yet is not rejected either.
+    assert validate_server_args_shell_safe("--a 1 2 --b=3 --c x") == "--a 1 2 --b=3 --c x"
+
+
+def test_validate_server_args_still_catches_positionals_after_a_flag():
+    """The multi-value relaxation must not become "one flag opens the gates".
+
+    A first pass tracked only "have we seen any flag", so every bare token after
+    the first flag was accepted -- which is no check at all for the argv shapes
+    this guard exists to reject.
+    """
+    with pytest.raises(ValueError, match="bare positional"):
+        # --port=8000 already carries its value; run.sh is positional.
+        validate_server_args_shell_safe("--port=8000 run.sh")
+    with pytest.raises(ValueError, match="bare positional"):
+        # --foo consumes bar; payload.json after it is not a value list.
+        validate_server_args_shell_safe("--foo bar payload.json")
 
 
 @pytest.mark.parametrize(

@@ -103,33 +103,17 @@ _AITER_ENV_TO_TABLE: dict[str, str] = {
 }
 
 
-def _safe_mtime(path: Path) -> float:
-    """Return ``path``'s mtime, or ``0`` when it cannot be read.
-
-    Sorting server logs by mtime races the round that is still writing them, and
-    an ``exists()`` guard does not close the window. Ordering is a heuristic for
-    picking the newest log, so a vanished file is worth sorting last rather than
-    aborting the check that owns it.
-    """
-    try:
-        return path.stat().st_mtime
-    except OSError:
-        return 0.0
-
-
 def _integrate_server_logs(session_dir: Path, tuner_name: str) -> list[Path]:
     """Server logs for a tuner's integrate run, retries included, oldest first.
 
-    A retried integrate lands in a sibling directory with a ``-2``/``-3``
-    suffix, so scanning only ``integrate-gemm_tune_<tuner>`` grades the retry on
-    the *first* attempt's log. Seven such retries exist on the fleet, including
-    every faulted post-merge session.
+    Thin naming shim over
+    :func:`..kernel.gemm_shape_coverage.integrate_server_logs`, which owns the
+    retry-sibling and mtime-ordering rules; this side only knows that a dense
+    tuner's run directory is ``integrate-gemm_tune_<tuner>``.
     """
-    parent = session_dir / "runs" / "integrate"
-    base = f"integrate-gemm_tune_{tuner_name}"
-    dirs = [parent / base, *sorted(parent.glob(f"{base}-*"))]
-    logs = [log_path for run_dir in dirs for log_path in run_dir.rglob("server.log")]
-    return sorted(logs, key=_safe_mtime)
+    from ..kernel.gemm_shape_coverage import integrate_server_logs
+
+    return integrate_server_logs(session_dir, f"integrate-gemm_tune_{tuner_name}")
 
 
 def _candidate_tuned_file(env: Any, env_var: str) -> str:
@@ -3132,7 +3116,16 @@ class KernelPhase(PhaseHandler):
             log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
 
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
-        """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
+        """Sync the latest GEMM history row, and publish the verdict to disk.
+
+        Not a pure in-memory update: every call also overwrites
+        ``<workspace>/result.json`` via ``_writeback_gemm_result_json``. The two
+        are deliberately coupled because they are the two books that must agree
+        -- ``record_gemm_tuning`` stores a shallow copy, so a caller that
+        rewrote scalars on ``result`` has changed neither the history row nor
+        the on-disk snapshot until this runs. All three call sites are terminal
+        verdict points, which is the only place either write is correct.
+        """
         if not isinstance(result, dict):
             return
         entry = dict(result)
@@ -3256,6 +3249,20 @@ class KernelPhase(PhaseHandler):
         candidates = self._gemm_e2e_candidates(result)
         if not candidates:
             log.info("gemm tuning: no candidates to E2E validate")
+            # Close the books here too. Returning early left the recorded
+            # attempt and the on-disk result.json claiming
+            # ``requires_e2e_validation=true`` with ``micro_decision=candidate``
+            # forever -- the same two-books-disagree state the exception arm was
+            # fixed for, and at least as common: any run whose tuners produced
+            # no usable env lands here.
+            result["decision"] = "REVERT"
+            result["requires_e2e_validation"] = False
+            result["e2e_validated"] = False
+            result["micro_decision"] = "no_e2e_candidates"
+            for stale in ("recommended_env", "extra_envs"):
+                if result.get(stale):
+                    result[stale] = {}
+            self._replace_latest_gemm_tuning_attempt(result)
             return
 
         baseline_tput = float(self.shared_state.baseline_tput or 0.0)
