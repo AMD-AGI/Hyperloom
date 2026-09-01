@@ -128,6 +128,13 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
     return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
+#: The one owner label a patch KEEP stages under. Explore- and framework-agent
+#: lifts used to route to two separate columns; the three-column layout has a
+#: single ``patch`` column, so both collapse to this marker. Attribution keeps
+#: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
+_PATCH_KEEP_OWNER = "PATCH"
+
+
 def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
     """Name the section a KEEP stages into, preferring the lever it moved."""
     by_lever = owner_from_lever(_lever_for_keep(task_params, result))
@@ -489,6 +496,12 @@ class WritebackCollaborator:
         normalized = str(owner or "").strip().upper()
         if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
             return
+        # The membership test above is the live "does this KEEP feed the patch
+        # column?" gate. Past it, the specific owner no longer picks a column --
+        # there is only one -- so everything stored (row id, outbox owner, the
+        # stack's ``kb_required_owner``) uses one marker rather than a routing
+        # choice that no longer exists.
+        normalized = _PATCH_KEEP_OWNER
         sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
         # The realized diff is what the tree ended up holding, so it replaces the
         # delivered patch rather than joining it -- staging both would apply the

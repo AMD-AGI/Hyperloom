@@ -556,6 +556,9 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(session_dir, tmp_p
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
     assert KnowledgeSections(draft).staged("explore") is None
+    # Explore and framework KEEPs share the one patch column, so both record the
+    # same owner marker rather than the old per-column explore/framework label.
+    assert coord.shared_state.optimization_stack[-1]["kb_required_owner"] == "PATCH"
 
 
 @pytest.mark.asyncio
