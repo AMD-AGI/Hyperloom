@@ -34,7 +34,8 @@
 #   CLAUDE_MODEL      model for the Agent turns                  (required)
 #   CLAUDE_CLI_VERSION pinned Claude CLI version                 (required)
 #   ANTHROPIC_API_KEY Claude CLI auth; injected here as base64
-#                     into the workload env (never written to NFS)(required)
+#                     into the workload env; bootstrap decodes it
+#                     into the leg's .env, which is on NFS       (required)
 #   ANTHROPIC_BASE_URL optional proxy / base url                 (optional)
 #   TASKS             comma-separated leg subset (default: all 8)
 #   DISPATCH_MAP      output file: JSON {leg: workloadId}
@@ -200,8 +201,8 @@ docker_gpu_index() {
 }
 
 # Common env for every workload. The API key is passed base64 so it is not visible in
-# plaintext in the API payload log; bootstrap decodes it and writes it only to the
-# pod-local .env (never to NFS). See design §9 (point D).
+# plaintext in the API payload log; bootstrap decodes it into the leg's .env, which sits
+# on NFS beside the workspace and is scrubbed by an EXIT trap. See design §9 (point D).
 common_env_json() {
   local model_path="$1" hours="$2" backend="$3"
   jq -n \

@@ -180,6 +180,32 @@ def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) ->
     assert "state.json stop_reason" in poll_script
     assert "reports/final.json missing" not in poll_script
     assert 'echo "PENDING|state.json stop_reason not set yet' in poll_script
+    # A tolerance knob nothing reads reads as a criterion the gate enforces; it did not.
+    assert "MAX_BOOT_FAILS=" not in poll_script
+
+
+def test_every_runner_label_is_declared_for_actionlint(workflow: dict) -> None:
+    """An undeclared self-hosted label fails pre-commit on work that never touched it."""
+    assert _GITHUB is not None
+    declared = yaml.safe_load((_GITHUB / "actionlint.yaml").read_text(encoding="utf-8"))
+    labels = set(declared["self-hosted-runner"]["labels"])
+    for job in workflow["jobs"].values():
+        runs_on = job["runs-on"]
+        if isinstance(runs_on, str) and "${{" not in runs_on:
+            assert runs_on in labels, f"runs-on {runs_on!r} is not in .github/actionlint.yaml"
+
+
+def test_the_first_setup_turn_tolerates_a_transient_failure(bootstrap_script: str) -> None:
+    """A bare first call let one 429 kill a multi-hour leg; turn 2 was already guarded."""
+    assert 'if ! agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"; then' in bootstrap_script
+
+
+def test_the_env_file_does_not_claim_to_stay_off_nfs(dispatch_script: str, bootstrap_script: str) -> None:
+    """The key lands on the share; comments saying otherwise stop anyone from hardening it."""
+    for script in (dispatch_script, bootstrap_script):
+        assert "never written to NFS" not in script
+        assert "never to NFS" not in script
+        assert "only to pod-local" not in script
 
 
 # ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ----

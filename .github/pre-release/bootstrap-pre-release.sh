@@ -18,7 +18,10 @@
 #
 # Inputs (env, injected by the dispatch script):
 #   CI_VERSION NFS_ROOT
-#   ANTHROPIC_API_KEY_B64          base64 key; decoded here, written only to pod-local .env
+#   ANTHROPIC_API_KEY_B64          base64 key; decoded into the leg's .env, which lives on
+#                                  NFS with the workspace the agent reads it from. Kept off
+#                                  stdout and out of the API payload, but NOT off NFS: the
+#                                  EXIT trap scrubs the key, so a SIGKILL leaves it on disk.
 #   ANTHROPIC_BASE_URL (optional)  CLAUDE_MODEL  CLAUDE_CLI_VERSION  TARGET_GAIN
 #   Baremetal leg:  LEG_ID  HYPERLOOM_RUN_MODE=baremetal  HYPERLOOM_BACKEND  HYPERLOOM_MODEL_PATH  DEMO_HOURS
 #   Docker host:    E2E_DOCKER_HOST=1  DOCKER_LEGS  DOCKER_GPU_MAP(json)  MODEL_3H  MODEL_12H
@@ -157,8 +160,10 @@ run_leg() {
   log "pip install ${wheels[0]} --target $root"
   pip install --no-input --target "$root" "${wheels[0]}" >/dev/null
 
-  # 2. decode the key and write the pod-local .env (NEVER on stdout / NEVER to a
-  #    location the poll reads). Restrict perms; scrub on exit.
+  # 2. decode the key and write the leg's .env. It lands on NFS because the agent reads it
+  #    from the workspace it runs in; umask 077 restricts it and the EXIT trap scrubs the
+  #    key, but a SIGKILL (eviction, SaFE hard timeout) leaves it readable on the share.
+  #    Never echoed to stdout.
   #
   # For a docker leg the agent (not the harness) starts the single-GPU container per the
   # demo skill. The demo skill's literal `docker run` cannot express our per-card
@@ -326,7 +331,13 @@ run_leg() {
     turn=$(( turn + 1 ))
     if [ "$turn" = 1 ]; then
       log "claude --print (setup, turn 1, session $uuid); agent transcript -> $agent_log"
-      agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"
+      # Tolerated exactly like a resumed turn: under `set -e` a bare call would let one
+      # transient CLI/gateway error (a 429, a dropped connection) kill a multi-hour leg,
+      # while the same failure from turn 2 on is only a warning. The stall check and the
+      # setup deadline below are what decide the leg is dead.
+      if ! agent_turn "$agent_log" --session-id "$uuid" < "$setup_prompt"; then
+        log "WARN: leg $leg -- setup turn 1 exited non-zero; anything it detached keeps running"
+      fi
     else
       log "claude --print (setup, turn $turn, resuming session $uuid)"
       if ! printf '%s\n' "$SETUP_RESUME_NUDGE" | agent_turn "$agent_log" --resume "$uuid"; then

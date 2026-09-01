@@ -33,7 +33,10 @@
 #                                  pod's own death is observed instead of timing out
 #                                  first; zombie legs with an empty stop_reason wait
 #                                  here rather than a stall check)
-#   MAX_CRASHES / MAX_BOOT_FAILS   tolerance (default 0 / 0)
+#   MAX_CRASHES                    crash_count tolerance (default 0). Server boot
+#                                  failures are NOT a pass criterion: the count lives in
+#                                  the report journal, not state.json, so nothing here
+#                                  reads it -- do not re-add a knob that judges nothing.
 #   Optional GitHub commit status (per-leg context pre-release-e2e/<leg>):
 #     GH_STATUS_TOKEN / GH_STATUS_REPO / GH_STATUS_SHA / GH_STATUS_DETAILS_URL
 #   Supersede detection (release runner when a newer pre-release run is queued):
@@ -46,7 +49,6 @@ TARGET_GAIN="${TARGET_GAIN:-100}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-120}"
 GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-52200}"
 MAX_CRASHES="${MAX_CRASHES:-0}"
-MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
 LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
 # This run's dispatch tag, written by dispatch beside the map. Pods stamp it into their
 # session pin; an untagged/foreign pin is a leftover from an earlier run on these paths.

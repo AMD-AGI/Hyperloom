@@ -6,3 +6,4 @@
 self-hosted-runner:
   labels:
     - Hyperloom-e2e-ci
+    - hyperloom-pre-e2e-baremetal
