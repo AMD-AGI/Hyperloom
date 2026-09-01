@@ -2,6 +2,6 @@
 - Linked issue(s): close/fix refs
 - Tests: added/updated? commands run?
 - Breaking changes: yes/no (details if yes)
-- [ ] Single concern (if not, why bundled?): ___
-- Downstream repos affected: ___
-- Root cause is in-repo; if upstream (TraceLens/GEAK/Magpie), ticket: ___
+- PR addresses single concern: yes/no (details if not):
+- Repos affected:
+- Root cause is upstream (TraceLens/GEAK/Magpie), ticket filed:

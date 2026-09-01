@@ -10,7 +10,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 
 ## Proposing a new framework or platform
 
-Hyperloom is glue over external components (GEAK, Magpie, TraceLens, the frameworks in `orchestrator/framework/paths.py`). A team building a **new framework** (e.g. AgentX) or **platform** (e.g. world models) must work bring-up through the owning-component leads **before** integration code lands, not after — the owners named in [`.github/CODEOWNERS`](.github/CODEOWNERS) know the contracts a new caller will lean on. Open a tracking issue that names the target component(s) and links the owners, and drive the interface review there so the eventual PR is a formality rather than a first look. See [`AGENTS.md`](AGENTS.md) for the authoring rules that apply once code exists.
+Hyperloom includes external components (GEAK, Magpie, TraceLens, frameworks). Building features for a new framework or **platform** must work bring-up through the components before integration code lands, the owners are named in [`github/CODEOWNERS`](.github/CODEOWNERS).d
 
 ## CI and documentation-only changes
 

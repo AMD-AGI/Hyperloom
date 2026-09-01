@@ -45,21 +45,20 @@
 /src/hyperloom/agents/kernel/tools/_analysis_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/_idle_gate.py                @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/inference_optimizer/tracelens_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
+/docs/components/tracelens.md                                   @tsrikris @devalshahamd @AMD-AGI/SaFE
 
-# Benchmarking / profiling
+# Benchmarking
 /src/hyperloom/agents/kernel/tools/tracelens_arch_benchmark.py  @devalshahamd @AMD-AGI/SaFE
 
-# Magpie integration glue (Magpie lead consulted alongside @AMD-AGI/SaFE)
+# Magpie integration glue
 /src/hyperloom/orchestrator/actions/executors/profile.py           @devalshahamd @haofrank @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/actions/executors/roofline.py          @devalshahamd @haofrank @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/roofline.py          @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/benchmark_backend.py @devalshahamd @haofrank @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py   @devalshahamd @haofrank @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/_magpie_patcher.py   @haofrank @AMD-AGI/SaFE
 
-# Post-TraceLens -> GEAK processing layer + glue (GEAK leads consulted alongside @AMD-AGI/SaFE)
-/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/source_resolver.py           @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/kernel_source_index.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/source_env.py                @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/src/hyperloom/agents/kernel/tools/backends/geak_runner.py      @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
-/docs/components/tracelens.md                                   @tsrikris @devalshahamd @Ahmedhasssan-aig @yueliu14 @chao-xu-spec @iraj465 @AMD-AGI/SaFE
+# Post-TraceLens -> GEAK processing layer + glue
+/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/source_resolver.py           @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/kernel_source_index.py       @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/backends/geak_runner.py      @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
+/src/hyperloom/orchestrator/actions/executors/_geak_sweep.py    @iraj465 @yueliu14 @chao-xu-spec @AMD-AGI/SaFE
