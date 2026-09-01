@@ -486,38 +486,24 @@ def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="
     return cfg["benchmark"]["envs"]
 
 
-def test_a_sweep_variant_gets_a_bound_sized_for_its_own_conc(monkeypatch, tmp_path):
-    """The ladder walks 256..2 while the session sits at one value.
+def test_a_sweep_variant_keeps_the_session_scaled_grace(monkeypatch, tmp_path):
+    """The variant's grace must stay in step with the caps that bound it.
 
-    apply_agentx_switch runs during the config rebuild, BEFORE the variant's
-    extra_envs are merged, so the grace it exports is scaled by the session
-    concurrency. A CONC=128 variant was being handed a bound sized for the
-    session's CONC=8 -- and the client's --warmup-grace-period is what actually
-    stops the warmup, so that variant's warmup ends mid-corpus.
+    Re-scaling it from the variant's own CONC is tempting -- the ladder walks
+    256..2 while the session sits at one value -- but ``bench["timeout_seconds"]``
+    and the subprocess cap are both derived from the SESSION concurrency. Raising
+    only the client's grace makes the round wait inside a bound its own caps do
+    not cover: at session CONC=8 with the ladder at 256 the grace becomes 57600s
+    against a 10800s cap, so the round is SIGKILLed mid-warmup. Leaving the grace
+    alone is strictly better until the caps are variant-aware too.
     """
     envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128)
     assert envs["CONC"] == "128"
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "3600"
 
 
-def test_the_variant_bound_is_not_scaled_twice(monkeypatch, tmp_path):
-    """Re-derive from the OPERATOR's anchor, not from the already-scaled export.
-
-    A session at CONC=32 exports 14400s from a 3600s anchor. Feeding that back
-    through the scaler for a CONC=128 variant would yield 230400s instead of
-    57600s -- an order of magnitude of dead wait on a hung round.
-    """
-    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=128)
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
-
-
-def test_a_low_conc_variant_keeps_the_larger_session_bound(monkeypatch, tmp_path):
-    """Only ever upward: a bound already paid for is not taken back.
-
-    A CONC=2 variant needs less warmup than the session's CONC=32 bound covers,
-    but shrinking it buys nothing (the round ends when the corpus drains) and
-    risks cutting a warmup that was going to finish.
-    """
+def test_the_session_scaled_grace_still_reaches_a_variant(monkeypatch, tmp_path):
+    """What the switch exported must survive the variant merge untouched."""
     envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2)
     assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 32 // 8)
 
@@ -548,33 +534,3 @@ def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):
     envs = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["envs"]
     assert "AGENTX_WARMUP_GRACE_PERIOD" not in envs
     assert envs["CONC"] == "128"
-
-
-def test_a_variant_honours_the_declared_grace_anchor(monkeypatch, tmp_path):
-    """The anchor travels with the grace into the variant re-derivation.
-
-    Dropping it there would re-anchor the variant to the repo default while the
-    baseline used the operator's -- two rounds of one session disagreeing about
-    what the same number means.
-    """
-    envs = _variant_envs(
-        monkeypatch,
-        tmp_path,
-        session_conc=16,
-        variant_conc=64,
-        anchor="14400",
-        grace_conc=16,
-    )
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(14400 * 64 // 16)
-
-
-def test_a_variant_at_the_declared_anchor_is_untouched(monkeypatch, tmp_path):
-    envs = _variant_envs(
-        monkeypatch,
-        tmp_path,
-        session_conc=16,
-        variant_conc=16,
-        anchor="14400",
-        grace_conc=16,
-    )
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "14400"

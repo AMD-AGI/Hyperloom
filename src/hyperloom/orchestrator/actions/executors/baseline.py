@@ -698,12 +698,27 @@ AGENTX_CANON_WARMUP_CONC = 8
 
 
 def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
-    """Read a positive integer from ``src``; 0 when unset or unusable."""
+    """Read a positive integer from ``src``; 0 when unset or unusable.
+
+    A whole number written with a decimal point (``"16.0"``, ``"3600.0"``) is
+    accepted. ``int()`` alone rejects it, and rejecting is not a safe default
+    here: these knobs feed a ratio, so discarding a declared anchor of ``16.0``
+    silently re-anchors the grace at 8 and doubles it -- the exact failure
+    ``AGENTX_WARMUP_GRACE_CONC`` exists to prevent. A fractional value
+    (``"8.5"``) is still rejected, because a non-integral concurrency or second
+    count is a typo rather than an intent.
+    """
     raw = (src.get(name) or "").strip()
     try:
         value = int(raw)
     except ValueError:
-        return 0
+        try:
+            as_float = float(raw)
+        except ValueError:
+            return 0
+        if not as_float.is_integer():
+            return 0
+        value = int(as_float)
     return value if value > 0 else 0
 
 
@@ -750,13 +765,18 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
         The warmup grace in seconds, never below the operator's own value.
     """
     src = os.environ if env is None else env
-    raw = (src.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
-    try:
-        grace = int(raw)
-    except ValueError:
-        grace = AGENTX_CANON_WARMUP_GRACE_SEC
-    if grace <= 0:
-        grace = AGENTX_CANON_WARMUP_GRACE_SEC
+    measured = _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_PERIOD")
+    if not measured:
+        # Nothing was measured, so there is nothing to scale. The canonical
+        # 1800s is a CONSTANT, not an observation of this model at this
+        # concurrency, and multiplying it by CONC/anchor would invent a bound
+        # nobody stands behind: at CONC=64 an untuned round would silently get
+        # 14400s of warmup share and a 23400s cap where the documented
+        # canonical total is 10800s. Return it flat so the canonical invariant
+        # holds at EVERY concurrency, and let the "nothing has been tuned for
+        # this model" warning below do the talking.
+        return AGENTX_CANON_WARMUP_GRACE_SEC
+    grace = measured
     # The client's warmup is linear in CONC by construction (per-lane requests x
     # CONC lanes), but the grace knob is a flat number, so a grace measured at
     # one concurrency under-budgets every higher one. Scale, never shrink, and
@@ -792,20 +812,16 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """
     src = os.environ if env is None else env
 
+    # One parser for every knob in this module. Two of them would drift: a
+    # grace of "3600.0" that ``agentx_warmup_grace_sec`` accepts but a local
+    # ``int()`` rejects would be scaled AND reported as "nothing has been
+    # tuned", which is how the suppressed-warning mismatch got here the first
+    # time.
     def _int(name: str, default: int) -> int:
-        raw = (src.get(name) or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return default
-        return value if value > 0 else default
+        return _agentx_positive_int(src, name) or default
 
     def _is_valid_override(name: str) -> bool:
-        raw = (src.get(name) or "").strip()
-        try:
-            return int(raw) > 0
-        except ValueError:
-            return False
+        return _agentx_positive_int(src, name) > 0
 
     explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
     if explicit:

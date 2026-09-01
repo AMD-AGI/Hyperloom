@@ -65,6 +65,12 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 # ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
 
+# How many rungs the AgentX floor below buys when the default budget cannot fund
+# even one. Two, not the full ladder: the point is to make the sweep produce a
+# comparison instead of nothing, not to silently authorize twelve hours of GPU.
+# A caller who wants the whole ladder passes --conc-sweep-total-budget-sec.
+_AGENTX_MIN_FUNDED_RUNGS = 2
+
 
 def _granted_cap_sec(variant_timeout_sec: int) -> float:
     """What a variant will actually be granted, for budget arithmetic.
@@ -1283,6 +1289,38 @@ async def run_conc_sweep(
             error=str(exc),
             workspace=str(workspace),
         )
+
+    # The module default is synthetic-sized and cannot fund a single AgentX rung.
+    # ``_granted_cap_sec`` prices a rung at what ``run_grid`` will actually grant
+    # it, which under AgentX is the raised cap (10800s at canonical settings) --
+    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own. Left alone, the
+    # first rung trips "insufficient_remaining_for_variant" and the whole ladder
+    # is skipped with zero measurements, which reads like a benchmark failure
+    # rather than a budget that was never sized for this workload.
+    #
+    # The CLI already raises this knob for AgentX; a caller that reaches
+    # ``run_conc_sweep`` directly (SDK, tests, any path that does not go through
+    # ``_apply_agentx_budget_profile``) got the synthetic default. Give it the
+    # same floor here, and only when the caller left the default in place -- a
+    # number the operator chose is never overridden. Safe to raise: this is the
+    # action's own slice, and the session deadline still clamps it via
+    # ``_session_soft_dl`` below.
+    if total_budget_sec is not None and int(total_budget_sec) == DEFAULT_TOTAL_BUDGET_SEC:
+        _rung_cost = _granted_cap_sec(variant_timeout_sec)
+        if _rung_cost > float(total_budget_sec):
+            _raised = int(_rung_cost * _AGENTX_MIN_FUNDED_RUNGS)
+            log.warning(
+                "conc_sweep: the default total budget %ds cannot fund even one rung at "
+                "the granted cap %.0fs, so every rung would be skipped as "
+                "insufficient_remaining_for_variant. Raising the budget to %ds (%d rungs) "
+                "for this AgentX sweep. Pass --conc-sweep-total-budget-sec to size it "
+                "yourself; the session deadline still clamps whatever is set here.",
+                total_budget_sec,
+                _rung_cost,
+                _raised,
+                _AGENTX_MIN_FUNDED_RUNGS,
+            )
+            total_budget_sec = _raised
 
     has_budget = total_budget_sec is not None
     started_at = time.time()

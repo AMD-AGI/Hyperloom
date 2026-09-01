@@ -666,57 +666,23 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    # The variant's own CONC only exists as of the line above, and the AgentX
-    # warmup grace has to be derived from it -- ``apply_agentx_switch`` ran
-    # during the rebuild, before this merge, so what it exported was scaled by
-    # the SESSION concurrency (``cli`` writes ``--conc`` into os.environ). For a
-    # conc sweep that is the wrong number by construction: the ladder walks
-    # 256..2 while the session sits at one value, so a CONC=128 variant was
-    # being handed a bound sized for CONC=8. Re-derive from the merged env, and
-    # only ever upward -- an operator or reference env that already asked for
-    # more keeps it.
+    # NOT re-derived per variant. The variant's own CONC only exists as of the
+    # merge above, and it is tempting to re-scale AGENTX_WARMUP_GRACE_PERIOD from
+    # it -- a conc sweep walks 256..2 while the session sits at one value, so a
+    # high-CONC variant runs with a grace sized for the session's concurrency.
     #
-    # AgentX-only: gated on ``agentx_enabled()``, and nothing writes
-    # AGENTX_WARMUP_GRACE_PERIOD into a synthetic variant's env in the first
-    # place, so the default grid never enters this branch.
-    from ._workload_envs import agentx_enabled
-
-    if agentx_enabled() and str(envs.get("CONC", "")).strip():
-        from .baseline import agentx_warmup_grace_sec
-
-        # The OPERATOR's anchor plus the VARIANT's concurrency -- never the
-        # value already sitting in ``envs``. That one has been scaled once
-        # (by the session CONC), and feeding it back in would scale it a
-        # second time: a session at CONC=32 with a 3600s anchor exports
-        # 14400s, and re-scaling that for a CONC=128 variant yields 230400s
-        # instead of the correct 57600s.
-        # AGENTX_WARMUP_GRACE_CONC travels with the grace: it declares which
-        # concurrency that grace was measured at, and dropping it here would
-        # silently re-anchor the variant to the repo default while the baseline
-        # used the operator's.
-        _variant_grace = agentx_warmup_grace_sec(
-            {
-                "AGENTX_WARMUP_GRACE_PERIOD": os.environ.get("AGENTX_WARMUP_GRACE_PERIOD", ""),
-                "AGENTX_WARMUP_GRACE_CONC": os.environ.get("AGENTX_WARMUP_GRACE_CONC", ""),
-                "CONC": str(envs.get("CONC", "")),
-            }
-        )
-        _prev_grace = str(envs.get("AGENTX_WARMUP_GRACE_PERIOD", "")).strip()
-        try:
-            _prev_val = int(_prev_grace)
-        except ValueError:
-            _prev_val = 0
-        if _variant_grace > _prev_val:
-            envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_variant_grace)
-            log.info(
-                "grid: variant %s runs at CONC=%s, so its warmup grace is re-derived "
-                "%ss -> %ds. The switch that exported the first value ran before this "
-                "variant's CONC existed, and the client's --warmup-grace-period is what "
-                "actually stops the warmup.",
-                variant.name,
-                _prev_grace or "unset",
-                _variant_grace,
-            )
+    # Doing that here is WRONG while the two caps above it are session-scaled.
+    # ``apply_agentx_switch`` sets ``bench["timeout_seconds"]`` and
+    # ``agentx_variant_timeout_sec`` sets the subprocess cap, both from
+    # os.environ's session CONC. Raising only the client's grace makes the round
+    # wait inside a bound its own caps do not cover: at session CONC=8 with the
+    # ladder at 256 the grace would become 57600s against a 10800s cap, so the
+    # round is SIGKILLed at 10800s while warmup is still draining -- strictly
+    # worse than leaving the grace alone, which is what shipped before.
+    #
+    # The real fix is to make the caps variant-aware too (thread the merged CONC
+    # into ``agentx_variant_timeout_sec`` / ``_round_timeout_sec``); until then
+    # all three numbers stay session-scaled and consistent with each other.
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.

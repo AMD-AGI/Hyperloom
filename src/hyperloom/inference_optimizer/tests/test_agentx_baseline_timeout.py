@@ -177,11 +177,45 @@ def test_at_or_below_the_anchor_the_cap_is_unchanged(monkeypatch, conc):
 
 @pytest.mark.parametrize("conc", [16, 32, 64])
 def test_the_warmup_share_scales_linearly_with_conc(monkeypatch, conc):
-    """Warmup is per-lane requests x CONC lanes, so its budget must track CONC."""
+    """Warmup is per-lane requests x CONC lanes, so a MEASURED budget tracks CONC."""
     _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
     monkeypatch.setenv("CONC", str(conc))
     grown = (AGENTX_CANON_WARMUP_GRACE_SEC * conc) // AGENTX_CANON_WARMUP_CONC - AGENTX_CANON_WARMUP_GRACE_SEC
     assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
+
+
+@pytest.mark.parametrize("conc", [16, 32, 64, 256])
+def test_an_untuned_round_keeps_the_canonical_cap_at_every_conc(monkeypatch, conc):
+    """Nothing measured means nothing to scale.
+
+    The canonical 1800s is a constant, not an observation of this model at this
+    concurrency. Multiplying it invents a bound nobody stands behind: at CONC=64
+    an untouched round would get a 23400s cap where the documented canonical
+    total is 10800s, and the conc sweep would then price every rung against it
+    and skip the lot. The "nothing has been tuned for this model" warning is the
+    correct response, not a 3.2x cap.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", str(conc))
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+def test_the_untuned_warning_decomposition_still_adds_up(monkeypatch, caplog):
+    """The warning prints ``overhead = non-warmup + grace``; it must be arithmetic.
+
+    While the default was being scaled, a CONC=64 round printed
+    ``19800s (= 5400s + 1800s)`` and called the scaled value canonical -- an
+    equation that does not hold, hiding the very inflation it was reporting.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", "64")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    msgs = [r.getMessage() for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
+    assert msgs, "the untuned warning did not fire"
+    assert f"canonical {AGENTX_BASELINE_OVERHEAD_SEC}s" in msgs[0]
+    assert f"{AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC}s non-warmup" in msgs[0]
 
 
 def test_the_floor_composes_with_an_operator_raised_grace(monkeypatch):
@@ -237,6 +271,7 @@ def test_a_pinned_overhead_outranks_the_conc_floor(monkeypatch):
 def test_the_scaling_is_announced(monkeypatch, caplog):
     """A cap that moved silently is a cap nobody can reconcile against a log."""
     _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
     monkeypatch.setenv("CONC", "32")
     with caplog.at_level("INFO"):
         agentx_baseline_timeout_sec()
@@ -443,3 +478,32 @@ def test_the_cap_follows_the_declared_anchor_too(monkeypatch):
     monkeypatch.setenv("CONC", "32")
     non_warmup = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
     assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + non_warmup + 28800
+
+
+def test_a_whole_number_written_with_a_decimal_point_is_honoured(monkeypatch):
+    """ "16.0" is an anchor of 16, not a missing anchor.
+
+    Rejecting it silently re-anchors the grace at the default 8 and doubles it
+    -- the exact failure the anchor exists to prevent.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400.0")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16.0")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_conc() == 16
+    assert agentx_warmup_grace_sec() == 14400
+
+
+@pytest.mark.parametrize("bad", ["8.5", "abc", "", "-16.0", "0"])
+def test_a_fractional_or_unparseable_anchor_is_still_rejected(monkeypatch, bad):
+    """A non-integral concurrency is a typo, not an intent."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+
+
+def test_an_exponent_form_whole_number_is_accepted(monkeypatch):
+    """``1e3`` is 1000, unambiguously. The bar is integrality, not notation."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "1e3")
+    assert agentx_warmup_grace_conc() == 1000
