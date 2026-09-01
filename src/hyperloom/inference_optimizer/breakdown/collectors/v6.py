@@ -1432,6 +1432,7 @@ def _source_attempt(
             "patches_applied": _string_list(outputs.get("patches_applied")),
             "source_snapshot": _first(outputs.get("source_snapshot"), None),
             "source_manifest": _first(outputs.get("source_manifest"), None),
+            "framework_root": _first(outputs.get("framework_root"), None),
             "workspace": _first(outputs.get("workspace"), None),
         },
         "failure": {

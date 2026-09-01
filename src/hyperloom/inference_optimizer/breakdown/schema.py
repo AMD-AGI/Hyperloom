@@ -816,6 +816,9 @@ class KernelE2E(TypedDict, total=False):
         patch_path (str | None): Adopted patch path, or None.
         target_file (str | None): File the patch applies to, or None.
         extra_server_args (str): Server-arg fragment introduced by the adoption.
+        kernel_repo (str | None): Absolute deploy/apply root the integrated
+            kernel landed in (the kernel analogue of the framework apply root),
+            or None for an env-only adoption that named no repo.
         ts (str): ISO UTC timestamp of the integrate decision.
     """
 
@@ -827,6 +830,7 @@ class KernelE2E(TypedDict, total=False):
     patch_path: str | None
     target_file: str | None
     extra_server_args: str
+    kernel_repo: str | None
     self_reported_e2e_gain_pct: float | None
     revalidation_measured_tput: float
     revalidation_current_best_tput: float
