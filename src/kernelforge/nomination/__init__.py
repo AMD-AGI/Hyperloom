@@ -191,6 +191,79 @@ def summarize(candidates: list[Candidate], targets: list[Target]) -> NominationS
     )
 
 
+@dataclass(frozen=True)
+class Resolution:
+    """Everything one nomination pass decided, ready for the CLI to act on."""
+
+    request: NominationRequest
+    targets: tuple[Target, ...]
+    summary: NominationSummary
+
+
+def resolve(nomination_input: str | Path) -> Resolution:
+    """Read the brief, rank the candidates, and pick targets.
+
+    Args:
+        nomination_input: Path to the nomination request JSON.
+
+    Returns:
+        The request, the chosen targets, and the counts to report.
+
+    Raises:
+        NominationError: On a malformed request or candidate list.
+    """
+    request = read_request(nomination_input)
+    candidates = read_candidates(request.candidates_path)
+    targets = nominate(request, candidates)
+    return Resolution(
+        request=request,
+        targets=tuple(targets),
+        summary=summarize(candidates, targets),
+    )
+
+
+def patch_entry(
+    target: Target,
+    *,
+    patch_path: str,
+    base_commit: str = "",
+    micro_speedup: float = 0.0,
+    kernel_repo: str = "",
+    snapshot_dir: str = "",
+) -> dict[str, Any]:
+    """Build one result-envelope entry for a target that produced a patch.
+
+    Field names mirror ``hyperloom.orchestrator.kernel.nomination_result``; the
+    three the consumer requires are the kernel name, the patch path, and the
+    target file.
+
+    Args:
+        target: The nominated target this patch came from.
+        patch_path: Path to the published patch.
+        base_commit: Commit the patch is diffed against.
+        micro_speedup: Forge's own measurement, used only as a queue tiebreaker.
+        kernel_repo: Repo root, required for a multi-file patch.
+        snapshot_dir: Snapshot dir, which enables atomic multi-file apply.
+
+    Returns:
+        The entry mapping.
+    """
+    entry: dict[str, Any] = {
+        "kernel_name": target.kernel_name,
+        "patch_path": str(patch_path),
+        "target_file": target.source_file,
+        "micro_speedup": float(micro_speedup or 0.0),
+    }
+    for key, value in (
+        ("base_commit", base_commit),
+        ("kernel_repo", kernel_repo),
+        ("snapshot_dir", snapshot_dir),
+    ):
+        if str(value or "").strip():
+            entry[key] = str(value)
+    return entry
+
+
 def _load_json(path: str | Path, *, what: str) -> Any:
     """Read JSON, turning every failure into one contract error."""
     try:

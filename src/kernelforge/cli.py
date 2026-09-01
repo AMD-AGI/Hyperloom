@@ -700,10 +700,118 @@ def _make_lane_agent_factory(
 # ─── Autonomous Forge loop command ───
 
 
+def _resolve_nomination(*, auto, nomination_input, kernel, resume):
+    """Run one nomination pass, or return None when --auto was not requested.
+
+    Args:
+        auto: Whether self-nomination was requested.
+        nomination_input: Path to the nomination request JSON.
+        kernel: The --kernel value, which --auto is meant to supply instead.
+        resume: Whether this is a resumed campaign.
+
+    Returns:
+        The resolution, or ``None`` when running in the named-kernel mode.
+
+    Raises:
+        click.ClickException: On a conflicting or incomplete invocation, or when
+            the nomination picked more targets than this build can execute.
+    """
+    if not auto:
+        if nomination_input:
+            raise click.ClickException("--nomination-input requires --auto")
+        return None
+    if resume:
+        raise click.ClickException("--auto cannot be combined with --resume; a resumed campaign has its target")
+    if not nomination_input:
+        raise click.ClickException("--auto requires --nomination-input")
+    if kernel:
+        raise click.ClickException("--auto derives the kernel from the nomination; do not pass --kernel")
+
+    from kernelforge.nomination import NominationError, resolve
+
+    try:
+        resolution = resolve(nomination_input)
+    except NominationError as error:
+        raise click.ClickException(str(error)) from error
+    if len(resolution.targets) > 1:
+        # Running several targets in one call needs a per-target base commit and
+        # per-target scratch paths, neither of which exists yet. Refuse loudly
+        # rather than silently optimizing only the first pick.
+        raise click.ClickException(
+            f"nomination picked {len(resolution.targets)} targets but multi-target execution "
+            "is not implemented; lower max_kernels to 1"
+        )
+    return resolution
+
+
+def _nominated_patches(resolution, *, campaign_root, best_commit, micro_speedup):
+    """Build the ``patches`` array for a nominated run that reached a best.
+
+    Args:
+        resolution: The nomination that chose this run's target.
+        campaign_root: Campaign directory holding the published best bundle.
+        best_commit: Commit the best result was published from.
+        micro_speedup: Forge's own mean-case speedup, a queue tiebreaker only.
+
+    Returns:
+        One entry when a published patch exists, otherwise an empty list.
+    """
+    from kernelforge.nomination import patch_entry
+
+    if not best_commit or not resolution.targets:
+        return []
+    root = Path(campaign_root)
+    try:
+        manifest = json.loads((root / "best" / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    # The manifest records the patch relative to the campaign root, and the
+    # published directory is versioned, so the path cannot be assumed.
+    relative = str(manifest.get("patch_path") or "").strip() if isinstance(manifest, dict) else ""
+    if not relative:
+        return []
+    patch_path = root / relative
+    if not patch_path.is_file():
+        return []
+    return [
+        patch_entry(
+            resolution.targets[0],
+            patch_path=str(patch_path),
+            base_commit=best_commit,
+            micro_speedup=float(micro_speedup or 0.0),
+        )
+    ]
+
+
+def _emit_empty_nomination(resolution) -> None:
+    """Report a nomination that selected nothing, as a clean success."""
+    payload = json.dumps(
+        {
+            "patches": [],
+            "nomination": resolution.summary.to_dict(),
+            "improved": False,
+        }
+    )
+    click.echo(f"__FORGE_RESULT__{payload}__FORGE_RESULT__")
+
+
 @main.command("forge-loop")
 @click.option("--kernel", default=None, help="Fresh campaign: kernel file to optimize")
 @click.option("--driver", default=None, help="Fresh campaign: validation/bench driver")
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
+@click.option(
+    "--auto",
+    is_flag=True,
+    help="Pick the kernels here instead of being handed one. Requires "
+    "--nomination-input; --kernel is then derived from the nomination and "
+    "must not be passed. Off by default, so a run without it is unchanged.",
+)
+@click.option(
+    "--nomination-input",
+    default="",
+    help="Path to the nomination request JSON (trace, candidate list, lane "
+    "budget, target ceiling). Only read under --auto.",
+)
 @click.option(
     "--snr-threshold",
     default=DEFAULT_SNR_THRESHOLD_DB,
@@ -1003,6 +1111,8 @@ def forge_loop(
     kernel,
     driver,
     workspace_dir,
+    auto,
+    nomination_input,
     snr_threshold,
     max_hours,
     session_timeout_sec,
@@ -1066,7 +1176,23 @@ def forge_loop(
     The campaign is resumable: its immutable inputs are snapshotted into
     <workspace>/forge_experiments/campaign_config.json and each session's control
     state into run_state.json, so --resume continues an interrupted campaign.
+
+    Under --auto the kernel is nominated here rather than named by Hyperloom, and
+    the result carries a ``patches`` array plus nomination counts.
     """
+    nomination = _resolve_nomination(
+        auto=auto,
+        nomination_input=nomination_input,
+        kernel=kernel,
+        resume=resume,
+    )
+    if nomination is not None:
+        if not nomination.targets:
+            # No eligible candidate is an answer, not a failure: Hyperloom's
+            # phase latch needs a clean exit to stop waiting on this lane.
+            _emit_empty_nomination(nomination)
+            return
+        kernel = nomination.targets[0].source_file
     long_horizon = _is_long_horizon(max_hours)
     critic_enabled = bool(long_horizon)
     try:
@@ -2012,6 +2138,14 @@ def forge_loop(
                 # Tracker metadata is optional on incomplete runs; final result
                 # emission must remain available so callers can reject it cleanly.
                 pass
+        if nomination is not None:
+            result["nomination"] = nomination.summary.to_dict()
+            result["patches"] = _nominated_patches(
+                nomination,
+                campaign_root=campaign_root,
+                best_commit=best_commit,
+                micro_speedup=total_speedup,
+            )
         return result
 
     def _write_result_json(result: dict) -> None:
