@@ -3193,13 +3193,10 @@ class BaselineExecutor:
 
         # An overlay recording its own root needs no resolved target, so this
         # only refuses when nothing names a tree at all.
-        if (
-            params.get("patches")
-            and not any(
-                str((entry or {}).get("framework_root") or "").strip()
-                for entry in params["patches"]
-                if isinstance(entry, dict)
-            )
+        if params.get("patches") and not any(
+            str((entry or {}).get("framework_root") or "").strip()
+            for entry in params["patches"]
+            if isinstance(entry, dict)
         ):
             patch_application = {
                 "status": "failed",

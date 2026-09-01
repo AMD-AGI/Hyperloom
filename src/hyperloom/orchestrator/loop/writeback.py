@@ -138,9 +138,7 @@ _PATCH_KEEP_OWNER = "PATCH"
 #: Levers whose overlays feed the one patch column. ``kernel`` publishes through
 #: its own column and is absent; a KEEP that names none of these falls back to
 #: the authoring phase to decide.
-_PATCH_COLUMN_LEVERS = frozenset(
-    {LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT}
-)
+_PATCH_COLUMN_LEVERS = frozenset({LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT})
 
 
 def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
