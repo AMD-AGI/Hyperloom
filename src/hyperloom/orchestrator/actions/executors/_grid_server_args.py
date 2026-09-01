@@ -51,7 +51,10 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
 
     * ``--flag=value`` already carries its value, so a bare token after it is
       unambiguously positional.
-    * a flag in :data:`_MULTI_VALUE_FLAGS` takes an unlimited value list.
+    * a flag in :data:`_MULTI_VALUE_FLAGS` takes an unlimited value list -- but
+      every entry in that whitelist is a list of batch sizes, so the list is
+      still digits-only. Letting the whitelist waive the token shape as well
+      would readmit ``--cuda-graph-bs 1 2 run.sh``.
     * any other flag takes one arbitrary value; further tokens are accepted only
       while they still look like list elements (digits), never as bare words.
       That covers an ``nargs="+"`` flag not yet on the whitelist -- those carry
@@ -79,7 +82,7 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
             else:
                 state = "any"
             continue
-        if state == "many":
+        if state == "many" and _NUMERIC_VALUE_RE.match(token):
             continue
         if state == "any":
             state = "numeric"

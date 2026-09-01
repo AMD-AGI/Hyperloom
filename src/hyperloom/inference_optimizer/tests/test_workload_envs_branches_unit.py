@@ -107,6 +107,11 @@ def test_validate_server_args_still_catches_positionals_after_a_flag():
     with pytest.raises(ValueError, match="bare positional"):
         # --foo consumes bar; payload.json after it is not a value list.
         validate_server_args_shell_safe("--foo bar payload.json")
+    with pytest.raises(ValueError, match="bare positional"):
+        # Being on the multi-value whitelist widens how MANY values a flag
+        # takes, not what they may look like: every entry on that list is a
+        # list of batch sizes.
+        validate_server_args_shell_safe("--cuda-graph-bs 1 2 run.sh")
 
 
 @pytest.mark.parametrize(
