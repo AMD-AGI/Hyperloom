@@ -5408,6 +5408,13 @@ def build_source_resolution_entries(candidates: list[dict[str, Any]]) -> list[di
             # case they exist to record.
             previous_source_file=str(item.get("previous_source_file") or ""),
             previous_method=str(item.get("previous_method") or ""),
+            # Classify from the routing gate's own verdict, so the artifact
+            # reports why a kernel is undispatchable rather than only how many.
+            reason_class=_KSC.classify_skip_reason(
+                reusable=item.get("reusable_native_kernel"),
+                skip_reason=item.get("skip_reason"),
+                source_file=item.get("source_file"),
+            ),
         )
         audit = item.get("source_resolution_llm_audit")
         if isinstance(audit, dict):
@@ -5521,14 +5528,25 @@ def write_source_resolution_artifact(
             return None
         path = Path(out_path)
         atomic_write_json(path, doc)
-        final_entries = doc.get("entries") or []
-        resolved = sum(1 for entry in final_entries if entry.get("source_file"))
-        summary = f"source resolution: {resolved}/{len(final_entries)} kernel(s) located -> {path.name}"
-        log.info("%s", summary)
+        summary = _KSC.summarize_resolution(doc.get("entries") or [])
+        line = f"source resolution: {summary['located']}/{summary['total']} kernel(s) located -> {path.name}"
+        # A count alone cannot say whether the unlocated kernels were worth
+        # chasing, so report the GPU share behind each class next to it.
+        if summary["undispatchable_gpu_pct"] > 0.0:
+            line += (
+                f"; {summary['undispatchable_gpu_pct']:.1f}% GPU undispatchable"
+                f" ({summary['recoverable']} recoverable, {summary['unsalvageable']} unsalvageable)"
+            )
+        for reason_class, count in sorted(summary["by_class"].items()):
+            line += f"; {reason_class}={count}"
+        log.info("%s", line)
         if log_path:
-            append_log(log_path, summary)
+            append_log(log_path, line)
         return path
-    except Exception as exc:  # noqa: BLE001 - reporting aid, never fails the run
+    except (OSError, TypeError, ValueError, AttributeError, KeyError) as exc:
+        # Reporting aid: a write or projection failure must not fail the run,
+        # but it is logged with its type so a silent gap is not mistaken for
+        # "every kernel resolved".
         log.warning("could not write source-resolution artifact: %r", exc)
         return None
 
