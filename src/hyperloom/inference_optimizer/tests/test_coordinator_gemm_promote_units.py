@@ -146,74 +146,61 @@ def coord_session_dir(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_intent_router_gemm_roofline_survives_terminal_lifecycle_save(
+async def test_gemm_roofline_refresh_survives_terminal_lifecycle_save(
     coord_session_dir,
     monkeypatch,
 ):
-    """The lifecycle END save must not clobber the inline Roofline refresh.
+    """The terminal state save must not clobber the inline Roofline refresh.
 
-    On the intent_router path the terminal lifecycle event persists the live
-    state between the handler returning and the GEMM result being handled, so
-    the refresh has to be merged back before that save.
+    ``run_gemm_tuning`` is now a Coordinator-owned lane that the model can no
+    longer REQUEST (the intent path denies it), so the merge is exercised on the
+    live entrypoint: ``_handle_gemm_tuning_result`` calls
+    ``_sync_profile_state_after_gemm_roofline`` before it records the result and
+    persists the live state. A block-FP8 handler runs its inline Roofline
+    against a throwaway ``SharedState`` on disk; those refreshed fields have to
+    be merged into the live state before any save, or the next run loses the
+    steady-state trace.
     """
     coord = Coordinator(coord_session_dir, backends=_silent_backends())
     try:
         selected_trace = str(coord_session_dir / "mixed_steady_state.trace.json.gz")
 
-        async def fake_handler(payload, *, session_dir):
-            # Mirror the handler-owned inline Roofline: it mutates a throwaway
-            # SharedState loaded from disk and persists it there.
-            state = SharedState.load_or_init(session_dir)
-            state.last_profile_trace = str(session_dir / "profile.trace.json.gz")
-            state.last_profile_status = "succeeded"
-            state.last_profile_workload = {
-                "framework": "vllm",
-                "server_args": "--attention-backend AITER",
-            }
-            state.last_trace_analyze = {
-                "trace_input": state.last_profile_trace,
-                "steady_state_trace": selected_trace,
-                "roofline_snapshot_id": 7,
-            }
-            state.baseline_eager_fallback = False
-            state.save(session_dir)
-            return {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "geak",
-                "shape_capture": {
-                    "capture_mode": "block_fp8_profile",
-                    "source_profile_trace": selected_trace,
-                },
-            }
+        # Mirror the handler-owned inline Roofline: a throwaway SharedState
+        # loaded from disk, mutated, and persisted there -- exactly what the
+        # block-FP8 GEMM handler leaves behind before returning.
+        state = SharedState.load_or_init(coord_session_dir)
+        state.last_profile_trace = str(coord_session_dir / "profile.trace.json.gz")
+        state.last_profile_status = "succeeded"
+        state.last_profile_workload = {
+            "framework": "vllm",
+            "server_args": "--attention-backend AITER",
+        }
+        state.last_trace_analyze = {
+            "trace_input": state.last_profile_trace,
+            "steady_state_trace": selected_trace,
+            "roofline_snapshot_id": 7,
+        }
+        state.baseline_eager_fallback = False
+        state.save(coord_session_dir)
 
-        monkeypatch.setitem(
-            krh_mod.KERNEL_REQUEST_HANDLERS,
-            "run_gemm_tuning",
-            fake_handler,
-        )
-        monkeypatch.setattr(
-            coord.dispatcher,
-            "_sequence_denial_for_request",
-            lambda target, kind: None,
-        )
         coord.shared_state.baseline_eager_fallback = True
 
-        await coord._handle_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={
-                    "target_agent": "kernel_agent",
-                    "kind": "run_gemm_tuning",
-                    "params": {},
-                },
-            ),
-        )
+        result = {
+            "status": "ok",
+            "decision": "REVERT",
+            "backend": "geak",
+            "shape_capture": {
+                "capture_mode": "block_fp8_profile",
+                "source_profile_trace": selected_trace,
+            },
+        }
+
+        # The live entrypoint both KERNEL-entry and any resume converge on. It
+        # syncs the Roofline refresh, then records + persists the live state.
+        await coord.phase_kernel._handle_gemm_tuning_result(result)
 
         assert coord.shared_state.last_trace_analyze.get("steady_state_trace") == selected_trace
         assert coord.shared_state.last_profile_status == "succeeded"
-        assert coord.shared_state.roofline_snapshot_id == 7
         assert coord.shared_state.baseline_eager_fallback is False
         # It must also survive on disk so the next run can reuse the trace.
         reloaded = SharedState.load_or_init(coord_session_dir)
@@ -2183,108 +2170,26 @@ class TestForgeGemmRuntimeConfigMerge:
         assert result["e2e_results"]["reverted"] == []
 
 
-class TestBf16DenseFallback:
-    def test_fallback_predicate_requires_forge_sglang_fp8_no_candidate(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
+class TestBf16DenseFallbackIsInternalToForge:
+    """Change 3: the fp8->bf16 dense retry moved down into forge's tuner router.
 
-        assert coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [
-                    {
-                        "status": "no_improvement",
-                        "tuner": "a8w8",
-                        "improved_shapes": 0,
-                    }
-                ],
-            }
-        )
-
-    def test_fallback_predicate_skips_existing_candidate(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
-
-        assert not coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "candidate",
-                "recommended_env": {"AITER_CONFIG_GEMM_A8W8": "/tmp/tuned.csv"},
-                "tuners_run": [
-                    {
-                        "status": "ok",
-                        "tuner": "a8w8",
-                        "improved_shapes": 4,
-                        "env_var": "AITER_CONFIG_GEMM_A8W8",
-                        "env_value": "/tmp/tuned.csv",
-                    }
-                ],
-            }
-        )
-
-    def test_fallback_predicate_skips_candidate_reverted_by_e2e(self, tmp_path):
-        coord = _coord(tmp_path, framework="sglang")
-
-        assert not coord._should_run_bf16_dense_gemm_fallback(
-            {
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "candidate_no_e2e_gain",
-                "e2e_validated": True,
-                "e2e_results": {"kept": [], "reverted": [{"tuner": "a8w8"}]},
-            }
-        )
-
-    def test_fallback_pending_resumes_terminal_fp8_no_candidate(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            framework="sglang",
-            precision="fp8",
-            last_gemm_tuning={
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
-            },
-        )
-        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
-
-        assert coord._bf16_dense_gemm_fallback_pending() is True
-        assert coord._gemm_tuning_required_before_kernel_opt() is True
-
-        coord.shared_state.gemm_tuning_attempts.append(
-            {
-                "status": "complete",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "bf16",
-                "workspace": str(tmp_path / "runs/gemm_tuning/kernel_entry_gemm_tuning_bf16_fallback"),
-                "tuners_run": [{"tuner": "sglang_dense_bf16"}],
-            }
-        )
-
-        assert coord._bf16_dense_gemm_fallback_pending() is False
-        assert coord._gemm_tuning_required_before_kernel_opt() is False
+    Hyperloom used to launch a *second* gemm subprocess
+    (``kernel_entry_gemm_tuning_bf16_fallback``) when an fp8 dense tuning came
+    back empty. That whole machinery is gone: forge now selects
+    ``sglang_dense_bf16`` as a conditional ``fallback`` tuner inside the single
+    KERNEL-entry call and runs it in-process only when the fp8 tuner produced no
+    candidate. From Hyperloom's side KERNEL entry makes exactly one gemm call,
+    regardless of whether that call ended up trying bf16 internally.
+    """
 
     @pytest.mark.asyncio
-    async def test_kernel_entry_runs_bf16_dense_fallback_after_fp8_no_improvement(self, tmp_path, monkeypatch):
+    async def test_kernel_entry_makes_exactly_one_gemm_call(self, tmp_path, monkeypatch):
         coord = _coord(tmp_path, framework="sglang")
-        coord.bus = type(
-            "Bus",
-            (),
-            {"append_and_seq": staticmethod(lambda *_args, **_kwargs: None)},
-        )()
 
         async def _append_and_seq(*_args, **_kwargs):
             return None
 
+        coord.bus = type("Bus", (), {})()
         coord.bus.append_and_seq = _append_and_seq
         coord.phase_machine._kernel_enabled = lambda: True
         coord.phase_kernel._geak_enabled = lambda: False
@@ -2298,8 +2203,14 @@ class TestBf16DenseFallback:
         coord.phase_kernel._maybe_reprofile_for_kernel = _noop
 
         calls: list[dict] = []
-        responses = [
-            {
+
+        async def _fake_run_gemm(payload, *, session_dir):
+            assert session_dir == tmp_path
+            calls.append(payload)
+            # An fp8 dense tuning that came back empty. Under the old design this
+            # return value would have triggered a second bf16 subprocess; now the
+            # bf16 retry, if any, already happened inside this one call.
+            return {
                 "status": "ok",
                 "decision": "REVERT",
                 "backend": "forge",
@@ -2308,112 +2219,33 @@ class TestBf16DenseFallback:
                 "framework": "sglang",
                 "micro_decision": "no_improvement",
                 "tuners_run": [
-                    {
-                        "status": "no_improvement",
-                        "tuner": "a8w8",
-                        "improved_shapes": 0,
-                    }
+                    {"status": "no_improvement", "tuner": "a8w8", "improved_shapes": 0},
                 ],
-            },
-            {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "engine": "forge",
-                "precision": "bf16",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-            },
-        ]
-
-        async def _fake_run_gemm(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return dict(responses[len(calls) - 1])
-
-        monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
-
-        await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-        assert [c["task_id"] for c in calls] == [
-            "kernel_entry_gemm_tuning",
-            "kernel_entry_gemm_tuning_bf16_fallback",
-        ]
-        assert calls[1]["precision"] == "bf16"
-        assert calls[1]["tuner"] == "sglang_dense_bf16"
-        assert coord.shared_state.last_gemm_tuning["precision"] == "bf16"
-
-    @pytest.mark.asyncio
-    async def test_kernel_entry_resumes_pending_bf16_fallback_without_rerunning_fp8(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            framework="sglang",
-            precision="fp8",
-            last_gemm_tuning={
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "precision": "fp8",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
-                "tuners_run": [{"status": "no_improvement", "tuner": "a8w8"}],
-            },
-        )
-        coord.bus = type("Bus", (), {})()
-
-        async def _append_and_seq(*_args, **_kwargs):
-            return None
-
-        async def _noop(*_args, **_kwargs):
-            return None
-
-        coord.bus.append_and_seq = _append_and_seq
-        coord.phase_machine._kernel_enabled = lambda: True
-        coord.phase_kernel._geak_enabled = lambda: False
-        coord.phase_machine._record_phase_entry_evidence = lambda **_kwargs: None
-        coord.phase_kernel._kernel_opt_work_remains = lambda: False
-        coord.phase_kernel._maybe_reprofile_for_kernel = _noop
-        monkeypatch.setattr(krh_mod, "_resolve_gemm_tuning_backend", lambda _p: "forge")
-
-        calls: list[dict] = []
-
-        async def _fake_run_gemm(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return {
-                "status": "ok",
-                "decision": "REVERT",
-                "backend": "forge",
-                "engine": "forge",
-                "precision": "bf16",
-                "framework": "sglang",
-                "micro_decision": "no_improvement",
             }
 
         monkeypatch.setattr(krh_mod, "run_gemm_tuning_handler", _fake_run_gemm)
 
         await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
-        assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning_bf16_fallback"]
-        assert calls[0]["precision"] == "bf16"
-        assert coord.shared_state.last_gemm_tuning["task_id"] == ("kernel_entry_gemm_tuning_bf16_fallback")
-        assert coord._bf16_dense_gemm_fallback_pending() is False
+        assert [c["task_id"] for c in calls] == ["kernel_entry_gemm_tuning"]
+        # No second, bf16-flavoured subprocess is launched.
+        assert not any(c["task_id"].endswith("_bf16_fallback") for c in calls)
+        assert "bf16_fallback" not in coord.shared_state.last_gemm_tuning.get("task_id", "")
 
-    @pytest.mark.asyncio
-    async def test_bf16_fallback_failure_is_recorded_as_attempt(self, tmp_path):
+    def test_deleted_fallback_machinery_is_gone(self, tmp_path):
+        """The dedicated bf16-fallback methods no longer exist on the coordinator.
+
+        Guards against reintroducing the second-subprocess path by accident.
+        """
         coord = _coord(tmp_path, framework="sglang")
-
-        async def _raise(*_args, **_kwargs):
-            raise RuntimeError("fallback boom")
-
-        result = await coord._run_bf16_dense_gemm_fallback(_raise)
-
-        assert result["status"] == "failed"
-        assert result["decision"] == "REVERT"
-        assert result["task_id"] == "kernel_entry_gemm_tuning_bf16_fallback"
-        assert result["source"] == "fp8_no_improvement_bf16_fallback"
-        assert result["precision"] == "bf16"
-        assert coord._is_bf16_dense_gemm_fallback_attempt(result) is True
+        for name in (
+            "_run_bf16_dense_gemm_fallback",
+            "_should_run_bf16_dense_gemm_fallback",
+            "_bf16_dense_gemm_fallback_pending",
+            "_bf16_dense_gemm_fallback_attempted",
+            "_is_bf16_dense_gemm_fallback_attempt",
+        ):
+            assert not hasattr(coord, name), f"{name} should have been removed by Change 3"
 
 
 def _eligible_coord(tmp_path, monkeypatch, **overrides):

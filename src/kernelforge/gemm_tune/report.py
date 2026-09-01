@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .candidates import failed_tuner_records, is_candidate, per_tuner_candidates
 from .model_analyzer import ModelProfile
 from .tuners.base import TuneResult
 
@@ -43,6 +44,12 @@ class TuneReport:
     failed_tuners: list[dict[str, Any]] = field(default_factory=list)
     recommended_env: dict[str, str] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
+    # Per-tuner deployable results, each landable on its own. The MoE and dense
+    # tuners write disjoint tables read through disjoint env vars, so a caller can
+    # KEEP one and REVERT the other instead of the all-or-nothing that
+    # ``recommended_env`` forces. Additive: the collapsed fields above stay for
+    # the legacy consumer.
+    candidates: list[dict[str, Any]] = field(default_factory=list)
 
     # Timing
     total_elapsed_s: float = 0.0
@@ -69,6 +76,7 @@ class TuneReport:
             "tuners_run": self.tuners_run,
             "recommended_env": self.recommended_env,
             "artifacts": self.artifacts,
+            "candidates": self.candidates,
             "total_elapsed_s": round(self.total_elapsed_s, 2),
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -134,7 +142,7 @@ def build_report(
         # partial_output counts alongside ok: the rows the tuner did write are a
         # valid deployable artifact, the shortfall is reported separately via
         # expected_shapes/missing_shapes rather than by discarding the result.
-        if (r.status in ("ok", "partial_output") and r.has_improvement) or (r.candidate and r.status != "failed"):
+        if is_candidate(r):
             has_candidate = True
             if r.env_var and r.env_value:
                 recommended_env[r.env_var] = r.env_value
@@ -145,14 +153,10 @@ def build_report(
 
     # Overall decision
     failed_results = [r for r in results if r.status == "failed"]
-    failed_tuners = [
-        {
-            "tuner": r.tuner_name,
-            "error_class": r.error_class,
-            "error": r.error,
-        }
-        for r in failed_results
-    ]
+    failed_tuners = failed_tuner_records(results)
+    # Per-tuner projection: each deployable tuner as its own landable candidate,
+    # so a caller can KEEP one and REVERT another instead of all-or-nothing.
+    candidates = [c.to_dict() for c in per_tuner_candidates(results)]
     all_failed = bool(results) and len(failed_results) == len(results)
     all_skipped = len(results) == 0
 
@@ -213,6 +217,7 @@ def build_report(
         failed_tuners=failed_tuners,
         recommended_env=recommended_env,
         artifacts=artifacts,
+        candidates=candidates,
         total_elapsed_s=total_elapsed_s,
         started_at=started_at,
         finished_at=finished_at,

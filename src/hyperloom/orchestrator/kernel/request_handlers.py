@@ -4088,6 +4088,29 @@ async def _run_forge_gemm_tuning(
         if reason:
             result["skip_reason"] = reason
 
+    # Surface crashed tuners. forge lists every failure in ``failed_tuners``
+    # regardless of the overall decision, but this array was previously dropped
+    # here -- so a dense tuner winning made a MoE tuner's crash invisible, and a
+    # KEEP read as "no headroom elsewhere" when siblings had in fact hard-failed.
+    # Backfill from disk when the sentinel omitted it (mirrors tuners_skipped),
+    # keep it on the envelope for the trace row / breakdown, and log it so the
+    # failure is never silent even when the session is kept.
+    if not result.get("failed_tuners"):
+        disk_failed = _read_forge_result_json(workspace).get("failed_tuners")
+        if disk_failed:
+            result["failed_tuners"] = disk_failed
+    _failed_tuners = result.get("failed_tuners")
+    if isinstance(_failed_tuners, list) and _failed_tuners:
+        for _f in _failed_tuners:
+            if not isinstance(_f, dict):
+                continue
+            log.warning(
+                "forge gemm tuner %s failed (%s): %s",
+                _f.get("tuner") or "?",
+                _f.get("error_class") or "?",
+                _f.get("error") or "",
+            )
+
     # The breakdown and the stack read the envelope, not the jsonl audit row, so
     # a tuner's own error class has to surface here too. Lifted before the bridge
     # so a specific class outranks the generic wording. ``tuners_run`` is forge's
@@ -5321,6 +5344,9 @@ def _trace_gemm_tuning_run(result: Any, *, session_dir: Path) -> None:
         "workspace": result.get("workspace"),
         "requires_e2e_validation": result.get("requires_e2e_validation"),
         "tuners_run": tuners,
+        # A crash stays in the audit even when a sibling tuner won and the run was
+        # kept -- otherwise a KEEP row hid the failures behind it.
+        "failed_tuners": result.get("failed_tuners") or None,
         "error_class": error_class,
     }
     row = {k: v for k, v in row.items() if v is not None}
