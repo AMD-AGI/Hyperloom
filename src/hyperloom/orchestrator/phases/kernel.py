@@ -3653,7 +3653,7 @@ class KernelPhase(PhaseHandler):
             # ``failed`` with an ``error_class``, so the run is reported as
             # infrastructure that gave up, not as "this model has no fusion
             # opportunity".
-            spent = _as_int(last.get("infrastructure_aborts"))
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
             if spent >= MAX_FUSION_INFRA_RETRIES:
                 log.info(
                     "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
@@ -4298,11 +4298,15 @@ class KernelPhase(PhaseHandler):
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
         if isinstance(result, dict) and result.get("infrastructure_abort"):
-            # Carried across runs so the gate above can bound the retries. Read
-            # before the assignment below overwrites the record it counts.
-            prior = getattr(self.shared_state, "last_fusion", None)
-            spent = _as_int(prior.get("infrastructure_aborts")) if isinstance(prior, dict) else 0
-            result["infrastructure_aborts"] = spent + 1
+            # Counted on the session, not on the record: ``last_fusion`` is
+            # replaced by every run, so a timeout or a handler crash landing
+            # between two aborts would carry no count forward and hand the cap
+            # back a clean slate on every other entry.
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            try:
+                self.shared_state.fusion_infra_aborts = spent + 1
+            except Exception:  # noqa: BLE001 - state shape tolerant, as below
+                pass
         try:
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)
