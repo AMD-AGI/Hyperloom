@@ -8,6 +8,10 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 - Ensure merge requirements and applicable GitHub checks pass before requesting review (see [CI and documentation-only changes](#ci-and-documentation-only-changes)).
 - Avoid committing generated artifacts; keep diffs minimal.
 
+## Proposing a new framework or platform
+
+Hyperloom is glue over external components (GEAK, Magpie, TraceLens, the frameworks in `orchestrator/framework/paths.py`). A team building a **new framework** (e.g. AgentX) or **platform** (e.g. world models) must work bring-up through the owning-component leads **before** integration code lands, not after — the owners named in [`.github/CODEOWNERS`](.github/CODEOWNERS) know the contracts a new caller will lean on. Open a tracking issue that names the target component(s) and links the owners, and drive the interface review there so the eventual PR is a formality rather than a first look. See [`AGENTS.md`](AGENTS.md) for the authoring rules that apply once code exists.
+
 ## CI and documentation-only changes
 
 This repository treats **documentation-only** pushes and pull requests the same way across automation: when **every** changed file in that event matches **only** the [canonical paths-ignore list](#canonical-paths-ignore-list) below, matching GitHub Actions workflows **do not** start (no workflow run is created for that event).
