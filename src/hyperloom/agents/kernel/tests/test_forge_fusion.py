@@ -675,6 +675,170 @@ def test_an_llm_outage_verdict_is_matched_tolerantly(tmp_path):
     assert result["status"] == "failed"
 
 
+def _aborted_manifest(reason, **loop_extra):
+    """A manifest for a run that located a recipe, then died before attempting it.
+
+    This is exactly the shape observed on the fleet: discovery succeeded, so
+    ``verdict`` is ``candidate`` and ``fusion.env_flag`` names a real flag, while
+    ``fusion_loop`` reports zero attempts and no promoted flag.
+    """
+    loop = {"termination_reason": reason, "attempts": 0, "best": None, "best_env_flag": None}
+    loop.update(loop_extra)
+    return {
+        "schema_version": 2,
+        "verdict": "candidate",
+        "diagnosis": {"is_candidate": True},
+        "fusion": {
+            "env_flag": "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE",
+            "source_file": "/sgl-workspace/sglang/python/sglang/srt/models/deepseek_v4.py",
+        },
+        "fusion_loop": loop,
+        "validation": None,
+        "artifacts": None,
+    }
+
+
+def test_normalize_manifest_reports_a_harness_author_abort_as_infrastructure(tmp_path):
+    """``harness_author_failed`` means the loop never ran, so it is not a verdict.
+
+    The generic no-KEEP shape would call it ``complete``/``no_improvement``, which
+    records an abort as an optimization result AND satisfies the KERNEL-entry
+    idempotency gate -- one failed authoring turn would then skip fusion for the
+    whole remaining session, even though the recipe had already been located.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_aborted_manifest("harness_author_failed")), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "failed"
+    assert result["micro_decision"] == "failed"
+    assert result["decision"] == "REVERT"
+    assert result["kept"] is False
+    assert result["requires_e2e_validation"] is False
+    assert result["error_class"] == "harness_author_failed"
+    assert "harness_author_failed" in result["error"]
+    # The located recipe is carried for the retry, but not as a confirmed flag:
+    # nothing measured it, and ``env_flags`` means "flags this run confirmed".
+    assert result["located_env_flag"] == "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE"
+    assert "DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE" in result["error"]
+    assert result["env_flags"] == {}
+    assert result["baseline_env_flags"] == {}
+
+
+def test_an_abort_leaves_fusion_retryable_at_the_next_kernel_entry(tmp_path):
+    """The load-bearing consequence: ``status`` decides whether fusion runs again.
+
+    ``_fusion_required_before_kernel_opt`` skips fusion once ``last_fusion.status``
+    is one of ok/complete/kept, so an abort must NOT report one of those.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_aborted_manifest("harness_author_failed")), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] not in ("ok", "complete", "kept")
+
+
+def test_a_missing_git_workspace_abort_takes_the_same_path(tmp_path):
+    """The handling keys on the termination reason, not on one known failure.
+
+    ``no_git_workspace`` aborts the loop just as early and reaches the same
+    normalization, so fixing only the reason that happened to be observed would
+    leave an identical defect one code path away.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    # attempts absent rather than 0: that abort path builds its LoopResult
+    # without ever setting the counter.
+    manifest = _aborted_manifest("no_git_workspace")
+    del manifest["fusion_loop"]["attempts"]
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "failed"
+    assert result["error_class"] == "no_git_workspace"
+    assert result["status"] not in ("ok", "complete", "kept")
+
+
+def test_an_abort_never_discards_a_validated_fusion(tmp_path):
+    """A KEEP outranks the abort reason, however the manifest ends up shaped.
+
+    A loop that kept a fusion by definition attempted one, so the two should never
+    co-occur -- but that invariant lives in another repository, and being wrong
+    would throw away a measured patch, so the guard is local.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _aborted_manifest(
+        "harness_author_failed",
+        kept=True,
+        attempts=3,
+        best={"kernel_speedup": 1.4},
+        best_env_flag="DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE",
+    )
+    manifest["artifacts"] = {
+        "patch": _patch_file(output_dir),
+        "changes": [{"path": "foo.py"}],
+        "repo_root": "/venv/site-packages",
+    }
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["kept"] is True
+    assert result["decision"] == "KEEP"
+    assert result["status"] == "ok"
+    assert result["requires_e2e_validation"] is True
+    assert result["env_flags"] == {"DEEPSEEK_V4_FUSED_ATTN_REDUCE_INV_ROPE": "1"}
+    assert "error_class" not in result
+
+
+def test_a_loop_that_ran_still_reports_no_improvement(tmp_path):
+    """Regression guard: only a loop that never attempted is an abort.
+
+    A loop that ran and found nothing worth keeping is a real result and must keep
+    reporting ``complete``/``no_improvement`` with its promoted flags, or the fix
+    would turn every honest no-improvement into a retry.
+    """
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    manifest = _aborted_manifest(
+        "exhausted", attempts=1, best_env_flag="QWEN3_FUSED_QK_NORM_ROPE_KVCACHE"
+    )
+    (output_dir / "fusion_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["status"] == "complete"
+    assert result["micro_decision"] == "no_improvement"
+    assert result["env_flags"] == {"QWEN3_FUSED_QK_NORM_ROPE_KVCACHE": "1"}
+    assert "error_class" not in result
+    assert "located_env_flag" not in result
+
+
+def test_an_abort_reason_is_matched_tolerantly(tmp_path):
+    """Matching must not fail open: a stray space would fall back to the
+    no_improvement mapping, i.e. straight back into the bug this prevents."""
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    (output_dir / "fusion_manifest.json").write_text(
+        json.dumps(_aborted_manifest("  harness_author_failed  ")), encoding="utf-8"
+    )
+
+    result = forge_fusion._normalize_manifest(str(output_dir), rc=0)
+
+    assert result["error_class"] == "harness_author_failed"
+    assert result["status"] == "failed"
+
+
 def test_main_relays_the_outage_sentinel_despite_a_non_zero_exit(tmp_path, monkeypatch, capsys):
     """forge-fusion exits 3 for an unreachable LLM, which is the first non-zero exit
     that still carries a valid manifest.

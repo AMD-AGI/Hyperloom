@@ -46,6 +46,14 @@ RESULT_END = "FORGE_FUSION_RESULT_END"
 # so it must not be normalized into an optimization outcome -- see
 # _normalize_manifest.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
+
+# ``fusion_loop.termination_reason`` values for a run that died before the loop
+# ran a single attempt. Like an LLM outage, this is infrastructure failing rather
+# than a statement about the kernel -- see _normalize_manifest. Keyed on the
+# termination reason, which is KernelForge's contract for why the loop stopped,
+# so a new abort path inherits the handling instead of silently regressing into
+# the no-KEEP shape.
+INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
 DEFAULT_TIMEOUT_SEC = 7200
 _AGENT_BACKENDS = frozenset({"claude", "codex"})
 
@@ -298,6 +306,42 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
                 "verdict": LLM_UNAVAILABLE_VERDICT,
                 "error_class": LLM_UNAVAILABLE_VERDICT,
                 "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+            }
+        )
+        return result
+
+    aborted = str(loop.get("termination_reason") or "").strip()
+    if aborted in INFRA_ABORT_REASONS and not kept and not (loop.get("attempts") or 0):
+        # Discovery finished and named a recipe; only the harness-authoring turn
+        # died, so the loop never got to judge anything. The default no-KEEP shape
+        # below would report that as ``complete``/``no_improvement`` -- an outage
+        # recorded as an optimization result, AND ``complete`` satisfies the
+        # KERNEL-entry idempotency gate (``_fusion_required_before_kernel_opt``),
+        # so one abort would skip fusion for the whole remaining session even
+        # though every later entry could have retried it. Same reasoning, and the
+        # same retryable shape, as the LLM outage above.
+        #
+        # Guarded on ``not kept`` and on the loop never having attempted, so this
+        # can never discard a measured fusion: with zero attempts there is no
+        # measurement to discard.
+        #
+        # ``located_env_flag`` is diagnostic only. The recipe was never validated,
+        # so it must not enter ``env_flags``, whose contract is "flags this run
+        # confirmed"; naming it here is what makes the retry cheap and the failure
+        # legible without dressing a guess up as a measurement.
+        #
+        # ``result`` still carries its failed/REVERT/not-kept defaults from above,
+        # so only the abort's identity has to be added.
+        located = str((m.get("fusion") or {}).get("env_flag") or "")
+        result.update(
+            {
+                "verdict": m.get("verdict"),
+                "error_class": aborted,
+                "located_env_flag": located,
+                "error": (
+                    f"forge-fusion aborted before any attempt ({aborted}); "
+                    f"recipe already located: {located or 'unknown'}"
+                )[:1500],
             }
         )
         return result
