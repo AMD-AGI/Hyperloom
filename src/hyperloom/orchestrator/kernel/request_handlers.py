@@ -1644,12 +1644,25 @@ async def _run_subprocess(
             subprocess.TimeoutExpired: When the command exceeds ``timeout_sec``.
         """
         env = os.environ.copy()
+        from hyperloom.common.llm_attribution import inject_env
+
         from ..actions.executors._multi_node_env import (
             is_multi_node,
             ray_gcs_address_from_state,
             infera_ssh_env_from_state,
         )
         from ..actions.executors._subprocess_kill import run_with_session_kill
+
+        # Every kernel tool spends through this one spawn, and the phase it
+        # spends in lives only in this process: a new interpreter starts with
+        # none and cannot restate it. Without the tag the tools that do name
+        # themselves -- tracelens, the candidate reviewer -- still arrive at the
+        # gateway with no phase, so their spend cannot be placed in the run.
+        #
+        # The component stands for whichever calls the child does not name
+        # itself, and these tools are the kernel agent's; the ones that do name
+        # themselves refine it. What only this side can supply is the phase.
+        inject_env(env, component="kernel_agent", operation=_tool_label(cmd))
 
         if is_multi_node():
             # Infera backend: route GEAK GPU work to a pod over SSH (no Ray).
