@@ -71,7 +71,8 @@ jobs:
         github.event.label.name == 'retest' ||
         github.event.label.name == 'skip-e2e-test') &&
        (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
-    runs-on: Hyperloom-e2e-ci
+    # GitHub API + jq only. Keep Hyperloom-e2e-ci for the smoke job.
+    runs-on: ubuntu-latest
     outputs:
       run: ${{ steps.decide.outputs.run }}
       pr_number: ${{ steps.decide.outputs.pr_number }}
