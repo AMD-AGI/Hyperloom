@@ -18,7 +18,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALO
 from hyperloom.orchestrator.framework.build_actions import TargetedBuildAction, BuildResult, FrameworkRuntime
 from hyperloom.orchestrator.loop.build_lifecycle import BuildLifecycleCollaborator
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.phases.framework import (
+from hyperloom.orchestrator.enablement.build import (
     _derive_gpu_arch,
     _repo_matches_targeted_build_component,
 )
@@ -61,6 +61,12 @@ def coord(build_coord):
     build_coord.enqueue_targeted_build = _enqueue_targeted_build
     build_coord._framework_gpu_params = lambda: {}
     build_coord._framework_authoring_lanes_ttl = lambda params, *, base_ttl_sec: (["research_lane"], base_ttl_sec)
+    # The launch probe is an ``integrate_patch`` task, so it resolves its lanes
+    # from that kind rather than from the specialist research lane.
+    build_coord._registry_lanes_ttl = lambda kind: (
+        ["server_lifecycle", "workspace_mutation", "benchmark_lane"],
+        3600,
+    )
     build_coord._coerce_needs_gpu = bool
     build_coord._bl = BuildLifecycleCollaborator(build_coord)
     return build_coord

@@ -35,10 +35,10 @@ WEB_SEARCH = "### Web search"
 KERNEL_REQUEST_KINDS = "### Kernel request kinds"
 ROOFLINE_BLOCK = "### Roofline / profile analysis"
 
-# One goal block per phase; FRAMEWORK_AGENT is Coordinator-driven and has none.
+# One goal block per phase.
 PHASE_GOAL_BLOCKS = {
     _ps.PHASE_PRELUDE: "### PRELUDE — phase goal",
-    _ps.PHASE_EXPLORE: "### EXPLORE — phase goal",
+    _ps.PHASE_FRAMEWORK_AGENT: "### OPTIMIZE — phase goal",
     _ps.PHASE_KERNEL_AGENT: "### KERNEL — phase goal",
     _ps.PHASE_SWEEP: "### SWEEP — phase goal",
     _ps.PHASE_CLOSE: "### CLOSE — phase goal",
@@ -48,7 +48,6 @@ PHASE_GOAL_BLOCKS = {
 ROOFLINE_PHASES = {
     _ps.PHASE_PRELUDE,
     _ps.PHASE_FRAMEWORK_AGENT,
-    _ps.PHASE_EXPLORE,
     _ps.PHASE_KERNEL_AGENT,
 }
 
@@ -86,7 +85,6 @@ def _build(registry: dict, phase: str) -> str:
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         kernel_enabled=True,
-        explore_enabled=True,
         framework_agent_phase_enabled=True,
         objective_kind="gain_pct",
         objective_value=15.0,
@@ -113,7 +111,7 @@ def test_idea_generation_only_in_explore_phase(registry):
     """The explore grid idea pipeline is unreachable outside EXPLORE."""
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
-        if phase == _ps.PHASE_EXPLORE:
+        if phase == _ps.PHASE_FRAMEWORK_AGENT:
             assert IDEA_GENERATION in text
         else:
             assert IDEA_GENERATION not in text, f"idea generation leaked into {phase}"
@@ -143,7 +141,7 @@ def test_specialist_dispatch_prose_only_in_explore(registry):
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         for marker in SPECIALIST_DISPATCH_OPS:
-            if phase == _ps.PHASE_EXPLORE:
+            if phase == _ps.PHASE_FRAMEWORK_AGENT:
                 assert marker in text, f"{marker} missing from {phase}"
             else:
                 assert marker not in text, f"{marker} leaked into {phase}"
@@ -151,7 +149,7 @@ def test_specialist_dispatch_prose_only_in_explore(registry):
 
 def test_specialist_watching_prose_spans_both_dispatching_phases(registry):
     """A live specialist can exist in EXPLORE and FRAMEWORK_AGENT; the LLM steers both."""
-    with_specialists = {_ps.PHASE_EXPLORE, _ps.PHASE_FRAMEWORK_AGENT}
+    with_specialists = {_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT}
     for phase in _ps.PHASE_NAMES:
         text = _build(registry, phase)
         if phase in with_specialists:
@@ -510,7 +508,7 @@ def _reloop_line(phase: str) -> str | None:
 
 
 def test_reloop_line_reaches_every_mid_chain_phase():
-    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_EXPLORE, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
+    for phase in (_ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_FRAMEWORK_AGENT, _ps.PHASE_KERNEL_AGENT, _ps.PHASE_SWEEP):
         line = _reloop_line(phase)
         assert line is not None, f"reloop line missing for {phase}"
         # The field name is the prompt/doc contract; models grep for it verbatim.
@@ -525,7 +523,7 @@ def test_reloop_line_absent_in_wind_down_phases():
 
 
 def test_reloop_is_a_projection_before_sweep():
-    assert "(projected)" in (_reloop_line(_ps.PHASE_EXPLORE) or "")
+    assert "(projected)" in (_reloop_line(_ps.PHASE_FRAMEWORK_AGENT) or "")
     assert "(projected)" not in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
@@ -536,9 +534,8 @@ def test_reloop_feasibility_matches_the_transition_decision():
     assert f"cycle_reloop_feasible={expected}" in (_reloop_line(_ps.PHASE_SWEEP) or "")
 
 
-def test_reloop_infeasible_when_both_target_phases_are_disabled():
+def test_reloop_infeasible_when_the_target_phase_is_disabled():
     s = _render_state(_ps.PHASE_SWEEP)
-    s.explore_enabled = False
     s.framework_agent_phase_enabled = False
     line = next(line for line in s.to_phase_status_summary().splitlines() if line.startswith("reloop"))
     assert "cycle_reloop_feasible=false" in line
@@ -616,7 +613,6 @@ def test_an_unknown_transport_is_refused_not_rendered_empty(registry):
             enabled_actions=default_enabled_actions(no_kernel=False),
             framework="sglang",
             kernel_enabled=True,
-            explore_enabled=True,
             framework_agent_phase_enabled=True,
             objective_kind="gain_pct",
             objective_value=15.0,
@@ -636,7 +632,6 @@ def test_every_declared_transport_still_renders(registry, transport):
         enabled_actions=default_enabled_actions(no_kernel=False),
         framework="sglang",
         kernel_enabled=True,
-        explore_enabled=True,
         framework_agent_phase_enabled=True,
         objective_kind="gain_pct",
         objective_value=15.0,

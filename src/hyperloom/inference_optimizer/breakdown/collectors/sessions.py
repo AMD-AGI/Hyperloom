@@ -1570,7 +1570,6 @@ def collect_enablement(
     stays hidden, while "opted out" explains why nothing tried to repair a run
     that failed to establish a baseline.
     """
-    stack_actions_raw = _eg(state, "stack_actions")
     active_runtime_raw = _eg(state, "active_runtime")
     attempt_runtimes_raw = _eg(state, "attempt_runtimes")
     failure_kind = str(_eg(state, "failure_kind", "") or "")
@@ -1590,13 +1589,12 @@ def collect_enablement(
     dispatched = bool(_eg(state, "inflight_task_id"))
     have_active = isinstance(active_runtime_raw, dict) and bool(active_runtime_raw)
     have_attempts = isinstance(attempt_runtimes_raw, list) and bool(attempt_runtimes_raw)
-    have_actions = isinstance(stack_actions_raw, list) and bool(stack_actions_raw)
     have_build_manifest = isinstance(build_manifest_raw, list) and bool(build_manifest_raw)
     have_last_failure = isinstance(last_build_failure_raw, dict) and bool(last_build_failure_raw)
     have_kept_patches = isinstance(kept_patches_raw, list) and bool(kept_patches_raw)
     # Detect eval-origin by active origin OR persisted kind from a completed run.
     have_eval = origin == "eval" or bool(eval_kind)
-    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_actions or have_eval)
+    engaged = bool(attempts > 0 or dispatched or have_kept_patches or have_eval)
     if not (engaged or mode == "off" or have_active or have_attempts or have_build_manifest or have_last_failure):
         return {}
 
@@ -1688,10 +1686,6 @@ def collect_enablement(
         evidence = str(_eg(state, "baseline_eval_evidence", "") or "")
         if evidence:
             out["trigger_evidence_excerpt"] = evidence[-_ENABLEMENT_LOG_EXCERPT_CHARS:]
-    if have_actions:
-        summaries = [_stack_action_summary(a) for a in stack_actions_raw if isinstance(a, dict)]
-        if summaries:
-            out["stack_actions"] = summaries
     active_root = str(active_runtime_raw.get("venv_root") or "") if have_active else ""
     if have_active:
         out["active_runtime"] = _runtime_summary(active_runtime_raw, promoted=True)

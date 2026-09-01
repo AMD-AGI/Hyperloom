@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Run forge-gemm-tune as a Hyperloom kernel-agent tool.
+"""Run the forge GEMM tuner as a Hyperloom kernel-agent tool.
 
 The orchestrator writes an input JSON file and calls this script; the
-deterministic tuning implementation lives in the standalone ``forge_gemm_tune``
-package.
+deterministic tuning implementation lives in ``kernelforge.gemm_tune``, reached
+through the one forge CLI as ``python -m kernelforge.cli gemm-tune run``.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 
 
 def _build_cmd(args: dict[str, Any]) -> list[str]:
-    cmd = [sys.executable, "-m", "forge_gemm_tune.cli", "run"]
+    cmd = [sys.executable, "-m", "kernelforge.cli", "gemm-tune", "run"]
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
     _add_opt(cmd, args, "precision", "--precision", required=True)
@@ -92,7 +92,7 @@ def _add_kb_opts(cmd: list[str], args: dict[str, Any]) -> None:
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Hyperloom wrapper for forge-gemm-tune")
+    p = argparse.ArgumentParser(description="Hyperloom wrapper for kernelforge gemm-tune")
     p.add_argument("--input-json", required=True)
     return p.parse_args(argv)
 

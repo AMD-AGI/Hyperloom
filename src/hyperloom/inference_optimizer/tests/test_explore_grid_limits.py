@@ -22,7 +22,7 @@ from hyperloom.orchestrator.state.shared_state import SharedState
 
 def _gate(research_lane_capacity: int = 1) -> PolicyGate:
     s = SharedState()
-    s.phase = "EXPLORE"
+    s.phase = "FRAMEWORK_AGENT"
     s.research_lane_capacity = research_lane_capacity
     return PolicyGate(role_registry=default_role_registry(), shared_state=s)
 
@@ -148,7 +148,7 @@ def test_gpu_specialist_allowed_within_capacity(monkeypatch):
     for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES", "TP"):
         monkeypatch.delenv(name, raising=False)
     s = SharedState()
-    s.phase = "EXPLORE"
+    s.phase = "FRAMEWORK_AGENT"
     s.gpu_specialist_capacity = 2
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
     gate.validate_intent(
@@ -159,7 +159,7 @@ def test_gpu_specialist_allowed_within_capacity(monkeypatch):
 
 def test_gpu_specialist_denies_above_capacity():
     s = SharedState()
-    s.phase = "EXPLORE"
+    s.phase = "FRAMEWORK_AGENT"
     s.gpu_specialist_capacity = 1
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=s)
     with pytest.raises(PolicyDenied) as exc:

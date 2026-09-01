@@ -180,13 +180,16 @@ class TestDeadlineUnix:
     def test_a_stamp_survives_a_max_minutes_truncated_to_zero(self):
         from datetime import datetime, timezone
 
-        from hyperloom.common.coerce import to_unix
-
         state = SharedState(session_id="s")
-        stamped = state.stamp_deadline_unix(budget_minutes=0.0001)
-        start = to_unix(state.start_ts)
-        assert stamped == pytest.approx(start + 0.006, abs=0.001)
-        assert state.remaining_minutes() == pytest.approx(0.0001, abs=0.00005)
+        now_unix = 1_000.0
+        state.start_ts = datetime.fromtimestamp(now_unix, tz=timezone.utc).isoformat()
+        stamped = state.stamp_deadline_unix(
+            budget_minutes=0.0001,
+            now_unix=now_unix,
+        )
+        now = datetime.fromtimestamp(now_unix, tz=timezone.utc)
+        assert stamped == pytest.approx(now_unix + 0.006)
+        assert state.remaining_minutes(now=now) == pytest.approx(0.0001)
         state.max_minutes = 0
         now = datetime.fromtimestamp(stamped - 6.0, tz=timezone.utc)
         assert state.remaining_minutes(now=now) == pytest.approx(0.1)

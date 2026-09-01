@@ -10,6 +10,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+from hyperloom.orchestrator.kernel import request_handlers as krh
+
 
 _MODULE_PATH = Path(__file__).resolve().parent.parent / "tools" / "forge_gemm_tuning.py"
 _SPEC = importlib.util.spec_from_file_location("forge_gemm_tuning_tool", _MODULE_PATH)
@@ -51,7 +53,7 @@ def _payload() -> dict:
 def test_build_cmd_maps_all_options():
     cmd = forge_gemm_tuning._build_cmd(_payload())
 
-    assert cmd[:4] == [forge_gemm_tuning.sys.executable, "-m", "forge_gemm_tune.cli", "run"]
+    assert cmd[:5] == [forge_gemm_tuning.sys.executable, "-m", "kernelforge.cli", "gemm-tune", "run"]
     assert cmd[cmd.index("--model-path") + 1] == "/models/qwen"
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--precision") + 1] == "bf16"
@@ -68,6 +70,15 @@ def test_build_cmd_maps_all_options():
     assert "--skip-gpu-check" in cmd
     assert "--verbose" in cmd
     assert "--thorough" in cmd
+
+
+def test_preflight_and_inner_cli_use_the_same_interpreter():
+    """The readiness probe must describe the command the wrapper will run."""
+    probe = krh._forge_gemm_tune_probe_cmd()
+    inner = forge_gemm_tuning._build_cmd(_payload())
+
+    assert probe[:4] == inner[:4]
+    assert probe[0] == forge_gemm_tuning.sys.executable
 
 
 def test_build_cmd_forwards_the_moe_untuned_csv():

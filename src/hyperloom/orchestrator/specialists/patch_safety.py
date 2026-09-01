@@ -74,11 +74,9 @@ _UNIFIED_DIFF_HUNK_RE: re.Pattern[str] = re.compile(
     re.M,
 )
 
-# Patch path within a unified diff (``--- a/<p>`` / ``+++ b/<p>``).
-_PATCH_PATH_RE: re.Pattern[str] = re.compile(
-    r"^(?:---|\+\+\+) (?:a|b)/(?P<path>.+)$",
-    re.M,
-)
+#: The one absolute header a legitimate diff carries: the missing side of an
+#: add or delete. Never treated as an escape.
+_DEV_NULL_PATHS: frozenset[str] = frozenset({"/dev/null", "dev/null"})
 
 
 # Candidate ``-p`` strip levels for resolving a diff header path to a real file.
@@ -144,12 +142,20 @@ _GROUNDING_UNDECIDABLE_REASONS: frozenset[str] = frozenset(
 )
 
 
-def _safe_patch_path(raw: str) -> str:
+def _normalize_patch_path(raw: str) -> str:
+    """Strip the header decoration ``git apply -p1`` drops, without judging it."""
     value = str(raw or "").strip().split("\t", 1)[0]
     if value in {"", _DEV_NULL}:
         return value
     if value.startswith(("a/", "b/")):
         value = value[2:]
+    return value
+
+
+def _safe_patch_path(raw: str) -> str:
+    value = _normalize_patch_path(raw)
+    if value in {"", _DEV_NULL}:
+        return value
     parsed = PurePosixPath(value)
     if parsed.is_absolute() or ".." in parsed.parts or not parsed.parts:
         raise ValueError(f"unsafe patch target path: {raw!r}")
@@ -461,8 +467,8 @@ CROSS_DOMAIN_RULES: tuple[CrossDomainRule, ...] = (
             "surface this combination within its own-domain prompt. A "
             "simple specialist-A + specialist-B concatenation is a grid "
             "combo (explore grid), not a cross-domain change; advise when "
-            "the motivation degenerates so the stack rebench + KEEP "
-            "threshold can adjudicate."
+            "the motivation degenerates so the KEEP threshold can "
+            "adjudicate."
         ),
         failure_verdict=ADVISE_VERDICT,
         failure_reason_code="cross_domain_motivation_invalid",
@@ -549,10 +555,7 @@ def advisory_only_reason_codes() -> frozenset[str]:
 # about a specialist-authored payload -- ``proposal_set[*]`` for the
 # quantitative-claim rule, ``scope=domains`` for the cross-domain ones -- which
 # reaches review as a ``specialist`` proposal or as the ``explore`` grid that
-# ``proposal_set`` is materialised into. ``framework_agent`` is here because the
-# quantitative-claim rule names it by exception ("never fire the rule on them",
-# see prompts/critic.md): its payload always carries ``predicted_gain_pct``, so
-# a verdict citing the rule there is a misapplication of the rule itself.
+# ``proposal_set`` is materialised into.
 #
 # Spelled out rather than derived: no ACTION_CATALOGUE field separates these
 # from ``integrate_patch``, which shares their ``exploration`` verdict class,
@@ -561,7 +564,6 @@ def advisory_only_reason_codes() -> frozenset[str]:
 ADVISORY_RULE_PROPOSAL_KINDS: frozenset[str] = frozenset(
     {
         "explore",
-        "framework_agent",
         "specialist",
     }
 )
@@ -610,6 +612,10 @@ def is_unified_diff(text: str) -> bool:
 def patch_escapes_tree(patch_text: str) -> str | None:
     """Return the first offending path that escapes the tree, else ``None``.
 
+    Reads the same ``---``/``+++`` header pairs the apply path resolves its
+    targets from, so the gate and the applier cannot disagree on which paths a
+    patch touches.
+
     Args:
         patch_text: The unified-diff text to scan.
 
@@ -617,10 +623,13 @@ def patch_escapes_tree(patch_text: str) -> str | None:
         The first absolute or ``..``-containing path, or ``None`` when none
         escape the tree.
     """
-    for hit in _PATCH_PATH_RE.finditer(patch_text or ""):
-        cand = hit.group("path").strip()
-        if cand.startswith("/") or ".." in Path(cand).parts:
-            return cand
+    for old, new in patch_file_targets(patch_text):
+        for raw in (old, new):
+            cand = _normalize_patch_path(raw)
+            if not cand or cand in _DEV_NULL_PATHS:
+                continue
+            if cand.startswith("/") or ".." in PurePosixPath(cand).parts:
+                return cand
     return None
 
 

@@ -78,7 +78,7 @@ def test_forge_attempt_usage_lands_token_row(tmp_path: Path) -> None:
     session_dir.mkdir()
     log = tmp_path / "forge-xy_stdout.log"
     stdout = (
-        "forge done: baseline=92.3 best=85.1 improved=True fellow=ck gpu=gfx942\n"
+        "forge done: baseline=92.3 best=85.1 improved=True kernel_backend=ck gpu=gfx942\n"
         + "FORGE_LLM_USAGE "
         + json.dumps(
             {

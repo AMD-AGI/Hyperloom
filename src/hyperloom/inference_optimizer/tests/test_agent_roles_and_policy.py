@@ -339,7 +339,7 @@ def test_gate_orchestration_propose_recover_rejected_by_source(gate):
 
 def test_gate_robustness_delegate_recover_in_phase_ok():
     """The robustness ``gpu_memory_leaked`` ladder delegates ``recover`` with a live phase set."""
-    state = SharedState(phase="EXPLORE", framework="sglang")
+    state = SharedState(phase="FRAMEWORK_AGENT", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     gate.validate_intent(
         "robustness",
@@ -359,7 +359,7 @@ def test_gate_robustness_delegate_recover_in_phase_ok():
 
 def test_gate_orchestration_propose_recover_in_phase_rejected():
     """With a live phase set, Orchestration's propose(recover) is denied (the source gate fires first)."""
-    state = SharedState(phase="EXPLORE", framework="sglang")
+    state = SharedState(phase="FRAMEWORK_AGENT", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state)
     with pytest.raises(PolicyDenied) as exc:
         gate.validate_intent(
@@ -426,7 +426,7 @@ def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
     "phase,action",
     [
         ("PRELUDE", "baseline"),
-        ("EXPLORE", "explore"),
+        ("FRAMEWORK_AGENT", "explore"),
         ("SWEEP", "sweep"),
         ("CLOSE", "session_breakdown"),
     ],

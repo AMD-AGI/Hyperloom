@@ -60,9 +60,17 @@ jobs:
           python-version: "3.11"
 
       - name: Install Ruff
+        # Pinned exactly, not a floating range. Both `check` and `format --check`
+        # below are hard gates, and ruff changes rule behaviour and formatting
+        # between minor releases -- with a range, a ruff release reds main with
+        # no code change. Absorbed from KernelForge's pre-merge.yml, which pinned
+        # this for the same reason.
+        #
+        # The version is the one the tree was last formatted with; bumping it
+        # means running `ruff format .` in the same commit.
         run: |
           pip install --upgrade pip
-          pip install "ruff>=0.8,<1"
+          pip install "ruff==0.16.2"
 
       - name: Ruff check
         id: ruff_check
@@ -71,6 +79,25 @@ jobs:
       - name: Ruff format (check only)
         id: ruff_format
         run: ruff format --check .
+
+  compile:
+    name: byte-compile (syntax check)
+    runs-on: ubuntu-latest
+    # Seconds long, and it catches the failure mode ruff cannot: ruff parses
+    # with its own frontend, so a construct CPython rejects can lint clean.
+    # The vendored `kernelforge` tree arrived via a bulk rename, which is
+    # exactly how syntax casualties get introduced. Ported from KernelForge's
+    # pre-merge.yml, which compiled the two source packages it had back then;
+    # those are one package now, so this compiles it plus hyperloom itself.
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile package sources
+        run: python -m compileall -q src/kernelforge src/hyperloom
 
   bandit:
     name: bandit (medium+, production code)
@@ -98,7 +125,20 @@ jobs:
           # Bandit hook is passed explicit filenames and already covered
           # scripts/ -- and the step stays advisory (continue-on-error), so it
           # reports rather than gates.
-          bandit -r src/hyperloom scripts -x "*/tests/*" -q --severity-level medium
+          #
+          # src/kernelforge is scanned for the same reason as scripts/: it shells
+          # out to rocprofv3, ninja and git and launches agent CLIs. It reports
+          # ~27 medium-or-higher findings today, all pre-existing in the vendored
+          # tree and untriaged; the step is advisory, so they are visible without
+          # blocking. Triaging them is tracked separately.
+          #
+          # -c pyproject.toml is required, not cosmetic: [tool.bandit]
+          # exclude_dirs (which keeps the shipped sample kernels under
+          # kernelforge/data out of the scan) is inert unless the config is
+          # passed. B101 in the same table is already below --severity-level
+          # medium, so the config changes nothing for the existing scan.
+          bandit -c pyproject.toml -r src/hyperloom src/kernelforge scripts \
+            -x "*/tests/*" -q --severity-level medium
 
       - name: Advisory notice when Bandit failed
         if: always() && steps.bandit_scan.outcome == 'failure'
@@ -131,6 +171,15 @@ jobs:
           PYTHONPATH: >-
             ${{ github.workspace }}
         run: |
+          # src/kernelforge is deliberately NOT in this list, and the omission
+          # is measured rather than inherited: adding it yields ~58 findings,
+          # essentially all E1120 no-value-for-parameter on click-decorated
+          # commands, whose parameters are injected by the decorators pylint
+          # does not follow. Two findings land in non-click production code and
+          # both are the known __dataclass_fields__ false positive. At that
+          # signal-to-noise ratio the errors-only job stops being readable for
+          # the packages it does cover. Bandit above *does* scan kernelforge --
+          # a security scanner has different economics than a type checker.
           pylint --errors-only \
             hyperloom.inference_optimizer \
             hyperloom.orchestrator \

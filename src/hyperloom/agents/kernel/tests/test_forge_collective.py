@@ -108,19 +108,19 @@ def test_cmd_invokes_forge_loop_as_a_module(tmp_path):
         deadline_unix=9_999_999_999,
     )
     assert cmd[:1] == [sys.executable]
-    assert cmd[1:4] == ["-m", "kernel_agents.cli", "forge-loop"]
+    assert cmd[1:4] == ["-m", "kernelforge.cli", "forge-loop"]
 
 
 def test_an_explicit_cli_override_is_honoured(tmp_path):
     """An operator pinning a real console script must still win."""
-    payload = dict(_payload(tmp_path), cli="/usr/local/bin/kernel-agents")
+    payload = dict(_payload(tmp_path), cli="/usr/local/bin/kernelforge")
     cmd = fc._build_cmd(
         payload,
         _rig(tmp_path),
         tmp_path,
         deadline_unix=9_999_999_999,
     )
-    assert cmd[:2] == ["/usr/local/bin/kernel-agents", "forge-loop"]
+    assert cmd[:2] == ["/usr/local/bin/kernelforge", "forge-loop"]
 
 
 def test_cmd_carries_rank_count_and_generated_rig(tmp_path):
@@ -208,7 +208,7 @@ def test_target_functions_list_is_joined(tmp_path):
 
 
 def test_cmd_carries_kb_identity(tmp_path):
-    """forge-loop needs these to pick the fellow and place the KB page."""
+    """forge-loop needs these to pick the kernel backend and place the KB page."""
     payload = _payload(
         tmp_path,
         source_files=["/repo/custom_all_reduce.cuh"],
@@ -222,7 +222,7 @@ def test_cmd_carries_kb_identity(tmp_path):
         tmp_path,
         deadline_unix=9_999_999_999,
     )
-    assert cmd[cmd.index("--fellow") + 1] == fc.COLLECTIVE_FELLOW
+    assert cmd[cmd.index("--kernel-backend") + 1] == fc.COLLECTIVE_KERNEL_BACKEND
     assert cmd[cmd.index("--framework") + 1] == "sglang"
     assert cmd[cmd.index("--operator-name") + 1] == "cross_device_reduce_1stage"
     assert cmd[cmd.index("--source-files") + 1] == "/repo/custom_all_reduce.cuh"
@@ -991,7 +991,7 @@ def test_forge_result_file_requires_object(tmp_path):
 
 
 def test_timeout_result_is_a_plain_revert(tmp_path):
-    exc = subprocess.TimeoutExpired(["kernel-agents"], 10)
+    exc = subprocess.TimeoutExpired(["kernelforge"], 10)
     out = fc._timeout_result(str(tmp_path), 10, exc)
     assert out["decision"] == "REVERT"
     assert out["error_class"] == "subprocess_timeout"

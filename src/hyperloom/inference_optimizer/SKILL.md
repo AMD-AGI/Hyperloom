@@ -162,6 +162,157 @@ pollution after the fact.
 > stale servers before every restart. IR-1 above is the *outer* gate that
 > fires before the optimizer process exists.
 
+#### Prior workload cleanup gate (error recovery)
+
+**Trigger (MUST):** whenever a run fails, is abandoned, or you are about to
+start a **replacement** workload after any error — credential failures,
+optimizer crash, install/preflight failure, user retry/restart, or any recovery
+where you would run `docker run`, `install.sh`, or a new/fresh `optimize`.
+Applies in bare-metal and docker mode, **whether reusing the existing container
+or starting a new one.** Leftover optimizer/serving processes or occupied VRAM
+are the usual cause of misleading 0% validated gain (#1314).
+
+**Exception:** `--resume-from "$SESSION_DIR"` against the **same** session
+immediately after a clean crash (no credential change, user explicitly wants
+resume) may skip — but if the probe finds live or ambiguous leftover workload,
+run it anyway and ask the user.
+
+**Probe on the docker host** (bare-metal: current host). **Never** rely on
+`docker exec` for process or VRAM checks — container PID namespaces hide
+processes in *other* containers; the host namespace is the superset (#1314).
+
+```bash
+export REPO_ROOT="${REPO_ROOT:-$(pwd -P)}"
+# .env fills gaps only — same pattern as the launch block below.
+_dotenv_prev="$(export -p | grep -v -e '=""$' -e "=''\$")"
+if [ -f "$REPO_ROOT/.env" ]; then set -a; . "$REPO_ROOT/.env"; set +a; fi
+eval "$_dotenv_prev"
+unset _dotenv_prev
+export USER_DATA_PATH="${USER_DATA_PATH:-/workspace/hyperloom}"
+export RUN_DIR="${USER_DATA_PATH}/optimizer_runs"
+
+# Prior launch handles from canonical artifacts (no last_launch.env — never written)
+LATEST_PID_FILE="$(ls -t "$RUN_DIR"/run_*.pid 2>/dev/null | head -1 || true)"
+LATEST_LAUNCH_INFO="$(ls -t "$RUN_DIR"/launch_*.json 2>/dev/null | head -1 || true)"
+PRIOR_SESSION=""
+if [ -n "$LATEST_LAUNCH_INFO" ]; then
+  PRIOR_SESSION="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("session_dir") or "")' "$LATEST_LAUNCH_INFO" 2>/dev/null || true)"
+fi
+PRIOR_PID=""
+PRIOR_PID_LIVE=false
+if [ -n "$LATEST_PID_FILE" ] && [ -f "$LATEST_PID_FILE" ]; then
+  PRIOR_PID="$(tr -d '[:space:]' < "$LATEST_PID_FILE" 2>/dev/null || true)"
+  if [ -n "$PRIOR_PID" ] && kill -0 "$PRIOR_PID" 2>/dev/null; then
+    PRIOR_PID_LIVE=true
+  fi
+fi
+echo "prior_pid_file=${LATEST_PID_FILE:-none}"
+echo "prior_pid=${PRIOR_PID:-none}"
+echo "prior_pid_live=${PRIOR_PID_LIVE}"
+echo "prior_launch_info=${LATEST_LAUNCH_INFO:-none}"
+echo "prior_session=${PRIOR_SESSION:-none}"
+
+# Foreign processes — host-level pgrep (patterns match preflight_optimizer.py)
+pgrep -af 'hyperloom\.inference_optimizer\.cli.*optimize' || true
+pgrep -af 'sglang\.launch_server|vllm\.entrypoints|Magpie' || true
+
+# VRAM — stdlib-only rocm-smi parse (must run on docker host; no hyperloom import)
+python3 - <<'PY'
+import json, shutil, subprocess
+
+def unreadable():
+    print("gpu_vram=unreadable")
+
+if not shutil.which("rocm-smi"):
+    unreadable()
+    raise SystemExit(0)
+try:
+    proc = subprocess.run(
+        ["rocm-smi", "--showmeminfo", "vram", "--json"],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+except (OSError, subprocess.SubprocessError):
+    unreadable()
+    raise SystemExit(0)
+if proc.returncode != 0:
+    unreadable()
+    raise SystemExit(0)
+try:
+    data = json.loads(proc.stdout)
+except (json.JSONDecodeError, ValueError):
+    unreadable()
+    raise SystemExit(0)
+if not isinstance(data, dict):
+    unreadable()
+    raise SystemExit(0)
+
+rows: list[tuple[float, float]] = []
+for fields in data.values():
+    if not isinstance(fields, dict):
+        continue
+    raw: dict[str, float] = {}
+    for key, val in fields.items():
+        kl = key.lower()
+        if "vram" not in kl:
+            continue
+        if "used" in kl:
+            raw["used"] = float(val)
+        elif "total" in kl:
+            raw["total"] = float(val)
+    if not raw:
+        continue
+    try:
+        used_mib = raw["used"] / 1024**2
+        total_mib = raw["total"] / 1024**2
+    except (KeyError, TypeError, ValueError):
+        unreadable()
+        raise SystemExit(0)
+    if total_mib <= 0.0:
+        unreadable()
+        raise SystemExit(0)
+    rows.append((used_mib, total_mib))
+
+if not rows:
+    unreadable()
+    raise SystemExit(0)
+
+for i, (used_mib, total_mib) in enumerate(rows):
+    pct = used_mib / total_mib
+    busy = pct > 0.01
+    print(
+        f"gpu{i}_vram_used={used_mib:.1f}/{total_mib:.1f} MiB "
+        f"({pct:.2%}) {'BUSY' if busy else 'idle'}"
+    )
+PY
+
+# Other hyperloom-named containers — exclude the one we will reuse
+CURRENT_CONTAINER="${HYPERLOOM_CONTAINER_NAME:-hyperloom-local}"
+docker ps --filter "name=hyperloom" --format '{{.Names}}' 2>/dev/null \
+  | grep -v "^${CURRENT_CONTAINER}$" || true
+```
+
+**If anything is found** (`prior_pid_live=true`, foreign process from pgrep,
+any GPU line marked `BUSY` or `gpu_vram=unreadable`, or another
+hyperloom-named running container), stop and ask the user explicitly — e.g.
+*"The previous run may still be active (session …, PID …, GPU VRAM …). Stop
+it before we continue?"* Wait for yes/no.
+
+- **Yes:** stop in this order: serving PIDs from pgrep, then the optimizer
+  (`kill "$PRIOR_PID"` when `prior_pid_live=true`, else the pgrep match), then
+  **only** other hyperloom-named containers from the filtered list above
+  (`docker stop <name>`). Only then continue with `--resume-from "$PRIOR_SESSION"`
+  or a fresh launch as appropriate.
+- **No:** do **not** treat results as clean. Continue only if the user insists;
+  **MUST** add this caveat verbatim to the final report / session summary:
+
+  > **Contaminated baseline warning (#1314):** Prior GPU workload was not
+  > stopped per user choice. Validated gain and benchmark numbers may be
+  > unreliable.
+
+Never kill processes or stop containers without explicit user approval.
+
 ### IR-2 — install.sh MUST succeed before every launch
 
 Run `bash "$REPO_ROOT/src/hyperloom/inference_optimizer/assets/install.sh"` and
@@ -205,13 +356,13 @@ round-trip saved); `manifest.json` then records `reason=explicit_flag`.
 Pass `--degraded-kb` and `--degraded-pr` together to short-circuit the entire
 IR-3 step.
 
-### IR-4 / IR-6 — EXPLORE phase contracts (Coordinator-internal)
+### IR-4 — OPTIMIZE phase contracts (Coordinator-internal)
 
-These govern the optimizer's EXPLORE phase, not the launcher; the full
+These govern the optimizer's OPTIMIZE phase, not the launcher; the full
 contract lives in `src/hyperloom/orchestrator/prompts/orchestration.md`. In
 brief:
 
-- **IR-4 — EXPLORE is specialist-informed**: prefer specialist- or
+- **IR-4 — OPTIMIZE is specialist-informed**: prefer specialist- or
   research-backed variants when available, but `llm_direct`,
   `default_grid`, `specialist:<domain-or-tag>`, and `dynamic` provenance
   values are all accepted audit labels when phase and sequence gates pass.
@@ -234,35 +385,38 @@ brief:
   (any port that is not the production serving port 8888), profile, autotune,
   and run real benchmark loops. The one invariant is that they must not touch
   the production serving process, its cards, or port 8888.
-- **IR-6 HARD force-exit**: EXPLORE exits the moment the unspent fraction of
-  its own phase budget drops to `--explore-force-exit-budget-pct` (default
-  20%). Non-negotiable. The buffer for KERNEL_AGENT → SWEEP → CLOSE + report is
-  already inside that fraction, since charge-back rebuilds the allotment from
-  the time left at phase entry; there is no session-remaining arm.
-- **Plateau advisory**: EXPLORE / KERNEL_AGENT / FRAMEWORK plateau signals
-  are computed every tick and rendered as advisory in the orchestration
-  prompt. They do NOT drive phase advance — the LLM may emit
+- **Plateau**: both arms' signals and KERNEL_AGENT's are computed every tick
+  and rendered in the orchestration prompt. One arm dry is advisory — the
+  phase stays open on the other lever. **Both arms dry advances the phase**
+  via `optimize_no_more_leverage`. A KERNEL_AGENT plateau stays advisory. The
+  LLM may also emit
   `escalate_strategy_change{hint='skip_to_kernel'/'skip_to_sweep'/'skip_to_close'}`
-  when it judges further effort unproductive. IR-6 force-exit and the
-  per-phase budget remain the only hard advance gates.
+  when it judges further effort unproductive.
 
-### FRAMEWORK_AGENT phase (Coordinator-internal)
+### FRAMEWORK_AGENT phase — the optimisation phase
 
-Inserted between PRELUDE and EXPLORE (`--no-framework-agent` opts out). The
-Coordinator owns the loop end-to-end — the LLM never proposes the
-`framework_agent` action. It discovers a candidate batch **once** via
-`fa phase-discover`; then each exploration processes exactly **one**
-candidate, with the agent ranking the still-available candidates and
-picking the one most likely to raise throughput (LLM ranker, with a
-deterministic discovery-order fallback). The chosen candidate is
-Critic-gated, then `git apply`d against the live framework_source_roots
-and benchmarked; KEEP commits to the live tree (next candidate stacks on
-top), REVERT does `git reset --hard`. Exits on low budget
-(<0.6 × max_hours), **plateau (5 consecutive benchmarked candidate tests
-with no KEEP)**, the per-phase budget cap,
-or an empty discovery batch. Resume skips completed candidates by
-idempotency key. The launcher only chooses whether the phase runs
-(`--no-framework-agent`).
+One phase, two arms (`--no-framework-agent` skips it entirely).
+
+The **configuration arm** runs server-arg / env grids, sourced by specialist
+fan-out. The **source arm** lands upstream PRs and specialist-authored
+patches. They are worked in parallel and rotate on their own plateau
+judgement, not on a wall-clock split.
+
+The source arm's supply is the `candidate_discovery_specialist`: it surveys
+the allowlisted repos, ranks what it finds against the stack and the tried
+ledger, and judges each entry — already present, not applicable, or worth a
+bench and by which route. The pump takes that batch in the order given; it
+does not re-rank or re-audit. When discovery comes back empty its full retry
+budget, the local-exploration arm authors against profile evidence instead;
+with that off too, the source arm reports itself dry.
+
+Every diff lands through `integrate_patch`, with `patch_source` naming where
+it came from. KEEP commits to the live tree so the next candidate stacks on
+top; REVERT does `git reset --hard`. Resume skips completed candidates by
+idempotency key.
+
+The phase exits when both arms are dry, when its budget is spent, or at the
+absolute per-phase cap.
 
 ### IR-8 — `--framework atom` is single-node only
 
@@ -286,14 +440,12 @@ loader, nor the `vendor_kernel_config` / `operator_tuning` /
 
 Rules that look reasonable but break the current flow:
 
-- **No `framework first-explore priority` rule** in
-  `prompts/orchestration.md` — conflicts with the EXPLORE
-  specialist-informed flow.
-  Framework-agent runs in the dedicated **FRAMEWORK** phase
-  before EXPLORE; the LLM never proposes the `framework_agent`
-  action — it is Coordinator-managed and absent from
-  `PHASE_LLM_PROPOSABLE_ACTIONS`, so PolicyGate R1 denies any
-  LLM-side propose / delegate with `rule='phase_incompatible'`.
+- **No "source lever before configuration" rule** in
+  `prompts/orchestration.md` — the two are arms of one phase,
+  worked in parallel and ranked by what the bottleneck calls for.
+  Upstream diffs land through `integrate_patch` with
+  `patch_source='upstream_pr'`; there is no separate
+  `framework_agent` action for the LLM to propose or be denied.
   Use `--no-framework-agent` to skip the phase entirely.
 - **`kernel_opt` sequencing** is no longer gated by an
   explore-minimum check (the
@@ -717,7 +869,8 @@ wins over auto `ISL+OSL+headroom`. A comma `$CONC` value such as
 Use `--conc-sweep-concs` for the explicit sweep ladder.
 
 Operator server flags are the workload baseline, but they are not sacred. When
-EXPLORE has evidence or an operator hint that a pinned flag may be harmful, it
+the configuration arm has evidence or an operator hint that a pinned flag may
+be harmful, it
 may test an ablation variant with `remove_args` (or `unset_envs` for inherited
 environment variables). Do not simulate deletion by adding an unrelated
 counter-flag: emit an explicit explore grid entry such as

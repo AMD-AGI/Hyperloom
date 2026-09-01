@@ -29,7 +29,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     backends = ps.get("backends") or {}
     params = ps.get("params") or {}
     flags = ps.get("discovered_flags") or {}
-    winners = ps.get("backend_winners_history") or []
     synergy = ps.get("synergy_attempted") or []
 
     explore_accepted = len((explore.get("accepted") or []) if isinstance(explore, dict) else [])
@@ -50,8 +49,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     facts.append(f"params search: tested={params_tested}, accepted={params_accepted}")
     if has_explore:
         facts.append(f"explore ledger: tested={explore_tested}, accepted={explore_accepted}")
-    if winners:
-        facts.append(f"backend_winners_history: {len(winners)} round(s).")
     if synergy:
         facts.append(f"synergy_attempted combos: {len(synergy)}.")
     if not flags:
@@ -110,28 +107,6 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
 
-    if winners:
-        md_parts.append("")
-        md_parts.append(f"**Backend winners history** (last 5 of {len(winners)}):")
-        rows = []
-        for w in winners[-5:]:
-            rows.append(
-                [
-                    w.get("round_id"),
-                    w.get("action"),
-                    w.get("base_tput"),
-                    ((w.get("best") or {}).get("name") if isinstance(w.get("best"), dict) else None),
-                    ((w.get("best") or {}).get("gain_pct") if isinstance(w.get("best"), dict) else None),
-                    w.get("ts"),
-                ]
-            )
-        md_parts.append(
-            md_table(
-                ["round", "action", "base_tput", "best_name", "best_gain_pct", "ts"],
-                rows,
-            )
-        )
-
     if synergy:
         md_parts.append("")
         md_parts.append("**Synergy combos attempted**: " + ", ".join(f"`{c}`" for c in synergy[:20]))
@@ -139,8 +114,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             md_parts[-1] += f" (+{len(synergy) - 20} more)"
 
     no_search_data = (
-        not winners
-        and not synergy
+        not synergy
         and not flags
         and explore_accepted == 0
         and explore_tested == 0

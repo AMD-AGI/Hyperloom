@@ -1,0 +1,344 @@
+name: Forge E2E (single-GPU forge-loop smoke)
+
+# Run the same Triton-softmax ``kernelforge forge-loop`` smoke that guarded the
+# standalone KernelForge repository, now against the exact Hyperloom PR commit
+# containing the vendored package. The GPU job is path-gated; the cheap resolve
+# job still handles labels, comments, renames, and manual dispatch consistently.
+
+on:
+  pull_request:
+    branches: [main, v1.0-dev]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      head_ref:
+        description: "Branch to run (defaults to the caller ref)"
+        required: false
+      head_sha:
+        description: "Exact commit SHA to run (defaults to the resolved head_ref)"
+        required: false
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  resolve:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request != null &&
+       contains(github.event.comment.body, '/retest') &&
+       (github.event.comment.author_association == 'OWNER' ||
+        github.event.comment.author_association == 'MEMBER' ||
+        github.event.comment.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action != 'labeled' ||
+        github.event.label.name == 'retest' ||
+        github.event.label.name == 'skip-e2e-test') &&
+       (github.event.action != 'unlabeled' || github.event.label.name == 'skip-e2e-test'))
+    # API/file filtering does not need the scarce private-network polling runner.
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      pr_number: ${{ steps.decide.outputs.pr_number }}
+      head_ref: ${{ steps.decide.outputs.head_ref }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      head_repo: ${{ steps.decide.outputs.head_repo }}
+      opted_out: ${{ steps.decide.outputs.opted_out }}
+      path_skipped: ${{ steps.decide.outputs.path_skipped }}
+    steps:
+      - name: Checkout Forge path gate
+        uses: actions/checkout@v7
+
+      - name: Decide + resolve PR metadata
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          ACTION: ${{ github.event.action }}
+          LABEL: ${{ github.event.label.name }}
+          PR_LABELS_JSON: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+          PR_NUMBER_EVT: ${{ github.event.pull_request.number }}
+          PR_HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          IS_PR_COMMENT: ${{ github.event.issue.pull_request != null }}
+          DISPATCH_HEAD_REF: ${{ inputs.head_ref }}
+          DISPATCH_HEAD_SHA: ${{ inputs.head_sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          run=false; pr_number=""; head_ref=""; head_sha=""; head_repo=""
+          opted_out=false; path_skipped=false
+          emit() {
+            {
+              echo "run=$run"
+              echo "pr_number=$pr_number"
+              echo "head_ref=$head_ref"
+              echo "head_sha=$head_sha"
+              echo "head_repo=$head_repo"
+              echo "opted_out=$opted_out"
+              echo "path_skipped=$path_skipped"
+            } >> "$GITHUB_OUTPUT"
+          }
+
+          case "$EVENT" in
+            workflow_dispatch)
+              run=true
+              head_ref="${DISPATCH_HEAD_REF:-$REF_NAME}"
+              head_sha="${DISPATCH_HEAD_SHA:-}"
+              if [ -z "$head_sha" ]; then
+                ref_uri="$(printf '%s' "$head_ref" | jq -sRr @uri)"
+                commit_json="$(curl -fsS \
+                  -H "Authorization: Bearer $GH_TOKEN" \
+                  -H "Accept: application/vnd.github+json" \
+                  "$API_URL/repos/$REPO/commits/$ref_uri")"
+                head_sha="$(printf '%s' "$commit_json" | jq -r '.sha // ""')"
+              fi
+              ;;
+            pull_request)
+              pr_number="$PR_NUMBER_EVT"; head_ref="$PR_HEAD_REF"
+              head_sha="$PR_HEAD_SHA"; head_repo="$PR_HEAD_REPO"
+              if printf '%s' "$PR_LABELS_JSON" | jq -e 'index("skip-e2e-test")' >/dev/null 2>&1; then
+                echo "skip-e2e-test present; skipping"
+                opted_out=true; emit; exit 0
+              fi
+              if [ "$ACTION" = "labeled" ] && [ "$LABEL" != "retest" ]; then
+                echo "labeled '$LABEL' (not retest); skipping"; emit; exit 0
+              fi
+              if [ "$ACTION" = "unlabeled" ] && [ "$LABEL" != "skip-e2e-test" ]; then
+                echo "unlabeled '$LABEL' (not skip-e2e-test); skipping"; emit; exit 0
+              fi
+              run=true
+              ;;
+            issue_comment)
+              if [ "$IS_PR_COMMENT" != "true" ]; then
+                echo "not a PR comment; skipping"; emit; exit 0
+              fi
+              body="$(printf '%s' "$COMMENT_BODY" | tr -d '\r')"
+              if ! printf '%s' "$body" | grep -qiE '(^|[[:space:]])/retest(-failed)?([[:space:]]|$)'; then
+                echo "no /retest command; skipping"; emit; exit 0
+              fi
+              pr_number="$ISSUE_NUMBER"
+              pr_json="$(curl -fsS \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$API_URL/repos/$REPO/pulls/$pr_number")"
+              head_ref="$(printf '%s' "$pr_json" | jq -r '.head.ref // ""')"
+              head_sha="$(printf '%s' "$pr_json" | jq -r '.head.sha // ""')"
+              head_repo="$(printf '%s' "$pr_json" | jq -r '.head.repo.full_name // ""')"
+              if printf '%s' "$pr_json" | jq -e '[.labels[].name] | index("skip-e2e-test")' >/dev/null 2>&1; then
+                echo "skip-e2e-test present; skipping /retest"
+                opted_out=true; emit; exit 0
+              fi
+              run=true
+              ;;
+          esac
+
+          if [ "$run" = true ] && [ -z "$head_sha" ]; then
+            echo "failed to resolve head_sha for ref=$head_ref" >&2
+            exit 1
+          fi
+
+          # pull_request.paths cannot cover issue_comment/retest. Query the Pull
+          # Files API for every PR-backed trigger and include previous_filename
+          # so a rename or deletion out of src/kernelforge still runs the smoke.
+          if [ "$run" = true ] && [ "$EVENT" != "workflow_dispatch" ]; then
+            forge_changed=false
+            page=1
+            while :; do
+              files_json="$(curl -fsS \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                -H "X-GitHub-Api-Version: 2022-11-28" \
+                "$API_URL/repos/$REPO/pulls/$pr_number/files?per_page=100&page=$page")"
+              file_count="$(printf '%s' "$files_json" | jq 'length')"
+              if printf '%s' "$files_json" \
+                | jq -r '.[] | .filename, (.previous_filename // empty)' \
+                | python3 .github/scripts/forge_e2e_gate.py; then
+                forge_changed=true
+                break
+              fi
+              if [ "$file_count" -lt 100 ]; then break; fi
+              # The API exposes at most 3,000 files. Fail open at that cap.
+              if [ "$page" -ge 30 ]; then forge_changed=true; break; fi
+              page=$((page + 1))
+            done
+            if [ "$forge_changed" != true ]; then
+              echo "no Forge package or Forge E2E paths changed; skipping GPU smoke"
+              run=false; path_skipped=true; emit; exit 0
+            fi
+          fi
+
+          echo "decision: run=$run pr=$pr_number ref=$head_ref sha=$head_sha repo=$head_repo"
+          emit
+
+  skipped-status:
+    needs: resolve
+    if: >-
+      needs.resolve.outputs.head_sha != '' &&
+      (needs.resolve.outputs.opted_out == 'true' || needs.resolve.outputs.path_skipped == 'true')
+    # Concurrency starts only after resolve has authenticated and parsed the
+    # event. A no-op comment therefore cannot cancel an in-flight GPU job.
+    concurrency:
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close out the Forge E2E status
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          OPTED_OUT: ${{ needs.resolve.outputs.opted_out }}
+        run: |
+          if [ "$OPTED_OUT" = true ]; then
+            description="skipped via skip-e2e-test label"
+          else
+            description="skipped: no Forge-related files changed"
+          fi
+          # Fork pull_request jobs get a read-only GITHUB_TOKEN even with
+          # permissions.statuses: write, so this POST 403s and used to fail
+          # the required skipped-status check. Swallow only that 403;
+          # other HTTP / curl failures still fail the job. ci-e2e/kernelforge
+          # is often already SUCCESS (posted by a write-capable actor). A
+          # pull_request_target or workflow_run trigger would get a real
+          # write token — see the PR that introduced this fallback.
+          body="${RUNNER_TEMP:-/tmp}/skipped-status-body.json"
+          http_code="$(curl -sS -o "$body" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/statuses/$SHA" \
+            -d "$(jq -n --arg d "$description" \
+              '{state:"success", context:"ci-e2e/kernelforge", description:$d}')" \
+            || true)"
+          case "$http_code" in
+            200|201)
+              echo "posted ci-e2e/kernelforge success"
+              ;;
+            403)
+              echo "status POST not permitted from a fork token (HTTP 403); continuing"
+              ;;
+            *)
+              echo "status POST failed HTTP=${http_code:-curl-error}" >&2
+              cat "$body" >&2 || true
+              exit 1
+              ;;
+          esac
+
+  e2e:
+    needs: resolve
+    if: needs.resolve.outputs.run == 'true'
+    concurrency:
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      cancel-in-progress: true
+    runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
+    timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
+    steps:
+      - name: Consume retest label
+        if: github.event_name == 'pull_request' && github.event.action == 'labeled' && github.event.label.name == 'retest'
+        run: |
+          curl -sS -X DELETE \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/issues/${{ needs.resolve.outputs.pr_number }}/labels/retest" \
+            -o /dev/null -w 'remove-label HTTP=%{http_code}\n' || true
+
+      - uses: actions/checkout@v7
+
+      - name: Ensure jq
+        run: command -v jq >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y jq)
+
+      - name: Dispatch + monitor single-GPU Forge smoke
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          E2E_INFRA_TYPE: ${{ secrets.CI_E2E_INFRA_TYPE || 'kubernetes' }}
+          GPUS: ${{ vars.FORGE_E2E_GPUS || '1' }}
+          MAX_HOURS: ${{ vars.FORGE_E2E_MAX_HOURS || '1.0' }}
+          GPU_TARGET: ${{ vars.FORGE_E2E_GPU_TARGET || 'gfx950' }}
+          FORGE_MODEL: ${{ vars.FORGE_E2E_MODEL }}
+          CI_E2E_USER_NAME: ${{ secrets.CI_E2E_USER_NAME }}
+          # The registered kernelforge workload template is deployed here. Do
+          # not reuse KERNEL_OPT_WORKSPACE: that names an optimizer workspace,
+          # and may not be a Kubernetes namespace on the Robust cluster.
+          CI_E2E_WORKSPACE: ${{ vars.FORGE_E2E_WORKSPACE || 'control-plan-hyperloom-ci' }}
+          CI_E2E_PR_CHECK_BASE: ${{ secrets.CI_E2E_PR_CHECK_BASE }}
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
+          CI_E2E_CACERT: ${{ secrets.CI_E2E_CACERT }}
+          CI_E2E_API_PREFIX: ${{ vars.FORGE_E2E_API_PREFIX || '/api/v1' }}
+          PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
+          HEAD_REF: ${{ needs.resolve.outputs.head_ref }}
+          HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
+          BASE_REPO_URL: https://github.com/${{ github.repository }}.git
+          PR_PULL_REF: ${{ needs.resolve.outputs.pr_number && format('refs/pull/{0}/head', needs.resolve.outputs.pr_number) || '' }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GH_STATUS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_STATUS_REPO: ${{ github.repository }}
+          GH_STATUS_SHA: ${{ needs.resolve.outputs.head_sha }}
+          GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          STATUS_CONTEXT: ci-e2e/kernelforge
+          STATUS_INTERVAL_S: "300"
+          POLL_INTERVAL_S: "60"
+          CI_E2E_BOOTSTRAP_SLACK_SEC: ${{ vars.FORGE_E2E_BOOTSTRAP_SLACK_SEC || '3600' }}
+          CI_E2E_DELETE_ON_TIMEOUT: ${{ vars.FORGE_E2E_DELETE_ON_TIMEOUT || '0' }}
+        run: |
+          chmod +x .github/scripts/forge-ci-e2e-dispatch.sh
+          .github/scripts/forge-ci-e2e-dispatch.sh
+
+      - name: Backstop terminal commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ needs.resolve.outputs.head_sha }}
+          DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          if [ -f "${RUNNER_TEMP}/forge_e2e_status_terminal" ]; then exit 0; fi
+          uid="$(cat "${RUNNER_TEMP}/forge_e2e_session_uid" 2>/dev/null || true)"
+          case "$JOB_STATUS" in
+            success) state=success; desc="Forge E2E workload passed; terminal status backfilled" ;;
+            cancelled) state=error; desc="Forge E2E cancelled before a terminal workload state" ;;
+            *) state=failure; desc="Forge E2E job ${JOB_STATUS} before a terminal workload state" ;;
+          esac
+          [ -n "$uid" ] && desc="${desc}; uid=${uid}"
+          curl -fsS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API_URL/repos/$REPO/statuses/$SHA" \
+            -d "$(jq -n --arg s "$state" --arg d "${desc:0:139}" --arg u "$DETAILS_URL" \
+              '{state:$s, description:$d, context:"ci-e2e/kernelforge", target_url:$u}')"
+
+      - name: Cancel workload on job cancel
+        if: cancelled()
+        env:
+          E2E_API_KEY: ${{ secrets.CI_E2E_API_KEY }}
+          E2E_API_BASE: ${{ secrets.CI_E2E_API_BASE }}
+          CI_E2E_API_PREFIX: ${{ vars.FORGE_E2E_API_PREFIX || '/api/v1' }}
+          CI_E2E_INSECURE: ${{ secrets.CI_E2E_INSECURE || '0' }}
+          CI_E2E_CACERT: ${{ secrets.CI_E2E_CACERT }}
+        run: |
+          uid="$(cat "${RUNNER_TEMP}/forge_e2e_session_uid" 2>/dev/null || true)"
+          if [ -z "$uid" ] || [ -z "${E2E_API_BASE:-}" ]; then exit 0; fi
+          tls=()
+          if [ -n "${CI_E2E_CACERT:-}" ]; then
+            tls=(--cacert "$CI_E2E_CACERT")
+          elif [ "$CI_E2E_INSECURE" = "1" ]; then
+            tls=(-k)
+          fi
+          curl -sS "${tls[@]}" -X DELETE \
+            -H "Authorization: Bearer ${E2E_API_KEY}" \
+            "${E2E_API_BASE%/}${CI_E2E_API_PREFIX}/orchestration/workloads/${uid}"

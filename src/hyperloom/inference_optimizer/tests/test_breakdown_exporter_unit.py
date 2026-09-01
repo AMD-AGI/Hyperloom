@@ -99,6 +99,32 @@ def test_build_empty_session(tmp_path):
     assert any("missing" in w for w in out["warnings"])
 
 
+def test_build_exports_geak_diagnostics_and_capability_engagement(tmp_path):
+    (tmp_path / "state.json").write_text(
+        json.dumps(
+            {
+                "session_id": "geak-session",
+                "kernel_optimizer": "geak",
+                "geak_result": {
+                    "status": "ok",
+                    "baseline_throughput_tok_s": 1000.0,
+                    "final_throughput_tok_s": 1032.0,
+                    "accepted_kernels": [{"kernel_id": "k1"}],
+                },
+                "optimization_stack": [{"action": "geak_e2e", "variant_name": "geak_e2e", "source": "geak_e2e"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    out = ex.build(tmp_path)
+
+    assert out["geak"]["engaged"] is True
+    assert out["geak"]["gain_pct"] == pytest.approx(3.2)
+    assert out["capability_summary"]["geak"]["status"] == "kept"
+    assert out["capability_summary"]["geak"]["attempts"] == 1
+
+
 def test_build_include_transcripts_process_default(tmp_path):
     ex.set_default_include_transcripts(True)
     try:

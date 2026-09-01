@@ -301,37 +301,17 @@ class RemoteWarmRecipeAdapter:
 
     @staticmethod
     def _candidate_has_replay_material(candidate_dir: Path) -> bool:
-        """Check replay material through its owning AgentKB SDK readers."""
-        from ..agent_kb import (
-            ExploreAgentKB,
-            FrameworkAgentKB,
-            KernelAgentKB,
-            RecipeReplayKB,
-        )
+        """Ask each column's facade whether it carries anything replayable."""
+        from ..agent_kb import ConfigKB, KernelAgentKB, PatchKB
 
         sections = KnowledgeSections(
             candidate_dir / ".selection-sdk",
             warm_start_dir=candidate_dir,
         )
-        replay = RecipeReplayKB(sections)
-        config = replay.read_config()
-        config_envs = config.get("extra_envs")
-        if str(config.get("extra_server_args") or "").strip() or (
-            isinstance(config_envs, Mapping) and bool(config_envs)
-        ):
+        config = ConfigKB(sections).read()
+        if str(config.get("extra_server_args") or "").strip() or config.get("extra_envs"):
             return True
-        for reader_type in (ExploreAgentKB, FrameworkAgentKB):
-            reader = reader_type(sections)
-            # Legacy schema-v1 config fallback.
-            config = reader.read_config()
-            if str(config.get("extra_server_args") or "").strip():
-                return True
-            envs = config.get("extra_envs")
-            if isinstance(envs, Mapping) and envs:
-                return True
-            if reader.read_patches():
-                return True
-        if replay.read_patch_timeline():
+        if PatchKB(sections).read_patches():
             return True
         kernel = KernelAgentKB(sections)
         for column in (

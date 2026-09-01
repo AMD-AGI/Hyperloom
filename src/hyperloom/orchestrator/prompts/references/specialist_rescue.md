@@ -1,5 +1,5 @@
 <!-- when: a specialist has been dispatched and you need to intervene, redirect, or cancel it -->
-<!-- phase: EXPLORE, FRAMEWORK_AGENT -->
+<!-- phase: FRAMEWORK_AGENT -->
 # Specialist rescue moves
 
 Nothing in the prompt reports in-flight specialists: the prompt renders

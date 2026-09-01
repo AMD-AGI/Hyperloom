@@ -18,6 +18,7 @@ not read as an outage.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import urllib.error
@@ -25,6 +26,9 @@ import urllib.request
 from typing import Any
 
 from hyperloom.common.jsonio import iter_sse_objects
+from hyperloom.common.url_safety import require_http_url
+
+log = logging.getLogger(__name__)
 
 
 class GbrainPageError(RuntimeError):
@@ -58,6 +62,7 @@ class GbrainPageClient:
     _RPC_ID = "1"
 
     def __init__(self, base_url: str, token: str, *, timeout_sec: float = 10.0) -> None:
+        require_http_url(base_url, error=GbrainPageError, context="GBRAIN_BASE_URL")
         self._base = base_url.rstrip("/")
         self._token = token
         self._timeout = max(0.5, float(timeout_sec))
@@ -181,7 +186,15 @@ def _as_hit_list(res: Any) -> list[dict[str, Any]]:
 
 
 def build_gbrain_page_client_from_env() -> GbrainPageClient | None:
-    """Build a client from ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``; ``None`` if unset."""
+    """Build a client from ``GBRAIN_BASE_URL`` / ``GBRAIN_TOKEN``; ``None`` if unset.
+
+    A configured URL whose scheme is not ``http``/``https`` is refused (logged
+    and ``None``) so a bad ``GBRAIN_BASE_URL`` cannot reach ``urlopen``. One
+    ``urllib.parse`` cannot parse at all (an unterminated IPv6 literal raises
+    ``ValueError`` from under the scheme check) is refused the same way: every
+    caller of this builder reads ``None`` as "source unconfigured", so a typo in
+    the environment must not propagate as an exception.
+    """
     base_url = (os.environ.get("GBRAIN_BASE_URL", "") or "").strip()
     token = (os.environ.get("GBRAIN_TOKEN", "") or "").strip()
     if not base_url or not token:
@@ -193,7 +206,11 @@ def build_gbrain_page_client_from_env() -> GbrainPageClient | None:
             timeout_sec = float(raw)
         except ValueError:
             timeout_sec = 10.0
-    return GbrainPageClient(base_url, token, timeout_sec=timeout_sec)
+    try:
+        return GbrainPageClient(base_url, token, timeout_sec=timeout_sec)
+    except (GbrainPageError, ValueError) as exc:
+        log.warning("gbrain: refusing client for GBRAIN_BASE_URL: %s", exc)
+        return None
 
 
 __all__ = [

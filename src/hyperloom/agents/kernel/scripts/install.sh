@@ -161,7 +161,7 @@ TRACELENS_REPO="https://github.com/AMD-AGI/TraceLens.git"
 # the matching release/hyperloom_integration_v1.0 branch of
 # AMD-AGI/TraceLens-internal, but Hyperloom keeps no pin/URL for it — the
 # operator supplies it via TRACELENS_INTERNAL_ROOT.
-TRACELENS_REF="14eb554fab0363d9d827727f642a5523f2a50fd7"
+TRACELENS_REF="a59a9c165bb64c7c416fd7cf79149803d552e43c"
 # Operator override iff TRACELENS_ROOT points OUTSIDE the pod-local default.
 # The persistent kernel-agent env re-exports the resolved default path, so a
 # presence-only check (${VAR:+1}) would misclassify it as an override and skip
@@ -1333,12 +1333,12 @@ ensure_geak() {
 }
 
 # The forge backend drives the `claude` CLI inside its autonomous loop
-# (see forge_submit._apply_fellow_env), so it needs Node/npm, the claude npm
+# (see forge_submit._apply_kernel_backend_env), so it needs Node/npm, the claude npm
 # CLI, and ~/.claude auth.
 ensure_forge_claude_cli() {
   log "ensuring claude CLI for the forge backend"
   if [ "$CHECK_ONLY" -eq 1 ]; then
-    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its fellow"
+    command -v claude >/dev/null 2>&1 || warn "claude CLI missing; forge backend will fail to drive its kernel_backend"
     return 0
   fi
   if [ "$DRY_RUN" -eq 1 ]; then
