@@ -24,6 +24,7 @@ tests pin the invariants it depends on.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -206,6 +207,119 @@ def test_the_env_file_does_not_claim_to_stay_off_nfs(dispatch_script: str, boots
         assert "never written to NFS" not in script
         assert "never to NFS" not in script
         assert "only to pod-local" not in script
+
+
+# ---- trigger classification: what a PR costs in GPU hours ----
+# pyproject.toml must stay in on.pull_request.paths, or a PR that only bumps the version
+# would never start the workflow. So the scope decision cannot infer "not a version bump,
+# therefore CI logic changed" -- a dependency edit satisfies the path filter too.
+
+_PYPROJECT = '[project]\nname = "x"\nversion = "{version}"\ndependencies = [{deps}]\n'
+_CI_PATHS = (
+    ".github/workflows/pre-release-e2e-test.yml",
+    ".github/scripts/pre-release-e2e-poll.sh",
+    ".github/pre-release/bootstrap-pre-release.sh",
+)
+
+
+def _decide_step_script(workflow: dict) -> str:
+    steps = workflow["jobs"]["resolve"]["steps"]
+    return next(s["run"] for s in steps if s.get("id") == "decide")
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _decide(workflow: dict, tmp_path: Path, *, edits: dict[str, str], event: str = "pull_request") -> dict[str, str]:
+    """Commit a base tree, apply `edits`, then run the real decide step over the diff."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "pyproject.toml").write_text(_PYPROJECT.format(version="1.0.0", deps=""), encoding="utf-8")
+    for rel in _CI_PATHS:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    base_sha = _git(repo, "rev-parse", "HEAD")
+
+    for rel, body in edits.items():
+        (repo / rel).write_text(body, encoding="utf-8")
+    if edits:
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-qm", "head")
+
+    out = tmp_path / "gh_output"
+    out.write_text("", encoding="utf-8")
+    subprocess.run(
+        ["bash", "-c", _decide_step_script(workflow)],
+        cwd=repo,
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(tmp_path),
+            "EVENT": event,
+            "REUSE_IN": "",
+            "TASKS_IN": "",
+            "BASE_SHA": base_sha,
+            "BASE_REF": "main",
+            "GITHUB_OUTPUT": str(out),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return dict(line.split("=", 1) for line in out.read_text(encoding="utf-8").splitlines() if "=" in line)
+
+
+def test_a_version_bump_runs_every_leg(workflow: dict, tmp_path: Path) -> None:
+    got = _decide(workflow, tmp_path, edits={"pyproject.toml": _PYPROJECT.format(version="1.0.1", deps="")})
+    assert got["run"] == "true"
+    assert got["run_scope"] == "full"
+    assert got["tasks"] == ""  # empty = all 8 in dispatch
+    assert got["ci_version"].startswith("1.0.1.dev")
+
+
+def test_touching_this_ci_runs_the_fast_legs(workflow: dict, tmp_path: Path) -> None:
+    got = _decide(workflow, tmp_path, edits={".github/scripts/pre-release-e2e-poll.sh": "changed\n"})
+    assert got["run"] == "true"
+    assert got["run_scope"] == "scripts-only"
+    assert got["tasks"].split(",") == [
+        "baremetal-vllm-3h",
+        "baremetal-sglang-3h",
+        "docker-vllm-3h",
+        "docker-sglang-3h",
+    ]
+
+
+def test_a_dependency_edit_costs_no_gpu_time(workflow: dict, tmp_path: Path) -> None:
+    """A pyproject change that is not a version bump must not buy a 4-leg round."""
+    got = _decide(workflow, tmp_path, edits={"pyproject.toml": _PYPROJECT.format(version="1.0.0", deps='"requests"')})
+    assert got["run"] == "false"
+    assert got["run_scope"] == "none"
+
+
+def test_a_dependency_edit_alongside_a_ci_change_still_runs(workflow: dict, tmp_path: Path) -> None:
+    got = _decide(
+        workflow,
+        tmp_path,
+        edits={
+            "pyproject.toml": _PYPROJECT.format(version="1.0.0", deps='"requests"'),
+            ".github/pre-release/bootstrap-pre-release.sh": "changed\n",
+        },
+    )
+    assert got["run"] == "true"
+    assert got["run_scope"] == "scripts-only"
+
+
+def test_a_manual_run_is_always_full_scope(workflow: dict, tmp_path: Path) -> None:
+    got = _decide(workflow, tmp_path, edits={}, event="workflow_dispatch")
+    assert got["run"] == "true"
+    assert got["run_scope"] == "full"
+    assert got["tasks"] == ""
 
 
 # ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ----

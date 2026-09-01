@@ -148,14 +148,20 @@ jobs:
               run=true; run_scope="full"
               echo "version bump vs base ${BASE_REF}: '${prev}' -> '${base_version}' -> FULL run (all 8 legs)"
             else
-              # Version unchanged vs base. on.pull_request.paths already guaranteed this PR
-              # touched one of the watched paths, and it wasn't the version -> it changed
-              # the CI's own scripts/prompts/workflow. Run the fast scripts-only scope.
-              run=true; run_scope="scripts-only"
+              # Version unchanged vs base. pyproject.toml is itself a watched path -- it has
+              # to be, or a PR that ONLY bumps the version would never start this workflow --
+              # so "no version bump" does NOT imply the CI's own logic changed. A plain
+              # dependency or tooling edit lands here and used to buy a 4-leg round it has no
+              # use for. Decide on the CI paths themselves; anything else is not our concern.
               changed="$(git diff --name-only "${BASE_SHA}" HEAD 2>/dev/null | grep -E \
                 '^\.github/(workflows/pre-release-e2e-test\.yml|scripts/pre-release-e2e-.*\.sh|pre-release/)' \
                 | paste -sd',' - || true)"
-              echo "version unchanged vs base ${BASE_REF}; CI logic changed (${changed:-see path filter}) -> SCRIPTS-ONLY run (4 fast 3h legs)"
+              if [ -n "$changed" ]; then
+                run=true; run_scope="scripts-only"
+                echo "version unchanged vs base ${BASE_REF}; CI logic changed (${changed}) -> SCRIPTS-ONLY run (4 fast 3h legs)"
+              else
+                echo "version unchanged vs base ${BASE_REF} and no pre-release CI path touched -> no run"
+              fi
             fi
           fi
 
