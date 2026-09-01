@@ -189,17 +189,6 @@ leg_model_path() { case "$1" in *-3h) echo "$MODEL_3H" ;; *-12h) echo "$MODEL_12
 leg_hours()      { case "$1" in *-3h) echo "3"       ;; *-12h) echo "12"       ;; esac; }
 leg_backend()    { case "$1" in *-vllm-*) echo "vllm" ;; *-sglang-*) echo "sglang" ;; esac; }
 
-# GPU index a docker leg binds inside the privileged host (design §3).
-docker_gpu_index() {
-  case "$1" in
-    docker-vllm-3h)    echo 0 ;;
-    docker-vllm-12h)   echo 1 ;;
-    docker-sglang-3h)  echo 2 ;;
-    docker-sglang-12h) echo 3 ;;
-    *) echo "" ;;
-  esac
-}
-
 # Common env for every workload. The API key is passed base64 so it is not visible in
 # plaintext in the API payload log; bootstrap decodes it into the leg's .env, which sits
 # on NFS beside the workspace and is scrubbed by an EXIT trap. See design §9 (point D).
@@ -333,17 +322,26 @@ leg_resources_1gpu="$(jq -n --arg cpu "$LEG_CPU" --arg mem "$LEG_MEM" --arg eph 
 # It schedules more slowly and spends minutes on dockerd + image pulls before the
 # nested legs even start setup, so queue it before the four 1-GPU baremetal pods.
 want_docker_host=0
-docker_legs=""; gpu_map="{}"
+docker_legs=""
 for leg in $REQ_TASKS; do
   case "$leg" in
     docker-*)
       want_docker_host=1
-      idx="$(docker_gpu_index "$leg")"
       docker_legs="${docker_legs}${docker_legs:+ }${leg}"
-      gpu_map="$(printf '%s' "$gpu_map" | jq --arg l "$leg" --arg i "$idx" '. + {($l): $i}')"
       ;;
   esac
 done
+# The host pod binds each leg to the GPU at its position in DOCKER_LEGS (design §3), so
+# there is nothing to send: the ordered list IS the assignment. Numbering it here too is
+# only for the summary below, and cannot disagree because it is the same list.
+docker_leg_gpu_index() { # leg -> its position in $docker_legs, or "" when absent
+  local want="$1" i=0 leg
+  for leg in $docker_legs; do
+    [ "$leg" = "$want" ] && { printf '%s' "$i"; return 0; }
+    i=$(( i + 1 ))
+  done
+  printf ''
+}
 
 # ---- docker legs: one privileged 8-GPU host running all requested docker legs ----
 if [ "$want_docker_host" = 1 ]; then
@@ -360,7 +358,7 @@ if [ "$want_docker_host" = 1 ]; then
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
-    --arg legs "$docker_legs" --argjson gpumap "$gpu_map" \
+    --arg legs "$docker_legs" \
     --arg dm3 "$DOCKER_LEG_MEM_3H" --arg dm12 "$DOCKER_LEG_MEM_12H" \
     --arg ds3 "$DOCKER_LEG_SHM_3H" --arg ds12 "$DOCKER_LEG_SHM_12H" \
     --arg rtag "$VERSION_TAG" \
@@ -372,7 +370,7 @@ if [ "$want_docker_host" = 1 ]; then
       ANTHROPIC_API_KEY_B64:$keyb64,
       HYPERLOOM_RUN_MODE:"docker",
       E2E_DOCKER_HOST:"1",
-      DOCKER_LEGS:$legs, DOCKER_GPU_MAP:($gpumap|tostring),
+      DOCKER_LEGS:$legs,
       DOCKER_LEG_MEM_3H:$dm3, DOCKER_LEG_MEM_12H:$dm12,
       DOCKER_LEG_SHM_3H:$ds3, DOCKER_LEG_SHM_12H:$ds12
     }
@@ -393,7 +391,7 @@ if [ "$want_docker_host" = 1 ]; then
   # reading each leg's own session dir on NFS.
   for leg in $docker_legs; do
     record_dispatch "$leg" "$wid"
-    summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_gpu_index "$leg"), deadline $((host_dl/3600))h)"
+    summary "• \`$leg\` → workloadId \`$wid\` (docker host, GPU $(docker_leg_gpu_index "$leg"), deadline $((host_dl/3600))h)"
   done
 fi
 

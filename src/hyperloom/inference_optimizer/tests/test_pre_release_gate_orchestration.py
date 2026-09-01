@@ -356,6 +356,20 @@ def test_an_unreachable_api_is_not_mistaken_for_a_missing_phase(poll_script: str
     assert err.strip(), "curl's diagnosis must be kept, not sent to /dev/null"
 
 
+def test_the_gpu_assignment_is_the_leg_order_not_a_second_copy_of_it(
+    dispatch_script: str, bootstrap_script: str
+) -> None:
+    """A parallel leg->GPU map could only ever disagree with DOCKER_LEGS; a miss read as 0."""
+    for script in (dispatch_script, bootstrap_script):
+        assert "DOCKER_GPU_MAP" not in script
+        assert "gpu_map" not in script
+    # Both sides number the same ordered list: dispatch for its summary, the host for the
+    # binding. Same list, same counting, so they cannot drift apart.
+    assert "docker_leg_gpu_index() {" in dispatch_script
+    assert "local pids=() leg idx=-1 backend hours model_path" in bootstrap_script
+    assert "idx=$(( idx + 1 ))" in bootstrap_script
+
+
 def test_the_poll_gives_up_on_a_total_api_outage(poll_script: str) -> None:
     """Waiting out 14h holds 8 GPUs to learn nothing the first failed poll did not say."""
     assert 'API_FAIL_ABORT="${API_FAIL_ABORT:-10}"' in poll_script

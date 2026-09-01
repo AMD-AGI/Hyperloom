@@ -24,7 +24,7 @@
 #                                  EXIT trap scrubs the key, so a SIGKILL leaves it on disk.
 #   ANTHROPIC_BASE_URL (optional)  CLAUDE_MODEL  CLAUDE_CLI_VERSION  TARGET_GAIN
 #   Baremetal leg:  LEG_ID  HYPERLOOM_RUN_MODE=baremetal  HYPERLOOM_BACKEND  HYPERLOOM_MODEL_PATH  DEMO_HOURS
-#   Docker host:    E2E_DOCKER_HOST=1  DOCKER_LEGS  DOCKER_GPU_MAP(json)  MODEL_3H  MODEL_12H
+#   Docker host:    E2E_DOCKER_HOST=1  DOCKER_LEGS  MODEL_3H  MODEL_12H
 set -euo pipefail
 
 : "${CI_VERSION:?}"; : "${NFS_ROOT:?}"; : "${ANTHROPIC_API_KEY_B64:?}"
@@ -577,12 +577,17 @@ ensure_dockerd() {
 # run_leg works unchanged. Each `run_leg &` is its own subshell, so their per-leg EXIT
 # traps (the .env key scrub) don't clobber each other.
 run_docker_host() {
-  : "${DOCKER_LEGS:?}"; : "${DOCKER_GPU_MAP:?}"; : "${MODEL_3H:?}"; : "${MODEL_12H:?}"
+  : "${DOCKER_LEGS:?}"; : "${MODEL_3H:?}"; : "${MODEL_12H:?}"
   ensure_dockerd || { log "ERROR: cannot provide docker on the host pod"; return 1; }
   log "docker host: legs='${DOCKER_LEGS}'"
-  local pids=() leg idx backend hours model_path
+  # The index is the leg's position in DOCKER_LEGS. A leg->index map used to travel
+  # alongside this list; being a second copy of the same ordering, its only possible
+  # contribution was to disagree with it -- and a lookup miss yielded the string "null",
+  # which arithmetic reads as 0, quietly binding two legs to the same card. Dispatch
+  # numbers the same list the same way for its summary line.
+  local pids=() leg idx=-1 backend hours model_path
   for leg in $DOCKER_LEGS; do
-    idx="$(printf '%s' "$DOCKER_GPU_MAP" | jq -r --arg l "$leg" '.[$l]')"
+    idx=$(( idx + 1 ))
     case "$leg" in
       *-vllm-*)   backend=vllm ;;
       *-sglang-*) backend=sglang ;;
@@ -602,10 +607,10 @@ run_docker_host() {
   return "$rc"
 }
 
-# The SaFE rocm/pytorch Authoring image is minimal: besides node/npm (see ensure_node)
-# it also lacks `jq`, which run_docker_host uses to read DOCKER_GPU_MAP. Install it up
-# front (apt works in the pod) so both the host pod and the nested single-leg containers
-# -- which re-run THIS script -- have it. Idempotent; cheap when already present.
+# The SaFE rocm/pytorch Authoring image is minimal: besides node/npm (see ensure_node) it
+# also lacks `jq`, which the wait loop needs to read stop_reason out of state.json. Install
+# it up front (apt works in the pod) so both the host pod and the nested single-leg
+# containers -- which re-run THIS script -- have it. Idempotent; cheap when present.
 ensure_base_tools() {
   command -v jq >/dev/null 2>&1 && return 0
   log "installing jq (not in the Authoring base image)"
