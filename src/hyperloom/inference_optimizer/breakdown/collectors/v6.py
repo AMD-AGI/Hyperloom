@@ -10,6 +10,7 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 
 from ..agent_ownership import LEVER_KINDS
 from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
+from ..kb_timeline import collect_kb_events
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
@@ -2039,6 +2040,7 @@ def collect_v6_timeline(
         )
     )
     timeline.extend(_projected("kernel", _kernel_events, warnings))
+    timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (

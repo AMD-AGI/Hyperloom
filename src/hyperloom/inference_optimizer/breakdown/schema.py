@@ -3070,6 +3070,193 @@ class V6TimelineEvent(TypedDict, total=False):
     ext: dict[str, Any]
 
 
+class V6WarmStartMatched(TypedDict, total=False):
+    """The Recipe the PRELUDE KB lookup selected.
+
+    Present only on a ``matched`` event. ``tier`` and ``confidence`` name the
+    rung of the seven-tuple degradation ladder the hit came from, which is what
+    separates an exact identity match from one that relaxed hardware or
+    framework version to find anything at all. ``origin`` points back at the
+    session that wrote the record, so a replay result can be compared against
+    the run it came from.
+
+    Attributes:
+        match_type (str): ``exact`` when the tier is ``exact``, else ``degraded``.
+        tier (str): Ladder rung — ``exact`` / ``same_arch_class`` /
+            ``same_gpu_isa`` / ``compatible_framework_version``.
+        confidence (float | None): Transfer confidence for that rung; gates the
+            replay through ``--warm-replay-min-confidence``.
+        source (str): Store the record came from (``kb-store`` / local).
+        canonical_id (str): The seven-tuple actually matched.
+        scope (dict[str, Any]): The matched record's own workload shape.
+        optimized_throughput (float | None): Throughput the record validated.
+        validated_gain_pct (float | None): Gain the record validated.
+        expected_gain_pct (float | None): Gain the replay is expected to reproduce.
+        replayable (bool | None): Whether the record may be replayed at all.
+        replay_disabled_reason (str | None): Why it may not.
+        replay_material_available (bool | None): Whether the three columns hold
+            anything to replay — separates a hit on an empty record from a hit
+            on a usable one.
+        view_source (str | None): Which Recipe View the record was read through.
+        origin (dict[str, Any]): ``{session_id, gain_pct}`` of the writing session.
+        experience (dict[str, Any]): Counts of the lessons/pitfalls carried over.
+    """
+
+    match_type: Literal["exact", "degraded"]
+    tier: str
+    confidence: float | None
+    source: str
+    canonical_id: str
+    scope: dict[str, Any]
+    optimized_throughput: float | None
+    validated_gain_pct: float | None
+    expected_gain_pct: float | None
+    replayable: bool | None
+    replay_disabled_reason: str | None
+    replay_material_available: bool | None
+    view_source: str | None
+    origin: dict[str, Any]
+    experience: dict[str, Any]
+
+
+class V6WarmStartExt(TypedDict, total=False):
+    """``timeline[type=warm_start].ext`` — what was asked for, what came back.
+
+    Attributes:
+        requested (dict[str, Any]): ``{canonical_id, scope}`` this session asked
+            for. ``canonical_id`` is read from ``recipe_finalize`` rather than
+            rebuilt, because the hardware dimension is topology-aware.
+        match_status (str): The raw ``warm_start_context.status`` when it is not
+            a plain hit; ``seed_only`` is a hit that could not be executed and
+            would otherwise be indistinguishable from a miss.
+        matched (V6WarmStartMatched): Omitted unless the status is ``matched``.
+    """
+
+    requested: dict[str, Any]
+    match_status: str
+    matched: V6WarmStartMatched
+
+
+class V6WarmReplayApplied(TypedDict, total=False):
+    """What was running when a warm replay reproduced its gain.
+
+    Recorded only on ``reproduced``. The columns are applied together and
+    measured together, so one merged configuration is reported rather than a
+    per-column split that would have to guess which column earned the gain. A
+    replay that did not reproduce records its reason instead — its material has
+    already been rolled back, so there is no running configuration to describe.
+
+    Attributes:
+        config (dict[str, Any]): The effective ``extra_server_args`` and
+            ``extra_envs``, recipe and kernel columns already merged.
+        patch (list[str]): Overlay refs that applied successfully. The
+            lexicographic order of a ref is its replay order; the separate
+            ``patch_timeline`` column is retired.
+        kernel (dict[str, Any]): ``{status, total, kept, reverted, columns}``
+            for the kernel column.
+    """
+
+    config: dict[str, Any]
+    patch: list[str]
+    kernel: dict[str, Any]
+
+
+class V6WarmReplayExt(TypedDict, total=False):
+    """``timeline[type=warm_replay].ext`` — did the record reproduce, and why not.
+
+    Attributes:
+        raw_status (str): The runtime status before it was collapsed onto the
+            five published outcomes (it also spells ``rollback_failed``,
+            ``enqueue_failed``, ``quality_failed``, ``accuracy_failed``,
+            ``promotion_failed``, ``kernel_preparation_failed`` and
+            ``reproduced_but_no_params``).
+        result_type (str): Stable reason code; omitted on a clean reproduce.
+        raw_reason (str | None): The unmapped reason, so normalization cannot
+            silently drop detail.
+        tier (str | None): Ladder rung of the replayed record.
+        confidence (float | None): Transfer confidence of that rung.
+        config_source (str | None): Identity that owned the replayed config.
+        config_donor_tier (str | None): ``self`` when the identity owned it.
+        donor (dict[str, Any]): Borrowed donor's identity, session and gain.
+        before_tput (float | None): Baseline the replay was judged against.
+        after_tput (float | None): Measured HOT-round throughput.
+        gain_pct (float | None): Measured gain against ``before_tput``.
+        expected_gain_pct (float | None): Gain the record claimed.
+        keep_threshold_pct (float | None): Threshold this replay had to clear.
+        historical_reproduce_bar_pct (float | None): ``expected_gain`` scaled by
+            the minimum reproduce ratio.
+        below_historical_reproduce (bool | None): Positive gain that still fell
+            short of that bar — reproduced, but materially degraded.
+        accuracy (dict[str, Any]): ``{eval_ran, baseline, replay, passed}``.
+        applied (V6WarmReplayApplied): Present only on ``reproduced``.
+        active_framework_root (str): Checkout promoted after a reproduce.
+        rollback (dict[str, Any]): ``{ok, errors}`` when material was reverted.
+        failure (dict[str, Any]): ``{error_class, error}``.
+    """
+
+    raw_status: str
+    result_type: str
+    raw_reason: str | None
+    tier: str | None
+    confidence: float | None
+    config_source: str | None
+    config_donor_tier: str | None
+    donor: dict[str, Any]
+    before_tput: float | None
+    after_tput: float | None
+    gain_pct: float | None
+    expected_gain_pct: float | None
+    keep_threshold_pct: float | None
+    historical_reproduce_bar_pct: float | None
+    below_historical_reproduce: bool | None
+    accuracy: dict[str, Any]
+    applied: V6WarmReplayApplied
+    active_framework_root: str
+    rollback: dict[str, Any]
+    failure: dict[str, Any]
+
+
+class V6KBWriteBackExt(TypedDict, total=False):
+    """``timeline[type=kb_write_back].ext`` — did this session's Recipe land.
+
+    The published Recipe body is deliberately not mirrored here: it is the KB
+    Store's record, and duplicating three columns of overlay refs into every
+    breakdown would grow the export without answering a question the identity
+    and the throughput do not already answer.
+
+    Attributes:
+        result_type (str): Stable reason code. The publisher's own vocabulary is
+            narrower than it looks — build, transport and upload failures all
+            surface as a bare exception class name — so the raw reasons are
+            mapped onto a fixed set here.
+        raw_reason (str | None): The unmapped reason.
+        backend (str | None): ``kb-store`` / ``local`` / ``disabled``.
+        canonical_id (str | None): Identity written to.
+        session_id (str | None): Session id recorded on the KB side.
+        scope (dict[str, Any]): Workload dimensions the Champion is keyed by.
+        optimized_throughput (float | None): Throughput submitted, and the value
+            compared against the incumbent Champion.
+        validated_gain_pct (float | None): Session's cumulative validated gain.
+        attempts (int | None): Finalize attempts; above one means it retried.
+        source (str | None): ``close`` or the ``t4_fallback`` teardown path.
+        queue (dict[str, Any]): Local write-queue depths.
+        failure (dict[str, Any]): ``{error_class, error}``.
+    """
+
+    result_type: str
+    raw_reason: str | None
+    backend: str | None
+    canonical_id: str | None
+    session_id: str | None
+    scope: dict[str, Any]
+    optimized_throughput: float | None
+    validated_gain_pct: float | None
+    attempts: int | None
+    source: str | None
+    queue: dict[str, Any]
+    failure: dict[str, Any]
+
+
 class V6Close(TypedDict, total=False):
     """V6 session finalization result exposed outside the business timeline."""
 
@@ -3292,6 +3479,7 @@ __all__ = [
     "V6MetadataSession",
     "V6MetadataVersions",
     "V6Close",
+    "V6KBWriteBackExt",
     "V6OutcomeAttribution",
     "V6OutcomeAttributionBySource",
     "V6OutcomeGainBucket",
@@ -3300,6 +3488,10 @@ __all__ = [
     "V6OutcomeValidation",
     "V6TaskConfig",
     "V6TimelineEvent",
+    "V6WarmReplayApplied",
+    "V6WarmReplayExt",
+    "V6WarmStartExt",
+    "V6WarmStartMatched",
     "Workload",
     "WorkloadObjective",
 ]
