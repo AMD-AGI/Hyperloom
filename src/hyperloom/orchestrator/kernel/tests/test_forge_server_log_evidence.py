@@ -154,6 +154,22 @@ class TestTokensFromServingLog:
         text = HIT.format(m=1) + "".join(HIT.format(m=m) * 3 for m in (2, 3, 4))
         assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=3) == "2,3,4"
 
+    def test_uniform_counts_do_not_starve_the_prefill_end(self, tmp_path):
+        # Regression: a serving warmup sweeps every M about equally often, so
+        # the counts come out uniform and a plain frequency ranking degenerates
+        # into its tie-break -- which kept the smallest M and dropped the large
+        # prefill shapes the runtime then missed. Both fleet sessions we
+        # replayed looked exactly like this (17 distinct M x4, 44 distinct
+        # M x40), and both missed on 16384/24576/32768 and 57344/65536.
+        ms = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 8192, 16384, 24576, 32768]
+        text = "".join(HIT.format(m=m) * 4 for m in ms)
+        got = rh._tokens_from_serving_log(_log(tmp_path / "a.log", text), limit=8)
+        picked = {int(t) for t in got.split(",")}
+        assert {24576, 32768} <= picked, got
+        assert len(picked) == 8, got
+        # ...and the decode end still gets the majority of the budget.
+        assert len([m for m in picked if m <= 256]) >= 4, got
+
     def test_a_quiet_log_yields_nothing(self, tmp_path):
         assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", QUIET)) == ""
 

@@ -2078,13 +2078,23 @@ def _log_has_aiter_evidence(path) -> bool:
         return False
 
 
-def _tokens_from_serving_log(path, limit: int = 12) -> str:
+def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) -> str:
     """Derive forge's ``--tokens`` from the M values the server actually saw.
 
-    Returns the ``limit`` most frequent distinct M values, smallest first, as a
+    Returns up to ``limit`` distinct M values, smallest first, as a
     comma-separated string -- empty when the log carries no dispatch lines.
-    Frequency rather than magnitude: tuning the M values the model spends its
-    time at beats tuning the largest one it ever reached.
+
+    Selection is frequency-ranked, because tuning the M values the model spends
+    its time at beats tuning the largest one it ever reached. But frequency
+    alone is not enough: a serving warmup sweeps every M about equally often,
+    so on real logs the counts come out uniform and the ranking degenerates
+    into its tie-break. Measured on two fleet sessions, every distinct M
+    carried an identical count (17 values x4, and 44 values x40), so a plain
+    frequency cut kept the smallest M and dropped exactly the large prefill
+    shapes -- 16384/24576/32768 and 57344/65536 -- that the runtime then
+    missed. Reserve slots for the largest observed M so the prefill end
+    survives the cut; GEMM time scales with M, so those are also where the
+    end-to-end time actually is.
     """
     counts: dict[int, int] = {}
     tail = b""
@@ -2103,8 +2113,16 @@ def _tokens_from_serving_log(path, limit: int = 12) -> str:
         return ""
     if not counts:
         return ""
-    ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
-    return ",".join(str(m) for m in sorted(m for m, _n in ranked))
+    # Never let the reservation crowd out the frequency ranking: at most a
+    # quarter of the budget goes to "largest", and always at least one slot.
+    reserve = min(max(reserve_largest, 0), max(1, limit // 4))
+    picked: list[int] = sorted(counts, reverse=True)[:reserve]
+    for value, _n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+        if len(picked) >= limit:
+            break
+        if value not in picked:
+            picked.append(value)
+    return ",".join(str(m) for m in sorted(picked))
 
 
 def _resolve_trace_shape_manifest(state, session_dir: Path) -> str:
