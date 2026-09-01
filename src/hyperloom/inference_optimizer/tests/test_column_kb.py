@@ -584,6 +584,113 @@ def test_close_adopts_only_successfully_replayed_prior_overlays(tmp_path: Path) 
     bundle.validate()
 
 
+def test_close_carries_prior_apply_root_onto_adopted_overlay(tmp_path: Path) -> None:
+    """An adopted overlay keeps the checkout its prior record named.
+
+    Dropping the prior apply_root would leave the re-homed overlay rootless, and
+    the next generation's fail-closed replay would then skip the whole Recipe --
+    so the root travels with the bytes onto the new ref.
+    """
+    old_ref = "patch/overlays/000004/00-upstream.patch"
+    warm = tmp_path / "warm"
+    old_patch = warm / "files" / old_ref
+    old_patch.parent.mkdir(parents=True)
+    old_patch.write_bytes(b"prior replayed bytes")
+    (warm / "recipe.json").write_text(
+        json.dumps(
+            {
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+                "value": {
+                    "config": {"extra_server_args": "--prior-config", "extra_envs": {}},
+                    "kernel": {},
+                    "patch": {
+                        "patches": [old_ref],
+                        "provenance": [
+                            {
+                                "stack_index": 4,
+                                "host_origin": {"apply_roots": {old_ref: "/sgl-workspace/sglang"}},
+                            }
+                        ],
+                    },
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
+    state = _state(
+        [
+            {
+                "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
+                "extra_server_args": "--prior-config",
+            }
+        ]
+    )
+    state.warm_replay_outcome = {"status": "reproduced", "replayed_patch_refs": [old_ref]}
+
+    bundle = build_remote_knowledge(state, tmp_path / "files", sections=sections)
+
+    adopted = "patch/overlays/000000/00-upstream.patch"
+    patch = bundle.knowledge["value"]["patch"]
+    assert patch["patches"] == [adopted]
+    roots = {
+        ref: root
+        for row in patch.get("provenance", [])
+        for ref, root in row.get("host_origin", {}).get("apply_roots", {}).items()
+    }
+    assert roots == {adopted: "/sgl-workspace/sglang"}
+    bundle.validate()
+
+
+def test_close_leaves_adopted_overlay_rootless_when_prior_had_no_root(tmp_path: Path) -> None:
+    """Nothing is invented: an ancestor that already lost its root stays rootless."""
+    old_ref = "patch/overlays/000004/00-upstream.patch"
+    warm = tmp_path / "warm"
+    old_patch = warm / "files" / old_ref
+    old_patch.parent.mkdir(parents=True)
+    old_patch.write_bytes(b"prior replayed bytes")
+    (warm / "recipe.json").write_text(
+        json.dumps(
+            {
+                "knowledge_schema_version": CURRENT_KNOWLEDGE_SCHEMA_VERSION,
+                "record_kind": RECORD_KIND_HYPERLOOM_RECIPE,
+                "value": {
+                    "config": {"extra_server_args": "--prior-config", "extra_envs": {}},
+                    "kernel": {},
+                    "patch": {"patches": [old_ref]},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
+    state = _state(
+        [
+            {
+                "action": "replay_warm_recipe",
+                "source_phase": "PRELUDE",
+                "extra_server_args": "--prior-config",
+            }
+        ]
+    )
+    state.warm_replay_outcome = {"status": "reproduced", "replayed_patch_refs": [old_ref]}
+
+    bundle = build_remote_knowledge(state, tmp_path / "files", sections=sections)
+
+    adopted = "patch/overlays/000000/00-upstream.patch"
+    patch = bundle.knowledge["value"]["patch"]
+    assert patch["patches"] == [adopted]
+    roots = {
+        ref: root
+        for row in patch.get("provenance", [])
+        for ref, root in row.get("host_origin", {}).get("apply_roots", {}).items()
+    }
+    assert roots == {}
+    bundle.validate()
+
+
 def test_close_fails_when_a_replayed_prior_overlay_is_absent_from_prior_knowledge(tmp_path: Path) -> None:
     warm = tmp_path / "warm"
     (warm / "files").mkdir(parents=True)

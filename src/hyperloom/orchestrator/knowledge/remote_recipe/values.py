@@ -533,7 +533,18 @@ def build_kernel_fusion_value(state: Any, files: _Files) -> dict[str, Any]:
         declared,
     )
     if not apply_root.startswith("/"):
-        raise RemoteRecipeValidationError("accepted kernel/fusion cannot name the checkout it was applied into")
+        # Degrade per item, not per session: a rootless kernel item would poison
+        # the whole combined warm replay (kernel_apply_root_missing), so it is
+        # dropped from the Recipe rather than published broken. Aborting the
+        # entire publish here would also throw away config, patch, and the other
+        # kernel columns, which is a worse outcome than losing this one item.
+        log.warning(
+            "kernel/fusion KEEP dropped from Recipe: cannot derive the checkout it "
+            "was applied into (patch=%r); publishing the rest of the session",
+            patch_source,
+        )
+        files.discard(patch_ref)
+        return {"items": []}
     integrated_for_publish = dict(integrated)
     for key in (
         "target_file",
@@ -660,10 +671,16 @@ def build_kernel_rewrite_value(state: Any, files: _Files) -> dict[str, Any]:
             declared,
         )
         if not apply_root.startswith("/"):
-            raise RemoteRecipeValidationError(
-                "accepted kernel/rewrite cannot name the checkout it was applied into: "
-                f"integration_id={integration_id!r}"
+            # Drop this one item, not the whole session: a rootless kernel item
+            # would poison the combined warm replay, and raising would take
+            # config/patch/other kernel items down with it.
+            log.warning(
+                "kernel/rewrite KEEP dropped from Recipe: cannot derive the checkout it "
+                "was applied into (integration_id=%r); publishing the rest of the session",
+                integration_id,
             )
+            files.discard(patch)
+            continue
         e2e_gain = _number(entry.get("gain_pct"))
         optimized_throughput = _number(entry.get("tput"))
         experience = files.write(
@@ -796,6 +813,23 @@ def _adopt_replayed_prior(
             f"successfully replayed prior overlays are absent from prior knowledge: {sorted(missing_metadata)!r}"
         )
 
+    # Prior apply roots keyed by the prior ref, so a re-homed overlay carries
+    # forward the checkout it must be applied into. Without this the adopted
+    # overlay publishes rootless and the next generation's replay skips the
+    # whole Recipe with framework_apply_root_missing.
+    prior_roots: dict[str, str] = {}
+    for prov_row in _mapping(prior_value.get(PATCH_SECTION)).get("provenance") or []:
+        if not isinstance(prov_row, Mapping):
+            continue
+        origin = prov_row.get("host_origin")
+        if not isinstance(origin, Mapping):
+            continue
+        for ref, root in (origin.get("apply_roots") or {}).items():
+            root_str = str(root or "").strip()
+            if str(ref) and root_str:
+                prior_roots[str(ref)] = root_str
+
+    adopted_roots: dict[str, str] = {}
     member_index = 0
     seen: set[str] = set()
     files_root = warm_root / "files"
@@ -843,7 +877,36 @@ def _adopt_replayed_prior(
             refs.append(new_ref)
         node["patches"] = sorted(refs)
         value[PATCH_SECTION] = node
+        if prior_root := prior_roots.get(old_ref):
+            adopted_roots[new_ref] = prior_root
         member_index += 1
+
+    # Re-home the prior apply roots onto the new refs, under the replay stack
+    # index the adopted overlays now live at. Every adopted overlay whose prior
+    # record named a root keeps it, so a re-published Recipe stays replayable
+    # rather than losing its provenance one generation on. An overlay whose
+    # prior record was already rootless stays rootless -- nothing is invented.
+    if adopted_roots:
+        node = _mapping(value.get(PATCH_SECTION))
+        rows = [dict(row) for row in (node.get("provenance") or []) if isinstance(row, Mapping)]
+        row = next((r for r in rows if int(r.get("stack_index") or -1) == replay_index), None)
+        if row is None:
+            row = {
+                "stack_index": replay_index,
+                "base_sha": "",
+                "complete": True,
+                "artifacts_outside_root": 0,
+                "realized": True,
+            }
+            rows.append(row)
+        origin = dict(row.get("host_origin") or {})
+        merged_roots = dict(origin.get("apply_roots") or {})
+        merged_roots.update(adopted_roots)
+        origin["apply_roots"] = merged_roots
+        row["host_origin"] = origin
+        rows.sort(key=lambda r: int(r.get("stack_index") or 0))
+        node["provenance"] = rows
+        value[PATCH_SECTION] = node
 
 
 def _remap_artifact_refs(value: Any, refs: Mapping[str, str]) -> Any:

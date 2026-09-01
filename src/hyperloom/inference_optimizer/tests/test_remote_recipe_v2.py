@@ -469,8 +469,15 @@ def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path)
     assert all(root == str(tmp_path) for root in roots)
 
 
-def test_kernel_fusion_that_cannot_name_its_checkout_fails_closed(tmp_path: Path) -> None:
-    """Publishing it unrooted would produce a record replay can only skip."""
+def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
+    """An item that cannot name its checkout degrades to a drop, not an abort.
+
+    Publishing it rootless would poison the combined replay, and raising would
+    take config, patch, and the still-rooted kernels down with it. So the fusion
+    item is dropped while the rest of the Recipe still publishes -- and because a
+    successful build passes the section mismatch guard, the staged fusion patch
+    is proven to leave no orphan behind.
+    """
     state = _state(tmp_path)
     state.last_fusion.pop("kernel_repo", None)
     state.last_fusion["source_file"] = "source.cu"
@@ -479,8 +486,12 @@ def test_kernel_fusion_that_cannot_name_its_checkout_fails_closed(tmp_path: Path
         if str(row.get("action") or "").lower() == "fusion":
             row["target_file"] = "source.cu"
 
-    with pytest.raises(RemoteRecipeValidationError, match="checkout it was applied into"):
-        _build(state, tmp_path / "files-fusion-unrooted")
+    bundle = _build(state, tmp_path / "files-fusion-unrooted")
+    kernel = bundle.knowledge["value"]["kernel"]
+    assert kernel["fusion"]["items"] == []
+    assert "kernel/fusion/patches" not in json.dumps(kernel["fusion"])
+    # The rest of the session is unharmed: the rooted rewrite still publishes.
+    assert len(kernel["rewrite"]["items"]) == 1
 
 
 def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:

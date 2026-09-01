@@ -291,6 +291,41 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
     assert add_cmd[-3:] == ["-A", "--", "pkg/mod.py"]
 
 
+def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
+    """The realized-diff harvest gates on this note: '' means HEAD advanced.
+
+    A no-op commit must report a non-empty note so the caller does not harvest
+    the previous KEEP's diff as this KEEP's realized change. This uses real git
+    to lock the exact contract the gate depends on.
+    """
+    import subprocess
+
+    def _git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _git("init", "-q")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+
+    # A real tree change commits and reports an empty note (HEAD advances).
+    ok, note = ip._git_commit_kept(tmp_path, "keep-1", ["pkg/mod.py"])
+    assert ok is True
+    assert note == ""
+
+    # Re-committing the same, unchanged path is a benign no-op: HEAD does not
+    # advance, so the note must be non-empty and the harvest must be skipped.
+    ok, note = ip._git_commit_kept(tmp_path, "keep-2", ["pkg/mod.py"])
+    assert ok is True
+    assert note == "nothing to commit"
+
+
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     """git checkout spawn failure is reported directly."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))

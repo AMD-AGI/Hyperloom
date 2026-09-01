@@ -3419,6 +3419,7 @@ class IntegratePatchExecutor:
         # stack would claim a win the tree no longer carries. Non-git roots have
         # no checkout revert to survive, so the commit is skipped there.
         commit_failure: str = ""
+        keep_committed = False
         if framework_root is None or not _is_git_tree(framework_root):
             log.info(
                 "integrate_patch: non-git framework root %s; skipping commit-on-KEEP",
@@ -3434,6 +3435,13 @@ class IntegratePatchExecutor:
                 )
                 if not ok:
                     commit_failure = note or "git commit failed"
+                else:
+                    # Only a real commit advances HEAD, and ``_git_commit_kept``
+                    # signals that with an empty note. Either no-op ("nothing to
+                    # commit" or "no patch-touched paths to commit") leaves HEAD on
+                    # the previous KEEP, so a later ``HEAD^..HEAD`` would be that
+                    # KEEP's diff, not this one -- the harvest must not run then.
+                    keep_committed = note == ""
             except Exception as exc:  # noqa: BLE001 — surfaced as a verdict below
                 log.exception("integrate_patch: commit-on-KEEP raised")
                 commit_failure = f"commit raised: {exc!r}"
@@ -3542,11 +3550,17 @@ class IntegratePatchExecutor:
                         if isinstance(item, dict) and item.get("rel")
                     ]
                     source_snapshot_complete = bool(snap.get("complete"))
-                    source_realized_patch = harvest_realized_diff(
-                        framework_root,
-                        rel_paths,
-                        Path(source_snapshot_dir) / "realized.patch",
-                    )
+                    # Only harvest when a real commit landed. Without a new
+                    # commit ``HEAD^..HEAD`` is the previous KEEP; harvesting it
+                    # would publish that diff as this KEEP's realized change.
+                    # Leaving it empty falls back to the delivered patch
+                    # (realized=False), which is the honest record.
+                    if keep_committed:
+                        source_realized_patch = harvest_realized_diff(
+                            framework_root,
+                            rel_paths,
+                            Path(source_snapshot_dir) / "realized.patch",
+                        )
         except Exception:  # noqa: BLE001 — snapshot is best-effort durability
             log.exception("integrate_patch: source-layer snapshot failed")
 

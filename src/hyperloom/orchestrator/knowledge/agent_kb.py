@@ -153,6 +153,18 @@ class DraftArtifactSink:
         self._members[rel] = text.encode("utf-8")
         return rel
 
+    def discard(self, ref: str) -> None:
+        """Undo a just-added ref so a skipped item leaves no staged orphan.
+
+        A kernel KEEP whose checkout cannot be named is dropped from the Recipe
+        rather than aborting the whole publish, but its patch was already staged
+        to reserve the ref. Without removing it the column's members would carry
+        a file the published value no longer references, which the section
+        mismatch guard rejects.
+        """
+        self._members.pop(ref, None)
+        self._sources = {key: value for key, value in self._sources.items() if value != ref}
+
 
 class _ColumnKB:
     """One published column: read the prior record, stage this run's."""
@@ -506,9 +518,12 @@ class KernelAgentKB(_ColumnKB):
                     "rewrite": {"items": []},
                 }
             )
-        # A builder that cannot materialize an accepted kernel raises, and that
-        # must reach CLOSE: publishing the column without it would record a
-        # Recipe that silently replays fewer kernels than it was measured on.
+        # A builder that cannot materialize an accepted kernel still raises, and
+        # that must reach CLOSE. A KEEP whose checkout cannot be named is the one
+        # exception: the builder drops just that item and publishes the rest, so
+        # one unrooted kernel no longer takes config, patch, and the other kernels
+        # down with it -- publishing it rootless would instead poison the whole
+        # combined replay.
         sink = DraftArtifactSink()
         document = {
             "gemm": build_kernel_gemm_value(state, sink),
