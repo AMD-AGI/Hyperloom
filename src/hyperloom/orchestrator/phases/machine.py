@@ -174,18 +174,16 @@ class MachinePhase(PhaseHandler):
         running, because a task waiting on a resource lane is work the phase is
         committed to, not dead air.
 
-        The kind filter is ``PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`` — the same
-        allowlist the transition path uses to cancel work incompatible with a
-        phase — so any action kind newly admitted to KERNEL is covered without a
-        second list to keep in sync.
+        The kind filter is ``KERNEL_LANE_TASK_KINDS``, not the phase's proposable
+        actions: a Coordinator-owned lane is dispatched without ever being
+        proposable, and its task is every bit as much work in flight. Reusing the
+        proposable set here once made a running kernel_opt invisible to the idle
+        guard the moment that action stopped being model-requestable.
 
         Returns:
             tuple[str, ...]: Sorted ids of in-flight kernel-lane tasks.
         """
-        kinds = _phase_state.PHASE_ALLOWED_ACTIONS.get(
-            _phase_state.PHASE_KERNEL_AGENT,
-            frozenset(),
-        )
+        kinds = _phase_state.KERNEL_LANE_TASK_KINDS
         tasks = list(await self.tasks.queued()) + list(await self.tasks.running())
         return tuple(
             sorted(str(task.task_id) for task in tasks if str(getattr(task, "kind", "") or "").strip() in kinds)

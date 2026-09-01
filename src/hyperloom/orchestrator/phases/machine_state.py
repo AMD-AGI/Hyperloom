@@ -82,11 +82,14 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
             "recover",
         }
     ),
+    # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase
+    # entry, so an LLM re-issuing them per tick would bypass the lane budget and
+    # the nomination it is derived from. ``integrate`` stays -- draining the KEEP
+    # queue is still the model's job. This set is about what may be *proposed*;
+    # what counts as kernel-lane work in flight is ``KERNEL_LANE_TASK_KINDS``.
     PHASE_KERNEL_AGENT: frozenset(
         {
-            "kernel_opt",
             "integrate",
-            "gemm_tuning",
             "specialist",
             "roofline",
             "profile",
@@ -112,6 +115,19 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
 
 # Dispatched by the Coordinator or owned by the Robustness ladder.
 _NOT_LLM_PROPOSABLE: frozenset[str] = COORDINATOR_INTERNAL_ACTIONS | ROBUSTNESS_DELEGATE_ONLY_ACTIONS
+
+# Task kinds that mean the KERNEL lane is busy, which is a wider question than
+# what a model may propose: a Coordinator-owned lane is dispatched without ever
+# being proposable, and its task occupies the phase just the same. Kept separate
+# from PHASE_ALLOWED_ACTIONS because the idle guard once shared that set and a
+# running kernel_opt went invisible the moment the action stopped being
+# model-requestable.
+KERNEL_LANE_TASK_KINDS: frozenset[str] = PHASE_ALLOWED_ACTIONS[PHASE_KERNEL_AGENT] | frozenset(
+    {
+        "kernel_opt",
+        "gemm_tuning",
+    }
+)
 
 
 def allowed_actions_for(phase: str) -> tuple[str, ...]:

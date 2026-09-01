@@ -507,7 +507,7 @@ def test_policy_source_file_trusted_scope_passes(tmp_path):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "run_optimization",
+            "kind": "integrate",
             "params": {
                 "kernel_id": "k1",
                 "source_file": "/sgl-workspace/aiter/csrc/attn.cu",
@@ -528,7 +528,7 @@ def test_policy_source_file_any_installed_package_passes(tmp_path, monkeypatch):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "run_optimization",
+            "kind": "integrate",
             "params": {"kernel_id": "k1", "source_file": str(source)},
         },
     )
@@ -541,7 +541,7 @@ def test_policy_source_file_outside_trusted_scope_denied(tmp_path):
         type=IntentType.REQUEST,
         payload={
             "target_agent": "kernel_agent",
-            "kind": "run_optimization",
+            "kind": "integrate",
             "params": {
                 "kernel_id": "k1",
                 "source_file": "/random/path/attn.cu",
