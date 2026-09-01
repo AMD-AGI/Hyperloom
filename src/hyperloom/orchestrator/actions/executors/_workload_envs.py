@@ -203,11 +203,34 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     # layers stay consistent. AgentX-only: this function returned early above when AgentX
     # is off, so the default (synthetic) cap is untouched. The import is function-local
     # to avoid a circular dependency (``baseline`` imports this module at load time).
+    #
+    # max(), never assignment: this is the ONLY place in the AgentX path that
+    # writes an existing cap, and a bare assignment LOWERS every config that
+    # already declares more than the AgentX derivation. profile_sglang.yaml
+    # declares 14400s ("Qwen-32B TP=1 profile with steady-state window can take
+    # ~3 h") against a default derivation of 10800s, so an AgentX profile round
+    # there was being cut from four hours to three -- the same mid-round kill this
+    # module exists to prevent, introduced by the fix for it. A declared cap is a
+    # measured statement about that config; the derivation is a floor under it,
+    # not a replacement for it.
     from hyperloom.orchestrator.actions.executors.baseline import (
         agentx_baseline_timeout_sec,
     )
 
-    bench["timeout_seconds"] = agentx_baseline_timeout_sec()
+    _derived = agentx_baseline_timeout_sec()
+    try:
+        _declared = int(bench.get("timeout_seconds") or 0)
+    except (TypeError, ValueError):
+        _declared = 0
+    if _declared > _derived:
+        log.info(
+            "AgentX: keeping the config's declared benchmark timeout %ds (> the AgentX "
+            "derivation %ds). The derivation is a floor, never a ceiling -- lowering a "
+            "cap the config measured for itself is how a round gets killed mid-window.",
+            _declared,
+            _derived,
+        )
+    bench["timeout_seconds"] = max(_declared, _derived)
     envs["RUN_EVAL"] = "false"
     envs["MODEL"] = str(model_path or bench.get("model") or os.environ.get("MODEL_PATH", "")).strip()
     envs["FRAMEWORK"] = framework
