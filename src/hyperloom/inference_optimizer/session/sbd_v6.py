@@ -21,7 +21,11 @@ from .session_paths import (
 SCHEMA_VERSION_V6 = "hyperloom.session_breakdown.v6.0"
 _PENDING_INSTALL_ATTR = "_sbd_v6_install_event"
 _STORAGE_SEQUENCE_KEY = "__sbd_v6_timeline_sequence"
-_EVENT_TYPES = ("install", "model_gate")
+# ``roofline`` is the only stage that recurs within one session (one event per
+# dispatched roofline action); its profile / analysis sub-steps are nested in
+# ``ext`` rather than emitted as sibling events, because neither is dispatchable
+# on its own.
+_EVENT_TYPES = ("install", "model_gate", "roofline")
 _EVENT_FILE_RE = re.compile(r"^(?P<sequence>\d+)-(?P<event_type>[a-z0-9_]+)\.json$")
 
 

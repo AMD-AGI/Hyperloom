@@ -565,6 +565,48 @@ def main(argv: list[str] | None = None) -> int:
     trace_health_warnings: list[dict[str, Any]] = []
     top_k = args.top_k if args.top_k and args.top_k > 0 else 15
 
+    # Mirrors the ``run_meta`` block tracelens_analysis.py returns so the caller's
+    # SBD V6 roofline event carries one shape for both tools. The ladder is
+    # genuinely shorter here: this reader picks its steady-state window in memory,
+    # so there is no TraceLens install, no on-disk split, and no chunk selection.
+    # Tool-specific analysis output goes under ``route_ext`` instead of widening
+    # the shared envelope.
+    run_meta: dict[str, Any] = {
+        "preflight": {},
+        "split": {},
+        "selection": {},
+        "steps": [],
+        "route_ext": {},
+    }
+
+    def _note_step(
+        step_id: str,
+        *,
+        category: str,
+        status: str,
+        skip_reason: str | None = None,
+        **detail: Any,
+    ) -> None:
+        """Append one step to the run's ladder.
+
+        Args:
+            step_id: Stable step name.
+            category: Ladder phase (``preflight`` / ``analyze`` / ``emit``).
+            status: ``ok`` / ``failed`` / ``skipped``.
+            skip_reason: Why the step did not run, when skipped.
+            **detail: Measured values for the step.
+        """
+        run_meta["steps"].append(
+            {
+                "step_id": step_id,
+                "order": len(run_meta["steps"]) + 1,
+                "category": category,
+                "status": status,
+                "skip_reason": skip_reason,
+                "detail": detail,
+            }
+        )
+
     framework_l = (args.framework or "").lower()
     # Steady-state windowing: opt-in via --steady-state-mode / env, always on
     # for xDiT. Falls back to full-trace shares when no repeating window found.
@@ -598,6 +640,33 @@ def main(argv: list[str] | None = None) -> int:
             )
         except Exception as exc:  # noqa: BLE001 — never abort the pipeline
             analyze = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+    run_meta["preflight"].update(
+        {
+            "trace_input": str(args.trace_input),
+            "steady_state_requested": bool(enable_steady),
+            "steady_state_mode": str(args.steady_state_mode or ""),
+        }
+    )
+    _note_step(
+        "discover_inputs",
+        category="preflight",
+        status="ok",
+        trace_input=str(args.trace_input),
+    )
+    for _skipped_step, _skip_reason in (
+        ("install_tracelens", "the TraceLens-free reader needs no TraceLens checkout"),
+        ("split_trace", "the reader windows the trace in memory and writes no split chunks"),
+        ("select_chunk", "no split chunks exist to select from"),
+    ):
+        _note_step(_skipped_step, category="split", status="skipped", skip_reason=_skip_reason)
+    _note_step(
+        "run_analysis",
+        category="analyze",
+        status="ok" if analyze.get("status") == "ok" else "failed",
+        reader="bypass_trace_reader",
+        steady_state_requested=bool(enable_steady),
+        error=str(analyze.get("error") or ""),
+    )
     # ``analysis_degraded`` distinguishes an analysis failure (bad/unparsable
     # trace) from a genuine empty result.
     analysis_degraded = False
@@ -944,6 +1013,50 @@ def main(argv: list[str] | None = None) -> int:
             "trace_input_manifest": str(manifest_path),
         },
     }
+    run_meta["selection"].update(
+        {
+            "requested_mode": str(args.steady_state_mode or ""),
+            "steady_window": steady_window,
+            "aggregation_scope": scope,
+            "fell_back_to_full_trace": bool(estimated),
+        }
+    )
+    # Analysis output that only this reader produces. Kept out of the shared
+    # envelope so a consumer reading ``analysis`` across routes never has to
+    # branch on which tool ran to find a field it needs.
+    run_meta["route_ext"] = {
+        "target_platform": str(args.target_platform or ""),
+        "analyzed_rank": analyzed_rank,
+        "rank_count": rank_count,
+        "num_denoise_steps": requested_denoise_steps or inferred_denoise_steps,
+        "estimated": bool(estimated),
+        "analysis_degraded": bool(analysis_degraded),
+        "graph_coverage": analyze.get("graph_coverage") or {},
+        "timeline": analyze.get("timeline") or {},
+        "attribution": analyze.get("attribution") or {},
+        "fusion": {
+            "launch_count": fusion.get("launch_count", 0),
+            "fusable_cluster_count": fusion.get("fusable_cluster_count", 0),
+            "fusable_time_us": fusion.get("fusable_time_us", 0.0),
+        },
+        # Counts rather than the lists: the lists are already in the candidates
+        # artifact, and it is the partition that says whether dispatch has
+        # anything to work with.
+        "routable_kernel_count": len(candidates.get("routable_kernels", []) or []),
+        "skipped_kernel_count": len(candidates.get("skipped_kernels", []) or []),
+        "task_group_count": len(candidates.get("task_groups", []) or []),
+        "trace_shape_manifest_status": str(shape_manifest.get("status") or ""),
+        "diffusion_roofline_path": str(diffusion_roofline_path or ""),
+    }
+    _note_step(
+        "extract_hot_kernels",
+        category="emit",
+        status="ok",
+        hot_kernel_count=len(hot_kernels),
+        routable_kernel_count=run_meta["route_ext"]["routable_kernel_count"],
+    )
+    _note_step("write_reports", category="emit", status="ok", report_path=str(analysis_md_path))
+    result["run_meta"] = run_meta
     # Surfaced only when the opt-in manifest was produced (P0-A / WP-1).
     result["trace_shape_manifest"] = shape_manifest
     if shape_manifest.get("status") == "ok" and shape_manifest.get("path"):
