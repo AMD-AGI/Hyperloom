@@ -15,9 +15,10 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_ENABLEMENT,
     LEVER_KERNEL,
+    LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
-    owner_from_lever,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -134,13 +135,27 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
 #: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
 _PATCH_KEEP_OWNER = "PATCH"
 
+#: Levers whose overlays feed the one patch column. ``kernel`` publishes through
+#: its own column and is absent; a KEEP that names none of these falls back to
+#: the authoring phase to decide.
+_PATCH_COLUMN_LEVERS = frozenset(
+    {LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT}
+)
 
-def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
-    """Name the section a KEEP stages into, preferring the lever it moved."""
-    by_lever = owner_from_lever(_lever_for_keep(task_params, result))
-    if by_lever:
-        return by_lever
-    return str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+
+def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    """Whether a settled KEEP's overlay belongs in the patch column.
+
+    A patch-column lever answers on its own; a KEEP that names no such lever
+    (kernel, or none recorded) falls back to the authoring phase, exactly as the
+    old owner label did before explore and framework shared one column. This is
+    now one boolean rather than a per-agent owner, because there is one column.
+    """
+    lever = _lever_for_keep(task_params, result)
+    if lever in _PATCH_COLUMN_LEVERS:
+        return True
+    phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+    return phase in {"EXPLORE", "FRAMEWORK_AGENT"}
 
 
 def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
@@ -479,13 +494,18 @@ class WritebackCollaborator:
     def _enqueue_agent_keep_outbox(
         self,
         *,
-        owner: str,
         stack_index: int,
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
     ) -> None:
-        """Persist an idempotent section handoff to run after state durability."""
+        """Persist an idempotent section handoff to run after state durability.
+
+        The caller has already decided this KEEP feeds the patch column, so
+        every stored field (row id, outbox owner, the stack's
+        ``kb_required_owner``) uses the single patch-owner marker: the
+        three-column layout has one patch column, not a per-agent one.
+        """
         from ..knowledge.remote_recipe import KnowledgeSections
 
         if (
@@ -493,14 +513,6 @@ class WritebackCollaborator:
             or KnowledgeSections.from_env() is None
         ):
             return
-        normalized = str(owner or "").strip().upper()
-        if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
-            return
-        # The membership test above is the live "does this KEEP feed the patch
-        # column?" gate. Past it, the specific owner no longer picks a column --
-        # there is only one -- so everything stored (row id, outbox owner, the
-        # stack's ``kb_required_owner``) uses one marker rather than a routing
-        # choice that no longer exists.
         normalized = _PATCH_KEEP_OWNER
         sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
         # The realized diff is what the tree ended up holding, so it replaces the
@@ -4272,10 +4284,8 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = _keep_owner_section(task_params, result)
-            if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
+            if _is_patch_column_keep(task_params, result):
                 self._enqueue_agent_keep_outbox(
-                    owner=owner,
                     stack_index=len(self.shared_state.optimization_stack) - 1,
                     result=result,
                     task=task,

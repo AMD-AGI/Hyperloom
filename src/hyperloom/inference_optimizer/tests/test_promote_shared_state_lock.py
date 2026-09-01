@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop import writeback as wb
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _keep_owner_section
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -589,7 +589,7 @@ async def test_a_config_lever_keep_stages_under_the_configuration_section(sessio
 
     stack = coord.shared_state.optimization_stack
     assert stack and stack[-1]["lever_kind"] == LEVER_CONFIG
-    assert _keep_owner_section({"source_phase": "EXPLORE"}, {"lever_kind": LEVER_CONFIG}) == "EXPLORE"
+    assert _is_patch_column_keep({"source_phase": "EXPLORE"}, {"lever_kind": LEVER_CONFIG}) is True
 
 
 @pytest.mark.asyncio
