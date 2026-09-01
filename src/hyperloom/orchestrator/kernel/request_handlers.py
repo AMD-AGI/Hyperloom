@@ -2046,6 +2046,15 @@ def _resolve_forge_precision_and_quant(state, payload: dict) -> tuple[str, str]:
 #: shape source; a log without one is silent about shapes no matter how recent
 #: or how well its workspace matches.
 _AITER_DISPATCH_MARKER = "shape is M:"
+#: The MoE half of the same question. The resolved log is not only a dense-shape
+#: source: ``kernelforge.gemm_tune.router`` reads it for MoE stage coverage and
+#: 1-stage ASM detection, and those parse ``[fused_moe]`` dispatch lines, which
+#: aiter prints from a different code path than the dense ``shape is M:`` ones.
+#: Requiring the dense marker alone would reject a log that is fully informative
+#: about MoE routing -- on a fleet where every model under tuning is MoE, that
+#: is the common case, and the router would silently fall back to "tune CK 2-stage
+#: unconditionally".
+_AITER_MOE_DISPATCH_MARKERS = (b"[fused_moe]", b"Mxfp4 MoE backend")
 #: Only the M of a dispatch line. Reading M straight off the serving log is the
 #: one token source grounded in what the model actually ran -- forge's fallback
 #: derives ``--tokens`` from ``conc`` alone, and real fleet logs reach M=15842,
@@ -2061,14 +2070,8 @@ _LOG_SCAN_CHUNK = 1 << 20
 _LOG_SCAN_OVERLAP = 64
 
 
-def _scan_serving_log_m(path, *, first_only: bool = False) -> dict[int, int]:
-    """Count the M values of the aiter dispatch lines in a serving log.
-
-    One scan answers both questions asked of a serving log: whether it carries
-    aiter evidence at all (a non-empty result) and which M the model actually
-    ran (the counts). ``first_only`` stops at the first dispatch line, which is
-    what the evidence check wants -- a log with evidence usually proves it in
-    the first few KB, and only a silent log is read to the end.
+def _scan_serving_log_m(path) -> dict[int, int]:
+    """Count the M values of the dense aiter dispatch lines in a serving log.
 
     Chunks overlap by ``_LOG_SCAN_OVERLAP`` so a match spanning a boundary is
     still seen, but the carry starts after the last match already counted:
@@ -2093,8 +2096,6 @@ def _scan_serving_log_m(path, *, first_only: bool = False) -> dict[int, int]:
                     value = int(match.group(1))
                     if value > 0:
                         counts[value] = counts.get(value, 0) + 1
-                    if first_only:
-                        return counts
                 carry = buf[max(last_end, len(buf) - _LOG_SCAN_OVERLAP) :]
     except (OSError, ValueError):
         return {}
@@ -2102,8 +2103,34 @@ def _scan_serving_log_m(path, *, first_only: bool = False) -> dict[int, int]:
 
 
 def _log_has_aiter_evidence(path) -> bool:
-    """True when the log contains at least one aiter dispatch line."""
-    return bool(_scan_serving_log_m(path, first_only=True))
+    """True when the log carries at least one aiter dispatch line, dense or MoE.
+
+    Kept separate from :func:`_scan_serving_log_m` rather than folded into it as
+    a ``first_only`` flag. Two reasons, both of which cost a real behaviour bug
+    when the two were one function:
+
+    * The M counter skips ``M:0``, so a log whose first dispatch line carried
+      one read as "no evidence at all".
+    * Evidence is not dense-only. ``[fused_moe]`` lines make a log fully usable
+      for the MoE routing decisions that consume the same path.
+
+    Stops at the first marker: a log with evidence usually proves it in the
+    first few KB, and only a silent log is read to the end.
+    """
+    markers = (_AITER_DISPATCH_MARKER.encode(), *_AITER_MOE_DISPATCH_MARKERS)
+    carry = b""
+    try:
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(_LOG_SCAN_CHUNK)
+                if not chunk:
+                    return False
+                buf = carry + chunk
+                if any(marker in buf for marker in markers):
+                    return True
+                carry = buf[-_LOG_SCAN_OVERLAP:]
+    except OSError:
+        return False
 
 
 def _tokens_from_serving_log(path, limit: int = 16, reserve_largest: int = 4) -> str:
@@ -2263,11 +2290,13 @@ def _resolve_forge_server_log(state, session_dir: Path) -> str:
     if candidates_by_age:
         log.warning(
             "GEMM: %d server.log file(s) under %s but none contain aiter dispatch "
-            "lines (%r), so there is no runtime shape source. Serving runs need "
-            "AITER_LOG_TUNED_CONFIG enabled for shapes to be observable",
+            "lines (dense %r or MoE %s), so there is no runtime shape source. "
+            "Serving runs need AITER_LOG_TUNED_CONFIG enabled for shapes to be "
+            "observable",
             len(candidates_by_age),
             runs_dir,
             _AITER_DISPATCH_MARKER,
+            " / ".join(repr(m.decode()) for m in _AITER_MOE_DISPATCH_MARKERS),
         )
     return ""
 

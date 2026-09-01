@@ -159,3 +159,26 @@ class TestTheStatusSaysWhatActuallyHappened:
 
         assert result.status == "failed"
         assert result.error_class == "input_missing"
+
+
+class TestTheBudgetIsAppliedAfterTheDtypeFilter:
+    def test_bf16_shapes_below_the_first_64_are_not_starved_out(self, tmp_path):
+        # Demand is ranked, and the dtype filter drops what this tuner has no
+        # record type for. Fetching exactly the budget and filtering afterwards
+        # let a run whose top 64 shapes are all fp8 come out empty while bf16
+        # shapes sat just below the cut -- and then report it as "skipped, no
+        # record type", which is true of the sample and false of the demand.
+        keys = [_key(m, 512, 4096, "torch.float8_e4m3fn") for m in range(1, 65)]
+        keys += [_key(m, 512, 4096, "torch.bfloat16") for m in range(100, 104)]
+        lines = _records(tmp_path, keys, precision="fp8")
+        assert lines is not None
+        assert len(lines) == 4
+        assert all(line.startswith(BF16) for line in lines)
+
+    def test_the_budget_still_caps_the_input_file(self, tmp_path):
+        from kernelforge.gemm_tune.tuners.vllm_dense_tunableop import _DEMAND_SHAPE_LIMIT
+
+        keys = [_key(m, 512, 4096, "torch.bfloat16") for m in range(1, _DEMAND_SHAPE_LIMIT + 40)]
+        lines = _records(tmp_path, keys)
+        assert lines is not None
+        assert len(lines) == _DEMAND_SHAPE_LIMIT

@@ -71,6 +71,12 @@ def _tunableop_op_for_dtype(raw: Any) -> str | None:
 # Demand can list thousands of distinct keys; TunableOp times each one against
 # every hipBLASLt solution, so the whole run would be spent on one tuner.
 _DEMAND_SHAPE_LIMIT = 64
+# How many to *fetch* before the per-shape dtype filter runs. The filter drops
+# shapes this tuner has no record type for (fp8, fp4), and demand is ranked, so
+# taking exactly 64 first and filtering after would let a run whose top shapes
+# are all fp8 come out empty while bf16 shapes sat just below the cut. Fetch
+# wide, filter, then cap -- the ranking survives and the budget still holds.
+_DEMAND_FETCH_LIMIT = _DEMAND_SHAPE_LIMIT * 8
 
 
 def tunableop_untuned_line(m: int, n: int, k: int, op: str) -> str:
@@ -287,7 +293,7 @@ class VllmDenseTunableopTuner(BaseTuner):
         # lookup at the padded M; TunableOp keys on the exact shape and has no
         # such fallback, so a row written at 512 does nothing for a request at
         # 464. This tuner needs the M values the runtime literally asked for.
-        shapes = demand_shapes(entry, limit=_DEMAND_SHAPE_LIMIT, bucket=False) if entry else []
+        shapes = demand_shapes(entry, limit=_DEMAND_FETCH_LIMIT, bucket=False) if entry else []
         if not shapes:
             # No demand names this tuner, which is the normal case: the runtime
             # logs lookups against aiter's tables, and TunableOp has no table of
@@ -303,14 +309,14 @@ class VllmDenseTunableopTuner(BaseTuner):
                 # bucket=False for the same reason as the direct path above:
                 # borrowing another table's misses does not borrow aiter's
                 # padded-M retry along with them.
-                borrowed.extend(demand_shapes(other, limit=_DEMAND_SHAPE_LIMIT, bucket=False))
+                borrowed.extend(demand_shapes(other, limit=_DEMAND_FETCH_LIMIT, bucket=False))
             if borrowed:
                 log.info(
                     "%s: no demand of its own; taking %d dense shape(s) the runtime missed on other dense tables",
                     self.name,
-                    len(borrowed[:_DEMAND_SHAPE_LIMIT]),
+                    len(borrowed[:_DEMAND_FETCH_LIMIT]),
                 )
-            shapes = borrowed[:_DEMAND_SHAPE_LIMIT]
+            shapes = borrowed[:_DEMAND_FETCH_LIMIT]
         if not shapes:
             return None
 
@@ -324,6 +330,11 @@ class VllmDenseTunableopTuner(BaseTuner):
         lines = []
         unsupported: dict[str, int] = {}
         for shape in shapes:
+            # Budget reached. Stop here rather than filtering the whole fetched
+            # list and truncating, so ``unsupported`` counts only shapes that
+            # were actually in contention.
+            if len(lines) >= _DEMAND_SHAPE_LIMIT:
+                break
             try:
                 m, n, k = int(shape["M"]), int(shape["N"]), int(shape["K"])
             except (KeyError, TypeError, ValueError):

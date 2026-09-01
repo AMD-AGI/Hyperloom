@@ -26,6 +26,9 @@ HIT = (
 )
 MISS = "shape is M:{m}, N:512, K:4096 not found tuned config in /tmp/aiter_configs/bf16_tuned_gemm.csv, using default\n"
 QUIET = "INFO server started on 0.0.0.0:8000\nINFO warmup complete\n"
+# A MoE dispatch line: no dense "shape is M:" anywhere, but the log is fully
+# informative for the routing decisions kernelforge makes off the same path.
+MOE = "[aiter] [fused_moe] using ck_moe_2stages for ('bf16', 'bf16', 128, 8, 1, 0, 0)\n"
 
 
 class _State:
@@ -65,6 +68,24 @@ class TestEvidenceDetection:
     def test_evidence_late_in_a_large_log_is_found(self, tmp_path):
         text = ("noise line\n" * 200_000) + HIT.format(m=99)
         assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", text))
+
+    def test_a_moe_only_log_is_evidence_too(self, tmp_path):
+        # The resolved log is not only a dense-shape source: kernelforge's router
+        # reads it for MoE stage coverage and 1-stage ASM detection, which parse
+        # [fused_moe] lines. Rejecting a log that has those but no dense
+        # "shape is M:" line would blind the router on exactly the MoE models
+        # this lane runs against.
+        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", MOE))
+        assert rh._log_has_aiter_evidence(_log(tmp_path / "b.log", "Mxfp4 MoE backend selected\n"))
+
+    def test_a_moe_only_log_yields_no_dense_tokens(self, tmp_path):
+        # ...and it must not invent any: --tokens comes from dense M only.
+        assert rh._tokens_from_serving_log(_log(tmp_path / "a.log", MOE)) == ""
+
+    def test_a_dispatch_line_at_m_zero_is_still_evidence(self, tmp_path):
+        # The M counter skips 0, so an evidence check derived from its output
+        # read this log as silent.
+        assert rh._log_has_aiter_evidence(_log(tmp_path / "a.log", HIT.format(m=0)))
 
 
 class TestSelection:

@@ -749,25 +749,23 @@ class SglangDenseBf16Tuner(BaseTuner):
                 ),
             )
             status = "partial_output"
-        elif dropped:
-            # Every expected shape was tuned. The artifact is short purely
-            # because the accuracy filter removed rows, which is a backend
-            # correctness signal, not a truncated run -- and the status stays
-            # one the E2E gate already accepts, because the surviving rows are
-            # still worth validating.
-            log.warning(
-                "Dense BF16: all %d shapes tuned, but %d row(s) failed aiter's own "
-                "accuracy check and were removed; %d remain in the artifact. This is "
-                "accuracy filtering, not budget exhaustion",
-                n_expected,
-                len(dropped),
-                total,
-            )
-            status = "ok" if (improved or unverified) else "no_improvement"
-        elif improved or unverified:
-            status = "ok"
         else:
-            status = "no_improvement"
+            if dropped:
+                # Every expected shape was tuned. The artifact is short purely
+                # because the accuracy filter removed rows, which is a backend
+                # correctness signal, not a truncated run. Say so, but do not
+                # branch the status on it: the surviving rows are still worth
+                # validating, and a status of its own would be a new routing key
+                # that the E2E gate does not admit.
+                log.warning(
+                    "Dense BF16: all %d shapes tuned, but %d row(s) failed aiter's own "
+                    "accuracy check and were removed; %d remain in the artifact. This is "
+                    "accuracy filtering, not budget exhaustion",
+                    n_expected,
+                    len(dropped),
+                    total,
+                )
+            status = "ok" if (improved or unverified) else "no_improvement"
 
         return TuneResult(
             tuner_name=self.name,
