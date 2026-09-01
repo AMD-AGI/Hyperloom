@@ -186,6 +186,18 @@ def test_a_local_child_keeps_pr_service_url_without_recipe_token() -> None:
     assert child["KERNELFORGE_GBRAIN_ENABLED"] == "false"
 
 
+def test_a_local_child_defaults_to_public_pr_service() -> None:
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    local = KnowledgeConfig.from_env({"KNOWLEDGE_STORE_MODE": "local"})
+    child: dict[str, str] = {}
+
+    local.apply_to_child_env(child)
+
+    assert child["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
+    assert "KB_STORE_TOKEN" not in child
+
+
 def test_a_kernelforge_child_never_stages_into_the_inference_draft() -> None:
     config = KnowledgeConfig.from_env(
         {

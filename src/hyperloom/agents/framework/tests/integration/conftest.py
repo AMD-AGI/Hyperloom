@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Fake Primus Cortex HTTP server fixture (healthz, prs list/detail/files/patches)."""
+"""Fake PR Monitor HTTP server fixture (healthz, prs list/detail/files/patches)."""
 
 from __future__ import annotations
 
@@ -88,8 +88,8 @@ class _FakeHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture
-def fake_primus() -> Iterator[str]:
-    """Start a fake Primus Cortex server and yield its base URL."""
+def fake_pr_monitor() -> Iterator[str]:
+    """Start a fake PR Monitor server and yield its base URL."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHandler)
     host, port = server.server_address[:2]
     thread = threading.Thread(target=server.serve_forever, daemon=True)

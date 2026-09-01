@@ -89,7 +89,7 @@ def _stub_enumerate(monkeypatch, cands):
 @pytest.mark.parametrize(
     ("enabled", "expected_modes"),
     [
-        (True, ("primus_cortex", "github")),
+        (True, ("pr_monitor", "github")),
         (False, ("github",)),
     ],
 )

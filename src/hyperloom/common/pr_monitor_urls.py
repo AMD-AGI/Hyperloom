@@ -8,6 +8,7 @@ from collections.abc import Mapping
 
 KB_STORE_URL_ENV = "KB_STORE_URL"
 PR_MONITOR_MOUNT = "pr-monitor"
+DEFAULT_KB_STORE_URL = "https://global.primus-safe.amd.com/knowledge-base"
 
 
 def kb_store_url(
@@ -15,10 +16,19 @@ def kb_store_url(
     *,
     env: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the normalized KB Store service URL, or ``""`` when unset."""
+    """Return the KB Service URL used by PR Monitor.
+
+    Local Recipe mode falls back to the public KB Service so PR discovery works
+    without extra configuration. Remote Recipe mode stays strict: its write
+    credentials must include an explicit URL and token.
+    """
 
     source = os.environ if env is None else env
-    return str(value if value is not None else source.get(KB_STORE_URL_ENV, "")).strip().rstrip("/")
+    configured = str(value if value is not None else source.get(KB_STORE_URL_ENV, "")).strip().rstrip("/")
+    if configured:
+        return configured
+    mode = str(source.get("KNOWLEDGE_STORE_MODE") or "local").strip().lower()
+    return DEFAULT_KB_STORE_URL if mode == "local" else ""
 
 
 def pr_monitor_base_url(
@@ -55,6 +65,7 @@ def pr_monitor_mcp_url(
 
 
 __all__ = [
+    "DEFAULT_KB_STORE_URL",
     "KB_STORE_URL_ENV",
     "PR_MONITOR_MOUNT",
     "kb_store_url",

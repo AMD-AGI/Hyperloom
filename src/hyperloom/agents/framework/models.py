@@ -5,8 +5,8 @@
 
 ``ExploreRequest.gap_description`` feeds :mod:`hyperloom.agents.framework.keywords` for
 perf keyword extraction; ``search_modes`` is an ordered tuple of enabled
-candidate sources (e.g. ``("primus_cortex", "github")`` unions both, with
-primus_cortex hard-failing and GitHub best-effort).
+candidate sources (e.g. ``("pr_monitor", "github")`` unions both, with
+pr_monitor hard-failing and GitHub best-effort).
 """
 
 from __future__ import annotations
@@ -80,12 +80,12 @@ class Thresholds:
 
 
 @dataclass(frozen=True)
-class PrimusCortexConfig:
-    """Configuration for the primus_cortex service.
+class PRMonitorConfig:
+    """Configuration for the pr_monitor service.
 
     When present on :class:`ExploreRequest`, the agent routes PR candidate
     enumeration through this service. Errors are hard-failed by callers
-    (see :mod:`hyperloom.agents.framework.sources.primus_cortex`).
+    (see :mod:`hyperloom.agents.framework.sources.pr_monitor`).
     """
 
     base_url: str
@@ -93,22 +93,22 @@ class PrimusCortexConfig:
     default_label: str | None = None
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "PrimusCortexConfig":
-        """Parse primus_cortex block; base_url is mandatory.
+    def from_dict(cls, raw: dict[str, Any]) -> "PRMonitorConfig":
+        """Parse pr_monitor block; base_url is mandatory.
 
         Args:
             raw (dict[str, Any]): Mapping with ``base_url`` and optional
                 ``timeout_sec`` / ``default_label``.
 
         Returns:
-            PrimusCortexConfig: The parsed config.
+            PRMonitorConfig: The parsed config.
 
         Raises:
             ValueError: If ``base_url`` is missing or empty.
         """
         base_url = str(raw.get("base_url") or "").strip()
         if not base_url:
-            raise ValueError("primus_cortex.base_url is required when primus_cortex block is set")
+            raise ValueError("pr_monitor.base_url is required when pr_monitor block is set")
         timeout_raw = raw.get("timeout_sec", 10.0)
         label_raw = raw.get("default_label")
         return cls(
@@ -152,7 +152,7 @@ class CommandSpec:
 
 @dataclass(frozen=True)
 class Candidate:
-    """A single PR or git ref candidate (explicit, primus_cortex, or GitHub).
+    """A single PR or git ref candidate (explicit, pr_monitor, or GitHub).
 
     ``score`` is the gap-relevance score; 0.0 when no gap-driven ranking happened.
     """
@@ -220,8 +220,8 @@ class PrFilter:
 
     Every dimension (labels, author, dates, paths, counts) is evaluated
     locally in ``explorer._passes_filter``; no part of this filter is pushed
-    into the primus_cortex query (the only server-side narrowing is the
-    separate ``PrimusCortexConfig.default_label``). Path filters require
+    into the pr_monitor query (the only server-side narrowing is the
+    separate ``PRMonitorConfig.default_label``). Path filters require
     Stage 2 enrichment (``changed_files`` populated). Labels are
     case-insensitive.
     """
@@ -306,7 +306,7 @@ class PrFilter:
         )
 
 
-_VALID_SEARCH_MODES = frozenset({"gbrain_pr_kb", "primus_cortex", "github"})
+_VALID_SEARCH_MODES = frozenset({"gbrain_pr_kb", "pr_monitor", "github"})
 _VALID_PR_STATES = frozenset({"open", "merged", "closed", "all"})
 
 
@@ -367,7 +367,7 @@ def _parse_keywords(raw: Any) -> tuple[str, ...]:
 
 
 def _parse_search_modes(raw: Any) -> tuple[str, ...]:
-    """Coerce a list of mode names; default to primus_cortex + GitHub.
+    """Coerce a list of mode names; default to pr_monitor + GitHub.
 
     Args:
         raw (Any): ``None``/empty (defaults applied), a single mode string, or a
@@ -381,7 +381,7 @@ def _parse_search_modes(raw: Any) -> tuple[str, ...]:
             mode name.
     """
     if raw is None or raw == "":
-        return ("primus_cortex", "github")
+        return ("pr_monitor", "github")
     if isinstance(raw, str):
         items = [raw.strip()] if raw.strip() else []
     elif isinstance(raw, (list, tuple)):
@@ -411,7 +411,7 @@ class ExploreRequest:
     prepare_candidate_env: bool = True
     commands: dict[str, CommandSpec] = field(default_factory=dict)
     outputs: dict[str, str] = field(default_factory=dict)
-    primus_cortex: PrimusCortexConfig | None = None
+    pr_monitor: PRMonitorConfig | None = None
     pr_filter: PrFilter = field(default_factory=PrFilter)
     gap_description: str = ""
     gap_canonical_id: str = ""
@@ -420,7 +420,7 @@ class ExploreRequest:
     precision: str = ""
     # Explicit keyword override; non-empty bypasses extract_keywords().
     keywords: tuple[str, ...] = ()
-    search_modes: tuple[str, ...] = ("primus_cortex", "github")
+    search_modes: tuple[str, ...] = ("pr_monitor", "github")
     # PR states to include in discovery.
     pr_states: tuple[str, ...] = ("open",)
     # Empty string disables the KB contribute hook.
@@ -468,14 +468,14 @@ class ExploreRequest:
         outputs = raw.get("outputs") or {}
         if not isinstance(outputs, dict):
             raise ValueError("outputs must be an object when present")
-        primus_raw = raw.get("primus_cortex")
-        if isinstance(primus_raw, dict):
-            primus_cortex = PrimusCortexConfig.from_dict(primus_raw)
-        elif primus_raw is None:
+        pr_monitor_raw = raw.get("pr_monitor")
+        if isinstance(pr_monitor_raw, dict):
+            pr_monitor = PRMonitorConfig.from_dict(pr_monitor_raw)
+        elif pr_monitor_raw is None:
             env_base_url = pr_monitor_base_url()
-            primus_cortex = PrimusCortexConfig(base_url=env_base_url) if env_base_url else None
+            pr_monitor = PRMonitorConfig(base_url=env_base_url) if env_base_url else None
         else:
-            raise ValueError("primus_cortex must be an object when present")
+            raise ValueError("pr_monitor must be an object when present")
         return cls(
             framework=framework,
             repo_url=repo_url,
@@ -488,7 +488,7 @@ class ExploreRequest:
             prepare_candidate_env=bool(raw.get("prepare_candidate_env", True)),
             commands=commands,
             outputs={str(k): str(v) for k, v in outputs.items()},
-            primus_cortex=primus_cortex,
+            pr_monitor=pr_monitor,
             pr_filter=PrFilter.from_dict(raw.get("pr_filter")),
             gap_description=str(raw.get("gap_description") or "").strip(),
             gap_canonical_id=str(raw.get("gap_canonical_id") or "").strip(),

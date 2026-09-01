@@ -519,13 +519,13 @@ class EnablementParams(CoordinatorCollaborator):
         # The PR query service is co-hosted by KB Store.
         plane = getattr(self, "knowledge_plane", None)
         pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
-        primus_url = pr_monitor_base_url() if pr_enabled else ""
-        if primus_url:
-            search_modes = ["primus_cortex", "github"]
-            primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+        pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
+        if pr_monitor_url:
+            search_modes = ["pr_monitor", "github"]
+            pr_monitor_block: dict[str, Any] = {"pr_monitor": {"base_url": pr_monitor_url}}
         else:
             search_modes = ["github"]
-            primus_block = {}
+            pr_monitor_block = {}
 
         collected: list[Candidate] = []
         for repo in plan.repos:
@@ -543,7 +543,7 @@ class EnablementParams(CoordinatorCollaborator):
                         "keywords": list(plan.keywords),
                         "pr_states": ["all"],
                         "max_search_candidates": max_candidates,
-                        **primus_block,
+                        **pr_monitor_block,
                     }
                 )
                 collected.extend(enumerate_candidates(explore_req))

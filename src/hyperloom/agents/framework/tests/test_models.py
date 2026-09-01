@@ -15,7 +15,7 @@ from hyperloom.agents.framework.models import (
     CommandSpec,
     ExploreRequest,
     PrFilter,
-    PrimusCortexConfig,
+    PRMonitorConfig,
     Thresholds,
 )
 
@@ -66,13 +66,13 @@ def test_candidate_pr_number() -> None:
     assert Candidate(ref="PR:not_int", repo="r", source="x").pr_number is None
 
 
-# PrimusCortexConfig -----------------------------------------------------
+# PRMonitorConfig -----------------------------------------------------
 
 
-def test_primus_config_requires_base_url() -> None:
-    """PrimusCortexConfig.from_dict rejects empty/missing base_url."""
+def test_pr_monitor_config_requires_base_url() -> None:
+    """PRMonitorConfig.from_dict rejects empty/missing base_url."""
     with pytest.raises(ValueError, match="base_url"):
-        PrimusCortexConfig.from_dict({})
+        PRMonitorConfig.from_dict({})
 
 
 # CommandSpec ------------------------------------------------------------
@@ -119,7 +119,7 @@ def test_explore_request_minimal() -> None:
     r = ExploreRequest.from_dict(_minimal_request_dict())
     assert r.framework == "sglang"
     assert r.work_dir == Path("/tmp/req")
-    assert r.search_modes == ("primus_cortex", "github")
+    assert r.search_modes == ("pr_monitor", "github")
     assert r.search_perf_prs is False
     assert r.gap_description == ""
 
@@ -129,8 +129,8 @@ def test_explore_request_derives_pr_monitor_from_kb_store(monkeypatch) -> None:
 
     request = ExploreRequest.from_dict(_minimal_request_dict())
 
-    assert request.primus_cortex is not None
-    assert request.primus_cortex.base_url == "https://kb.example/knowledge-base/pr-monitor"
+    assert request.pr_monitor is not None
+    assert request.pr_monitor.base_url == "https://kb.example/knowledge-base/pr-monitor"
 
 
 def test_explore_request_requires_framework_and_repo_url() -> None:
@@ -149,5 +149,5 @@ def test_explore_request_search_modes_validates() -> None:
 
 def test_explore_request_search_modes_explicit_tuple() -> None:
     """Explicit search_modes is preserved in declared order."""
-    r = ExploreRequest.from_dict(_minimal_request_dict(search_modes=["github", "primus_cortex"]))
-    assert r.search_modes == ("github", "primus_cortex")
+    r = ExploreRequest.from_dict(_minimal_request_dict(search_modes=["github", "pr_monitor"]))
+    assert r.search_modes == ("github", "pr_monitor")

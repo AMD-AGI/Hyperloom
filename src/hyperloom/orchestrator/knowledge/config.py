@@ -11,6 +11,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping, MutableMapping
 
+from hyperloom.common.pr_monitor_urls import kb_store_url as resolve_kb_service_url
+
 
 class KnowledgeStoreMode(str, Enum):
     """The selected knowledge backend."""
@@ -78,7 +80,7 @@ class KnowledgeConfig:
             local_root=local_root,
             # The URL also hosts PR Monitor and is therefore useful in local
             # Recipe mode; only the Recipe bearer token is mode-specific.
-            kb_store_url=kb_store_url,
+            kb_store_url=(kb_store_url if mode is KnowledgeStoreMode.REMOTE else resolve_kb_service_url(env=source)),
             kb_store_token=kb_store_token if mode is KnowledgeStoreMode.REMOTE else "",
         )
 

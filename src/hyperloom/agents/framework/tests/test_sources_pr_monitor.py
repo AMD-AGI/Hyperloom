@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Tests for hyperloom.agents.framework.sources.primus_cortex. Hermetic - no real HTTP."""
+"""Tests for hyperloom.agents.framework.sources.pr_monitor. Hermetic - no real HTTP."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import urllib.error
 
 import pytest
 
-from hyperloom.agents.framework.sources import primus_cortex as pc
+from hyperloom.agents.framework.sources import pr_monitor as pc
 from hyperloom.agents.framework.sources._shared import GitHubPr, _repo_slug
 
 
@@ -34,7 +34,7 @@ class _FakeResp:
 
 
 def _install_urlopen(monkeypatch, handler) -> None:
-    """Replace urllib.request.urlopen used by primus_cortex with handler."""
+    """Replace urllib.request.urlopen used by pr_monitor with handler."""
 
     def fake(req, timeout):  # noqa: ARG001
         return handler(req)
@@ -96,11 +96,11 @@ def test_base_url_may_include_v1_suffix(monkeypatch) -> None:
     _install_urlopen(monkeypatch, handler)
     pc.list_perf_prs(
         "https://github.com/sgl-project/sglang.git",
-        base_url="https://global.primus-safe.amd.com/knowledge-base/pr-monitor/v1",
+        base_url="https://pr-monitor.example.com/knowledge-base/pr-monitor/v1",
         limit=1,
     )
     assert "/v1/v1/" not in seen["url"]
-    assert seen["url"].startswith("https://global.primus-safe.amd.com/knowledge-base/pr-monitor/v1/repos/")
+    assert seen["url"].startswith("https://pr-monitor.example.com/knowledge-base/pr-monitor/v1/repos/")
 
 
 def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
@@ -121,7 +121,7 @@ def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
         ]
     ).encode("utf-8")
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, body))
-    prs = pc.search_perf_prs_via_primus_search(
+    prs = pc.search_perf_prs_via_pr_monitor_search(
         "https://github.com/ROCm/vllm.git",
         base_url="http://x",
         query="dsv4",
@@ -138,13 +138,13 @@ def test_search_prs_unwraps_summary_match_records(monkeypatch) -> None:
 
 
 def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
-    """HTTPError from urlopen propagates as PrimusCortexError."""
+    """HTTPError from urlopen propagates as PRMonitorError."""
 
     def handler(req):
         raise urllib.error.HTTPError(req.get_full_url(), 503, "boom", {}, io.BytesIO(b"oops"))
 
     _install_urlopen(monkeypatch, handler)
-    with pytest.raises(pc.PrimusCortexError, match="HTTP 503"):
+    with pytest.raises(pc.PRMonitorError, match="HTTP 503"):
         pc.list_perf_prs(
             "https://github.com/sgl-project/sglang.git",
             base_url="http://x",
@@ -152,9 +152,9 @@ def test_list_perf_prs_hard_fails_on_http_error(monkeypatch) -> None:
 
 
 def test_list_perf_prs_hard_fails_on_bad_json(monkeypatch) -> None:
-    """Non-JSON body propagates as PrimusCortexError."""
+    """Non-JSON body propagates as PRMonitorError."""
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"<html>not json"))
-    with pytest.raises(pc.PrimusCortexError, match="non-JSON"):
+    with pytest.raises(pc.PRMonitorError, match="non-JSON"):
         pc.list_perf_prs(
             "https://github.com/sgl-project/sglang.git",
             base_url="http://x",
@@ -162,13 +162,13 @@ def test_list_perf_prs_hard_fails_on_bad_json(monkeypatch) -> None:
 
 
 def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
-    """URLError (DNS / unreachable) propagates as PrimusCortexError."""
+    """URLError (DNS / unreachable) propagates as PRMonitorError."""
 
     def handler(req):
         raise urllib.error.URLError("dns")
 
     _install_urlopen(monkeypatch, handler)
-    with pytest.raises(pc.PrimusCortexError, match="unreachable"):
+    with pytest.raises(pc.PRMonitorError, match="unreachable"):
         pc.list_perf_prs(
             "https://github.com/sgl-project/sglang.git",
             base_url="http://x",
@@ -176,7 +176,7 @@ def test_list_perf_prs_hard_fails_on_url_error(monkeypatch) -> None:
 
 
 def test_pr_patches_renders_unified_diff_from_json(monkeypatch) -> None:
-    """pr_patches converts primus-cortex JSON array into a unified diff stream."""
+    """pr_patches converts pr-monitor JSON array into a unified diff stream."""
     payload = [
         {
             "file": {"file_path": "a/x.py", "status": "modified"},
@@ -226,5 +226,5 @@ def test_pr_files_extracts_list(monkeypatch) -> None:
 def test_pr_get_requires_object(monkeypatch) -> None:
     """pr_get refuses non-object payloads."""
     _install_urlopen(monkeypatch, lambda req: _FakeResp(200, b"[]"))
-    with pytest.raises(pc.PrimusCortexError, match="did not return an object"):
+    with pytest.raises(pc.PRMonitorError, match="did not return an object"):
         pc.pr_get("o/r", 1, base_url="http://x")

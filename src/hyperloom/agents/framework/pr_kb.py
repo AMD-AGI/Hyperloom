@@ -10,7 +10,7 @@ framework-agent already consumes:
 * :func:`parse_index_prs` — candidate discovery inputs (P2).
 
 All helpers are defensive: missing keys / unparseable blocks yield empty
-results so callers fall back to Primus Cortex / GitHub.
+results so callers fall back to PR Monitor / GitHub.
 """
 
 from __future__ import annotations

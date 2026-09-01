@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Integration test: ``fa explore --execute`` against fake Primus + echo build/bench; asserts deterministic winner gate and KB auto-append when ``kb_domain`` is set."""
+"""Integration test: ``fa explore --execute`` against fake PR Monitor + echo build/bench; asserts deterministic winner gate and KB auto-append when ``kb_domain`` is set."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 def _write_request(
     tmp_path: Path,
     *,
-    primus_base_url: str,
+    pr_monitor_base_url: str,
     work_dir: Path,
 ) -> Path:
     """Materialise an ExploreRequest JSON for execute-mode integration."""
@@ -38,8 +38,8 @@ def _write_request(
         "thresholds": {"min_throughput_ratio": 1.05, "max_accuracy_drop": 0.05},
         "search_perf_prs": True,
         "max_search_candidates": 1,
-        "primus_cortex": {"base_url": primus_base_url, "timeout_sec": 5.0},
-        "search_modes": ["primus_cortex"],
+        "pr_monitor": {"base_url": pr_monitor_base_url, "timeout_sec": 5.0},
+        "search_modes": ["pr_monitor"],
         "prepare_candidate_env": False,
         "kb_domain": "framework",
         "commands": {
@@ -56,11 +56,11 @@ def _write_request(
     return path
 
 
-def test_explore_execute_mock_winner_and_kb_append(tmp_path: Path, fake_primus: str) -> None:
+def test_explore_execute_mock_winner_and_kb_append(tmp_path: Path, fake_pr_monitor: str) -> None:
     """``fa explore --execute`` picks the winner and auto-appends KB."""
     work_dir = tmp_path / "work"
     kb_root = tmp_path / "kb"
-    req_path = _write_request(tmp_path, primus_base_url=fake_primus, work_dir=work_dir)
+    req_path = _write_request(tmp_path, pr_monitor_base_url=fake_pr_monitor, work_dir=work_dir)
     summary_path = tmp_path / "summary.json"
 
     env = dict(os.environ)

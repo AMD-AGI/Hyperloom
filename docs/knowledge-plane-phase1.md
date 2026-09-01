@@ -18,7 +18,7 @@ endpoint. Framework Doc, GEMM tuning, Read A, and Read C are unchanged.
 | --- | --- |
 | `KNOWLEDGE_STORE_MODE` | `local` or `remote`; unset defaults to `local` |
 | `KNOWLEDGE_LOCAL_ROOT` | Local knowledge root. Defaults to `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` |
-| `KB_STORE_URL` | KB Service endpoint. Required for Recipe access in `remote` mode and for PR Monitor in either mode; PR REST and MCP are derived as `/pr-monitor/v1` and `/pr-monitor/mcp/`. |
+| `KB_STORE_URL` | KB Service endpoint. Local Recipe mode defaults to `https://global.primus-safe.amd.com/knowledge-base` for PR Monitor only. Remote Recipe mode requires an explicit value. PR REST and MCP are derived as `/pr-monitor/v1` and `/pr-monitor/mcp/`. |
 | `KB_STORE_TOKEN` | Required only in `remote` mode |
 | `GBRAIN_BASE_URL` / `GBRAIN_TOKEN` | Optional GBrain credentials for Framework PR capabilities |
 
@@ -34,11 +34,12 @@ Local Recipe mode is local-only. Remote Recipe mode writes one final Recipe
 session to KB Store at CLOSE; neither mode performs an inline mirror or dual
 write.
 
-PR Monitor configuration is orthogonal to Recipe storage mode. When
-`KB_STORE_URL` is present and `--degraded-pr` is absent, Framework discovery,
-KernelForge PR priors, IR-3, and specialist tools all use its co-hosted PR
-surface. The former independent PR endpoint flags and Cortex endpoint variable
-are unsupported.
+PR Monitor configuration is orthogonal to Recipe storage mode. Unless
+`--degraded-pr` is set, Framework discovery, KernelForge PR priors, IR-3, and
+specialist tools all use the co-hosted PR surface derived from `KB_STORE_URL`.
+The former independent PR endpoint flags and Cortex endpoint variable are
+unsupported. In local Recipe mode an unset URL uses the public global KB
+Service default; remote Recipe mode never defaults write configuration.
 
 The older `--local-kb-root` and `HYPERLOOM_LOCAL_KB_ROOT` inputs remain a
 deprecated compatibility path when `KNOWLEDGE_LOCAL_ROOT` is absent.
@@ -87,11 +88,13 @@ Hyperloom's `KernelExperienceBridge` only:
 
 1. validates and forwards the shared mode/root;
 2. forwards validated KB Store credentials in Recipe remote mode and strips
-   them in local mode;
-3. keeps optional GBrain credentials in the Hyperloom parent for Framework PR
+   the bearer token in local mode;
+3. forwards the KB Service URL for PR Monitor in either mode, using the public
+   global default when local mode has no explicit URL;
+4. keeps optional GBrain credentials in the Hyperloom parent for Framework PR
    clients, but never forwards them to KernelForge children;
-4. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
-5. collects bounded capability/result provenance returned by KernelForge.
+5. forces the legacy `KERNELFORGE_GBRAIN_ENABLED` Recipe-derived flag off; and
+6. collects bounded capability/result provenance returned by KernelForge.
 
 KernelForge continues to own local knowledge. Hyperloom does not implement
 kernel-experience CRUD or ranking.

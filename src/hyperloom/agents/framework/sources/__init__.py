@@ -6,7 +6,7 @@
 Routes :class:`ExploreRequest` to one or more backends per
 ``request.search_modes`` and merges into a deduplicated :class:`Candidate`
 list. Backends: ``gbrain_pr_kb`` (gbrain PR KB pages, best-effort, ``[]`` on
-failure), ``primus_cortex`` (Primus Cortex REST, hard-fail on errors) and
+failure), ``pr_monitor`` (PR Monitor REST, hard-fail on errors) and
 ``github`` (Search, best-effort, ``[]`` on failure).
 
 Contract: empty ``search_modes`` -> ``[]``; a mode requested without its
@@ -27,10 +27,10 @@ from ..keywords import (
 from ..models import Candidate, ExploreRequest
 from ._shared import GitHubPr
 from . import github as github_backend
-from .primus_cortex import (
-    PrimusCortexError,
+from .pr_monitor import (
+    PRMonitorError,
     list_perf_prs,
-    search_perf_prs_via_primus_search,
+    search_perf_prs_via_pr_monitor_search,
 )
 
 
@@ -119,7 +119,7 @@ class BackendSpec:
 
         Best-effort backends swallow any exception and return ``[]``; hard-fail
         backends let their exceptions propagate (``SourceConfigError`` for
-        missing config, ``PrimusCortexError`` for transport).
+        missing config, ``PRMonitorError`` for transport).
 
         Args:
             request (ExploreRequest): The request to dispatch to this backend.
@@ -141,7 +141,7 @@ class BackendSpec:
 # monkeypatch an individual backend and have the dispatch pick it up.
 _SEARCH_BACKENDS: dict[str, BackendSpec] = {
     "gbrain_pr_kb": BackendSpec("gbrain_pr_kb", lambda req: _run_pr_kb(req), _BEST_EFFORT),
-    "primus_cortex": BackendSpec("primus_cortex", lambda req: _run_primus_cortex(req), _HARD_FAIL),
+    "pr_monitor": BackendSpec("pr_monitor", lambda req: _run_pr_monitor(req), _HARD_FAIL),
     "github": BackendSpec("github", lambda req: _run_github(req), _BEST_EFFORT),
 }
 
@@ -155,8 +155,8 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
          backend, map to Candidate(source=mode), append.
       3. Deduplicate by ref, preserving the first occurrence.
 
-    Hard-fails when ``primus_cortex`` is requested without configuration,
-    or when the primus_cortex transport fails.
+    Hard-fails when ``pr_monitor`` is requested without configuration,
+    or when the pr_monitor transport fails.
 
     Args:
         request (ExploreRequest): Request carrying explicit refs, search modes,
@@ -168,8 +168,8 @@ def enumerate_candidates(request: ExploreRequest) -> list[Candidate]:
 
     Raises:
         SourceConfigError: If an unknown search mode is requested, or
-            ``primus_cortex`` is requested without configuration.
-        PrimusCortexError: If a primus_cortex query fails.
+            ``pr_monitor`` is requested without configuration.
+        PRMonitorError: If a pr_monitor query fails.
     """
     out: list[Candidate] = []
 
@@ -244,7 +244,7 @@ def _run_github(request: ExploreRequest) -> list[Candidate]:
 
 
 def _resolve_keywords(request: ExploreRequest) -> list[str]:
-    """Resolve the keyword list for primus_cortex search + client rerank.
+    """Resolve the keyword list for pr_monitor search + client rerank.
 
     Priority: (1) ``request.keywords`` non-empty -> used verbatim (lowercased,
     bypasses extract_keywords); (2) ``gap_description`` -> auto-extract via
@@ -286,8 +286,8 @@ def _rank_by_keyword_overlap(prs: list[GitHubPr], keywords: list[str]) -> list[G
     )
 
 
-def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
-    """Query primus_cortex with gap-aware ranking.
+def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
+    """Query pr_monitor with gap-aware ranking.
 
     With non-empty keywords, prefer the free-text ``/v1/search/prs`` endpoint
     (over-fetch, then client-rerank by title overlap, trim to
@@ -295,19 +295,19 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
     unimplemented. With no keywords, use the cheap label-only path.
 
     Args:
-        request: The explore request carrying the Primus config.
+        request: The explore request carrying the PR Monitor config.
 
     Returns:
-        Candidates from Primus Cortex, ranked when keywords are present.
+        Candidates from PR Monitor, ranked when keywords are present.
 
     Raises:
-        SourceConfigError: If ``primus_cortex`` is requested without config.
-        PrimusCortexError: On Primus transport errors.
+        SourceConfigError: If ``pr_monitor`` is requested without config.
+        PRMonitorError: On PR Monitor transport errors.
     """
-    cfg = request.primus_cortex
+    cfg = request.pr_monitor
     if cfg is None:
         raise SourceConfigError(
-            "search_modes contains 'primus_cortex' but no primus_cortex block was provided (nor KB_STORE_URL env var)"
+            "search_modes contains 'pr_monitor' but no pr_monitor block was provided (nor KB_STORE_URL env var)"
         )
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)
@@ -333,12 +333,12 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             timeout_sec=cfg.timeout_sec,
             **list_state_kwargs,
         )
-        return [_pr_to_candidate(pr, request.repo_url, "primus_cortex") for pr in prs]
+        return [_pr_to_candidate(pr, request.repo_url, "pr_monitor") for pr in prs]
 
     over_fetch = max(requested * 3, requested)
     query = " ".join(keywords)
     try:
-        prs = search_perf_prs_via_primus_search(
+        prs = search_perf_prs_via_pr_monitor_search(
             request.repo_url,
             base_url=cfg.base_url,
             query=query,
@@ -346,7 +346,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
             state=search_state,
             timeout_sec=cfg.timeout_sec,
         )
-    except PrimusCortexError:
+    except PRMonitorError:
         # Service may not implement /v1/search/prs; fall back to label-only listing.
         prs = list_perf_prs(
             request.repo_url,
@@ -375,7 +375,7 @@ def _run_primus_cortex(request: ExploreRequest) -> list[Candidate]:
         _pr_to_candidate(
             pr,
             request.repo_url,
-            "primus_cortex",
+            "pr_monitor",
             score=score_title_with_anti_signal(pr.title or "", keywords),
         )
         for pr in ranked
