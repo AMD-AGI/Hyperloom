@@ -784,7 +784,7 @@ class KernelPhase(PhaseHandler):
             reference_verification_status = "unverified"
         reference_verified = reference_verification_status == "verified_observed"
         observed_identity = str(measurement.get("observed_launch_identity") or "")
-        if not observed_identity and identity_matches and observed_flags:
+        if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
             observed_payload = json.dumps(
                 {
                     "declared_launch_identity": measured_identity,

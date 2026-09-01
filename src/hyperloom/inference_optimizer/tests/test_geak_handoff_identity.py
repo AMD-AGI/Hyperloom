@@ -128,6 +128,25 @@ def test_measurement_identity_invalidates_when_recipe_content_changes(tmp_path: 
     assert writer.build_env_spec()["launch_identity"] != identity
 
 
+def test_measurement_identity_survives_recipe_repath_with_identical_content(tmp_path: Path) -> None:
+    first = tmp_path / "baseline.20260901T010101Z.yaml"
+    first.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
+    state = SharedState(
+        baseline_config_path=str(first),
+        current_best={"tput": 100.0, "optimization_stack": []},
+    )
+    writer = _writeback(tmp_path, state)
+    writer._stamp_current_best_measurement()
+    identity = state.current_best_measurement["launch_identity"]
+
+    # A baseline re-run materializes the same recipe at a fresh timestamped path.
+    second = tmp_path / "baseline.20260901T020202Z.yaml"
+    second.write_text("benchmark: {model: /models/a}\n", encoding="utf-8")
+    state.baseline_config_path = str(second)
+
+    assert writer.build_env_spec()["launch_identity"] == identity
+
+
 @pytest.mark.asyncio
 async def test_handoff_rejects_stale_tput_without_matching_measurement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -311,6 +330,46 @@ async def test_handoff_exposes_archived_sglang_observed_identity_map(
     assert handoff["same_config_reference_verification_status"] == "verified_observed"
     assert handoff["same_config_observed_identity"] == expected
     assert handoff["observed_server_identity"] == expected
+
+
+@pytest.mark.asyncio
+async def test_handoff_hashes_observed_identity_from_server_args_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ServerArgs line proves observation even without an argv trace.
+
+    The two come from different writers, so a log can carry
+    ``server_args=ServerArgs(...)`` and no ``+ python -m sglang.launch_server``
+    line; the observed identity hash must still be published as proof.
+    """
+    state = _verified_current_best(tmp_path)
+    measurement = state.current_best["measurement"]
+    measurement["resolved_server_launch_flags"] = ""
+    measurement["launch_evidence"] = {
+        "schema_version": 1,
+        "framework": "sglang",
+        "requested_server_args": "--mem-fraction-static 0.8",
+        "recipe_digest": "sha256:declared",
+        "observed_server_launch_flags": "",
+        "observed_server_identity": {"model_path": "/models/qwen", "tp_size": 8},
+    }
+    measurement["launch_identity"] = _writeback(tmp_path, state).build_env_spec()["launch_identity"]
+    coord = Coordinator.__new__(Coordinator)
+    coord.session_dir = tmp_path
+    coord.shared_state = state
+    coord.phase_kernel._record_geak_kernel_journey = lambda _result: None
+    monkeypatch.setenv("FRAMEWORK", "sglang")
+
+    monkeypatch.setattr(
+        "hyperloom.orchestrator.kernel.request_handlers._kernel_agent_tool_path",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("stop after handoff write")),
+    )
+    await coord._run_geak_kernel_phase(from_phase="KERNEL")
+
+    handoff = json.loads((tmp_path / "geak" / "handoff.json").read_text(encoding="utf-8"))
+    assert handoff["same_config_reference_verification_status"] == "verified_observed"
+    assert handoff["same_config_reference_observed_identity"].startswith("sha256:")
+    assert handoff["orchestrator_best_tput_same_config"] == pytest.approx(1403.43)
 
 
 def test_sglang_server_args_fallback_records_declared_resolved_config(

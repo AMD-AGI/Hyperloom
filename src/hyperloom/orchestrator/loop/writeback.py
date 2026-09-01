@@ -4397,8 +4397,11 @@ class WritebackCollaborator:
     def _handoff_launch_identity(env_spec: Mapping[str, Any]) -> str:
         """Return a stable identity for the complete GEAK baseline launch."""
         config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        # The recipe PATH is deliberately excluded: a baseline re-run repoints
+        # ``baseline_config_path`` at a new timestamped YAML without re-stamping
+        # current_best, so hashing the path drops the same-config reference for a
+        # byte-identical recipe. The digest already carries the recipe content.
         payload = {
-            "base_launch_recipe": str(env_spec.get("base_launch_recipe") or ""),
             "base_launch_recipe_digest": str(env_spec.get("base_launch_recipe_digest") or ""),
             "extra_server_args": str(config.get("extra_server_args") or ""),
             "extra_envs": dict(config.get("extra_envs") or {}),
