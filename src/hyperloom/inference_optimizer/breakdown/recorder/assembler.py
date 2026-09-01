@@ -338,6 +338,7 @@ def _deep_merge(
     *,
     conflicts: list[str] | None = None,
     path: str = "",
+    entity_root: bool = True,
 ) -> dict[str, Any]:
     """Merge partial entity state while preserving nested keyed histories."""
     merged = dict(current)
@@ -349,9 +350,20 @@ def _deep_merge(
                 value,
                 conflicts=conflicts,
                 path=f"{path}.{key}" if path else key,
+                entity_root=False,
             )
         elif isinstance(previous, list) and isinstance(value, list):
             merged[key] = _merge_lists(previous, value, conflicts=conflicts, path=path)
+        elif key == "started_at" and previous and value and entity_root:
+            # Partial updates describe one operation. The first fragment owns
+            # its start time; later result/finalization updates must not move
+            # the start forward merely because they were written later.
+            #
+            # Only at the entity root (``path`` is the bare stable id, or empty
+            # for a direct call): a substep / gate / extension nested below has
+            # its own start time, and quietly keeping the smaller of two would
+            # stamp one sub-entity with another's clock and swallow the conflict.
+            merged[key] = min(str(previous), str(value))
         else:
             if conflicts is not None and previous is not None and value is not None and previous != value:
                 # A field arriving twice with two values. Filling a gap is what
@@ -401,6 +413,7 @@ def _merge_lists(
                 value,
                 conflicts=conflicts,
                 path=f"{path}.{identity[1]}" if identity and path else path,
+                entity_root=False,
             )
     return merged
 

@@ -2135,6 +2135,16 @@ def invoke_backend(
             result["output_dir"] = str(out_dir)
             if invocation_spec_path.is_file():
                 result["invocation_spec_path"] = str(invocation_spec_path)
+            # submit() decides the FlyDSL rewrite route and records the verdict
+            # on its result, but nothing persisted that dict, so opting in with
+            # HYPERLOOM_FORGE_REWRITE_BY_FLYDSL and silently getting plain
+            # forge-loop was indistinguishable from the route running. This is
+            # the one channel the attempt log is known to surface.
+            if log_path is not None:
+                route = result.get("flydsl_rewrite")
+                if isinstance(route, dict):
+                    verdict = "eligible" if route.get("eligible") else f"declined:{route.get('reason')}"
+                    append_log(log_path, f"flydsl_rewrite_route={verdict} {route.get('detail') or ''}".rstrip())
             return result
         return {
             "returncode": 2,

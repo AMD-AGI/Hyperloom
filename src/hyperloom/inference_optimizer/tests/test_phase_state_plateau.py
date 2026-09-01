@@ -259,7 +259,6 @@ def test_plateau_kernel_empty_attempts_dict_with_no_entries_does_not_trigger():
 def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state = SharedState(session_id="t")
     state.params_no_promote_streak = 4
-    state.explore_specialist_dispatched_count = 3
     state.framework_agent_phase_done = True
     state.framework_agent_discover_failures = 2
     state.framework_agent_empty_discoveries = 2
@@ -274,7 +273,6 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.reset_per_cycle_plateau_state()
 
     assert state.params_no_promote_streak == 0
-    assert state.explore_specialist_dispatched_count == 0
     assert state.framework_agent_phase_done is False
     assert state.framework_agent_discover_failures == 0
     assert state.framework_agent_empty_discoveries == 0

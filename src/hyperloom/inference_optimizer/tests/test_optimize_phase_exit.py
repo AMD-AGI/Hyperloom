@@ -113,7 +113,6 @@ def test_every_reason_it_emits_is_in_the_exit_vocabulary():
         "optimize_no_more_leverage",
         "optimize_phase_budget_exhausted",
         "optimize_budget_cap",
-        "plateau_explore",
     }
     assert emitted <= ps.PHASE_EXIT_REASONS
 

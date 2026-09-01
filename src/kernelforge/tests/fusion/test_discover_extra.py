@@ -107,12 +107,27 @@ def test_default_llm_fn_no_custom_headers_omits_default_headers(monkeypatch):
     assert "default_headers" not in captured
 
 
-def test_default_llm_fn_ignores_anthropic_custom_headers(monkeypatch):
-    # OpenAI side reads only OPENAI_CUSTOM_HEADERS; Anthropic-only headers must
-    # not leak onto the OpenAI-compatible endpoint (matches Hyperloom).
-    monkeypatch.setenv("OPENAI_BASE_URL", "http://gw")
+def test_default_llm_fn_falls_back_to_anthropic_custom_headers(monkeypatch):
+    # When OPENAI_CUSTOM_HEADERS is unset and both lines are the same gateway,
+    # fusion discovery reuses the Anthropic line's headers so spend tags
+    # injected there reach OpenAI-protocol calls.
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://gw/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "KEY")
     monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://gw")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "user: ntid-123")
+    captured = _install_capturing_openai(monkeypatch)
+    default_llm_fn()("prompt")
+    assert captured["default_headers"] == {"user": "ntid-123"}
+
+
+def test_default_llm_fn_does_not_send_anthropic_headers_to_another_host(monkeypatch):
+    # These headers carry the operator's gateway secret; a different host is not
+    # entitled to it just because this line left its own header slot empty.
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://other/v1")
+    monkeypatch.setenv("OPENAI_API_KEY", "KEY")
+    monkeypatch.delenv("OPENAI_CUSTOM_HEADERS", raising=False)
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://gw")
     monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "user: ntid-123")
     captured = _install_capturing_openai(monkeypatch)
     default_llm_fn()("prompt")

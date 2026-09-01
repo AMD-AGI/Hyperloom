@@ -40,6 +40,9 @@ def _build_session(sd: Path) -> None:
     _write(sd / "reports" / "optimization_journal.json", "[]")
     _write(sd / "reports" / "kernel_optimization_summary.json", "{}")
     _write(sd / "reports" / "kernel_roofline.json", "{}")
+    _write(sd / "reports" / "sbd_v6" / "timeline" / "000001-install.json", "{}")
+    _write(sd / "reports" / "sbd_v6" / "timeline" / "000002-model_gate.json", "{}")
+    _write(sd / "reports" / "sbd_v6" / "write_warnings.jsonl", "{}\n")
     _write(sd / "reports" / "trace" / "decision_trace.jsonl", "{}\n")
     _write(sd / "reports" / "trace" / "llm_calls.jsonl", "{}\n")
     _write(sd / "target_analysis" / "target_baseline.json", "{}")
@@ -102,6 +105,9 @@ def test_package_includes_curated_excludes_noise(tmp_path: Path) -> None:
         "reports/optimization_journal.json",
         "reports/kernel_optimization_summary.json",
         "reports/kernel_roofline.json",
+        "reports/sbd_v6/timeline/000001-install.json",
+        "reports/sbd_v6/timeline/000002-model_gate.json",
+        "reports/sbd_v6/write_warnings.jsonl",
         "reports/trace/decision_trace.jsonl",
         "reports/trace/llm_calls.jsonl",
         "target_analysis/target_baseline.json",
@@ -213,6 +219,8 @@ def test_loose_files_dropped_at_dest_root(tmp_path: Path) -> None:
         "session_breakdown.json",
         "state.json",
         "reports/final.json",
+        "reports/sbd_v6/timeline/000001-install.json",
+        "reports/sbd_v6/timeline/000002-model_gate.json",
         "reports/trace/decision_trace.jsonl",
         "kernel-agent/runs/20260609T010022Z/20260609T012416Z_tl-abc/tracelens/analysis.md",
         "runs/baseline/abc/measure_round/benchmark_sglang_x/benchmark_report.json",

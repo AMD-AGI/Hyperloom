@@ -165,7 +165,7 @@ def test_a_session_whose_records_never_arrived_says_so(tmp_path):
     assert "attribution" not in result
     assert "geak_invocations" not in result
     assert "forge_invocations" not in result
-    assert "geak" not in result
+    assert result["geak"] == {}
     assert "gemm_tuning" not in result
 
 

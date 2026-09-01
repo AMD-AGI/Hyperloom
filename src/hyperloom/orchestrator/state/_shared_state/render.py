@@ -115,10 +115,26 @@ class _RenderMixin:
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
+        geak_revalidation_status = (
+            str(self.geak_result.get("revalidation_status") or "")
+            if isinstance(getattr(self, "geak_result", None), dict)
+            else ""
+        )
+        geak_in_stack = any(
+            isinstance(entry, dict) and str(entry.get("action") or "") == "geak_e2e"
+            for entry in (getattr(self, "optimization_stack", None) or [])
+        )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
         elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
+        elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
+            # A fallback rebench that also failed is the same unjudged drop; only
+            # ``no_material`` / ``no_promote`` are verdicts and stay silent here.
+            # A ``failed`` 2b is never retracted when the 2a fallback then
+            # promotes, so confirm the candidate really is out of the stack
+            # before calling it dropped.
+            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry

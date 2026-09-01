@@ -21,6 +21,7 @@ from kernelforge.agent_backends import (
     AgentRunSpec,
     AgentToolPolicy,
     StdioMcpServer,
+    watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.llm.process_reaping import ReapReport, reap_processes_under
@@ -630,7 +631,7 @@ class SpecialistAgent:
                     ),
                     usage=usage,
                 ),
-                timeout=self.timeout_sec,
+                timeout=watchdog_timeout_sec(self.timeout_sec),
             )
             if is_api_failure(result):
                 detail = (
@@ -765,6 +766,12 @@ class SpecialistAgent:
             load_sandbox(candidate.server_env())
         except ProbeSandboxError as error:
             return self._no_probe(assignment, str(error))
+        # Create after load_sandbox: a refused probe must not leave an orphaned sentinel.
+        try:
+            candidate.device_lock.parent.mkdir(parents=True, exist_ok=True)
+            candidate.device_lock.touch(exist_ok=True)
+        except OSError as error:
+            return self._no_probe(assignment, f"could not create device sentinel: {error}")
         return candidate
 
     def _no_probe(self, assignment: SpecialistAssignment, reason: str) -> _ProbeSetup:

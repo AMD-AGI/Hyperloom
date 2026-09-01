@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 from kernelforge.agent_backends.base import (
+    AGENT_WATCHDOG_GRACE_SEC,
     AgentBackend,
     AgentCapabilities,
     AgentHook,
@@ -19,6 +20,7 @@ from kernelforge.agent_backends.base import (
     AgentToolPolicy,
     ResumableAgentBackend,
     StdioMcpServer,
+    watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.registry import (
     AgentProvider,
@@ -32,6 +34,7 @@ from kernelforge.agent_backends.registry import (
 )
 
 __all__ = [
+    "AGENT_WATCHDOG_GRACE_SEC",
     "AgentBackend",
     "AgentCapabilities",
     "AgentHook",
@@ -53,4 +56,5 @@ __all__ = [
     "list_agent_providers",
     "register_agent_provider",
     "resolve_agent_runtime",
+    "watchdog_timeout_sec",
 ]

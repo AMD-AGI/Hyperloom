@@ -91,7 +91,7 @@ Bypass with `--critic-mock` for offline / smoke runs. See
   stop and report, only resume if the user changes workload / search space /
   model / strategy.
   (Leverage exhaustion *within* a single phase is now the non-terminal
-  phase-exit reason `explore_no_more_leverage` / `kernel_no_more_leverage`,
+  phase-exit reason `optimize_no_more_leverage` / `kernel_no_more_leverage`,
   which switches lever rather than ending the run.)
 - `stop_reason=policy_loop`: a legacy stop_reason kept in the vocabulary for
   resuming old sessions; nothing in the runtime sets it. Repeated `policy_denied`

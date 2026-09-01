@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sys
 import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
-from kernelforge.agent_backends import AgentRunSpec
+from kernelforge.agent_backends import AgentRunSpec, watchdog_timeout_sec
 from kernelforge.agent_backends.session_resume import is_api_failure
 from kernelforge.config import Config
 from kernelforge.durable_io import atomic_write_text
@@ -284,6 +285,10 @@ def make_supervisor_fn(
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise asyncio.TimeoutError
+                # One budget drives both, so the backend's own deadline always fires
+                # before the outer watchdog. Rounded up: a sub-second sliver of
+                # elapsed time must not shorten the configured session budget.
+                session_budget = max(1, math.ceil(min(float(timeout_sec), remaining)))
                 result = await asyncio.wait_for(
                     selected_backend.run(
                         AgentRunSpec(
@@ -291,7 +296,7 @@ def make_supervisor_fn(
                             user_prompt=user_prompt,
                             cwd=workspace,
                             writable=False,
-                            timeout_sec=timeout_sec,
+                            timeout_sec=session_budget,
                             reasoning_effort="max",
                             tool_policy=AgentToolPolicy(
                                 read=True,
@@ -305,7 +310,7 @@ def make_supervisor_fn(
                         ),
                         usage=usage,
                     ),
-                    timeout=remaining,
+                    timeout=watchdog_timeout_sec(session_budget),
                 )
                 if is_api_failure(result):
                     detail = (
