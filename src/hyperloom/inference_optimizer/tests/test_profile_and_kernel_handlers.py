@@ -4507,7 +4507,9 @@ def test_batch_candidates_skips_in_flight_kernels(
             {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
         ]
     )
-    # Plant a running status file for k004.
+    # Plant a running status file for k004. The pid must be a live one: the
+    # marker is only honored while its process is, so a fabricated pid would
+    # describe a dead run and correctly free the kernel.
     status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
     status_dir.mkdir(parents=True, exist_ok=True)
     (status_dir / "ko-deadbeef.json").write_text(
@@ -4515,7 +4517,7 @@ def test_batch_candidates_skips_in_flight_kernels(
             {
                 "state": "running",
                 "current_step": "run_backends",
-                "pid": 123456,
+                "pid": os.getpid(),
                 "last_lines": ["kernel_id=k004", "selected_backends=forge"],
             }
         )
@@ -4527,6 +4529,38 @@ def test_batch_candidates_skips_in_flight_kernels(
     )
     out_ids = sorted(c.get("kernel_id") for c in out)
     assert out_ids == ["k001"]
+
+
+def test_batch_candidates_ignore_a_stale_in_flight_marker(
+    session_dir,
+    _candidates_factory,
+):
+    """A signal-killed run leaves its marker behind; its kernel must stay eligible."""
+    cpath = _candidates_factory(
+        [
+            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
+            {"kernel_id": "k004", "gpu_pct": 9.7, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
+        ]
+    )
+    status_dir = session_dir / "kernel-agent" / "runs" / session_dir.name / "status" / "kernel_optimization"
+    status_dir.mkdir(parents=True, exist_ok=True)
+    (status_dir / "ko-deadbeef.json").write_text(
+        json.dumps(
+            {
+                "state": "running",
+                "current_step": "run_backends",
+                # A pid that cannot exist: the process is provably gone.
+                "pid": 2**31 - 1,
+                "last_lines": ["kernel_id=k004", "selected_backends=forge"],
+            }
+        )
+    )
+
+    out = krh._batch_kernel_candidates(
+        {"candidates_path": cpath},
+        session_dir=session_dir,
+    )
+    assert sorted(c.get("kernel_id") for c in out) == ["k001", "k004"]
 
 
 def test_batch_candidates_below_min_gpu_pct_skipped(

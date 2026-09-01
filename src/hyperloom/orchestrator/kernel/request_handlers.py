@@ -6020,12 +6020,27 @@ def _in_flight_kernel_ids(session_dir: Path) -> set[str]:
     status_dir = kernel_agent_runs_dir(session_dir, sid) / "status" / "kernel_optimization"
     if not status_dir.is_dir():
         return in_flight
+    from hyperloom.common.in_flight_liveness import evaluate_marker
+
     for p in status_dir.glob("ko-*.json"):
         try:
             d = json.loads(p.read_text(encoding="utf-8"))
         except Exception:
             continue
-        if str(d.get("state") or "").lower() != "running":
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            mtime = None
+        # A signal-killed subprocess never clears its own marker, so a running
+        # state alone would pin its kernel as busy for the rest of the session.
+        verdict = evaluate_marker(state=d.get("state"), pid=d.get("pid"), mtime=mtime)
+        if not verdict.in_flight:
+            if verdict.stale_reason:
+                log.info(
+                    "kernel in-flight marker %s is stale (%s); treating its kernel as free",
+                    p.name,
+                    verdict.stale_reason,
+                )
             continue
         kid = ""
         for line in d.get("last_lines") or []:

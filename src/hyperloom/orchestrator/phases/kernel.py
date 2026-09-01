@@ -3586,16 +3586,26 @@ class KernelPhase(PhaseHandler):
             "KERNEL entry: dispatching the source-level kernel_opt batch",
         )
         try:
-            from ..kernel.request_handlers import run_optimization_handler
+            from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
 
-            result = await run_optimization_handler(
-                {
-                    "candidates_path": candidates_path,
-                    "session_id": self.session_dir.name,
-                },
-                session_dir=self.session_dir,
-                record_partial=self._record_kernel_opt_partial,
-            )
+            from ..kernel.request_handlers import run_optimization_handler
+            from .machine_state import KERNEL_HEARTBEAT_SEC
+
+            # This step awaits a subprocess that can run for an hour. Without a
+            # re-stamped progress marker the idle guard cannot tell a working
+            # phase from a stuck one, and the phase is unobservable throughout.
+            def _stamp(when: float) -> None:
+                self.shared_state.kernel_inline_step_seen_unix = when
+
+            async with inline_step_heartbeat(stamp=_stamp, interval_sec=KERNEL_HEARTBEAT_SEC):
+                result = await run_optimization_handler(
+                    {
+                        "candidates_path": candidates_path,
+                        "session_id": self.session_dir.name,
+                    },
+                    session_dir=self.session_dir,
+                    record_partial=self._record_kernel_opt_partial,
+                )
         except Exception as exc:  # noqa: BLE001
             log.exception("KERNEL entry run_optimization after GEMM failed")
             result = {
