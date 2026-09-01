@@ -90,6 +90,13 @@ _ROLLUP_TO_OUTCOME = {
 }
 _OUTCOME_VALUES = frozenset({"KEEP", "REVERT", "FAILED", "NEEDS_REVIEW", "SKIPPED"})
 _MICRO_DECISIONS = frozenset({"KEEP", "REVERT", "PARTIAL", "FAILED", "SKIPPED"})
+# A final rebench either adopted, rejected, could not decide, or never reached
+# a verdict. ``PARTIAL`` / ``SKIPPED`` are candidate-level words and say
+# nothing about a measurement that ran.
+_ATTEMPT_DECISIONS = frozenset({"KEEP", "REVERT", "NEEDS_REVIEW", "FAILED"})
+# The sweep lane spells success ``ok`` where the kernel lanes spell it
+# ``succeeded``; the two vocabularies are not interchangeable.
+_SWEEP_POINT_OK = "ok"
 # ``make_proposal`` emits a fifth verdict for a rewrite that cleared the gates
 # it could measure and left the rest unproven. ``micro_decision`` has no such
 # member; ``PARTIAL`` is the one that means the same thing here, and reading it
@@ -104,6 +111,16 @@ _GEAK_REVALIDATION_OUTCOMES = {
     "failed": "FAILED",
     "fallback_failed": "FAILED",
 }
+# ``collect_geak``'s own words for a run whose result it could not read back.
+# Both carry ``error_class: no_result``; recognizing them here keeps the shared
+# status normalizer from reporting an ordinary GEAK miss as vocabulary drift.
+_GEAK_STATUS_ALIASES = {"missing": "failed", "no_result_recovered_from_disk": "failed"}
+# ``missing`` is the one GEAK status that is not a record of work: it is what
+# ``collect_geak`` returns when ``kernel_optimizer=geak`` was selected, nothing
+# was recorded, and nothing was on disk either — the launch config echoed back.
+# GEAK is the default backend, so reading it as evidence would conjure a Kernel
+# visit onto every session that ended before KERNEL.
+_GEAK_CONFIG_ECHO_STATUSES = frozenset({"missing"})
 # The run-level lanes spell the same field in their own lowercase vocabulary.
 _CANDIDATE_DECISIONS = frozenset({"candidate", "no_improvement", "failed", "skipped"})
 _STOP_REASONS_SWEEP = frozenset({"sweep_failed", "sweep_unusable", "sweep_timeout"})
@@ -158,11 +175,19 @@ def _lane_status(raw: Any, *, where: str, warnings: list[str], allow_partial: bo
 def _lane_outcome(*values: Any, where: str, warnings: list[str]) -> str:
     """Resolve a candidate's business outcome onto the closed ``outcome`` enum.
 
-    The first value that says anything wins; ``kernel_journey``'s coarse rollup
-    vocabulary is translated rather than uppercased, and ``PARTIAL`` — legal for
-    a ``micro_decision`` but not for an ``outcome`` — becomes ``NEEDS_REVIEW``,
-    which is the enum's word for "measured, but not a verdict".
+    The first value that *says something recognizable* wins; ``kernel_journey``'s
+    coarse rollup vocabulary is translated rather than uppercased, and
+    ``PARTIAL`` — legal for a ``micro_decision`` but not for an ``outcome`` —
+    becomes ``NEEDS_REVIEW``, which is the enum's word for "measured, but not a
+    verdict".
+
+    An unrecognized spelling is warned about and then *skipped*, not returned
+    on. The values are passed in priority order precisely because the later
+    ones are weaker restatements of the same fact, so a new spelling of the
+    strongest one must not also discard the fallbacks that still parse —
+    that would disable the drift tolerance in the case it exists for.
     """
+    drifted = False
     for value in values:
         raw = _lower(value)
         if not raw:
@@ -172,9 +197,51 @@ def _lane_outcome(*values: Any, where: str, warnings: list[str]) -> str:
             return mapped
         if mapped == "PARTIAL":
             return "NEEDS_REVIEW"
-        warnings.append(f"v6.timeline.kernel: unrecognized {where} outcome {raw!r}; reported as SKIPPED")
-        return "SKIPPED"
+        warnings.append(f"v6.timeline.kernel: unrecognized {where} outcome {raw!r}; ignored")
+        drifted = True
+    if drifted:
+        warnings.append(f"v6.timeline.kernel: no recognizable {where} outcome; reported as SKIPPED")
     return "SKIPPED"
+
+
+def _attempt_decision(raw: Any, *, warnings: list[str]) -> str:
+    """Resolve a final rebench's verdict onto the ``attempts[].decision`` enum.
+
+    Distinct from :func:`_micro_decision`, whose enum is the candidate-level
+    one. A rebench that produced no verdict at all reports ``FAILED``; a
+    verdict spelled in a vocabulary this does not know reports
+    ``NEEDS_REVIEW``, because something was decided and filing it as a failure
+    would claim more than the record supports.
+    """
+    decision = _upper(raw)
+    if not decision:
+        return "FAILED"
+    if decision in _ATTEMPT_DECISIONS:
+        return decision
+    if decision in _MICRO_DECISION_ALIASES or decision == "PARTIAL":
+        return "NEEDS_REVIEW"
+    warnings.append(f"v6.timeline.kernel: unrecognized attempt decision {decision!r}; reported as NEEDS_REVIEW")
+    return "NEEDS_REVIEW"
+
+
+def _sweep_point_status(raw: Any, *, warnings: list[str]) -> str:
+    """Map a grid point's status onto the sweep enum ``ok | skipped | failed``.
+
+    Kept separate from :func:`_lane_status` because the sweep lane spells
+    success ``ok``. That is not cosmetic: :func:`project_sweep_event` counts
+    usable points by that exact word, so a producer switching to ``succeeded``
+    would not merely look odd — the stage would report ``skipped`` while
+    carrying a full grid of measured points.
+    """
+    status = _lower(raw)
+    if not status or status in _SKIPPED_STATUSES:
+        return "skipped"
+    if status in _OK_STATUSES:
+        return _SWEEP_POINT_OK
+    if status in _FAILED_STATUSES:
+        return "failed"
+    warnings.append(f"v6.timeline.sweep: unrecognized point status {status!r}; reported as failed")
+    return "failed"
 
 
 def _candidate_decision(raw: Any, *, where: str, warnings: list[str], default: str) -> str:
@@ -235,6 +302,26 @@ def _time_window(*row_groups: list[dict[str, Any]]) -> tuple[str, str]:
 
 def _failure(error_class: Any = None, error: Any = None) -> dict[str, Any]:
     return {"error_class": _text(error_class), "error": _text(error)}
+
+
+def _sequence(value: Any) -> list[Any]:
+    """Read a recorded field that should be a sequence, whatever it turned out to be.
+
+    A corrupt or hand-edited ``state.json`` that stored a bare scalar where a
+    list belongs would otherwise raise out of the projector, and a raise here
+    costs the whole timeline rather than one field. A string is wrapped rather
+    than iterated: its characters are never the intended elements.
+    """
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _int_list(value: Any) -> list[int]:
+    """Coerce a recorded grid to the ints it can supply, dropping the rest."""
+    return [number for number in (_to_int(item) for item in _sequence(value)) if number is not None]
 
 
 def _sorted_grid(rows: list[dict[str, Any]], key: str) -> list[int]:
@@ -338,7 +425,7 @@ def project_baseline_event(
 # ---------------------------------------------------------------------------
 # sweep
 # ---------------------------------------------------------------------------
-def _sweep_variant(point: dict[str, Any]) -> dict[str, Any]:
+def _sweep_variant(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     return {
         # V5 names sweep points, it does not id them; the name is the identity
         # the rest of the session joins on.
@@ -349,7 +436,7 @@ def _sweep_variant(point: dict[str, Any]) -> dict[str, Any]:
         "conc": _to_int(point.get("conc")),
         "isl": _to_int(point.get("isl")),
         "osl": _to_int(point.get("osl")),
-        "status": _lower(point.get("status")) or "skipped",
+        "status": _sweep_point_status(point.get("status"), warnings=warnings),
         "output_throughput_tok_s": _to_float(point.get("output_throughput_tok_s")),
         "ttft_mean_ms": _to_float(point.get("ttft_mean_ms")),
         "e2el_mean_ms": _to_float(point.get("e2el_mean_ms")),
@@ -401,8 +488,8 @@ def project_sweep_event(
     if not points and not last_sweep and not attempts and not rows:
         return None
 
-    variants = [_sweep_variant(point) for point in points]
-    ok_count = sum(1 for variant in variants if variant["status"] == "ok")
+    variants = [_sweep_variant(point, warnings) for point in points]
+    ok_count = sum(1 for variant in variants if variant["status"] == _SWEEP_POINT_OK)
     failed_count = sum(1 for variant in variants if variant["status"] == "failed")
 
     stop_reason = _lower(state.get("stop_reason"))
@@ -481,10 +568,10 @@ def project_sweep_event(
 # ---------------------------------------------------------------------------
 # conc_sweep
 # ---------------------------------------------------------------------------
-def _conc_point(point: dict[str, Any]) -> dict[str, Any]:
+def _conc_point(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     return {
         "conc": _to_int(point.get("conc")),
-        "status": _lower(point.get("status")) or "skipped",
+        "status": _lane_status(point.get("status"), where="conc_sweep.points", warnings=warnings),
         "output_throughput": _to_float(point.get("output_throughput")),
         "ttft_mean_ms": _to_float(point.get("ttft_mean_ms")),
         "e2el_mean_ms": _to_float(point.get("e2el_mean_ms")),
@@ -494,13 +581,13 @@ def _conc_point(point: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _conc_arm(arm: Any) -> dict[str, Any]:
+def _conc_arm(arm: Any, warnings: list[str]) -> dict[str, Any]:
     mapping = _mapping(arm)
     return {
         # Non-nullable: the baseline arm's defining property is that it adds
         # no server args, and ``""`` says that where ``None`` would not.
         "extra_server_args": str(mapping.get("extra_server_args") or ""),
-        "points": [_conc_point(point) for point in _dict_rows(mapping.get("points"))],
+        "points": [_conc_point(point, warnings) for point in _dict_rows(mapping.get("points"))],
     }
 
 
@@ -558,16 +645,17 @@ def project_conc_sweep_event(
 
     reported = _lower(_first(summary.get("status"), last.get("status")))
     budget_exhausted = _optional_bool(_first(summary.get("budget_exhausted"), last.get("budget_exhausted")))
-    if reported == "skipped":
-        status = "skipped"
-    elif reported in _FAILED_STATUSES:
-        status = "failed"
-    elif reported in _OK_STATUSES:
+    # One normalization feeds both the event status and ``result.status``, so a
+    # producer's spelling cannot make the two disagree. An unrecognized word
+    # lands on ``failed`` with a warning, as it does in every other lane,
+    # rather than on a silent ``degraded`` that reads like a real measurement.
+    result_status = _lane_status(reported, where="conc_sweep", warnings=warnings)
+    if result_status == "succeeded":
         # A curve cut short by the time budget still produced usable pairs,
         # but not the ladder that was asked for.
         status = "degraded" if budget_exhausted else "succeeded"
     else:
-        status = "degraded"
+        status = result_status
 
     points_by_arm = {
         arm: {_to_int(point.get("conc")): point for point in _dict_rows(_mapping(summary.get(arm)).get("points"))}
@@ -613,25 +701,20 @@ def project_conc_sweep_event(
             },
             "plan": {
                 "grid_source": None,
-                "concs_requested": [
-                    value
-                    for value in (
-                        _to_int(item)
-                        for item in (summary.get("concs_requested") or state.get("conc_sweep_concs") or [])
-                    )
-                    if value is not None
-                ],
+                "concs_requested": _int_list(
+                    summary.get("concs_requested") or state.get("conc_sweep_concs"),
+                ),
                 "budget_sec": _to_int(
                     _first(summary.get("total_budget_sec"), state.get("conc_sweep_total_budget_sec"))
                 ),
             },
             "arms": {
-                "baseline": _conc_arm(summary.get("baseline")),
-                "optimized": _conc_arm(summary.get("optimized")),
+                "baseline": _conc_arm(summary.get("baseline"), warnings),
+                "optimized": _conc_arm(summary.get("optimized"), warnings),
             },
             "comparison": comparison,
             "result": {
-                "status": reported or "skipped",
+                "status": result_status,
                 "best_conc": _to_int(result_summary.get("best_conc")),
                 "best_speedup": _to_float(result_summary.get("best_speedup")),
                 "skip_reason": _text(_first(summary.get("skip_reason"), last.get("skip_reason"))),
@@ -703,8 +786,6 @@ def _adopted_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
     if not rows:
         return None
     stamped = [row for row in rows if row.get("best_artifact_path")]
-    if len(stamped) == 1:
-        return stamped[0]
 
     def _rank(row: dict[str, Any]) -> tuple[float, str]:
         speedup = _to_float(_first(row.get("micro_speedup"), row.get("speedup")))
@@ -713,10 +794,29 @@ def _adopted_attempt(attempts: list[dict[str, Any]]) -> dict[str, Any] | None:
     return max(stamped or rows, key=_rank)
 
 
+def _rewrite_id(entry: dict[str, Any], attempt: dict[str, Any], sequence: int) -> str:
+    """Identify one backend attempt on one kernel, uniquely within the session.
+
+    ``attempt_id`` is the producer's own key and wins whenever it survived.
+    A recording that lost it used to fall back to ``kernel_id``, which *every*
+    backend attempt on that kernel shares — so two rows took one id, the
+    adopted-set test in :func:`_link_rebench_attempts` matched both, and the
+    losing backend claimed the winner's final rebench. The fallback now carries
+    the backend and the attempt's position, which is what tells the rows apart.
+    """
+    attempt_id = _text(attempt.get("attempt_id"))
+    if attempt_id:
+        return attempt_id
+    kernel_id = _text(entry.get("kernel_id")) or "unknown"
+    backend = _lower(attempt.get("backend")) or "unknown"
+    return f"{kernel_id}:{backend}:{sequence}"
+
+
 def _kernel_rewrite(
     entry: dict[str, Any],
     attempt: dict[str, Any],
     *,
+    sequence: int,
     adopted: bool,
     warnings: list[str],
 ) -> dict[str, Any]:
@@ -764,7 +864,7 @@ def _kernel_rewrite(
         # attempt that produced it.
         artifact_path = optimized_files[0] if optimized_files else None
     return {
-        "rewrite_id": str(_first(attempt.get("attempt_id"), entry.get("kernel_id")) or ""),
+        "rewrite_id": _rewrite_id(entry, attempt, sequence),
         # Backend attempts are keyed by run, not by orchestrator task.
         "task_id": None,
         "parent_run_id": _text(attempt.get("run_id")),
@@ -920,10 +1020,40 @@ def _gemm_tuner_attempts(run: dict[str, Any], warnings: list[str]) -> list[dict[
 
 
 def _gemm_tuning_run(run: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
-    """Project one ``optimizations.gemm_tuning_runs`` row."""
+    """Project one ``optimizations.gemm_tuning_runs`` row.
+
+    Like the fusion and collective lanes, a tuning run that beat its baseline
+    and that nothing adjudicated reports ``NEEDS_REVIEW`` rather than
+    ``SKIPPED``. The tuner does not adopt — only the final rebench does — and
+    ``SKIPPED`` is the one word :func:`_settle_pending_outcomes` will not
+    revisit, so a tuned table the rebench went on to KEEP used to stay on the
+    timeline as work that never happened.
+    """
     parameters = _mapping(run.get("parameters"))
     summary = _mapping(run.get("summary"))
     speedup = _to_float(run.get("best_speedup"))
+    micro_decision = (
+        "candidate"
+        if speedup is not None and speedup > 1.0
+        else ("no_improvement" if speedup is not None else ("failed" if run.get("error") else "skipped"))
+    )
+    if _text(run.get("decision")) or run.get("adopted"):
+        outcome = _lane_outcome(
+            run.get("decision"),
+            "adopted" if run.get("adopted") else None,
+            where="gemm_tuning_runs",
+            warnings=warnings,
+        )
+    elif micro_decision == "candidate":
+        outcome = "NEEDS_REVIEW"
+    elif micro_decision == "failed":
+        outcome = "FAILED"
+    elif micro_decision == "no_improvement":
+        # The tuner measured no improvement, so it offered nothing to
+        # integrate; there is no verdict outstanding.
+        outcome = "REVERT"
+    else:
+        outcome = "SKIPPED"
     return {
         # A tuning run's artifact is its dispatch CSV, which is also the
         # identity ``GemmTuningRun`` is keyed by.
@@ -936,18 +1066,9 @@ def _gemm_tuning_run(run: dict[str, Any], warnings: list[str]) -> dict[str, Any]
         "shape_artifact_path": _text(_first(parameters.get("shape_artifact_path"), parameters.get("shapes_path"))),
         "tuner_attempts": _gemm_tuner_attempts(run, warnings),
         "recommended_env": _mapping(_first(summary.get("recommended_env"), parameters.get("recommended_env"))),
-        "micro_decision": (
-            "candidate"
-            if speedup is not None and speedup > 1.0
-            else ("no_improvement" if speedup is not None else ("failed" if run.get("error") else "skipped"))
-        ),
+        "micro_decision": micro_decision,
         "final_rebench_attempt_ids": [],
-        "outcome": _lane_outcome(
-            run.get("decision"),
-            "adopted" if run.get("adopted") else None,
-            where="gemm_tuning_runs",
-            warnings=warnings,
-        ),
+        "outcome": outcome,
         "reason": _text(run.get("error")),
         "failure": _failure(run.get("error_class"), run.get("error")),
         "workspace": _text(run.get("workspace")),
@@ -1005,7 +1126,7 @@ def _collective_run(attempt: dict[str, Any], warnings: list[str]) -> dict[str, A
     }
 
 
-def _geak_run(geak: dict[str, Any], revalidation_status: str = "") -> dict[str, Any]:
+def _geak_run(geak: dict[str, Any], revalidation_status: str, warnings: list[str]) -> dict[str, Any]:
     """Project the session's GEAK whole-pipeline run.
 
     ``collect_geak`` folds the run into one session-scoped record, so this is
@@ -1019,23 +1140,37 @@ def _geak_run(geak: dict[str, Any], revalidation_status: str = "") -> dict[str, 
     from that stamp, and :func:`_settle_pending_outcomes` settles it once the
     window's rebench attempts are linked. A finished runner nobody adjudicated
     is ``NEEDS_REVIEW``, never ``KEEP``.
+
+    ``status`` and ``outcome`` are derived from one normalized value. They used
+    to keep separate vocabularies — ``outcome`` consulted the whole
+    ``_SKIPPED_STATUSES`` set while ``status`` compared against the literal
+    ``"skipped"`` — so a producer writing ``not_run`` emitted a row that
+    reported ``status: failed`` beside ``outcome: SKIPPED``.
     """
     handoff = _mapping(geak.get("handoff"))
     accepted = _mapping(geak.get("accepted_config"))
     status = _lower(geak.get("status"))
+    run_status = _GEAK_STATUS_ALIASES.get(status) or _lane_status(
+        status,
+        where="geak_runs",
+        warnings=warnings,
+    )
     revalidated = _GEAK_REVALIDATION_OUTCOMES.get(_lower(revalidation_status))
     if revalidated:
         outcome = revalidated
-    elif status in _OK_STATUSES:
+    elif run_status == "succeeded":
         outcome = "NEEDS_REVIEW"
-    elif not status or status in _SKIPPED_STATUSES:
+    elif run_status == "skipped":
         outcome = "SKIPPED"
     else:
         outcome = "FAILED"
     return {
         "run_id": str(_first(geak.get("exp_root"), geak.get("report_path"), "geak") or "geak"),
         "task_id": _text(handoff.get("task_id")),
-        "status": "succeeded" if status in _OK_STATUSES else ("skipped" if status == "skipped" else "failed"),
+        # The design's enum for this field has no ``partial``; a salvaged run
+        # is reported by its ``error_class`` and ``reason``, not by a status
+        # the contract does not define.
+        "status": "failed" if run_status == "partial" else run_status,
         # Whether GEAK's own baseline matched Hyperloom's is reasoned about at
         # rebench time and not written back onto the run record.
         "baseline_alignment_status": _text(geak.get("metric_basis")),
@@ -1052,7 +1187,7 @@ def _geak_run(geak: dict[str, Any], revalidation_status: str = "") -> dict[str, 
         "kernel_rewrite_ids": _string_list(
             [
                 _first(kernel.get("kernel_id"), kernel.get("name"), kernel) if isinstance(kernel, dict) else kernel
-                for kernel in geak.get("accepted_kernels") or []
+                for kernel in _sequence(geak.get("accepted_kernels"))
             ]
         ),
         "final_rebench_attempt_ids": [],
@@ -1147,12 +1282,13 @@ def _final_rebench_attempt(
     task_id_by_operation: dict[str, str],
     throughput_unit: str,
     attributed_gain_pct: float | None,
+    warnings: list[str],
 ) -> dict[str, Any]:
     """Project one ``optimizations.attempts[]`` row into a V6 rebench row."""
     source_kind = _attempt_source_kind(attempt)
     attempt_id = str(attempt.get("attempt_id") or "")
     status = _lower(attempt.get("status"))
-    decision = _upper(attempt.get("decision"))
+    decision = _attempt_decision(attempt.get("decision"), warnings=warnings)
     artifacts = _dict_rows(attempt.get("artifacts"))
     output_throughput = _to_float(attempt.get("throughput_after"))
     # Recorder operations use their terminal business word as ``status``. A
@@ -1209,7 +1345,7 @@ def _final_rebench_attempt(
             "evidence_path": _text(next((row.get("path") for row in artifacts if row.get("path")), None)),
             "reason": None,
         },
-        "decision": decision or "FAILED",
+        "decision": decision,
         # A REVERT the measurement itself broke is not the same claim as a
         # candidate that measured fairly and did not earn its threshold.
         "is_fault": is_fault,
@@ -1374,7 +1510,6 @@ def project_kernel_events(
     geak: Any = None,
     baseline: Any = None,
     recorded_operations: list[dict[str, Any]] | None = None,
-    kernel_optimization_summary: Any = None,
 ) -> list[dict[str, Any]]:
     """Project each Kernel Agent visit into its own V6 timeline event.
 
@@ -1402,8 +1537,6 @@ def project_kernel_events(
         baseline (Any): The V5 ``baseline`` section, for the throughput unit.
         recorded_operations (list[dict[str, Any]] | None): Raw recorder
             operations, joined on ``operation_id`` for the attempt task ids.
-        kernel_optimization_summary (Any): The V5 summary section, used only
-            to cross-check the attempt count.
 
     Returns:
         list[dict[str, Any]]: One event per Kernel visit, oldest first. Empty
@@ -1429,7 +1562,12 @@ def project_kernel_events(
     # route-level ``kernel_optimizer_run`` operation. New sessions have the
     # canonical ``geak_e2e`` attempt introduced by PR #1340.
     recorded_geak_attempts = _recorded_geak_final_attempts(recorded_operations, geak)
-    canonical_geak_attempts = [row for row in kernel_attempts if _lower(row.get("name")) == "geak_e2e"]
+    # Detect the canonical attempt the same way the lane classifier does. A
+    # narrower test here (``name == "geak_e2e"``) lets a canonical row spelled
+    # any other way slip past, and the recovery below then adds a second row
+    # for the same final validation — the canonical and route operations have
+    # different ids, so the de-dup cannot catch it either.
+    canonical_geak_attempts = [row for row in kernel_attempts if _attempt_source_kind(row) == "geak_e2e"]
     known_attempt_ids = {str(row.get("attempt_id") or "") for row in kernel_attempts}
     if not canonical_geak_attempts:
         for attempt in recorded_geak_attempts:
@@ -1437,10 +1575,17 @@ def project_kernel_events(
             if attempt_id and attempt_id not in known_attempt_ids:
                 kernel_attempts.append(attempt)
                 known_attempt_ids.add(attempt_id)
-    geak_engaged = _optional_bool(geak.get("engaged")) is True or bool(geak.get("status"))
+    geak_status = _lower(geak.get("status"))
+    geak_engaged = _optional_bool(geak.get("engaged")) is True or bool(geak_status)
+    # Engagement is not evidence. ``collect_geak`` reports ``missing`` when the
+    # optimizer flag selected GEAK and neither a result nor an on-disk working
+    # tree was found, which is the launch config read back rather than a record
+    # of work. GEAK is the default backend, so counting it would synthesize a
+    # Kernel visit for every session that ended in PRELUDE.
+    geak_evidence = geak_engaged and geak_status not in _GEAK_CONFIG_ECHO_STATUSES
 
     has_evidence = bool(
-        journey_entries or fusion_result or gemm_runs or collective_attempts or kernel_attempts or geak_engaged
+        journey_entries or fusion_result or gemm_runs or collective_attempts or kernel_attempts or geak_evidence
     )
     if not windows:
         if not has_evidence:
@@ -1492,10 +1637,10 @@ def project_kernel_events(
             # still the only record that the kernel was considered.
             attempts = [{}]
         adopted = _adopted_attempt(attempts)
-        for attempt in attempts:
+        for sequence, attempt in enumerate(attempts):
             index = _window_index(_first(attempt.get("ts"), _safe_get(entry, "e2e", "ts")), windows)
             is_adopted = attempt is adopted or adopted is None
-            row = _kernel_rewrite(entry, attempt, adopted=is_adopted, warnings=warnings)
+            row = _kernel_rewrite(entry, attempt, sequence=sequence, adopted=is_adopted, warnings=warnings)
             lanes_by_window[index]["kernel_rewrites"].append(row)
             if is_adopted:
                 adopted_by_window[index].add(row["rewrite_id"])
@@ -1513,7 +1658,24 @@ def project_kernel_events(
         index = _window_index(_first(attempt.get("integration_ts"), attempt.get("ts")), windows)
         lanes_by_window[index]["collective_runs"].append(_collective_run(attempt, warnings))
 
-    cycle_to_index = {int(window.get("cycle") or 0): position for position, window in enumerate(windows)}
+    # A cycle resolves to a window only when it owns exactly one. The phase
+    # machine advances monotonically inside a macro-cycle, so KERNEL is entered
+    # once per cycle and this is normally total — but a truncated or unstamped
+    # ``phase_history`` can still yield two windows on one cycle, and a
+    # single-valued dict would silently file every attempt of that cycle onto
+    # whichever window happened to be built last. Ambiguous cycles fall through
+    # to the timestamp placement instead of picking one arbitrarily.
+    windows_by_cycle: dict[int, list[int]] = {}
+    for position, window in enumerate(windows):
+        windows_by_cycle.setdefault(int(window.get("cycle") or 0), []).append(position)
+    cycle_to_index = {cycle: found[0] for cycle, found in windows_by_cycle.items() if len(found) == 1}
+    ambiguous_cycles = sorted(cycle for cycle, found in windows_by_cycle.items() if len(found) > 1)
+    if ambiguous_cycles:
+        warnings.append(
+            "v6.timeline.kernel: macro cycle(s) "
+            f"{', '.join(str(cycle) for cycle in ambiguous_cycles)} hold more than one KERNEL window; "
+            "their attempts are placed by timestamp instead"
+        )
 
     if geak_engaged:
         geak_attempt_indexes: list[int] = []
@@ -1541,7 +1703,7 @@ def project_kernel_events(
         # The verdict on a GEAK candidate is written back onto ``geak_result``
         # rather than onto the run record ``collect_geak`` projects.
         revalidation_status = str(_mapping(state.get("geak_result")).get("revalidation_status") or "")
-        lanes_by_window[geak_window_index]["geak_runs"].append(_geak_run(geak, revalidation_status))
+        lanes_by_window[geak_window_index]["geak_runs"].append(_geak_run(geak, revalidation_status, warnings))
 
     # The kernel each rebench says it was validating, where the producer
     # recorded one. ``source_id`` on the projected row falls back to the
@@ -1570,6 +1732,7 @@ def project_kernel_events(
                 task_id_by_operation,
                 throughput_unit,
                 attributed_gain_by_attempt.get(str(attempt.get("attempt_id") or "")),
+                warnings,
             )
         )
 
@@ -1639,15 +1802,19 @@ def _link_rebench_attempts(
     candidate* triggered, and grouping by ``source_kind`` alone would give two
     rewrites in one visit the same two attempts each.
 
+    An edge is made only where exactly one candidate answers to the attempt's
+    ``source_id``. Two candidates sharing an identity are as unresolvable as
+    none, so a contested attempt stays unlinked and is warned about — the rule
+    applies to every ambiguity, not only to the attempts that matched nothing.
+
     An attempt that names no subject can still be placed: where its lane holds
     exactly one row, the kind grouping is unambiguous and that row takes it.
     An attempt that *does* name a subject its lane speaks the same language as
     — a kernel id, against a lane keyed on kernel identity — and matches none
     of them is never absorbed, however few candidates are on offer. The record
     says it validated some other kernel, and one available row is not evidence
-    against that. Both it and the merely unplaceable are warned about, because
-    a wrong edge here reads as a candidate having been validated when it was
-    not.
+    against that. All three cases are warned about, because a wrong edge here
+    reads as a candidate having been validated when it was not.
 
     The comparison is deliberately namespace-aware. A fusion rebench carrying
     the kernel it patched is not in conflict with the visit's only fusion run,
@@ -1664,18 +1831,43 @@ def _link_rebench_attempts(
         candidates = by_source.get(source_kind, [])
         if not rows or not candidates:
             continue
-        order = [attempt["attempt_id"] for attempt in candidates]
-        matched_ids: set[str] = set()
+        keys_by_row: list[set[str]] = []
         for row in rows:
             adopted = lane_name != "kernel_rewrites" or row["rewrite_id"] in adopted_rewrites
-            keys = _lane_identity_keys(lane_name, row, adopted=adopted)
-            ids = [attempt["attempt_id"] for attempt in candidates if keys and _lower(attempt.get("source_id")) in keys]
-            row["final_rebench_attempt_ids"] = ids
-            matched_ids.update(ids)
+            keys_by_row.append(_lane_identity_keys(lane_name, row, adopted=adopted))
+            row["final_rebench_attempt_ids"] = []
 
-        leftover = [attempt for attempt in candidates if attempt["attempt_id"] not in matched_ids]
+        claimed_by: dict[str, list[int]] = {}
+        for attempt in candidates:
+            source_id = _lower(attempt.get("source_id"))
+            if not source_id:
+                continue
+            owners = [position for position, keys in enumerate(keys_by_row) if source_id in keys]
+            if owners:
+                claimed_by[attempt["attempt_id"]] = owners
+
+        contested: list[str] = []
+        for attempt in candidates:
+            owners = claimed_by.get(attempt["attempt_id"])
+            if owners is None:
+                continue
+            if len(owners) == 1:
+                rows[owners[0]]["final_rebench_attempt_ids"].append(attempt["attempt_id"])
+            else:
+                contested.append(attempt["attempt_id"])
+        if contested:
+            warnings.append(
+                f"v6.timeline.kernel: {len(contested)} {source_kind} rebench attempt(s) answer to more than "
+                f"one recorded candidate; left unlinked"
+            )
+
+        # Contested attempts named a subject, so they are neither anonymous nor
+        # unmatched; excluding them here keeps the fallback below from
+        # absorbing an attempt whose owner is genuinely undecidable.
+        leftover = [attempt for attempt in candidates if attempt["attempt_id"] not in claimed_by]
         if not leftover:
             continue
+        order = [attempt["attempt_id"] for attempt in candidates]
         # Only a lane keyed on kernel identity can be contradicted by an
         # attempt that names a kernel.
         keyed_on_kernel = "kernel_id" in _LANE_IDENTITY_FIELDS.get(lane_name, ())
@@ -1779,11 +1971,16 @@ def _kernel_event(
     # not be read as the stage having concluded anything.
     measured = [attempt for attempt in attempts if attempt["status"] == "succeeded"]
     faulted = [attempt for attempt in attempts if attempt["status"] == "failed"]
-    if stage_failed:
+    if stage_failed and not (kept or measured):
         status = "failed"
     elif not window.get("end_time") and did_work:
         # The session ended inside KERNEL; the visit has real work on it but
         # never reached its own exit.
+        status = "degraded"
+    elif stage_failed:
+        # The visit adopted or measured something and *then* hit a phase-level
+        # error. ``failed`` would deny work the session's own ledger kept; the
+        # error is still reported, in ``ext.failure``.
         status = "degraded"
     elif kept or measured:
         status = "succeeded"

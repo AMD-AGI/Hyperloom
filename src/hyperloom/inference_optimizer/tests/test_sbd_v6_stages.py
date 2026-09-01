@@ -1249,9 +1249,6 @@ def test_canonical_geak_attempt_outranks_route_fallback_and_carries_both_gains(t
             "entries": [{"adopted_attempt_id": "geak-e2e-0", "gain_pct": 5.0}],
         },
         recorded_operations=[route],
-        # This report counts per-kernel micro attempts, not final rebenches.
-        # A config-only GEAK route win therefore legitimately adds no row.
-        kernel_optimization_summary={"totals": {"attempted": 0}},
     )
 
     event = _event(timeline, "kernel")
@@ -2224,13 +2221,31 @@ def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
     "projector",
     ["project_baseline_event", "project_sweep_event", "project_conc_sweep_event", "project_kernel_events"],
 )
-def test_a_raising_stage_projector_cannot_disturb_the_v5_payload(tmp_path, monkeypatch, projector):
+def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatch, projector):
+    """One stage blowing up must not take the durable events or its peers down.
+
+    The exporter wraps the whole timeline collector, so without per-projector
+    isolation a kernel-stage bug discards the ``install`` event a session read
+    off disk before the Coordinator existed -- the one record a run that never
+    reached KERNEL actually has.
+    """
     _write_json(
         tmp_path / "state.json",
         {"session_id": "s1", "model_name": "M", "framework": "sglang", "baseline_tput": 100.0, "phase": "CLOSE"},
     )
     _write_json(tmp_path / "manifest.json", {"session_id": "s1", "model_name": "M", "framework": "sglang"})
+    write_timeline_event(
+        tmp_path,
+        {"type": "install", "kind": "install", "status": "succeeded", "start_time": "", "end_time": ""},
+    )
     before = exporter.build(tmp_path)
+    stage = {
+        "project_baseline_event": "baseline",
+        "project_sweep_event": "sweep",
+        "project_conc_sweep_event": "conc_sweep",
+        "project_kernel_events": "kernel",
+    }[projector]
+    assert "install" in {event["type"] for event in before["timeline"]}
 
     def _boom(*args, **kwargs):
         raise RuntimeError(f"{projector} exploded")
@@ -2243,8 +2258,13 @@ def test_a_raising_stage_projector_cannot_disturb_the_v5_payload(tmp_path, monke
         key: value for key, value in before.items() if key not in v6_keys
     }
     assert after["warnings"] == before["warnings"]
-    assert after["timeline"] == []
-    assert any(projector in warning or "timeline" in warning for warning in after["metadata"]["warnings"])
+
+    types_after = [event["type"] for event in after["timeline"]]
+    # The durable event survives, and so does every stage that projected.
+    assert "install" in types_after
+    assert stage not in types_after
+    assert types_after == [event["type"] for event in before["timeline"] if event["type"] != stage]
+    assert any(f"v6.timeline.{stage}" in warning for warning in after["metadata"]["warnings"])
 
 
 def test_a_raising_close_collector_cannot_disturb_the_v5_payload(tmp_path, monkeypatch):
@@ -2261,3 +2281,256 @@ def test_a_raising_close_collector_cannot_disturb_the_v5_payload(tmp_path, monke
     assert after["warnings"] == before["warnings"]
     assert after["close"] == {}
     assert any("close" in warning for warning in after["metadata"]["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# fabrication, settlement, identity and vocabulary
+# ---------------------------------------------------------------------------
+def _events(timeline: list[dict], event_type: str) -> list[dict]:
+    return [event for event in timeline if event["type"] == event_type]
+
+
+_GEAK_ECHO = {"engaged": True, "status": "missing", "error_class": "no_result", "accepted_kernels": []}
+
+
+def test_geak_config_echo_does_not_fabricate_a_kernel_visit(tmp_path):
+    """``kernel_optimizer=geak`` on its own is a launch flag, not a Kernel visit.
+
+    GEAK is the default backend, so ``collect_geak`` answers ``status:
+    missing`` for every session that selected it and ended before KERNEL --
+    baseline failures and enablement stalls included. Counting that as evidence
+    invented a degraded ``kernel`` event, carrying a FAILED ``geak_run``, for
+    runs that never dispatched a kernel at all.
+    """
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state={"phase": "PRELUDE", "macro_cycle": 0, "phase_history": [], "kernel_optimizer": "geak"},
+        geak=_GEAK_ECHO,
+    )
+
+    assert _events(timeline, "kernel") == []
+    assert not any("kernel evidence exists" in warning for warning in warnings)
+
+
+def test_the_geak_echo_is_still_reported_inside_a_real_visit(tmp_path):
+    """The echo is ignored as *evidence*; a visit that happened still shows it."""
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak=_GEAK_ECHO,
+    )
+
+    run = _events(timeline, "kernel")[0]["ext"]["geak_runs"][0]
+    # One normalizer feeds both fields, so they cannot contradict each other.
+    assert (run["status"], run["outcome"]) == ("failed", "FAILED")
+
+
+def test_a_skipped_geak_spelling_does_not_contradict_itself(tmp_path):
+    """``not_run`` used to emit ``status: failed`` beside ``outcome: SKIPPED``."""
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak={"engaged": True, "status": "not_run", "accepted_kernels": []},
+    )
+
+    run = _events(timeline, "kernel")[0]["ext"]["geak_runs"][0]
+    assert (run["status"], run["outcome"]) == ("skipped", "SKIPPED")
+
+
+_GEMM_RUN = {
+    "engine": "forge",
+    "status": "succeeded",
+    "tuned_file": "runs/gemm/aiter.csv",
+    "best_speedup": 1.4,
+    "ts": "2026-08-27T01:20:00+00:00",
+}
+
+
+def test_a_gemm_candidate_is_settled_by_the_rebench_that_kept_it(tmp_path):
+    """A tuned table nothing adjudicated is pending, not skipped.
+
+    ``SKIPPED`` is the one outcome ``_settle_pending_outcomes`` will not
+    revisit, so a GEMM run the final rebench went on to KEEP used to sit on the
+    timeline as work that never happened.
+    """
+    warnings: list[str] = []
+    attempt = _kernel_attempt(
+        "gemm-rebench-0",
+        0,
+        kind="gemm_tuning",
+        name="runs/gemm/aiter.csv",
+        kernel_id="",
+        backend="forge",
+    )
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        optimizations={"gemm_tuning_runs": [_GEMM_RUN], "attempts": [attempt]},
+    )
+
+    lane = _events(timeline, "kernel")[0]["ext"]["gemm_tuning_runs"][0]
+    assert lane["micro_decision"] == "candidate"
+    assert lane["final_rebench_attempt_ids"] == ["gemm-rebench-0"]
+    assert lane["outcome"] == "KEEP"
+
+
+def test_a_gemm_run_with_no_rebench_stays_pending(tmp_path):
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        optimizations={"gemm_tuning_runs": [_GEMM_RUN]},
+    )
+
+    assert _events(timeline, "kernel")[0]["ext"]["gemm_tuning_runs"][0]["outcome"] == "NEEDS_REVIEW"
+
+
+def test_unidentified_backend_attempts_do_not_share_one_rewrite_id(tmp_path):
+    """Two backends on one kernel must stay two rows.
+
+    The fallback used to be the ``kernel_id`` every backend attempt on a kernel
+    carries, so both rows took one id, both passed the adopted-set test, and
+    the losing backend claimed the winner's final rebench.
+    """
+    warnings: list[str] = []
+    journey = {
+        "kernels": [
+            {
+                "kernel_id": "rmsnorm",
+                "name": "rmsnorm",
+                "e2e": {"decision": "KEEP", "ts": "2026-08-27T01:30:00+00:00"},
+                "backend_attempts": [
+                    {"backend": "geak", "status": "succeeded", "micro_speedup": 1.1},
+                    {
+                        "backend": "forge",
+                        "status": "succeeded",
+                        "micro_speedup": 1.9,
+                        "best_artifact_path": "runs/k/forge.py",
+                    },
+                ],
+            }
+        ]
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        kernel_journey=journey,
+        optimizations={"attempts": [_kernel_attempt("rebench-0", 0, kernel_id="rmsnorm")]},
+    )
+
+    rewrites = _events(timeline, "kernel")[0]["ext"]["kernel_rewrites"]
+    assert len({row["rewrite_id"] for row in rewrites}) == 2
+    # Only the adopted backend answers for the kernel's rebench.
+    assert {row["backend"]: row["final_rebench_attempt_ids"] for row in rewrites} == {
+        "forge": ["rebench-0"],
+        "geak": [],
+    }
+
+
+def test_a_rebench_two_candidates_answer_to_is_left_unlinked(tmp_path):
+    """Ambiguity is ambiguity whether the attempt matched none or several."""
+    warnings: list[str] = []
+    collective = {
+        "attempts": [
+            {
+                "collective_attempt_id": "c1",
+                "kernel_id": "all_reduce",
+                "status": "succeeded",
+                "kept": True,
+                "ts": "2026-08-27T01:10:00+00:00",
+            },
+            {
+                "collective_attempt_id": "c2",
+                "kernel_id": "all_reduce",
+                "status": "succeeded",
+                "kept": True,
+                "ts": "2026-08-27T01:20:00+00:00",
+            },
+        ]
+    }
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state(),
+        collective=collective,
+        optimizations={
+            "attempts": [_kernel_attempt("coll-rebench-0", 0, kind="kernel_collective", kernel_id="all_reduce")]
+        },
+    )
+
+    runs = _events(timeline, "kernel")[0]["ext"]["collective_runs"]
+    assert [row["final_rebench_attempt_ids"] for row in runs] == [[], []]
+    assert any("more than one recorded candidate" in warning for warning in warnings)
+
+
+def test_a_kept_visit_that_then_errored_is_degraded_not_failed(tmp_path):
+    state = _kernel_state()
+    state["phase_history"][-1]["evidence"] = {"error_class": "TimeoutError", "error": "sweep handoff timed out"}
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=state,
+        optimizations={"attempts": [_kernel_attempt("rebench-0", 0)]},
+    )
+
+    event = _events(timeline, "kernel")[0]
+    assert event["status"] == "degraded"
+    # The error is not lost; it is just not the whole verdict.
+    assert event["ext"]["failure"]["error_class"] == "TimeoutError"
+
+
+def test_a_sweep_point_status_is_normalized_onto_the_sweep_enum(tmp_path):
+    """The sweep lane counts usable points by the literal word ``ok``."""
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        sweep={"all_variants": [{"variant_name": "v1", "status": "succeeded", "output_throughput_tok_s": 120.0}]},
+    )
+
+    event = _events(timeline, "sweep")[0]
+    assert event["ext"]["sweep"]["all_variants"][0]["status"] == "ok"
+    assert event["status"] == "succeeded"
+
+
+def test_a_malformed_conc_grid_does_not_raise_out_of_the_projector(tmp_path):
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        conc_sweep_summary={"status": "ok", "concs_requested": 64},
+    )
+
+    assert _events(timeline, "conc_sweep")[0]["ext"]["plan"]["concs_requested"] == [64]
+
+
+def test_an_unknown_close_step_status_is_reported(tmp_path):
+    warnings: list[str] = []
+    state = {
+        "close_sequence_done": True,
+        "phase_history": [
+            {
+                "to_phase": "CLOSE",
+                "ts": "2026-08-27T02:00:00+00:00",
+                "evidence": {
+                    "close_steps": [{"step": "report", "status": "completed", "ts": "2026-08-27T02:00:01+00:00"}]
+                },
+            }
+        ],
+    }
+    section = collect_v6_close(tmp_path, state, {}, warnings)
+
+    # Passed through unchanged -- inventing ``done`` is the one thing this key
+    # cannot afford -- but no longer silent about it.
+    assert section["steps"][0]["status"] == "completed"
+    assert any("unrecognized close step status" in warning for warning in warnings)

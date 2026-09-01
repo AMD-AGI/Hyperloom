@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1934,6 +1935,42 @@ def _framework_event(
     }
 
 
+def _projected(
+    stage: str,
+    project: Callable[[], Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Run one stage projector so its failure costs only its own events.
+
+    The exporter already wraps this whole collector, but that granularity is
+    too coarse to honor what V6 promises. A single ``_safe_collect`` around the
+    lot means one projector raising on a malformed field discards the durable
+    ``install`` / ``model_gate`` events read moments earlier and every other
+    stage that projected cleanly — so a session that failed at the model gate,
+    whose gate event is the only thing worth reporting, can lose it to a
+    kernel-stage bug it never reached.
+
+    Args:
+        stage (str): Stage name, used to name the projector in the warning.
+        project (Callable[[], Any]): Returns one event, a list of events, or
+            ``None``.
+        warnings (list[str]): V6 warning sink (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The projected events, or ``[]`` on failure.
+    """
+    try:
+        result = project()
+    except Exception as exc:  # noqa: BLE001 — one stage must not cost the timeline
+        warnings.append(f"v6.timeline.{stage}: projection failed ({type(exc).__name__}: {exc}); stage omitted")
+        return []
+    if result is None:
+        return []
+    if isinstance(result, dict):
+        return [result]
+    return [event for event in result if isinstance(event, dict)]
+
+
 def collect_v6_timeline(
     session_dir: Path,
     warnings: list[str],
@@ -1949,7 +1986,6 @@ def collect_v6_timeline(
     kernel_journey: Any = None,
     collective: Any = None,
     geak: Any = None,
-    kernel_optimization_summary: Any = None,
 ) -> list[dict[str, Any]]:
     """Load durable events and project stage work without mutating V5 state.
 
@@ -1958,35 +1994,24 @@ def collect_v6_timeline(
     is projected here from V5 sections the exporter has already built, so the
     keyword arguments are all optional: a caller that passes none still gets
     the durable events plus the framework projection.
+
+    Every projection is isolated (see :func:`_projected`). The durable events
+    are read first and are never discarded by a later stage's failure.
     """
     timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
     critic_iterations = [row for row in critic_iterations or [] if isinstance(row, dict)]
-    windows = _framework_windows(state, operations)
-    for window in windows:
-        timeline.append(
-            _framework_event(
-                session_dir,
-                state,
-                operations,
-                critic_iterations,
-                warnings,
-                window,
-                len(windows),
-            )
-        )
-    timeline.extend(
-        event
-        for event in (
-            project_baseline_event(baseline, phase_timeline, warnings),
-            project_sweep_event(sweep, state, baseline, phase_timeline, warnings),
-            project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
-        )
-        if event is not None
-    )
-    timeline.extend(
-        project_kernel_events(
+
+    def _framework_events() -> list[dict[str, Any]]:
+        windows = _framework_windows(state, operations)
+        return [
+            _framework_event(session_dir, state, operations, critic_iterations, warnings, window, len(windows))
+            for window in windows
+        ]
+
+    def _kernel_events() -> list[dict[str, Any]]:
+        return project_kernel_events(
             state,
             _phase_windows(state, _KERNEL_PHASES),
             warnings,
@@ -1996,9 +2021,23 @@ def collect_v6_timeline(
             geak=geak,
             baseline=baseline,
             recorded_operations=operations,
-            kernel_optimization_summary=kernel_optimization_summary,
+        )
+
+    timeline.extend(_projected("framework_agent", _framework_events, warnings))
+    timeline.extend(
+        _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
+    )
+    timeline.extend(
+        _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
+    )
+    timeline.extend(
+        _projected(
+            "conc_sweep",
+            lambda: project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
+            warnings,
         )
     )
+    timeline.extend(_projected("kernel", _kernel_events, warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (

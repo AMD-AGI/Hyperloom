@@ -397,7 +397,13 @@ class ClosePhase(PhaseHandler):
         try:
             from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
-            pkg_path = package_session_artifacts(self.session_dir, session_id=session_id)
+            # Zipping a large session walks thousands of files; off the loop so
+            # it does not stall the Coordinator's other shutdown work.
+            pkg_path = await asyncio.to_thread(
+                package_session_artifacts,
+                self.session_dir,
+                session_id=session_id,
+            )
             if pkg_path is not None:
                 await self._record_close_step(
                     "artifact_package",
@@ -452,15 +458,36 @@ class ClosePhase(PhaseHandler):
         # rebuild: it rewrites the same path the ``artifact_package`` step
         # already names, and recording it would strand the bundled copy one
         # step behind again.
+        #
+        # The two deliverables can diverge here: the session copy is patched
+        # first, so a rebuild that fails leaves the shipped zip holding the
+        # step-2 snapshot with nothing downstream able to tell. There is no
+        # close step to record it against — the rebuild rewrites the path
+        # ``artifact_package`` already names — so it is said in the log, at a
+        # level the default configuration prints.
         try:
             from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
 
             if patch_breakdown_close(self.session_dir) and pkg_path is not None:
                 from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
-                package_session_artifacts(self.session_dir, session_id=session_id)
+                rebuilt = await asyncio.to_thread(
+                    package_session_artifacts,
+                    self.session_dir,
+                    session_id=session_id,
+                )
+                if rebuilt is None:
+                    log.warning(
+                        "CLOSE step 6: close section refreshed but the artifact package rebuild produced "
+                        "nothing; %s still carries the pre-refresh close section",
+                        pkg_path,
+                    )
         except Exception:  # noqa: BLE001
-            log.debug("CLOSE step 6 (close section refresh) failed", exc_info=True)
+            log.warning(
+                "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
+                "the pre-refresh close section",
+                exc_info=True,
+            )
 
         log.info("CLOSE 7-step sequencer complete")
 

@@ -74,6 +74,13 @@ _KNOWN_STEPS = frozenset(
     }
 )
 
+# The status vocabulary the sequencer actually writes. A word outside it is
+# passed through unchanged — inventing ``done`` for something spelled
+# differently is the one failure mode this key cannot afford — but it is also
+# warned about, because an unrecognized status counts as unsettled and would
+# otherwise pin ``close.status`` to ``degraded`` with nothing to explain why.
+_KNOWN_STATUSES = frozenset({"running", "done", "failed", "skipped"})
+
 _ESCALATED_STOP_REASON = "robustness_escalated"
 
 
@@ -176,6 +183,14 @@ def collect_v6_close(
     unknown = sorted({step["step"] for step in steps if step["step"] and step["step"] not in _KNOWN_STEPS})
     if unknown:
         warnings.append(f"v6.close: unrecognized close step(s) {', '.join(unknown)}; passed through unchanged")
+    unknown_statuses = sorted(
+        {step["status"] for step in steps if step["status"] and step["status"] not in _KNOWN_STATUSES}
+    )
+    if unknown_statuses:
+        warnings.append(
+            f"v6.close: unrecognized close step status(es) {', '.join(unknown_statuses)}; "
+            "passed through unchanged and counted as unsettled"
+        )
 
     failed = [step for step in steps if step["status"] == "failed"]
     unsettled = [
