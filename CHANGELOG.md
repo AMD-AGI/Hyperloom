@@ -61,11 +61,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   measurement. Rounds that previously passed on a raised threshold will now be
   rejected — which is the intended correction, not a regression.
 
-## [v1.0.0] - 2026-08-26
-Current packaged version (`pyproject.toml`). See
-[release notes](docs/release-notes.md) and the
-[GitHub release](https://github.com/AMD-AGI/Hyperloom/releases/tag/v1.0.0)
-for the user-facing summary.
 ### Added
 
 - **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
