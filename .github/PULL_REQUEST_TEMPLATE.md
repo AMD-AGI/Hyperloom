@@ -2,6 +2,5 @@
 - Linked issue(s): close/fix refs
 - Tests: added/updated? commands run?
 - Breaking changes: yes/no (details if yes)
-- PR addresses single concern: yes/no (details if not):
-- Repos affected:
-- Root cause is upstream (TraceLens/GEAK/Magpie), ticket filed:
+- PR addresses single concern: yes/no (details if no):
+- Root cause is upstream (Magpie/TraceLens/GEAK/IntelliKit/AgentKernelArena), ticket filed:

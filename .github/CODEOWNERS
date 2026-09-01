@@ -48,8 +48,6 @@
 /src/hyperloom/inference_optimizer/tracelens_md.py              @tsrikris @devalshahamd @AMD-AGI/SaFE
 /docs/components/tracelens.md                                   @tsrikris @devalshahamd @AMD-AGI/SaFE
 
-# Benchmarking
-
 # Magpie integration
 /src/hyperloom/orchestrator/actions/executors/profile.py           @devalshahamd @haofrank @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/roofline.py          @devalshahamd @AMD-AGI/SaFE
