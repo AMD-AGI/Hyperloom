@@ -148,24 +148,72 @@ def _logical_value(word: str) -> str:
     return word
 
 
-def _span_end(words: list[str], flag_index: int) -> int:
-    """Index just past the operands of the option at ``flag_index``.
-
-    An option owns every following word up to the next option name, and nothing
-    tracks JSON nesting here on purpose. The depth-tracking version this
-    replaced could enter a blob that never balanced (``--foo a}``) and then run
-    to the end of the string, so removing that one flag silently deleted the
-    entire tail of the configuration and the server booted without it.
-
-    Fragments of a whitespace-bearing JSON value need no special case: they are
-    not option names, so the plain scan already takes them as one span. They are
-    also already undeliverable — :func:`_transport_unsafe_tokens` reports them —
-    so no removal decision can make that input launchable either way.
-    """
-    end = flag_index + 1
+def _plain_span_end(words: list[str], start: int) -> int:
+    """First index at or after ``start`` that names an option."""
+    end = start
     while end < len(words) and not _is_flag_token(words[end]):
         end += 1
     return end
+
+
+def _span_end(words: list[str], flag_index: int) -> int:
+    """Index just past the operands of the option at ``flag_index``.
+
+    An option owns every following word up to the next option name, with one
+    exception. A JSON value split by its own interior whitespace can produce a
+    fragment spelled exactly like an option: ``{"t":"Answer --now please"}``
+    splits at ``--now``. Ending the span there left the rest of the blob behind,
+    so removing the flag handed ``--now please"}`` to the launcher and
+    :func:`validate_server_args_shell_safe` refused the whole string — one the
+    previous shlex-based removal took out cleanly.
+
+    So the span may run past an option name while the JSON scan is unbalanced,
+    and only as far as the word that balances it. When nothing balances it the
+    plain scan is what stands: an operand carrying a stray ``}`` (``--foo a}``)
+    must not let the span run to the end of the string, which is how removing
+    one flag once deleted the entire tail of the configuration.
+
+    Fragments are undeliverable either way — :func:`_transport_unsafe_tokens`
+    reports them — but that is a statement about the value, not a licence to
+    rewrite the flags around it.
+    """
+    plain_end = _plain_span_end(words, flag_index + 1)
+    depth, in_string, escaped = 0, False, False
+    for index in range(flag_index + 1, plain_end):
+        depth, in_string, escaped = _json_scan(words[index], depth, in_string, escaped)
+    if depth == 0 and not in_string:
+        return plain_end
+    end = plain_end
+    while end < len(words):
+        depth, in_string, escaped = _json_scan(words[end], depth, in_string, escaped)
+        end += 1
+        if depth == 0 and not in_string:
+            return _plain_span_end(words, end)
+    return plain_end
+
+
+def _words_inside_json(words: list[str]) -> set[int]:
+    """Indices of words that sit inside an unterminated JSON blob.
+
+    A word is only an option name when it is argv. The interior whitespace that
+    fragments a JSON value can leave a fragment spelled like an option —
+    including one on :data:`_BENCHMARK_HARNESS_FLAG_DENYLIST` — and matching it
+    there cut the blob in half on the path every compose reaches. A word the
+    scan meets while a brace or a string is still open is part of a value.
+
+    Symmetric with :func:`_span_end`, including its fallback: a stray closing
+    brace (``--foo a}``) drives the running depth negative, and carrying that
+    forward would mark every later word as nested and make the flags after it
+    unremovable. A depth below zero is not an open blob, so it clamps to closed.
+    """
+    inside: set[int] = set()
+    depth, in_string, escaped = 0, False, False
+    for index, word in enumerate(words):
+        if depth > 0 or in_string:
+            inside.add(index)
+        depth, in_string, escaped = _json_scan(word, depth, in_string, escaped)
+        depth = max(depth, 0)
+    return inside
 
 
 # Payloads already reported as undeliverable, so the warning below fires once
@@ -199,12 +247,18 @@ def _unsafe_token_owners(tokens: list[str], unsafe: list[str]) -> list[str]:
     is always a subset of ``tokens``, so this cannot happen today; falling back
     to the token would put the value in the log the moment it could, which is
     the one thing this function exists to prevent.
+
+    A fragment inside a JSON value can be spelled like an option, and taking it
+    as one would name the following tokens after a byte of somebody's value —
+    the same leak by a different route. :func:`_words_inside_json` is what tells
+    the two apart.
     """
     unsafe_set = set(unsafe)
+    nested = _words_inside_json(tokens)
     owners: list[str] = []
     current = "<positional>"
-    for token in tokens:
-        if _is_flag_token(token):
+    for index, token in enumerate(tokens):
+        if index not in nested and _is_flag_token(token):
             current = token.partition("=")[0]
         if token in unsafe_set:
             owners.append(current)
@@ -265,10 +319,11 @@ def _parse_remove_specs(removes: list[str]) -> tuple[set[str], set[tuple[str, st
     remove_pairs: set[tuple[str, str]] = set()
     for spec in removes:
         words = _words_of(spec)
+        nested = _words_inside_json(words)
         i = 0
         while i < len(words):
             word = words[i]
-            if not _is_flag_token(word):
+            if i in nested or not _is_flag_token(word):
                 i += 1
                 continue
             if "=" in word:
@@ -313,7 +368,10 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     ``--online_quant_config`` to the server. Both sides are split on whitespace
     only, which is exactly what the unquoted ``EXTRA_*_ARGS`` transport does
     (see :func:`_split_keeping_separators`); there is no separate untokenizable
-    path, because there is nothing left for a quote to unbalance.
+    path, because there is nothing left for a quote to unbalance. A fragment of
+    a JSON value is never read as an option name, however it happens to be
+    spelled (:func:`_words_inside_json`), so a value can neither be cut in half
+    nor be removed as though it were a flag.
 
     A word the transport cannot carry is passed through rather than abandoning
     the whole removal, and is reported once per distinct payload per process
@@ -336,6 +394,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     if unsafe:
         _warn_undeliverable_tokens(words, unsafe, len(removes))
 
+    nested = _words_inside_json(words)
     remove_flags, remove_pairs = _parse_remove_specs(removes)
 
     dropped: set[int] = set()
@@ -356,7 +415,7 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     i = 0
     while i < len(words):
         word = words[i]
-        if not _is_flag_token(word):
+        if i in nested or not _is_flag_token(word):
             i += 1
             continue
         end = _span_end(words, i)

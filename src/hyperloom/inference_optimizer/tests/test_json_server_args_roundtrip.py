@@ -329,6 +329,54 @@ class TestValueSpanStopsAtShortOptions:
         assert remove_server_args(args, ["--b"]) == '--a {"k":"v with space"} -tp 8'
 
 
+class TestAnOptionLookalikeInsideAValue:
+    """A JSON string value may contain a word spelled exactly like an option.
+
+    The shapes above all carry values whose fragments happen not to start with a
+    dash, so the span ended where the value ended by luck rather than by rule.
+    One dash inside the string and the span ended mid-value instead: the removal
+    left the rest of the blob behind as argv words, and
+    ``validate_server_args_shell_safe`` then refused a string the previous
+    shlex-based removal had taken out cleanly.
+    """
+
+    def test_the_span_covers_a_fragment_spelled_like_an_option(self):
+        args = '--tp 8 --tmpl {"t":"Answer --now please"} --max-num-seqs 64'
+        assert remove_server_args(args, ["--tmpl"]) == "--tp 8 --max-num-seqs 64"
+
+    def test_the_result_is_still_launchable(self):
+        """The regression was visible only at the sink, which is where it aborted."""
+        args = '--tp 8 --tmpl {"t":"Answer --now please"} --max-num-seqs 64'
+        validate_server_args_shell_safe(remove_server_args(args, ["--tmpl"]))
+
+    def test_a_lookalike_is_not_itself_removable(self):
+        """No spec needed: the harness strip runs on every compose."""
+        args = '--a {"k":"x --no-enable-prefix-caching y"} --tp 8'
+        assert strip_benchmark_harness_flags(args) == args
+
+    def test_a_neighbour_removal_leaves_the_value_verbatim(self):
+        args = '--tp 8 --tmpl {"t":"Answer --now please"} --max-num-seqs 64'
+        assert remove_server_args(args, ["--tp"]) == '--tmpl {"t":"Answer --now please"} --max-num-seqs 64'
+
+    def test_an_unbalanced_brace_still_stops_the_span(self):
+        """The fallback. Nothing balances, so the plain scan stands.
+
+        Letting the span run while the scan is unbalanced is what deleted the
+        whole tail of the configuration; it may only run as far as the word that
+        balances the blob, and no further when none does.
+        """
+        assert remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"]) == "--tp 8 --max-num-seqs 64"
+
+    def test_a_stray_brace_does_not_make_later_flags_unremovable(self):
+        """The same clamp, read from the other side.
+
+        Carrying the negative depth forward would mark every later word as part
+        of a value, and a flag inside a value is not removable — so one stray
+        ``}`` would have silently disabled every removal after it.
+        """
+        assert remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--tp"]) == "--foo a} --max-num-seqs 64"
+
+
 class TestExactPairRemoval:
     def test_a_pair_spec_matches_a_flag_with_trailing_operands(self):
         """``--foo bar`` names one operand, not "everything after --foo".
@@ -462,6 +510,7 @@ _SHAPES: tuple[tuple[str, str], ...] = (
     ("--parser2", "'my parser'"),  # quoted operand with whitespace
     ("--half", "'unclosed"),  # single edge quote, untokenizable for shlex
     ("--tmpl", '{"t":"a  b"}'),  # double space inside a JSON string value
+    ("--tmpl2", '{"t":"a --b c"}'),  # JSON string value carrying an option lookalike
     ("--eqlist=1", "2 4"),  # equals-joined operand, then more operands
 )
 
