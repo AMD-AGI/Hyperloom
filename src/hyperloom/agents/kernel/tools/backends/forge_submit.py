@@ -714,6 +714,95 @@ def _pkg_sys_path_root(source_file: str) -> str:
     return str(top.parent)
 
 
+def _is_on_network_fs(path: Path) -> bool:
+    """True when ``path`` or its nearest existing ancestor is on a network FS.
+
+    Imported inside the call: this file also runs as a standalone script on
+    nodes with no ``hyperloom`` on the path, the invariant
+    ``test_forge_submit_stays_import_light`` pins.
+    """
+    from hyperloom.common.fs_utils import is_network_fs  # noqa: PLC0415
+
+    probe = path
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    return is_network_fs(str(probe))
+
+
+def _local_scratch_dir(output_dir: Path) -> Path:
+    """Return where the scratch worktree belongs for ``output_dir``.
+
+    A worktree is throwaway but gets copied and git-hashed in full, so on a
+    network mount it is placed on local disk instead. Only the worktree moves;
+    the durable archive under ``output_dir`` stays where the operator put it.
+    Override the local root with ``$FORGE_LOCAL_SCRATCH_ROOT``.
+
+    The local tree mirrors ``<session_id>/<attempt>`` from the durable side.
+    The attempt name alone is the kernel's, so two sessions optimizing one
+    kernel would claim one path and the second would be refused for a collision
+    with the first. Carrying the session id also scopes the owner marker that
+    lets the sweep identify live trees regardless of durable-root differences.
+    """
+    if not _is_on_network_fs(output_dir):
+        return output_dir / "worktree"
+    root_env = os.environ.get("FORGE_LOCAL_SCRATCH_ROOT", "").strip()
+    local_root = Path(root_env).expanduser() if root_env else Path.home() / ".cache" / "hyperloom" / "forge_scratch"
+    session_dir = local_root / output_dir.parent.name
+    session_dir.mkdir(parents=True, exist_ok=True)
+    _write_scratch_owner(session_dir)
+    _sweep_orphaned_scratch(local_root, output_dir.parent.name)
+    return session_dir / output_dir.name / "worktree"
+
+
+def _scratch_owner_file(session_dir: Path) -> Path:
+    return session_dir / ".owner"
+
+
+def _write_scratch_owner(session_dir: Path) -> None:
+    """Record pid and start-time so the sweep can tell live from dead sessions."""
+    pid = os.getpid()
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            starttime = fh.read().split()[21]
+    except OSError:
+        starttime = "0"
+    _scratch_owner_file(session_dir).write_text(f"{pid}:{starttime}", encoding="ascii")
+
+
+def _scratch_owner_alive(session_dir: Path) -> bool:
+    """True when the process that created this scratch session is still running."""
+    try:
+        text = _scratch_owner_file(session_dir).read_text(encoding="ascii").strip()
+        pid_str, starttime = text.split(":", 1)
+        pid = int(pid_str)
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # EPERM proves the pid exists, owned by another uid
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            current_starttime = fh.read().split()[21]
+        return current_starttime == starttime
+    except OSError:
+        return True  # unreadable stat: assume live to avoid deleting a running tree
+
+
+def _sweep_orphaned_scratch(local_root: Path, current_session: str) -> None:
+    """Delete local scratch whose owning process is no longer running."""
+    for child in local_root.iterdir():
+        if not child.is_dir() or child.name == current_session:
+            continue
+        if not any(child.glob("*/worktree")):
+            continue
+        if not _scratch_owner_alive(child):
+            shutil.rmtree(child, ignore_errors=True)
+            log.info("forge: swept orphaned scratch session %s", child)
+
+
 def _prepare_worktree_nogit(
     source_file: str,
     kernel_repo: str,
@@ -734,8 +823,7 @@ def _prepare_worktree_nogit(
        one top-level package subtree (e.g. ``vllm/``), NEVER the entire
        ``dist-packages``/``site-packages`` directory (which would copy every
        installed package — torch, vllm, ... — 5-15 GB per submit, risking
-       ENOSPC). Ignores ``.git``, ``__pycache__``, ``*.egg-info``, ``build/``,
-       ``dist/`` to keep the copy small and fast.
+       ENOSPC). Ignores ``.git`` and the producer's runtime-artefact names.
     3. ``git init`` + sets ``user.name``/``user.email`` + excludes regenerated
        bytecode caches + ``git add -A`` + initial commit so Forge's
        ``IterationLoop`` (which uses ``git commit``/``reset --hard``) can manage
@@ -792,18 +880,32 @@ def _prepare_worktree_nogit(
         rel = Path(src_abs.name)
         copy_subtrees = None
 
-    scratch_dir = output_dir / "worktree"
+    scratch_dir = _local_scratch_dir(output_dir)
     if scratch_dir.exists() or scratch_dir.is_symlink():
         raise _RetainedWorkspaceCollision(f"retained Forge workspace already exists: {scratch_dir}")
     if not branch or branch in {"main", "master"}:
         raise _WorktreePreparationError("no-git scratch requires a supplied non-main Forge branch")
 
+    # In-call for the reason ``_is_on_network_fs`` states. The copy takes the
+    # narrow set; only the index may drop what a package is imported through.
+    from kernelforge.loop.path_ownership import (  # noqa: PLC0415
+        COPY_FILTER_DIRECTORY_NAMES,
+        RUNTIME_DIRECTORY_GLOBS,
+        RUNTIME_DIRECTORY_NAMES,
+        RUNTIME_FILE_SUFFIXES,
+    )
+    import fnmatch as _fnmatch  # noqa: PLC0415
+
+    skipped_dirs = RUNTIME_DIRECTORY_NAMES | COPY_FILTER_DIRECTORY_NAMES | {".git"}
+    runtime_suffixes = tuple(RUNTIME_FILE_SUFFIXES)
+    dir_globs = RUNTIME_DIRECTORY_GLOBS
+
     def _ignore(directory: str, names: list[str]) -> list[str]:
-        ignored: list[str] = []
-        for n in names:
-            if n in (".git", "__pycache__", "build", "dist") or n.endswith(".egg-info"):
-                ignored.append(n)
-        return ignored
+        return [
+            n
+            for n in names
+            if n in skipped_dirs or n.endswith(runtime_suffixes) or any(_fnmatch.fnmatchcase(n, g) for g in dir_globs)
+        ]
 
     try:
         if copy_subtrees is None:
@@ -823,7 +925,14 @@ def _prepare_worktree_nogit(
 
     def _scaffold(cmds: list[list[str]]) -> bool:
         for cmd in cmds:
-            proc = _run_git(cmd, timeout=120)
+            # 120s, not less: the baseline ``git add -A`` hashes every copied
+            # extension module, and a framework package carries GBs of them.
+            try:
+                proc = _run_git(cmd, timeout=120)
+            except subprocess.TimeoutExpired:
+                log.warning("forge: non-git scaffold git step timed out: %s", cmd)
+                shutil.rmtree(scratch_dir, ignore_errors=True)
+                return False
             if proc.returncode != 0:
                 log.warning(
                     "forge: non-git scaffold git init step failed: %s -> %s",
@@ -846,7 +955,7 @@ def _prepare_worktree_nogit(
 
     # Must precede the baseline `git add -A`, so the pattern is in force for
     # every commit the loop later makes against this repository.
-    _exclude_bytecode_caches(scratch_dir)
+    _exclude_runtime_artifacts(scratch_dir)
 
     if not _scaffold(
         [
@@ -1310,7 +1419,6 @@ sys.exit("forge task-preparer placeholder: no measurement driver authored yet")
 
 
 _GENERATED_DRIVER_GLOB = ".forge_driver_*.py"
-_BYTECODE_CACHE_GLOB = "__pycache__/"
 
 
 def _exclude_generated_drivers(workspace: Path) -> None:
@@ -1355,32 +1463,31 @@ def _git_exclude_file(workspace: Path) -> Path | None:
     return common / "info" / "exclude"
 
 
-def _exclude_bytecode_caches(workspace: Path) -> None:
-    """Keep regenerated bytecode caches out of the scratch repository's commits.
-
-    Importing the sources the loop edits rewrites ``__pycache__`` beside them.
-    The scratch copy skips the caches that existed, but nothing stops a broad
-    ``git add`` from staging the ones written while the loop runs: they then
-    reach the published patch as binary hunks, and ``git apply`` refuses those
-    for lacking a full index line, so the solution cannot be replayed.
+def _exclude_runtime_artifacts(workspace: Path) -> None:
+    """Keep machine-generated artefacts out of the scratch repository's index.
 
     Only the throwaway scratch repository needs this. Real repositories carry
-    their own ignore rules, and an entry written there would outlive the run.
+    their own ignore rules, and entries written there would outlive the run.
     """
+    from kernelforge.loop.path_ownership import runtime_gitignore_globs  # noqa: PLC0415
+
     exclude = _git_exclude_file(workspace)
     if exclude is None:
         return
     try:
         existing = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
-        if _BYTECODE_CACHE_GLOB in existing.split():
+        present = set(existing.split())
+        missing = [g for g in runtime_gitignore_globs() if g not in present]
+        if not missing:
             return
         exclude.parent.mkdir(parents=True, exist_ok=True)
         with open(exclude, "a", encoding="utf-8") as handle:
             if existing and not existing.endswith("\n"):
                 handle.write("\n")
-            handle.write(_BYTECODE_CACHE_GLOB + "\n")
+            for glob in missing:
+                handle.write(glob + "\n")
     except OSError as error:
-        log.warning("forge: could not exclude bytecode caches from git: %s", error)
+        log.warning("forge: could not write scratch exclude patterns: %s", error)
 
 
 def _restore_generated_driver_exclude(workspace: Path) -> None:
@@ -1768,6 +1875,14 @@ def _apply_kernel_backend_env(env: dict) -> None:
     from _llm_stability_env import apply_llm_stability_env
 
     apply_llm_stability_env(env)
+    # The forge loop spends against the gateway for the whole of its run, and
+    # every agent it drives inherits this env, so without a tag here that spend
+    # arrives naming no component at all. Injecting from this side is what makes
+    # the phase and the action travel: both live in this process only, and the
+    # loop can refine the component it is given without having to restate them.
+    from hyperloom.common.llm_attribution import inject_env
+
+    inject_env(env, component="forge", operation="forge_loop")
     # Shared KnowledgePlane contract. KernelForge remains responsible for its
     # own local knowledge implementation and remote kernel-experience behavior.
     from hyperloom.orchestrator.knowledge.kernel_experience_bridge import (

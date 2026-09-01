@@ -14,6 +14,15 @@ MAX_KNOWLEDGE_BYTES = 5 * 1024 * 1024
 MAX_FILES = 512
 MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_PATH_BYTES = 1024
+
+#: The columns a published Recipe carries, in the order a reader applies them.
+#: A column name is also the prefix every artifact it owns lives under, so this
+#: is the one place the on-the-wire names are spelled.
+CONFIG_SECTION = "config"
+PATCH_SECTION = "patch"
+KERNEL_SECTION = "kernel"
+RECIPE_SECTIONS: tuple[str, ...] = (CONFIG_SECTION, PATCH_SECTION, KERNEL_SECTION)
+
 _ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
     {
         "artifact_files",
@@ -35,10 +44,10 @@ _ARTIFACT_REF_KEYS: frozenset[str] = frozenset(
         "tuned_file",
     }
 )
+#: Only these columns own artifacts; ``config`` is pure data.
 _BUILDER_REF_PREFIXES: tuple[str, ...] = (
-    "explore/",
-    "framework/",
-    "kernel/",
+    f"{KERNEL_SECTION}/",
+    f"{PATCH_SECTION}/",
 )
 
 
@@ -281,11 +290,15 @@ class RemoteWriteResult:
 
 __all__ = [
     "Artifact",
+    "CONFIG_SECTION",
+    "KERNEL_SECTION",
     "KnowledgeBundle",
     "MAX_FILE_BYTES",
     "MAX_FILES",
     "MAX_KNOWLEDGE_BYTES",
     "MAX_PATH_BYTES",
+    "PATCH_SECTION",
+    "RECIPE_SECTIONS",
     "RemoteRecipeValidationError",
     "RemoteWriteResult",
     "RecipeScope",

@@ -196,6 +196,10 @@ def _build_specialist_executor(
                 model=selected_model,
                 max_turns_default=max_turns,
                 allowed_intents=SPECIALIST_INTENTS,
+                # Same label the subprocess dispatch mode reports, so switching
+                # modes does not move this spend between components.
+                attribution_component="specialist",
+                attribution_operation="run_agent",
             )
 
         runner = SpecialistRunner(

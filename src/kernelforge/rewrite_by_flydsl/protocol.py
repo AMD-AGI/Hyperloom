@@ -8,17 +8,17 @@ consumer queries before committing to an integration, the rule turning a logical
 operator identity into a legal Python builder symbol, the environment a
 measurement driver is invoked with, and the apply-back manifest and validator.
 
-It imports nothing from the rest of the package, so the contract can be read
-without pulling in agent, GPU, or git machinery.
+It imports only from :mod:`kernelforge.loop.path_ownership`, which itself
+imports nothing but stdlib, so the contract can be read without pulling in
+agent, GPU, or git machinery.
 """
 
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import keyword
 import re
-from pathlib import PurePosixPath
+from kernelforge.loop.path_ownership import ATTEMPT_ROOT_DIR, is_producer_owned_path
 
 REWRITE_PROTOCOL_VERSION = 2
 ARTIFACT_SCHEMA_VERSION = 2
@@ -63,18 +63,6 @@ ENV_SOURCE_KERNEL = "KERNELFORGE_REWRITE_SOURCE_KERNEL"
 ENV_CANDIDATE_KERNEL = "KERNELFORGE_REWRITE_CANDIDATE_KERNEL"
 ENV_BUILDER_SYMBOL = "KERNELFORGE_REWRITE_BUILDER_SYMBOL"
 ENV_LOGICAL_OP = "KERNELFORGE_REWRITE_LOGICAL_OP"
-
-# Root of the producer's attempt-scoped scratch inside a caller's workspace.
-ATTEMPT_ROOT_DIR = ".forge_rewrite"
-
-# Workspace state the producer creates while running a campaign. It is forge's
-# own bookkeeping, never part of the framework, so it must not reach a patch a
-# consumer applies to their repository.
-PRODUCER_OWNED_PATH_PATTERNS = (
-    "forge_experiments",
-    ATTEMPT_ROOT_DIR,
-    ".forge_driver_*",
-)
 
 # A readable slug stays short enough to keep the generated symbol legible; the
 # digest, not the readable part, is what makes it unique.
@@ -122,18 +110,6 @@ def operator_slug(logical_op_name: str) -> str:
 def builder_symbol(logical_op_name: str) -> str:
     """The FlyDSL factory symbol a port must expose for ``logical_op_name``."""
     return f"build_{operator_slug(logical_op_name)}_module"
-
-
-def is_producer_owned_path(path: str) -> bool:
-    """True when a repository-relative path holds forge state, not framework code.
-
-    Matching is per path component, so a framework file whose name merely starts
-    with a producer prefix stays framework-owned.
-    """
-    for part in PurePosixPath(str(path).strip()).parts:
-        if any(fnmatch.fnmatchcase(part, pattern) for pattern in PRODUCER_OWNED_PATH_PATTERNS):
-            return True
-    return False
 
 
 def driver_environment(

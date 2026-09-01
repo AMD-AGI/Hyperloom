@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
+
 #: Historical collector-only schema retained for archived-reader identification.
 SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
@@ -756,10 +758,19 @@ class KernelBackendAttempt(TypedDict, total=False):
         model (str | None): Model used by the backend, or None.
         ts (str): ISO UTC timestamp of the attempt.
         status (str): Attempt status.
-        decision (str): KEEP / PARTIAL / REVERT / FAILED.
+        decision (str): KEEP / PARTIAL / REVERT / NEEDS_REVIEW / FAILED. The
+            kernel-level verdict on the adopted attempt, the attempt's own
+            otherwise.
         micro_speedup (float | None): Micro-benchmark speedup, or None.
         compile_passed (bool | None): Whether compilation passed, or None.
         correctness_passed (bool | None): Whether correctness passed, or None.
+        correctness_source (str | None): What the correctness verdict was read
+            from (``forge_rewrite_reference`` / ``report_scan`` /
+            ``cli_override`` / ...), or None when nothing recorded one.
+        best_artifact_path (str): The rewritten source the kernel was carried
+            to integrate with. Written on the adopted attempt only; ``""``
+            elsewhere. Distinct from ``optimized_files``, which is the
+            attempt's own output (a stdout log for a real backend run).
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
         error_class (str | None): Failure classification (pre-dispatch markers).
@@ -783,6 +794,8 @@ class KernelBackendAttempt(TypedDict, total=False):
     micro_speedup: float | None
     compile_passed: bool | None
     correctness_passed: bool | None
+    correctness_source: str | None
+    best_artifact_path: str
     optimized_files: list[str]
     error: str | None
     error_class: str | None
@@ -803,6 +816,9 @@ class KernelE2E(TypedDict, total=False):
         patch_path (str | None): Adopted patch path, or None.
         target_file (str | None): File the patch applies to, or None.
         extra_server_args (str): Server-arg fragment introduced by the adoption.
+        kernel_repo (str | None): Absolute deploy/apply root the integrated
+            kernel landed in (the kernel analogue of the framework apply root),
+            or None for an env-only adoption that named no repo.
         ts (str): ISO UTC timestamp of the integrate decision.
     """
 
@@ -814,6 +830,7 @@ class KernelE2E(TypedDict, total=False):
     patch_path: str | None
     target_file: str | None
     extra_server_args: str
+    kernel_repo: str | None
     self_reported_e2e_gain_pct: float | None
     revalidation_measured_tput: float
     revalidation_current_best_tput: float
@@ -927,7 +944,6 @@ class ParamSearchLedger(TypedDict, total=False):
         accepted (list[ParamSearchEntry]): Variants that were accepted.
         rejected (list[ParamSearchEntry]): Variants that were rejected.
         top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
-        winner_history (list[dict[str, Any]]): History of winning variants.
         no_promote_streak (int): Consecutive evaluations without a promotion.
     """
 
@@ -936,7 +952,6 @@ class ParamSearchLedger(TypedDict, total=False):
     accepted: list[ParamSearchEntry]
     rejected: list[ParamSearchEntry]
     top_by_gain: list[ParamSearchEntry]
-    winner_history: list[dict[str, Any]]
     no_promote_streak: int
 
 
@@ -948,14 +963,12 @@ class ParamSearch(TypedDict, total=False):
         backends (ParamSearchLedger): Ledger for the backend-tuning family.
         synergy_attempted (list[str]): Synergy combinations that were attempted.
         discovered_flags (dict[str, Any]): Flags discovered during search.
-        backend_winners_history (list[dict[str, Any]]): History of backend winners.
     """
 
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
     discovered_flags: dict[str, Any]
-    backend_winners_history: list[dict[str, Any]]
 
 
 # Sweep
@@ -1022,6 +1035,12 @@ class Geak(TypedDict, total=False):
     error_class: str | None
     error: str | None
     returncode: int | None
+    # Same-harness adjudication, kept on the result because it is terminal
+    # state: ``geak_pending`` is cleared when the verdict lands, and the final
+    # report still has to say why a measured candidate was dropped.
+    revalidation_status: str | None
+    revalidation_error_class: str | None
+    revalidation_error: str | None
     recovered_from_disk: bool
     handoff: dict[str, Any] | None
     exp_root: str | None
@@ -1062,6 +1081,8 @@ class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
     Attributes:
+        iteration_id (str): Stable session-unique identity for this persisted
+            review pass, including resume-time reuse of ``iter``.
         iter (int): Iteration index.
         ts (str): ISO UTC timestamp of the review.
         topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
@@ -1072,8 +1093,13 @@ class CriticIteration(TypedDict, total=False):
         judge_bundle_path (str): Path to the judge bundle.
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
+        phase (str): Coordinator phase captured with the critic request.
+        macro_cycle (int): Coordinator macro cycle captured with the request.
+        framework_reviews (list[dict[str, Any]]): Durable normalized V6
+            Framework review rows.
     """
 
+    iteration_id: str
     iter: int
     ts: str
     topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
@@ -1083,6 +1109,9 @@ class CriticIteration(TypedDict, total=False):
     judge_bundle_path: str
     emit_path: str
     review_path: str
+    phase: str
+    macro_cycle: int
+    framework_reviews: list[dict[str, Any]]
 
 
 class RobustnessSignal(TypedDict, total=False):
@@ -1431,129 +1460,6 @@ class PhaseSegment(TypedDict, total=False):
     elapsed_seconds: float | None
 
 
-# KB Provenance — RecipeKB / PR Monitor integration
-class KBQueueStats(TypedDict, total=False):
-    """Depth statistics for the on-disk KB write queues.
-
-    Attributes:
-        pending_lines (int): Current depth of ``.kb_pending.ndjson``.
-        flushed_bookmarks (int): Drain-bookmark rows in ``.kb_flushed.ndjson``.
-        dead_letter_lines (int): Rows in ``.kb_dead_letter.ndjson``.
-    """
-
-    pending_lines: int  # current depth of .kb_pending.ndjson
-    flushed_bookmarks: int  # rows in .kb_flushed.ndjson (drain bookmarks)
-    dead_letter_lines: int  # rows in .kb_dead_letter.ndjson
-
-
-class KBFlusherStatus(TypedDict, total=False):
-    """``kb_provenance.flusher_status``: boot marker merged with a live pid probe."""
-
-    enabled: bool  # cli flag (false when --no-kb-flusher or --degraded-kb)
-    spawned: bool  # daemon was actually subprocess.Popen'd this boot
-    alive: bool  # live pid probe at breakdown emit time
-    pid: int | None
-    interval_sec: float
-    batch_size: int
-    reason: str  # boot-time spawn decision text
-    ts: str  # iso UTC of the boot marker
-    pid_path: str  # absolute path to .kb_flusher.pid
-
-
-class WarmReplayOutcome(TypedDict, total=False):
-    """GAP 1 — warm-recipe replay result. Empty {} when it never fired; else ``status`` + per-status fields.
-
-    ``eval_ran`` / ``replay_accuracy`` / ``baseline_accuracy`` are recorded on
-    every replay that reached a throughput measurement, not only on rejection:
-    a config that was checked and passed is a different record from one that
-    was never checked. ``eval_ran`` is what separates "the model scored 0.0"
-    from "no score exists", which are otherwise both a null accuracy.
-
-    A measurement that fails never stops the run. The replay is admitted and
-    ``eval_error`` carries why no score could be read, so an unjudged promotion
-    is visible after the fact rather than silently indistinguishable from a
-    judged one.
-    """
-
-    status: str
-    expected_gain_pct: float
-    actual_gain_pct: float
-    throughput_after: float
-    eval_ran: bool
-    eval_error: str | None
-    replay_accuracy: float | None
-    baseline_accuracy: float | None
-    warm_recipe_tier: str
-    warm_recipe_conf: float
-    config_source: str
-    config_donor_tier: str
-    donor_canonical_id: str
-    donor_model: str
-    donor_session_id: str
-    donor_family_tags: list[str]
-    donor_gain_pct: float
-    donor_breakdown_link: str
-    replay_task_id: str
-    error_class: str
-    reason: str
-
-
-class KBProvenance(TypedDict, total=False):
-    """Recipe KB integration audit for the session.
-
-    Covers warm-start context seeded from the KB, the warm-replay outcome,
-    queue depth, and the flusher daemon status.
-
-    Attributes:
-        recipe_kb_session_id (str): Recipe KB session id.
-        warm_start_ts (str): ISO UTC timestamp of warm start.
-        warm_start_recipe_seen (bool): Whether a warm recipe was seen.
-        warm_start_recipe_tier (str): Tier of the seen warm recipe.
-        warm_start_recipe_source (str): KB path that supplied the applied
-            warm recipe (e.g. ``kb-store`` / ``recipe_kb``); empty when none.
-        warm_start_pitfall_count (int): Number of pitfalls injected at warm start.
-        warm_start_lesson_count (int): Number of lessons injected at warm start.
-        warm_replay (WarmReplayOutcome): Operator-visible warm-replay summary.
-        warm_replay_attempted (bool): Whether a warm replay was attempted.
-        warm_history_injected (bool): Whether warm history was injected.
-        recipe_finalize (dict[str, Any]): Terminal Recipe publication outcome.
-        recipe_finalize_status (str): Persisted publication lifecycle state.
-        recipe_finalize_attempts (int): Number of idempotent finalize attempts.
-        stack_fingerprint (dict[str, str]): Fingerprint of the optimization stack.
-        queue (KBQueueStats): Depth stats for the KB write queues.
-        audit_tail_count (int): Number of audit-tail entries.
-        audit_status_counts (dict[str, int]): Audit entries counted by status.
-        flusher_status (KBFlusherStatus): KB flusher daemon lifecycle marker.
-        kb_degraded_reason (str): KB soft-degrade reason (None / ``explicit_flag`` /
-            ``ir3_auto``).
-        pr_degraded_reason (str): PR Monitor soft-degrade reason (None /
-            ``explicit_flag`` / ``ir3_auto``).
-    """
-
-    recipe_kb_session_id: str
-    warm_start_ts: str
-    warm_start_recipe_seen: bool
-    warm_start_recipe_tier: str
-    # Which KB path (e.g. "kb-store" / "recipe_kb") supplied the applied warm recipe.
-    warm_start_recipe_source: str
-    warm_start_pitfall_count: int
-    warm_start_lesson_count: int
-    warm_replay: WarmReplayOutcome
-    warm_replay_attempted: bool
-    warm_history_injected: bool
-    recipe_finalize: dict[str, Any]
-    recipe_finalize_status: str
-    recipe_finalize_attempts: int
-    stack_fingerprint: dict[str, str]
-    queue: KBQueueStats
-    audit_tail_count: int
-    audit_status_counts: dict[str, int]
-    flusher_status: KBFlusherStatus
-    # Soft-degrade audit: None / "explicit_flag" / "ir3_auto".
-    kb_degraded_reason: str
-    pr_degraded_reason: str
-
-
 # specialist_runs section
 class SpecialistDomainBreakdown(TypedDict, total=False):
     """Per-domain attribution for one ``specialist_rounds`` entry."""
@@ -1594,7 +1500,7 @@ class SpecialistRound(TypedDict, total=False):
 
 # critic_robustness.kb_writes_summary sub-block
 class CriticKBWritesSummary(TypedDict, total=False):
-    """Summary of critic-agent ``commit-review`` outputs (Coordinator proxies these into ``kb_provenance``)."""
+    """Summary of critic-agent ``commit-review`` outputs."""
 
     total: int
     by_verdict: dict[str, int]  # APPROVE / REJECT / REDIRECT / ADVISE / NEEDS_REVIEW (upper-cased critic verdicts)
@@ -2923,6 +2829,360 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
+class V6MetadataVersions(TypedDict, total=False):
+    """Version identifiers projected into V6 metadata."""
+
+    schema_version: str
+    hyperloom: str
+    framework: str | None
+    framework_version: str | None
+    tools: dict[str, str | None]
+
+
+class V6MetadataSession(TypedDict, total=False):
+    """Session identity and lifecycle fields exposed by V6 metadata."""
+
+    session_id: str
+    claw_session_id: str | None
+    sandbox_user_id: str | None
+    created_at_utc: str
+    start_ts: str
+    ended_at_utc: str
+    host: str
+    session_dir: str
+    user_data_path: str
+    code_revision: str
+    pid: int
+    max_minutes: int
+    elapsed_minutes: float
+    tick_count: int
+    recovery: dict[str, Any]
+
+
+class V6TaskConfig(TypedDict, total=False):
+    """Launch-time workload and model architecture projected into V6."""
+
+    model_name: str
+    model_path: str
+    framework_name: str
+    framework_version: str
+    gpu_type: str
+    tp: int | None
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    precision: str
+    max_model_len: int | None
+    objective: dict[str, Any]
+    launch_env: dict[str, str]
+    launch_server_args: str
+    architecture: dict[str, Any]
+
+
+class V6Metadata(TypedDict, total=False):
+    """V6 task identity, configuration, versions, and trace entrypoint."""
+
+    exported_at_utc: str
+    versions: V6MetadataVersions
+    session: V6MetadataSession
+    task_config: V6TaskConfig
+    langfuse: dict[str, Any]
+    warnings: list[str]
+
+
+class V6OutcomeGainBucket(TypedDict, total=False):
+    """Additive, session-baseline-relative gain for one V6 source bucket."""
+
+    total_gain_pct: float | None
+    keep_count: int
+    non_attributable_keep_count: int
+
+
+class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
+    """Kernel gain with its authoritative GEAK and Forge backend split."""
+
+    by_backend: dict[str, V6OutcomeGainBucket]
+
+
+class V6OutcomeAttributionBySource(TypedDict, total=False):
+    """Canonical ledger gain projected onto the V6 stage vocabulary."""
+
+    warm_replay: V6OutcomeGainBucket
+    framework_agent: V6OutcomeGainBucket
+    kernel: V6OutcomeKernelAttribution
+
+
+class V6OutcomeAttribution(TypedDict, total=False):
+    """Availability and additive gain attribution from the canonical ledger."""
+
+    available: bool
+    by_source: V6OutcomeAttributionBySource
+
+
+class V6OutcomeValidation(TypedDict, total=False):
+    """Reconciliation of final measured gain with canonical KEEP entries."""
+
+    attributed_gain_pct: float
+    unattributed_gain_pct: float
+    reconciliation_gap_pct: float | None
+    attribution: V6OutcomeAttribution
+    notes: list[str]
+
+
+class V6Outcome(TypedDict, total=False):
+    """V6 session result projection for downstream consumers."""
+
+    stop_reason: str
+    status: Literal["completed", "failed", "aborted"]
+    stage_reached: str
+    baseline: dict[str, Any]
+    final: dict[str, Any]
+    validation: V6OutcomeValidation
+
+
+class V6TimelineEvent(TypedDict, total=False):
+    """One ordered V6 business-stage event; CLOSE is intentionally excluded."""
+
+    type: str
+    kind: str
+    status: str
+    start_time: str
+    end_time: str
+    ext: dict[str, Any]
+
+
+class V6WarmStartMatched(TypedDict, total=False):
+    """The Recipe the PRELUDE KB lookup selected.
+
+    Present only on a ``matched`` event. ``tier`` and ``confidence`` name the
+    rung of the seven-tuple degradation ladder the hit came from, which is what
+    separates an exact identity match from one that relaxed hardware or
+    framework version to find anything at all. ``origin`` points back at the
+    session that wrote the record, so a replay result can be compared against
+    the run it came from.
+
+    Attributes:
+        match_type (str): ``exact`` when the tier is ``exact``, else ``degraded``.
+        tier (str): Ladder rung — ``exact`` / ``same_arch_class`` /
+            ``same_gpu_isa`` / ``compatible_framework_version``.
+        confidence (float | None): Transfer confidence for that rung; gates the
+            replay through ``--warm-replay-min-confidence``.
+        source (str): Store the record came from (``kb-store`` / local).
+        canonical_id (str): The seven-tuple actually matched.
+        scope (dict[str, Any]): The matched record's own workload shape.
+        optimized_throughput (float | None): Throughput the record validated.
+        validated_gain_pct (float | None): Gain the record validated.
+        expected_gain_pct (float | None): Gain the replay is expected to reproduce.
+        replayable (bool | None): Whether the record may be replayed at all.
+        replay_disabled_reason (str | None): Why it may not.
+        replay_material_available (bool | None): Whether the three columns hold
+            anything to replay — separates a hit on an empty record from a hit
+            on a usable one.
+        view_source (str | None): Which Recipe View the record was read through.
+        origin (dict[str, Any]): ``{session_id, gain_pct}`` of the writing session.
+        experience (dict[str, Any]): Counts of the lessons/pitfalls carried over.
+    """
+
+    match_type: Literal["exact", "degraded"]
+    tier: str
+    confidence: float | None
+    source: str
+    canonical_id: str
+    scope: dict[str, Any]
+    optimized_throughput: float | None
+    validated_gain_pct: float | None
+    expected_gain_pct: float | None
+    replayable: bool | None
+    replay_disabled_reason: str | None
+    replay_material_available: bool | None
+    view_source: str | None
+    origin: dict[str, Any]
+    experience: dict[str, Any]
+
+
+class V6WarmStartReads(TypedDict, total=False):
+    """``timeline[type=warm_start].ext.reads`` — Recipe KB read attribution.
+
+    Aggregated from the recipe-snapshot audit log (last 50 reads): how the T0
+    lookups resolved, which backend served each, and which source supplied the
+    champion config. Omitted when the session recorded no readable read.
+
+    Attributes:
+        count (int): Number of read rows considered (capped at the last 50).
+        hits (int): How many of those reads returned a usable record.
+        by_resolution (dict[str, int]): Reads counted by resolution outcome.
+        by_remote (dict[str, int]): Reads counted by serving backend
+            (e.g. ``kb-store`` vs local ``recipe_kb``).
+        by_source (dict[str, int]): Contributing-source counts across the reads.
+        best_config_by_source (dict[str, int]): Which source supplied the
+            champion config, counted per source.
+        tail (list[dict[str, Any]]): The most recent raw audit rows; downstream
+            champion-config and donor resolution read the latest hit's own
+            ``result`` off these.
+    """
+
+    count: int
+    hits: int
+    by_resolution: dict[str, int]
+    by_remote: dict[str, int]
+    by_source: dict[str, int]
+    best_config_by_source: dict[str, int]
+    tail: list[dict[str, Any]]
+
+
+class V6WarmStartExt(TypedDict, total=False):
+    """``timeline[type=warm_start].ext`` — what was asked for, what came back.
+
+    Attributes:
+        requested (dict[str, Any]): ``{canonical_id, scope}`` this session asked
+            for. ``canonical_id`` is read from ``recipe_finalize`` rather than
+            rebuilt, because the hardware dimension is topology-aware.
+        match_status (str): The raw ``warm_start_context.status`` when it is not
+            a plain hit; ``seed_only`` is a hit that could not be executed and
+            would otherwise be indistinguishable from a miss.
+        matched (V6WarmStartMatched): Omitted unless the status is ``matched``.
+        reads (V6WarmStartReads): Per-source read attribution from the recipe
+            snapshot audit; omitted when no read was recorded.
+    """
+
+    requested: dict[str, Any]
+    match_status: str
+    matched: V6WarmStartMatched
+    reads: V6WarmStartReads
+
+
+class V6WarmReplayApplied(TypedDict, total=False):
+    """What was running when a warm replay reproduced its gain.
+
+    Recorded only on ``reproduced``. The columns are applied together and
+    measured together, so one merged configuration is reported rather than a
+    per-column split that would have to guess which column earned the gain. A
+    replay that did not reproduce records its reason instead — its material has
+    already been rolled back, so there is no running configuration to describe.
+
+    Attributes:
+        config (dict[str, Any]): The effective ``extra_server_args`` and
+            ``extra_envs``, recipe and kernel columns already merged.
+        patch (list[str]): Overlay refs that applied successfully. The
+            lexicographic order of a ref is its replay order; the separate
+            ``patch_timeline`` column is retired.
+        kernel (dict[str, Any]): ``{status, total, kept, reverted, columns}``
+            for the kernel column.
+    """
+
+    config: dict[str, Any]
+    patch: list[str]
+    kernel: dict[str, Any]
+
+
+class V6WarmReplayExt(TypedDict, total=False):
+    """``timeline[type=warm_replay].ext`` — did the record reproduce, and why not.
+
+    Attributes:
+        raw_status (str): The runtime status before it was collapsed onto the
+            five published outcomes (it also spells ``rollback_failed``,
+            ``enqueue_failed``, ``quality_failed``, ``accuracy_failed``,
+            ``promotion_failed``, ``kernel_preparation_failed`` and
+            ``reproduced_but_no_params``).
+        result_type (str): Stable reason code; omitted on a clean reproduce.
+        raw_reason (str | None): The unmapped reason, so normalization cannot
+            silently drop detail.
+        tier (str | None): Ladder rung of the replayed record.
+        confidence (float | None): Transfer confidence of that rung.
+        config_source (str | None): Identity that owned the replayed config.
+        config_donor_tier (str | None): ``self`` when the identity owned it.
+        donor (dict[str, Any]): Borrowed donor's identity, session and gain.
+        before_tput (float | None): Baseline the replay was judged against.
+        after_tput (float | None): Measured HOT-round throughput.
+        gain_pct (float | None): Measured gain against ``before_tput``.
+        expected_gain_pct (float | None): Gain the record claimed.
+        keep_threshold_pct (float | None): Threshold this replay had to clear.
+        historical_reproduce_bar_pct (float | None): ``expected_gain`` scaled by
+            the minimum reproduce ratio.
+        below_historical_reproduce (bool | None): Positive gain that still fell
+            short of that bar — reproduced, but materially degraded.
+        accuracy (dict[str, Any]): ``{eval_ran, baseline, replay, passed}``.
+        applied (V6WarmReplayApplied): Present only on ``reproduced``.
+        active_framework_root (str): Checkout promoted after a reproduce.
+        rollback (dict[str, Any]): ``{ok, errors}`` when material was reverted.
+        failure (dict[str, Any]): ``{error_class, error}``.
+    """
+
+    raw_status: str
+    result_type: str
+    raw_reason: str | None
+    tier: str | None
+    confidence: float | None
+    config_source: str | None
+    config_donor_tier: str | None
+    donor: dict[str, Any]
+    before_tput: float | None
+    after_tput: float | None
+    gain_pct: float | None
+    expected_gain_pct: float | None
+    keep_threshold_pct: float | None
+    historical_reproduce_bar_pct: float | None
+    below_historical_reproduce: bool | None
+    accuracy: dict[str, Any]
+    applied: V6WarmReplayApplied
+    active_framework_root: str
+    rollback: dict[str, Any]
+    failure: dict[str, Any]
+
+
+class V6KBWriteBackExt(TypedDict, total=False):
+    """``timeline[type=kb_write_back].ext`` — did this session's Recipe land.
+
+    The published Recipe body is deliberately not mirrored here: it is the KB
+    Store's record, and duplicating three columns of overlay refs into every
+    breakdown would grow the export without answering a question the identity
+    and the throughput do not already answer.
+
+    Attributes:
+        result_type (str): Stable reason code. The publisher's own vocabulary is
+            narrower than it looks — build, transport and upload failures all
+            surface as a bare exception class name — so the raw reasons are
+            mapped onto a fixed set here.
+        raw_reason (str | None): The unmapped reason.
+        backend (str | None): ``kb-store`` / ``local`` / ``disabled``.
+        canonical_id (str | None): Identity written to.
+        session_id (str | None): Session id recorded on the KB side.
+        scope (dict[str, Any]): Workload dimensions the Champion is keyed by.
+        optimized_throughput (float | None): Throughput submitted, and the value
+            compared against the incumbent Champion.
+        validated_gain_pct (float | None): Session's cumulative validated gain.
+        attempts (int | None): Finalize attempts; above one means it retried.
+        source (str | None): ``close`` or the ``t4_fallback`` teardown path.
+        queue (dict[str, Any]): Local write-queue depths.
+        failure (dict[str, Any]): ``{error_class, error}``.
+    """
+
+    result_type: str
+    raw_reason: str | None
+    backend: str | None
+    canonical_id: str | None
+    session_id: str | None
+    scope: dict[str, Any]
+    optimized_throughput: float | None
+    validated_gain_pct: float | None
+    attempts: int | None
+    source: str | None
+    queue: dict[str, Any]
+    failure: dict[str, Any]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline."""
+
+    status: Literal["succeeded", "failed", "degraded"]
+    start_time: str
+    end_time: str
+    close_sequence_done: bool
+    steps: list[dict[str, Any]]
+    robustness: dict[str, Any]
+    artifacts: dict[str, Any]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2946,6 +3206,7 @@ class SessionBreakdown(TypedDict, total=False):
         phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
         capability_summary (CapabilitySummary): Per-capability roll-up.
+        geak (Geak): GEAK route diagnostics and accepted artifacts.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
@@ -2956,7 +3217,6 @@ class SessionBreakdown(TypedDict, total=False):
         optimizations (Optimizations): Canonical adopted-optimization read
             model spanning Warm Replay, Explore, Framework Agent, and Kernel
             Agent.
-        kb_provenance (KBProvenance): Recipe KB integration audit.
         specialist_runs (list[SpecialistRound]): Specialist sub-agent dispatch records.
         kernel_roofline (KernelRoofline): Hot-kernel table for the dashboard.
         roofline (list[dict[str, Any]]): Per-snapshot roofline comparison list for
@@ -2984,6 +3244,7 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
+    geak: Geak
     kernel_lifecycle: KernelLifecycle
     collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.
@@ -2994,7 +3255,6 @@ class SessionBreakdown(TypedDict, total=False):
     telemetry: Telemetry
     # Single downstream read model for every formally adopted optimization.
     optimizations: Optimizations
-    kb_provenance: KBProvenance  # Recipe KB audit
     specialist_runs: list[SpecialistRound]
     # Hot-kernel table, mirror of ``reports/kernel_roofline.json``.
     kernel_roofline: KernelRoofline
@@ -3018,6 +3278,10 @@ class SessionBreakdown(TypedDict, total=False):
     versions: dict[str, KernelToolMetadata]
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
+    metadata: V6Metadata
+    outcome: V6Outcome
+    timeline: list[V6TimelineEvent]
+    close: V6Close
 
     warnings: list[str]
     source_files: SourceFiles
@@ -3028,6 +3292,7 @@ __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
+    "SCHEMA_VERSION_V6",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -3084,8 +3349,6 @@ __all__ = [
     "Integrity",
     "IntegrityFieldStatus",
     "IntegrityStatus",
-    "KBProvenance",
-    "KBQueueStats",
     "LaneTimelineEntry",
     "KernelLifecycle",
     "KernelMetadata",
@@ -3122,6 +3385,24 @@ __all__ = [
     "TokenUsageAttribution",
     "TokenUsageBucket",
     "TokenUsageTimelineEntry",
+    "V6Metadata",
+    "V6MetadataSession",
+    "V6MetadataVersions",
+    "V6Close",
+    "V6KBWriteBackExt",
+    "V6OutcomeAttribution",
+    "V6OutcomeAttributionBySource",
+    "V6OutcomeGainBucket",
+    "V6OutcomeKernelAttribution",
+    "V6Outcome",
+    "V6OutcomeValidation",
+    "V6TaskConfig",
+    "V6TimelineEvent",
+    "V6WarmReplayApplied",
+    "V6WarmReplayExt",
+    "V6WarmStartExt",
+    "V6WarmStartMatched",
+    "V6WarmStartReads",
     "Workload",
     "WorkloadObjective",
 ]

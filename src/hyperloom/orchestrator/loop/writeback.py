@@ -15,10 +15,14 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_ENABLEMENT,
+    LEVER_KERNEL,
+    LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
     patch_lever_kind,
     patch_owner_phase,
 )
+from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
@@ -71,7 +75,7 @@ from ..actions.executors._accuracy_gate import (
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
 )
-from ..knowledge.agent_kb import ExploreAgentKB, FrameworkAgentKB
+from ..knowledge.agent_kb import PatchKB
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -87,22 +91,69 @@ import logging as _logging
 
 log = _logging.getLogger(__name__)
 
-# FRAMEWORK_AGENT KEEPs are stacked under the ``framework`` attribution family
+# Upstream-PR KEEPs are stacked under the ``framework`` attribution family
 # label rather than under their task kind, because that label is what
-# ``phase_breakdown`` and the action-family table publish. Anything that
-# reconciles a ``framework_agent`` task against the stack has to translate.
+# ``phase_breakdown`` and the action-family table publish.
 _FRAMEWORK_STACK_ACTION = "framework"
 
 #: Task kind -> the lever it moves, for winners whose params carried no stamp.
 #: ``integrate_patch`` is absent: it lands every lever, so its stamp is the only
 #: evidence and a missing one is a real gap rather than something to guess at.
+#: ``geak_e2e`` is absent for the same reason: it promotes on a proven kernel
+#: overlay OR on a config/env-only win, and only the promoting site knows which.
+#: It stamps ``lever_kind`` on the winner from the same overlay proof
+#: ``_geak_stack_entry_extra`` uses, so guessing ``kernel`` here would let the
+#: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
     "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
+    "gemm_tuning": LEVER_KERNEL,
+    "collective": LEVER_KERNEL,
+    "fusion": LEVER_KERNEL,
+    "integrate": LEVER_KERNEL,
+    # Reachable when a session recorded before the action was retired is
+    # resumed and its orphaned KEEPs are reconciled against the stack.
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
+
+
+def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
+    """Name the lever a settled KEEP moved, reading the delivery first.
+
+    What came back outranks what was asked for: a mandate that goes out naming
+    one lever routinely returns another, and the result carries the applier's
+    own markers.
+    """
+    return patch_lever_kind(result) or patch_lever_kind(task_params)
+
+
+#: The one owner label a patch KEEP stages under. Explore- and framework-agent
+#: lifts used to route to two separate columns; the three-column layout has a
+#: single ``patch`` column, so both collapse to this marker. Attribution keeps
+#: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
+_PATCH_KEEP_OWNER = "PATCH"
+
+#: Levers whose overlays feed the one patch column. ``kernel`` publishes through
+#: its own column and is absent; a KEEP that names none of these falls back to
+#: the authoring phase to decide.
+_PATCH_COLUMN_LEVERS = frozenset({LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT})
+
+
+def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    """Whether a settled KEEP's overlay belongs in the patch column.
+
+    A patch-column lever answers on its own; a KEEP that names no such lever
+    (kernel, or none recorded) falls back to the authoring phase, exactly as the
+    old owner label did before explore and framework shared one column. This is
+    now one boolean rather than a per-agent owner, because there is one column.
+    """
+    lever = _lever_for_keep(task_params, result)
+    if lever in _PATCH_COLUMN_LEVERS:
+        return True
+    phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+    return phase in {"EXPLORE", "FRAMEWORK_AGENT"}
 
 
 def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
@@ -371,6 +422,26 @@ class WritebackCollaborator:
             resolved.append(canonical)
         return resolved, missing
 
+    @staticmethod
+    def _provenance_with_apply_roots(
+        provenance: Mapping[str, Any],
+        refs: list[str],
+    ) -> dict[str, Any]:
+        """Turn this KEEP's single apply root into a per-ref answer.
+
+        One KEEP lands in one checkout, so every ref it staged shares that root;
+        recording it per ref is what lets a Recipe whose KEEPs came from
+        different trees stay replayable without anything reconciling them.
+        """
+        row = {key: value for key, value in provenance.items() if key != HOST_ORIGIN_KEY}
+        origin = dict(provenance.get(HOST_ORIGIN_KEY) or {})
+        apply_root = str(origin.pop("apply_root", "") or "").strip()
+        if apply_root and refs:
+            origin["apply_roots"] = {str(ref): apply_root for ref in refs if str(ref).strip()}
+        if origin:
+            row[HOST_ORIGIN_KEY] = origin
+        return row
+
     def _stage_agent_keep(
         self,
         *,
@@ -379,47 +450,60 @@ class WritebackCollaborator:
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
+        provenance: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Stage one KEEP into its owner section.
+        """Stage one KEEP into the patch column.
 
-        Returns ``False`` when patch staging must be retried. Final config is
-        published once from durable ``current_best`` at CLOSE.
+        Returns ``False`` when staging must be retried. The overlay bytes are
+        captured now rather than at CLOSE because the worktree they were
+        harvested from does not outlive the round. Config and kernel are
+        published once from the settled stack at CLOSE.
         """
-        normalized = str(owner or "").strip().upper()
-        facade = (
-            ExploreAgentKB.open()
-            if normalized == "EXPLORE"
-            else FrameworkAgentKB.open()
-            if normalized == "FRAMEWORK_AGENT"
-            else None
-        )
-        if facade is None or not facade.active:
+        if not str(owner or "").strip():
+            return False
+        patch_kb = PatchKB.open()
+        if not patch_kb.active:
             return False
         sources, missing = self._keep_patch_sources(result, task)
         if include_patches and missing:
             log.warning(
-                "%s kb: KEEP at stack index %d references missing patch members: %s",
-                normalized,
+                "patch kb: KEEP at stack index %d references missing patch members: %s",
                 stack_index,
                 missing,
             )
             return False
-        if include_patches and sources:
-            refs = facade.stage_patches(sources, stack_index=stack_index)
+        if not include_patches:
+            return True
+        refs: list[str] = []
+        if sources:
+            refs = patch_kb.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
+        # How the overlay was captured travels with it, so a later session can
+        # tell a complete capture from one that could not account for every path,
+        # and can apply each overlay to the checkout it was taken from.
+        if provenance and not patch_kb.stage_provenance(
+            stack_index=stack_index,
+            **self._provenance_with_apply_roots(provenance, refs),
+        ):
+            return False
         return True
 
     def _enqueue_agent_keep_outbox(
         self,
         *,
-        owner: str,
         stack_index: int,
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
     ) -> None:
-        """Persist an idempotent section handoff to run after state durability."""
+        """Persist an idempotent section handoff to run after state durability.
+
+        The caller has already decided this KEEP feeds the patch column, so
+        every stored field (row id, outbox owner, the stack's
+        ``kb_required_owner``) uses the single patch-owner marker: the
+        three-column layout has one patch column, not a per-agent one.
+        """
         from ..knowledge.remote_recipe import KnowledgeSections
 
         if (
@@ -427,10 +511,15 @@ class WritebackCollaborator:
             or KnowledgeSections.from_env() is None
         ):
             return
-        normalized = str(owner or "").strip().upper()
-        if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
-            return
+        normalized = _PATCH_KEEP_OWNER
         sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
+        # The realized diff is what the tree ended up holding, so it replaces the
+        # delivered patch rather than joining it -- staging both would apply the
+        # same change twice. It is chosen here, not at drain, because drain only
+        # ever sees the row.
+        realized = Path(str(result.get("source_realized_patch") or "").strip() or ".")
+        if include_patches and realized.is_file():
+            sources, missing = [realized], []
         row = {
             "id": f"{normalized}:{int(stack_index)}",
             "owner": normalized,
@@ -438,6 +527,21 @@ class WritebackCollaborator:
             "include_patches": bool(include_patches),
             "patch_sources": [str(path) for path in sources],
             "missing_patch_sources": missing,
+            "provenance": {
+                "base_sha": str(result.get("base_sha") or ""),
+                "complete": bool(result.get("source_snapshot_complete", True)),
+                "artifacts_outside_root": int(result.get("source_artifacts_outside_root") or 0),
+                "realized": bool(include_patches and realized.is_file()),
+                # Where this KEEP came from on this host. ``apply_root`` becomes
+                # a per-ref answer once the refs exist; the rest is for reading a
+                # record back that would not replay.
+                HOST_ORIGIN_KEY: {
+                    "apply_root": str(result.get("framework_root") or ""),
+                    "snapshot": str(result.get("source_snapshot") or ""),
+                    "manifest": str(result.get("source_manifest") or ""),
+                    "sources": [str(path) for path in sources],
+                },
+            },
         }
         outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
@@ -503,6 +607,7 @@ class WritebackCollaborator:
                 result={"patches": list(row.get("patch_sources") or [])},
                 task=task,
                 include_patches=bool(row.get("include_patches")),
+                provenance=row.get("provenance"),
             ):
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained
@@ -916,6 +1021,10 @@ class WritebackCollaborator:
                     result_payload.get("error") or result_payload.get("reason") or ""
                 )[:500]
                 self.shared_state.geak_result = geak_result
+                # ``geak_pending`` is a live-work slot, not a diagnostic
+                # archive.  Keeping a terminal failure here prevents the
+                # KERNEL -> SWEEP transition forever.  The settled verdict and
+                # its diagnostics survive in ``geak_result`` instead.
                 self.shared_state.geak_pending = {}
                 self.shared_state.resume_pending_revalidation = False
                 any_changed = True
@@ -1361,7 +1470,7 @@ class WritebackCollaborator:
                 pitfall/REVERT).
         """
         journal = self._ensure_journal()
-        # integrate_patch / framework_agent report their delta under ``delta_pct``;
+        # integrate_patch reports its delta under ``delta_pct``;
         # fall back to it so a reverted/kept patch shows its REAL measured delta
         # in the journal instead of a null gain.
         gain_pct = to_float(result_dict.get("gain_pct"))
@@ -2244,6 +2353,7 @@ class WritebackCollaborator:
         task: Task,
         done_payload: dict[str, Any],
         source: str,
+        run_error: str = "",
     ) -> None:
         """Common bookkeeping for any specialist task termination (dispatcher loop + intent routing); idempotent on round_id, failures logged not raised.
 
@@ -2252,8 +2362,11 @@ class WritebackCollaborator:
             done_payload: The specialist's done payload (proposal_set, domain,
                 summary, etc.).
             source: The emitting agent string (``specialist:<task_id>``).
+            run_error: Dispatch failure text when the specialist produced no
+                usable payload.
         """
-        domain = str(done_payload.get("domain") or "").strip()
+        task_params = task.params or {}
+        domain = str(done_payload.get("domain") or task_params.get("domain") or "").strip()
         proposals = done_payload.get("proposal_set") or []
         if not isinstance(proposals, list):
             proposals = []
@@ -2263,6 +2376,7 @@ class WritebackCollaborator:
             task=task,
             done_payload=done_payload,
             source=source,
+            run_error=run_error,
         )
         # Advisory multi-model scoring of the proposal_set; informational only, gates nothing. Defensive.
         _scorer = getattr(self, "_proposal_scorer", None)
@@ -2272,8 +2386,8 @@ class WritebackCollaborator:
                     gap={
                         "domain": domain,
                         "gap_canonical_id": done_payload.get("gap_canonical_id", ""),
-                        "gap_symptom": (task.params or {}).get("gap_symptom"),
-                        "gap_evidence": (task.params or {}).get("gap_evidence"),
+                        "gap_symptom": task_params.get("gap_symptom"),
+                        "gap_evidence": task_params.get("gap_evidence"),
                         "summary": done_payload.get("summary", ""),
                     },
                     proposals=proposals,
@@ -2320,12 +2434,14 @@ class WritebackCollaborator:
                 {
                     "task_id": task.task_id,
                     "domain": domain,
-                    "gap_canonical_id": str(done_payload.get("gap_canonical_id") or ""),
+                    "gap_canonical_id": str(
+                        done_payload.get("gap_canonical_id") or task_params.get("gap_canonical_id") or ""
+                    ),
                     "empty": is_empty,
                     "proposals_total": len(proposals),
                     "confidence": done_payload.get("confidence"),
                     "summary": str(done_payload.get("summary") or "")[:480],
-                    "reason": str(done_payload.get("reason") or "")[:480],
+                    "reason": str(run_error or done_payload.get("reason") or "")[:480],
                     "ts": datetime.now(timezone.utc).isoformat(),
                 }
             )
@@ -4080,7 +4196,7 @@ class WritebackCollaborator:
             }
             # The mandate's stamp and the deliverable's markers together;
             # the result wins on a collision.
-            lever_kind = patch_lever_kind({**task_params, **result})
+            lever_kind = _lever_for_keep(task_params, result)
             if lever_kind:
                 lift["lever_kind"] = lever_kind
             if source_phase:
@@ -4166,10 +4282,8 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
-            if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
+            if _is_patch_column_keep(task_params, result):
                 self._enqueue_agent_keep_outbox(
-                    owner=owner,
                     stack_index=len(self.shared_state.optimization_stack) - 1,
                     result=result,
                     task=task,
@@ -4813,6 +4927,11 @@ class WritebackCollaborator:
             **dict(getattr(state, "warm_replay_outcome", {}) or {}),
             "status": "failed",
             "reason": "interrupted_combined_validation_rolled_back",
+            # This terminal branch never runs ``_promote_warm_replay``, which is
+            # what normally stamps ``settled_at``; stamp it here so the SBD
+            # warm_replay event reports the real span instead of collapsing its
+            # end_time back onto ``enqueued_at`` (a zero-duration replay).
+            "settled_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "kernel": {
                 "status": "reverted",
                 "reason": "interrupted_combined_validation",

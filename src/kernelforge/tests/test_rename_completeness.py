@@ -113,9 +113,10 @@ _FELLOW_ALLOWED: tuple[tuple[str, str, str], ...] = (
         "narrative may not, because rewriting it falsifies the record. Scoped to "
         "*.md for the same reason its kernel_agents sibling is: a data/* glob also "
         "swallowed examples/*/run_example.sh, seven of which kept passing a "
-        "--fellow flag the CLI no longer declares. forge-loop is a TolerantCommand, "
-        "so those runs did not fail -- they silently ran an inferred backend "
-        "instead of the intended one.",
+        "--fellow flag the CLI no longer declares. forge-loop tolerated unknown "
+        "options at the time, so those runs did not fail -- they silently ran an "
+        "inferred backend instead of the intended one. That tolerance is gone: an "
+        "undeclared option is now an exit code, which is what makes this scope safe.",
     ),
     (
         # The retired-name detector, and the test that pins it. This is the one

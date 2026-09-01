@@ -24,6 +24,7 @@ from kernelforge.agent_backends import (
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
+    watchdog_timeout_sec,
 )
 from kernelforge.agent_backends.session_resume import (
     EXHAUSTED_END_REASON,
@@ -1550,7 +1551,7 @@ class AnalysisAgentService:
                     usage=usage,
                     deadline_sec=timeout_sec,
                 ),
-                timeout=timeout_sec,
+                timeout=watchdog_timeout_sec(timeout_sec),
             )
             if run_result.end_reason == EXHAUSTED_END_REASON:
                 raise AnalysisBundleError(

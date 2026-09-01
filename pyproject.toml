@@ -256,7 +256,6 @@ hyperloom = [
     "README.md",
     "examples/*.json",
     "examples/*.py",
-    "kb/framework_optimization/*.jsonl",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",

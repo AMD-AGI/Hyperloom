@@ -809,7 +809,7 @@ class PolicyGate:
             trusted_framework_targets=trusted_framework_targets,
         )
         # Coordinator-managed internal actions (roofline / profile /
-        # replay_warm_recipe / framework_agent / conc_sweep) are dispatched by
+        # replay_warm_recipe / conc_sweep) are dispatched by
         # the Coordinator itself, never LLM-delegated, so they receive path
         # checks only. In particular the SWEEP-entry auto-enqueued conc_sweep
         # must NOT be re-validated against the delegate-body sweep-family

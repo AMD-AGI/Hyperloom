@@ -19,6 +19,12 @@ from hyperloom.common.env_safety import (
 )
 
 _DROP = object()
+
+#: The one key whose subtree may carry absolute paths from the producing host.
+#: Deliberately unambiguous rather than a word like ``origin`` that another
+#: producer could introduce for something else and silently widen the exemption.
+HOST_ORIGIN_KEY = "host_origin"
+
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:[\\/]")
 _PATH_KEY_RE = re.compile(
     r"(?:^|_)(?:path|paths|dir|directory|file|filename|root|workspace|home)(?:$|_)",
@@ -202,7 +208,7 @@ def sanitize_publish_server_args(value: str) -> str:
     return _reserialize_json_blobs(" ".join(safe))
 
 
-def _sanitize_value(value: Any, *, key: str = "") -> Any:
+def _sanitize_value(value: Any, *, key: str = "", allow_absolute: bool = False) -> Any:
     if key in {
         "source_file",
         "source_files",
@@ -221,14 +227,18 @@ def _sanitize_value(value: Any, *, key: str = "") -> Any:
         safe: dict[str, Any] = {}
         for raw_key, nested in value.items():
             name = str(raw_key)
-            cleaned = _sanitize_value(nested, key=name)
+            cleaned = _sanitize_value(
+                nested,
+                key=name,
+                allow_absolute=allow_absolute or name == HOST_ORIGIN_KEY,
+            )
             if cleaned is not _DROP:
                 safe[name] = cleaned
         return safe
     if isinstance(value, (list, tuple, set)):
         safe_items = []
         for item in value:
-            cleaned = _sanitize_value(item, key=key)
+            cleaned = _sanitize_value(item, key=key, allow_absolute=allow_absolute)
             if cleaned is not _DROP:
                 safe_items.append(cleaned)
         return safe_items
@@ -236,7 +246,11 @@ def _sanitize_value(value: Any, *, key: str = "") -> Any:
         value = os.fspath(value)
     if isinstance(value, str):
         if _is_absolute_path_text(value):
-            return _DROP
+            # Everywhere but the host-origin subtree, an absolute path is a leak
+            # of the producing machine. There it is the payload: a later session
+            # cannot look for the checkout a KEEP was taken from without being
+            # told where that was.
+            return value if allow_absolute else _DROP
         if _PATH_KEY_RE.search(key) and ("/" in value or "\\" in value):
             # Relative bundle references remain replayable; absolute values were
             # removed above.
@@ -246,12 +260,27 @@ def _sanitize_value(value: Any, *, key: str = "") -> Any:
 
 
 def sanitize_shared_knowledge(knowledge: Mapping[str, Any]) -> dict[str, Any]:
-    """Return a publishable copy with secrets and host paths removed."""
+    """Return a publishable copy with secrets and host paths removed.
+
+    Host paths survive in exactly one place, the :data:`HOST_ORIGIN_KEY` subtree,
+    because a KEEP that cannot say which checkout it came from cannot be replayed
+    on an image that lays that checkout out somewhere else.
+
+    The exemption is scoped precisely: inside the subtree an absolute-path string
+    is returned verbatim, which means the value-level scrubbing every other
+    string gets -- ``redact_secret_values`` and embedded-path redaction -- is
+    bypassed for it (that is the whole point: the path must survive intact).
+    Key-level dropping is *not* relaxed there: a secret-named key is still
+    removed inside the subtree exactly as it is everywhere else. So do not put a
+    credential-bearing value under this key expecting the path exemption to also
+    launder its content -- it will not.
+    """
     cleaned = _sanitize_value(dict(knowledge))
     return cleaned if isinstance(cleaned, dict) else {}
 
 
 __all__ = [
+    "HOST_ORIGIN_KEY",
     "PUBLISH_ENV_EXACT_ALLOWLIST",
     "PUBLISH_ENV_PREFIX_ALLOWLIST",
     "sanitize_publish_env_mapping",

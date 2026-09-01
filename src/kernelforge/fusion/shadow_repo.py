@@ -28,7 +28,9 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
 from kernelforge.llm.git import git
+from kernelforge.loop.path_ownership import runtime_gitignore_globs
 
 log = logging.getLogger("forge_fusion")
 
@@ -42,14 +44,7 @@ SHADOW_BRANCH = "forge-fusion"
 # will not descend into an excluded directory, so re-admitting the directory
 # itself is what makes this work. Artifact patterns come last to apply inside it.
 _EXCLUDE_HEADER = "/*\n"
-_EXCLUDE_ARTIFACTS = """\
-__pycache__/
-*.pyc
-*.pyo
-*.so
-*.egg-info/
-.pytest_cache/
-"""
+_EXCLUDE_ARTIFACTS = "".join(f"{glob}\n" for glob in runtime_gitignore_globs())
 
 
 def _git(repo: str, *args: str, env: dict[str, str], timeout: int = _GIT_TIMEOUT_SEC) -> subprocess.CompletedProcess:
@@ -105,9 +100,9 @@ class ShadowRepo:
     def reset_to_base(self) -> bool:
         """Put the framework tree back as the campaign found it.
 
-        ``clean`` takes no pathspec because the exclude is a whitelist: it will
-        not touch an ignored path, so the neighbouring wheels are out of reach
-        while a module the author added beside the source is not.
+        ``clean`` takes no pathspec because the exclude file lists only cache
+        directories safe to leave behind; artefacts that affect measurement
+        (compiled extensions, build output) are tracked and restored by reset.
         """
         for args in (("reset", "--hard", "-q", self.base_commit), ("clean", "-fdq")):
             result = _git(self.root, *args, env=self.env)

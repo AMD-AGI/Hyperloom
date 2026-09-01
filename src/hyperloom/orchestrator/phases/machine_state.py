@@ -434,12 +434,8 @@ DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC: float = _default_cycle_reloop_min_remain
 # the run is considered converged (stop looping → CLOSE).
 DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES: int = 3
 
-# A macro-cycle "gained" when validated cumulative gain rose by more than this
-# (percentage points); guards against float noise being read as progress.
-DEFAULT_CYCLE_MIN_GAIN_PCT: float = 1e-6
-
 # Decaying acceptance curve: the marginal-gain bar shrinks each macro-cycle. It
-# is injected at dispatch for explore, integrate_patch and framework_agent, and
+# is injected at dispatch for explore and integrate_patch, and
 # also sets the stack-stable threshold (=keep/2) and the convergence gain bar.
 # The kernel-owned families hold their own fixed thresholds instead.
 KEEP_THRESHOLD_FLOOR_PCT: float = 0.1
@@ -673,6 +669,41 @@ def _kernel_idle_min_seconds() -> float:
 
 
 KERNEL_IDLE_MIN_SECONDS: float = _kernel_idle_min_seconds()
+
+#: How often the intent router refreshes the inline-step liveness stamp.
+KERNEL_HEARTBEAT_SEC: float = 150.0
+
+#: How stale ``kernel_inline_step_seen_unix`` may be and still mean "running".
+#: Three heartbeat intervals absorb a late beat under load; a stamp orphaned by a
+#: process that died mid-step expires shortly after rather than muting the guard.
+KERNEL_INLINE_STEP_STALE_SECONDS: float = 3.0 * KERNEL_HEARTBEAT_SEC
+
+
+def kernel_inline_step_running(state: Any, *, now_unix: float | None = None) -> bool:
+    """Report whether an inline kernel request is executing right now.
+
+    Reads the stamp ``SharedState.kernel_inline_step_seen_unix`` carries, which
+    the idle guard has no other way to see. One older than
+    :data:`KERNEL_INLINE_STEP_STALE_SECONDS` is a leftover, not a live step.
+
+    Args:
+        state: Frozen SharedState view.
+        now_unix: Override for the current time.
+
+    Returns:
+        ``True`` when an inline kernel step reported itself recently enough.
+    """
+    seen = getattr(state, "kernel_inline_step_seen_unix", 0.0)
+    try:
+        seen = float(seen or 0.0)
+    except (TypeError, ValueError):
+        return False
+    if seen <= 0.0:
+        return False
+    now = float(now_unix if now_unix is not None else _now_unix(state))
+    return 0.0 <= (now - seen) <= KERNEL_INLINE_STEP_STALE_SECONDS
+
+
 ESCALATE_HINT_EXTEND_EXPLORE_BUDGET: str = "extend_explore_budget"
 ESCALATE_HINT_EXTEND_KERNEL_BUDGET: str = "extend_kernel_budget"
 
@@ -1070,9 +1101,9 @@ def phase_cumulative_seconds(
     """Return wall-clock seconds spent in ``phase``, summed over EVERY entry.
 
     :func:`phase_elapsed_seconds` measures the CURRENT entry only, because
-    ``phase_started_unix`` is reset on every phase entry. Each phase is re-entered
-    once per macro-cycle, so a budget guard built on it hands the phase a fresh
-    full allotment on every re-entry. This reads the durable
+    ``phase_started_unix`` is reset on every phase entry. The absolute cap
+    (:func:`phase_cap_exceeded`) bounds the whole run, so it needs this total
+    rather than one entry's clock. This reads the durable
     ``phase_elapsed_totals`` banked at each transition out of the phase and adds
     the live segment when ``phase`` is the phase currently running.
 
@@ -1104,7 +1135,7 @@ def phase_cumulative_seconds(
 
 
 def explore_elapsed_seconds(state: Any, *, now_unix: float | None = None) -> float | None:
-    """Return total Explore wall-clock seconds across all macro cycles.
+    """Return total optimisation-phase wall-clock seconds across all macro cycles.
 
     Completed segments are accumulated at every transition out of the
     optimisation phase. If it is still current, append the live segment at
@@ -1208,15 +1239,16 @@ def phase_budget_remaining_seconds(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
-    """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited).
+    """Return seconds left in the current phase ENTRY's budget (``None`` when budget window 0 = unlimited).
 
-    Charges the phase's CUMULATIVE spend (:func:`phase_cumulative_seconds`), not
-    just the current entry: the budget fraction is the phase's share of the run,
-    so a phase re-entered on a later macro-cycle resumes from what it has already
-    spent instead of being handed its whole allotment again. Note the allotment
-    itself (:func:`_phase_budget_total_seconds`) still reconstructs the base from
-    the CURRENT entry — it charges back against the clock at this entry's start,
-    which is a per-entry quantity by construction.
+    Charges :func:`phase_elapsed_seconds`, matching the allotment's basis:
+    :func:`_phase_budget_total_seconds` charges back against the clock at this
+    entry's start, so earlier entries are already priced into it. Subtracting
+    the cumulative total as well bills them twice, which pins a re-entered phase
+    at ``0`` for the rest of the run however much session is left.
+
+    Lifetime spend is bounded by :func:`phase_cap_exceeded` instead; every exit
+    predicate that reads this checks that cap alongside it.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -1225,14 +1257,14 @@ def phase_budget_remaining_seconds(
         now_unix (float | None): Override for the current time.
 
     Returns:
-        float | None: Non-negative seconds left in the current phase's budget,
-        or ``None`` when the budget window is unlimited or the phase has no
+        float | None: Non-negative seconds left in this entry's budget, or
+        ``None`` when the budget window is unlimited or the phase has no
         allocated fraction.
     """
     total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     if total is None:
         return None
-    return max(0.0, total - phase_cumulative_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:
@@ -1503,7 +1535,7 @@ def compute_plateau_kernel(
 ) -> tuple[bool, dict[str, Any]]:
     """Real plateau_kernel → ``(triggered, evidence)``.
 
-    Trigger (OR, weaker than explore's AND): revert_streak
+    Trigger (OR, weaker than the config arm's AND): revert_streak
     >= threshold OR recent_keep_gain < keep_gain_threshold_pct.
 
     Args:
@@ -2974,7 +3006,7 @@ LIFECYCLE_STATUSES: frozenset[str] = frozenset(
     }
 )
 
-# Human-friendly labels for the six coordinator phases.
+# Human-friendly labels for the coordinator phases.
 PHASE_HUMAN_LABELS: dict[str, str] = {
     PHASE_PRELUDE: "Prelude (baseline + roofline)",
     PHASE_FRAMEWORK_AGENT: "Optimize (config / source / upstream)",
@@ -3363,7 +3395,6 @@ __all__ = [
     "DEFAULT_MAX_MACRO_CYCLES",
     "DEFAULT_CYCLE_RELOOP_MIN_REMAINING_SEC",
     "DEFAULT_GLOBAL_CONVERGENCE_NO_GAIN_CYCLES",
-    "DEFAULT_CYCLE_MIN_GAIN_PCT",
     "DEFAULT_LONGRUN_THRESHOLD_MINUTES",
     "is_long_run",
     "resolve_keep_threshold",

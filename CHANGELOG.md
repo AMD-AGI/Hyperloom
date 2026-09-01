@@ -5,6 +5,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **A published Recipe now carries three columns instead of five.**
+  `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
+  `config`/`patch`/`kernel`, each owned end to end by one SDK facade
+  (`ConfigKB`, `PatchKB`, `KernelAgentKB`). The `explore` and `framework`
+  source overlays merge into a single `patch` column; replay order is the
+  lexicographic order of the zero-padded stack/member indices in each
+  `patch/overlays/<stack>/<member>-<name>.patch` ref, so `patch_timeline` is
+  gone. Each overlay carries a `provenance` row.
+
+- **The recorded apply root is now the sole authority for warm replay.**
+  Each overlay records `provenance[].host_origin.apply_roots` (`{ref:
+  absolute_root}`) and each kernel item records `host_origin.apply_root`, read
+  back at replay to place the change into the checkout it was measured on. The
+  env/allowlist root search is removed: a record that cannot name its checkout
+  is skipped whole rather than applied to a tree the gain was never measured
+  on. `host_origin` is the one sanitizer-exempt subtree allowed to carry
+  absolute paths (secret-named keys are still dropped there).
+
 ### Fixed
 
 - **The AgentX baseline overhead is derived from the warmup bound instead of a
@@ -61,7 +81,61 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   measurement. Rounds that previously passed on a raised threshold will now be
   rejected — which is the intended correction, not a regression.
 
+- **The AgentX warmup bound scales with concurrency, and both layers read the
+  same number.** The client builds warmup as `CANON_WARMUP_PER_LANE` requests
+  per lane across `CONC` lanes, so the work is linear in concurrency by
+  construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
+  measured at one concurrency under-budgets every higher one (measured on
+  Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
+  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
+  lives in one function that both consumers call: this process derives the
+  subprocess cap from it, and `apply_agentx_switch` exports its result into the
+  benchmark env so the client's `--warmup-grace-period` — the thing that
+  actually stops the warmup — cannot disagree with the cap. A sweep variant
+  re-derives from its own `CONC` after the variant envs are merged, since the
+  switch runs before that concurrency exists.<br/>
+  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
+  grace was measured at and defaults to 8, so every existing configuration
+  derives exactly what it derived before. Declare it when you measured
+  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
+  passed in without the anchor is read as an 8-anchored number and doubled.
+  The floor only ever raises a bound.
+
+- **Budget admission prices a variant at the cap it will actually be granted.**
+  Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the
+  sweep's session soft deadline compared the remaining budget against the
+  *declared* `variant_timeout_sec`. Under AgentX the round is granted the raised
+  cap instead, so a variant was admitted that the budget could not pay for, had
+  its timeout clamped back to the remaining time, and died mid-warmup — the
+  exact failure the cap-raise exists to prevent. All five now use the raised
+  cap; with AgentX off the helper is the identity and the synthetic path prices
+  and paces exactly as before.
+
+- **An AgentX benchmark timeout is never lowered below what the config
+  declared.** The inner-timeout raise was an unconditional assignment, so a
+  config declaring more than the AgentX derivation had its timeout cut
+  (`profile_sglang.yaml`'s 14400s became 10800s). It now takes the maximum and
+  logs when the config's own number wins.
+
+- **The AgentX client holds the server connection open, and validates its
+  numeric knobs.** `AIPERF_HTTP_TCP_USER_TIMEOUT` gave the client a 900s
+  tolerance, but nothing raised the server's keep-alive (vLLM defaults to 5s),
+  so the server closed idle connections mid-warmup and the round failed with
+  `ServerDisconnectedError` after a full weight load. The wrapper now defaults
+  the framework's own knob (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE` /
+  `SGLANG_TIMEOUT_KEEP_ALIVE`) to the same tolerance, overridable via
+  `AGENTX_HTTP_KEEP_ALIVE_S` and never overwriting an explicit setting.
+  Separately, `AGENTX_FAILED_REQUEST_THRESHOLD` was interpolated into an awk
+  program body, making its value executable; the three measurement knobs are now
+  validated as numbers and the comparison passes them through `awk -v`.
+
 ### Added
+
+- **Session breakdown exports now include the additive V6 startup contract.**
+  The existing V5 payload remains intact while `metadata`, `outcome`,
+  `timeline`, and `close` provide the V6 read model. Install and model-gate
+  source events use one ordered timeline ledger that preserves fresh and resume
+  attempts, and write failures are surfaced through `metadata.warnings`.
 
 - **KernelForge now ships inside Hyperloom as the built-in kernel-opt agent.**
   Its source was snapshotted from `AMD-BRAIN-Internal/KernelForge` at
@@ -91,6 +165,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   hipBLASLt, and the fusion backend. `deploy/` is also absent -- every file in
   it targets the retired repository.
 
+- **`scripts/partition_mode_sweep.py` measures which compute-partition mode a
+  workload wants.** Sets each mode on one card in turn, runs the same benchmark
+  on every partition that mode creates, sums the throughput, and restores the
+  card's entry mode on the way out — including after a failure or a Ctrl-C.
+  Modes whose partitions provably cannot hold the configured streams are skipped
+  with the arithmetic shown rather than run into an out-of-memory failure.<br/>
+  The fan-out is the substance of it. A benchmark that loads one partition and
+  ignores the rest measures a fraction of the card, which reports `CPX` as eight
+  times worse than it is; every figure here is the sum over a mode's partitions
+  with all of them loaded together, and a mode is reported only when every one of
+  its partitions returned a measurement. Partitions are selected by matching CU
+  count within the swept card's PCI bus, never by device index: `amd-smi` orders
+  by PCI address while HSA/HIP enumerates whole cards first, so on an 8-card
+  MI355X node with card 0 in `CPX` the two tools disagree about which devices the
+  partitions are — 0-7 against 7-14.<br/>
+  This is where the privileged `amd-smi set` lives, and the only place it does.
+  A card-wide mutation that evicts every GPU context is reasonable between
+  benchmarks in a script an operator ran on purpose, and unreasonable inside an
+  optimization loop that also runs agent-authored code, so `optimize` continues
+  to only read the mode. Together the two halves are a boundary: the sweep
+  chooses the shape, the session asserts it.<br/>
+  Because that set evicts work, the check standing in front of it fails closed:
+  an `amd-smi` process listing in a shape the parser does not model is a refusal,
+  not an empty one, since the only wrong answer that destroys anything is reading
+  a busy node as free. It is scoped to the card being swept, so a neighbour's
+  benchmark on a shared node no longer forces `--allow-busy` and with it the loss
+  of the guard on the target card. Every exit from a started sweep runs the
+  restore and the report, including on an error the script does not model — which
+  exits `4`, keeps the modes already measured, and still yields `3` if the card
+  could not be put back.
 - **The card's compute-partition shape is now recorded, checked, and published.**
   An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
   `QPX`, `CPX`), and splitting one trades per-request latency for aggregate
@@ -134,6 +238,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **BREAKING: `forge-loop` and `forge-rewrite-by-flydsl` now reject an undeclared
+  option instead of dropping it.** These two were the only tolerant entry points
+  in the forge CLI: an option they did not declare was discarded, named on
+  stderr, and recorded as `ignored_cli_options` on the result document, and the
+  run proceeded on the defaults. The exemption existed because a consumer in a
+  *separate repository* drove them and could ship ahead of the installed
+  producer; vendoring put producer and consumer in one tree and one wheel, so
+  that skew can no longer occur. What the tolerance still absorbed was typos and
+  renames — silently. Seven shipped examples kept passing a `--fellow` flag after
+  the `fellow` -> `kernel_backend` rename and ran an inferred backend instead of
+  the intended one, exiting 0 the whole time; contrast the fusion wrapper's
+  `--llm-model` -> `--model` rename, which `forge-fuse` rejected outright and
+  which was therefore found and fixed. Both commands now behave like every other
+  forge subcommand — click's own error, exit 2, before any GPU work starts, with
+  a "Did you mean" suggestion. `kernelforge/cli_forward_compat.py` and the
+  `ignored_cli_options` result field are removed; nothing in Hyperloom read that
+  field. The retired `--max-iters`, previously accepted and ignored, is now
+  rejected too.
+
 - **BREAKING: `$FORGE_PATH` is removed, not demoted.** Installing Hyperloom
   installs forge, so there is no checkout to point at and nothing to clone:
   `local_setup.sh` no longer clones the private KernelForge repo (and the
@@ -169,9 +292,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `kernel_backend`, and a config carrying the retired key **fails loudly at
   load** rather than migrating silently; the environment variable is
   `FORGE_DISABLE_COMPILED_KERNEL_BACKENDS`.<br/>
-  The CLI flag is the one place where the failure is *not* loud on its own:
-  `forge-loop` is a `TolerantCommand`, so `--fellow triton-fellow` is dropped
-  with a warning and the campaign proceeds on an inferred backend. The seven
+  The CLI flag was the one place where the failure was *not* loud on its own:
+  `forge-loop` still tolerated unknown options at the time, so `--fellow
+  triton-fellow` was dropped with a warning and the campaign proceeded on an
+  inferred backend. That tolerance is removed in this same release (see above),
+  so the flag now fails like the config key does. The seven
   shipped `run_example.sh` that still passed it are fixed, and the rename guard
   that should have caught them — its exemption globbed `data/*` rather than
   `data/*.md`, so it was exempting runnable scripts along with the prose it
@@ -453,6 +578,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   wrapper's own input JSON is unchanged.
 
 ### Fixed
+
+- **The recorded framework version now comes from the interpreter preflight
+  resolved, not from whatever the orchestrator's own process happens to have.**
+  `--framework-env isolated` is the default for vLLM, whose ROCm wheel pins its
+  own torch, so the framework is installed where `importlib.metadata` in this
+  process cannot see it — and `detect_stack_fingerprint` probed this process
+  first, recording `unknown` on the default bare-metal vLLM path, or the version
+  of a shared install the run never served with when one happened to be present.
+  `_resolve_framework_build` already walks the candidate interpreters and imports
+  the framework to find the right one, but `_check_serving_framework` only
+  printed the winner; it is now published as `$HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON`
+  (paired with `$HYPERLOOM_RESOLVED_FRAMEWORK`, since the scan answers for one
+  framework and `sglang` is the default) and the fingerprint reads its
+  `site-packages`. The installer-written `$VLLM_VENV_ROOT` is no longer read by
+  the fingerprint directly: it is only ever written, never cleared, so on its own
+  it cannot say whether the tree it names still holds vLLM. It still leads
+  preflight's candidate list and is probed there, which is what the recorded
+  version now follows. A prefix that yields no `site-packages` — a system Python keeps its
+  packages in `dist-packages` — is treated as a failed derivation and falls back
+  to this process, not as an authoritative "not installed".<br/>
+  **Operator note**: the framework check returns before publishing when
+  `$HYPERLOOM_SKIP_FRAMEWORK_CHECK` is set, when `$BENCHMARK_BASE_URL` points at
+  a remote server, on external multi-node, and for scriptable frameworks (xDiT,
+  custom) that own their entrypoint — serving is not local on those paths, so
+  the fingerprint falls back to this process rather than reading a venv root
+  that describes some other host.
 
 - **Shell and loader hijack names are rejected from the `extra_envs` argument to
   `materialize_config_with_envs` before the config is persisted.** The predicate

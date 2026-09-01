@@ -148,6 +148,17 @@ def _split_args_preserving_json(text: str) -> list[str] | None:
     return [_unwrap_shell_quotes(tok) for tok in tokens]
 
 
+def _unquote_token(token: str) -> str:
+    """Drop one layer of matching shell quotes from a non-POSIX-split token.
+
+    The removal specs are still POSIX-split, so they arrive unquoted; this puts
+    both sides of a pair comparison in the same shape.
+    """
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
 def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     """Remove flag specs from a server-arg string.
 
@@ -163,10 +174,24 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     here with a non-empty denylist, so a lossy round trip would corrupt a
     sibling ``--compilation-config`` even for a variant that removes nothing.
     """
-    args = str(server_args or "").strip()
+    # Compact the JSON values first, then split without POSIX quote processing.
+    # Compacting leaves every JSON value as one whitespace-free word, so the
+    # non-POSIX split keeps it whole AND keeps its inner double quotes, which
+    # the POSIX split eats (``{"a":"b"}`` -> ``{a:b}``, rejected by vLLM's
+    # ``json.loads`` at boot). Re-quoting afterwards cannot recover every value:
+    # _repair_unquoted_json has to guess where the quotes went, and atom's
+    # ``--online_quant_config`` wildcards (``*.mlp.gate``) fall outside that
+    # guess, so they reached the server unparseable.
+    args = _reserialize_json_blobs(str(server_args or "").strip())
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
+    # Same non-POSIX split main arrived at independently, plus the wrapper strip:
+    # a plain operand written as ``--tool-call-parser 'kimi_k3'`` must not keep
+    # its quotes, because Magpie expands EXTRA_*_ARGS unquoted and they would
+    # reach argv literally. _unwrap_shell_quotes only touches fully-wrapped,
+    # whitespace-free tokens, so a JSON blob (starts with ``{``/``[``) is never
+    # affected and token boundaries cannot shift.
     tokens = _split_args_preserving_json(args)
     if tokens is None:
         return args
@@ -201,12 +226,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
         flag = tok.split("=", 1)[0] if tok.startswith("--") else ""
         if flag and "=" in tok:
             _flag, _, value = tok.partition("=")
-            if _flag in remove_flags or (_flag, value) in remove_pairs:
+            if _flag in remove_flags or (_flag, _unquote_token(value)) in remove_pairs:
                 i += 1
                 continue
         if flag and i + 1 < len(tokens) and not tokens[i + 1].startswith("--"):
             value = tokens[i + 1]
-            if flag in remove_flags or (flag, value) in remove_pairs:
+            if flag in remove_flags or (flag, _unquote_token(value)) in remove_pairs:
                 i += 2
                 continue
         if flag and flag in remove_flags:
@@ -214,10 +239,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
             continue
         out.append(tok)
         i += 1
-    # Tokens are already JSON-compacted and quote-preserving, so a plain join is
-    # lossless: no after-the-fact re-quoting of a damaged blob is needed (and
-    # none was ever possible for a value like ``["+fused_rms_norm_gated"]``,
-    # whose ``+`` sign the repair heuristic could not reconstruct).
+    # No re-serialisation on the way out: the tokens are already JSON-compacted
+    # and the non-POSIX split kept each one byte-for-byte, so re-joining the
+    # survivors cannot corrupt a sibling flag. After-the-fact re-quoting was
+    # never a workable alternative -- _repair_unquoted_json has to guess where
+    # the quotes went, and a value like ``["+fused_rms_norm_gated"]`` (whose
+    # ``+`` the heuristic cannot reconstruct) is unrecoverable once damaged.
     return " ".join(out)
 
 

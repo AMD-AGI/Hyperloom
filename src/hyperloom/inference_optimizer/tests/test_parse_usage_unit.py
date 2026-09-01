@@ -305,6 +305,51 @@ def test_summarize_tool_input_clips_long():
     assert len(out) <= 241
 
 
+def test_summarize_tool_input_redacts_bearer_and_assignment():
+    """Shell commands in the intel ledger must not keep credential values."""
+    bearer_header = ": ".join(("Authorization", "Bearer secret-token-value"))
+    bearer = pu._summarize_tool_input({"command": f"{bearer_header} https://x"})
+    assert "secret-token-value" not in bearer
+    assert "[REDACTED]" in bearer
+
+    assigned = pu._summarize_tool_input({"command": "OPENAI_API_KEY=sk-live-abcdef curl https://x"})
+    assert "sk-live-abcdef" not in assigned
+    assert "[REDACTED]" in assigned
+
+    # Quoting the value is the common shell shape, so it must mask too.
+    quoted = pu._summarize_tool_input({"command": 'export MYAPP_PASSWORD="hunter2" && ./run.sh'})
+    assert "hunter2" not in quoted
+    assert "[REDACTED]" in quoted
+
+
+def test_summarize_tool_input_redacts_before_clipping():
+    """A secret near the clip boundary is masked on the full string first."""
+    bearer_header = ": ".join(("Authorization", "Bearer secret-token-value"))
+    cmd = f"{bearer_header} " + ("x" * 300)
+    out = pu._summarize_tool_input({"command": cmd})
+    assert "secret-token-value" not in out
+    assert "[REDACTED]" in out
+    assert out.endswith("…")
+    assert len(out) <= 241
+
+
+def test_summarize_tool_input_redacts_past_clip_inside_scan_window():
+    """A secret past the 240 clip but inside the 4096 scan window is still masked."""
+    cmd = ("x" * 300) + " OPENAI_API_KEY=sk-live-abcdef"
+    out = pu._summarize_tool_input({"command": cmd}, limit=400)
+    assert "sk-live-abcdef" not in out
+    assert "[REDACTED]" in out
+
+
+def test_summarize_tool_input_bounds_scan_on_huge_write_dump():
+    """A megabyte Write input is still a 240-char summary, with leading secrets masked."""
+    out = pu._summarize_tool_input({"content": "OPENAI_API_KEY=sk-live-abcdef " + ("a" * 50_000)})
+    assert "sk-live-abcdef" not in out
+    assert "[REDACTED]" in out
+    assert out.endswith("…")
+    assert len(out) <= 241
+
+
 # ---- parse_claude_stream_json_usage ----
 
 

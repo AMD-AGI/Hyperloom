@@ -18,6 +18,7 @@ from kernelforge.agent_backends import (
     AgentRunSpec,
     AgentToolPolicy,
     create_registered_backend,
+    watchdog_timeout_sec,
 )
 from kernelforge.config import Config
 from kernelforge.orchestrator.agent_response import (
@@ -1328,7 +1329,7 @@ class OrchestrationAgent:
                     ),
                     usage=usage,
                 ),
-                timeout=effective_timeout,
+                timeout=watchdog_timeout_sec(effective_timeout),
             )
         except asyncio.TimeoutError as error:
             raise OrchestrationInfrastructureError(f"{role} backend exceeded {effective_timeout}s timeout") from error
@@ -1364,7 +1365,7 @@ class OrchestrationAgent:
                     feedback,
                     usage=usage,
                 ),
-                timeout=timeout_sec,
+                timeout=watchdog_timeout_sec(timeout_sec),
             )
         except asyncio.TimeoutError as error:
             raise OrchestrationInfrastructureError(f"{role} backend exceeded {timeout_sec}s timeout") from error

@@ -291,6 +291,41 @@ def test_git_commit_kept_scopes_add_to_paths(tmp_path, monkeypatch):
     assert add_cmd[-3:] == ["-A", "--", "pkg/mod.py"]
 
 
+def test_git_commit_kept_note_is_empty_only_on_a_real_commit(tmp_path):
+    """The realized-diff harvest gates on this note: '' means HEAD advanced.
+
+    A no-op commit must report a non-empty note so the caller does not harvest
+    the previous KEEP's diff as this KEEP's realized change. This uses real git
+    to lock the exact contract the gate depends on.
+    """
+    import subprocess
+
+    def _git(*args):
+        subprocess.run(
+            ["git", "-C", str(tmp_path), *args],
+            check=True,
+            capture_output=True,
+        )
+
+    _git("init", "-q")
+    _git("config", "user.email", "t@t")
+    _git("config", "user.name", "t")
+    target = tmp_path / "pkg" / "mod.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("x = 1\n", encoding="utf-8")
+
+    # A real tree change commits and reports an empty note (HEAD advances).
+    ok, note = ip._git_commit_kept(tmp_path, "keep-1", ["pkg/mod.py"])
+    assert ok is True
+    assert note == ""
+
+    # Re-committing the same, unchanged path is a benign no-op: HEAD does not
+    # advance, so the note must be non-empty and the harvest must be skipped.
+    ok, note = ip._git_commit_kept(tmp_path, "keep-2", ["pkg/mod.py"])
+    assert ok is True
+    assert note == "nothing to commit"
+
+
 def test_git_checkout_clean_spawn_fail(tmp_path, monkeypatch):
     """git checkout spawn failure is reported directly."""
     monkeypatch.setattr(gitmod.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError("git")))
@@ -541,3 +576,65 @@ def test_upstream_pr_lane_refuses_an_unreviewed_candidate(tmp_path: Path) -> Non
     assert out is not None
     assert out["status"] == "rejected_by_critic"
     assert "patches" not in params
+
+
+def _git_tree(root: Path) -> None:
+    """Initialise a git checkout with one committed file."""
+    import subprocess as sp
+
+    sp.run(["git", "init", str(root)], capture_output=True)
+    sp.run(["git", "-C", str(root), "config", "user.email", "t@t"], capture_output=True)
+    sp.run(["git", "-C", str(root), "config", "user.name", "T"], capture_output=True)
+    (root / "keep.py").write_text("original\n", encoding="utf-8")
+    sp.run(["git", "-C", str(root), "add", "-A"], capture_output=True)
+    sp.run(["git", "-C", str(root), "commit", "-q", "-m", "base"], capture_output=True)
+
+
+def test_harvest_realized_diff_reads_the_keep_commit(tmp_path):
+    """The KEEP is already committed, so its own commit is the realized change."""
+    import subprocess as sp
+
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+
+    root = tmp_path / "framework"
+    root.mkdir()
+    _git_tree(root)
+    (root / "keep.py").write_text("patched\n", encoding="utf-8")
+    (root / "generated.py").write_text("side effect\n", encoding="utf-8")
+    sp.run(["git", "-C", str(root), "add", "-A", "--", "keep.py", "generated.py"], capture_output=True)
+    sp.run(["git", "-C", str(root), "commit", "-q", "-m", "keep"], capture_output=True)
+
+    written = harvest_realized_diff(root, ["keep.py", "generated.py"], tmp_path / "out" / "realized.patch")
+
+    assert written == str(tmp_path / "out" / "realized.patch")
+    text = Path(written).read_text(encoding="utf-8")
+    assert "-original" in text and "+patched" in text
+    # A file the delivered patch never named still travels.
+    assert "generated.py" in text
+
+
+def test_harvest_realized_diff_returns_empty_without_a_change(tmp_path):
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+
+    root = tmp_path / "framework"
+    root.mkdir()
+    _git_tree(root)
+
+    assert harvest_realized_diff(root, ["keep.py"], tmp_path / "realized.patch") == ""
+    assert not (tmp_path / "realized.patch").exists()
+
+
+def test_harvest_realized_diff_returns_empty_outside_git(tmp_path):
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "keep.py").write_text("x\n", encoding="utf-8")
+
+    assert harvest_realized_diff(plain, ["keep.py"], tmp_path / "realized.patch") == ""
+
+
+def test_harvest_realized_diff_refuses_an_empty_path_set(tmp_path):
+    from hyperloom.orchestrator.actions.executors._patch_snapshot import harvest_realized_diff
+
+    assert harvest_realized_diff(tmp_path, [], tmp_path / "realized.patch") == ""

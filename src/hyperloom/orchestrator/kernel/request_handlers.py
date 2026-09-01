@@ -5878,8 +5878,9 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Priority: env ``KERNEL_OPT_BACKEND_BUDGET_MIN`` > payload ``budget_minutes``
     > :data:`_DEFAULT_BACKEND_BUDGET_MINUTES`. The env wins because the payload
     value is LLM-authored from a prompt template, so an operator raising the
-    budget must not be silently overridden by it. forge-loop reserves half this
-    window for finalize, so 60 leaves only ~30 min of actual iteration.
+    budget must not be silently overridden by it. The rewrite-route floor is
+    applied in all cases: an operator who tunes the budget down for an unrelated
+    reason still cannot silently disable the route they opted into.
 
     Args:
         payload (dict): Request payload carrying an optional ``budget_minutes``.
@@ -5887,6 +5888,7 @@ def _optimization_budget_minutes(payload: dict) -> float:
     Returns:
         float: The wall-clock budget in minutes for this optimization.
     """
+    floor = _rewrite_route_budget_floor_minutes()
     raw = os.environ.get("KERNEL_OPT_BACKEND_BUDGET_MIN", "").strip()
     if raw:
         try:
@@ -5894,8 +5896,29 @@ def _optimization_budget_minutes(payload: dict) -> float:
         except ValueError:
             forced = 0.0
         if forced > 0:
-            return forced
-    return float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
+            return max(forced, floor)
+    budget = float(payload.get("budget_minutes", _DEFAULT_BACKEND_BUDGET_MINUTES))
+    return max(budget, floor)
+
+
+def _rewrite_route_budget_floor_minutes() -> float:
+    """Minutes the FlyDSL rewrite route needs, or 0 when it is not opted into.
+
+    Below its own minimum the route declines every candidate as
+    ``budget_insufficient`` and falls back to forge-loop without saying so, so a
+    budget tuned down for an unrelated reason would switch the route off
+    silently. Raising the floor only for a run that opted in leaves every other
+    run's budget untouched.
+
+    Returns:
+        float: The floor in minutes, or ``0.0`` when the route is disabled.
+    """
+    from hyperloom.agents.kernel.tools.backends._flydsl_rewrite import (
+        MIN_BUDGET_SEC,
+        rewrite_enabled,
+    )
+
+    return MIN_BUDGET_SEC / 60.0 if rewrite_enabled() else 0.0
 
 
 def _optimization_wrapper_timeout_sec(payload: dict) -> int:

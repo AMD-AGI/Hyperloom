@@ -265,6 +265,7 @@ class EnablementParams(CoordinatorCollaborator):
 
         params_out: dict[str, Any] = {
             "domain": "enablement_specialist",
+            "source_phase": "ENABLEMENT",
             "gap_canonical_id": gap_cid,
             "gap_symptom": (f"{framework or '?'} cannot launch {model or 'the target model'}: {signature.kind}"),
             "gap_layer": "framework",

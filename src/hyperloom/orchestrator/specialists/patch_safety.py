@@ -555,10 +555,7 @@ def advisory_only_reason_codes() -> frozenset[str]:
 # about a specialist-authored payload -- ``proposal_set[*]`` for the
 # quantitative-claim rule, ``scope=domains`` for the cross-domain ones -- which
 # reaches review as a ``specialist`` proposal or as the ``explore`` grid that
-# ``proposal_set`` is materialised into. ``framework_agent`` is here because the
-# quantitative-claim rule names it by exception ("never fire the rule on them",
-# see prompts/critic.md): its payload always carries ``predicted_gain_pct``, so
-# a verdict citing the rule there is a misapplication of the rule itself.
+# ``proposal_set`` is materialised into.
 #
 # Spelled out rather than derived: no ACTION_CATALOGUE field separates these
 # from ``integrate_patch``, which shares their ``exploration`` verdict class,
@@ -567,7 +564,6 @@ def advisory_only_reason_codes() -> frozenset[str]:
 ADVISORY_RULE_PROPOSAL_KINDS: frozenset[str] = frozenset(
     {
         "explore",
-        "framework_agent",
         "specialist",
     }
 )

@@ -426,7 +426,7 @@ def test_gate_robustness_delegate_recover_empty_evidence_rejected(gate):
     "phase,action",
     [
         ("PRELUDE", "baseline"),
-        ("EXPLORE", "explore"),
+        ("FRAMEWORK_AGENT", "explore"),
         ("SWEEP", "sweep"),
         ("CLOSE", "session_breakdown"),
     ],

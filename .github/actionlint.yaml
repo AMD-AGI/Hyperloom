@@ -1,0 +1,9 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+#
+# Declare self-hosted runner labels so actionlint does not flag them as unknown.
+# Used by ci-e2e.yml and pre-release-e2e-test.yml.
+self-hosted-runner:
+  labels:
+    - Hyperloom-e2e-ci
+    - hyperloom-pre-e2e-baremetal

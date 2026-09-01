@@ -256,7 +256,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("workspace_write", "server_restart", "launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + "
-                "accuracy gate, KEEP or REVERT. Deterministic executor for EXPLORE and FRAMEWORK_AGENT; also serves "
+                "accuracy gate, KEEP or REVERT. Deterministic executor for FRAMEWORK_AGENT; also serves "
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),

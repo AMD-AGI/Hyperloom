@@ -18,11 +18,6 @@ from typing import TYPE_CHECKING, Iterable
 import click
 
 from kernelforge.llm.git import git
-from kernelforge.cli_forward_compat import (
-    TolerantCommand,
-    ignored_cli_options,
-    stamp_ignored_cli_options,
-)
 from kernelforge.config import Config
 from kernelforge.knowledge.experience_store import (
     REMOTE_BACKEND_KB_STORE,
@@ -705,7 +700,7 @@ def _make_lane_agent_factory(
 # ─── Autonomous Forge loop command ───
 
 
-@main.command("forge-loop", cls=TolerantCommand)
+@main.command("forge-loop")
 @click.option("--kernel", default=None, help="Fresh campaign: kernel file to optimize")
 @click.option("--driver", default=None, help="Fresh campaign: validation/bench driver")
 @click.option("--workspace", "workspace_dir", required=True, help="Git workspace dir")
@@ -1487,7 +1482,6 @@ def forge_loop(
                 }
                 if prep.audit_dir:
                     err_result["task_preparation_audit_dir"] = prep.audit_dir
-                stamp_ignored_cli_options(err_result)
                 err_payload = json.dumps(err_result)
                 if result_json:
                     atomic_write_json(result_json, err_result)
@@ -1708,7 +1702,6 @@ def forge_loop(
             "llm_usage": usage.totals(),
             "returned_after_read_kb": True,
         }
-        stamp_ignored_cli_options(result)
         payload = json.dumps(result)
         if result_json:
             atomic_write_json(result_json, result)
@@ -2019,7 +2012,6 @@ def forge_loop(
                 # Tracker metadata is optional on incomplete runs; final result
                 # emission must remain available so callers can reject it cleanly.
                 pass
-        stamp_ignored_cli_options(result)
         return result
 
     def _write_result_json(result: dict) -> None:
@@ -2275,7 +2267,7 @@ def _emit_rewrite_applyback_contract(ctx, _param, value):
     ctx.exit()
 
 
-@main.command("forge-rewrite-by-flydsl", cls=TolerantCommand)
+@main.command("forge-rewrite-by-flydsl")
 @click.option(
     "--capabilities-json",
     is_flag=True,
@@ -2542,7 +2534,6 @@ def forge_rewrite(
         applyback_import_modules=applyback_import_modules,
         max_applyback_attempts=max_applyback_attempts,
         rewrite_kb_enabled=rewrite_kb_enabled,
-        ignored_cli_options=ignored_cli_options(),
     )
     # The structured result and sentinel were already emitted for callers to parse.
     # Also exit non-zero on a FAILED rewrite so pure shell/CI (which checks $?, not

@@ -128,15 +128,11 @@ def test_bootstrap_recipe_kb_remote_stores_metadata_not_replay_payload(
                 "optimized_throughput": 120.0,
                 "validated_e2e_gain": 20.0,
                 "value": {
-                    "patch_timeline": [],
                     "kernel": {},
-                    "explore": {
+                    "patch": {"patches": []},
+                    "config": {
                         "extra_server_args": "--page-size 32",
-                        "extra_envs": {"EXPLORE": "1"},
-                    },
-                    "framework": {
-                        "extra_server_args": "--framework-ignored",
-                        "extra_envs": {"FRAMEWORK": "1"},
+                        "extra_envs": {"SGLANG_USE_AITER": "1"},
                     },
                 },
             }

@@ -69,6 +69,55 @@ def _config(tmp_path: Path) -> Config:
     )
 
 
+def test_authoring_spec_does_not_declare_the_driver_protected(tmp_path, monkeypatch):
+    """The driver being authored must not also be the guarded measurement surface.
+
+    ``driver_script`` tells the workspace guard which file to defend, so naming
+    the stage driver there made it protected AND the target: the agent wrote a
+    working driver, and verify() ended the session with "protected tracked files
+    changed: <driver>" and rolled it back to the placeholder. Every attempt of
+    every rewrite failed driver_preparation_failed with the untouched stub.
+
+    The tests around this one all replace ``_run_agent``, so nothing exercised
+    the spec it builds -- which is how the contradiction survived.
+    """
+    captured: dict[str, object] = {}
+
+    class _Backend:
+        async def run(self, spec):
+            captured["spec"] = spec
+            raise RuntimeError("stop after capturing the spec")
+
+    monkeypatch.setattr(
+        driver_preparation,
+        "create_registered_backend",
+        lambda _runtime: _Backend(),
+    )
+    stage = tmp_path / "stage"
+    stage.mkdir()
+    stage_driver = stage / ".forge_driver_probe.py"
+    stage_driver.write_text("# placeholder\n", encoding="utf-8")
+
+    try:
+        asyncio.run(
+            driver_preparation._run_agent(
+                config=_config(tmp_path),
+                stage=stage,
+                stage_driver=stage_driver,
+                evidence_paths=set(),
+                prompt="author it",
+                timeout_sec=30,
+                progress_log=[],
+            )
+        )
+    except RuntimeError:
+        pass
+
+    spec = captured["spec"]
+    assert str(stage_driver) in spec.target_files
+    assert not spec.driver_script
+
+
 def test_rewrite_preflight_accepts_source_timing_and_unready_candidate(tmp_path):
     spec = _spec(tmp_path)
     driver = tmp_path / "driver.py"

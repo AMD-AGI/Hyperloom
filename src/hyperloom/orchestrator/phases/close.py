@@ -392,12 +392,17 @@ class ClosePhase(PhaseHandler):
         # Bundle the curated result/report/analysis files into a single zip under
         # ``/workspace`` so the Claw sandbox sync ships it to object storage even
         # when ``$USER_DATA_PATH`` points outside ``/workspace``. Best-effort.
+        session_id = str(getattr(self.shared_state, "session_id", "") or "")
+        pkg_path = None
         try:
             from hyperloom.inference_optimizer.breakdown import package_session_artifacts
 
-            pkg_path = package_session_artifacts(
+            # Zipping a large session walks thousands of files; off the loop so
+            # it does not stall the Coordinator's other shutdown work.
+            pkg_path = await asyncio.to_thread(
+                package_session_artifacts,
                 self.session_dir,
-                session_id=str(getattr(self.shared_state, "session_id", "") or ""),
+                session_id=session_id,
             )
             if pkg_path is not None:
                 await self._record_close_step(
@@ -434,6 +439,56 @@ class ClosePhase(PhaseHandler):
                 "CLOSE step 5 (close_sequence_done save) failed; cli.finally will still write a safety-net breakdown"
             )
         await self._record_close_step("done", status="done")
+
+        # Refresh the breakdown's ``close`` key now that the sequence is on
+        # disk. Step 2 wrote the breakdown, so the copy it produced describes
+        # only the close-out up to itself: the steps above are missing from it
+        # and ``close_sequence_done`` was still false. ``_record_close_step``
+        # persists on every step, so ``state.json`` is complete by this line.
+        # Splices one key; best-effort and last, after stop_reason and
+        # close_sequence_done are settled, so it cannot affect the run.
+        #
+        # Re-package when that changed something. ``session_breakdown.json`` is
+        # bundled into the zip *and* the loose tree, and the package is what
+        # external sync actually ships — the same reason the langfuse splice
+        # above insists on running before the packaging step. The refresh has
+        # to come after, because the close section cannot be complete until
+        # ``artifact_package`` has an outcome to report, so the bundle is
+        # rebuilt rather than reordered. No close step is recorded for the
+        # rebuild: it rewrites the same path the ``artifact_package`` step
+        # already names, and recording it would strand the bundled copy one
+        # step behind again.
+        #
+        # The two deliverables can diverge here: the session copy is patched
+        # first, so a rebuild that fails leaves the shipped zip holding the
+        # step-2 snapshot with nothing downstream able to tell. There is no
+        # close step to record it against — the rebuild rewrites the path
+        # ``artifact_package`` already names — so it is said in the log, at a
+        # level the default configuration prints.
+        try:
+            from hyperloom.inference_optimizer.breakdown import patch_breakdown_close
+
+            if patch_breakdown_close(self.session_dir) and pkg_path is not None:
+                from hyperloom.inference_optimizer.breakdown import package_session_artifacts
+
+                rebuilt = await asyncio.to_thread(
+                    package_session_artifacts,
+                    self.session_dir,
+                    session_id=session_id,
+                )
+                if rebuilt is None:
+                    log.warning(
+                        "CLOSE step 6: close section refreshed but the artifact package rebuild produced "
+                        "nothing; %s still carries the pre-refresh close section",
+                        pkg_path,
+                    )
+        except Exception:  # noqa: BLE001
+            log.warning(
+                "CLOSE step 6 (close section refresh) failed; the artifact package may still carry "
+                "the pre-refresh close section",
+                exc_info=True,
+            )
+
         log.info("CLOSE 7-step sequencer complete")
 
     async def _enqueue_runnable_internal_task(

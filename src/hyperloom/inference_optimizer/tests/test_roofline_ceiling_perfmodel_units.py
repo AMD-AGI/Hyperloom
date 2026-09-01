@@ -336,6 +336,7 @@ def _state(tmp_path: Path, benchmark: dict, **attrs):
     """A run state whose baseline provenance points at a materialized yaml."""
     import yaml
 
+    tmp_path.mkdir(parents=True, exist_ok=True)
     cfg = tmp_path / "baseline.yaml"
     cfg.write_text(yaml.safe_dump({"benchmark": benchmark}), encoding="utf-8")
     from types import SimpleNamespace
@@ -437,3 +438,201 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     """A zero is 'unknown', not 'infinitely slow'; it must not win the min."""
     peak, _kind = rc.select_peak_and_bound(mem, cmp)
     assert peak == max(mem, cmp)
+
+
+def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path):
+    """Recognized --quantization wins; unrecognized quant falls through; precision tags do not."""
+    meta_fp32 = _dense_meta(weight_dtype_bytes=4.0)
+    meta_fp8 = _dense_meta(weight_dtype_bytes=1.0)
+
+    (tmp_path / "quant").mkdir()
+    (tmp_path / "prequant").mkdir()
+    (tmp_path / "dtype").mkdir()
+    (tmp_path / "quant_vs_prequant").mkdir()
+    (tmp_path / "prequant_vs_dtype").mkdir()
+    (tmp_path / "fallback").mkdir()
+    (tmp_path / "meta_eq_2").mkdir()
+    (tmp_path / "meta_eq_0").mkdir()
+    (tmp_path / "act_floor").mkdir()
+
+    quant_state = _state(
+        tmp_path / "quant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8 --dtype bfloat16"),
+        precision="fp4",
+    )
+    quant = rc.resolve_runtime_dtype(quant_state, meta_fp32)
+    assert quant.source == "server_args_quantization"
+    assert quant.quantization == "fp8"
+    assert quant.weight_dtype_bytes == 1.0
+    assert quant.activation_dtype_bytes == 2.0
+    assert quant.compute_precision_tag == "fp8"
+
+    prequant_state = _state(
+        tmp_path / "prequant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization not-a-method"),
+        precision="fp8",
+    )
+    prequant = rc.resolve_runtime_dtype(prequant_state, meta_fp8)
+    assert prequant.source == "quantization_config"
+    assert prequant.weight_dtype_bytes == 1.0
+    assert prequant.compute_precision_tag == "fp8"
+
+    dtype_state = _state(
+        tmp_path / "dtype",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
+        precision="fp8",
+    )
+    dtype = rc.resolve_runtime_dtype(dtype_state, meta_fp32)
+    assert dtype.source == "server_args_dtype"
+    assert dtype.quantization == "none"
+    assert dtype.weight_dtype_bytes == 4.0
+    assert dtype.activation_dtype_bytes == 4.0
+    assert dtype.compute_precision_tag == "fp32"
+
+    # 1-vs-2: server_args_quantization must beat quantization_config when both present.
+    # A pre-quantized meta (weight_dtype_bytes=0.5 fp4) + recognised --quantization fp8
+    # → branch 1 must win even though branch 2 would also fire.
+    quant_vs_prequant_state = _state(
+        tmp_path / "quant_vs_prequant",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8"),
+        precision="fp4",
+    )
+    meta_fp4 = _dense_meta(weight_dtype_bytes=0.5)
+    quant_vs_prequant = rc.resolve_runtime_dtype(quant_vs_prequant_state, meta_fp4)
+    assert quant_vs_prequant.source == "server_args_quantization"
+    assert quant_vs_prequant.weight_dtype_bytes == 1.0
+    assert quant_vs_prequant.compute_precision_tag == "fp8"
+
+    # 2-vs-3: quantization_config must beat server_args_dtype when both present.
+    # A pre-quantized fp8 meta + --dtype float32 → branch 2 must win over branch 3.
+    prequant_vs_dtype_state = _state(
+        tmp_path / "prequant_vs_dtype",
+        _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float32"),
+        precision="fp4",
+    )
+    prequant_vs_dtype = rc.resolve_runtime_dtype(prequant_vs_dtype_state, meta_fp8)
+    assert prequant_vs_dtype.source == "quantization_config"
+    assert prequant_vs_dtype.weight_dtype_bytes == 1.0
+    assert prequant_vs_dtype.compute_precision_tag == "fp8"
+
+    fallback_state = _state(tmp_path / "fallback", _serving_benchmark(tmp_path / "m"), precision="fp8")
+    fallback = rc.resolve_runtime_dtype(fallback_state, meta_fp32)
+    assert fallback.source == "config_torch_dtype"
+    assert fallback.quantization == "none"
+    assert fallback.weight_dtype_bytes == 2.0
+    assert fallback.activation_dtype_bytes == 2.0
+    assert fallback.compute_precision_tag == "bf16"
+
+    # Upper edge of `0 < meta_w_bytes < 2.0`: 2.0 must fall through, not take
+    # quantization_config (which a `<= 2.0` widening would incorrectly do).
+    meta_eq_2 = rc.resolve_runtime_dtype(
+        _state(tmp_path / "meta_eq_2", _serving_benchmark(tmp_path / "m")),
+        _dense_meta(weight_dtype_bytes=2.0),
+    )
+    assert meta_eq_2.source == "config_torch_dtype"
+    assert meta_eq_2.weight_dtype_bytes == 2.0
+
+    # Lower edge: unknown (0.0) must not take quantization_config either.
+    meta_eq_0 = rc.resolve_runtime_dtype(
+        _state(tmp_path / "meta_eq_0", _serving_benchmark(tmp_path / "m")),
+        _dense_meta(weight_dtype_bytes=0.0),
+    )
+    assert meta_eq_0.source == "config_torch_dtype"
+    assert meta_eq_0.weight_dtype_bytes == 2.0
+
+    # bf16 activation floor: --dtype fp8 is 1B, but activations stay >= 2.0.
+    act_floor = rc.resolve_runtime_dtype(
+        _state(
+            tmp_path / "act_floor",
+            _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype fp8"),
+        ),
+        meta_fp32,
+    )
+    assert act_floor.source == "server_args_dtype"
+    assert act_floor.weight_dtype_bytes == 1.0
+    assert act_floor.activation_dtype_bytes == 2.0
+
+
+def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch):
+    # Patch vendor to a *different* positive value (500.0) so swapping the
+    # operands of `achievable or vendor` would change the result.  With vendor==0
+    # both orderings yield 100.0 and the precedence isn't pinned.
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 500.0)
+
+    active = 1_000_000_000
+    weight = 9_000_000_000
+    # achievable (100.0) must win over vendor (500.0).
+    expected = (100.0 * 1e12 * 2) / (2.0 * active / 2.0)
+    got = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=2,
+        precision_tag="bf16",
+        active_weight_bytes=active,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert got == pytest.approx(expected)
+
+    # active→total-weight fallback (active_weight_bytes=0 falls back to weight_bytes).
+    fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=2,
+        precision_tag="bf16",
+        active_weight_bytes=0,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert fallback == pytest.approx((100.0 * 1e12 * 2) / (2.0 * weight / 2.0))
+    assert fallback > 0.0
+
+    # Vendor-peak fallback: achievable absent (0.0), vendor-peak covers it.
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 200.0)
+    vendor_fallback = rc.compute_compute_bound_ceiling_tok_per_sec(
+        gpu_type="mi300x",
+        num_gpus=1,
+        precision_tag="bf16",
+        active_weight_bytes=active,
+        weight_bytes=weight,
+        weight_dtype_bytes=2.0,
+    )
+    assert vendor_fallback == pytest.approx((200.0 * 1e12) / (2.0 * active / 2.0))
+    assert vendor_fallback > 0.0
+
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 0.0)
+    monkeypatch.setattr(rc, "_resolve_peak_tflops", lambda _gpu, _tag: 0.0)
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="unknown-gpu",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=active,
+            weight_bytes=weight,
+            weight_dtype_bytes=2.0,
+        )
+        == 0.0
+    )
+    monkeypatch.setattr(rc, "_resolve_achievable_tflops", lambda _gpu, _tag: 100.0)
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=0,
+            weight_bytes=0,
+            weight_dtype_bytes=2.0,
+        )
+        == 0.0
+    )
+    assert (
+        rc.compute_compute_bound_ceiling_tok_per_sec(
+            gpu_type="mi300x",
+            num_gpus=1,
+            precision_tag="bf16",
+            active_weight_bytes=active,
+            weight_bytes=weight,
+            weight_dtype_bytes=0.0,
+        )
+        == 0.0
+    )

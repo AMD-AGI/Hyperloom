@@ -1186,6 +1186,10 @@ class DispatcherCollaborator:
                         "specialist auto-retry hook failed for task=%s",
                         task.task_id,
                     )
+            if isinstance(result.result, dict):
+                reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
+                if reauthor_attempt not in (None, ""):
+                    result.result.setdefault("reauthor_attempt", reauthor_attempt)
             try:
                 await self.bus.append_and_seq(
                     Message.new(
@@ -1221,6 +1225,7 @@ class DispatcherCollaborator:
                             task=task,
                             done_payload=done_payload,
                             source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                            run_error=str(result.error or ""),
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
@@ -1255,11 +1260,6 @@ class DispatcherCollaborator:
                             "FRAMEWORK: candidate discovery ingest failed for task=%s",
                             task.task_id,
                         )
-                # Bump the per-round specialist dispatch counter.
-                try:
-                    self.shared_state.bump_specialist_dispatched()
-                except Exception:  # noqa: BLE001
-                    log.exception("bump_specialist_dispatched failed")
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
                 try:

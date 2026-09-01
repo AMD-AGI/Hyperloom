@@ -67,6 +67,7 @@ from pathlib import Path
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
@@ -99,7 +100,11 @@ log = logging.getLogger(__name__)
 # ~3600s budget), so a larger value never overruns the outer budget.
 PREPARE_MAX_ATTEMPTS = int(os.environ.get("FORGE_PREPARE_MAX_ATTEMPTS", "3") or "3")
 PREPARE_MAX_WALL_SEC = int(os.environ.get("FORGE_PREPARE_MAX_WALL", "3000") or "3000")
-PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", "900") or "900")
+# Derived from the wall so it scales with it; a fixed constant falls below the
+# wall/attempts ratio as soon as either grows.
+PER_ATTEMPT_CAP_SEC = int(
+    os.environ.get("FORGE_PREPARE_ATTEMPT_CAP") or max(1, PREPARE_MAX_WALL_SEC // max(1, PREPARE_MAX_ATTEMPTS))
+)
 # Smallest budget worth spending on a RETRY. Measured over 25 recorded attempts:
 # successful ones ran 350-896s, and every retry that started with less than that
 # floor (150s, 298s, 300s, 325s) burned its whole budget without writing a byte.
@@ -107,6 +112,8 @@ PER_ATTEMPT_CAP_SEC = int(os.environ.get("FORGE_PREPARE_ATTEMPT_CAP", "900") or 
 # better than not trying — but handing the scraps to a retry only converts the
 # tail of the wall into tokens and a misleading "FAILED after 2 attempts".
 PREPARE_MIN_RETRY_SEC = int(os.environ.get("FORGE_PREPARE_MIN_RETRY", "350") or "350")
+# Wall seconds reserved per attempt for the salvage preflight after a timeout.
+_SALVAGE_RESERVE_SEC: float = float(os.environ.get("FORGE_SALVAGE_RESERVE", "120") or "120")
 
 # Preflight bench is a quick format check, not a real measurement — keep it cheap.
 # These deliberately differ from bench_wallclock's measurement defaults (10/30,
@@ -1390,7 +1397,7 @@ async def _run_prepare_agent(
     )
     result = await asyncio.wait_for(
         backend.run(spec, usage=usage),
-        timeout=timeout_sec,
+        timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
 
@@ -1766,6 +1773,9 @@ async def prepare_task(
         except OSError:
             return ""
 
+    def _detect_driver_edited(digest_before: str) -> bool:
+        return _driver_digest() != digest_before
+
     def _audit_driver(relative: str) -> None:
         if audit_dir is None or not driver_path.is_file():
             return
@@ -2095,7 +2105,9 @@ async def prepare_task(
                 starved_retry_sec = remaining
                 break
             attempts += 1
-            attempt_timeout = min(remaining, float(PER_ATTEMPT_CAP_SEC))
+            is_last_attempt = attempts >= PREPARE_MAX_ATTEMPTS
+            spendable = max(0.0, remaining - _SALVAGE_RESERVE_SEC)
+            attempt_timeout = spendable if is_last_attempt else min(spendable, float(PER_ATTEMPT_CAP_SEC))
             # Each attempt authors against the reference bundle; the preceding
             # attempt's verdict retired it (see _reset_scaffold).
             _open_scaffold()
@@ -2136,7 +2148,7 @@ async def prepare_task(
             except asyncio.TimeoutError:
                 _audit_driver(f"{attempt_dir}/driver_at_timeout.py")
                 elapsed_s = round(time.monotonic() - agent_started, 3)
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2205,7 +2217,7 @@ async def prepare_task(
                 break
             except Exception as exc:  # noqa: BLE001
                 _audit_driver(f"{attempt_dir}/driver_at_exception.py")
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",
@@ -2233,7 +2245,7 @@ async def prepare_task(
                     "\n".join(progress_log),
                 )
                 _audit_driver(f"{attempt_dir}/driver_after.py")
-                driver_edited = _driver_digest() != digest_before
+                driver_edited = _detect_driver_edited(digest_before)
                 edited_any_attempt = edited_any_attempt or driver_edited
                 _audit_json(
                     f"{attempt_dir}/agent_event.json",

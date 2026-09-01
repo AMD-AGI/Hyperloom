@@ -50,6 +50,17 @@ LEVER_KINDS = (
     LEVER_KERNEL,
 )
 
+#: Lever -> owning agent. Stronger evidence than the phase: once both arms run
+#: inside one phase, what a unit of work delivered is the only thing that still
+#: separates their owners.
+AGENT_BY_LEVER = {
+    LEVER_CONFIG: "explore",
+    LEVER_SOURCE_PATCH: "framework_agent",
+    LEVER_UPSTREAM_PR: "framework_agent",
+    LEVER_ENABLEMENT: "framework_agent",
+    LEVER_KERNEL: "kernel_agent",
+}
+
 #: Lever kinds whose phase is not in doubt. ``source_patch`` and ``config`` are
 #: absent on purpose: either can be dispatched from more than one phase, so the
 #: lever alone does not name one and the older evidence still decides.
@@ -95,7 +106,10 @@ def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
         # returns server args about as often as a diff.
         wrote_a_patch = evidence.get("patch_name") or evidence.get("patches_applied") or evidence.get("patch_path")
         return LEVER_SOURCE_PATCH if wrote_a_patch else LEVER_CONFIG
-    if evidence.get("patch_name") or evidence.get("specialist_task_id") or evidence.get("patches_applied"):
+    # A task id says a specialist ran, not that it wrote anything; the arm
+    # returns server args about as often as a diff, and the Coordinator names
+    # the diff it resolved before the patch reaches an applier.
+    if evidence.get("patch_name") or evidence.get("patches_applied"):
         return LEVER_SOURCE_PATCH
     return ""
 
@@ -103,6 +117,11 @@ def patch_lever_kind(evidence: Mapping[str, Any] | None) -> str:
 def agent_from_phase(value: Any) -> str:
     """Map a phase label to its owning agent, or ``""`` when unknown."""
     return AGENT_BY_PHASE.get(str(value or "").strip().upper(), "")
+
+
+def agent_from_lever(value: Any) -> str:
+    """Map a lever kind to its owning agent, or ``""`` when unknown."""
+    return AGENT_BY_LEVER.get(str(value or "").strip().lower(), "")
 
 
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
@@ -142,6 +161,7 @@ def patch_author(evidence: Mapping[str, Any] | None) -> str:
 
 
 __all__ = [
+    "AGENT_BY_LEVER",
     "AGENT_BY_PHASE",
     "LEVER_CONFIG",
     "LEVER_ENABLEMENT",
@@ -150,6 +170,7 @@ __all__ = [
     "LEVER_SOURCE_PATCH",
     "LEVER_UPSTREAM_PR",
     "UNATTRIBUTED",
+    "agent_from_lever",
     "agent_from_phase",
     "patch_author",
     "patch_lever_kind",

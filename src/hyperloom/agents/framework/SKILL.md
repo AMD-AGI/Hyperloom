@@ -13,7 +13,7 @@ This skill lives in the `hyperloom` src-layout distribution:
 
 ```
 src/hyperloom/agents/framework/     # hyperloom.agents.framework
-├── runtime/cli.py                 # fa schema / candidates / explore / phase-discover / kb
+├── runtime/cli.py                 # fa schema / candidates / explore / kb
 ├── runtime/tools_api.py           # library API behind the CLI verbs
 ├── explorer.py                    # explore loop (libcst-free)
 ├── isolation.py                   # per-candidate worktree + venv
@@ -43,55 +43,13 @@ Read-only seed data shipped in the wheel lives separately under the package.
 fa schema                 # print the request schema summary (debug)
 fa candidates --request req.json [--out -]   # enumerate PR/ref candidates, no build/bench
 fa explore   --request req.json [--execute] [--out -]   # plan (default) or build/bench loop
-fa phase-discover --request req.json [--out -]   # Coordinator FRAMEWORK_AGENT phase entry point
-fa phase-audit --request req.json [--out -]   # static local-source judging of a discovered candidate
 fa kb list|show|search|contribute|synthesize ...   # knowledge-base ops
 ```
 
 `fa candidates` / `fa explore` run a standalone investigation loop (no
-IO coordinator). The `fa phase-*` subcommands were the Coordinator's own
-entry points into this agent; the Coordinator no longer invokes them —
-candidate discovery is a specialist, and its verdicts arrive in the
-deliverable rather than from a per-candidate audit call.
-
-## FRAMEWORK_AGENT phase (`fa phase-discover`)
-
-Reads `--request <json>` and writes `--out <json|->` (envelope style
-mirrors `hyperloom.agents.critic.runtime.cli`):
-
-```bash
-# Discover a batch of PR candidates for the current run's gaps.
-#    request: {model, framework, gpu_type, gaps[], repo_url?, max_search_candidates, batch_id}
-#    output:  {batch_id, framework, repo_url, candidates: [...]}
-fa phase-discover --request req.json --out -
-```
-
-## FRAMEWORK semantic audit (`fa phase-audit`)
-
-Given a discovered candidate + the live framework source roots, decide whether
-the PR's change is already present locally so the Coordinator can skip
-already-merged PRs and seed the authoring specialist with evidence:
-
-```bash
-# request: {candidate, framework, framework_source_roots[],
-#           diff_text|patches_path|primus_cortex_url, work_dir?, use_llm?, model?}
-# output:  {candidate_id, semantic_status, applicability, confidence,
-#           evidence[], risks[], recommended_next_step, layer, metrics}
-fa phase-audit --request req.json --out -
-```
-
-- **static layer (default, hermetic)**: parse the diff, resolve each touched
-  file under `framework_source_roots`, measure added-line / symbol presence +
-  context-anchor presence.
-  - `semantic_status` ∈ `already_equivalent` / `already_superset` /
-    `partially_present` / `not_present` / `unknown`.
-  - `applicability` ∈ `direct_apply` / `needs_rewrite` / `not_applicable` /
-    `needs_human_review`; `recommended_next_step` ∈ `skip` /
-    `direct_framework` / `author_via_specialist`.
-  - `already_*` is evidence-gated (downgraded to `unknown` without a concrete
-    symbol/line hit).
-- **llm layer (opt-in, `use_llm=true`)**: single chat-completion refine; needs
-  `OPENAI_API_KEY` + `OPENAI_BASE_URL`; best-effort; never authors patches.
+IO coordinator). This agent has no Coordinator entry point: candidate
+discovery is a specialist, and its verdicts arrive in the deliverable rather
+than from a per-candidate audit call.
 
 ## Candidate refs feed the targeted build
 
@@ -132,6 +90,4 @@ fa kb synthesize --domain framework_optimization --findings findings.json [--wit
 ```
 
 `contribute` appends to `${KB}/<domain>/empirical_kb.md`, creating the domain
-dir and file if missing. The `framework_optimization` partition already exists
-in a fresh install — it ships `cross_framework_map.jsonl` (package data) as its
-only seed.
+dir and file if missing. The `framework_optimization` partition is created on first contribution.

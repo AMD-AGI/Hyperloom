@@ -16,10 +16,11 @@ from hyperloom.orchestrator.roles import (
     MockRobustnessBackend,
     ScriptedPlan,
 )
+from hyperloom.inference_optimizer.breakdown.agent_ownership import LEVER_CONFIG
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.loop.coordinator import Coordinator
 from hyperloom.orchestrator.loop import writeback as wb
-from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
+from hyperloom.orchestrator.loop.writeback import WritebackCollaborator, _is_patch_column_keep
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor.kb_store_client import (
     KnowledgeSections,
 )
@@ -522,18 +523,13 @@ async def test_integrate_patch_preserves_proposal_owner_across_phase_change(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("source_phase", "section"),
-    [("EXPLORE", "explore"), ("FRAMEWORK_AGENT", "framework")],
-)
-async def test_integrate_keep_stages_patch_for_proposal_owner(
-    session_dir, tmp_path, monkeypatch, source_phase, section
-):
+@pytest.mark.parametrize("source_phase", ["EXPLORE", "FRAMEWORK_AGENT"])
+async def test_integrate_keep_stages_patch_for_proposal_owner(session_dir, tmp_path, monkeypatch, source_phase):
     draft = tmp_path / "kb-draft"
     monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
     monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
-    patch = tmp_path / f"{section}.diff"
-    patch.write_bytes(f"{section} bytes".encode())
+    patch = tmp_path / f"{source_phase.lower()}.diff"
+    patch.write_bytes(f"{source_phase} bytes".encode())
     coord = _coord(session_dir)
     coord.shared_state.baseline_tput = 100.0
 
@@ -542,23 +538,58 @@ async def test_integrate_keep_stages_patch_for_proposal_owner(
         {
             "status": "kept",
             "output_throughput": 120.0,
-            "specialist_task_id": f"spec-{section}",
+            "specialist_task_id": f"spec-{source_phase.lower()}",
             "source_phase": source_phase,
             "patches_applied": [str(patch)],
         },
         task=_task(
             "integrate_patch",
             params={
-                "specialist_task_id": f"spec-{section}",
+                "specialist_task_id": f"spec-{source_phase.lower()}",
                 "source_phase": source_phase,
             },
         ),
     )
 
-    staged = KnowledgeSections(draft).staged(section)
-    ref = f"{section}/overlays/000000/00-{section}.patch"
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = f"patch/overlays/000000/00-{source_phase.lower()}.patch"
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+    assert KnowledgeSections(draft).staged("explore") is None
+    # Explore and framework KEEPs share the one patch column, so both record the
+    # same owner marker rather than the old per-column explore/framework label.
+    assert coord.shared_state.optimization_stack[-1]["kb_required_owner"] == "PATCH"
+
+
+@pytest.mark.asyncio
+async def test_a_config_lever_keep_stages_under_the_configuration_section(session_dir, tmp_path, monkeypatch):
+    """A KEEP that touched nothing on disk belongs to the configuration lever.
+
+    The section it stages into is the other half of the routing an authored
+    diff exercises: reading the phase instead would file both under one owner.
+    """
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 120.0,
+            "lever_kind": LEVER_CONFIG,
+            "source_phase": "EXPLORE",
+            "extra_server_args": "--page-size 32",
+            "patches_applied": [],
+        },
+        task=_task("integrate_patch", params={"source_phase": "EXPLORE"}),
+    )
+
+    stack = coord.shared_state.optimization_stack
+    assert stack and stack[-1]["lever_kind"] == LEVER_CONFIG
+    assert _is_patch_column_keep({"source_phase": "EXPLORE"}, {"lever_kind": LEVER_CONFIG}) is True
 
 
 @pytest.mark.asyncio
@@ -745,10 +776,92 @@ async def test_framework_agent_keep_stages_returned_raw_patch(session_dir, tmp_p
         ),
     )
 
-    staged = KnowledgeSections(draft).staged("framework")
-    ref = "framework/overlays/000000/00-pr-7.patch"
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-pr-7.patch"
     assert staged.knowledge["patches"] == [ref]
     assert (draft / "files" / ref).read_bytes() == patch.read_bytes()
+    row = staged.knowledge["provenance"][0]
+    assert row["stack_index"] == 0
+    assert row["base_sha"] == ""
+    assert row["complete"] is True
+    assert row["artifacts_outside_root"] == 0
+    assert row["realized"] is False
+    # No snapshot ran, so the delivered patch is the only absolute origin known.
+    assert row["host_origin"] == {"sources": [str(patch)]}
+
+
+@pytest.mark.asyncio
+async def test_realized_diff_replaces_the_delivered_patch(session_dir, tmp_path, monkeypatch):
+    """The realized diff is what landed, so publishing both would apply it twice."""
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    delivered = tmp_path / "delivered.patch"
+    delivered.write_bytes(b"as delivered")
+    realized = tmp_path / "snapshot" / "realized.patch"
+    realized.parent.mkdir()
+    realized.write_bytes(b"as landed")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-realized",
+            "patches_applied": [str(delivered)],
+            "source_realized_patch": str(realized),
+            "base_sha": "abc123",
+            "source_snapshot_complete": True,
+            "source_artifacts_outside_root": 2,
+            "framework_root": "/sglang",
+            "source_snapshot": str(realized.parent),
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    ref = "patch/overlays/000000/00-realized.patch"
+    assert staged.knowledge["patches"] == [ref]
+    assert (draft / "files" / ref).read_bytes() == b"as landed"
+    row = staged.knowledge["provenance"][0]
+    assert row["realized"] is True
+    assert row["base_sha"] == "abc123"
+    assert row["artifacts_outside_root"] == 2
+    # Where the KEEP came from has to survive the handoff, not just the result,
+    # and it lands on the ref so overlays from two trees stay distinguishable.
+    assert row["host_origin"]["apply_roots"] == {ref: "/sglang"}
+    assert row["host_origin"]["snapshot"] == str(realized.parent)
+    assert row["host_origin"]["sources"] == [str(realized)]
+
+
+@pytest.mark.asyncio
+async def test_delivered_patch_is_the_fallback_when_no_realized_diff(session_dir, tmp_path, monkeypatch):
+    draft = tmp_path / "kb-draft"
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
+    delivered = tmp_path / "delivered.patch"
+    delivered.write_bytes(b"as delivered")
+    coord = _coord(session_dir)
+    coord.shared_state.baseline_tput = 100.0
+
+    await coord._promote_to_shared_state(
+        "integrate_patch",
+        {
+            "status": "kept",
+            "output_throughput": 130.0,
+            "specialist_task_id": "spec-fallback",
+            "patches_applied": [str(delivered)],
+            # A non-git tree harvests no realized diff.
+            "source_realized_patch": "",
+        },
+        task=_task("integrate_patch", params={"source_phase": "FRAMEWORK_AGENT"}),
+    )
+
+    staged = KnowledgeSections(draft).staged("patch")
+    assert staged.knowledge["patches"] == ["patch/overlays/000000/00-delivered.patch"]
+    assert staged.knowledge["provenance"][0]["realized"] is False
 
 
 @pytest.mark.asyncio

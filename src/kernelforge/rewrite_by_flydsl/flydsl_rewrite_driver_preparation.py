@@ -32,6 +32,7 @@ from pathlib import Path
 from kernelforge.agent_backends.base import (
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
     with_writable_sandbox,
 )
 from kernelforge.agent_backends.registry import create_registered_backend
@@ -337,7 +338,15 @@ async def _run_agent(
         writable=True,
         timeout_sec=timeout_sec,
         target_files=[str(stage_driver)],
-        driver_script=str(stage_driver),
+        # Deliberately no driver_script, for the reason task_preparer records at
+        # its own AgentRunSpec: that field declares the measurement surface the
+        # guard must defend, so it snapshots the driver as protected. Here the
+        # driver is the artifact being authored, and naming it both target and
+        # protected made every attempt end in
+        #   "protected tracked files changed: <driver>"
+        # followed by a rollback to the placeholder -- the agent wrote a working
+        # driver, verified it in --ref-bench-mode, and had the file reverted out
+        # from under it three times in a row. target_files already carries it.
         protected_globs=[path.name for path in evidence_paths],
         allow_dirty_targets=True,
         allow_untracked=False,
@@ -354,7 +363,7 @@ async def _run_agent(
     )
     result = await asyncio.wait_for(
         backend.run(run_spec),
-        timeout=timeout_sec,
+        timeout=watchdog_timeout_sec(timeout_sec),
     )
     return result.text.strip()
 

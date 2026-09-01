@@ -153,31 +153,21 @@ def test_gpu_type_cli_override_reaches_rewrite_config(monkeypatch, tmp_path):
     assert captured["config"].gpu_target == "gfx950"
 
 
-def test_rewrite_reports_an_unknown_option_instead_of_aborting(monkeypatch, tmp_path):
-    """A consumer ahead of this producer still gets its rewrite run.
+def test_rewrite_rejects_an_unknown_option(monkeypatch, tmp_path):
+    """An undeclared option is fatal here too, for the same reason as forge-loop.
 
-    Aborting during argument parsing spent the caller's whole attempt on an exit
-    code. The dropped tokens are named on stderr and handed to the runner, which
-    reports them on the result document.
+    These two were the only tolerant entry points, granted the exemption because
+    a consumer in another repository drove them. Vendoring removed that repository.
     """
-    result, captured = _invoke_rewrite(
+    result, _captured = _invoke_rewrite(
         monkeypatch,
         tmp_path,
         "--logical-op-name",
         ("--e2e-pct", "3.2"),
     )
 
-    assert result.exit_code == 0
-    assert "No such option" not in result.output
-    assert "--e2e-pct" in result.stderr
-    assert captured["ignored_cli_options"] == ["--e2e-pct", "3.2"]
-
-
-def test_rewrite_reports_nothing_ignored_for_a_conforming_call(monkeypatch, tmp_path):
-    result, captured = _invoke_rewrite(monkeypatch, tmp_path, "--logical-op-name")
-
-    assert result.exit_code == 0
-    assert captured["ignored_cli_options"] == []
+    assert result.exit_code != 0
+    assert "No such option" in result.output
 
 
 def test_rewrite_gpu_help_distinguishes_sku_from_architecture():

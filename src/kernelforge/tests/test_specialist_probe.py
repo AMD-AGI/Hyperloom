@@ -951,6 +951,34 @@ async def test_a_probe_locks_the_same_device_sentinel_the_fanout_lanes_do(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_specialist_setup_creates_the_campaign_sentinel(tmp_path, monkeypatch) -> None:
+    """Naming the sentinel is not enough; the analysis round has to find it.
+
+    A probe opens the sentinel without creating it, and the only other maker is
+    the fan-out lane path, which a campaign reaches after the analysis round.
+    Left uncreated here, every probe of every specialist is refused and the
+    round plans against nothing it measured.
+    """
+    from kernelforge.loop.fanout import campaign_device_lock_path
+
+    _patch_primitive(monkeypatch, _stub_primitive)
+    workspace = _workspace(tmp_path)
+    sentinel = campaign_device_lock_path(workspace)
+    assert not sentinel.exists()
+
+    agent = SpecialistAgent(
+        definition=_definition(),
+        backend=_McpBackend(),
+        timeout_sec=1800,
+        max_turns=4,
+        probe=_probe(tmp_path),
+    )
+    await agent.run(_assignment(), _context(workspace))
+
+    assert sentinel.is_file()
+
+
+@pytest.mark.asyncio
 async def test_a_probe_with_no_device_sentinel_measures_nothing(tmp_path, monkeypatch) -> None:
     _patch_primitive(monkeypatch, _stub_primitive)
     sandbox = _sandbox(tmp_path, device_lock=None)

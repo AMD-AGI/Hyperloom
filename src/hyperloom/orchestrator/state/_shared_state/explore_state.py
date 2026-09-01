@@ -340,18 +340,6 @@ class _ExploreStateMixin:
         elif ct == "code_patch":
             self.consecutive_config_only_rounds = 0
 
-    def bump_specialist_dispatched(self, n: int = 1) -> int:
-        """Increment the per-round specialist dispatch counter; returns post-increment value.
-
-        Args:
-            n (int): Amount to add to the dispatch counter (default 1).
-
-        Returns:
-            int: The post-increment dispatch count.
-        """
-        self.explore_specialist_dispatched_count = int(self.explore_specialist_dispatched_count or 0) + int(n)
-        return self.explore_specialist_dispatched_count
-
     def bump_research_scout_runs(self, n: int = 1) -> int:
         """Increment the research-scout dispatch counter; return new total.
 
@@ -403,7 +391,6 @@ class _ExploreStateMixin:
         earned it.
         """
         self.params_no_promote_streak = 0
-        self.explore_specialist_dispatched_count = 0
         self.framework_agent_phase_done = False
         self.framework_agent_discover_failures = 0
         self.framework_agent_empty_discoveries = 0

@@ -2024,6 +2024,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
                 _set_trace_ctx(
                     tick=int(self.shared_state.tick or 0),
                     phase=(self.shared_state.phase or "") or None,
+                    macro_cycle=int(self.shared_state.macro_cycle or 0),
                 )
             except Exception:  # noqa: BLE001
                 pass

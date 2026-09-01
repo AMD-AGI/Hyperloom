@@ -515,11 +515,12 @@ class CriticAgentBackend:
     # dataclass field) to avoid descriptor binding as a method.
     _client: Any = field(default=None, init=False, repr=False)
     _turn_idx: int = field(default=0, init=False, repr=False)
-    # Trace context (tick / phase) the Coordinator stamps before each reactor
+    # Trace context the Coordinator stamps before each reactor
     # ``run()`` so the critic's self-written llm_calls row carries the timeline
     # keys.
     _trace_tick: int | None = field(default=None, init=False, repr=False)
     _trace_phase: str | None = field(default=None, init=False, repr=False)
+    _trace_macro_cycle: int | None = field(default=None, init=False, repr=False)
     # Proposal msg_ids reviewed by the current turn, snapshotted for llm_calls
     # attribution.
     _trace_reviewed_msg_ids: list[str] | None = field(
@@ -731,6 +732,8 @@ class CriticAgentBackend:
         context = dict(self._static_context)
         if self._trace_phase:
             context["phase"] = str(self._trace_phase).strip().upper()
+        if self._trace_macro_cycle is not None:
+            context["macro_cycle"] = self._trace_macro_cycle
         request: dict[str, Any] = {
             "kind": "coordinator_inbox",
             "session_id": session_id,
@@ -867,6 +870,8 @@ class CriticAgentBackend:
             instrument.record_critic_iteration(
                 self.session_dir,
                 iter_n=turn_idx,
+                request=request,
+                judge_bundle=judge_bundle,
                 review=review,
                 emit=emit,
                 workdir=workdir,
@@ -1403,12 +1408,14 @@ class CriticAgentBackend:
         *,
         tick: int | None = None,
         phase: str | None = None,
+        macro_cycle: int | None = None,
     ) -> None:
-        """Stamp the timeline keys for the next reactor turn's trace row.
+        """Stamp the timeline keys for the next reactor turn and request.
 
         The Coordinator calls this before ``run()`` (it owns ``shared_state``)
-        so the critic's self-written ``llm_calls`` row carries the same
-        tick/phase the in-process reactor trace would have. Best-effort: a
+        so the critic request carries the current phase/macro-cycle and its
+        self-written ``llm_calls`` row carries the same tick/phase as the
+        in-process reactor trace. Best-effort: a
         bad value degrades to ``None`` rather than raising.
         """
         try:
@@ -1416,6 +1423,10 @@ class CriticAgentBackend:
         except (TypeError, ValueError):
             self._trace_tick = None
         self._trace_phase = (str(phase) or None) if phase else None
+        try:
+            self._trace_macro_cycle = int(macro_cycle) if macro_cycle is not None else None
+        except (TypeError, ValueError):
+            self._trace_macro_cycle = None
 
     def _trace_critic_llm_call(
         self,

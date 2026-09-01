@@ -24,7 +24,6 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
-    LEVER_SOURCE_PATCH,
     patch_lever_kind,
     patch_owner_phase,
 )
@@ -52,6 +51,7 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -76,10 +76,6 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
     IntentType.ALERT: "_handle_alert",
     IntentType.UPDATE_STATE: "_handle_update_state",
 }
-
-
-# Half the robustness stall threshold, so one dropped beat cannot trip it.
-_KERNEL_HEARTBEAT_SEC: float = 150.0
 
 
 def _is_upstream_pr_candidate(pending: Any) -> bool:
@@ -113,16 +109,14 @@ class IntentRouter:
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
         """Freeze patch ownership when a specialist task is created.
 
-        Stamps both the lever the work moves and the phase that owns it. The
-        lever is the durable half: it says what was changed, which stays true
-        after the phase machine is rearranged, while the phase only says when.
+        Stamps the phase that owns the work, and the lever only where the
+        mandate already names one. A mandate that names neither a PR nor an
+        enablement flag does not know which lever its specialist will move, and
+        a guess written here would outrank the delivery that settles it.
         """
         lever = patch_lever_kind(params)
-        if not lever:
-            # A specialist that neither names a PR nor carries an enablement
-            # flag is authoring against the source tree.
-            lever = LEVER_SOURCE_PATCH
-        params["lever_kind"] = lever
+        if lever:
+            params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
@@ -130,6 +124,11 @@ class IntentRouter:
             # Layer first, phase last: both lanes share one phase, so the live
             # phase no longer says which lever a specialist moves. The phase
             # stays as the fallback when the mandate named neither.
+            #
+            # ``EXPLORE`` below is an owner namespace, not a phase this build
+            # can enter: it is the published KB section name for the
+            # configuration lever, and renaming it would orphan the overlays
+            # every record already stores under that prefix.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
@@ -148,8 +147,6 @@ class IntentRouter:
         owner = patch_owner_phase(params)
         if owner:
             params["source_phase"] = owner
-            if not params.get("lever_kind"):
-                params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
             return owner
         specialist_task_id = str(params.get("specialist_task_id") or "").strip()
         if not specialist_task_id:
@@ -178,8 +175,6 @@ class IntentRouter:
             if value not in (None, "", [], {}):
                 params.setdefault(key, value)
         params["source_phase"] = owner
-        if not params.get("lever_kind"):
-            params["lever_kind"] = patch_lever_kind(params) or LEVER_SOURCE_PATCH
         return owner
 
     async def _handle_intent(self, source: str, intent: Intent) -> None:
@@ -787,9 +782,15 @@ class IntentRouter:
             started (float): ``time.monotonic()`` at the step's start.
         """
 
+        # Re-stamped per beat rather than once at the start, so a stamp that
+        # outlives its process expires instead of muting the KERNEL idle guard.
+        def _mark_running() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = time.time()
+
         async def _beat() -> None:
             while True:
                 await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                _mark_running()
                 await self.bus.append_and_seq(
                     Message.new(
                         "orchestration",
@@ -803,6 +804,7 @@ class IntentRouter:
                     )
                 )
 
+        _mark_running()
         task = asyncio.create_task(_beat())
         try:
             yield
@@ -810,6 +812,7 @@ class IntentRouter:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
         """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.

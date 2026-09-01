@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.protocol.action_surfaces import ACTION_CATALOGUE
+from hyperloom.orchestrator.phases.machine_state import PHASE_NAMES
 from hyperloom.orchestrator.loop.coordinator_helpers import _parse_iso_unix
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -45,7 +46,9 @@ def test_orchestration_prompt_includes_phase_contract(registry):
         max_minutes=120,
     )
     assert "PHASE CONTRACT" in text
-    for phase in ("PRELUDE", "FRAMEWORK_AGENT", "EXPLORE", "KERNEL_AGENT", "SWEEP", "CLOSE"):
+    # Driven off the phase table: a hand-written list keeps naming a phase the
+    # build dropped, and passes on any other string that happens to contain it.
+    for phase in PHASE_NAMES:
         assert phase in text, f"missing phase {phase} from orchestration prompt"
     assert "phase-allowed actions" in text.lower()
     assert "policy_denied" in text.lower()

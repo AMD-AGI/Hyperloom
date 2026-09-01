@@ -41,7 +41,14 @@ from hyperloom.common.coerce import to_float
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.timeutil import iso_z, now_iso
 
-from ..agent_ownership import UNATTRIBUTED, agent_from_phase, patch_author
+from ..agent_ownership import (
+    UNATTRIBUTED,
+    agent_from_lever,
+    agent_from_phase,
+    patch_author,
+    patch_lever_kind,
+)
+from ..critic_reviews import normalize_framework_reviews
 from .trace import trace_skip
 
 log = logging.getLogger(__name__)
@@ -183,12 +190,7 @@ def _operation_status(status: Any) -> str:
 
 
 _AGENT_BY_ACTION = {
-    "framework_agent": "framework_agent",
-    "framework": "framework_agent",
     "explore": "explore",
-    "backends": "explore",
-    "params": "explore",
-    "specialist": "explore",
     "replay_warm_recipe": "warm_replay",
     "warm_replay": "warm_replay",
     "baseline": "coordinator",
@@ -229,7 +231,12 @@ def _resolve_agent(
     if name.startswith("kernel_opt") or name in {"geak_e2e", "gemm_tuning", "fusion", "kernel_optimization"}:
         return "kernel_agent"
 
-    return agent_from_phase(result.get("source_phase")) or agent_from_phase(phase) or UNATTRIBUTED
+    return (
+        agent_from_lever(patch_lever_kind(result))
+        or agent_from_phase(result.get("source_phase"))
+        or agent_from_phase(phase)
+        or UNATTRIBUTED
+    )
 
 
 def _action_operation_id(action: str, entry: Mapping[str, Any]) -> str:
@@ -511,7 +518,6 @@ def _mirror_action_v4(
         "baseline": "workload",
         "profile": "profile",
         "roofline": "roofline_snapshot",
-        "framework_agent": "framework_candidate",
         "explore": "variant",
         "sweep": "sweep",
         "conc_sweep": "concurrency_sweep",
@@ -620,36 +626,7 @@ def _mirror_action_v4(
                 "metadata": {"trace_health": result.get("trace_health")},
             }
         )
-    elif action == "framework_agent":
-        for name in ("apply", "benchmark", "evaluation", "decision"):
-            substeps.append(
-                {
-                    "substep_id": _stable_id("substep", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": status,
-                    "ended_at": ended_at,
-                }
-            )
     gates: list[dict[str, Any]] = []
-    if action == "framework_agent":
-        for name, value in (
-            ("accuracy", result.get("accuracy_pass")),
-            ("throughput", result.get("throughput_pass")),
-            ("critic", result.get("critic_pass")),
-        ):
-            if value is None:
-                continue
-            gates.append(
-                {
-                    "gate_id": _stable_id("gate", operation_id, name),
-                    "kind": name,
-                    "name": name,
-                    "status": "passed" if bool(value) else "failed",
-                    "decision": "allow" if bool(value) else "deny",
-                    "evaluated_at": ended_at,
-                }
-            )
     agent = _resolve_agent(action, result=result, phase=phase)
     # ``or`` would let a real 0.0% fall through to ``best_gain_pct``; a measured
     # zero is a verdict, not a missing value.
@@ -694,7 +671,6 @@ def _mirror_action_v4(
     if executor_verdict in _EXECUTOR_ADOPTION_VERDICTS:
         verdict = executor_verdict
     adoptable_actions = {
-        "framework_agent",
         "explore",
         "integrate",
         "integrate_patch",
@@ -758,7 +734,7 @@ def _mirror_action_v4(
         session_dir,
         operation_id=operation_id,
         root_operation_id=operation_id,
-        kind="composite" if action in {"baseline", "roofline", "framework_agent"} else action,
+        kind="composite" if action in {"baseline", "roofline"} else action,
         name=action,
         phase=phase,
         macro_cycle=int(macro_cycle or 0),
@@ -1114,11 +1090,9 @@ def _snapshot_explore_search(rec, st: Any) -> None:
     search = dict(getattr(st, "explore_search", None) or {})
     if not search:
         return
-    search["winner_history"] = []
     search["no_promote_streak"] = int(getattr(st, "params_no_promote_streak", 0) or 0)
     search["discovered_flags"] = dict(getattr(st, "discovered_flags", None) or {})
     search["synergy_attempted"] = list(search.get("synergy_attempted") or [])
-    search["backend_winners_history"] = []
     rec.record_singleton("explore_search", search)
 
 
@@ -1872,41 +1846,176 @@ def record_geak_operation(
         error=value.get("error") or value.get("error_class"),
         **timing_fields,
     )
-    adoption_id = _stable_id("adoption", route_id, "final_validation")
-    if validated or stage in {"final_validation", "final_validation_failed"}:
+    # A route is execution context, not an optimization attempt. Its final
+    # validation belongs in the gates/measurements above; a KEEP adoption is
+    # emitted by ``record_geak_e2e_attempt`` (aggregate route win) or
+    # ``record_kernel_e2e`` (an attributable per-kernel win). Attaching an
+    # adoption here creates an orphan from the optimization ledger because
+    # ``kernel_optimizer_run`` is intentionally not an attempt kind.
+
+
+def record_geak_e2e_attempt(
+    session_dir: Path | str | None,
+    *,
+    kind: str,
+    throughput_before: float,
+    throughput_after: float,
+    baseline_tput: float | None = None,
+    gain_pct: float | None = None,
+    attribution_eligible: bool = True,
+    macro_cycle: int | None = None,
+    accepted_config: Mapping[str, Any] | None = None,
+    provenance: str = "",
+    occurrence: Any = None,
+    result: Mapping[str, Any] | None = None,
+    producer: str = PRODUCER_COORDINATOR,
+) -> None:
+    """Record one validated GEAK route-level win as a countable attempt.
+
+    ``record_geak_operation`` describes the GEAK route, but route operations
+    are intentionally excluded from the canonical optimization ledger.  This
+    companion record carries the validated before/after pair on an attempt kind
+    the ledger counts, so the GEAK dashboard bucket receives the gain without
+    relying on per-kernel attribution.
+
+    Args:
+        result: GEAK's ``result.json`` payload, read only for the artifact
+            paths (report, eval dir, journey, patch) attached to the adoption.
+            Without them the ledger's keep names a gain with nothing on disk
+            to audit it against.
+    """
+    if not session_dir:
+        trace_skip(reason="no session_dir", section="operations")
+        return
+    before = to_float(throughput_before)
+    after = to_float(throughput_after)
+    if not (before and after and before > 0 and after > 0):
+        trace_skip(reason="no throughput pair to attribute", section="operations")
+        return
+    try:
+        attempt_kind = kind if kind in {"kernel_optimization", "gemm_tuning"} else "kernel_optimization"
+        cycle = int(macro_cycle) if macro_cycle is not None else 0
+        now = _now_iso_safe()
+        route_id = _kernel_route_operation_id(session_dir, "geak", macro_cycle=macro_cycle)
+        recorded_occurrence = occurrence if occurrence is not None else f"{before}->{after}"
+        # The measured pair is part of the identity: one macro cycle can promote
+        # twice (a rebench that beats an earlier promotion), and keying on the
+        # cycle alone would merge the second win onto the first and lose its
+        # gain. Re-writing the SAME pair still collapses, which is what keeps
+        # the writer idempotent.
+        operation_id = _stable_id(
+            "op",
+            "geak_e2e_attempt",
+            _session_key(session_dir),
+            f"macro_cycle:{cycle}",
+            recorded_occurrence,
+        )
+        subject = {
+            "subject_id": _kernel_route_subject_id(session_dir, "geak", route_operation_id=route_id),
+            "subject_type": "kernel_optimizer_route",
+            "role": "selected",
+            "name": "geak",
+        }
+        measurement_refs: list[str] = []
+        for name, numeric in (("baseline_throughput", before), ("final_throughput", after)):
+            is_accounting_anchor = name == "baseline_throughput"
+            measurement_id = _stable_id(
+                "measurement",
+                operation_id,
+                name,
+                _measurement_occurrence(recorded_occurrence, value=numeric),
+            )
+            record_measurement(
+                session_dir,
+                measurement_id=measurement_id,
+                producer=producer,
+                operation_id=operation_id,
+                subject=subject,
+                kind="throughput",
+                name=name,
+                value=numeric,
+                unit="tok/s",
+                # ``before`` is the residual ledger anchor, not a throughput
+                # sample taken by the GEAK harness.  It can be synthesized as
+                # ``pre_geak + claimed_kernel_delta`` so calling it validated
+                # would put a fictitious measurement on the canonical stream.
+                status="derived" if is_accounting_anchor else "validated",
+                measured_at=now,
+                metric_basis="output",
+                dimensions={
+                    "role": "baseline" if is_accounting_anchor else "final",
+                    **(
+                        {
+                            "derived": True,
+                            "derivation": "geak_route_residual_anchor",
+                        }
+                        if is_accounting_anchor
+                        else {}
+                    ),
+                },
+                **_measurement_metadata("geak_e2e_orchestrator", harness="geak_e2e"),
+            )
+            measurement_refs.append(measurement_id)
+        artifact_refs = (
+            _geak_result_artifacts(session_dir, operation_id, result, producer) if isinstance(result, Mapping) else []
+        )
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
+            producer=producer,
+            kind=attempt_kind,
+            name="geak_e2e",
+            phase="KERNEL_AGENT",
+            macro_cycle=cycle,
+            scope="run",
+            strategy_group="kernel_optimizer",
+            strategy="geak",
+            executor_class="llm_tool",
+            status="succeeded",
+            parent_operation_id=route_id,
+            root_operation_id=route_id,
+            subject=subject,
+            outputs={
+                "decision": "KEEP",
+                "validated": True,
+                "source": "geak_e2e",
+                "baseline_tput": to_float(baseline_tput),
+                "accepted_config": dict(accepted_config or {}),
+            },
+            measurement_refs=measurement_refs,
+            artifact_refs=artifact_refs,
+            ended_at=now,
+        )
+        adoption_id = _stable_id("adoption", operation_id, "geak_e2e")
         _record_adoption_transition(
             session_dir,
             adoption_id=adoption_id,
             producer=producer,
-            operation_id=route_id,
-            adopted=validated,
-            reason=validation_source
-            or ("orchestrator_final_validation_passed" if validated else "orchestrator_final_validation_failed"),
+            operation_id=operation_id,
+            adopted=True,
+            attribution_eligible=bool(attribution_eligible),
+            reason=provenance or "geak_e2e_validated",
+            subject=subject,
             transitioned_at=now,
             measurement_ids=measurement_refs,
             artifact_ids=artifact_refs,
-            kind="kernel_optimizer",
-            configuration=dict(value.get("accepted_config") or {}),
+            kind=attempt_kind,
+            gain_pct=to_float(gain_pct),
+            throughput_before=before,
+            throughput_after=after,
+            configuration=dict(accepted_config or {}),
             validation_basis="e2e_validation",
-            metadata={"validation_tier": "orchestrator_final"},
+            metadata={"validation_tier": "geak_e2e_orchestrator"},
         )
-    else:
-        # A stage that has not reached final validation has nothing to adopt
-        # yet. Traced because "not yet" and "never arrived" produce the same
-        # absence downstream.
-        trace_skip(
-            reason=f"stage {stage!r} has not reached final validation",
-            section="adoptions",
-            entity=adoption_id,
+        record_operation(
+            session_dir,
+            operation_id=operation_id,
             producer=producer,
+            adoption_refs=[adoption_id],
         )
-        return
-    record_operation(
-        session_dir,
-        operation_id=route_id,
-        producer=producer,
-        adoption_refs=[adoption_id],
-    )
+    except Exception as exc:  # noqa: BLE001
+        log.debug("record_geak_e2e_attempt failed", exc_info=True)
+        trace_skip(reason="writer raised", section="operations", error=exc)
 
 
 def _record_geak_internal_ref(
@@ -2994,6 +3103,15 @@ def record_kernel_backend_result(
     collapsed. Mirrors the attempt ladder in ``result['attempts']`` and carries
     the per-attempt timing + tool metadata when the kernel-agent surfaced them.
 
+    An attempt row as the backend writes it holds only how the run went --
+    ``status`` / ``optimized_path`` / ``error``. The verdict
+    (``proposal.decision``), the compile/correctness gates and the source
+    artifact are computed once per kernel and live beside ``attempts`` on the
+    result, so they are folded onto the attempt ``verification`` adopted and
+    onto no other. A losing backend keeps its own status, an unknown gate
+    stays unknown, and a failed attempt with no verdict of its own is recorded
+    as ``FAILED``.
+
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
@@ -3019,6 +3137,20 @@ def record_kernel_backend_result(
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
         kernel_micro_speedup = to_float(verification.get("micro_speedup"))
+        # The verdict and the verification evidence are kernel-level facts: a
+        # backend attempt carries only status/optimized_path/error, while
+        # ``proposal.decision``, the compile/correctness gates and the source
+        # artifact all live beside ``attempts`` on the result. They belong to
+        # the attempt verification actually adopted, so they are stamped onto
+        # that one and no other -- the same rule
+        # :func:`record_kernel_invocations` applies to the invocation lanes.
+        # Without an explicit ``best_attempt_id`` nothing was adopted, so no
+        # attempt inherits them (``_best_attempt_id``'s speedup fallback would
+        # otherwise hand a failed kernel's REVERT to an arbitrary row).
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+        kernel_decision = str(proposal.get("decision") or "").upper()
+        adopted_attempt_id = str(verification.get("best_attempt_id") or "")
+        kernel_artifact_path = str(verification.get("best_artifact_path") or "")
         legacy_only = str(route_strategy or "") == "legacy_only"
         geak_internal = str(route_strategy or "") == "geak_internal"
         if geak_internal:
@@ -3066,6 +3198,22 @@ def record_kernel_backend_result(
                 and attempt_id == best_attempt_id
             ):
                 micro_speedup = kernel_micro_speedup
+            is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
+            status_lower = str(att.get("status") or "").lower()
+            decision = str(att.get("decision") or "").upper()
+            if not decision and status_lower in _FAILED_STATUSES:
+                decision = "FAILED"
+            if is_adopted and kernel_decision:
+                decision = kernel_decision
+            compile_passed = _to_bool(att.get("compile_passed"))
+            correctness_passed = _to_bool(att.get("correctness_passed"))
+            correctness_source = att.get("correctness_source")
+            if is_adopted:
+                if compile_passed is None:
+                    compile_passed = _to_bool(verification.get("compile_passed"))
+                if correctness_passed is None:
+                    correctness_passed = _to_bool(verification.get("correctness_passed"))
+                correctness_source = correctness_source or verification.get("correctness_source")
             payload = {
                 "kernel_id": kid,
                 "attempt_id": attempt_id,
@@ -3073,11 +3221,16 @@ def record_kernel_backend_result(
                 "backend": backend,
                 "model": att.get("model"),
                 "ts": str(att.get("ts") or att.get("started_at") or att.get("created_at") or ""),
-                "status": str(att.get("status") or "").lower(),
-                "decision": str(att.get("decision") or "").upper(),
+                "status": status_lower,
+                "decision": decision,
                 "micro_speedup": micro_speedup,
-                "compile_passed": _to_bool(att.get("compile_passed")),
-                "correctness_passed": _to_bool(att.get("correctness_passed")),
+                "compile_passed": compile_passed,
+                "correctness_passed": correctness_passed,
+                "correctness_source": str(correctness_source) if correctness_source else None,
+                # The source artifact the kernel was carried to integrate with.
+                # ``optimized_files`` is the attempt's own output path, which
+                # for a real backend run is its stdout log -- not the rewrite.
+                "best_artifact_path": kernel_artifact_path if is_adopted else "",
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
                 "error_class": str(att.get("error_type") or "") or None,
@@ -3088,9 +3241,10 @@ def record_kernel_backend_result(
             recorded_any = True
             if operation_id:
                 canonical_attempt_id = attempt_id or _stable_id("attempt", operation_id, run_id, backend)
-                correctness_source = (
-                    att.get("correctness_source") or verification.get("correctness_source") or "partial:not_provided"
-                )
+                # Resolved above: kernel-level evidence only reaches the
+                # adopted attempt, so a losing backend's gates stay unknown
+                # rather than inheriting the winner's.
+                canonical_correctness_source = correctness_source or "partial:not_provided"
                 canonical_attempts.append(
                     {
                         "attempt_id": canonical_attempt_id,
@@ -3099,18 +3253,18 @@ def record_kernel_backend_result(
                         "started_at": str(att.get("started_at") or att.get("created_at") or ""),
                         "ended_at": str(att.get("ended_at") or ""),
                         "outputs": {
-                            "decision": str(att.get("decision") or ""),
-                            "compile_passed": _to_bool(att.get("compile_passed")),
-                            "correctness_passed": _to_bool(att.get("correctness_passed")),
-                            "correctness_source": correctness_source,
+                            "decision": decision,
+                            "compile_passed": compile_passed,
+                            "correctness_passed": correctness_passed,
+                            "correctness_source": canonical_correctness_source,
                             "verification_status": verification.get("status"),
                         },
                         "error": att.get("error") or att.get("error_message"),
                     }
                 )
                 for gate_name, gate_value, gate_kind in (
-                    ("compile", _to_bool(att.get("compile_passed")), "compile"),
-                    ("correctness", _to_bool(att.get("correctness_passed")), "correctness"),
+                    ("compile", compile_passed, "compile"),
+                    ("correctness", correctness_passed, "correctness"),
                 ):
                     canonical_gates.append(
                         {
@@ -3123,7 +3277,7 @@ def record_kernel_backend_result(
                             if gate_value is False
                             else "partial",
                             "decision": "allow" if gate_value is True else "deny" if gate_value is False else "review",
-                            "evidence": {"source": correctness_source, "value": gate_value},
+                            "evidence": {"source": canonical_correctness_source, "value": gate_value},
                         }
                     )
                 numeric_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
@@ -3391,6 +3545,17 @@ def record_kernel_e2e(
             "patch_path": patch_path,
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
+            # The deploy/apply root the integrated kernel landed in, the kernel
+            # analogue of the framework column's apply root. Absolute; empty when
+            # the integrate named no repo (e.g. an env-only adoption). Read off
+            # the integrate result, falling back to the deploy-root ledger keys.
+            "kernel_repo": str(
+                evidence.get("kernel_repo")
+                or evidence.get("deploy_repo_root")
+                or evidence.get("last_deploy_repo_root")
+                or ""
+            )
+            or None,
             "ts": _now_iso_safe(),
             # Carried on the record so the replay paths that re-record this
             # outcome from state pass the same value back instead of counting
@@ -3637,10 +3802,9 @@ def record_specialist_round(
             a no-op.
         entry (dict[str, Any]): the specialist round entry (keyed by
             ``round_id``); an empty/non-dict value is a no-op.
-        phase (str): the phase the round ran in; falls back to
-            ``entry["phase"]``, then to the reader's timestamp backfill. A
-            specialist runs in more than one phase, so this cannot be a
-            constant.
+        phase (str): the runtime phase used when the entry does not already
+            declare ``source_phase``. A specialist runs in more than one phase,
+            so this cannot be a constant.
         producer (str): the breakdown producer label (defaults to the
             Coordinator).
     """
@@ -3648,19 +3812,23 @@ def record_specialist_round(
         trace_skip(reason="no session_dir" if not session_dir else "empty entry", section="specialist_rounds")
         return
     try:
-        key = str(entry.get("round_id") or "") or None
+        source_phase = str(entry.get("source_phase") or phase or entry.get("phase") or "").strip().upper()
+        recorded_entry = dict(entry)
+        if source_phase:
+            recorded_entry.setdefault("source_phase", source_phase)
+        key = str(recorded_entry.get("round_id") or "") or None
         _recorder(session_dir, producer).record_item(
             "specialist_runs",
-            dict(entry),
+            recorded_entry,
             key=key,
         )
-        round_id = str(entry.get("round_id") or key or entry.get("task_id") or "unknown")
+        round_id = str(recorded_entry.get("round_id") or key or recorded_entry.get("task_id") or "unknown")
         operation_id = _stable_id("op", "specialist", round_id)
         round_subject_id = _stable_id("subject", "specialist-round", round_id)
-        domains = list(entry.get("domains") or [])
-        if entry.get("domain"):
-            domains.append(str(entry.get("domain")))
-        domains.extend(str(tag) for tag in (entry.get("tags") or []) if str(tag))
+        domains = list(recorded_entry.get("domains") or [])
+        if recorded_entry.get("domain"):
+            domains.append(str(recorded_entry.get("domain")))
+        domains.extend(str(tag) for tag in (recorded_entry.get("tags") or []) if str(tag))
         domains = list(dict.fromkeys(domain for domain in domains if domain))
         record_subject(
             session_dir,
@@ -3670,7 +3838,7 @@ def record_specialist_round(
             name=round_id,
             attributes={
                 "domains": domains,
-                "proposals_total": entry.get("proposals_total"),
+                "proposals_total": recorded_entry.get("proposals_total"),
             },
             producer=producer,
         )
@@ -3688,7 +3856,7 @@ def record_specialist_round(
             )
             domain_subjects.append({"subject_id": domain_id, "subject_type": "specialist_domain"})
         proposal_subjects: list[dict[str, Any]] = []
-        proposals = entry.get("proposal_set")
+        proposals = recorded_entry.get("proposal_set")
         if isinstance(proposals, list):
             for index, proposal in enumerate(proposals):
                 if not isinstance(proposal, Mapping):
@@ -3713,19 +3881,19 @@ def record_specialist_round(
             root_operation_id=operation_id,
             kind="specialist",
             name=f"specialist round {round_id}",
-            phase=phase or str(entry.get("phase") or ""),
-            status="succeeded" if entry.get("completed_at") else "partial",
+            phase=source_phase,
+            status="succeeded" if recorded_entry.get("completed_at") else "partial",
             source="specialist_recorder_hook",
             executor_class="llm_agent",
             purpose="proposal",
-            scope=str(entry.get("scope") or ""),
+            scope=str(recorded_entry.get("scope") or ""),
             strategy_group="specialist",
             strategy="multi_domain",
             producer=producer,
-            ended_at=str(entry.get("completed_at") or entry.get("dispatched_at") or ""),
+            ended_at=str(recorded_entry.get("completed_at") or recorded_entry.get("dispatched_at") or ""),
             subject={"subject_id": round_subject_id, "subject_type": "specialist_round"},
             subjects=domain_subjects + proposal_subjects,
-            outputs=dict(entry),
+            outputs=recorded_entry,
             adoption_refs=[],
             extensions={"downstream_relation": "proposal_only"},
         )
@@ -3747,6 +3915,8 @@ def record_critic_iteration(
     session_dir: Path | str | None,
     *,
     iter_n: int,
+    request: dict[str, Any] | None = None,
+    judge_bundle: dict[str, Any] | None = None,
     review: dict[str, Any] | None,
     emit: dict[str, Any] | None,
     workdir: Path | str | None,
@@ -3755,9 +3925,10 @@ def record_critic_iteration(
 ) -> None:
     """Record one ``critic_robustness.critic_iterations`` item.
 
-    Recorded per-iteration (idempotent on ``iter_n``) so the critic backend's
-    workdir pruning never erases history; payload mirrors
-    ``collectors.collect_critic_robustness``.
+    Recorded per-iteration under a session-unique identity so workdir pruning
+    and resume-time turn-index reuse never erase history; payload mirrors
+    ``collectors.collect_critic_robustness`` and retains normalized Framework
+    review rows for the V6 timeline.
 
     ``kb_priors`` (when provided) carries the per-iteration KB integration
     trace: whether the historical priors were used, the request, the response,
@@ -3767,7 +3938,9 @@ def record_critic_iteration(
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
-        iter_n (int): the critic iteration number (idempotency key).
+        iter_n (int): the process-local critic iteration number.
+        request (dict[str, Any] | None): the critic request payload.
+        judge_bundle (dict[str, Any] | None): the proposal bundle reviewed.
         review (dict[str, Any] | None): the critic review payload.
         emit (dict[str, Any] | None): the critic emit payload.
         workdir (Path | str | None): the critic backend workdir holding the
@@ -3783,6 +3956,14 @@ def record_critic_iteration(
         review = review if isinstance(review, dict) else {}
         emit = emit if isinstance(emit, dict) else {}
         wd = Path(workdir) if workdir else None
+        request = request if isinstance(request, dict) else read_json(wd / "request.json", default={}) if wd else {}
+        judge_bundle = (
+            judge_bundle
+            if isinstance(judge_bundle, dict)
+            else read_json(wd / "judge_bundle.json", default={})
+            if wd
+            else {}
+        )
         payload = {
             "iter": int(iter_n),
             "ts": str(emit.get("ts") or review.get("ts") or ""),
@@ -3795,14 +3976,45 @@ def record_critic_iteration(
             "review_path": _rel(wd / "review.json", session_dir) if wd else None,
             "kb_writes": list(emit.get("kb_writes") or []) if isinstance(emit.get("kb_writes"), list) else [],
         }
+        request_context = request.get("context") if isinstance(request.get("context"), dict) else {}
+        phase = str(request_context.get("phase") or "").strip().upper()
+        if phase:
+            payload["phase"] = phase
+        try:
+            macro_cycle = int(request_context["macro_cycle"])
+        except (KeyError, TypeError, ValueError):
+            macro_cycle = None
+        if macro_cycle is not None:
+            payload["macro_cycle"] = macro_cycle
+        framework_reviews = normalize_framework_reviews(
+            request=request,
+            judge_bundle=judge_bundle,
+            review=review,
+            emit=emit,
+            review_path=_rel(wd / "review.json", session_dir).replace("\\", "/") if wd else None,
+        )
+        if framework_reviews:
+            payload["framework_reviews"] = framework_reviews
         if isinstance(kb_priors, dict) and kb_priors:
             payload["kb_priors"] = kb_priors
+        iteration_id = _stable_id(
+            "critic-iteration",
+            iter_n,
+            payload.get("ts"),
+            [row.get("proposal_msg_id") for row in framework_reviews],
+            payload.get("topic"),
+            request,
+            judge_bundle,
+            review,
+            emit,
+        )
+        payload["iteration_id"] = iteration_id
         _recorder(session_dir, producer).record_item(
             "critic_iterations",
             payload,
-            key=str(iter_n),
+            key=iteration_id,
         )
-        operation_id = _stable_id("op", "critic", iter_n)
+        operation_id = _stable_id("op", iteration_id)
         artifact_refs: list[str] = []
         for name in ("request_path", "judge_bundle_path", "emit_path", "review_path"):
             path = payload.get(name)
@@ -3861,7 +4073,7 @@ def record_critic_iteration(
             write_key = (
                 write.get("write_id") or write.get("point_id") or write.get("edge_id") or write.get("kind") or index
             )
-            write_operation_id = _stable_id("op", "kb-write", iter_n, write_key)
+            write_operation_id = _stable_id("op", "kb-write", iteration_id, write_key)
             result_payload = write.get("result") if isinstance(write.get("result"), Mapping) else {}
             write_status = _operation_status(result_payload.get("status") or write.get("status") or "succeeded")
             record_operation(
@@ -3987,7 +4199,7 @@ def record_singleton_section(
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
-        if section.startswith("kb_") or section in {"warm_replay", "kb_provenance"}:
+        if section.startswith("kb_") or section in {"warm_replay"}:
             operation_id = _stable_id(
                 "op",
                 section,
@@ -4212,6 +4424,8 @@ _AGENT_BY_OPERATION_KIND = {
     "kernel_optimizer_selection": "kernel_agent",
     "strategy_selection": "kernel_agent",
     "gemm_tuning": "kernel_agent",
+    # A specialist round is discovery, not an attempt: it carries no gain and
+    # no adoption, so this names the agent whose activity it was.
     "specialist": "explore",
     "critic": "critic",
     "kb_write": "critic",
@@ -4468,6 +4682,7 @@ __all__ = [
     "record_kernel_strategy_selection",
     "record_native_kernel_run_start",
     "record_native_kernel_run_result",
+    "record_geak_e2e_attempt",
     "record_geak_operation",
     "record_gemm_tuning_operation",
     "record_phase_event",

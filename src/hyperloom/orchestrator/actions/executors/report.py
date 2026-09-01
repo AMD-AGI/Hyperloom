@@ -400,7 +400,6 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
         "resume; the run stopped instead of falling back to a different tree."
     ),
     # Search / phase plateaus and completions.
-    "plateau_explore": "EXPLORE plateaued: no new leverage was found in the search space.",
     "plateau_kernel": "KERNEL_AGENT plateaued: no further validated kernel win was found.",
     "no_kernel_skipped": "No kernel candidates were available, so the kernel phase was skipped and the run closed.",
     "sweep_done": "SWEEP finished the configured concurrency / shape grid.",
@@ -413,6 +412,7 @@ _STOP_REASON_EXPLANATIONS: dict[str, str] = {
     "optimize_budget_cap": "OPTIMIZE reached the absolute per-phase wall-clock cap.",
     # Retired reason names, kept so a report over an archived session still
     # explains what it is reading.
+    "plateau_explore": "The configuration search plateaued: no new leverage was found in the search space.",
     "framework_agent_phase_done": "The framework-enablement agent completed its phase.",
     "framework_agent_plateau": "The framework-enablement agent plateaued with no further progress.",
     "global_converged": "Cyclic phases converged: repeated macro-cycles stopped yielding new validated gain.",

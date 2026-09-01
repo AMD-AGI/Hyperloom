@@ -38,6 +38,7 @@ from kernelforge.agent_backends.base import (
     AgentHooks,
     AgentRunSpec,
     AgentToolPolicy,
+    watchdog_timeout_sec,
 )
 
 from .emit import _FUSED_MODULE_MARKERS, _FUSED_MODULE_PREFIXES, _is_fused_module_name
@@ -1236,7 +1237,7 @@ def _run_registered_author(
     async def _run() -> Any:
         return await asyncio.wait_for(
             backend.run(spec),
-            timeout=max(1, int(timeout_s)),
+            timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
         )
 
     previous_gpu = os.environ.get("HIP_VISIBLE_DEVICES")

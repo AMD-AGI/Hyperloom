@@ -427,3 +427,34 @@ def test_remove_server_args_accepts_multi_flag_string() -> None:
         "--flag-a --flag-b --flag-c",
     )
     assert out == "--keep 4"
+
+
+def test_remove_server_args_keeps_a_sibling_json_value_parseable() -> None:
+    """Removing one flag must not corrupt a JSON-valued sibling.
+
+    The JSON arrives with no shell wrapper because ``compact_json_server_args``
+    strips it upstream, so the POSIX shlex round-trip used to eat the JSON's own
+    double quotes. The bareword repair could not put them back around atom's
+    ``exclude_layer`` wildcards, and ``strip_benchmark_harness_flags`` puts this
+    call on every launch path, so ``--online_quant_config`` reached the server
+    unparseable and every conc_sweep launch died in ``json.loads``.
+    """
+    args = (
+        '--online_quant_config {"global_quant_config":"ptpc_fp8",'
+        '"exclude_layer":["*.mlp.gate","*expert*"]} '
+        "--no-enable-prefix-caching --tp 8"
+    )
+    out = gr.remove_server_args(args, ["--no-enable-prefix-caching"])
+    tokens = out.split(" ")
+    assert tokens[0] == "--online_quant_config"
+    assert json.loads(tokens[1]) == {
+        "global_quant_config": "ptpc_fp8",
+        "exclude_layer": ["*.mlp.gate", "*expert*"],
+    }
+    assert tokens[2:] == ["--tp", "8"]
+
+
+def test_remove_server_args_unbalanced_brace_drops_only_its_own_flag() -> None:
+    """A stray ``}`` is not a JSON blob and must not take the tail with it."""
+    out = gr.remove_server_args("--foo a} --tp 8 --max-num-seqs 64", ["--foo"])
+    assert out == "--tp 8 --max-num-seqs 64"

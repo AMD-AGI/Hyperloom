@@ -247,8 +247,8 @@ def test_is_promotable_result_baseline_eval_failed(coord: Coordinator) -> None:
 def test_journal_entry_phase(coord: Coordinator) -> None:
     coord.shared_state.phase = ""
     assert coord._journal_entry_phase() == "UNKNOWN"
-    coord.shared_state.phase = "explore"
-    assert coord._journal_entry_phase() == "EXPLORE"
+    coord.shared_state.phase = "framework_agent"
+    assert coord._journal_entry_phase() == "FRAMEWORK_AGENT"
 
 
 def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
@@ -258,7 +258,7 @@ def test_source_session_id_prefers_recipe_kb(coord: Coordinator) -> None:
     assert coord._source_session_id() == coord.session_dir.name
 
 
-def test_kernel_and_explore_enabled(coord: Coordinator) -> None:
+def test_kernel_enabled(coord: Coordinator) -> None:
     coord.shared_state.kernel_enabled = True
     assert coord._kernel_enabled() is True
     coord.shared_state.kernel_enabled = False

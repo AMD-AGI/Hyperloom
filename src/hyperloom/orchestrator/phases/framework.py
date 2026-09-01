@@ -149,7 +149,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 return
             self._record_framework_agent_phase_done(
                 reason="no_candidates_and_discovery_exhausted",
-                failure_count=int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
+                failure_count=int(getattr(state, "framework_agent_discover_failures", 0) or 0),
             )
             state.framework_agent_phase_done = True
             state.save(self.session_dir)
@@ -234,28 +234,15 @@ class FrameworkPhase(CoordinatorCollaborator):
             return []
         lines = [
             "",
-            "AUDIT EVIDENCE (from fa phase-audit — author against the LIVE source):",
-            f"- semantic_status: {audit.get('semantic_status') or 'unknown'}",
-            f"- applicability: {audit.get('applicability') or 'unknown'}"
-            " (raw upstream diff likely needs rewriting to fit the local tree)",
+            "CANDIDATE REVIEW (author against the LIVE source, not the raw diff):",
+            f"- verdict: {audit.get('verdict') or 'unknown'}",
         ]
-        evidence = audit.get("evidence") or []
-        if isinstance(evidence, list):
-            for ev in evidence[:8]:
-                if not isinstance(ev, dict):
-                    continue
-                local_file = str(ev.get("local_file") or "").strip()
-                symbol = str(ev.get("symbol") or "").strip()
-                reason = str(ev.get("reason") or "").strip()
-                if local_file or symbol or reason:
-                    lines.append(
-                        f"  • {local_file or '(file?)'}"
-                        + (f" [{symbol}]" if symbol else "")
-                        + (f": {reason}" if reason else "")
-                    )
-        risks = audit.get("risks") or []
-        if isinstance(risks, list) and risks:
-            lines.append("- risks: " + "; ".join(str(r) for r in risks[:4]))
+        reason = str(audit.get("reason") or "").strip()
+        if reason:
+            lines.append(f"- reason: {reason}")
+        next_step = str(audit.get("recommended_next_step") or "").strip()
+        if next_step:
+            lines.append(f"- recommended next step: {next_step}")
         return lines
 
     async def _enqueue_framework_agent_authoring_specialist(
@@ -272,10 +259,9 @@ class FrameworkPhase(CoordinatorCollaborator):
             candidate: The discovered FRAMEWORK candidate (PR url, title,
                 diff url, batch/candidate ids) used to seed the specialist's
                 authoring task and provenance markers.
-            audit: Optional ``fa phase-audit`` verdict; its evidence (local
-                symbols / why the raw diff doesn't fit / where the change
-                should land) is injected into the seed so the specialist
-                authors against the live source instead of re-discovering it.
+            audit: Optional candidate-review verdict; injected into the seed
+                so the specialist authors against the live source instead of
+                re-discovering why the candidate was worth trying.
             reauthor_attempt: Re-author round; ``> 0`` adds a ``reauthor:{n}``
                 idempotency-key suffix so the round gets a fresh task.
             critic_feedback: Prior-round Critic advisory (``required_evidence`` /
@@ -292,47 +278,8 @@ class FrameworkPhase(CoordinatorCollaborator):
         title = str(candidate.get("title") or "").strip()
         pr_url = str(candidate.get("pr_url") or "").strip()
         diff_url = str(candidate.get("diff_url") or "").strip()
-        is_cross_framework = isinstance(audit, dict) and str(audit.get("layer") or "") == "cross_framework"
-        cf_src_framework = ""
-        cf_dst_framework = ""
         notes_lines: list[str] = []
         notes_lines.extend(self._framework_agent_audit_seed_lines(audit))
-        if is_cross_framework:
-            _cf_metrics = audit.get("metrics") if isinstance(audit.get("metrics"), dict) else {}
-            cf_src_framework = str(_cf_metrics.get("src_framework") or candidate.get("framework") or "").strip().lower()
-            cf_dst_framework = (
-                str(_cf_metrics.get("dst_framework") or getattr(state, "framework", "") or "").strip().lower()
-            )
-            cf_provenance = f"specialist:serving:framework:cross_framework:{cf_src_framework}->{cf_dst_framework}"
-            notes_lines.extend(
-                [
-                    "",
-                    "CROSS-FRAMEWORK PORT (rewrite, NOT git apply):",
-                    f"- source framework: {cf_src_framework or '(unknown)'}; "
-                    f"target (this session) framework: {cf_dst_framework or '(unknown)'}",
-                    "- The upstream diff targets a DIFFERENT framework's repo layout / API,",
-                    "  so it can NEVER be applied directly. Re-implement the equivalent",
-                    "  logic against the TARGET framework's live source in your worktree.",
-                ]
-            )
-            for hit in (audit.get("evidence") or [])[:8]:
-                if not isinstance(hit, dict):
-                    continue
-                notes_lines.append(
-                    f"  • target module candidate: {hit.get('dst_module') or '(none)'} "
-                    f"(from {hit.get('src_path') or '?'}; feature={hit.get('feature') or '?'})"
-                )
-            notes_lines.extend(
-                [
-                    "- Deliverable MUST be a unified-diff source patch in your worktree",
-                    "  (``patches_written``) against the target framework source; a pure",
-                    "  config-lever proposal is NOT sufficient for a cross-framework port.",
-                    f"- In your proposal, set provenance exactly to: {cf_provenance}",
-                    f"- Echo source_framework={cf_src_framework!r} and "
-                    f"target_framework={cf_dst_framework!r} in the proposal so the KB",
-                    "  ledger records the cross-framework outcome.",
-                ]
-            )
         if critic_feedback:
             req_ev = [str(x).strip() for x in (critic_feedback.get("required_evidence") or []) if str(x).strip()]
             fb_lines = [
@@ -349,33 +296,26 @@ class FrameworkPhase(CoordinatorCollaborator):
             notes_lines.extend(fb_lines)
         notes = "\n".join(notes_lines).strip()
         params: dict[str, Any] = {
-            # Cross-framework ports route to a dedicated rewrite domain; the
-            # same-framework case follows the session's framework kind.
-            "domain": (
-                "cross_framework_rewrite_specialist" if is_cross_framework else self._authoring_specialist_domain()
-            ),
+            "domain": self._authoring_specialist_domain(),
             "gap_canonical_id": gap_cid,
             "gap_symptom": (title or f"Author a framework source patch inspired by {pr_url or cand_id}"),
             "gap_layer": "framework",
             "framework": str(candidate.get("framework") or getattr(state, "framework", "") or "").strip().lower(),
             "task_kind": "framework_authoring",
+            "source_phase": "FRAMEWORK_AGENT",
             "pr_lead": {"title": title, "url": pr_url, "diff_url": diff_url},
             "lever_kind": LEVER_UPSTREAM_PR,
             # Provenance markers for the dispatcher-side authored-patch bridge.
             "framework_agent_authoring": True,
             "framework_agent_candidate_id": cand_id,
             "framework_batch_id": batch_id,
+            "reauthor_attempt": int(reauthor_attempt),
             "framework_audit": (audit if isinstance(audit, dict) else {}),
             "source": "coordinator_internal",
             "notes": notes,
             # Whole-machine GPU request. Empty on multi-node / no-GPU hosts.
             **self._framework_gpu_params(),
         }
-        if is_cross_framework:
-            # Thread cross-framework provenance to the integrate_patch->ledger path.
-            params["cross_framework"] = True
-            params["source_framework"] = cf_src_framework
-            params["target_framework"] = cf_dst_framework
         try:
             await self._warm_specialist_params(params)
         except Exception:  # noqa: BLE001 — best-effort warmup
@@ -1438,6 +1378,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 evidence={
                     "event": "framework_agent_phase_done",
                     "failure_count": int(failure_count),
+                    "empty_count": int(getattr(state, "framework_agent_empty_discoveries", 0) or 0),
                     "retry_limit": int(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT),
                     "batches_discovered": len(getattr(state, "framework_agent_batches", None) or []),
                     "outcome_class": outcome_class,
@@ -2150,6 +2091,7 @@ class FrameworkPhase(CoordinatorCollaborator):
                 "accuracy_pass": res.get("accuracy_pass"),
                 "specialist_task_id": spec_tid,
                 "integrate_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": res.get("reauthor_attempt", params.get("reauthor_attempt")),
             },
         )
         if not recorded:
@@ -2249,7 +2191,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             rationale=run_error[:500],
             provenance="dispatch_failed",
             gain_pct=0.0,
-            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            extra={
+                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": params.get("reauthor_attempt"),
+            },
         )
         if not recorded:
             return
@@ -2364,7 +2309,10 @@ class FrameworkPhase(CoordinatorCollaborator):
             rationale=reason,
             provenance="authored_empty",
             gain_pct=0.0,
-            extra={"specialist_task_id": str(getattr(task, "task_id", "") or "")},
+            extra={
+                "specialist_task_id": str(getattr(task, "task_id", "") or ""),
+                "reauthor_attempt": params.get("reauthor_attempt"),
+            },
         )
         if not recorded:
             return

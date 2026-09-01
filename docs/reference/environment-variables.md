@@ -501,6 +501,52 @@ drive, and passing the flags with one warns. Its shape is still recorded in the
 report and the fingerprint — that is provenance, not a hand-off — and the report
 states plainly that the figure cannot be read as an aggregate.
 
+### Choosing the mode: `scripts/partition_mode_sweep.py`
+
+`optimize` treats the mode as fixed and asserts it. Deciding *which* mode to be
+in is a separate job, done before the session, by
+`python3 scripts/partition_mode_sweep.py`. It sets each mode on one card in
+turn, runs the same benchmark on every partition that mode creates, sums the
+result, and restores the card's entry mode on the way out.
+
+```bash
+# what it would do, nothing set
+python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+
+# sweep every mode the card reports, skipping any that cannot hold the workload
+python3 scripts/partition_mode_sweep.py \
+    --benchmark-config bench.yaml --output-dir /shared/sweep \
+    --per-stream-gib 20.7 --sudo
+```
+
+The fan-out is the point rather than a detail: a benchmark that loads one
+partition and ignores the rest measures a fraction of the card, which makes
+`CPX` look eight times worse than it is. The sweep therefore launches every
+partition at once, and reports a mode only when all of its partitions returned
+a measurement — a mode with six of eight reporting is unmeasured, not slow.
+
+It publishes the same `HYPERLOOM_PARTITION_*` variables as a session, so a
+benchmark entrypoint written against the table above works unchanged under
+either. It pins each process with `ROCR_VISIBLE_DEVICES` and removes any
+inherited `HIP_VISIBLE_DEVICES`, because two masks apply in sequence and the
+second indexes into the first.
+
+The privileged `amd-smi set` lives here and nowhere else. An operator-run script
+between benchmarks is a reasonable place for a card-wide mutation that evicts
+every GPU context; an optimization loop that also runs agent-authored code is
+not. Before setting anything it refuses if a process holds a context on the card
+being swept — and only that card, since no other card is repartitioned. A
+neighbour's benchmark on a shared node is not a reason to stop. If `amd-smi`
+reports its process list in a shape the script cannot read, that is also a
+refusal rather than an assumption that the card is idle: `--allow-busy` is the
+way past both, and `--dry-run` never asks.
+
+Exit codes: `0` swept, `1` nothing measurable, `2` refused before anything
+changed, `3` swept but the card could not be restored to its entry mode, `4`
+stopped on an error it does not model. Every path out of a started sweep goes
+through the restore and the report, so a mode that fails unexpectedly costs its
+own result and nothing else.
+
 ---
 
 ## Multi-node / prefill-decode (PD)
@@ -641,9 +687,9 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
-| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its combined config, ordered Explore/Framework overlays, and Kernel section, then writes one final session at CLOSE. |
+| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its Config column, ordered Patch column overlays, and Kernel column, then writes one final session at CLOSE. |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
-| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
+| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
 | `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
