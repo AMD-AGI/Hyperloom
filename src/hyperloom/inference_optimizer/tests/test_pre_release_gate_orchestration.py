@@ -24,6 +24,8 @@ tests pin the invariants it depends on.
 
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -66,6 +68,12 @@ def poll_script() -> str:
 def dispatch_script() -> str:
     assert _GITHUB is not None
     return (_GITHUB / "scripts" / "pre-release-e2e-dispatch.sh").read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
+def bootstrap_script() -> str:
+    assert _GITHUB is not None
+    return (_GITHUB / "pre-release" / "bootstrap-pre-release.sh").read_text(encoding="utf-8")
 
 
 def test_nothing_that_talks_to_safe_runs_on_a_github_hosted_runner(workflow: dict) -> None:
@@ -172,3 +180,101 @@ def test_poll_passes_on_clean_terminal_stop_reason_not_gain(poll_script: str) ->
     assert "state.json stop_reason" in poll_script
     assert "reports/final.json missing" not in poll_script
     assert 'echo "PENDING|state.json stop_reason not set yet' in poll_script
+
+
+# ---- reusing a CI_VERSION must not let the previous run's artifacts pass the gate ----
+# A reused CI_VERSION (workflow_dispatch reuse_ci_version, or a job re-run) puts this run
+# on the paths a finished run already wrote. Verdicts are recorded once and never revisited
+# and the loop breaks as soon as nothing is pending, so a single stale read on the first
+# tick is enough to declare the whole gate PASS before a pod has booted.
+
+
+def _leg_session_dir(poll_script: str, runs_dir: Path, leg: str, run_tag: str) -> str:
+    """Run the real leg_session_dir() out of the poll script."""
+    lines = poll_script.splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("leg_session_dir() {"))
+    end = next(i for i in range(start, len(lines)) if lines[i] == "}")
+    fn = "\n".join(lines[start : end + 1])
+    proc = subprocess.run(
+        [
+            "bash",
+            "-c",
+            f'runs_dir="$1"; RUN_TAG="$2"\n{fn}\nleg_session_dir "$3"',
+            "_",
+            str(runs_dir),
+            run_tag,
+            leg,
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_a_stale_session_pin_cannot_pass_the_gate(poll_script: str, tmp_path: Path) -> None:
+    """A pin written by an earlier run on these paths must not resolve to a session dir."""
+    leg = "baremetal-vllm-3h"
+    session = tmp_path / leg / "session"
+    finished = session / "Qwen3-8B" / "20260830T000000Z-deadbeef"
+    finished.mkdir(parents=True)
+    pin = session / ".session_dir"
+
+    pin.write_text(f"{finished}\nold-run\n", encoding="utf-8")
+    assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == ""
+
+    # An untagged pin predates the stamping and carries no proof of ownership either.
+    pin.write_text(f"{finished}\n", encoding="utf-8")
+    assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == ""
+
+    pin.write_text(f"{finished}\nthis-run\n", encoding="utf-8")
+    assert _leg_session_dir(poll_script, tmp_path, leg, "this-run") == str(finished)
+
+
+def test_the_run_tag_reaches_the_pod_and_the_poll(dispatch_script: str, bootstrap_script: str) -> None:
+    """Dispatch is the single source of the tag: pods stamp it, the poll compares it."""
+    assert "RUN_TAG: $rtag" in dispatch_script
+    assert "RUN_TAG:$rtag" in dispatch_script
+    assert '"${DISPATCH_MAP}.version_tag"' in dispatch_script
+    assert "printf '%s\\n' \"${RUN_TAG:-}\"" in bootstrap_script
+    assert bootstrap_script.count("pin_session_dir ") == 2
+    assert 'echo "$real_sdir" > "${session}/.session_dir"' not in bootstrap_script
+
+
+def test_bootstrap_rotates_the_agent_log_instead_of_appending(bootstrap_script: str) -> None:
+    """The setup marker grep reads this file; a previous run's marker must not satisfy it."""
+    assert ".prev-$(date -u +%Y%m%dT%H%M%SZ).log" in bootstrap_script
+    assert 'grep -qiE "setup complete: ${run_mode}/${backend}" "$agent_log"' in bootstrap_script
+
+
+def test_bootstrap_ignores_a_state_json_older_than_the_leg(bootstrap_script: str) -> None:
+    """The wait loop picks the newest state.json under $session -- scope it to this run."""
+    assert 'local leg_t0; leg_t0="$(date +%s)"' in bootstrap_script
+    assert '-name state.json -newermt "@$leg_t0"' in bootstrap_script
+
+
+# ---- layered timeouts: bootstrap total < SaFE pod timeout < poll global timeout ----
+
+
+def _shell_default(script: str, name: str) -> int:
+    match = re.search(rf"\$\{{{name}:-(\d+)\}}", script)
+    assert match, f"{name} default not found"
+    return int(match.group(1))
+
+
+def test_pod_timeout_covers_the_whole_bootstrap_budget(
+    dispatch_script: str, bootstrap_script: str, poll_script: str, workflow: dict
+) -> None:
+    """Setup is a separate budget; leaving it out of the pod cap gets legs killed mid-wait."""
+    setup_s = _shell_default(bootstrap_script, "LEG_SETUP_DEADLINE_S")
+    # The workflow env wins over the script default, so the effective value is the one
+    # the ladder has to hold for.
+    global_s = int(workflow["jobs"]["run"]["env"]["GLOBAL_TIMEOUT_S"])
+    assert global_s == _shell_default(poll_script, "GLOBAL_TIMEOUT_S")
+    assert global_s < int(workflow["jobs"]["run"]["timeout-minutes"]) * 60
+    assert "local deadline_s=$(( hours * 3600 + 3600 ))" in bootstrap_script
+    for hours, name in ((3, "DEADLINE_3H_S"), (12, "DEADLINE_12H_S")):
+        pod_s = _shell_default(dispatch_script, name)
+        bootstrap_s = setup_s + hours * 3600 + 3600
+        assert bootstrap_s < pod_s, f"{name}={pod_s} is below the {bootstrap_s}s bootstrap budget"
+        assert pod_s < global_s, f"{name}={pod_s} outlives the poll's {global_s}s global timeout"

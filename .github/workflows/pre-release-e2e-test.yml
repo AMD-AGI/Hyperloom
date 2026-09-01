@@ -293,7 +293,7 @@ jobs:
       HEAD_REF: ${{ github.head_ref }}
       GH_STATUS_DETAILS_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
       POLL_INTERVAL_S: "120"
-      GLOBAL_TIMEOUT_S: "50400"
+      GLOBAL_TIMEOUT_S: "52200"
     steps:
       - uses: actions/checkout@v7
 

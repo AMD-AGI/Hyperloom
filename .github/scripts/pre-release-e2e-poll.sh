@@ -28,9 +28,11 @@
 #   NFS_ROOT                       (default /shared_nfs/hyperloom-pre-release-e2e-test)
 #   TARGET_GAIN                    passed to optimize (demo skill); not used to judge PASS
 #   POLL_INTERVAL_S                seconds between polls (default 120)
-#   GLOBAL_TIMEOUT_S               hard cap; unfinished legs -> FAIL
-#                                  (default 50400 = 14h; zombie legs with an empty
-#                                  stop_reason wait here rather than a stall check)
+#   GLOBAL_TIMEOUT_S               hard cap; unfinished legs -> FAIL (default 52200 =
+#                                  14.5h, above the 14.25h 12h-leg pod timeout so the
+#                                  pod's own death is observed instead of timing out
+#                                  first; zombie legs with an empty stop_reason wait
+#                                  here rather than a stall check)
 #   MAX_CRASHES / MAX_BOOT_FAILS   tolerance (default 0 / 0)
 #   Optional GitHub commit status (per-leg context pre-release-e2e/<leg>):
 #     GH_STATUS_TOKEN / GH_STATUS_REPO / GH_STATUS_SHA / GH_STATUS_DETAILS_URL
@@ -42,10 +44,13 @@ set -euo pipefail
 NFS_ROOT="${NFS_ROOT:-/shared_nfs/hyperloom-pre-release-e2e-test}"
 TARGET_GAIN="${TARGET_GAIN:-100}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-120}"
-GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-50400}"
+GLOBAL_TIMEOUT_S="${GLOBAL_TIMEOUT_S:-52200}"
 MAX_CRASHES="${MAX_CRASHES:-0}"
 MAX_BOOT_FAILS="${MAX_BOOT_FAILS:-0}"
 LEAVE_RUNNING_FILE="${LEAVE_RUNNING_FILE:-${DISPATCH_MAP}.leave_running}"
+# This run's dispatch tag, written by dispatch beside the map. Pods stamp it into their
+# session pin; an untagged/foreign pin is a leftover from an earlier run on these paths.
+RUN_TAG="${RUN_TAG:-$(cat "${DISPATCH_MAP}.version_tag" 2>/dev/null || true)}"
 # Sleep in short slices instead of one long one so a cancelled job tears down in seconds
 # rather than at the end of a full POLL_INTERVAL_S. Each slice also re-checks whether a
 # newer pre-release run has been queued so this poll can exit and release the runner.
@@ -268,10 +273,18 @@ workload_phase() { # workloadId -> phase string
 # Resolve a leg's session dir. Bootstrap writes the pinned session dir to
 # runs/<CI_VERSION>/<leg>/session/.session_dir (design §9: never guess by timestamp).
 leg_session_dir() {
-  local leg="$1" pin
+  local leg="$1" pin tag
   pin="${runs_dir}/${leg}/session/.session_dir"
-  if [ -f "$pin" ]; then head -n1 "$pin"; return; fi
-  echo ""
+  [ -f "$pin" ] || { echo ""; return; }
+  # Line 2 carries the writing run's tag. A pin from an earlier run that reused this
+  # CI_VERSION points at a FINISHED session, so honouring it would judge that run's
+  # state.json as ours -- a clean stop_reason there would pass the gate before this
+  # run's pod has even booted. Treat a foreign or missing tag as "not pinned yet".
+  if [ -n "${RUN_TAG:-}" ]; then
+    tag="$(sed -n 2p "$pin" 2>/dev/null || true)"
+    [ "$tag" = "$RUN_TAG" ] || { echo ""; return; }
+  fi
+  head -n1 "$pin"
 }
 
 # Read one jq filter from state.json. Pods write it root-only (mode 600); the runner

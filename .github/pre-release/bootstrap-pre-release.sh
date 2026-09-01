@@ -124,6 +124,13 @@ is_clean_stop_reason() {
 }
 
 # Optimize writes state.json root-only; the poll runner reads as ubuntu.
+# Pin the session dir for the poll, stamped with this run's tag (dispatch passes RUN_TAG).
+# On a reused CI_VERSION the previous run's pin is still on disk pointing at a finished
+# session; the tag is how the poll tells that leftover from ours. Args: dir session
+pin_session_dir() {
+  { printf '%s\n' "$1"; printf '%s\n' "${RUN_TAG:-}"; } > "${2}/.session_dir"
+}
+
 publish_state_for_poll() {
   local state_json="$1" sdir="$2" session="$3"
   [ -f "$state_json" ] || return 0
@@ -138,6 +145,10 @@ run_leg() {
   local root="${NFS_ROOT%/}/runs/${CI_VERSION}/${leg}"
   local session="${root}/session"
   mkdir -p "$root" "$session"
+  # A reused CI_VERSION (workflow_dispatch reuse_ci_version, or a job re-run) lands on the
+  # same paths, so the previous run's artifacts are still here. Nothing older than leg_t0
+  # belongs to this run; the artifacts are kept for post-mortem, never trusted as ours.
+  local leg_t0; leg_t0="$(date +%s)"
   log "leg=$leg mode=$run_mode backend=$backend hours=$hours model=$model_path"
 
   # 1. install the wheel into the leg root (produces importable tree + bundled skills)
@@ -255,7 +266,7 @@ run_leg() {
 
   # 3. pin the session dir so the poll finds it without guessing by timestamp (design §9)
   export INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR="${session}"
-  echo "${session}" > "${session}/.session_dir"
+  pin_session_dir "${session}" "${session}"
 
   # 4. source env + drive setup, then demo, through the Agent CLI
   set -a
@@ -285,6 +296,12 @@ run_leg() {
   # the pod's stdout with it, so without this the agent's own account of the failure is
   # unrecoverable and a post-mortem is left reconstructing events from file mtimes.
   local agent_log="${session}/agent-${leg}.log"
+  # Rotate rather than append: the setup loop below decides it is done by grepping this
+  # file for the completion marker, and a previous run's marker would satisfy it on turn 1
+  # with nothing installed. Rotating keeps the old transcript for post-mortem.
+  if [ -f "$agent_log" ]; then
+    mv "$agent_log" "${agent_log%.log}.prev-$(date -u +%Y%m%dT%H%M%SZ).log" 2>/dev/null || true
+  fi
   local uuid; uuid="$(leg_session_uuid "$leg" "$CI_VERSION")"
   # `claude --print` is "print response and exit": ONE answer per invocation. Setup here
   # means installing a framework layer -- a vLLM ROCm wheel into an isolated venv, or
@@ -394,14 +411,16 @@ run_leg() {
 
     if [ -z "$real_sdir" ]; then
       # newest dir under $session that actually contains a state.json
-      real_sdir="$(find "$session" -mindepth 2 -type f -name state.json -printf '%T@ %h\n' 2>/dev/null \
+      # -newermt leg_t0 excludes a previous run's nested dirs, which sit under the same
+      # $session and would otherwise win "newest" and end this wait with their state.json.
+      real_sdir="$(find "$session" -mindepth 2 -type f -name state.json -newermt "@$leg_t0" -printf '%T@ %h\n' 2>/dev/null \
                    | sort -rn | head -n1 | cut -d' ' -f2- || true)"
       if [ -n "$real_sdir" ]; then
         final_json="${real_sdir}/reports/final.json"
         state_json="${real_sdir}/state.json"
         log "leg $leg real session dir: $real_sdir"
         # Re-pin so the poll (leg_session_dir -> head -n1 .session_dir) finds the report.
-        echo "$real_sdir" > "${session}/.session_dir"
+        pin_session_dir "$real_sdir" "$session"
         publish_state_for_poll "$state_json" "$real_sdir" "$session"
       else
         local idle

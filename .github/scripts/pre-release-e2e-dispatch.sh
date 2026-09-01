@@ -84,14 +84,16 @@ DISPATCH_MAP="${DISPATCH_MAP:-${RUNNER_TEMP:-/tmp}/pre_release_dispatch.json}"
 
 # Pod hard-timeout. SaFE terminates the workload at the deadline; the poll then sees a
 # non-Succeeded terminal / missing report and judges that leg FAIL. Counted from DISPATCH
-# (not queue) time. This MUST exceed the bootstrap's own in-pod wait deadline
-# (hours*3600+3600, i.e. 3h/12h demo + 1h agent/setup buffer) so SaFE never pre-empts the
-# pod mid-wait -- which would lose bootstrap's clean `return 1` + logging and reintroduce
-# the premature-teardown race. We add a further +30m pod margin on top of the bootstrap
-# deadline. Ordering per leg: bootstrap deadline < SaFE pod timeout < poll GLOBAL_TIMEOUT_S
-# (default 50400s=14h, still > 48600s). Given per duration:
-DEADLINE_3H_S="${DEADLINE_3H_S:-16200}"    # 3h demo + 1h bootstrap buffer + 30m pod margin = 4.5h
-DEADLINE_12H_S="${DEADLINE_12H_S:-48600}"  # 12h demo + 1h bootstrap buffer + 30m pod margin = 13.5h
+# (not queue) time. This MUST exceed everything bootstrap can spend in-pod, which is the
+# setup budget (LEG_SETUP_DEADLINE_S, 45m) PLUS the demo wait deadline (hours*3600+3600,
+# i.e. 3h/12h demo + 1h agent buffer). An earlier version counted only the demo wait and
+# so sat 15m BELOW the bootstrap total: a leg that used its full setup budget was killed
+# by SaFE mid-wait, losing bootstrap's clean `return 1` + logs. We add a further +30m pod
+# margin on top of that total. Ordering per leg:
+#   bootstrap total (setup + demo wait) < SaFE pod timeout < poll GLOBAL_TIMEOUT_S
+# 3h:  2700 + 14400 = 17100 < 18900 < 52200 ; 12h: 2700 + 46800 = 49500 < 51300 < 52200
+DEADLINE_3H_S="${DEADLINE_3H_S:-18900}"    # 45m setup + 3h demo + 1h buffer + 30m pod margin = 5.25h
+DEADLINE_12H_S="${DEADLINE_12H_S:-51300}"  # 45m setup + 12h demo + 1h buffer + 30m pod margin = 14.25h
 # The SaFE API field that carries the pod deadline. Confirmed against the Primus-SaFE
 # codebase: the create-workload body embeds WorkloadSpec inline, whose `timeout`
 # (integer seconds, top-level, from dispatch time) is enforced by WorkloadTTLController
@@ -210,6 +212,7 @@ common_env_json() {
     --arg keyb64 "$(printf '%s' "$ANTHROPIC_API_KEY" | base64 | tr -d '\n')" \
     --arg baseurl "${ANTHROPIC_BASE_URL:-}" \
     --arg cheaders "${ANTHROPIC_CUSTOM_HEADERS:-}" \
+    --arg rtag "$VERSION_TAG" \
     '{
       CI_VERSION: $civ,
       NFS_ROOT: $nfs,
@@ -219,6 +222,7 @@ common_env_json() {
       TARGET_GAIN: $tgain,
       CLAUDE_MODEL: $cmodel,
       CLAUDE_CLI_VERSION: $cver,
+      RUN_TAG: $rtag,
       ANTHROPIC_API_KEY_B64: $keyb64
     }
     + (if $baseurl  == "" then {} else {ANTHROPIC_BASE_URL: $baseurl} end)
@@ -309,6 +313,9 @@ declare -A DISPATCH   # leg -> workloadId
 # exists, then append after every successful create.
 : > "$DISPATCH_MAP" 2>/dev/null || true
 printf '{}\n' > "$DISPATCH_MAP"
+# Hand the poll this run's tag out-of-band rather than re-deriving it there: the pods
+# stamp it into their session pin, and the poll rejects a pin carrying any other tag.
+printf '%s\n' "$VERSION_TAG" > "${DISPATCH_MAP}.version_tag"
 record_dispatch() {  # leg workloadId -- add to the in-memory map AND the on-disk map
   local leg="$1" wid="$2"
   DISPATCH["$leg"]="$wid"
@@ -355,10 +362,12 @@ if [ "$want_docker_host" = 1 ]; then
     --arg legs "$docker_legs" --argjson gpumap "$gpu_map" \
     --arg dm3 "$DOCKER_LEG_MEM_3H" --arg dm12 "$DOCKER_LEG_MEM_12H" \
     --arg ds3 "$DOCKER_LEG_SHM_3H" --arg ds12 "$DOCKER_LEG_SHM_12H" \
+    --arg rtag "$VERSION_TAG" \
     '{
       CI_VERSION:$civ, NFS_ROOT:$nfs,
       MODEL_3H:$m3, MODEL_12H:$m12,
       TARGET_GAIN:$tgain, CLAUDE_MODEL:$cmodel, CLAUDE_CLI_VERSION:$cver,
+      RUN_TAG:$rtag,
       ANTHROPIC_API_KEY_B64:$keyb64,
       HYPERLOOM_RUN_MODE:"docker",
       E2E_DOCKER_HOST:"1",
