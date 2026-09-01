@@ -17,13 +17,14 @@ import pytest
 from .conftest import patch_integrate_patch_allowlist
 
 from hyperloom.orchestrator.actions.executors import integrate_patch as ip
+
+from ._optimize_fixtures import variant_result
 from hyperloom.orchestrator.actions.executors.integrate_patch import (
     IntegratePatchExecutor,
     _git_checkout_clean,
     _detect_p_level,
     _read_done_payload,
 )
-from hyperloom.orchestrator.actions.executors._stack_rebench import StackRebenchResult
 from hyperloom.orchestrator.actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
 )
@@ -286,7 +287,6 @@ async def test_bench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "enable_stack_rebench": False,
             },
             extra={"shared_state": _SS()},
         )
@@ -322,7 +322,6 @@ async def test_bench_budget_is_unbounded_without_a_session(tmp_path, monkeypatch
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "enable_stack_rebench": False,
             },
         )
     )
@@ -412,319 +411,12 @@ async def test_keep_path(tmp_path, monkeypatch):
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "enable_stack_rebench": False,
             },
         )
     )
     assert res["status"] == "kept"
     assert res["delta_pct"] == 100.0
     assert (repo / "src.py").read_text().endswith("return 2\n")
-
-
-def _stub_confirm(result: dict):
-    async def _c(self, **kwargs):
-        return result
-
-    return _c
-
-
-@pytest.mark.asyncio
-async def test_confirmation_rebench_floor_stays_below_keep_threshold(tmp_path, monkeypatch):
-    """A late-cycle confirmation cannot impose a stricter gain floor than KEEP."""
-    config_path = tmp_path / "base.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
-    captured: dict[str, float] = {}
-
-    def _materialize(*_args, **_kwargs):
-        return config_path
-
-    async def _measure(**kwargs):
-        captured["stable_threshold_pct"] = kwargs["stable_threshold_pct"]
-        return StackRebenchResult(tput=None, workspace=None)
-
-    monkeypatch.setattr(ip, "materialize_config_with_envs", _materialize)
-    monkeypatch.setattr(ip, "measure_stack_rebench", _measure)
-
-    executor = IntegratePatchExecutor(session_dir=tmp_path)
-    await executor._confirm_stack_rebench(
-        params={
-            "config_path": str(config_path),
-            "keep_threshold_pct": 0.4,
-            "rebench_stable_threshold_pct": 0.5,
-        },
-        output_root=tmp_path / "output",
-        extra_server_args_applied="",
-        extra_envs_applied={},
-        specialist_task_id="spec",
-        base_tput=100.0,
-    )
-
-    assert captured["stable_threshold_pct"] == pytest.approx(0.2)
-
-
-@pytest.mark.asyncio
-async def test_stack_rebench_is_bounded_by_the_session_budget(tmp_path, monkeypatch):
-    """The confirmation round must not outlive the run it is confirming for."""
-    config_path = tmp_path / "baseline.yaml"
-    config_path.write_text("benchmark: {}\n", encoding="utf-8")
-    captured: dict[str, Any] = {}
-
-    async def _measure(**kwargs):
-        captured.update(kwargs)
-        return StackRebenchResult(tput=None, workspace=None)
-
-    monkeypatch.setattr(ip, "materialize_config_with_envs", lambda *a, **k: config_path)
-    monkeypatch.setattr(ip, "measure_stack_rebench", _measure)
-
-    await IntegratePatchExecutor(session_dir=tmp_path)._confirm_stack_rebench(
-        params={"config_path": str(config_path)},
-        output_root=tmp_path / "output",
-        extra_server_args_applied="",
-        extra_envs_applied={},
-        specialist_task_id="spec",
-        base_tput=100.0,
-        session_deadline_sec=4242.0,
-        variant_expected_sec=600.0,
-    )
-
-    assert captured["session_deadline_sec"] == 4242.0
-    assert captured["variant_expected_sec"] == 600.0
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("error_class", ["session_time_exhausted", "orchestrator_cancelled"])
-async def test_rebench_the_run_stopped_is_not_reported_as_a_failed_measurement(tmp_path, error_class):
-    """Not measuring a variant is not evidence that the variant is unstable."""
-    from unittest.mock import patch
-
-    from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, VariantResult
-    from hyperloom.orchestrator.actions.executors import _stack_rebench as sr
-
-    skipped = VariantResult(
-        name="v",
-        extra_server_args="",
-        extra_envs={},
-        status="skipped",
-        error="the run stopped this round before it measured anything",
-        error_class=error_class,
-    )
-
-    async def _fake_run_grid(**_kwargs):
-        return [skipped]
-
-    with patch.object(sr, "run_grid", new=_fake_run_grid):
-        result = await sr.measure_stack_rebench(
-            config_path=tmp_path / "base.yaml",
-            base_extra_args="",
-            variant=GridVariant("v"),
-            base_tput=100.0,
-            stable_threshold_pct=0.5,
-            output_slot=tmp_path / "slot",
-            variant_timeout_sec=600,
-        )
-
-    assert result.error_class == error_class
-    assert result.warnings == [f"stack_rebench_skipped:{error_class}"]
-    assert not any("stack_rebench_failed" in w for w in result.warnings)
-
-
-@pytest.mark.asyncio
-async def test_keep_confirmed_by_rebench(tmp_path, monkeypatch):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
-    )
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_confirm_stack_rebench",
-        _stub_confirm(
-            {
-                "stable": True,
-                "tput": 190.0,
-                "workspace": "/w",
-                "warnings": [],
-                "stable_floor": 100.0,
-                "accuracy_pass": True,
-            }
-        ),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
-        )
-    )
-    assert res["status"] == "kept"
-    assert res["output_throughput"] == 190.0
-    assert res["delta_pct"] == 90.0
-
-
-@pytest.mark.asyncio
-async def test_revert_when_rebench_unstable(tmp_path, monkeypatch):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
-    )
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_confirm_stack_rebench",
-        _stub_confirm(
-            {
-                "stable": False,
-                "tput": 80.0,
-                "workspace": "/w",
-                "warnings": [],
-                "stable_floor": 100.0,
-                "accuracy_pass": None,
-            }
-        ),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
-        )
-    )
-    assert res["status"] == "reverted"
-    assert "stability floor" in res["reason"]
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_revert_when_rebench_accuracy_fails(tmp_path, monkeypatch):
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
-    )
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_confirm_stack_rebench",
-        _stub_confirm(
-            {
-                "stable": True,
-                "tput": 190.0,
-                "workspace": "/w",
-                "warnings": [],
-                "stable_floor": 100.0,
-                "accuracy_pass": False,
-            }
-        ),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
-        )
-    )
-    assert res["status"] == "reverted"
-    assert "accuracy regression on rebench" in res["reason"]
-
-
-@pytest.mark.asyncio
-async def test_revert_when_rebench_accuracy_missing_with_baseline(tmp_path, monkeypatch):
-    """First bench passes accuracy, but the stable rebench produces NO accuracy
-    verdict. For a framework-authored patch with a baseline accuracy, the gate
-    must reject rather than KEEP on the stale first-bench pass."""
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": True}),
-    )
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_confirm_stack_rebench",
-        _stub_confirm(
-            {
-                "stable": True,
-                "tput": 190.0,
-                "workspace": "/w",
-                "warnings": [],
-                "stable_floor": 100.0,
-                "accuracy_pass": None,
-            }
-        ),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {
-                "specialist_task_id": "spec",
-                "framework_source_root": str(repo),
-                "base_tput": 100.0,
-                "framework_agent_authoring": True,
-                "accuracy_baseline": 0.8,
-            },
-        )
-    )
-    assert res["status"] == "accuracy_unavailable_reject"
-    assert "no eval result" in res["reason"]
-    assert (repo / "src.py").read_text().endswith("return 1\n")
-
-
-@pytest.mark.asyncio
-async def test_keep_when_rebench_accuracy_missing_but_not_required(tmp_path, monkeypatch):
-    """A generic (non-framework-authored) integrate_patch with no baseline still
-    KEEPs on a stable rebench with a missing accuracy verdict — the rebench gate
-    only tightens the required+baseline case."""
-    session = tmp_path / "s"
-    session.mkdir()
-    repo = tmp_path / "fw"
-    _init_git_repo(repo)
-    _write_workspace(session, "spec")
-    ex = IntegratePatchExecutor(session_dir=session)
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_bench_patch",
-        _stub_bench({"output_throughput": 200.0, "status": "succeeded"}, {"accuracy_pass": None}),
-    )
-    monkeypatch.setattr(
-        IntegratePatchExecutor,
-        "_confirm_stack_rebench",
-        _stub_confirm(
-            {
-                "stable": True,
-                "tput": 190.0,
-                "workspace": "/w",
-                "warnings": [],
-                "stable_floor": 100.0,
-                "accuracy_pass": None,
-            }
-        ),
-    )
-    res = await ex(
-        _make_ctx(
-            "t",
-            {"specialist_task_id": "spec", "framework_source_root": str(repo), "base_tput": 100.0},
-        )
-    )
-    assert res["status"] == "kept"
 
 
 @pytest.mark.asyncio
@@ -870,7 +562,6 @@ async def test_framework_kb_writeback(tmp_path, monkeypatch):
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "enable_stack_rebench": False,
             },
         )
     )
@@ -916,7 +607,6 @@ async def test_framework_kb_writeback_config_lever_untagged_proposal(tmp_path, m
                 "specialist_task_id": "spec",
                 "framework_source_root": str(repo),
                 "base_tput": 100.0,
-                "enable_stack_rebench": False,
                 "config_changes": {"SGLANG_USE_AITER": "1"},
                 "framework_agent_authoring": True,
                 "framework_agent_candidate_id": "https://github.com/ROCm/aiter/pull/1",
@@ -1043,19 +733,16 @@ def test_read_done_payload_bad_json(tmp_path):
     assert _read_done_payload(tmp_path) is None
 
 
-class _FakeVR:
-    """Minimal VariantResult stand-in for _bench_patch."""
+def _FakeVR(**kw):
+    """A real ``VariantResult`` for ``_bench_patch``.
 
-    def __init__(self, **kw):
-        self.name = kw.get("name", "v")
-        self.status = kw.get("status", "succeeded")
-        self.output_throughput = kw.get("output_throughput", 123.0)
-        self.ttft_ms = kw.get("ttft_ms", 10.0)
-        self.itl_ms = kw.get("itl_ms", 5.0)
-        # Mirror the real VariantResult ``workspace`` attribute (the accuracy-gate eval dir).
-        self.workspace = kw.get("workspace", "/tmp/rd")
-        self.error = kw.get("error", "")
-        self.nonfatal_warnings = kw.get("nonfatal_warnings", [])
+    Was a hand-rolled stand-in carrying ``ttft_ms`` / ``itl_ms`` -- names the
+    real dataclass does not have, copied from what the executor read while it
+    was wrong. The stand-in made the bug untestable and then broke when it was
+    fixed, so the fake is gone and the dataclass is used directly.
+    """
+    kw.setdefault("workspace", "/tmp/rd")
+    return variant_result(**kw)
 
 
 @pytest.mark.asyncio

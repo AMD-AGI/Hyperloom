@@ -264,7 +264,7 @@ async def test_kernel_entry_auto_runs_gemm_tuning_for_fp8_sglang(
             lambda _self, _env_var, env_value: env_value,
         )
 
-        await c._on_enter_kernel(from_phase="EXPLORE")
+        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert calls
         assert c.shared_state.gemm_tuning_attempts
@@ -316,7 +316,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
         monkeypatch.setattr(kernel_request_handlers, "run_gemm_tuning_handler", fake_gemm)
         monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake_kernel)
 
-        await c._on_enter_kernel(from_phase="EXPLORE")
+        await c._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
         assert kernel_calls
         assert kernel_calls[0]["candidates_path"] == "/tmp/candidates.json"

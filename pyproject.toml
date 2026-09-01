@@ -44,7 +44,48 @@ web = [
 # Full runtime dependency set installed by the packaged install.sh.
 runtime = [
     "PyYAML>=6.0",
-    "hyperloom-inference_optimizer[llm,web]",
+    "hyperloom-inference_optimizer[llm,web,forge]",
+]
+# Built-in kernel-opt agent (``kernelforge``). ``torch`` is deliberately absent:
+# the ROCm build is supplied by the container image and a bare specifier would
+# resolve to the CUDA wheel from PyPI.
+#
+# ``llm`` is a hard requirement, not a convenience: forge's agent backends
+# lazy-import ``claude_agent_sdk`` and ``openai_codex`` at the first agent turn,
+# so a ``[forge]``-only install imports cleanly and then fails minutes into a
+# campaign. It only looked self-contained because ``runtime`` happens to pull
+# ``[llm,web,forge]`` together.
+forge = [
+    "click>=8.0",
+    "PyYAML>=6.0",
+    "anthropic>=0.40",
+    "hyperloom-inference_optimizer[llm]",
+]
+# ROCm Compute Profiler (rocprof-compute) Python requirements. Nothing in this
+# repository imports them: they satisfy the profiler, whose binary is supplied
+# by the ROCm image or system package. Without this extra, kernelforge
+# profiling degrades to the lightweight PMC path.
+forge-profiling = [
+    # Exact pins required by ROCm 7.2.x rocprofiler-compute.
+    "astunparse==1.6.2",
+    "kaleido==0.2.1",
+    "colorlover",
+    "dash-bootstrap-components",
+    "dash-svg",
+    "dash>=3.0.0",
+    "matplotlib",
+    "numpy>=1.17.5",
+    "plotext",
+    "plotille",
+    "plotly",
+    "pymongo",
+    "setuptools",
+    "sqlalchemy>=2.0.42",
+    "tabulate",
+    "textual",
+    "textual-plotext",
+    "textual-fspicker>=0.4.3",
+    "tqdm",
 ]
 test = [
     "hyperloom-inference_optimizer[runtime]",
@@ -98,6 +139,29 @@ framework-agent = "hyperloom.agents.framework.runtime.cli:main"
 fa = "hyperloom.agents.framework.runtime.cli:main"
 robustness-agent = "hyperloom.agents.robustness.main:main"
 quantization-agent = "hyperloom.agents.quantization.cli:main"
+# Built-in kernel-opt agent. The orchestrator dispatches
+# ``python -m kernelforge.cli`` directly; these are for interactive use.
+kernelforge = "kernelforge.cli:main"
+# Deprecated alias kept for one release: the standalone ``kernel-agents``
+# distribution is gone, and operator scripts still reference this name.
+kernel-agents = "kernelforge.cli:main"
+
+[tool.setuptools]
+# setuptools defaults this to true for pyproject-based config, which makes
+# build_py sweep every file living under a package directory -- including
+# subdirectories that are NOT packages. ``packages.find.exclude`` keeps
+# ``*.tests`` out of the *package* list, but the sweep then re-added the very
+# same files as package *data*: the wheel shipped 627 test entries before forge
+# was vendored and 833 after (all of ``kernelforge/tests/`` and
+# ``kernelforge/gemm_tune/tests/``). ``scripts/check_wheel_contents.py`` has
+# been reporting this; it is the ``packaging.yml`` wheel-contents job.
+#
+# Turning the sweep off makes ``[tool.setuptools.package-data]`` below the sole
+# source of shipped non-module files, which is the state the two packaging
+# checks already assume: ``test_packaging_lint.py`` walks tree -> declaration
+# and check_wheel_contents.py walks declaration -> wheel, so nothing can now
+# ship undeclared or be declared and missing.
+include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -117,6 +181,12 @@ exclude = [
     "*.testing.*",
     "testing",
     "testing.*",
+    # kernelforge's shipped resource trees (knowledge_base / local_knowledge /
+    # examples / serving_patches). They contain .py files, so with implicit
+    # namespace discovery setuptools would otherwise hand them out as
+    # importable top-level modules. They ship as package-data instead.
+    "kernelforge.data",
+    "kernelforge.data.*",
 ]
 
 [tool.setuptools.data-files]
@@ -186,7 +256,6 @@ hyperloom = [
     "README.md",
     "examples/*.json",
     "examples/*.py",
-    "kb/framework_optimization/*.jsonl",
 ]
 "hyperloom.agents.quantization" = [
     "SKILL.md",
@@ -217,16 +286,27 @@ hyperloom = [
 "hyperloom.inference_optimizer.multi_node.scripts" = [
     "*.sh",
 ]
+# kernelforge's read-only resource trees. Upstream KernelForge shipped these
+# from the repository root via hatchling ``force-include``; setuptools has no
+# equivalent, so they physically live under ``src/kernelforge/data`` and are
+# resolved through ``kernelforge.resources.resource_path``. The glob is
+# deliberately type-agnostic: the trees hold .md, .json, .py, .patch, .csv and
+# more, and a missed extension only breaks wheel installs (every dev and CI
+# path uses ``pip install -e``).
+kernelforge = [
+    "data/**/*",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
-# One recursive glob covers every per-package tests/ dir under src/hyperloom.
+# One recursive glob covers every per-package tests/ dir under src/ --
+# hyperloom and kernelforge alike.
 # ``scripts/tests`` is listed separately because the operator scripts sit
 # outside the package on purpose -- they have to run on hosts with no Hyperloom
 # install -- so the glob above cannot reach them, and without this line their
 # tests are collected by nobody and fail in silence.
 testpaths = [
-    "src/hyperloom/**/tests",
+    "src/**/tests",
     "scripts/tests",
 ]
 pythonpath = ["src", "."]
@@ -243,6 +323,7 @@ branch = false
 relative_files = true
 source = [
     "src/hyperloom",
+    "src/kernelforge",
     "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
@@ -307,6 +388,36 @@ omit = [
     # Subprocess-heavy benchmark drivers.
     "src/hyperloom/orchestrator/actions/executors/profile.py",
     "src/hyperloom/orchestrator/actions/executors/baseline.py",
+    # --- kernelforge (ported verbatim from KernelForge's own omit list) ---
+    "*/test_*.py",
+    # Shipped resource trees: knowledge-base sample drivers and reference
+    # kernels, not library code.
+    "src/kernelforge/data/*",
+    # Byte-identical upstream KB Store SDK; validated by checksum contract tests.
+    "src/kernelforge/knowledge/remote_exp/kb_store_client.py",
+    # CLI entry points (argument plumbing; exercised via the CLIs themselves).
+    "src/kernelforge/cli.py",
+    "src/kernelforge/gemm_tune/cli.py",
+    "src/kernelforge/fusion/command.py",
+    # GPU toolchain + profilers: shell out to rocprofv3 / rocprof-compute /
+    # ninja / the build system and require real hardware.
+    "src/kernelforge/mcp_server/tools/bench.py",
+    "src/kernelforge/mcp_server/tools/registers.py",
+    "src/kernelforge/loop/runner.py",
+    # Claude Agent SDK transport (spawns the agent CLI, network).
+    "src/kernelforge/orchestrator/agent.py",
+    # Filesystem index walker over the curated knowledge tree.
+    "src/kernelforge/knowledge/local_index.py",
+    # gemm-tune hardware tuners (drive vendor GEMM libraries on-device).
+    "src/kernelforge/gemm_tune/tuners/sglang_dense_bf16.py",
+    "src/kernelforge/gemm_tune/tuners/vllm_moe_triton.py",
+    "src/kernelforge/gemm_tune/tuners/fmoe_ck.py",
+    "src/kernelforge/gemm_tune/tuners/a4w4_blockscale.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8_blockscale.py",
+    "src/kernelforge/gemm_tune/tuners/a8w8_bpreshuffle.py",
+    "src/kernelforge/gemm_tune/tuners/vllm_dense_tunableop.py",
+    "src/kernelforge/gemm_tune/tuners/_aiter_dense_common.py",
 ]
 
 [tool.coverage.report]
@@ -344,7 +455,9 @@ relax_fail_under_repo_var = "COVERAGE_RELAX_FAIL_UNDER"
 # nearly all hits are test assertions and runtime invariants.
 [tool.bandit]
 skips = ["B101"]
-exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv"]
+# ``src/kernelforge/data`` holds shipped knowledge-base sample kernels and
+# reference drivers -- third-party illustrative code, not Hyperloom's own.
+exclude_dirs = ["*/tests/*", "*/test/*", "build", ".venv", "src/kernelforge/data"]
 
 # Pylint: minimal defaults for local runs; CI passes ``--errors-only``.
 [tool.pylint.main]
@@ -360,6 +473,9 @@ extend-exclude = [
     ".venv",
     "TraceLens-internal",
     "InferenceX",
+    # Knowledge base / examples / serving patches, not source we own the style
+    # of. The example drivers are .py and would otherwise be reformatted.
+    "src/kernelforge/data",
 ]
 
 [tool.ruff.lint]
@@ -386,6 +502,9 @@ ignore = ["E501", "E741"]
 "src/hyperloom/orchestrator/kernel/roofline_ceiling.py" = ["E402"]
 "src/hyperloom/orchestrator/prompts/specialist_prompt_builder.py" = ["E402"]
 "src/hyperloom/agents/critic/runtime/decision_reviewer.py" = ["E402"]
+# The import sits under the comment block explaining why the attribute name is
+# shared with kernelforge.llm rather than redeclared here.
+"src/kernelforge/fusion/llm_failure.py" = ["E402"]
 
 # Markdown formatting in Ruff is still preview/experimental; keep ``ruff format``
 # scoped to Python so CI ``ruff format --check`` does not rewrite docs/skills.

@@ -8,7 +8,7 @@ when AITER_LOG_TUNED_CONFIG=1. "No hit lines" therefore does not mean "zero
 hits", and a check that conflates them would revert every arm that ran without
 the flag -- which, in a scan of 60 production logs, was all of them.
 
-``forge_gemm_tune`` is not a Hyperloom dependency, so importorskip on it left
+``kernelforge.gemm_tune`` is not a Hyperloom dependency, so importorskip on it left
 this whole module -- and therefore the KEEP gate's entire decision surface --
 without automated coverage in CI. The verdict logic is exercised against a
 stand-in parser instead, and the real parser is used as well wherever forge
@@ -58,11 +58,11 @@ def parser(request, monkeypatch):
     """
     if request.param == "real_forge":
         # Skip on the submodule production actually imports, not the top-level
-        # package. A box can have forge_gemm_tune installed without
+        # package. A box can have kernelforge.gemm_tune installed without
         # ``evidence`` in it, and then the top-level check passes, the parser
         # comes back None, every verdict is "unknown", and eleven cases fail on
         # a developer machine for a reason that has nothing to do with them.
-        pytest.importorskip("forge_gemm_tune.evidence", reason="real parser unavailable")
+        pytest.importorskip("kernelforge.gemm_tune.evidence", reason="real parser unavailable")
         return None
 
     import re
@@ -89,12 +89,12 @@ def parser(request, monkeypatch):
             "consulted_tables": sorted(consulted),
         }
 
-    fake = types.ModuleType("forge_gemm_tune")
-    fake_ev = types.ModuleType("forge_gemm_tune.evidence")
+    fake = types.ModuleType("kernelforge.gemm_tune")
+    fake_ev = types.ModuleType("kernelforge.gemm_tune.evidence")
     fake_ev.parse_log_file = _fake_parse_log_file  # type: ignore[attr-defined]
     fake.evidence = fake_ev  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "forge_gemm_tune", fake)
-    monkeypatch.setitem(sys.modules, "forge_gemm_tune.evidence", fake_ev)
+    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune", fake)
+    monkeypatch.setitem(sys.modules, "kernelforge.gemm_tune.evidence", fake_ev)
     return None
 
 
@@ -235,7 +235,7 @@ class TestTheEnvToTableMapDoesNotDrift:
     """
 
     def test_every_env_var_maps_to_the_same_table_as_kernelforge(self):
-        forge_utils = pytest.importorskip("forge_gemm_tune.utils", reason="KernelForge not installed here")
+        forge_utils = pytest.importorskip("kernelforge.gemm_tune.utils", reason="KernelForge not installed here")
         from hyperloom.orchestrator.phases.kernel import _AITER_ENV_TO_TABLE
 
         forge_env_vars = set(getattr(forge_utils, "TUNER_ENV_VARS", {}).values())

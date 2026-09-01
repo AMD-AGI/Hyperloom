@@ -274,10 +274,13 @@ def test_target_tput_reads_the_shared_grading_anchor():
 
 @pytest.mark.asyncio
 async def test_run_stops_on_time_exhausted(session_dir):
+    """A short wall-clock budget stops the run wherever it expires."""
     c = Coordinator(session_dir, backends=_backends_silent())
     try:
         reason = await c.run(max_minutes=0.001, max_ticks=1000)
-        assert reason == "time_exhausted"
+        # The 60 ms budget can expire before or after PRELUDE depending on the
+        # runner's speed; both reasons prove that the session bound stopped it.
+        assert reason in {"time_exhausted", "time_exhausted_during_prelude"}
     finally:
         await c.stop()
 

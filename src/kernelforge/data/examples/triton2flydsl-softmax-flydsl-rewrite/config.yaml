@@ -1,0 +1,47 @@
+# triton2flydsl softmax rewrite task.
+#
+# Task-format metadata (mirrors the AgentKernelArena triton2flydsl task layout).
+# The actual end-to-end run is launched by run_example.sh via
+# `kernelforge forge-rewrite-by-flydsl`, which drives the port + optimize.
+#
+# Unlike a plain forge-loop task, this driver uses the forge stdout contract
+# (--bench-mode / --ref-bench-mode / --profile-run) rather than
+# the arena --compile/--correctness/--full-benchmark harness: the rewrite pipeline
+# needs to time BOTH the source kernel (oracle/baseline) and the FlyDSL candidate.
+
+# Source kernel to rewrite (protected; read-only reference + live oracle).
+source_file_path:
+  - softmax.py
+
+# Source symbols the port translates FROM (hint shown to the port agent + PMC label).
+target_kernel_functions:
+  - softmax
+  - _softmax_kernel
+
+# Logical op name; the FlyDSL port must expose build_<op_name>_module.
+op_name: softmax
+
+# Host callable in the source used as the live correctness oracle + baseline.
+source_entry: softmax
+
+# The FlyDSL kernel the pipeline produces (seeded, then written by the port agent).
+flydsl_kernel_name: kernel.py
+
+# Shapes driving correctness (SNR sweep) + benchmark. The largest is the primary.
+shapes:
+  - {M: 256, N: 1024, dtype: f32}
+  - {M: 4096, N: 1024, dtype: f32}
+
+# Correctness gate (dB).
+snr_threshold: 30.0
+
+# Driver contract (forge BYOD; see driver.py).
+compile_command:
+  - python3 driver.py
+correctness_command:
+  - python3 driver.py
+performance_command:
+  - python3 driver.py --bench-mode --warmup 10 --iters 30
+
+task_type: triton2flydsl
+task_result_template: null

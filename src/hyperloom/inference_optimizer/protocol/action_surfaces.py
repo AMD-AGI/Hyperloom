@@ -97,17 +97,7 @@ INTERNAL_ONLY_ACTION_NAMES: frozenset[str] = frozenset(
 )
 
 
-# Separate set for grouping only; ``framework_agent`` is denied by the same
-# generic ``rule="phase_incompatible"`` path as the other Coordinator-internal
-# actions.
-FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES: frozenset[str] = frozenset(
-    {
-        "framework_agent",
-    }
-)
-
-
-COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES | FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES
+COORDINATOR_INTERNAL_ACTIONS: frozenset[str] = INTERNAL_ONLY_ACTION_NAMES
 
 
 # Robustness-only actions (driven via its action-ladder); Orchestration must
@@ -215,24 +205,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply a batch of N candidate variants serially; KEEP/REVERT each, stack onto optimization_stack. "
-                "Per-KEEP stack rebench inlined (replaces backends/params/validate_stack)."
-            ),
-        ),
-        "framework_agent": ActionMetadata(
-            name="framework_agent",
-            family="shallow",
-            pipeline_phase="explore",
-            verdict_class="exploration",
-            expected_gain_pct=(0.0, 15.0),
-            accuracy_risk=0.1,
-            crash_risk=0.2,
-            typical_runtime_min=12.0,
-            lease_ttl_sec=10800,
-            requires_lanes=("server_lifecycle", "workspace_mutation", "benchmark_lane"),
-            side_effects=("workspace_write", "server_restart", "launches_server", "reads_server", "writes_results"),
-            description=(
-                "FRAMEWORK_AGENT-phase per-candidate executor: applies an upstream PR diff to framework_source_roots, "
-                "runs throughput + accuracy gate, KEEPs or REVERTs. Coordinator-internal."
+                "Each variant is benched on the stack (replaces backends/params/validate_stack)."
             ),
         ),
         "gemm_tuning": ActionMetadata(
@@ -283,7 +256,7 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             side_effects=("workspace_write", "server_restart", "launches_server", "reads_server", "writes_results"),
             description=(
                 "Apply specialist worktree patches to framework_source_roots, restart server, run throughput + "
-                "accuracy gate, KEEP or REVERT. Deterministic executor for EXPLORE and FRAMEWORK_AGENT; also serves "
+                "accuracy gate, KEEP or REVERT. Deterministic executor for FRAMEWORK_AGENT; also serves "
                 "the enablement launch-only build probe and framework-agent authoring lanes."
             ),
         ),
@@ -464,7 +437,6 @@ __all__ = [
     "ActionMetadata",
     "COORDINATOR_INTERNAL_ACTIONS",
     "COORDINATOR_OWNED_KERNEL_REQUEST_KINDS",
-    "FRAMEWORK_AGENT_INTERNAL_ACTION_NAMES",
     "FULL_ENABLED_ACTIONS",
     "INTERNAL_ONLY_ACTION_NAMES",
     "KERNEL_ACTION_REQUEST_KINDS",

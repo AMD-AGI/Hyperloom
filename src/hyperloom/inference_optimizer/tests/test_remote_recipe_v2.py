@@ -12,10 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.knowledge.agent_kb import (
-    ExploreAgentKB,
-    FrameworkAgentKB,
     KernelAgentKB,
-    RecipeReplayKB,
+    PatchKB,
 )
 from hyperloom.orchestrator.knowledge.remote_recipe import (
     CURRENT_KNOWLEDGE_SCHEMA_VERSION,
@@ -76,11 +74,27 @@ class RemoteWarmRecipeAdapter(_RemoteWarmRecipeAdapter):
         super().__init__(*args, scope=scope, **kwargs)
 
 
+@pytest.fixture(autouse=True)
+def _exported_draft_dir(tmp_path, monkeypatch):
+    """Mirror production, where the orchestrator always exports a draft dir."""
+    draft = tmp_path / "kb-draft-env"
+    draft.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("KB_DRAFT_DIR", str(draft))
+
+
+def _build(state, files_dir, *, sections=None):
+    """Build a bundle, defaulting to an empty draft for tests that stage nothing."""
+    files_dir = Path(files_dir)
+    if sections is None:
+        sections = KnowledgeSections(files_dir.with_name(f"{files_dir.name}-draft"))
+    return build_remote_knowledge(state, files_dir, sections=sections)
+
+
 def _state(tmp_path: Path) -> SimpleNamespace:
-    explore_patch = tmp_path / "explore.patch"
-    explore_patch.write_text("explore", encoding="utf-8")
-    framework_patch = tmp_path / "framework.patch"
-    framework_patch.write_text("framework", encoding="utf-8")
+    authored_patch = tmp_path / "authored.patch"
+    authored_patch.write_text("authored", encoding="utf-8")
+    upstream_patch = tmp_path / "upstream.patch"
+    upstream_patch.write_text("upstream", encoding="utf-8")
     tuned = tmp_path / "tuned.csv"
     tuned.write_text("M,N,K\n1,2,3\n", encoding="utf-8")
     fusion = tmp_path / "fusion.patch"
@@ -135,7 +149,7 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 },
                 "extra_server_args": "--page-size 32",
                 "extra_envs": {"VLLM_EXPLORE_TEST": "1"},
-                "patch_path": str(explore_patch),
+                "patch_path": str(authored_patch),
                 "tput": 110.0,
             },
             {
@@ -152,7 +166,7 @@ def _state(tmp_path: Path) -> SimpleNamespace:
                 },
                 "extra_server_args": "--page-size 32 --enable-foo",
                 "extra_envs": {"VLLM_FRAMEWORK_TEST": "1"},
-                "patch_path": str(framework_patch),
+                "patch_path": str(upstream_patch),
                 "tput": 120.0,
             },
             {
@@ -208,14 +222,15 @@ def _state(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> None:
-    bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files")
+def test_build_remote_knowledge_publishes_config_and_kernel_from_state(tmp_path: Path) -> None:
+    bundle = _build(_state(tmp_path), tmp_path / "files")
 
     assert bundle.knowledge["optimized_throughput"] == 130.0
     assert bundle.knowledge["knowledge_schema_version"] == CURRENT_KNOWLEDGE_SCHEMA_VERSION
     assert bundle.knowledge["record_kind"] == RECORD_KIND_HYPERLOOM_RECIPE
     assert bundle.knowledge["validated_e2e_gain"] == 30.0
     value = bundle.knowledge["value"]
+    assert sorted(value) == ["config", "kernel", "patch"]
     assert value["config"] == {
         "extra_server_args": "--page-size 32 --enable-foo",
         "extra_envs": {
@@ -223,12 +238,9 @@ def test_build_remote_knowledge_partitions_origins_and_files(tmp_path: Path) -> 
             "VLLM_FRAMEWORK_TEST": "1",
         },
     }
-    assert value["explore"]["extra_envs"] == {"VLLM_EXPLORE_TEST": "1"}
-    assert value["framework"]["extra_envs"] == {"VLLM_FRAMEWORK_TEST": "1"}
-    assert "config" not in value["explore"]
-    assert "phase" not in value["framework"]
-    assert value["explore"]["patches"][0].startswith("explore/overlays/000000/")
-    assert value["framework"]["patches"][0].startswith("framework/overlays/000001/")
+    # Overlays reach the record only through the patch column's own staging, so
+    # a stack entry naming a local patch file does not publish one by itself.
+    assert value["patch"] == {}
     assert not any(item.path.startswith("files/") for item in bundle.artifacts)
     assert isinstance(value["kernel"]["gemm"], dict)
     assert len(value["kernel"]["gemm"]["optimizations"]) == 1
@@ -407,7 +419,7 @@ def test_geak_recipe_keeps_kernel_partition_empty(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.kernel_optimizer = "geak"
 
-    bundle = build_remote_knowledge(state, tmp_path / "files-geak")
+    bundle = _build(state, tmp_path / "files-geak")
 
     assert bundle.knowledge["provenance"]["kernel_optimizer"] == "geak"
     assert bundle.knowledge["workload_shape"]["tp"] == 8
@@ -437,10 +449,50 @@ def test_fusion_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    bundle = build_remote_knowledge(state, tmp_path / "files-multi-fusion")
+    bundle = _build(state, tmp_path / "files-multi-fusion")
 
     fusion = bundle.knowledge["value"]["kernel"]["fusion"]["items"][0]
     assert fusion["patch"].startswith("kernel/fusion/patches/")
+
+
+def test_kernel_items_record_the_checkout_they_were_applied_into(tmp_path: Path) -> None:
+    """Replay places a kernel patch only into its recorded root, so it must be published.
+
+    The root is an absolute host path, which survives publication solely
+    because it sits under the sanitizer's host-origin exemption.
+    """
+    bundle = _build(_state(tmp_path), tmp_path / "files-kernel-roots")
+
+    kernel = bundle.knowledge["value"]["kernel"]
+    roots = [item["host_origin"]["apply_root"] for column in ("fusion", "rewrite") for item in kernel[column]["items"]]
+
+    assert roots, "fusion and rewrite each publish an item"
+    assert all(root == str(tmp_path) for root in roots)
+
+
+def test_kernel_fusion_that_cannot_name_its_checkout_is_dropped(tmp_path: Path) -> None:
+    """An item that cannot name its checkout degrades to a drop, not an abort.
+
+    Publishing it rootless would poison the combined replay, and raising would
+    take config, patch, and the still-rooted kernels down with it. So the fusion
+    item is dropped while the rest of the Recipe still publishes -- and because a
+    successful build passes the section mismatch guard, the staged fusion patch
+    is proven to leave no orphan behind.
+    """
+    state = _state(tmp_path)
+    state.last_fusion.pop("kernel_repo", None)
+    state.last_fusion["source_file"] = "source.cu"
+    state.last_fusion["target_file"] = "source.cu"
+    for row in state.optimization_stack:
+        if str(row.get("action") or "").lower() == "fusion":
+            row["target_file"] = "source.cu"
+
+    bundle = _build(state, tmp_path / "files-fusion-unrooted")
+    kernel = bundle.knowledge["value"]["kernel"]
+    assert kernel["fusion"]["items"] == []
+    assert "kernel/fusion/patches" not in json.dumps(kernel["fusion"])
+    # The rest of the session is unharmed: the rooted rewrite still publishes.
+    assert len(kernel["rewrite"]["items"]) == 1
 
 
 def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
@@ -461,7 +513,7 @@ def test_rewrite_writer_accepts_multi_file_patch(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    bundle = build_remote_knowledge(state, tmp_path / "files-multi-rewrite")
+    bundle = _build(state, tmp_path / "files-multi-rewrite")
 
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].startswith("kernel/rewrite/patches/")
@@ -474,7 +526,7 @@ def test_remote_recipe_projects_workload_shape_for_donor_gating(
     state.conc = 64
     state.isl = 1024
     state.osl = 256
-    bundle = build_remote_knowledge(state, tmp_path / "files-shape")
+    bundle = _build(state, tmp_path / "files-shape")
 
     row = knowledge_to_warm_recipe(
         {
@@ -534,7 +586,7 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     sanitized = sanitize_shared_knowledge(
         {
             "value": {
-                "explore": {
+                "config": {
                     "extra_envs": {
                         "VLLM_ROCM_USE_AITER": "1",
                         "HF_TOKEN": "secret",
@@ -552,8 +604,8 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
         }
     )
 
-    explore = sanitized["value"]["explore"]
-    assert explore == {
+    config = sanitized["value"]["config"]
+    assert config == {
         "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
         "extra_server_args": "--page-size 32",
     }
@@ -564,14 +616,48 @@ def test_shared_knowledge_sanitizer_scrubs_nested_columns_and_paths() -> None:
     assert "secret" not in rewrite["note"]
 
 
+def test_host_origin_is_the_one_subtree_that_keeps_absolute_paths() -> None:
+    """A KEEP that cannot name its checkout cannot be replayed on another layout."""
+    sanitized = sanitize_shared_knowledge(
+        {
+            "value": {
+                "patch": {
+                    "patches": ["patch/overlays/000000/00-fix.patch"],
+                    "provenance": [
+                        {
+                            "stack_index": 0,
+                            "host_origin": {
+                                "framework_root": "/sglang",
+                                "snapshot": "/session/optimization_stack/src/spec-1",
+                                "manifest": "/session/optimization_stack/src/spec-1/manifest.json",
+                                "patches": ["/session/optimization_stack/src/spec-1/realized.patch"],
+                                "HF_TOKEN": "secret",
+                            },
+                        }
+                    ],
+                },
+                "kernel": {"gemm": {"workspace": "/workspace/session"}},
+            }
+        }
+    )
+
+    origin = sanitized["value"]["patch"]["provenance"][0]["host_origin"]
+    assert origin["framework_root"] == "/sglang"
+    assert origin["snapshot"] == "/session/optimization_stack/src/spec-1"
+    assert origin["patches"] == ["/session/optimization_stack/src/spec-1/realized.patch"]
+    # The exemption is about absolute paths only.
+    assert "HF_TOKEN" not in origin
+    # Everywhere else a host path is still a leak.
+    assert sanitized["value"]["kernel"]["gemm"] == {}
+
+
 def test_empty_phase_sections_do_not_copy_cumulative_current_best(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.optimization_stack = [row for row in state.optimization_stack if row.get("source_phase") == "EXPLORE"]
-    bundle = build_remote_knowledge(state, tmp_path / "files-empty-framework")
+    bundle = _build(state, tmp_path / "files-config-only")
     value = bundle.knowledge["value"]
-    assert value["explore"]["extra_server_args"] == "--page-size 32"
-    assert value["framework"]["extra_server_args"] == ""
-    assert value["framework"]["extra_envs"] == {}
+    assert value["config"]["extra_server_args"] == "--page-size 32"
+    assert value["patch"] == {}
 
 
 def test_geak_results_are_excluded_from_remote_knowledge(tmp_path: Path) -> None:
@@ -591,7 +677,7 @@ def test_geak_results_are_excluded_from_remote_knowledge(tmp_path: Path) -> None
     ]
     state.geak_result = {"status": "ok", "throughput_speedup": 1.34}
 
-    bundle = build_remote_knowledge(state, tmp_path / "files-geak")
+    bundle = _build(state, tmp_path / "files-geak")
     kernel = bundle.knowledge["value"]["kernel"]
     assert set(kernel) == {"gemm", "fusion", "rewrite"}
     assert all(not artifact.path.startswith("kernel/geak/") for artifact in bundle.artifacts)
@@ -600,7 +686,7 @@ def test_geak_results_are_excluded_from_remote_knowledge(tmp_path: Path) -> None
 def test_micro_keep_without_integrate_stack_is_not_written(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.optimization_stack = [row for row in state.optimization_stack if row.get("action") != "integrate"]
-    bundle = build_remote_knowledge(state, tmp_path / "files-no-integrate")
+    bundle = _build(state, tmp_path / "files-no-integrate")
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
@@ -676,7 +762,7 @@ def test_prior_kernel_adoption_requires_successful_kernel_replay(
         warm_start_dir=prior_root,
     )
 
-    bundle = build_remote_knowledge(
+    bundle = _build(
         state,
         tmp_path / "files-prior-kernel",
         sections=sections,
@@ -730,7 +816,7 @@ def test_prior_kernel_artifact_conflict_is_renamed_and_remapped(
         warm_start_dir=prior_root,
     )
 
-    bundle = build_remote_knowledge(
+    bundle = _build(
         state,
         tmp_path / "files-conflict",
         sections=sections,
@@ -757,7 +843,7 @@ def test_micro_keep_with_e2e_revert_but_no_integrate_stack_is_not_written(
             "best_gain_pct": -2.0,
         }
     }
-    bundle = build_remote_knowledge(state, tmp_path / "files-revert")
+    bundle = _build(state, tmp_path / "files-revert")
     assert bundle.knowledge["value"]["kernel"]["rewrite"]["items"] == []
 
 
@@ -767,7 +853,7 @@ def test_integrate_stack_is_authoritative_for_rewrite_patch(tmp_path: Path) -> N
     unintegrated_patch.write_text("// micro only", encoding="utf-8")
     attempt = state.kernel_opt_task_attempts["rmsnorm"]
     attempt["last_artifact_path"] = str(unintegrated_patch)
-    bundle = build_remote_knowledge(state, tmp_path / "files-integrated")
+    bundle = _build(state, tmp_path / "files-integrated")
     rewrite = bundle.knowledge["value"]["kernel"]["rewrite"]["items"][0]
     assert rewrite["patch"].endswith("/rewrite.cu")
     assert "micro-only.cu" not in json.dumps(rewrite)
@@ -780,7 +866,7 @@ def test_integrated_rewrite_missing_artifact_fails_closed(tmp_path: Path) -> Non
     integrate["patch_path"] = str(tmp_path / "missing-rewrite.cu")
     state.kernel_opt_task_attempts["rmsnorm"]["last_artifact_path"] = ""
     with pytest.raises(RemoteRecipeValidationError, match="kernel/rewrite"):
-        build_remote_knowledge(state, tmp_path / "files-missing-rewrite")
+        _build(state, tmp_path / "files-missing-rewrite")
 
 
 def test_accepted_gemm_missing_tuned_file_fails_closed(tmp_path: Path) -> None:
@@ -789,7 +875,7 @@ def test_accepted_gemm_missing_tuned_file_fails_closed(tmp_path: Path) -> None:
     gemm["tuned_file"] = str(tmp_path / "missing-tuned.csv")
     state.last_gemm_tuning["tuned_file"] = gemm["tuned_file"]
     with pytest.raises(RemoteRecipeValidationError, match="kernel/gemm"):
-        build_remote_knowledge(state, tmp_path / "files-missing-gemm")
+        _build(state, tmp_path / "files-missing-gemm")
 
 
 def test_accepted_fusion_missing_patch_or_target_fails_closed(tmp_path: Path) -> None:
@@ -798,19 +884,19 @@ def test_accepted_fusion_missing_patch_or_target_fails_closed(tmp_path: Path) ->
     fusion["patch_path"] = str(tmp_path / "missing-fusion.patch")
     state.last_fusion["patch"] = fusion["patch_path"]
     with pytest.raises(RemoteRecipeValidationError, match="kernel/fusion"):
-        build_remote_knowledge(state, tmp_path / "files-missing-fusion")
+        _build(state, tmp_path / "files-missing-fusion")
 
 
 def test_bundle_rejects_path_mismatch_and_prefix(tmp_path: Path) -> None:
     source = tmp_path / "a"
     source.write_text("x", encoding="utf-8")
-    bundle = KnowledgeBundle({"value": {}}, [Artifact("explore/a", source)])
+    bundle = KnowledgeBundle({"value": {}}, [Artifact("patch/a", source)])
     with pytest.raises(RemoteRecipeValidationError, match="absent from knowledge"):
         bundle.validate()
-    bad = KnowledgeBundle({"value": {}}, [Artifact("files/explore/a", source)])
+    bad = KnowledgeBundle({"value": {}}, [Artifact("files/patch/a", source)])
     with pytest.raises(RemoteRecipeValidationError, match="files/ prefix"):
         bad.validate()
-    missing = KnowledgeBundle({"value": {"explore": {"patches": ["explore/missing.patch"]}}})
+    missing = KnowledgeBundle({"value": {"patch": {"patches": ["patch/missing.patch"]}}})
     with pytest.raises(RemoteRecipeValidationError, match="missing artifacts"):
         missing.validate()
 
@@ -821,12 +907,12 @@ def test_mixed_slash_free_text_is_not_treated_as_an_artifact_ref(
     source = tmp_path / "accepted.patch"
     source.write_text("diff", encoding="utf-8")
     files = _Files(tmp_path / "bundle-files")
-    ref = files.add(source, category="explore", kind="patches")
+    ref = files.add(source, category="patch", kind="patches")
     knowledge = {
         "value": {
-            "explore": {
+            "patch": {
                 "patches": [ref],
-                "patch": "see notes at a/b\\c",
+                "note": "see notes at a/b\\c",
             }
         }
     }
@@ -944,12 +1030,12 @@ def test_artifact_rejects_symlink_and_oversized_file(tmp_path: Path) -> None:
     link = tmp_path / "link"
     link.symlink_to(source)
     with pytest.raises(RemoteRecipeValidationError, match="symlink"):
-        Artifact("explore/link", link).validate()
+        Artifact("patch/link", link).validate()
     oversized = tmp_path / "oversized"
     with oversized.open("wb") as handle:
         handle.truncate(MAX_FILE_BYTES + 1)
     with pytest.raises(RemoteRecipeValidationError, match="limit"):
-        Artifact("explore/oversized", oversized).validate()
+        Artifact("patch/oversized", oversized).validate()
 
 
 def test_path_limit_and_strict_json_validation(tmp_path: Path) -> None:
@@ -1328,17 +1414,16 @@ class _FakeStore:
                 },
                 "provenance": {"kernel_optimizer": "forge"},
                 "value": {
-                    "patch_timeline": [],
                     "kernel": {
                         "gemm": {},
                         "fusion": {},
                         "rewrite": {},
                     },
-                    "explore": {
+                    "config": {
                         "extra_server_args": "--page-size 32",
                         "extra_envs": {"A": "1"},
                     },
-                    "framework": {},
+                    "patch": {},
                 },
                 "lessons": [{"statement": "x"}],
             },
@@ -1468,7 +1553,7 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
         {
             "optimized_throughput": 130.0,
             "value": {
-                "explore": {
+                "config": {
                     "extra_server_args": "--page-size 32 --api-key secret",
                     "extra_envs": {
                         "VLLM_ROCM_USE_AITER": "1",
@@ -1491,8 +1576,8 @@ def test_write_boundary_sanitizes_directly_constructed_bundle(tmp_path: Path) ->
 
     assert result.status == "written"
     assert store.published_knowledge is not None
-    explore = store.published_knowledge["value"]["explore"]
-    assert explore == {
+    published_config = store.published_knowledge["value"]["config"]
+    assert published_config == {
         "extra_server_args": "--page-size 32",
         "extra_envs": {"VLLM_ROCM_USE_AITER": "1"},
     }
@@ -1520,10 +1605,8 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
             "record_kind": "hyperloom_recipe",
             "value": {
                 "config": {"extra_server_args": "", "extra_envs": {}},
-                "explore": {"extra_server_args": "", "extra_envs": {}, "patches": []},
-                "framework": {"extra_server_args": "", "extra_envs": {}, "patches": []},
+                "patch": {"patches": []},
                 "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
-                "patch_timeline": [],
             },
         }
     )
@@ -1540,13 +1623,22 @@ def test_empty_replay_material_skips_even_when_throughput_beats_champion(
     assert store.calls == []
 
 
-def test_artifact_only_recipe_has_replay_material() -> None:
+def test_provenance_alone_is_not_replay_material() -> None:
+    """Provenance describes the overlays; without one there is nothing to replay."""
+    assert not has_replay_material(
+        {
+            "value": {
+                "config": {},
+                "patch": {"provenance": [{"stack_index": 0, "complete": True}]},
+                "kernel": {},
+            }
+        }
+    )
     assert has_replay_material(
         {
             "value": {
                 "config": {},
-                "explore": {"artifacts": ["explore/fix.py"]},
-                "framework": {},
+                "patch": {"patches": ["patch/overlays/000000/00-fix.patch"]},
                 "kernel": {},
             }
         }
@@ -1908,11 +2000,11 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     patch = tmp_path / "authored.patch"
     patch.write_text("authored", encoding="utf-8")
     sections = _sections(tmp_path)
-    refs = FrameworkAgentKB(sections).stage_patches(
+    refs = PatchKB(sections).stage_patches(
         [patch],
         stack_index=2,
     )
-    bundle = build_remote_knowledge(_state(tmp_path), tmp_path / "files", sections=sections)
+    bundle = _build(_state(tmp_path), tmp_path / "files", sections=sections)
     published = {artifact.path for artifact in bundle.artifacts}
     assert refs[0] in published
     assert (tmp_path / "files" / refs[0]).is_file()
@@ -1954,8 +2046,8 @@ def test_non_overlay_owner_patch_ref_fails_before_publish(
     patch.write_text("invalid", encoding="utf-8")
     sections = _sections(tmp_path)
     sections.write(
-        "framework",
-        {"patches": ["framework/patches/invalid-owner-ref.patch"]},
+        "patch",
+        {"patches": ["patch/patches/invalid-owner-ref.patch"]},
         files=[patch],
         kind="patches",
     )
@@ -1964,7 +2056,7 @@ def test_non_overlay_owner_patch_ref_fails_before_publish(
         RemoteRecipeValidationError,
         match="invalid overlay ref",
     ):
-        build_remote_knowledge(
+        _build(
             _state(tmp_path),
             tmp_path / "files-invalid-owner-ref",
             sections=sections,
@@ -1988,15 +2080,15 @@ def test_orphaned_required_staged_file_fails_close(tmp_path: Path) -> None:
     patch = tmp_path / "orphan.patch"
     patch.write_text("orphan", encoding="utf-8")
     sections = _sections(tmp_path)
-    sections.write("framework", {"note": "no ref"}, files=[patch], kind="patches")
+    sections.write("patch", {"note": "no ref"}, files=[patch], kind="patches")
     state = _state(tmp_path)
     state.optimization_stack[0]["kb_required_owner"] = "FRAMEWORK_AGENT"
 
     with pytest.raises(
         RemoteRecipeValidationError,
-        match="staged section 'framework' file mismatch",
+        match="staged section 'patch' file mismatch",
     ):
-        build_remote_knowledge(
+        _build(
             state,
             tmp_path / "files-orphan",
             sections=sections,
@@ -2201,7 +2293,7 @@ def test_nonfinite_built_metrics_are_normalized(tmp_path: Path) -> None:
     state = _state(tmp_path)
     state.current_best["tput"] = float("nan")
     state.cumulative_gain_validated = float("inf")
-    bundle = build_remote_knowledge(state, tmp_path / "finite-knowledge")
+    bundle = _build(state, tmp_path / "finite-knowledge")
     assert bundle.knowledge["optimized_throughput"] == 0.0
     assert bundle.knowledge["validated_e2e_gain"] == 0.0
 
@@ -2213,12 +2305,11 @@ def _current_knowledge(*, timeline: list[str] | None = None) -> dict:
         "optimized_throughput": 10.0,
         "validated_e2e_gain": 2.0,
         "value": {
-            "explore": {
+            "config": {
                 "extra_server_args": "--page-size 32",
                 "extra_envs": {"CURRENT": "1"},
             },
-            "framework": {},
-            "patch_timeline": list(timeline or []),
+            "patch": {"patches": list(timeline or [])},
             "kernel": {"gemm": {}, "fusion": {}, "rewrite": {}},
         },
     }
@@ -2266,10 +2357,10 @@ def test_current_contract_rejects_missing_or_wrong_identity_fields(
 @pytest.mark.parametrize(
     ("field", "value", "match"),
     [
-        ("explore", None, "value.explore"),
-        ("framework", None, "value.framework"),
-        ("patch_timeline", {}, "flat string list"),
-        ("patch_timeline", [{"patch": "x"}], "flat string list"),
+        ("config", None, "value.config"),
+        ("patch", None, "value.patch"),
+        ("patch", {"patches": "notalist"}, "flat string list"),
+        ("patch", {"patches": [{"patch": "x"}]}, "flat string list"),
         ("kernel", None, "value.kernel"),
     ],
 )
@@ -2288,8 +2379,8 @@ def test_current_contract_rejects_missing_required_value_fields(
 
 
 def test_current_warm_adapter_keeps_replay_payload_out_of_t0(tmp_path: Path) -> None:
-    ref = "framework/overlays/000002/00-pr-7.patch"
-    second_ref = "explore/overlays/000003/00-followup.patch"
+    ref = "patch/overlays/000002/00-pr-7.patch"
+    second_ref = "patch/overlays/000003/00-followup.patch"
 
     class _Remote:
         def read(self, identity: str, destination: Path, scope: RecipeScope):
@@ -2341,7 +2432,7 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     exact = "inference:target:mi300x:sglang:qwen:qwenarch:1.0:fp8"
     unproven = "inference:unproven:mi300x:sglang:qwen:qwenarch:1.0:fp8"
     donor = "inference:donor:mi300x:sglang:qwen:qwenarch:1.0:fp8"
-    patch_ref = "framework/overlays/000001/00-donor.patch"
+    patch_ref = "patch/overlays/000001/00-donor.patch"
 
     class _Remote:
         def __init__(self):
@@ -2386,16 +2477,11 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
             knowledge = _current_knowledge(timeline=timeline)
             knowledge["validated_e2e_gain"] = 7.0 if identity == donor else 0.0 if replayable else 41.0
             knowledge["what_worked"] = [{"description": f"history:{identity}"}]
-            knowledge["value"]["explore"] = {
-                "extra_server_args": "",
-                "extra_envs": {},
-                "patches": [],
-            }
-            knowledge["value"]["framework"] = {
+            knowledge["value"]["config"] = {
                 "extra_server_args": "--donor" if replayable else "",
                 "extra_envs": {},
-                "patches": timeline,
             }
+            knowledge["value"]["patch"] = {"patches": timeline}
             return {
                 "schema_version": 2,
                 "canonical_id": identity,
@@ -2484,8 +2570,8 @@ def test_remote_adapter_pages_history_then_materializes_l2_donor(
     selected = json.loads((main / "recipe.json").read_text(encoding="utf-8"))
     assert selected["canonical_id"] == donor
     assert (main / "files" / patch_ref).read_text(encoding="utf-8") == "donor patch"
-    replay_kb = RecipeReplayKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=main))
-    assert replay_kb.read_patch_timeline() == [patch_ref]
+    patch_kb = PatchKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=main))
+    assert patch_kb.read_patches() == [patch_ref]
     candidates = main.parent / f".{main.name}-candidates"
     assert not candidates.exists()
 
@@ -2592,8 +2678,8 @@ def test_remote_adapter_detects_kernel_only_replay_material(
     candidate = tmp_path / "candidate"
     candidate.mkdir()
     knowledge = _current_knowledge()
-    knowledge["value"]["explore"] = {}
-    knowledge["value"]["framework"] = {}
+    knowledge["value"]["config"] = {}
+    knowledge["value"]["patch"] = {}
     knowledge["value"]["kernel"]["rewrite"] = {"items": [{"kernel_name": "fused"}]}
     (candidate / "recipe.json").write_text(
         json.dumps(knowledge),
@@ -2610,10 +2696,10 @@ def test_remote_adapter_detects_kernel_only_replay_material(
     assert not RemoteWarmRecipeAdapter._candidate_has_replay_material(candidate)
 
 
-def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None:
+def test_patch_column_returns_the_recorded_replay_order(tmp_path: Path) -> None:
     timeline = [
-        "framework/overlays/000002/00-pr-7.patch",
-        "explore/overlays/000003/00-followup.patch",
+        "patch/overlays/000002/00-pr-7.patch",
+        "patch/overlays/000003/00-followup.patch",
     ]
     warm = tmp_path / "warm"
     warm.mkdir()
@@ -2621,9 +2707,9 @@ def test_recipe_replay_sdk_returns_exact_global_timeline(tmp_path: Path) -> None
         json.dumps(_current_knowledge(timeline=timeline)),
         encoding="utf-8",
     )
-    kb = RecipeReplayKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=warm))
+    kb = PatchKB(KnowledgeSections(tmp_path / "draft", warm_start_dir=warm))
 
-    assert kb.read_patch_timeline() == timeline
+    assert kb.read_patches() == timeline
 
 
 @pytest.mark.parametrize(
@@ -2653,7 +2739,7 @@ def test_current_warm_adapter_rejects_unsafe_timeline_refs(
 def test_owner_sdk_rejects_symlink_timeline_ref(
     tmp_path: Path,
 ) -> None:
-    ref = "framework/overlays/000000/00-link.patch"
+    ref = "patch/overlays/000000/00-link.patch"
 
     warm = tmp_path / "symlink"
     outside = tmp_path / "outside.patch"
@@ -2663,7 +2749,7 @@ def test_owner_sdk_rejects_symlink_timeline_ref(
     link.symlink_to(outside)
     sections = KnowledgeSections(tmp_path / "draft", warm_start_dir=warm)
 
-    assert FrameworkAgentKB(sections).prior_file(ref) is None
+    assert PatchKB(sections).prior_file(ref) is None
 
 
 def test_remote_read_is_wired_into_cli_t0_and_close_write_remains() -> None:
@@ -2688,7 +2774,9 @@ def test_obsolete_remote_contract_exports_are_removed() -> None:
         "read_remote_champion",
     ):
         assert not hasattr(remote_recipe, name)
-    assert not hasattr(ExploreAgentKB, "write_snapshot")
+    assert not hasattr(PatchKB, "write_snapshot")
+    # patch_roots could never survive publication, so the surface is gone.
+    assert not hasattr(PatchKB, "read_patch_roots")
     assert not hasattr(RemoteRecipeClient, "read_champion")
 
 

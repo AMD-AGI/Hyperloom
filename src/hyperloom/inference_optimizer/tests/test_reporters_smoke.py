@@ -80,7 +80,6 @@ def _fixture_breakdown(**overrides: Any) -> dict[str, Any]:
             "backends": {"accepted": ["vllm_kv_fp8"], "tested": {"vllm_kv_fp8": True}},
             "params": {"accepted": [], "tested": {}},
             "discovered_flags": {},
-            "backend_winners_history": [],
             "synergy_attempted": [],
         },
         "sweep": {"all_variants": [], "grid_size": 0},

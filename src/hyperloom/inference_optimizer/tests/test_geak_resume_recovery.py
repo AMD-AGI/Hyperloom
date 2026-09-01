@@ -170,7 +170,7 @@ async def test_geak_kernel_phase_does_not_reuse_already_promoted_result(
         _runner_resolved,
     )
 
-    await coord._run_geak_kernel_phase(from_phase="EXPLORE")
+    await coord._run_geak_kernel_phase(from_phase="FRAMEWORK_AGENT")
 
     # The recovery short-circuit must not have fired; the normal path resolves
     # the runner (and here aborts via the injected error).

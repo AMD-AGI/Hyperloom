@@ -3,23 +3,20 @@
 
 """Library entry-points for LLM specialists (Arbor / TBO / Hyperloom).
 
-Three helpers wrapping framework-agent internals without a full
+Two helpers wrapping framework-agent internals without a full
 :class:`ExploreRequest` JSON:
 
 * :func:`find_relevant_prs_smart`  - cross-repo PR discovery via
   primus_cortex + (optional) anonymous GitHub Search.
-* :func:`fetch_pr_audit_material`  - download ``pr.patches`` +
-  ``pr_files.json`` for one PR.
 * :func:`evaluate_candidate_outcome` - stateless winner check given
   pre-computed benchmark/accuracy JSON blobs.
 
-The CLI reaches these helpers indirectly via ``explorer`` and
-``phase-audit``; this module never imports the CLI.
+The CLI reaches these helpers indirectly via ``explorer``; this module
+never imports the CLI.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from hyperloom.common.coerce import first_float
@@ -27,12 +24,10 @@ from hyperloom.common.jsonio import coerce_dict
 
 from ..models import Candidate
 from ..sources import github as github_backend
-from ..sources._shared import GitHubPr, _repo_slug
+from ..sources._shared import GitHubPr
 from ..sources.primus_cortex import (
     PrimusCortexError,
     list_perf_prs,
-    pr_files,
-    pr_patches,
 )
 
 
@@ -130,59 +125,6 @@ def find_relevant_prs_smart(
     return out
 
 
-def fetch_pr_audit_material(
-    repo_url: str,
-    pr_number: int,
-    *,
-    out_dir: Path | str,
-    primus_cortex_url: str,
-    primus_timeout_sec: float = 30.0,
-) -> dict[str, str]:
-    """Download a PR's audit material (patches + files) under ``out_dir``.
-
-    Writes ``pr.patches`` (unified diff) and ``pr_files.json``
-    (``{repo, number, files}``).
-
-    Args:
-        repo_url: Repository URL the PR belongs to.
-        pr_number: PR number to fetch.
-        out_dir: Directory to write the artifacts into (created if needed).
-        primus_cortex_url: Primus Cortex base URL.
-        primus_timeout_sec: Per-request timeout for Primus calls.
-
-    Returns:
-        A dict of absolute artifact paths (``patches_path``,
-        ``files_json_path``).
-
-    Raises:
-        PrimusCortexError: On Primus transport / parse errors.
-    """
-    out = Path(out_dir).expanduser()
-    out.mkdir(parents=True, exist_ok=True)
-    repo_slug = _repo_slug(repo_url)
-    patches_text = pr_patches(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
-    patches_path = out / "pr.patches"
-    patches_path.write_text(patches_text, encoding="utf-8")
-    files_payload = pr_files(repo_slug, pr_number, base_url=primus_cortex_url, timeout_sec=primus_timeout_sec)
-    files_path = out / "pr_files.json"
-    files_path.write_text(
-        json.dumps(
-            {
-                "repo": repo_slug,
-                "number": pr_number,
-                "files": files_payload,
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
-    return {
-        "patches_path": str(patches_path),
-        "files_json_path": str(files_path),
-    }
-
-
 def evaluate_candidate_outcome(
     benchmark: dict | Path | str | None,
     accuracy: dict | Path | str | None = None,
@@ -259,6 +201,5 @@ def evaluate_candidate_outcome(
 
 __all__ = [
     "find_relevant_prs_smart",
-    "fetch_pr_audit_material",
     "evaluate_candidate_outcome",
 ]

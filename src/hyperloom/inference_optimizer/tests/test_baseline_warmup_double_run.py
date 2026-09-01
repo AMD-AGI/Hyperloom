@@ -563,7 +563,7 @@ def test_a_rebaselines_hot_pass_needs_only_its_own_wall_clock(tmp_path):
 
     result = _run_double_run_baseline(
         tmp_path,
-        _prelude_shared_state(usable_sec=1200.0, phase="EXPLORE"),
+        _prelude_shared_state(usable_sec=1200.0, phase="FRAMEWORK_AGENT"),
         clock=clock,
         boot_sec=350.0,
         benchmark_sec=550.0,
@@ -584,7 +584,7 @@ def test_a_rebaseline_that_cannot_cover_its_hot_pass_keeps_the_cold_warmup(tmp_p
 
     result = _run_double_run_baseline(
         tmp_path,
-        _prelude_shared_state(usable_sec=400.0, phase="EXPLORE"),
+        _prelude_shared_state(usable_sec=400.0, phase="FRAMEWORK_AGENT"),
         clock=clock,
         boot_sec=350.0,
         benchmark_sec=550.0,
@@ -901,7 +901,7 @@ class TestARoundThatCannotFinishIsNotIgnited:
             cold_round_sec=_COLD_ROUND_SEC,
             cold_post_ready_sec=_COLD_POST_READY_SEC,
             hot_round_sec=_HOT_ROUND_SEC,
-            phase="EXPLORE",
+            phase="FRAMEWORK_AGENT",
         )
 
         assert calls, "the round that validates the stack was refused for lack of a successor"
@@ -920,7 +920,7 @@ class TestARoundThatCannotFinishIsNotIgnited:
             cold_round_sec=_COLD_ROUND_SEC,
             cold_post_ready_sec=_COLD_POST_READY_SEC,
             hot_round_sec=_HOT_ROUND_SEC,
-            phase="EXPLORE",
+            phase="FRAMEWORK_AGENT",
         )
 
         assert calls == [], "GPU time was spent on a round the session cannot finish"
@@ -1964,7 +1964,7 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
     src = tmp_path / "InferenceX"
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: False)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: False)
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
 
@@ -1981,7 +1981,7 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     (src / "utils" / "marker.txt").write_text("payload")
 
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2008,7 +2008,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2029,7 +2029,7 @@ def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
@@ -2048,7 +2048,7 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2075,7 +2075,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     (src / "utils").mkdir(parents=True)
     (src / "utils" / "marker.txt").write_text("payload")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2114,7 +2114,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
         "}\n"
     )
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",

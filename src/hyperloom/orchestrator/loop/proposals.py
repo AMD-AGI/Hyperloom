@@ -423,7 +423,6 @@ class ProposalsCollaborator:
             params.setdefault("explore_search", es)
         keep = _phase_state.resolve_keep_threshold(self.shared_state)
         params.setdefault("keep_threshold_pct", keep)
-        params.setdefault("stack_stable_threshold_pct", keep / 2.0)
 
     async def _materialize_approved_proposal(
         self,
@@ -438,8 +437,11 @@ class ProposalsCollaborator:
             approved_variant_names: When set, restricts an explore grid to these
                 Critic-approved variant names; ``None`` keeps the full grid.
         """
-        # Route framework_agent candidates to their own materializer.
-        if pending.action_name == "framework_agent":
+        # An upstream-PR candidate pre-screen is an ``integrate_patch`` proposal
+        # carrying a candidate id at the top level (rather than params). It has
+        # its own materializer because approval means "spend a bench on this
+        # candidate", and the task params are built from the candidate row.
+        if pending.action_name == "integrate_patch" and (pending.payload or {}).get("framework_agent_candidate_id"):
             await self._materialize_framework_agent_candidate(pending)
             return
         params = dict(pending.payload.get("params") or {})

@@ -2,18 +2,15 @@
 # SPDX-License-Identifier: MIT
 
 """Unit tests for framework-agent pure helpers: KB prior-scoring (``decision``)
-and the dependency-light audit building blocks (``_audit_common``).
+and unified-diff parsing (``_audit_common``).
 
-Both modules are pure over plain dicts / dataclasses (diff parsing, verdict
-assembly, KB-derived scoring), so they are exercised directly here without any
-network, worktree, or gbrain/primus backend.
+Both modules are pure over plain dicts / dataclasses, so they are exercised
+directly here without any network, worktree, or gbrain/primus backend.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
 
 from hyperloom.agents.framework import _audit_common as ac
 from hyperloom.agents.framework.decision import (
@@ -147,76 +144,3 @@ def test_strip_diff_path_variants() -> None:
     assert ac._strip_diff_path("/dev/null") == "/dev/null"
     # No a//b/ prefix -> returned as-is.
     assert ac._strip_diff_path("plain/path.py") == "plain/path.py"
-
-
-def test_symbols_and_verdict() -> None:
-    syms = ac._symbols(["  async def go():", "class Widget:", "x = 1"])
-    assert syms == ["go", "Widget"]
-    v = ac._verdict(
-        candidate_id="c1",
-        semantic_status="plausible",
-        applicability="applicable",
-        confidence=0.123456,
-        evidence=[{"k": "v"}],
-        risks=["r"],
-        recommended_next_step="bench",
-    )
-    assert v["candidate_id"] == "c1" and v["confidence"] == 0.1235
-    assert v["layer"] == "static" and v["metrics"] == {}
-
-
-def test_fetch_diff_url_file_and_unknown_scheme(tmp_path: Path) -> None:
-    f = tmp_path / "pr.diff"
-    f.write_text("+++ b/x.py\n", encoding="utf-8")
-    assert ac._fetch_diff_url(f"file://{f}", tmp_path) == "+++ b/x.py\n"
-    # Missing file:// path -> "".
-    assert ac._fetch_diff_url("file:///no/such/file.diff", tmp_path) == ""
-    # Unknown scheme -> "" (exercises the scheme checks and final return).
-    assert ac._fetch_diff_url("ftp://example/x.diff", tmp_path) == ""
-
-
-def test_obtain_patch_text_inline_and_patches_path(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setenv("PR_KB_ENABLE", "0")  # skip the gbrain KB path
-    # Inline diff_text wins.
-    text, src = ac._obtain_patch_text({"diff_text": "+++ b/a.py\n"}, tmp_path)
-    assert src == "inline" and text.strip()
-
-    # patches_path file read.
-    pf = tmp_path / "pr.patches"
-    pf.write_text("+++ b/b.py\n", encoding="utf-8")
-    text, src = ac._obtain_patch_text({"patches_path": str(pf)}, tmp_path)
-    assert src == "patches_path" and "b.py" in text
-
-    # Nothing resolvable -> unavailable.
-    text, src = ac._obtain_patch_text({}, tmp_path)
-    assert src == "unavailable" and text == ""
-
-
-def test_obtain_patch_text_kb_path_degrades_when_no_client(tmp_path: Path, monkeypatch: Any) -> None:
-    """With PR_KB enabled but no gbrain client configured, the KB branch is
-    entered and cleanly falls through to ``unavailable`` (no partial diff)."""
-    monkeypatch.setenv("PR_KB_ENABLE", "1")
-    monkeypatch.delenv("PRIMUS_CORTEX_PR_API", raising=False)
-    request = {"repo_url": "https://github.com/acme/x", "candidate": {"pr_number": 11}}
-    text, src = ac._obtain_patch_text(request, tmp_path)
-    assert src == "unavailable" and text == ""
-
-
-def test_obtain_patch_text_primus_material(tmp_path: Path, monkeypatch: Any) -> None:
-    monkeypatch.setenv("PR_KB_ENABLE", "0")
-    patches = tmp_path / "fetched.patches"
-    patches.write_text("+++ b/c.py\n", encoding="utf-8")
-
-    def _fake_fetch(repo_url: str, pr_number: int, *, out_dir: Path, primus_cortex_url: str) -> dict[str, str]:
-        return {"patches_path": str(patches)}
-
-    import hyperloom.agents.framework.runtime.tools_api as tools_api
-
-    monkeypatch.setattr(tools_api, "fetch_pr_audit_material", _fake_fetch)
-    request = {
-        "repo_url": "https://github.com/acme/x",
-        "candidate": {"pr_number": 5},
-        "primus_cortex_url": "http://primus.invalid",
-    }
-    text, src = ac._obtain_patch_text(request, tmp_path)
-    assert src == "primus_cortex" and "c.py" in text

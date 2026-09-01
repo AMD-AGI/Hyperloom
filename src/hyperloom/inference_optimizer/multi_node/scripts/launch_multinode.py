@@ -44,6 +44,16 @@ _PD_PREFILL_PORT = 30000
 _PD_DECODE_PORT = 30001
 # Default collective port ($RAYJOB_DIST_INIT_PORT else 29500).
 _DEFAULT_DIST_INIT_PORT = 29500
+# vLLM PD connectors named in ``--pd-transfer-backend`` help. Unknown names
+# still serialize (so a future vLLM connector is not blocked) but warn.
+_VLLM_KV_CONNECTORS: frozenset[str] = frozenset(
+    (
+        "NixlConnector",
+        "P2pNcclConnector",
+        "MooncakeConnector",
+        "LMCacheConnectorV1",
+    )
+)
 
 
 def _pd_decode_dist_init_port(prefill_dist_init_port: int) -> int:
@@ -353,14 +363,18 @@ def _build_vllm_cmd(
         # vllm PD: kv-transfer-config JSON with connector + role + kv slot.
         kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
         connector = pd_transfer_backend or "NixlConnector"
-        kv_cfg = (
-            "{"
-            f'"kv_connector":"{connector}",'
-            f'"kv_role":"{kv_role}",'
-            f'"kv_rank":{int(pd_kv_rank)},'
-            f'"kv_parallel_size":{int(pd_kv_parallel_size)},'
-            '"kv_buffer_device":"cuda"'
-            "}"
+        if connector not in _VLLM_KV_CONNECTORS:
+            _log(f"WARN unknown vLLM kv connector {connector!r}; known: {sorted(_VLLM_KV_CONNECTORS)}")
+        kv_cfg = json.dumps(
+            {
+                "kv_connector": connector,
+                "kv_role": kv_role,
+                "kv_rank": int(pd_kv_rank),
+                "kv_parallel_size": int(pd_kv_parallel_size),
+                "kv_buffer_device": "cuda",
+            },
+            separators=(",", ":"),
+            sort_keys=False,
         )
         cmd.extend(["--kv-transfer-config", kv_cfg])
     if extra_args:

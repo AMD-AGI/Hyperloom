@@ -452,21 +452,40 @@ def parse_claude_stream_json_tool_calls(
     return calls
 
 
+# Bound on the string fed to ``redact_secret_values`` before the 240-char
+# clip. Far above the clip so a secret straddling 240 is still whole in the
+# window; a secret longer than this still matches, every pattern being
+# ``{8,}`` / ``+``. Write-tool inputs can be megabytes and would otherwise
+# run four regexes over the whole dump.
+_REDACT_SCAN_LIMIT = 4096
+
+
 def _summarize_tool_input(value: Any, *, limit: int = 240) -> str:
-    """Compact, clipped one-line summary of a tool_use ``input`` block."""
+    """Compact, clipped one-line summary of a tool_use ``input`` block.
+
+    Credential-shaped substrings are redacted before clipping so a secret that
+    straddles the length limit is not left in the clear. Claude ``tool_use``
+    blocks and Codex tool items both go through this helper. The scan is
+    bounded at :data:`_REDACT_SCAN_LIMIT` so a megabyte Write dump is not
+    run through every redaction pattern first.
+    """
     if isinstance(value, dict):
         for key in ("query", "url", "pattern", "path", "prompt", "command"):
             v = value.get(key)
             if isinstance(v, str) and v.strip():
                 s = v.strip()
-                return s if len(s) <= limit else (s[:limit] + "…")
-        try:
-            s = json.dumps(value, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError):
-            s = str(value)
+                break
+        else:
+            try:
+                s = json.dumps(value, ensure_ascii=False, sort_keys=True)
+            except (TypeError, ValueError):
+                s = str(value)
     else:
         s = "" if value is None else str(value)
-    return s if len(s) <= limit else (s[:limit] + "…")
+    if len(s) > _REDACT_SCAN_LIMIT:
+        s = s[:_REDACT_SCAN_LIMIT]
+    redacted = redact_secret_values(s)
+    return redacted if len(redacted) <= limit else (redacted[:limit] + "…")
 
 
 # ---------------------------------------------------------------------------

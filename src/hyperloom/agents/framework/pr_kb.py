@@ -7,7 +7,6 @@ Reads the markdown pages the ``Primus-Claw/pr-kb`` worker writes to gbrain
 (``pr-kb-meta/ pr-kb-files/ pr-kb-index/``) and adapts them to the shapes
 framework-agent already consumes:
 
-* :func:`fetch_pr_kb_diff` — files page -> unified diff text (P1, for audit).
 * :func:`parse_index_prs` — candidate discovery inputs (P2).
 
 All helpers are defensive: missing keys / unparseable blocks yield empty
@@ -20,8 +19,7 @@ import json
 import logging
 from typing import Any
 
-from .gbrain_page_client import GbrainPageClient, GbrainPageError
-from .pr_kb_slug import files_slug, index_slug, normalise_repo
+from .pr_kb_slug import index_slug
 
 log = logging.getLogger(__name__)
 
@@ -126,52 +124,6 @@ def parse_files_page(page: dict[str, Any]) -> dict[str, Any]:
     return {"files_truncated": truncated, "patch_omitted_any": omitted_any, "patches": patches}
 
 
-def fetch_pr_kb_diff(
-    repo: str,
-    pr_number: int | str,
-    *,
-    client: GbrainPageClient,
-    slug: str | None = None,
-) -> tuple[str, str]:
-    """Fetch + synthesize a PR's unified diff from its PR KB files page.
-
-    Returns ``("", "")`` on any miss / truncation / omission so the caller
-    falls back to a full source (``diff_url`` / Primus Cortex), never a partial diff.
-
-    Args:
-        repo: Repo full name or URL.
-        pr_number: PR number.
-        client: A configured :class:`GbrainPageClient`.
-        slug: Optional precomputed files-page slug (``candidate.pr_kb_files_slug``).
-            When provided it is used verbatim and ``repo``/``pr_number``
-            derivation is skipped, so a candidate carrying only the slug still
-            resolves its KB diff when ``pr_number`` is absent.
-
-    Returns:
-        ``(diff_text, "gbrain_pr_kb")`` on success, else ``("", "")``.
-    """
-    files_page_slug = (slug or "").strip()
-    if not files_page_slug:
-        repo_n = normalise_repo(repo)
-        if not repo_n or pr_number in (None, ""):
-            return "", ""
-        files_page_slug = files_slug(repo_n, pr_number)
-    try:
-        page = client.get_page(files_page_slug)
-    except GbrainPageError as exc:
-        log.warning("pr_kb: get_page(%s) failed: %r", files_page_slug, exc)
-        return "", ""
-    if not page:
-        return "", ""
-    parsed = parse_files_page(page)
-    # Never feed a partial diff downstream; degrade to the full diff_url.
-    if parsed["files_truncated"] or parsed["patch_omitted_any"]:
-        log.info("pr_kb: files page %s truncated/omitted; degrading to diff_url", files_page_slug)
-        return "", ""
-    diff = synthesize_unified_diff(parsed["patches"])
-    return (diff, "gbrain_pr_kb") if diff.strip() else ("", "")
-
-
 def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
     """Return the ``## PRs JSON`` list from an index page (empty on miss)."""
     data = _extract_fenced_json(_page_markdown(page), "## PRs JSON")
@@ -181,7 +133,6 @@ def parse_index_prs(page: dict[str, Any]) -> list[dict[str, Any]]:
 __all__ = [
     "synthesize_unified_diff",
     "parse_files_page",
-    "fetch_pr_kb_diff",
     "parse_index_prs",
     "index_slug",
 ]

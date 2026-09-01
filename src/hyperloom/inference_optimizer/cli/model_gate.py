@@ -14,12 +14,13 @@ import logging
 import os
 import struct
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .. import gpu_types as _gpu_types
+from ...common.timeutil import now_iso
 from ..model_config_utils import (  # noqa: F401 - re-exported for callers/tests
     GEMMA2_ARCHITECTURES as _GEMMA2_ARCHITECTURES,
     _config_architectures,
@@ -1806,6 +1807,251 @@ _CONTEXT_HEADROOM_DEFAULT = 512
 
 _MAX_MODEL_LEN_HEADROOM = 4096
 
+_MODEL_GATE_ORDER = (
+    "unsupported_model_arch",
+    "model_config_compat",
+    "context_window",
+)
+_MODEL_GATE_EVENT_ATTR = "_sbd_v6_model_gate_event"
+
+
+def _model_gate_workload(args: argparse.Namespace) -> dict[str, Any]:
+    model_path = str(getattr(args, "model", "") or "")
+    return {
+        "model_path": model_path,
+        "model_name": str(getattr(args, "model_display_name", "") or "")
+        or (Path(model_path).name if model_path else ""),
+        "framework": str(getattr(args, "framework", "") or os.environ.get("FRAMEWORK", "")),
+        "gpu_type": str(getattr(args, "gpu_type", "") or os.environ.get("TARGET_GPU_TYPE", "")),
+        "isl": int(getattr(args, "isl", 0) or 0),
+        "osl": int(getattr(args, "osl", 0) or 0),
+        "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
+        "headroom_tokens": _context_headroom_tokens(),
+        "headroom_env": _CONTEXT_HEADROOM_ENV,
+    }
+
+
+def _new_model_gate_event(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "type": "model_gate",
+        "kind": "model_gate",
+        "status": "succeeded",
+        "start_time": now_iso(timespec="seconds"),
+        "end_time": "",
+        "ext": {
+            "run_kind": "fresh",
+            "skip_reason": None,
+            "failed_gate_id": None,
+            "workload": _model_gate_workload(args),
+            "checks": [],
+            "degraded": {"active": False, "warnings": []},
+        },
+    }
+
+
+def _load_model_gate_event(args: argparse.Namespace, session_dir: Path) -> dict[str, Any]:
+    from ..session.sbd_v6 import read_timeline_event_for_update
+
+    event = getattr(args, _MODEL_GATE_EVENT_ATTR, None)
+    if not isinstance(event, dict):
+        event = read_timeline_event_for_update(session_dir, "model_gate")
+    if event is None or str(event.get("type") or "") != "model_gate":
+        event = _new_model_gate_event(args)
+    setattr(args, _MODEL_GATE_EVENT_ATTR, event)
+    event.setdefault("kind", "model_gate")
+    event.setdefault("status", "succeeded")
+    event.setdefault("start_time", now_iso(timespec="seconds"))
+    event.setdefault("end_time", "")
+    ext = event.get("ext")
+    if not isinstance(ext, dict):
+        ext = {}
+        event["ext"] = ext
+    ext.setdefault("run_kind", "fresh")
+    ext.setdefault("skip_reason", None)
+    ext.setdefault("failed_gate_id", None)
+    ext["workload"] = _model_gate_workload(args)
+    checks = ext.get("checks")
+    ext["checks"] = [row for row in checks if isinstance(row, dict)] if isinstance(checks, list) else []
+    degraded = ext.get("degraded")
+    if not isinstance(degraded, dict):
+        degraded = {}
+        ext["degraded"] = degraded
+    degraded["active"] = bool(degraded.get("active"))
+    warnings = degraded.get("warnings")
+    degraded["warnings"] = [row for row in warnings if isinstance(row, dict)] if isinstance(warnings, list) else []
+    return event
+
+
+def _write_model_gate_event(session_dir: Path, event: dict[str, Any]) -> bool:
+    from ..session.sbd_v6 import record_write_warning, write_timeline_event
+
+    try:
+        write_timeline_event(session_dir, event)
+    except Exception as exc:  # noqa: BLE001 — observability must never change gate behavior
+        log.warning("failed to persist SBD V6 model-gate event", exc_info=True)
+        if not record_write_warning(session_dir, component="model_gate.event", exc=exc):
+            log.debug("failed to persist SBD V6 model-gate write warning", exc_info=True)
+        return False
+    return True
+
+
+def _record_model_gate_warning(session_dir: Path, *, component: str, exc: BaseException) -> None:
+    """Best-effort retain a model-gate observability failure for export."""
+    from ..session.sbd_v6 import record_write_warning
+
+    if not record_write_warning(session_dir, component=component, exc=exc):
+        log.debug("failed to persist SBD V6 model-gate warning", exc_info=True)
+
+
+def _model_gate_status(
+    checks: list[dict[str, Any]],
+    *,
+    skip_reason: str | None = None,
+) -> str:
+    statuses = {str(check.get("status") or "") for check in checks}
+    if "failed" in statuses:
+        return "failed"
+    if "warned" in statuses or "unknown" in statuses:
+        return "degraded"
+    if skip_reason:
+        return "skipped"
+    return "succeeded"
+
+
+def _model_gate_check_order(check: dict[str, Any]) -> int:
+    try:
+        return int(check.get("order") or 0)
+    except (TypeError, ValueError):
+        return len(_MODEL_GATE_ORDER) + 1
+
+
+def _record_model_gate_check(
+    args: argparse.Namespace,
+    session_dir: Path,
+    check: dict[str, Any],
+    *,
+    failure: dict[str, Any] | None = None,
+    degraded_warning: dict[str, Any] | None = None,
+) -> None:
+    try:
+        event = _load_model_gate_event(args, session_dir)
+        ext = event["ext"]
+        checks = [
+            row for row in ext.get("checks", []) if isinstance(row, dict) and row.get("gate_id") != check.get("gate_id")
+        ]
+        checks.append(check)
+        checks.sort(key=_model_gate_check_order)
+        if failure is not None:
+            failed_order = int(check.get("order") or 0)
+            present = {str(row.get("gate_id") or "") for row in checks}
+            for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1):
+                if order > failed_order and gate_id not in present:
+                    checks.append(
+                        {
+                            "gate_id": gate_id,
+                            "order": order,
+                            "status": "skipped",
+                            "skip_reason": "prior_gate_failed",
+                            "detail": {},
+                        }
+                    )
+            checks.sort(key=_model_gate_check_order)
+            ext["failed_gate_id"] = str(check.get("gate_id") or "")
+            ext["failure"] = failure
+            event["end_time"] = now_iso(timespec="seconds")
+        if degraded_warning is not None:
+            degraded = ext.setdefault("degraded", {"active": False, "warnings": []})
+            degraded["active"] = True
+            degraded.setdefault("warnings", []).append(degraded_warning)
+        ext["checks"] = checks
+        event["status"] = _model_gate_status(
+            checks,
+            skip_reason=str(ext.get("skip_reason") or "") or None,
+        )
+        _write_model_gate_event(session_dir, event)
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change gate behavior
+        log.warning("failed to record SBD V6 model-gate check", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.check", exc=exc)
+
+
+def _start_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
+    """Create the model-gate event before the first check executes."""
+    try:
+        event = _new_model_gate_event(args)
+        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
+        _write_model_gate_event(session_dir, event)
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+        log.warning("failed to initialize SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.start", exc=exc)
+
+
+def _finish_model_gate(args: argparse.Namespace, session_dir: Path) -> None:
+    """Finalize a successfully completed three-check model-gate chain."""
+    try:
+        event = _load_model_gate_event(args, session_dir)
+        ext = event["ext"]
+        event["status"] = _model_gate_status(
+            ext["checks"],
+            skip_reason=str(ext.get("skip_reason") or "") or None,
+        )
+        event["end_time"] = now_iso(timespec="seconds")
+        _write_model_gate_event(session_dir, event)
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change launch behavior
+        log.warning("failed to finalize SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.finish", exc=exc)
+
+
+def _record_resumed_model_gate(
+    args: argparse.Namespace,
+    session_dir: Path,
+    *,
+    workload_overrides: Mapping[str, Any] | None = None,
+) -> None:
+    """Persist the explicit V6 skip required by the resume path."""
+    try:
+        timestamp = now_iso(timespec="seconds")
+        event = _new_model_gate_event(args)
+        event["status"] = "skipped"
+        event["start_time"] = timestamp
+        event["end_time"] = timestamp
+        event["ext"]["run_kind"] = "resume"
+        event["ext"]["skip_reason"] = "resume"
+        if workload_overrides:
+            event["ext"]["workload"].update(workload_overrides)
+        event["ext"]["checks"] = [
+            {
+                "gate_id": gate_id,
+                "order": order,
+                "status": "skipped",
+                "skip_reason": "resume",
+                "detail": {},
+            }
+            for order, gate_id in enumerate(_MODEL_GATE_ORDER, start=1)
+        ]
+        setattr(args, _MODEL_GATE_EVENT_ATTR, event)
+        _write_model_gate_event(session_dir, event)
+    except Exception as exc:  # noqa: BLE001 — V6 observability must never change resume behavior
+        log.warning("failed to record resumed SBD V6 model-gate event", exc_info=True)
+        _record_model_gate_warning(session_dir, component="model_gate.resume", exc=exc)
+
+
+def _write_model_gate_breakdown(
+    session_dir: Path,
+    *,
+    failure_label: str,
+) -> None:
+    """Write the fail-fast SBD once without masking the gate failure."""
+    try:
+        from ..breakdown import write_breakdown_json
+
+        write_breakdown_json(session_dir)
+    except Exception as exc:  # noqa: BLE001 — never mask the gate failure
+        print(
+            f"WARNING: failed to write session_breakdown.json on {failure_label} fail-fast: {exc!r}",
+            file=sys.stderr,
+        )
+        _record_model_gate_warning(session_dir, component=f"model_gate.{failure_label}.breakdown", exc=exc)
+
 
 def _context_headroom_tokens() -> int:
     """Resolve the context headroom (tokens); env override, else default.
@@ -1892,13 +2138,71 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
     isl = int(getattr(args, "isl", 0) or 0)
     osl = int(getattr(args, "osl", 0) or 0)
     if isl <= 0 or osl <= 0:
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "skipped",
+                "skip_reason": "isl_osl_unset",
+                "detail": {
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": _context_headroom_tokens(),
+                    "required": None,
+                    "max_position_embeddings": None,
+                    "fits": None,
+                    "policy": "no_context_length_override",
+                },
+            },
+        )
         return False
     maxpos = _load_model_max_position_embeddings(str(getattr(args, "model", "") or ""))
     if not maxpos:
+        headroom = _context_headroom_tokens()
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "skipped",
+                "skip_reason": "max_position_unknown",
+                "detail": {
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": isl + osl + headroom,
+                    "max_position_embeddings": None,
+                    "fits": None,
+                    "policy": "no_context_length_override",
+                },
+            },
+        )
         return False
     headroom = _context_headroom_tokens()
     required = isl + osl + headroom
     if maxpos >= required:
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "context_window",
+                "order": 3,
+                "status": "passed",
+                "skip_reason": None,
+                "detail": {
+                    "isl": isl,
+                    "osl": osl,
+                    "headroom": headroom,
+                    "required": required,
+                    "max_position_embeddings": maxpos,
+                    "fits": True,
+                    "policy": "no_context_length_override",
+                },
+            },
+        )
         return False
 
     reason = (
@@ -1938,17 +2242,37 @@ def _preflight_context_window(args: argparse.Namespace, session_dir: Path) -> bo
             f"WARNING: failed to persist context-window stop report: {exc!r}",
             file=sys.stderr,
         )
+    _record_model_gate_check(
+        args,
+        session_dir,
+        {
+            "gate_id": "context_window",
+            "order": 3,
+            "status": "failed",
+            "skip_reason": None,
+            "detail": {
+                "isl": isl,
+                "osl": osl,
+                "headroom": headroom,
+                "required": required,
+                "max_position_embeddings": maxpos,
+                "fits": False,
+                "policy": "no_context_length_override",
+            },
+        },
+        failure={
+            "gate_id": "context_window",
+            "stop_reason": "model_context_window_too_small",
+            "exit_code": 2,
+            "message": reason,
+            "artifacts": {
+                "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
+            },
+        },
+    )
     # Delivery-artifact parity: emit session_breakdown.json here too since
     # fail-fast exits before coordinator.run()'s finally.
-    try:
-        from ..breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on context fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
+    _write_model_gate_breakdown(session_dir, failure_label="context")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
@@ -1985,6 +2309,25 @@ def _preflight_model_config_compat(
         framework=framework,
     )
     if detail is None:
+        model_dir = resolve_local_model_dir(model) or Path(model)
+        config_path = model_dir / "config.json"
+        absent = not config_path.is_file()
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "model_config_compat",
+                "order": 2,
+                "status": "skipped" if absent else "passed",
+                "skip_reason": "config_absent_soft_pass" if absent else None,
+                "detail": {
+                    "config_path": str(config_path) if config_path.is_file() else None,
+                    "incompatible": False,
+                    "reason": None,
+                    "detector": None,
+                },
+            },
+        )
         return False
     name = Path(model).name or model
     reason = (
@@ -2018,15 +2361,34 @@ def _preflight_model_config_compat(
             f"WARNING: failed to persist model-config stop report: {exc!r}",
             file=sys.stderr,
         )
-    try:
-        from ..breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on config fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
+    model_dir = resolve_local_model_dir(model) or Path(model)
+    config_path = model_dir / "config.json"
+    _record_model_gate_check(
+        args,
+        session_dir,
+        {
+            "gate_id": "model_config_compat",
+            "order": 2,
+            "status": "failed",
+            "skip_reason": None,
+            "detail": {
+                "config_path": str(config_path) if config_path.is_file() else None,
+                "incompatible": True,
+                "reason": detail,
+                "detector": None,
+            },
+        },
+        failure={
+            "gate_id": "model_config_compat",
+            "stop_reason": "model_config_incompatible",
+            "exit_code": 2,
+            "message": reason,
+            "artifacts": {
+                "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
+            },
+        },
+    )
+    _write_model_gate_breakdown(session_dir, failure_label="config")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)
@@ -2076,11 +2438,49 @@ def _preflight_unsupported_model_arch(
     except Exception:  # noqa: BLE001 — registry import must never block the gate
         is_scriptable = str(framework).strip().lower() == "xdit"
     if is_scriptable:
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "unsupported_model_arch",
+                "order": 1,
+                "status": "skipped",
+                "skip_reason": "scriptable_framework",
+                "verdict": None,
+                "detail": {
+                    "architecture": None,
+                    "model_type": None,
+                    "signal": None,
+                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
+                    "action": "proceed",
+                },
+            },
+        )
         return False
 
     model = str(getattr(args, "model", "") or "")
     hit = _detect_unsupported_model(model)
     if hit is None:
+        config = _load_model_config_dict(model)
+        architectures = _config_architectures(config) if isinstance(config, dict) else []
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "unsupported_model_arch",
+                "order": 1,
+                "status": "passed" if isinstance(config, dict) else "unknown",
+                "skip_reason": None,
+                "verdict": "plain_text" if isinstance(config, dict) else None,
+                "detail": {
+                    "architecture": architectures[0] if architectures else None,
+                    "model_type": str(config.get("model_type") or "") if isinstance(config, dict) else None,
+                    "signal": None,
+                    "allow_mm_text_fallback": bool(getattr(args, "allow_mm_text_fallback", True)),
+                    "action": "proceed",
+                },
+            },
+        )
         return False
 
     name = Path(model).name or model
@@ -2121,6 +2521,30 @@ def _preflight_unsupported_model_arch(
                 f"WARNING: failed to persist degraded-mode marker: {exc!r}",
                 file=sys.stderr,
             )
+        _record_model_gate_check(
+            args,
+            session_dir,
+            {
+                "gate_id": "unsupported_model_arch",
+                "order": 1,
+                "status": "warned",
+                "skip_reason": None,
+                "verdict": verdict,
+                "detail": {
+                    "architecture": arch,
+                    "model_type": mt,
+                    "signal": str(hit.get("signal") or ""),
+                    "allow_mm_text_fallback": allow_fallback,
+                    "action": "proceed",
+                },
+            },
+            degraded_warning={
+                "kind": "multimodal_text_fallback",
+                "architecture": arch,
+                "model_type": mt,
+                "signal": str(hit.get("signal") or ""),
+            },
+        )
         return False
 
     reason = (
@@ -2159,17 +2583,36 @@ def _preflight_unsupported_model_arch(
             f"WARNING: failed to persist unsupported-model stop report: {exc!r}",
             file=sys.stderr,
         )
+    _record_model_gate_check(
+        args,
+        session_dir,
+        {
+            "gate_id": "unsupported_model_arch",
+            "order": 1,
+            "status": "failed",
+            "skip_reason": None,
+            "verdict": verdict,
+            "detail": {
+                "architecture": arch,
+                "model_type": mt,
+                "signal": str(hit.get("signal") or ""),
+                "allow_mm_text_fallback": allow_fallback,
+                "action": "fail_fast",
+            },
+        },
+        failure={
+            "gate_id": "unsupported_model_arch",
+            "stop_reason": "unsupported_model_arch",
+            "exit_code": 2,
+            "message": reason,
+            "artifacts": {
+                "final_json": "reports/final.json" if (session_dir / "reports" / "final.json").is_file() else None,
+            },
+        },
+    )
     # Delivery-artifact parity: emit session_breakdown.json here too since
     # fail-fast exits before coordinator.run()'s finally.
-    try:
-        from ..breakdown import write_breakdown_json
-
-        write_breakdown_json(session_dir)
-    except Exception as exc:  # noqa: BLE001 — best-effort; never mask the reason
-        print(
-            f"WARNING: failed to write session_breakdown.json on unsupported-model fail-fast: {exc!r}",
-            file=sys.stderr,
-        )
+    _write_model_gate_breakdown(session_dir, failure_label="unsupported-model")
     # Langfuse parity: this gate exits before coordinator.run()'s finally, so
     # push the breakdown to Langfuse here too.
     _emit_breakdown_to_langfuse(session_dir)

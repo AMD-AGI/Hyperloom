@@ -161,6 +161,7 @@ async def test_internal_research_scout_task_is_readonly(tmp_path: Path):
 
     assert task is not None
     assert task.params["mode"] == "research"
+    assert task.params["source_phase"] == "PRELUDE"
     assert task.side_effects == ["writes_results"]
     assert task.params["seen_pr_ids"] == ["https://pr/seen"]
     assert "Does this vLLM version support the backend?" in task.params["notes"]

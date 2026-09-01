@@ -103,7 +103,7 @@ class _RenderMixin:
             validated_age = f" (ts={self.cumulative_gain_validated_ts})"
         unvalidated = self.optimization_stack_has_unvalidated_keeps()
         unvalidated_tag = (
-            " ⚠ stack changed since last rebench — RUN `explore` (per-KEEP stack rebench is inlined)"
+            " ⚠ stack changed since last validation — RUN `explore` (a KEEP is measured on the stack)"
             if unvalidated
             else ""
         )
@@ -115,10 +115,26 @@ class _RenderMixin:
         geak_pending_status = (
             str(self.geak_pending.get("status") or "") if isinstance(getattr(self, "geak_pending", None), dict) else ""
         )
+        geak_revalidation_status = (
+            str(self.geak_result.get("revalidation_status") or "")
+            if isinstance(getattr(self, "geak_result", None), dict)
+            else ""
+        )
+        geak_in_stack = any(
+            isinstance(entry, dict) and str(entry.get("action") or "") == "geak_e2e"
+            for entry in (getattr(self, "optimization_stack", None) or [])
+        )
         if geak_pending_status == "awaiting_rebench":
             geak_pending_tag = " ⚠ geak candidate awaiting main-flow rebench — NOT in headline until validated"
         elif geak_pending_status in {"rebench_cancelled", "rebench_unavailable"}:
             geak_pending_tag = f" ⚠ geak candidate dropped unvalidated ({geak_pending_status})"
+        elif geak_revalidation_status in {"failed", "fallback_failed"} and not geak_in_stack:
+            # A fallback rebench that also failed is the same unjudged drop; only
+            # ``no_material`` / ``no_promote`` are verdicts and stay silent here.
+            # A ``failed`` 2b is never retracted when the 2a fallback then
+            # promotes, so confirm the candidate really is out of the stack
+            # before calling it dropped.
+            geak_pending_tag = f" ⚠ geak candidate dropped unvalidated (rebench_{geak_revalidation_status})"
         else:
             geak_pending_tag = ""
         from hyperloom.inference_optimizer import framework_registry
@@ -167,7 +183,7 @@ class _RenderMixin:
         budget_pct: dict[str, float] | None = None,
         now_unix: float | None = None,
     ) -> str:
-        """Render the per-tick ``=== Phase ===`` block (≤7 lines). EXPLORE adds a ``force_exit`` line showing the budget fraction left before the hard force-exit gate; the mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
+        """Render the per-tick ``=== Phase ===`` block (≤7 lines). The mid-chain phases add a ``cycle_reloop`` line showing whether another macro-cycle is still affordable.
 
         Args:
             budget_pct (dict[str, float] | None): Per-phase budget fractions;
@@ -178,12 +194,9 @@ class _RenderMixin:
             str: The compact ``=== Phase ===`` block.
         """
         from ...phases.machine_state import (
-            DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-            PHASE_EXPLORE,
             PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             PHASE_SWEEP,
-            _phase_budget_total_seconds,
             llm_proposable_actions_for,
             normalize_budget_pct,
             phase_budget_remaining_seconds,
@@ -195,9 +208,8 @@ class _RenderMixin:
 
         phase = (self.phase or "").strip().upper() or "UNSET"
         elapsed = int(phase_elapsed_seconds(self, now_unix=now_unix))
-        # ``remaining`` is charged against every entry of this phase, so showing
-        # only the current entry's elapsed time next to it reads as a
-        # contradiction on a re-entered phase: "elapsed_sec=0 remaining_sec=0".
+        # ``remaining`` paces this entry; the absolute cap reads ``cumulative``.
+        # A re-entered phase needs both to be legible.
         cumulative = int(phase_cumulative_seconds(self, now_unix=now_unix))
         budget = normalize_budget_pct(budget_pct or self.phase_budget_pct)
         budget_pct_for_phase = budget.get(phase, 0.0)
@@ -223,32 +235,11 @@ class _RenderMixin:
             budget_line,
             allowed_line,
         ]
-        # EXPLORE-only: distance to hard force-exit alongside the soft budget.
-        if phase == PHASE_EXPLORE:
-            overrides = self.plateau_overrides or {}
-            pct_thresh = float(
-                overrides.get(
-                    "force_exit_budget_pct",
-                    DEFAULT_EXPLORE_FORCE_EXIT_BUDGET_PCT,
-                )
-            )
-            # Same effective-total helper as `remaining` so the fraction stays in
-            # one unit (charge-back against the session for short runs, against
-            # the cycle-window-capped base for long bounded runs).
-            phase_total_sec = _phase_budget_total_seconds(self, budget_pct=budget, now_unix=now_unix)
-            if remaining is not None and phase_total_sec and phase_total_sec > 0:
-                phase_remaining_pct = remaining / phase_total_sec
-            else:
-                phase_remaining_pct = None
-            force_line = f"force_exit: pct_thresh={pct_thresh:.2f}"
-            if phase_remaining_pct is not None:
-                force_line += f" phase_remaining_pct={phase_remaining_pct:.3f}"
-            lines.append(force_line)
         # Whether deferring work to a later cycle is still a real option. Mirrors
         # the SWEEP-exit decision, so it is a projection before SWEEP is reached.
-        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_EXPLORE, PHASE_KERNEL_AGENT, PHASE_SWEEP):
+        if phase in (PHASE_FRAMEWORK_AGENT, PHASE_KERNEL_AGENT, PHASE_SWEEP):
             reloop, evidence = should_reloop_to_explore(self, now_unix=now_unix)
-            feasible = reloop and (self.framework_agent_phase_enabled or self.explore_enabled)
+            feasible = reloop and self.framework_agent_phase_enabled
             reloop_line = f"reloop    : cycle_reloop_feasible={'true' if feasible else 'false'}"
             threshold = evidence.get("min_remaining_sec_effective")
             if threshold is not None:
