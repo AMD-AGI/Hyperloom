@@ -264,8 +264,16 @@ def sanitize_shared_knowledge(knowledge: Mapping[str, Any]) -> dict[str, Any]:
 
     Host paths survive in exactly one place, the :data:`HOST_ORIGIN_KEY` subtree,
     because a KEEP that cannot say which checkout it came from cannot be replayed
-    on an image that lays that checkout out somewhere else. Secrets are dropped
-    there as everywhere: the exemption is about absolute paths only.
+    on an image that lays that checkout out somewhere else.
+
+    The exemption is scoped precisely: inside the subtree an absolute-path string
+    is returned verbatim, which means the value-level scrubbing every other
+    string gets -- ``redact_secret_values`` and embedded-path redaction -- is
+    bypassed for it (that is the whole point: the path must survive intact).
+    Key-level dropping is *not* relaxed there: a secret-named key is still
+    removed inside the subtree exactly as it is everywhere else. So do not put a
+    credential-bearing value under this key expecting the path exemption to also
+    launder its content -- it will not.
     """
     cleaned = _sanitize_value(dict(knowledge))
     return cleaned if isinstance(cleaned, dict) else {}

@@ -1204,10 +1204,15 @@ def _apply_warm_patches(
 
     Reads ``params["patches"]`` (list of dicts with patch_file/patch_content/
     patch_ref). An entry's ``framework_root`` is the checkout the KEEP was
-    applied into when it was recorded, and it is where that overlay goes;
-    ``target_repo`` serves the entries carrying none. So a Recipe whose KEEPs
-    came from different trees -- a framework patch and, separately, a data file
-    under another root -- replays against each of them.
+    applied into when it was recorded, and it is where that overlay goes, so a
+    Recipe whose KEEPs came from different trees -- a framework patch and,
+    separately, a data file under another root -- replays against each of them.
+
+    ``target_repo`` is only a fallback for an entry that records no root of its
+    own. The current-contract prelude never produces such an entry (it skips a
+    replay whose overlays are not all rooted), so on that path ``target_repo``
+    is always empty; it stays a parameter for direct callers and tests that
+    apply a rootless patch list against one explicit repo.
 
     Applies each patch via ``git apply`` when its tree is a git work-tree,
     otherwise via the shared nogit ``patch`` CLI path used by integrate_patch.

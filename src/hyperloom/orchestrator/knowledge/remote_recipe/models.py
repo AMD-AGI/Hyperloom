@@ -290,11 +290,15 @@ class RemoteWriteResult:
 
 __all__ = [
     "Artifact",
+    "CONFIG_SECTION",
+    "KERNEL_SECTION",
     "KnowledgeBundle",
     "MAX_FILE_BYTES",
     "MAX_FILES",
     "MAX_KNOWLEDGE_BYTES",
     "MAX_PATH_BYTES",
+    "PATCH_SECTION",
+    "RECIPE_SECTIONS",
     "RemoteRecipeValidationError",
     "RemoteWriteResult",
     "RecipeScope",
