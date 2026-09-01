@@ -121,7 +121,16 @@ def test_pin_uses_recipe_when_the_process_is_unmasked() -> None:
     assert out["ids"] == [6, 7]
 
 
-def test_pin_skips_blank_values() -> None:
+def test_a_blank_value_does_not_shadow_a_real_pin_further_down_the_chain() -> None:
+    """A blank ROCR must not hide a HIP pin — but it is still reported, see below.
+
+    ``gpu_pool._visible_device_mask`` and ``gate.detect_gpu_count`` read
+    ``VAR=""`` as "zero devices visible"; this resolver used to skip it
+    entirely, so with a blank ROCR and a stale ``HIP=2,3`` those layers saw
+    zero GPUs while the handoff advertised two. The blank is now recorded (see
+    :func:`test_an_empty_mask_reports_zero_devices_rather_than_unpinned`) but
+    only as the fallback, so a real pin still wins.
+    """
     out = _resolve_gpu_pin(
         recipe_envs={"ROCR_VISIBLE_DEVICES": "  "},
         environ={"HIP_VISIBLE_DEVICES": "2,3"},
