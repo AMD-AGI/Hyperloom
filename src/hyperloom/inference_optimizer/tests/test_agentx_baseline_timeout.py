@@ -32,6 +32,7 @@ from hyperloom.orchestrator.actions.executors.baseline import (
     BASELINE_DEFAULT_TIMEOUT_SEC,
     BaselineExecutor,
     agentx_baseline_timeout_sec,
+    agentx_warmup_grace_sec,
 )
 
 _MEASURED_VLLM_SEC = 6676  # the E4 round, warm corpus, no first-compile
@@ -314,3 +315,56 @@ def test_synthetic_cold_start_bump_is_untouched(monkeypatch):
         lambda: {},
     )
     assert BaselineExecutor()._resolve_timeout({}) == BASELINE_COLD_START_TIMEOUT_SEC
+
+
+# --- the warmup grace both layers must read -------------------------------------
+
+
+def test_the_cap_and_the_clients_bound_come_from_one_function(monkeypatch):
+    """The cap's warmup share IS the client's bound, or the round gets cut early.
+
+    This is the invariant the whole helper exists for: ``aiperf_client.sh``
+    passes this number to aiperf as ``--warmup-grace-period``, and that is what
+    actually stops the warmup. If the cap budgets more than the client is
+    allowed to spend, warmup ends mid-corpus and the round reports a
+    prefix-reuse figure taken before the cache was populated.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    grace = agentx_warmup_grace_sec()
+    _NON_WARMUP = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert grace == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + _NON_WARMUP + grace)
+
+
+@pytest.mark.parametrize("conc", ["1", "4", "8"])
+def test_the_grace_is_untouched_at_or_below_the_anchor(monkeypatch, conc):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", conc)
+    assert agentx_warmup_grace_sec() == 3600
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
+def test_an_unusable_grace_falls_back_to_canonical(monkeypatch, bad):
+    """A typo must not hand the client a warmup bound of zero."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
+    assert agentx_warmup_grace_sec() == AGENTX_CANON_WARMUP_GRACE_SEC
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-8", "8.5"])
+def test_an_unusable_conc_leaves_the_grace_alone(monkeypatch, bad):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", bad)
+    assert agentx_warmup_grace_sec() == 3600
+
+
+def test_the_grace_never_shrinks(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    for conc in (1, 2, 4, 8, 9, 16, 32, 64, 128):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() >= 3600

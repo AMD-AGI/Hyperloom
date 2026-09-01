@@ -670,6 +670,60 @@ def _agentx_conc(src: "Mapping[str, str]") -> int:
     return value if value > 0 else 0
 
 
+def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
+    """The warmup bound for this round: the operator's grace, scaled by CONC.
+
+    ONE function because there are TWO consumers that must agree. This module
+    sizes the subprocess cap that has to outlast the warmup, and
+    ``aiperf_client.sh`` passes ``--warmup-grace-period`` to aiperf, which is
+    what actually cuts the warmup off. They read the same env var, and the
+    docstring of the cap has always claimed they stay consistent -- but the
+    CONC scaling used to live inside the cap's own body, so the client kept
+    seeing the UNSCALED number.
+
+    Measured consequence on a Kimi-K3 conc=32 round: the cap budgeted 14400s of
+    warmup while the client was still bounded at 3600s, so warmup would have
+    been cut at 106 of 354 requests with the working set barely populated --
+    the round survives, and reports a prefix-reuse figure taken before the
+    cache had anything in it. Exporting this value to the client is what makes
+    the two layers agree.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The warmup grace in seconds, never below the operator's own value.
+    """
+    src = os.environ if env is None else env
+    raw = (src.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
+    try:
+        grace = int(raw)
+    except ValueError:
+        grace = AGENTX_CANON_WARMUP_GRACE_SEC
+    if grace <= 0:
+        grace = AGENTX_CANON_WARMUP_GRACE_SEC
+    # The client's warmup is linear in CONC by construction (per-lane requests x
+    # CONC lanes), but the grace knob is a flat number, so a grace chosen at one
+    # concurrency under-budgets every higher one. Scale, never shrink, and stay
+    # identity at or below the anchor so previously-validated rounds keep their
+    # exact bound.
+    conc = _agentx_conc(src)
+    if conc <= AGENTX_CANON_WARMUP_CONC:
+        return grace
+    scaled = (grace * conc) // AGENTX_CANON_WARMUP_CONC
+    log.info(
+        "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
+        "(warmup work is linear in CONC; anchor CONC=%d). The floor only raises the "
+        "bound -- an over-large one costs a longer wait on a hung round, an "
+        "under-sized one kills a warmup that would have finished.",
+        grace,
+        scaled,
+        conc,
+        AGENTX_CANON_WARMUP_CONC,
+    )
+    return scaled
+
+
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """Resolve the AgentX baseline cap: explicit, else duration + overhead.
 
@@ -709,28 +763,9 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
         grace = None
     else:
         # Derive the warmup share from the same knob that bounds it in the
-        # client, so the cap tracks the round the operator actually configured
-        # rather than the one this constant was measured on.
-        grace = _int("AGENTX_WARMUP_GRACE_PERIOD", AGENTX_CANON_WARMUP_GRACE_SEC)
-        # CONC-scaled floor: the client's warmup is linear in CONC by
-        # construction (per-lane requests x CONC lanes), but the grace knob is a
-        # flat number, so a grace chosen at one concurrency under-budgets every
-        # higher one. Scale, never shrink, and stay identity at or below the
-        # anchor so previously-validated rounds keep their exact cap.
-        conc = _agentx_conc(src)
-        if conc > AGENTX_CANON_WARMUP_CONC:
-            scaled = (grace * conc) // AGENTX_CANON_WARMUP_CONC
-            log.info(
-                "agentx_baseline_timeout_sec: scaling the warmup share %ds -> %ds for "
-                "CONC=%d (warmup work is linear in CONC; anchor CONC=%d). The floor only "
-                "raises the cap -- an over-large cap costs a longer wait on a hung round, "
-                "an under-sized one kills a round that would have finished.",
-                grace,
-                scaled,
-                conc,
-                AGENTX_CANON_WARMUP_CONC,
-            )
-            grace = scaled
+        # client, via the same helper the client's value is exported from, so
+        # the cap and the client's --warmup-grace-period cannot drift apart.
+        grace = agentx_warmup_grace_sec(src)
         overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
         if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
             # Nothing has been tuned for this model at all. The derivation

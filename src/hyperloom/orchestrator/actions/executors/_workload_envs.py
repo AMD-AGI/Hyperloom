@@ -215,6 +215,7 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     # not a replacement for it.
     from hyperloom.orchestrator.actions.executors.baseline import (
         agentx_baseline_timeout_sec,
+        agentx_warmup_grace_sec,
     )
 
     _derived = agentx_baseline_timeout_sec()
@@ -242,6 +243,33 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     for key, value in os.environ.items():
         if key.startswith("AGENTX_") or key in ("AIPERF_BIN", "WEKA_LOADER_OVERRIDE"):
             envs[key] = value
+    # ...but AGENTX_WARMUP_GRACE_PERIOD must not be forwarded raw. It is read by
+    # TWO layers that have to agree: this process derives the subprocess cap from
+    # it (scaled by CONC, because warmup is per-lane requests x CONC lanes), while
+    # aiperf_client.sh hands it to aiperf as --warmup-grace-period, which is what
+    # actually cuts the warmup off. The loop above copies the operator's raw
+    # value, so the client was bounded at the UNSCALED number while the cap
+    # budgeted the scaled one.
+    #
+    # Measured on a Kimi-K3 conc=32 round: cap 14400s of warmup vs client bound
+    # 3600s. Warmup would have been cut at 106 of 354 requests -- not a crash, a
+    # round that reports a prefix-reuse figure measured before the cache had
+    # anything in it. Export the derived value so both layers see one number.
+    #
+    # AgentX-only by construction: this function returned early when AgentX is
+    # off, and AGENTX_* has no meaning on the synthetic path.
+    _grace = agentx_warmup_grace_sec()
+    _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
+    envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
+    if _raw_grace != str(_grace):
+        log.info(
+            "AgentX: exporting the CONC-scaled warmup grace %ds to the client "
+            "(operator value %s). The client's --warmup-grace-period and this "
+            "process's subprocess cap are derived from the same number, so a "
+            "raw forward here would bound the warmup below what the cap pays for.",
+            _grace,
+            _raw_grace or "unset",
+        )
 
 
 def prepare_agentx_runtime(

@@ -358,3 +358,91 @@ def test_agentx_switch_skips_scriptable_inner_timeout(monkeypatch):
     bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
     apply_agentx_switch(bench)
     assert bench["timeout_seconds"] == 7200
+
+
+# --- the client's warmup bound must be the SCALED grace, not the raw one ------
+
+
+def _switched(monkeypatch, **env):
+    """Run the AgentX switch over a vllm bench and hand back its envs."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    return bench.get("envs", {})
+
+
+def test_the_client_is_handed_the_conc_scaled_grace(monkeypatch):
+    """One number, two layers.
+
+    ``aiperf_client.sh`` reads AGENTX_WARMUP_GRACE_PERIOD and passes it to
+    aiperf as ``--warmup-grace-period`` -- that is what actually stops the
+    warmup. This process scales the same knob by CONC to size the subprocess
+    cap. Forwarding the operator's RAW value bounds the client below what the
+    cap pays for: measured on a Kimi-K3 conc=32 round, a 14400s cap against a
+    3600s client bound would have cut warmup at 106 of 354 requests, and the
+    round would then report a prefix-reuse figure taken before the cache held
+    anything.
+    """
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", CONC="32")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "14400"
+
+
+def test_at_or_below_the_anchor_the_operators_grace_round_trips(monkeypatch):
+    """Zero drift for every concurrency the old behaviour was validated at."""
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", CONC="8")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "3600"
+
+
+def test_the_exported_grace_matches_what_the_cap_budgeted(monkeypatch):
+    """The invariant itself, asserted directly rather than via two constants."""
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_warmup_grace_sec,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="1800", CONC="64")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(agentx_warmup_grace_sec())
+
+
+def test_nothing_is_exported_on_the_default_synthetic_path(monkeypatch):
+    """AgentX off: no envs block, no grace, no benchmark_script -- untouched.
+
+    The switch returns early before any of this runs, so the synthetic path
+    cannot pick up an AgentX-shaped warmup bound.
+    """
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    _off(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert "envs" not in bench
+    assert "benchmark_script" not in bench
+    assert bench["timeout_seconds"] == 7200
+
+
+def test_a_scriptable_framework_gets_no_grace_either(monkeypatch):
+    """The other early return: scriptable frameworks never reach the switch."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert "envs" not in bench
