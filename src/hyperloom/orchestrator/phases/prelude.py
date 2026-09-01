@@ -12,8 +12,8 @@ import logging as _logging
 import math
 import os
 from pathlib import Path
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from collections.abc import Mapping, Sequence
+from typing import Any
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
@@ -28,9 +28,7 @@ from ..loop.coordinator_helpers import (
     measured_baseline_runtime_sec,
 )
 from .base import PhaseHandler
-
-if TYPE_CHECKING:
-    from ..framework.paths import WarmReplayRootResolution
+from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 
 log = _logging.getLogger(__name__)
 
@@ -40,21 +38,6 @@ log = _logging.getLogger(__name__)
 # no evidence the eval ran, and calling those "ran" makes an infrastructure
 # fault read as a model that answered nothing.
 _EVAL_RAN_BUT_UNSCORABLE = ("parse error:", "no recognized metric in")
-
-
-def _merge_current_recipe_configs(
-    explore: Mapping[str, Any],
-    framework: Mapping[str, Any],
-    kernel: Mapping[str, Any] | None = None,
-) -> tuple[str, dict[str, str]]:
-    """Merge owner config snapshots, failing on overlapping differences."""
-    owners: list[tuple[str, Mapping[str, Any]]] = [
-        ("explore", explore),
-        ("framework", framework),
-    ]
-    if kernel is not None:
-        owners.append(("kernel", kernel))
-    return _merge_named_current_recipe_configs(owners)
 
 
 def _merge_named_current_recipe_configs(
@@ -112,6 +95,55 @@ def _merge_named_current_recipe_configs(
                 raise ValueError(f"current Recipe env conflict for {key}: {envs[key]!r} != {value!r} ({owner})")
             envs[key] = value
     return " ".join(token for key in order for token in pairs[key]), envs
+
+
+def _recorded_apply_roots(provenance: Any) -> dict[str, str]:
+    """Map each overlay ref to the checkout the record says it was applied into.
+
+    Per ref rather than per record: a session can KEEP a patch against the
+    framework tree and another against a sibling one, and each is replayable
+    against the tree it came from.
+    """
+    roots: dict[str, str] = {}
+    for row in provenance or []:
+        if not isinstance(row, Mapping):
+            continue
+        origin = row.get("host_origin")
+        if not isinstance(origin, Mapping):
+            continue
+        for ref, root in (origin.get("apply_roots") or {}).items():
+            name = str(ref or "").strip()
+            value = str(root or "").strip()
+            if name and value:
+                roots.setdefault(name, value)
+    return roots
+
+
+def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]:
+    """Summarise how the overlays this replay is about to apply were captured.
+
+    Recorded on the outcome so a reader can tell an overlay set that reproduces
+    its session from one that never could: a capture that could not account for
+    every path, or a KEEP whose gain partly landed outside the framework root,
+    is a known gap rather than a clean replay.
+    """
+
+    def _count(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    rows = [row for row in (sdk_replay.get("provenance") or []) if isinstance(row, Mapping)]
+    overlays = len(sdk_replay.get("patches") or [])
+    if not overlays and not rows:
+        return {}
+    return {
+        "overlays": overlays,
+        "realized": sum(1 for row in rows if row.get("realized")),
+        "incomplete": sum(1 for row in rows if row.get("complete") is False),
+        "artifacts_outside_root": sum(_count(row.get("artifacts_outside_root")) for row in rows),
+    }
 
 
 def _warm_kernel_keep_threshold_pct(state: Any) -> float:
@@ -367,6 +399,12 @@ class PreludePhase(PhaseHandler):
                         "target_path",
                     }
                 }
+                # The checkout this item was applied into. Replay places the
+                # patch there and nowhere else, so an item that records none is
+                # not replayable and says so rather than being searched for.
+                host_origin = row.get(HOST_ORIGIN_KEY)
+                if isinstance(host_origin, Mapping):
+                    entry["apply_root"] = str(host_origin.get("apply_root") or "").strip()
                 patch_ref = str(row.get("patch") or "").strip()
                 if patch_ref:
                     patch_local = kb.prior_file(patch_ref)
@@ -429,26 +467,30 @@ class PreludePhase(PhaseHandler):
 
         patch_path = Path(str(entry.get("patch_path") or "").strip())
         try:
-            from ..framework.paths import resolve_warm_replay_kernel_root
             from ..specialists.patch_safety import parse_patch_targets
 
             parsed = parse_patch_targets(patch_path.read_text(errors="replace"))
-            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry])
-            root_value = str(resolution.root or "").rstrip("/")
         except (OSError, ValueError) as exc:
             return reject(f"invalid patch targets: {type(exc).__name__}: {exc}")
+        # The recorded root is the only answer. Searching an allowlist for a
+        # tree the diff happens to fit would replay against code the gain was
+        # never measured on, and a record naming no root is simply broken.
+        root_value = str(entry.get("apply_root") or "").strip().rstrip("/")
         if not root_value:
-            detail = resolution.reason
-            if resolution.allowlist:
-                detail = f"{detail}; allowlist={list(resolution.allowlist)!r}"
-            return reject(detail, code=resolution.reason)
+            return reject(
+                "kernel item records no apply root",
+                code="kernel_apply_root_missing",
+            )
         try:
             root = Path(root_value).resolve(strict=False)
             root_is_dir = root.is_dir()
         except (OSError, RuntimeError) as exc:
-            return reject(f"active framework root cannot be resolved: {type(exc).__name__}: {exc}")
+            return reject(f"recorded kernel apply root cannot be resolved: {type(exc).__name__}: {exc}")
         if not root_is_dir:
-            return reject(f"active framework root is invalid: {root}")
+            return reject(
+                f"recorded kernel apply root is not present on this host: {root}",
+                code="kernel_apply_root_absent",
+            )
 
         resolved: list[str] = []
         for target in parsed.all:
@@ -719,16 +761,17 @@ class PreludePhase(PhaseHandler):
     def _warm_replay_root_skip_outcome(
         *,
         reason: str,
-        resolution: "WarmReplayRootResolution",
         root_kind: str,
+        roots: Sequence[str] = (),
         rollback: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Record why warm replay stopped, with the roots it was allowed to use.
+        """Record why warm replay stopped, naming the roots the record asked for.
 
         Args:
             reason: The resolution failure to surface in SBD.
-            resolution: The failed resolution, for its source and allowlist.
             root_kind: ``framework`` or ``kernel``; names the reported keys.
+            roots: The recorded roots that could not be used, for a reader
+                diagnosing a record produced on another image.
             rollback: Outcome of undoing patches already applied, when any were.
 
         Returns:
@@ -737,8 +780,8 @@ class PreludePhase(PhaseHandler):
         outcome: dict[str, Any] = {
             "status": ("skipped" if rollback is None or rollback.get("ok") else "rollback_failed"),
             "reason": reason,
-            f"{root_kind}_patch_root_source": str(resolution.source or ""),
-            f"{root_kind}_patch_root_allowlist": list(resolution.allowlist or ()),
+            f"{root_kind}_patch_root_source": "recorded",
+            f"{root_kind}_patch_recorded_roots": list(roots),
         }
         if rollback is not None:
             outcome["rollback"] = rollback
@@ -748,30 +791,33 @@ class PreludePhase(PhaseHandler):
         self,
         state: Any,
     ) -> dict[str, Any] | None:
-        """Skip combined warm replay when a kernel patch root cannot be resolved."""
-        from ..framework.paths import _warm_replay_kernel_patch_roots, resolve_warm_replay_kernel_root
+        """Skip combined warm replay when a kernel item's recorded root is unusable.
 
-        allowlist = _warm_replay_kernel_patch_roots()
+        A persisted plan may be restored on resume under a different image, so
+        every recorded root is re-checked here rather than trusted from when the
+        plan was built.
+        """
         for entry in getattr(state, "warm_kernel_kb_plan", []) or []:
             if not isinstance(entry, dict):
                 continue
+            # gemm is parameter-shaped: it re-points env vars at downloaded files
+            # and never patches a checkout, so it has no root to resolve.
             if entry.get("column") == "gemm":
                 continue
-            patch_raw = str(entry.get("patch_path") or "").strip()
-            if not patch_raw:
+            if not str(entry.get("patch_path") or "").strip():
                 continue
-            # A persisted plan may be restored on resume under a different
-            # environment, and inline patch material may also have changed
-            # since the reason was recorded. Re-resolve every patch and only
-            # allow the combined replay when a safe root is explicit.
-            resolution = resolve_warm_replay_kernel_root(patch_entries=[entry], precomputed_allowlist=allowlist)
-            if resolution.root:
-                continue
-            return self._warm_replay_root_skip_outcome(
-                reason=resolution.reason,
-                resolution=resolution,
-                root_kind="kernel",
-            )
+            root = str(entry.get("apply_root") or "").strip()
+            if not root:
+                return self._warm_replay_root_skip_outcome(
+                    reason="kernel_apply_root_missing",
+                    root_kind="kernel",
+                )
+            if not Path(root).is_dir():
+                return self._warm_replay_root_skip_outcome(
+                    reason="kernel_apply_root_absent",
+                    root_kind="kernel",
+                    roots=[root],
+                )
         return None
 
     def _set_warm_kernel_outcome(
@@ -1093,35 +1139,18 @@ class PreludePhase(PhaseHandler):
         return bool(isinstance(recipe, Mapping) and recipe.get("record_kind") == RECORD_KIND_HYPERLOOM_RECIPE)
 
     def _read_current_recipe_replay(self) -> dict[str, Any]:
-        """Load current replay data exclusively through section SDK readers."""
-        from ..knowledge.agent_kb import (
-            ExploreAgentKB,
-            FrameworkAgentKB,
-            KernelAgentKB,
-            RecipeReplayKB,
-        )
+        """Load current replay data exclusively through the column facades."""
+        from ..knowledge.agent_kb import ConfigKB, KernelAgentKB, PatchKB
 
-        explore = ExploreAgentKB.open()
-        framework = FrameworkAgentKB.open()
+        config_kb = ConfigKB.open()
+        patch_kb = PatchKB.open()
         kernel = KernelAgentKB.open()
-        replay = RecipeReplayKB.open()
-        if not all((explore.active, framework.active, kernel.active, replay.active)):
-            raise ValueError("current Recipe SDK readers are unavailable")
+        if not all((config_kb.active, patch_kb.active, kernel.active)):
+            raise ValueError("current Recipe column facades are unavailable")
 
-        config = replay.read_config()
-        if config:
-            args = str(config.get("extra_server_args") or "")
-            envs = dict(config.get("extra_envs") or {})
-        else:
-            # Existing schema-v1 records stored config under owner sections.
-            args, envs = _merge_current_recipe_configs(
-                explore.read_config(),
-                framework.read_config(),
-            )
-            config = {
-                "extra_server_args": args,
-                "extra_envs": envs,
-            }
+        config = config_kb.read()
+        args = str(config.get("extra_server_args") or "")
+        envs = dict(config.get("extra_envs") or {})
         kernel_config = self._preview_current_kernel_config(kernel)
         combined_args, combined_envs = _merge_named_current_recipe_configs(
             [
@@ -1129,37 +1158,19 @@ class PreludePhase(PhaseHandler):
                 ("kernel", kernel_config),
             ]
         )
-        owner_kbs = {"explore": explore, "framework": framework}
-        owner_ref_lists = {owner: kb.read_patches() for owner, kb in owner_kbs.items()}
-        owner_patch_roots = {owner: kb.read_patch_roots() for owner, kb in owner_kbs.items()}
-        timeline = replay.read_patch_timeline()
-        all_owner_refs = [ref for refs in owner_ref_lists.values() for ref in refs]
+        # The column records its overlays in replay order, so the recorded
+        # order is the order they are applied in.
+        timeline = patch_kb.read_patches()
         if len(timeline) != len(set(timeline)):
-            raise ValueError("current Recipe patch_timeline contains duplicate refs")
-        if len(all_owner_refs) != len(set(all_owner_refs)):
-            raise ValueError("current Recipe owner patch lists contain duplicate refs")
-        timeline_refs = set(timeline)
-        section_refs = set(all_owner_refs)
-        if timeline_refs != section_refs:
-            missing = sorted(section_refs - timeline_refs)
-            extra = sorted(timeline_refs - section_refs)
-            raise ValueError(
-                f"current Recipe patch_timeline must exactly equal owner refs; missing={missing!r} extra={extra!r}"
-            )
-        owner_refs = {owner: set(refs) for owner, refs in owner_ref_lists.items()}
+            raise ValueError("current Recipe patch refs contain a duplicate")
+        provenance = patch_kb.read_provenance()
+        apply_roots = _recorded_apply_roots(provenance)
         patches: list[dict[str, Any]] = []
         for index, ref in enumerate(timeline):
-            owner = Path(ref).parts[0] if Path(ref).parts else ""
-            kb = owner_kbs.get(owner)
-            if kb is None:
-                raise ValueError(f"current Recipe timeline has unsupported owner: {ref!r}")
-            if ref not in owner_refs[owner]:
-                raise ValueError(f"current Recipe timeline ref is absent from value.{owner}: {ref!r}")
-            source = kb.prior_file(ref)
+            source = patch_kb.prior_file(ref)
             if source is None:
-                raise ValueError(f"current Recipe timeline artifact is unavailable: {ref!r}")
-            recorded_root = str(owner_patch_roots.get(owner, {}).get(ref) or "").strip()
-            patch_entry: dict[str, Any] = {
+                raise ValueError(f"current Recipe patch artifact is unavailable: {ref!r}")
+            entry: dict[str, Any] = {
                 "patch_file": ref,
                 "patch_ref": str(source),
                 "patch_content": "",
@@ -1167,9 +1178,11 @@ class PreludePhase(PhaseHandler):
                 "required": True,
                 "timeline_index": index,
             }
-            if recorded_root:
-                patch_entry["framework_root"] = recorded_root
-            patches.append(patch_entry)
+            # Each overlay carries the checkout it was applied into, so a Recipe
+            # whose KEEPs came from different trees replays against each of them.
+            if recorded_root := apply_roots.get(ref, ""):
+                entry["framework_root"] = recorded_root
+            patches.append(entry)
         return {
             "extra_server_args": args,
             "extra_envs": envs,
@@ -1179,6 +1192,7 @@ class PreludePhase(PhaseHandler):
             "timeline": timeline,
             "patches": patches,
             "kernel_kb": kernel,
+            "provenance": provenance,
         }
 
     async def _maybe_enqueue_warm_replay(
@@ -1239,18 +1253,27 @@ class PreludePhase(PhaseHandler):
                 }
                 state.save(self.session_dir)
                 return None
-            if sdk_replay.get("patches"):
-                from ..framework.paths import resolve_warm_replay_framework_root
-
-                framework_resolution = resolve_warm_replay_framework_root(
-                    patch_entries=list(sdk_replay.get("patches") or [])
-                )
-                if not framework_resolution.root:
+            if patch_entries := list(sdk_replay.get("patches") or []):
+                # Every overlay names the checkout it was measured on. One that
+                # does not is a broken record, not a case to search a tree for:
+                # any tree found that way is one this gain was never measured
+                # against. The whole replay is skipped, never part of it.
+                recorded = [str((entry or {}).get("framework_root") or "").strip() for entry in patch_entries]
+                if not all(recorded):
                     state.warm_replay_attempted = True
                     state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                        reason=framework_resolution.reason,
-                        resolution=framework_resolution,
+                        reason="framework_apply_root_missing",
                         root_kind="framework",
+                        roots=[root for root in recorded if root],
+                    )
+                    state.save(self.session_dir)
+                    return None
+                if absent := [root for root in dict.fromkeys(recorded) if not Path(root).is_dir()]:
+                    state.warm_replay_attempted = True
+                    state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
+                        reason="framework_apply_root_absent",
+                        root_kind="framework",
+                        roots=absent,
                     )
                     state.save(self.session_dir)
                     return None
@@ -1423,10 +1446,12 @@ class PreludePhase(PhaseHandler):
             wsc_patches = []
             required_patch_timeline = False
         if wsc_patches:
-            from ..framework.paths import resolve_warm_replay_framework_root
-
-            framework_resolution = resolve_warm_replay_framework_root(patch_entries=list(wsc_patches))
-            if not framework_resolution.root:
+            # Re-checked here because a persisted plan may be resumed under a
+            # different image, and because the kernel half is already applied by
+            # now: a root that has since gone means unwinding that too.
+            recorded_roots = [str((entry or {}).get("framework_root") or "").strip() for entry in wsc_patches]
+            unusable = [root for root in dict.fromkeys(recorded_roots) if root and not Path(root).is_dir()]
+            if not all(recorded_roots) or unusable:
                 rollback = (
                     self._revert_warm_kernel_patches(
                         kernel_applied,
@@ -1447,9 +1472,9 @@ class PreludePhase(PhaseHandler):
                         state.set_stop_reason("warm_replay_rollback_failed")
                 state.warm_replay_attempted = True
                 state.warm_replay_outcome = self._warm_replay_root_skip_outcome(
-                    reason=framework_resolution.reason,
-                    resolution=framework_resolution,
+                    reason=("framework_apply_root_absent" if unusable else "framework_apply_root_missing"),
                     root_kind="framework",
+                    roots=unusable or [root for root in recorded_roots if root],
                     rollback=rollback,
                 )
                 state.save(self.session_dir)
@@ -1634,6 +1659,7 @@ class PreludePhase(PhaseHandler):
             "replay_task_id": task.task_id,
             "kernel_count": len(kernel_pending),
             "recipe_suppressed": recipe_suppressed,
+            **({"overlay_provenance": summary} if (summary := _overlay_provenance_summary(sdk_replay)) else {}),
             **donor_metadata,
         }
         state.warm_replay_pending = {
@@ -1655,37 +1681,56 @@ class PreludePhase(PhaseHandler):
         result: dict[str, Any],
         task: "Task | None",
     ) -> tuple[bool, dict[str, Any]]:
-        """Validate the already-patched checkout selected by warm replay."""
+        """Validate every already-patched checkout selected by warm replay.
+
+        A replay may have patched more than one tree, because each overlay is
+        placed into the checkout it was recorded against. All of them are
+        promoted or none is: the measured gain came from the whole set.
+        """
         params = (task.params if task is not None else {}) or {}
         if not params.get("required_patch_timeline") or not params.get("patches"):
             return True, {"status": "not_required"}
 
-        target = str(result.get("warm_patch_target") or "").strip()
-        pre_sha = str(result.get("warm_patch_pre_sha") or "").strip()
-        manifest = result.get("warm_patch_snapshot_manifest")
-        if not target or not pre_sha or not isinstance(manifest, dict):
-            return False, {
-                "status": "failed",
-                "failure": "validated_recipe_checkout_incomplete",
-                "target_repo": target,
-            }
-        try:
-            target_path = Path(target).resolve(strict=True)
-            manifest_target = Path(str(manifest.get("repo_path") or "")).resolve(strict=True)
-        except (OSError, ValueError) as exc:
-            return False, {
-                "status": "failed",
-                "failure": f"validated_recipe_checkout_invalid:{type(exc).__name__}",
-            }
-        if target_path != manifest_target:
-            return False, {
-                "status": "failed",
-                "failure": "validated_recipe_checkout_manifest_mismatch",
-                "target_repo": str(target_path),
-            }
+        trees = [tree for tree in (result.get("warm_patch_trees") or []) if isinstance(tree, Mapping)]
+        if not trees:
+            # A round that predates the list reports only its primary tree.
+            trees = [
+                {
+                    "root": result.get("warm_patch_target"),
+                    "pre_sha": result.get("warm_patch_pre_sha"),
+                    "snapshot_manifest": result.get("warm_patch_snapshot_manifest"),
+                }
+            ]
+        promoted: list[str] = []
+        for tree in trees:
+            target = str(tree.get("root") or "").strip()
+            pre_sha = str(tree.get("pre_sha") or "").strip()
+            manifest = tree.get("snapshot_manifest")
+            if not target or not pre_sha or not isinstance(manifest, Mapping):
+                return False, {
+                    "status": "failed",
+                    "failure": "validated_recipe_checkout_incomplete",
+                    "target_repo": target,
+                }
+            try:
+                target_path = Path(target).resolve(strict=True)
+                manifest_target = Path(str(manifest.get("repo_path") or "")).resolve(strict=True)
+            except (OSError, ValueError) as exc:
+                return False, {
+                    "status": "failed",
+                    "failure": f"validated_recipe_checkout_invalid:{type(exc).__name__}",
+                }
+            if target_path != manifest_target:
+                return False, {
+                    "status": "failed",
+                    "failure": "validated_recipe_checkout_manifest_mismatch",
+                    "target_repo": str(target_path),
+                }
+            promoted.append(str(target_path))
         return True, {
             "status": "promoted",
-            "target_repo": str(target_path),
+            "target_repo": promoted[0],
+            "target_repos": promoted,
         }
 
     def _rollback_combined_warm(
@@ -1693,19 +1738,40 @@ class PreludePhase(PhaseHandler):
         result: dict[str, Any],
         task: "Task | None",
     ) -> dict[str, Any]:
-        """Restore both Recipe and Kernel halves of a combined replay."""
+        """Restore both Recipe and Kernel halves of a combined replay.
+
+        The Recipe half may span several checkouts, so every tree the replay
+        patched is restored -- leaving one behind would bank a mutation from a
+        replay that was rejected.
+        """
         from ..actions.executors.baseline import _revert_patches
 
         restores: list[dict[str, Any]] = []
         pending = getattr(self.shared_state, "warm_replay_pending", {}) or {}
-        target = str(result.get("warm_patch_target") or pending.get("recipe_patch_target") or "")
-        pre_sha = str(result.get("warm_patch_pre_sha") or pending.get("recipe_patch_pre_sha") or "")
-        recipe_manifest = result.get("warm_patch_snapshot_manifest") or pending.get("recipe_patch_snapshot_manifest")
-        if target:
+        trees = [
+            tree
+            for tree in (result.get("warm_patch_trees") or pending.get("recipe_patch_trees") or [])
+            if isinstance(tree, Mapping)
+        ]
+        if not trees:
+            trees = [
+                {
+                    "root": result.get("warm_patch_target") or pending.get("recipe_patch_target"),
+                    "pre_sha": result.get("warm_patch_pre_sha") or pending.get("recipe_patch_pre_sha"),
+                    "snapshot_manifest": (
+                        result.get("warm_patch_snapshot_manifest") or pending.get("recipe_patch_snapshot_manifest")
+                    ),
+                }
+            ]
+        for tree in trees:
+            target = str(tree.get("root") or "")
+            if not target:
+                continue
+            recipe_manifest = tree.get("snapshot_manifest")
             restores.append(
-                _revert_patches(target, pre_sha, recipe_manifest)
+                _revert_patches(target, str(tree.get("pre_sha") or ""), recipe_manifest)
                 if recipe_manifest
-                else {"ok": False, "errors": ["recipe:missing_snapshot_manifest"]}
+                else {"ok": False, "errors": [f"recipe:{target}:missing_snapshot_manifest"]}
             )
         params = (task.params if task is not None else {}) or {}
         kernel_applied = (

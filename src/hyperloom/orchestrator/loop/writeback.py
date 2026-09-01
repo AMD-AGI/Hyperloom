@@ -15,12 +15,14 @@ from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
+    LEVER_ENABLEMENT,
     LEVER_KERNEL,
+    LEVER_SOURCE_PATCH,
     LEVER_UPSTREAM_PR,
-    owner_from_lever,
     patch_lever_kind,
     patch_owner_phase,
 )
+from ..knowledge.remote_recipe.sanitize import HOST_ORIGIN_KEY
 from ..kernel._recorder_trace import trace_recording_skipped
 from ..state.optimization_journal import (
     Journal,
@@ -73,7 +75,7 @@ from ..actions.executors._accuracy_gate import (
     EVAL_KIND_ACCURACY_UNAVAILABLE,
     accuracy_meets_floor,
 )
-from ..knowledge.agent_kb import ExploreAgentKB, FrameworkAgentKB
+from ..knowledge.agent_kb import PatchKB
 
 from .coordinator import (
     _AUDIT_ACTIONS,
@@ -127,12 +129,31 @@ def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -
     return patch_lever_kind(result) or patch_lever_kind(task_params)
 
 
-def _keep_owner_section(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
-    """Name the section a KEEP stages into, preferring the lever it moved."""
-    by_lever = owner_from_lever(_lever_for_keep(task_params, result))
-    if by_lever:
-        return by_lever
-    return str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+#: The one owner label a patch KEEP stages under. Explore- and framework-agent
+#: lifts used to route to two separate columns; the three-column layout has a
+#: single ``patch`` column, so both collapse to this marker. Attribution keeps
+#: its own explore/framework split (``AGENT_BY_LEVER``) -- that is unaffected.
+_PATCH_KEEP_OWNER = "PATCH"
+
+#: Levers whose overlays feed the one patch column. ``kernel`` publishes through
+#: its own column and is absent; a KEEP that names none of these falls back to
+#: the authoring phase to decide.
+_PATCH_COLUMN_LEVERS = frozenset({LEVER_CONFIG, LEVER_SOURCE_PATCH, LEVER_UPSTREAM_PR, LEVER_ENABLEMENT})
+
+
+def _is_patch_column_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> bool:
+    """Whether a settled KEEP's overlay belongs in the patch column.
+
+    A patch-column lever answers on its own; a KEEP that names no such lever
+    (kernel, or none recorded) falls back to the authoring phase, exactly as the
+    old owner label did before explore and framework shared one column. This is
+    now one boolean rather than a per-agent owner, because there is one column.
+    """
+    lever = _lever_for_keep(task_params, result)
+    if lever in _PATCH_COLUMN_LEVERS:
+        return True
+    phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip().upper()
+    return phase in {"EXPLORE", "FRAMEWORK_AGENT"}
 
 
 def _lever_kind_for_lift(task_kind: str, bv: Any) -> str:
@@ -401,6 +422,26 @@ class WritebackCollaborator:
             resolved.append(canonical)
         return resolved, missing
 
+    @staticmethod
+    def _provenance_with_apply_roots(
+        provenance: Mapping[str, Any],
+        refs: list[str],
+    ) -> dict[str, Any]:
+        """Turn this KEEP's single apply root into a per-ref answer.
+
+        One KEEP lands in one checkout, so every ref it staged shares that root;
+        recording it per ref is what lets a Recipe whose KEEPs came from
+        different trees stay replayable without anything reconciling them.
+        """
+        row = {key: value for key, value in provenance.items() if key != HOST_ORIGIN_KEY}
+        origin = dict(provenance.get(HOST_ORIGIN_KEY) or {})
+        apply_root = str(origin.pop("apply_root", "") or "").strip()
+        if apply_root and refs:
+            origin["apply_roots"] = {str(ref): apply_root for ref in refs if str(ref).strip()}
+        if origin:
+            row[HOST_ORIGIN_KEY] = origin
+        return row
+
     def _stage_agent_keep(
         self,
         *,
@@ -409,47 +450,60 @@ class WritebackCollaborator:
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
+        provenance: Mapping[str, Any] | None = None,
     ) -> bool:
-        """Stage one KEEP into its owner section.
+        """Stage one KEEP into the patch column.
 
-        Returns ``False`` when patch staging must be retried. Final config is
-        published once from durable ``current_best`` at CLOSE.
+        Returns ``False`` when staging must be retried. The overlay bytes are
+        captured now rather than at CLOSE because the worktree they were
+        harvested from does not outlive the round. Config and kernel are
+        published once from the settled stack at CLOSE.
         """
-        normalized = str(owner or "").strip().upper()
-        facade = (
-            ExploreAgentKB.open()
-            if normalized == "EXPLORE"
-            else FrameworkAgentKB.open()
-            if normalized == "FRAMEWORK_AGENT"
-            else None
-        )
-        if facade is None or not facade.active:
+        if not str(owner or "").strip():
+            return False
+        patch_kb = PatchKB.open()
+        if not patch_kb.active:
             return False
         sources, missing = self._keep_patch_sources(result, task)
         if include_patches and missing:
             log.warning(
-                "%s kb: KEEP at stack index %d references missing patch members: %s",
-                normalized,
+                "patch kb: KEEP at stack index %d references missing patch members: %s",
                 stack_index,
                 missing,
             )
             return False
-        if include_patches and sources:
-            refs = facade.stage_patches(sources, stack_index=stack_index)
+        if not include_patches:
+            return True
+        refs: list[str] = []
+        if sources:
+            refs = patch_kb.stage_patches(sources, stack_index=stack_index)
             if len(refs) != len(sources) or any(not ref for ref in refs):
                 return False
+        # How the overlay was captured travels with it, so a later session can
+        # tell a complete capture from one that could not account for every path,
+        # and can apply each overlay to the checkout it was taken from.
+        if provenance and not patch_kb.stage_provenance(
+            stack_index=stack_index,
+            **self._provenance_with_apply_roots(provenance, refs),
+        ):
+            return False
         return True
 
     def _enqueue_agent_keep_outbox(
         self,
         *,
-        owner: str,
         stack_index: int,
         result: Mapping[str, Any],
         task: "Task | None",
         include_patches: bool,
     ) -> None:
-        """Persist an idempotent section handoff to run after state durability."""
+        """Persist an idempotent section handoff to run after state durability.
+
+        The caller has already decided this KEEP feeds the patch column, so
+        every stored field (row id, outbox owner, the stack's
+        ``kb_required_owner``) uses the single patch-owner marker: the
+        three-column layout has one patch column, not a per-agent one.
+        """
         from ..knowledge.remote_recipe import KnowledgeSections
 
         if (
@@ -457,10 +511,15 @@ class WritebackCollaborator:
             or KnowledgeSections.from_env() is None
         ):
             return
-        normalized = str(owner or "").strip().upper()
-        if normalized not in {"EXPLORE", "FRAMEWORK_AGENT"}:
-            return
+        normalized = _PATCH_KEEP_OWNER
         sources, missing = self._keep_patch_sources(result, task) if include_patches else ([], [])
+        # The realized diff is what the tree ended up holding, so it replaces the
+        # delivered patch rather than joining it -- staging both would apply the
+        # same change twice. It is chosen here, not at drain, because drain only
+        # ever sees the row.
+        realized = Path(str(result.get("source_realized_patch") or "").strip() or ".")
+        if include_patches and realized.is_file():
+            sources, missing = [realized], []
         row = {
             "id": f"{normalized}:{int(stack_index)}",
             "owner": normalized,
@@ -468,6 +527,21 @@ class WritebackCollaborator:
             "include_patches": bool(include_patches),
             "patch_sources": [str(path) for path in sources],
             "missing_patch_sources": missing,
+            "provenance": {
+                "base_sha": str(result.get("base_sha") or ""),
+                "complete": bool(result.get("source_snapshot_complete", True)),
+                "artifacts_outside_root": int(result.get("source_artifacts_outside_root") or 0),
+                "realized": bool(include_patches and realized.is_file()),
+                # Where this KEEP came from on this host. ``apply_root`` becomes
+                # a per-ref answer once the refs exist; the rest is for reading a
+                # record back that would not replay.
+                HOST_ORIGIN_KEY: {
+                    "apply_root": str(result.get("framework_root") or ""),
+                    "snapshot": str(result.get("source_snapshot") or ""),
+                    "manifest": str(result.get("source_manifest") or ""),
+                    "sources": [str(path) for path in sources],
+                },
+            },
         }
         outbox = list(getattr(self.shared_state, "kb_stage_outbox", []) or [])
         if not any(isinstance(existing, dict) and existing.get("id") == row["id"] for existing in outbox):
@@ -533,6 +607,7 @@ class WritebackCollaborator:
                 result={"patches": list(row.get("patch_sources") or [])},
                 task=task,
                 include_patches=bool(row.get("include_patches")),
+                provenance=row.get("provenance"),
             ):
                 retained.append(row)
         self.shared_state.kb_stage_outbox = retained
@@ -4207,10 +4282,8 @@ class WritebackCollaborator:
             "provisional": result.get("provisional"),
         }
         if lifted and not enablement_landing and len(self.shared_state.optimization_stack or []) > stack_len_before:
-            owner = _keep_owner_section(task_params, result)
-            if owner in {"EXPLORE", "FRAMEWORK_AGENT"}:
+            if _is_patch_column_keep(task_params, result):
                 self._enqueue_agent_keep_outbox(
-                    owner=owner,
                     stack_index=len(self.shared_state.optimization_stack) - 1,
                     result=result,
                     task=task,
