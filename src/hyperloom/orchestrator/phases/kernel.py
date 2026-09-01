@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
+from hyperloom.common.io import atomic_write_json
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
@@ -3028,6 +3029,13 @@ class KernelPhase(PhaseHandler):
             for stale in ("recommended_env", "extra_envs"):
                 if result.get(stale):
                     result[stale] = {}
+            # ``record_gemm_tuning`` above stored a SHALLOW COPY, so the scalar
+            # rewrites just made (decision/micro_decision/...) do not reach the
+            # recorded entry on their own -- only the normal exit re-syncs it.
+            # Without this the state kept the bridge's KEEP for an arm that was
+            # never measured, and the on-disk result.json kept the pre-E2E
+            # snapshot too.
+            self._replace_latest_gemm_tuning_attempt(result)
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
@@ -3097,6 +3105,32 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001 — journaling is best-effort
             log.exception("gemm_tuning journal append failed")
 
+    def _writeback_gemm_result_json(self, entry: dict[str, Any]) -> None:
+        """Overwrite ``<workspace>/result.json`` with the E2E-adjudicated envelope.
+
+        forge's CLI writes ``result.json`` the moment micro tuning ends, so on
+        disk it stays a pre-E2E snapshot (``status=ok`` /
+        ``requires_e2e_validation=true``) even after this phase has recorded a
+        REVERT. Anything that reads the file rather than ``state.json`` -- the
+        fusion/collective lanes treat ``result.json`` as the final verdict --
+        then sees a candidate that was already rejected. Writing the merged
+        envelope back keeps both ledgers on the same value.
+
+        Best-effort: the workspace lives on shared storage that can be read-only
+        or already reaped, and a failed writeback must not turn a recorded
+        verdict into a phase crash.
+        """
+        workspace = str(entry.get("workspace") or "").strip()
+        if not workspace:
+            return
+        path = Path(workspace) / "result.json"
+        try:
+            if not path.parent.is_dir():
+                return
+            atomic_write_json(path, entry, make_parents=False)
+        except (OSError, TypeError, ValueError):
+            log.warning("gemm result.json writeback failed for %s", path, exc_info=True)
+
     def _replace_latest_gemm_tuning_attempt(self, result: dict[str, Any]) -> None:
         """Sync the latest GEMM history row after forge E2E rewrites ``result``."""
         if not isinstance(result, dict):
@@ -3111,6 +3145,7 @@ class KernelPhase(PhaseHandler):
             attempts.append(entry)
         self.shared_state.gemm_tuning_attempts = attempts
         self.shared_state.last_gemm_tuning = entry
+        self._writeback_gemm_result_json(entry)
 
     def _gemm_e2e_candidates(self, result: dict[str, Any]) -> list[dict[str, Any]]:
         """Reduce a GEMM tuning result to the env sets worth E2E-validating.
