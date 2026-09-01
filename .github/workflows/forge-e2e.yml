@@ -190,7 +190,7 @@ jobs:
     # Concurrency starts only after resolve has authenticated and parsed the
     # event. A no-op comment therefore cannot cancel an in-flight GPU job.
     concurrency:
-      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
@@ -240,7 +240,7 @@ jobs:
     needs: resolve
     if: needs.resolve.outputs.run == 'true'
     concurrency:
-      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_ref || github.ref }}
+      group: forge-e2e-${{ needs.resolve.outputs.pr_number || needs.resolve.outputs.head_sha || needs.resolve.outputs.head_ref || github.ref }}
       cancel-in-progress: true
     runs-on: ${{ vars.FORGE_E2E_RUNNER_LABEL || 'Hyperloom-e2e-ci' }}
     timeout-minutes: ${{ fromJSON(vars.FORGE_E2E_JOB_TIMEOUT_MIN || '240') }}
