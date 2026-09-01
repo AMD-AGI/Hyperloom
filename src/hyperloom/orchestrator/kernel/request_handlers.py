@@ -46,6 +46,7 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
+from .lane_budget import gemm_per_tuner_timeout_sec
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -3985,7 +3986,11 @@ async def _run_forge_gemm_tuning(
         "conc": conc,
         "mp": mp,
         "output_dir": str(workspace),
-        "timeout": timeout,
+        # Passing the same value to both made the producer's own
+        # min(per_tuner, remaining) an identity, so the first tuner could
+        # consume the entire session and every later one was skipped for lack of
+        # time. The per-target cap must stay strictly below the global one.
+        "timeout": gemm_per_tuner_timeout_sec(timeout),
         # Bounds the whole session across all tuners.
         "global_timeout": timeout,
         "skip_gpu_check": True,
