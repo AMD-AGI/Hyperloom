@@ -1,9 +1,9 @@
 ---
 name: hyperloom-qwen3-8b-3h
-description: Run a 3-hour Hyperloom Qwen3-8B optimization session without the Kernel Agent. Use when the user wants a short, no-kernel Hyperloom demo on the local AMD ROCm environment.
+description: Run a 3-hour Hyperloom Qwen3-8B FRAMEWORK_AGENT (OPTIMIZE) session without the Kernel Agent. Use when the user wants a short, framework-only Hyperloom demo on the local AMD ROCm environment.
 ---
 
-# Hyperloom Qwen3-8B 3h No-Kernel Run
+# Hyperloom Qwen3-8B 3h Framework-Only (No-Kernel) Run
 
 Read `.env` first and resolve `HYPERLOOM_SKILL_PATH`. Read and follow the optimizer skill at `@${HYPERLOOM_SKILL_PATH}` before launching. If `HYPERLOOM_SKILL_PATH` is missing, fall back to `@hyperloom/inference_optimizer/SKILL.md` (wheel install) or `@src/hyperloom/inference_optimizer/SKILL.md` (source checkout). This skill provides the concrete workload and launch constraints for a short Qwen3-8B demo.
 
@@ -84,9 +84,8 @@ Required optimize CLI flags:
 - `--precision bf16`
 - `--target-gain 30`
 - `--max-hours 3`
-- `--max-minutes-framework-pct 0.44`
+- `--max-minutes-framework-pct 0.90`
 - `--max-minutes-sweep-pct 0.01`
-- `--no-framework-agent`
 - `--no-kernel`
 - `--no-enable-conc-sweep`
 - `--no-enable-roofline`
@@ -201,17 +200,14 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Include `--max-minutes-framework-pct 0.44` and `--max-minutes-sweep-pct 0.01`
-   in the optimize command. With FRAMEWORK_AGENT and KERNEL_AGENT disabled,
-   Hyperloom redistributes their shares so most of the short run budget is
-   reserved for OPTIMIZE while still leaving SWEEP/CLOSE time to exit cleanly
-   near the deadline.
-6. Include `--no-framework-agent` in the optimize command so the
-   FRAMEWORK_AGENT phase is skipped.
-7. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
-8. Include `--no-enable-conc-sweep` in the optimize command so the SWEEP-phase post-optimization concurrency sweep is skipped.
-9. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
-10. Report the session ID, log path, PID, and initial health check result.
-11. Monitor the process every 300 seconds until work is done.
-12. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-13. If `stop_reason` in the current session `state.json` is final, stop and exit.
+5. Include `--max-minutes-framework-pct 0.90` and `--max-minutes-sweep-pct 0.01`
+   in the optimize command. With `--no-kernel`, KERNEL_AGENT is disabled and its
+   budget share is redistributed mostly to FRAMEWORK_AGENT (~99% of wall clock).
+   Do **not** pass `--no-framework-agent` — that skips OPTIMIZE entirely.
+6. Include `--no-kernel` in the optimize command so the Kernel Agent phase is skipped.
+7. Include `--no-enable-conc-sweep` in the optimize command so the SWEEP-phase post-optimization concurrency sweep is skipped.
+8. Include `--no-enable-roofline` in the optimize command so PRELUDE uses the lighter profile path instead of roofline analysis.
+9. Report the session ID, log path, PID, and initial health check result.
+10. Monitor the process every 300 seconds until work is done.
+11. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+12. If `stop_reason` in the current session `state.json` is final, stop and exit.

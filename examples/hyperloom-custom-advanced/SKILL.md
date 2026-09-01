@@ -160,7 +160,8 @@ resolved values in the launch plan before starting the optimizer.
 Collect these optional advanced values:
 
 - Phase toggles: `--no-kernel`, `--no-framework-agent`,
-  `--no-enable-conc-sweep`, `--no-enable-roofline`.
+  `--no-framework-local-explore`, `--no-enable-conc-sweep`,
+  `--no-enable-roofline`.
 - Phase budget percentages:
   `PHASE_BUDGET_PRELUDE_PCT`, `PHASE_BUDGET_FRAMEWORK_PCT`,
   `PHASE_BUDGET_KERNEL_PCT`,
@@ -179,8 +180,13 @@ Guardrails:
   pass explicit CLI flags in the optimize command.
 - Omit `--gpu-type` unless the user explicitly chooses a hint; otherwise let
   Hyperloom auto-detect from ROCm/system info.
-- Warn the user when both `--no-framework-agent` and `--no-kernel` are selected; that
-  collapses the run mostly to baseline and sweep validation.
+- `--no-framework-agent` skips the entire OPTIMIZE phase (PRELUDE goes straight
+  to KERNEL_AGENT), dropping both of its arms: upstream-PR landing and local
+  source authoring. Warn before applying it; combined with `--no-kernel` it
+  leaves only baseline and sweep validation.
+- `--no-framework-local-explore` keeps OPTIMIZE but drops only its local
+  authoring arm, so the phase exits after three empty upstream discoveries
+  instead of authoring a patch from live source. No effect under diff-only mode.
 - Phase budget percentages are caps, not guaranteed time usage. A phase may end
   earlier, and disabled work phases have their share redistributed by the
   optimizer.
@@ -327,6 +333,7 @@ OPT_FLAGS=(
 [ -n "${PHASE_BUDGET_CLOSE_PCT:-}" ] && OPT_FLAGS+=(--max-minutes-close-pct "$PHASE_BUDGET_CLOSE_PCT")
 [ "${NO_KERNEL:-0}" = "1" ] && OPT_FLAGS+=(--no-kernel)
 [ "${NO_FRAMEWORK_AGENT:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-agent)
+[ "${NO_FRAMEWORK_LOCAL_EXPLORE:-0}" = "1" ] && OPT_FLAGS+=(--no-framework-local-explore)
 [ "${NO_CONC_SWEEP:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-conc-sweep)
 [ "${NO_ROOFLINE:-0}" = "1" ] && OPT_FLAGS+=(--no-enable-roofline)
 
