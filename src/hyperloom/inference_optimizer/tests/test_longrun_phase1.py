@@ -50,7 +50,7 @@ def test_sweep_reloops_to_explore_when_budget_and_leverage():
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
-    assert target == ps.PHASE_EXPLORE
+    assert target == ps.PHASE_FRAMEWORK_AGENT
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1
@@ -135,7 +135,7 @@ def test_sweep_skip_to_close_yields_to_reloop_when_conc_sweep_was_skipped():
     nxt = ps.compute_next_phase(st)
     assert nxt is not None
     target, reason, evidence = nxt
-    assert target == ps.PHASE_EXPLORE
+    assert target == ps.PHASE_FRAMEWORK_AGENT
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
 
@@ -155,7 +155,7 @@ def test_short_bounded_run_reloops_when_budget_and_leverage_remain():
     assert ev["next_cycle"] == 1
 
     target, reason, evidence = ps.compute_next_phase(st)
-    assert target == ps.PHASE_EXPLORE
+    assert target == ps.PHASE_FRAMEWORK_AGENT
     assert reason == "cycle_reloop"
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1
@@ -230,18 +230,18 @@ def test_per_cycle_budget_shrinks_phase_window():
     now = 1_000_000.0
     common = dict(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         max_minutes=96 * 60,
         phase_started_unix=now,
     )
     whole_run = SharedState(**common, cycle_minutes=0.0)
     per_cycle = SharedState(**common, cycle_minutes=360.0)  # 6h cycle
     budget = dict(ps.DEFAULT_PHASE_BUDGET_PCT)
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
 
     # Long bounded runs charge back (base * pct / denom); the per-cycle window
     # caps the base, so a 6h cycle plans a smaller EXPLORE than the 96h run.
-    denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_EXPLORE) :] if budget[p] > 0)
+    denom = sum(budget[p] for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :] if budget[p] > 0)
     rem_run = ps.phase_budget_remaining_seconds(
         whole_run,
         budget_pct=budget,
@@ -260,10 +260,10 @@ def test_per_cycle_budget_shrinks_phase_window():
 
 def test_long_run_chargeback_cap_and_tail():
     now = 1_000_000.0
-    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+    pct = ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
     denom = sum(
         ps.DEFAULT_PHASE_BUDGET_PCT[p]
-        for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_EXPLORE) :]
+        for p in ps.PHASE_NAMES[ps.phase_index(ps.PHASE_FRAMEWORK_AGENT) :]
         if ps.DEFAULT_PHASE_BUDGET_PCT[p] > 0
     )
     # A 48h long bounded run with a 24h cycle window: early on, remaining session
@@ -271,7 +271,7 @@ def test_long_run_chargeback_cap_and_tail():
     early_start = datetime.fromtimestamp(now - 1 * 3600.0, tz=timezone.utc).isoformat()
     early = SharedState(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         start_ts=early_start,
         max_minutes=48 * 60,
         cycle_minutes=24 * 60.0,
@@ -285,7 +285,7 @@ def test_long_run_chargeback_cap_and_tail():
     tail_start = datetime.fromtimestamp(now - 45 * 3600.0, tz=timezone.utc).isoformat()
     tail = SharedState(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         start_ts=tail_start,
         max_minutes=48 * 60,
         cycle_minutes=24 * 60.0,
@@ -297,7 +297,7 @@ def test_long_run_chargeback_cap_and_tail():
 
 def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
     # Long run (48h): cycle_minutes when set defines the per-cycle window.
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=48 * 60, cycle_minutes=0.0)
+    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=48 * 60, cycle_minutes=0.0)
     assert ps._budget_minutes(st) == 48 * 60.0
     st.cycle_minutes = 120.0
     assert ps._budget_minutes(st) == 120.0
@@ -306,7 +306,7 @@ def test_budget_minutes_falls_back_to_max_minutes_when_disabled():
 def test_budget_minutes_ignores_cycle_window_for_short_run():
     # Short bounded run (10h < 24h): the per-cycle window must NOT apply; phase
     # budgets stay anchored on the whole session even if cycle_minutes was pinned.
-    st = SharedState(phase=ps.PHASE_EXPLORE, max_minutes=600, cycle_minutes=360.0)
+    st = SharedState(phase=ps.PHASE_FRAMEWORK_AGENT, max_minutes=600, cycle_minutes=360.0)
     assert ps._budget_minutes(st) == 600.0
 
 
@@ -315,7 +315,7 @@ def test_short_run_keeps_chargeback_budgeting_across_cycles():
     start_ts = datetime.fromtimestamp(now - 2 * 3600.0, tz=timezone.utc).isoformat()
     common = dict(
         session_id="t",
-        phase=ps.PHASE_EXPLORE,
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         start_ts=start_ts,
         max_minutes=600,
         cycle_minutes=360.0,
@@ -326,8 +326,8 @@ def test_short_run_keeps_chargeback_budgeting_across_cycles():
 
     total0 = ps._phase_budget_total_seconds(cycle0, now_unix=now)
     total1 = ps._phase_budget_total_seconds(cycle1, now_unix=now)
-    legacy_whole_run = 600 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
-    cycle_window = 360.0 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_EXPLORE]
+    legacy_whole_run = 600 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
+    cycle_window = 360.0 * 60.0 * ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_FRAMEWORK_AGENT]
 
     assert total0 is not None and total0 > 0
     assert total0 == pytest.approx(total1)
@@ -451,7 +451,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
     from hyperloom.orchestrator.roles.agent_role import default_role_registry
 
     sd = make_session_dir()
-    st = SharedState(session_id="t", phase=ps.PHASE_EXPLORE, macro_cycle=2)
+    st = SharedState(session_id="t", phase=ps.PHASE_FRAMEWORK_AGENT, macro_cycle=2)
     # Simulate a history that already passed through SWEEP in a prior cycle.
     st.phase_history = [
         {
@@ -481,7 +481,7 @@ def test_policygate_allows_explore_action_after_loopback(tmp_path, monkeypatch):
 def test_regression_short_run_sweep_evidence_carries_loopback():
     st = _sweep_state(max_minutes=12 * 60)
     target, reason, evidence = ps.compute_next_phase(st)
-    assert (target, reason) == (ps.PHASE_EXPLORE, "cycle_reloop")
+    assert (target, reason) == (ps.PHASE_FRAMEWORK_AGENT, "cycle_reloop")
     assert evidence["loopback"] is True
     assert evidence["next_cycle"] == 1
 

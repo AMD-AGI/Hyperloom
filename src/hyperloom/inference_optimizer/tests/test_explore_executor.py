@@ -461,8 +461,6 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
             tput = 840.0  # +5% vs base 800
         elif "v01_v_revert" in slug:
             tput = 800.4  # +0.05% — below 1.0% threshold
-        elif "stack_rebench" in slug:
-            tput = 845.0  # stable for the KEEP'd variant
         else:
             tput = 800.0
         _fake_workspace(slot, tput=tput)
@@ -511,7 +509,6 @@ async def test_explore_executor_keeps_and_reverts_per_variant(sub_agent_runner, 
     assert out["status"] == "succeeded"
     assert {w["name"] for w in out["winners"]} == {"v_keep"}
     assert {lr["name"] for lr in out["losers"]} == {"v_revert"}
-    assert out["keep_unstable_in_stack"] == []
     ledger = out["explore_search_update"]
     assert set(ledger["tested"].keys()) == {
         canonical_fingerprint("--keep-flag", {}),
@@ -584,6 +581,65 @@ async def test_explore_serving_no_eval_reverts_without_stopping(sub_agent_runner
     reasons = {lr["name"]: lr.get("reason") for lr in out["losers"]}
     assert reasons.get("v_risky") == "accuracy_unavailable"
     # Post-baseline accuracy failure reverts the variant but never halts the run.
+    assert state.stop_reason == ""
+
+
+@pytest.mark.asyncio
+async def test_explore_gates_a_variant_no_flag_catalogue_would_have_caught(sub_agent_runner, tmp_path):
+    """The gate no longer asks which knobs look risky.
+
+    ``--online_quant_config`` changes numeric precision directly, and no entry of
+    the deleted high-risk catalogue matched it, so a variant carrying it cleared
+    on throughput alone with its measured accuracy discarded. With a baseline on
+    the state it is now gated like any other variant, and no eval verdict is a
+    REVERT rather than a KEEP.
+    """
+    sub, tr, _ = sub_agent_runner
+    state = SharedState()
+    state.baseline_tput = 800.0
+    state.baseline_accuracy = 0.80
+    sub.shared_state = state
+
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml(base)
+
+    def _fake_run(cmd, *args, **kwargs):
+        out_idx = cmd.index("--output-dir")
+        slot = Path(cmd[out_idx + 1])
+        _fake_workspace(slot, tput=840.0)  # +5% vs base 800 (clears throughput)
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
+
+    extra_args = '--online_quant_config {"global_quant_config":"ptpc_fp8"}'
+    task = await tr.create(
+        kind="explore",
+        params={
+            "config_path": str(base),
+            "output_dir": str(tmp_path / "explore-uncatalogued"),
+            "base_tput": 800.0,
+            "accuracy_baseline": 0.80,
+            "grid": [
+                {
+                    "name": "v_quant",
+                    "extra_args": extra_args,
+                    "extra_envs": {},
+                    "provenance": "llm_direct",
+                }
+            ],
+            "variant_timeout_sec": 10,
+        },
+        idempotency_key="ex-uncatalogued-acc",
+    )
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=_fake_run,
+    ):
+        res = await sub.run_task(task)
+
+    tested = res.result["explore_search_update"]["tested"][canonical_fingerprint(extra_args, {})]
+    assert tested["outcome"] == "REVERT"
+    reasons = {lr["name"]: lr.get("reason") for lr in res.result["losers"]}
+    assert reasons.get("v_quant") == "accuracy_unavailable"
     assert state.stop_reason == ""
 
 
@@ -663,7 +719,6 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
             "output_dir": str(tmp_path / "explore-out"),
             "base_tput": 800.0,
             "base_extra_args": "--bad-base 1 --keep-base 2",
-            "enable_stack_rebench": False,
             "grid": [
                 {
                     "name": "remove_bad_base",
@@ -676,7 +731,7 @@ async def test_explore_executor_keep_persists_effective_removal_stack(sub_agent_
         },
         idempotency_key="ex-remove-keep",
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
@@ -921,7 +976,6 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
             # Snapshotted together at dispatch, before the newer layer landed.
             "base_tput": 800.0,
             "base_extra_args": "--stale-layer 1",
-            "enable_stack_rebench": False,
             "grid": [
                 {
                     "name": "on_live_stack",
@@ -934,7 +988,7 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
         },
         idempotency_key="ex-live-base-args",
     )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path, enable_stack_rebench=False))
+    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
     with patch(
         "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
         side_effect=_fake_run,
@@ -949,62 +1003,6 @@ async def test_explore_executor_takes_live_base_args_with_the_live_anchor(
     assert "--variant 2" in winner["extra_server_args"]
     assert "--stale-layer" not in winner["extra_server_args"]
     assert winner["extra_envs"]["LIVE_ENV"] == "1"
-
-
-@pytest.mark.asyncio
-async def test_explore_stack_rebench_floor_follows_the_in_batch_anchor(
-    sub_agent_runner,
-    tmp_path,
-):
-    """A 2nd KEEP that regresses against the 1st is evicted, not KEPT with a negative gain."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        # Match on path segments: ``tmp_path`` is named after the test, so a
-        # substring check would fire on every round.
-        parts = set(slot.parts)
-        if "v01_second" in parts:
-            # Round 1 clears the advanced bar (1260 vs 1200); the confirmation
-            # round drops below it while still beating the round-start 1000.
-            tput = 1100.0 if "stack_rebench" in parts else 1260.0
-        else:
-            tput = 1200.0
-        _fake_workspace(slot, tput=tput)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-floor"),
-            "base_tput": 1000.0,
-            "grid": [
-                {"name": "first", "extra_args": "--first", "extra_envs": {}, "provenance": "llm_direct"},
-                {"name": "second", "extra_args": "--second", "extra_envs": {}, "provenance": "llm_direct"},
-            ],
-            "variant_timeout_sec": 10,
-        },
-        idempotency_key="ex-rebench-floor",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
-
-    out = res.result
-    tested = out["explore_search_update"]["tested"]
-    assert tested[canonical_fingerprint("--first", {})]["outcome"] == "KEEP"
-    assert tested[canonical_fingerprint("--second", {})]["outcome"] == "KEEP_UNSTABLE"
-    assert {w["name"] for w in out["winners"]} == {"first"}
-    assert all(w["gain_pct"] > 0 for w in out["winners"])
-    # The evicted variant must not drag the stack anchor down with it.
-    assert out["running_base_tput"] == 1200.0
 
 
 @pytest.mark.asyncio
@@ -1061,7 +1059,6 @@ async def test_explore_executor_historical_fingerprint_reruns(sub_agent_runner, 
                 "name_index": {},
             },
             "variant_timeout_sec": 10,
-            "enable_stack_rebench": False,
         },
         idempotency_key="ex-dedup",
     )
@@ -1132,10 +1129,9 @@ async def test_explore_executor_defaults_to_warm_decision_matching_hot_baseline(
         res = await sub.run_task(task)
 
     out = res.result
-    # warmup (discarded) + decision + stack_rebench == 3 Magpie runs.
-    assert len(bench_calls) == 3, bench_calls
+    # warmup (discarded) + decision == 2 Magpie runs.
+    assert len(bench_calls) == 2, bench_calls
     assert sum("warmup_round" in c for c in bench_calls) == 1
-    assert sum("stack_rebench" in c for c in bench_calls) == 1
     assert {w["name"] for w in out["winners"]} == {"warm_keep"}
 
 
@@ -1199,11 +1195,9 @@ async def test_explore_decision_round_skips_eval_warmup_keeps_it(
         await sub.run_task(task)
 
     warmup = [ev for slot, ev in seen if "warmup_round" in slot]
-    rebench = [ev for slot, ev in seen if "stack_rebench" in slot]
-    decision = [ev for slot, ev in seen if "warmup_round" not in slot and "stack_rebench" not in slot]
+    decision = [ev for slot, ev in seen if "warmup_round" not in slot]
     assert warmup and warmup[0] not in _RUN_EVAL_FALSE
     assert decision and all(ev in _RUN_EVAL_FALSE for ev in decision)
-    assert rebench and all(ev in _RUN_EVAL_FALSE for ev in rebench)
 
 
 @pytest.mark.asyncio
@@ -1257,7 +1251,7 @@ async def test_explore_cold_decision_keeps_eval(
         await sub.run_task(task)
 
     assert not [slot for slot, _ in seen if "warmup_round" in slot]
-    decision = [ev for slot, ev in seen if "stack_rebench" not in slot]
+    decision = [ev for _slot, ev in seen]
     assert decision and all(ev not in _RUN_EVAL_FALSE for ev in decision)
 
 
@@ -1373,99 +1367,6 @@ async def test_explore_executor_warm_decision_warmup_failure_marks_failed(
 
 
 @pytest.mark.asyncio
-async def test_explore_executor_stack_rebench_evicts_unstable_keep(
-    sub_agent_runner,
-    tmp_path,
-):
-    """An unstable stack rebench evicts the KEEP'd variant (KEEP_UNSTABLE → REVERT)."""
-    sub, tr, _ = sub_agent_runner
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    output_dir = tmp_path / "explore-unstable"
-
-    def _fake_run(cmd, *args, **kwargs):
-        out_idx = cmd.index("--output-dir")
-        slot = Path(cmd[out_idx + 1])
-        slug = slot.parent.name + "/" + slot.name
-        if "v00_unstable" in slug and "stack_rebench" not in slug:
-            tput = 850.0  # +6.25%
-        elif "stack_rebench" in slug:
-            tput = 802.0  # +0.25% — below the 0.5% stable floor
-        else:
-            tput = 800.0
-        _fake_workspace(slot, tput=tput)
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=0,
-            stdout="ok",
-            stderr="",
-        )
-
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(output_dir),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "unstable",
-                    "extra_args": "--unstable-flag",
-                    "extra_envs": {},
-                    "provenance": "llm_direct",
-                }
-            ],
-            "variant_timeout_sec": 10,
-            "stack_stable_threshold_pct": 0.5,
-        },
-        idempotency_key="ex-unstable",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
-
-    out = res.result
-    assert {k["name"] for k in out["keep_unstable_in_stack"]} == {"unstable"}
-    assert out["winners"] == []
-    ledger = out["explore_search_update"]
-    fp = canonical_fingerprint("--unstable-flag", {})
-    assert ledger["tested"][fp]["outcome"] == "KEEP_UNSTABLE"
-    rejected_reasons = {r["reason"] for r in ledger["rejected"]}
-    assert "stack_unstable" in rejected_reasons
-
-
-def test_default_keep_and_stack_stable_thresholds():
-    """Pin the KEEP gate (1.0%) and the lower stack-rebench stability floor (0.5%)."""
-    from hyperloom.orchestrator.actions.executors.explore import (
-        DEFAULT_KEEP_THRESHOLD_PCT,
-        DEFAULT_STACK_STABLE_PCT,
-    )
-
-    assert DEFAULT_KEEP_THRESHOLD_PCT == 1.0
-    assert DEFAULT_STACK_STABLE_PCT == 0.5
-    assert DEFAULT_STACK_STABLE_PCT <= DEFAULT_KEEP_THRESHOLD_PCT
-
-
-def test_stack_stable_floor_arithmetic_at_new_default():
-    """Integration-pin: +0.6% rebench clears the 0.5% floor, +0.3% falls below and is evicted."""
-    from hyperloom.orchestrator.actions.executors.explore import (
-        DEFAULT_STACK_STABLE_PCT,
-    )
-
-    base = 4438.83
-    stable_floor = base * (1.0 + DEFAULT_STACK_STABLE_PCT / 100.0)
-    assert base * 1.006 > stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.6% rebench should clear floor={stable_floor:.2f}"
-    )
-    assert base * 1.003 < stable_floor, (
-        f"DEFAULT_STACK_STABLE_PCT={DEFAULT_STACK_STABLE_PCT}: +0.3% rebench should fall below floor={stable_floor:.2f}"
-    )
-
-
-@pytest.mark.asyncio
 async def test_explore_executor_killed_overtime_no_tput_no_keep(
     sub_agent_runner,
     tmp_path,
@@ -1522,7 +1423,6 @@ async def test_explore_executor_killed_overtime_no_tput_no_keep(
     out = res.result
     assert out["status"] == "succeeded"
     assert out["winners"] == []
-    assert out["keep_unstable_in_stack"] == []
     assert len(out["losers"]) == 1
     loser = out["losers"][0]
     assert loser["name"] == "slow_variant"
@@ -1913,179 +1813,6 @@ async def test_explore_leaves_a_variant_out_when_the_run_reaped_its_grid_warmup(
     assert res.result["losers"] == []
     assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
     assert res.result["session_budget_untested"] == 1
-
-
-@pytest.mark.asyncio
-async def test_explore_does_not_call_a_variant_unstable_when_the_run_reaped_its_rebench(
-    sub_agent_runner,
-    tmp_path,
-    monkeypatch,
-):
-    """A confirmation the run stopped is not a failed confirmation.
-
-    The post-KEEP rebench is the second gate, so a reaped rebench used to evict
-    the variant as ``KEEP_UNSTABLE`` -- a stability verdict drawn from a round
-    that measured nothing. The decision round's own entry goes too, so a resume
-    re-measures the variant and its confirmation together.
-    """
-    _force_cold_decision(monkeypatch)
-    sub, tr, _ = sub_agent_runner
-    state = SharedState()
-    state.baseline_tput = 800.0
-    state.max_minutes = 600.0
-    state.baseline_runtime_sec = 20.0
-    sub.shared_state = state
-
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-
-    def _fake_run(cmd, *args, **kwargs):
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        if "stack_rebench" in str(slot):
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
-                stdout="",
-                stderr="reaped",
-            )
-        _fake_workspace(slot, tput=900.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-rebench-reaped"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_unconfirmed",
-                    "extra_args": "--max-num-seqs 256",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                }
-            ],
-            "variant_timeout_sec": 3600,
-            "baseline_runtime_sec": 20.0,
-        },
-        idempotency_key="ex-budget-rebench-reaped",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
-
-    assert res.result["explore_search_update"]["tested"] == {}
-    assert res.result["losers"] == []
-    assert res.result["winners"] == []
-    assert res.result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
-    assert res.result["session_budget_untested"] == 1
-
-
-@pytest.mark.asyncio
-async def test_the_reaped_rebench_rollback_spares_a_prior_rounds_ledger_row(
-    sub_agent_runner,
-    tmp_path,
-    monkeypatch,
-):
-    """Rolling back this round's write must not delete an earlier round's.
-
-    A fingerprint may be re-run across rounds, so the row a rerun overwrites is a
-    real measurement from a previous round. Undoing the rerun by deleting the key
-    takes that measurement out of the negative ledger with it, and the model is
-    free to re-propose a variant already measured and failed -- at the cost of a
-    full benchmark round.
-    """
-    _force_cold_decision(monkeypatch)
-    sub, tr, _ = sub_agent_runner
-    state = SharedState()
-    state.baseline_tput = 800.0
-    state.max_minutes = 600.0
-    state.baseline_runtime_sec = 20.0
-    sub.shared_state = state
-
-    base = tmp_path / "base.yaml"
-    _write_baseline_yaml(base)
-    fp_rerun = canonical_fingerprint("--rerun-flag", {})
-
-    def _fake_run(cmd, *args, **kwargs):
-        if "--output-dir" not in cmd:
-            return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-        slot = Path(cmd[cmd.index("--output-dir") + 1])
-        # Match on path segments: ``tmp_path`` is named after the test, so a
-        # substring check would fire on every round.
-        parts = set(slot.parts)
-        rerun = "v01_v_ok" in parts
-        if rerun and "stack_rebench" in parts:
-            return subprocess.CompletedProcess(
-                args=cmd,
-                returncode=SESSION_TIME_EXHAUSTED_RETURNCODE,
-                stdout="",
-                stderr="reaped",
-            )
-        _fake_workspace(slot, tput=1000.0 if rerun else 900.0)
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="ok", stderr="")
-
-    task = await tr.create(
-        kind="explore",
-        params={
-            "config_path": str(base),
-            "output_dir": str(tmp_path / "explore-rollback"),
-            "base_tput": 800.0,
-            "grid": [
-                {
-                    "name": "v_measured",
-                    "extra_args": "--other-flag",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                },
-                {
-                    "name": "v_ok",
-                    "extra_args": "--rerun-flag",
-                    "extra_envs": {},
-                    "provenance": "default_grid",
-                },
-            ],
-            "explore_search": {
-                "tested": {
-                    fp_rerun: {
-                        "fingerprint": fp_rerun,
-                        "name": "v_ok",
-                        "extra_server_args": "--rerun-flag",
-                        "extra_envs": {},
-                        "outcome": "FAILED",
-                        "round_id": "explore-001",
-                    }
-                },
-                "rejected": [],
-                "name_index": {"v_ok": fp_rerun},
-            },
-            "variant_timeout_sec": 3600,
-            "baseline_runtime_sec": 20.0,
-            "enable_stack_rebench": True,
-        },
-        idempotency_key="ex-rollback-prior-row",
-    )
-    sub.register_executor("explore", ExploreExecutor(session_dir=tmp_path))
-    with patch(
-        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
-        side_effect=_fake_run,
-    ):
-        res = await sub.run_task(task)
-
-    update = res.result["explore_search_update"]
-    prior = update["tested"].get(fp_rerun)
-    assert prior is not None, "prior round's ledger entry was deleted by the rollback"
-    assert prior["round_id"] == "explore-001"
-    assert prior["outcome"] == "FAILED"
-    assert update["name_index"]["v_ok"] == fp_rerun
-    # The round did measure something, so the update replaces the persisted
-    # ledger wholesale -- which is what makes a deletion here durable.
-    assert {t["name"] for t in update["tested"].values()} == {"v_measured", "v_ok"}
 
 
 @pytest.mark.asyncio
@@ -2530,7 +2257,6 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
                 "name_index": {},
             },
             "variant_timeout_sec": 10,
-            "enable_stack_rebench": False,
         },
         idempotency_key="ex-rerun-all",
     )
@@ -2548,4 +2274,4 @@ async def test_explore_executor_historical_failed_and_accepted_rerun(sub_agent_r
     tested = out["explore_search_update"]["tested"]
     assert fp_failed in tested
     # The latest result for fp_failed overwrites the FAILED entry.
-    assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KEEP_UNSTABLE", "KILLED_OVERTIME")
+    assert tested[fp_failed]["outcome"] in ("KEEP", "REVERT", "FAILED", "KILLED_OVERTIME")

@@ -288,6 +288,43 @@ def _build_parser() -> argparse.ArgumentParser:
         "Magpie does not yet ship MI308X/MI325X-specific SGLang/vLLM scripts.",
     )
     opt.add_argument(
+        "--compute-partition-mode",
+        type=str,
+        default=None,
+        metavar="MODE",
+        help="Declare the compute-partition mode the GPU is already in: SPX "
+        "(whole card), DPX (2), QPX (4) or CPX (8). This is an assertion, not "
+        "a request -- nothing in the optimizer changes the mode, because doing "
+        "so is privileged, evicts every process on the card, and renumbers its "
+        "devices. Set the mode with amd-smi before launching this command: the "
+        "shape is checked and recorded at launch, so a mode applied later is "
+        "too late to be either. Passing this flag makes the session "
+        "refuse to start if the card is in a different mode, which is what "
+        "catches an external set that did not take effect before three hours "
+        "are spent recording the numbers under the wrong topology. The mode is "
+        "recorded in the platform fingerprint whether or not this flag is "
+        "passed. See also --streams-per-partition.",
+    )
+    opt.add_argument(
+        "--streams-per-partition",
+        type=int,
+        # None, not 2, so a resume can tell "not passed" from "passed 2" and
+        # let the persisted value stand. The 2 is applied where it is resolved.
+        default=None,
+        metavar="N",
+        help="Concurrent streams to place on each partition when the card is "
+        "partitioned. Defaults to 2, which is where every mode measured on "
+        "MI355X peaked: one stream leaves each partition idle through the "
+        "fixed per-pass cost, a second fills it, a third only adds queueing. "
+        "Raise it only with evidence, and note that every stream on a "
+        "partition holds its own copy of the weights -- so this multiplies "
+        "the memory the workload has to fit, and the session refuses to start "
+        "when it provably will not. A value below 1 is refused rather than "
+        "quietly replaced by the default. Only a scriptable framework's "
+        "benchmark places work per partition; passing this with a serving "
+        "framework warns, because nothing would act on it.",
+    )
+    opt.add_argument(
         "--framework",
         choices=list(framework_registry.names()),
         default=None,
@@ -537,7 +574,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Reference launch recipe (.sh path or http(s) URL). Its serve "
             "flags plus the exports the denylist allows seed the baseline "
-            "server args at lowest priority (EXPLORE can override); shell-unsafe, "
+            "server args at lowest priority (the config arm can override); shell-unsafe, "
             "credential-shaped and optimizer-owned workload variables are "
             "dropped. The recipe is applied as given — there is no model gate "
             "and no auto-discovery — so a path that cannot be read, or that "
@@ -670,7 +707,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "report still has a deterministic 'External baseline' "
             "section. The reference is API-measured and never influences "
             "the Objective, scoring, or any KEEP/REVERT gate; a matching "
-            "row is surfaced to the EXPLORE gap advisory as direction only. "
+            "row is surfaced to the gap advisory as direction only. "
             "Other dimensions (model / framework / precision / ISL / OSL) "
             "are derived from the corresponding CLI arguments."
         ),
@@ -711,17 +748,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "quick-win parameter path. Default: kernel enabled.",
     )
     opt.add_argument(
-        "--no-explore",
-        action="store_true",
-        default=False,
-        help="Skip the EXPLORE phase entirely. PRELUDE (and "
-        "FRAMEWORK, if enabled) route straight to KERNEL "
-        "— or to SWEEP when --no-kernel is also set. Useful "
-        "for a baseline -> kernel-only run, or to validate "
-        "the current recipe via SWEEP without a serving-"
-        "param search. Default: explore enabled.",
-    )
-    opt.add_argument(
         "--no-eval",
         action="store_true",
         default=False,
@@ -730,16 +756,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "reference, and every candidate is graded on throughput only. "
         "Useful for CI/CD tuning runs that care about performance and not "
         "accuracy; the run is not accuracy-validated. Default: eval enabled.",
-    )
-    opt.add_argument(
-        "--enable-framework-config-exploration",
-        action="store_true",
-        default=False,
-        help="(Stage-1, default OFF) Let the FRAMEWORK_AGENT phase run "
-        "explore-style config-grid exploration (reusing the ExploreExecutor) "
-        "before it advances, giving FRAMEWORK the EXPLORE config-search "
-        "capability. The EXPLORE phase and overall phase flow are unchanged; "
-        "results share the explore_search dedup ledger.",
     )
     opt.add_argument(
         "--launch-info-file",
@@ -754,27 +770,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "stdout for stream-based parsers.",
     )
     opt.add_argument(
-        "--framework-discover-timeout-sec",
-        type=float,
-        default=0.0,
-        help="Override the per-call timeout for "
-        "``fa phase-discover``. 0 (the default) uses "
-        "framework_agent_client.DEFAULT_FA_PHASE_TIMEOUT_SEC "
-        "(180s). The Coordinator retries discover up to "
-        "DISCOVER_FAILURE_RETRY_LIMIT (3) consecutive "
-        "failures before marking FRAMEWORK done.",
-    )
-    opt.add_argument(
         "--no-framework-agent",
         action="store_true",
         default=False,
-        help="Skip the FRAMEWORK_AGENT phase (PRELUDE → EXPLORE "
-        "directly). The phase pre-scans upstream sglang/"
-        "vllm PRs via framework-agent and lands KEPT "
-        "patches before EXPLORE starts. Disable when "
-        "the framework-agent toolchain is unavailable "
-        "or you want a faster cold start. "
-        "Default: framework phase enabled.",
+        help="Skip the optimisation phase (PRELUDE → KERNEL_AGENT "
+        "directly). The phase runs both levers: configuration grids, and "
+        "upstream PRs plus specialist-authored source patches. Disable "
+        "when the framework-agent toolchain is unavailable or you want a "
+        "faster cold start. Default: enabled.",
     )
     opt.add_argument(
         "--enablement",
@@ -947,7 +950,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "in manifest.json). Default: lenient (M1 records the flag "
         "in manifest only; consumed by M5 specialist assembly).",
     )
-    # Warm-recipe replay: PRELUDE auto-applies KB best_config before EXPLORE.
+    # Warm-recipe replay: PRELUDE auto-applies KB best_config before optimising.
     opt.add_argument(
         "--no-warm-replay",
         dest="no_warm_replay",
@@ -981,7 +984,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "the warm config onto the optimization stack. Default "
         "0.8 — a recipe claiming +25%% counts if we measure "
         "+20%% or more. Below the threshold we record "
-        "``status=drift`` and continue with the regular EXPLORE "
+        "``status=drift`` and continue with the regular optimisation "
         "flow without inheriting the warm config.",
     )
     # PR Monitor REST + MCP.
@@ -1150,7 +1153,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Auto-dispatch a read-only research scout at PRELUDE (and "
-        "every --research-scout-interval EXPLORE rounds) that "
+        "every --research-scout-interval optimisation rounds) that "
         "collects proven priors — reference launch scripts, model "
         "config.json architecture features, and cross-framework / "
         "NVIDIA research — into ``research_hints.md`` and seeds "
@@ -1162,7 +1165,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="research_scout_interval",
         type=int,
         default=3,
-        help="Re-dispatch the research scout every N EXPLORE rounds with "
+        help="Re-dispatch the research scout every N optimisation rounds with "
         "the current bottleneck context (append-only). Default 3. "
         "Ignored when ``--no-research-scout`` is set.",
     )
@@ -1272,7 +1275,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Pin the per-variant hard timeout (seconds) inside the "
-        "EXPLORE phase. ``0`` (default) auto-derives from "
+        "optimisation phase. ``0`` (default) auto-derives from "
         "``baseline_runtime_sec * (--explore-overtime-kill-ratio + "
         "--explore-variant-timeout-safety-margin)`` once baseline "
         "lands, with a 2400-14400 s range guard. Set to a positive "
@@ -1284,7 +1287,7 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.5,
         help="Headroom (as a fraction of baseline_runtime_sec) added on "
-        "top of --explore-overtime-kill-ratio when the EXPLORE hard "
+        "top of --explore-overtime-kill-ratio when the explore hard "
         "cap is auto-derived. Default 0.5 (≈ 50%% of baseline as "
         "buffer for variant cold starts: torch.compile AOTI compile, "
         "fresh aiter shapes, spec-decoding draft load). Bump for "
@@ -1318,7 +1321,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_keep_gain",
         type=float,
         default=None,
-        help="EXPLORE plateau: max cumulative KEEP-gain (%%) across the "
+        help="Config-arm plateau: max cumulative KEEP-gain (%%) across the "
         "lookback window below which the AND condition fires. "
         "Default 0.5.",
     )
@@ -1327,7 +1330,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_empty_streak",
         type=int,
         default=None,
-        help="EXPLORE plateau: required count of *consecutive* specialist "
+        help="Config-arm plateau: required count of *consecutive* specialist "
         "rounds with empty proposal_set before the AND condition "
         "fires. Default 5.",
     )
@@ -1336,7 +1339,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="plateau_explore_lookback",
         type=int,
         default=None,
-        help="EXPLORE plateau: number of trailing rounds the gain sum is computed over. Default 5.",
+        help="Config-arm plateau: number of trailing rounds the gain sum is computed over. Default 5.",
     )
     opt.add_argument(
         "--plateau-kernel-revert-streak",
@@ -1362,16 +1365,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="KERNEL plateau: number of trailing integrate attempts the gain sum is computed over. Default 5.",
     )
-    # IR-6 — EXPLORE hard force-exit threshold (locked at start).
-    opt.add_argument(
-        "--explore-force-exit-budget-pct",
-        dest="explore_force_exit_budget_pct",
-        type=float,
-        default=None,
-        help="EXPLORE force-exit: phase-budget remaining fraction "
-        "(0..1) below which EXPLORE exits immediately. Default "
-        "0.20 (IR-6).",
-    )
     # phase budget percentages: each phase claims a fraction of the wall-clock
     # budget (caps; may exit earlier). Both ``--max-minutes-*-pct`` and
     # ``--phase-budget-*-pct`` spellings are accepted.
@@ -1386,18 +1379,15 @@ def _build_parser() -> argparse.ArgumentParser:
     opt.add_argument(
         "--max-minutes-framework-pct",
         "--phase-budget-framework-pct",
+        # The EXPLORE spellings land on the same option: configuration search
+        # and source landing are two arms of one phase with one budget, so a
+        # separate share for either would be a number nothing reads.
+        "--max-minutes-explore-pct",
+        "--phase-budget-explore-pct",
         dest="phase_budget_framework_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for FRAMEWORK_AGENT. Default: 0.20.",
-    )
-    opt.add_argument(
-        "--max-minutes-explore-pct",
-        "--phase-budget-explore-pct",
-        dest="phase_budget_explore_pct",
-        type=float,
-        default=None,
-        help="Wall-clock budget cap for EXPLORE. Default: 0.35.",
+        help="Wall-clock budget cap for the OPTIMIZE (FRAMEWORK_AGENT) phase. Default: 0.40.",
     )
     opt.add_argument(
         "--max-minutes-kernel-pct",
@@ -1405,7 +1395,7 @@ def _build_parser() -> argparse.ArgumentParser:
         dest="phase_budget_kernel_pct",
         type=float,
         default=None,
-        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.35.",
+        help="Wall-clock budget cap for KERNEL_AGENT. Default: 0.50.",
     )
     opt.add_argument(
         "--max-minutes-sweep-pct",

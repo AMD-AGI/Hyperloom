@@ -6,7 +6,7 @@
 
 The orchestrator writes an input JSON with one validated agent backend, model,
 and sandbox policy and calls this script; the autonomous fusion pipeline itself
-lives in KernelForge and is invoked as ``kernel-agents forge-fuse``.
+lives in KernelForge and is invoked as ``kernelforge forge-fuse``.
 
 It emits a ``fusion_manifest.json``; this wrapper normalizes that into the
 Hyperloom kernel-result contract (a ``FORGE_FUSION_RESULT_BEGIN/END`` stdout
@@ -46,6 +46,14 @@ RESULT_END = "FORGE_FUSION_RESULT_END"
 # so it must not be normalized into an optimization outcome -- see
 # _normalize_manifest.
 LLM_UNAVAILABLE_VERDICT = "llm_unavailable"
+
+# ``fusion_loop.termination_reason`` values for a run that died before the loop
+# ran a single attempt. Like an LLM outage, this is infrastructure failing rather
+# than a statement about the kernel -- see _normalize_manifest. Keyed on the
+# termination reason, which is KernelForge's contract for why the loop stopped,
+# so a new abort path inherits the handling instead of silently regressing into
+# the no-KEEP shape.
+INFRA_ABORT_REASONS = frozenset({"harness_author_failed", "no_git_workspace"})
 DEFAULT_TIMEOUT_SEC = 7200
 _AGENT_BACKENDS = frozenset({"claude", "codex"})
 
@@ -139,7 +147,7 @@ def _add_opt(cmd: list[str], args: dict[str, Any], key: str, flag: str, *, requi
 def _build_cmd(args: dict[str, Any]) -> list[str]:
     agent_backend = _validated_agent_backend(args.get("agent_backend"))
     agent_sandbox_mode = _validated_agent_sandbox_mode(args.get("agent_sandbox_mode"))
-    cmd = [sys.executable, "-m", "kernel_agents.cli", "forge-fuse"]
+    cmd = [sys.executable, "-m", "kernelforge.cli", "forge-fuse"]
     _add_opt(cmd, args, "trace_path", "--trace", required=True)
     _add_opt(cmd, args, "model_path", "--model-path", required=True)
     _add_opt(cmd, args, "framework", "--framework", required=True)
@@ -237,6 +245,19 @@ def _run_with_tree_timeout(cmd: list[str], timeout_sec: int) -> subprocess.Compl
         raise subprocess.TimeoutExpired(cmd, timeout_sec, output=stdout, stderr=stderr)
 
 
+def _attempted(loop: dict[str, Any]) -> bool:
+    """Whether ``fusion_loop`` reports at least one completed attempt.
+
+    Read defensively: the count crosses a repository boundary, and a non-numeric
+    value must not read as "attempted" -- that would drop the run back into the
+    ``complete``/``no_improvement`` shape this guards against.
+    """
+    try:
+        return int(loop.get("attempts") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     """Map forge-fusion's ``fusion_manifest.json`` -> Hyperloom result contract."""
     result: dict[str, Any] = {
@@ -298,6 +319,51 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
                 "verdict": LLM_UNAVAILABLE_VERDICT,
                 "error_class": LLM_UNAVAILABLE_VERDICT,
                 "error": f"forge-fusion never reached the LLM ({kind}{tried}): {message}"[:1500],
+            }
+        )
+        return result
+
+    aborted = str(loop.get("termination_reason") or "").strip().lower()
+    if aborted in INFRA_ABORT_REASONS and not kept and not compile_pass and not _attempted(loop):
+        # The loop stopped on infrastructure, not on a judgement about the kernel:
+        # the harness-authoring turn failed, or there was no git workspace to
+        # author in. Discovery had already run, so a recipe is named in the
+        # manifest; nothing ever got to measure it.
+        #
+        # The default no-KEEP shape below would report that as
+        # ``complete``/``no_improvement`` -- an outage recorded as an optimization
+        # result, AND ``complete`` satisfies the KERNEL-entry idempotency gate
+        # (``_fusion_required_before_kernel_opt``), so one abort would skip fusion
+        # for the whole remaining session even though every later entry could have
+        # retried it. Same reasoning, and the same retryable shape, as the LLM
+        # outage above.
+        #
+        # Guarded on ``not kept`` and ``not compile_pass`` so a measured result is
+        # never discarded. The attempt count is a weaker signal than it looks:
+        # KernelForge's abort handler builds a fresh ``LoopResult`` whose history
+        # is empty, so ``attempts`` reads 0 even when earlier recipes ran full
+        # campaigns. It is kept as a cheap filter for the ordinary case, but the
+        # load-bearing guards are the two above -- they are what a real
+        # measurement would set.
+        #
+        # ``result`` still carries its failed/REVERT/not-kept defaults from above,
+        # so only the abort's identity has to be added. The located recipe rides
+        # in the message rather than in ``env_flags``: nothing measured it, and
+        # ``env_flags`` means "flags this run confirmed".
+        located = str((m.get("fusion") or {}).get("env_flag") or "")
+        result.update(
+            {
+                "verdict": m.get("verdict"),
+                "error_class": aborted,
+                # Explicit rather than re-deriving the reason set on the consumer
+                # side: the orchestrator bounds how often it re-runs an abort, and
+                # a copied constant there would drift from the one above.
+                "infrastructure_abort": True,
+                "error": (
+                    f"forge-fusion aborted on infrastructure ({aborted}); "
+                    f"the loop reported no completed attempts and no result. "
+                    f"Recipe located by discovery: {located or 'unknown'}"
+                )[:1500],
             }
         )
         return result

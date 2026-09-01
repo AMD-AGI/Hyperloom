@@ -110,7 +110,6 @@ def _checkpoint(base_commit: str, best_commit: str, **overrides) -> dict:
 
 def _stub_submit_environment(monkeypatch) -> None:
     """Neutralize everything submit does outside the loop/recovery contract."""
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
 
 
 def test_observed_regression_score_is_preserved_for_diagnostics():
@@ -173,6 +172,32 @@ def test_all_kernel_sources_are_remapped_into_prepared_worktree(tmp_path):
     ]
     assert all(Path(path).is_file() for path in sources)
     assert all(Path(path).is_relative_to(Path(workspace).resolve()) for path in sources)
+
+
+def test_untracked_kernel_inside_a_git_repo_is_not_worktree_prepared(tmp_path):
+    """A repo that indexes only part of its tree must not swallow the kernel.
+
+    A scratch git repo created over a framework install can track only one
+    subtree (``vllm/`` and nothing else). ``git worktree add`` still succeeds
+    there, but the checkout has no copy of an untracked kernel, so preparation
+    has to decline and let the caller fall back to the no-git scratch path.
+    """
+    repo, _kernel = _make_repo(tmp_path)
+    untracked = repo / "aiter" / "ops" / "gemm.py"
+    untracked.parent.mkdir(parents=True)
+    untracked.write_text("BASELINE\n")
+    output_dir = tmp_path / "attempt"
+    output_dir.mkdir()
+
+    prepared = forge_submit._prepare_worktree(
+        str(untracked),
+        str(repo),
+        output_dir,
+        "forge/test/untracked-kernel",
+    )
+
+    assert prepared is None
+    assert not (output_dir / "worktree").exists()
 
 
 def test_unmappable_declared_source_fails_remapping(tmp_path):
@@ -642,8 +667,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     deadline = time.time() + 120.0
@@ -656,7 +680,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         branch="forge/session/kernel",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file=str(program),
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -699,7 +723,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     assert command[:5] == [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-loop",
         "--kernel",
     ]
@@ -712,7 +736,7 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
         "--git-branch": "forge/session/kernel",
         "--gpu-target": "gfx950",
         "--gpu-type": "mi355x",
-        "--fellow": "triton-fellow",
+        "--kernel-backend": "triton",
         "--experiments-dir": str(experiments),
         "--experiment-id": "hyperloom",
         "--experience-id": "attempt-1",
@@ -738,7 +762,12 @@ def test_cli_invocation_pins_the_forge_loop_contract(tmp_path, monkeypatch):
     # kernel's experience by the former, and declines to read or write without
     # it, so a run that carried only the target would accumulate nothing.
     assert captured["env"]["GPU_TYPE"] == "mi355x"
-    assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+    # KernelForge ships in this distribution now, so the child imports it from
+    # the same install as the parent and no checkout root is grafted onto
+    # PYTHONPATH. Asserting the graft is *gone* -- rather than that some value
+    # is present -- is what keeps a resurrected override from silently
+    # shadowing the packaged copy.
+    assert captured["env"].get("PYTHONPATH") == os.environ.get("PYTHONPATH")
     # Isolated process group -- the timeout kill signals the group, not just pid.
     assert captured["popen_kwargs"]["start_new_session"] is True
     assert captured["popen_kwargs"]["stdout"] is subprocess.PIPE
@@ -798,8 +827,7 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         def communicate(self, timeout=None):
             return "", "Error: No such option '--future-option'.\n"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(
         forge_submit.subprocess,
         "Popen",
@@ -815,7 +843,7 @@ def test_nonzero_exit_reports_the_child_reason_not_only_the_code(
         branch="b",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -864,8 +892,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         commands.append(command)
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     cases = [
@@ -879,7 +906,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [direct],
             "expected_framework": "",
             "expected_kind": "triton",
-            "expected_fellow": "triton-fellow",
+            "expected_kernel_backend": "triton",
             "expected_symbols": ["direct_kernel"],
         },
         {
@@ -894,7 +921,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [wrapper, aiter_impl],
             "expected_framework": "aiter",
             "expected_kind": "",
-            "expected_fellow": "triton-fellow",
+            "expected_kernel_backend": "triton",
             "expected_symbols": ["attention_kernel"],
         },
         {
@@ -908,7 +935,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [ck_source],
             "expected_framework": "aiter",
             "expected_kind": "aiter_ck",
-            "expected_fellow": "ck-fellow",
+            "expected_kernel_backend": "ck",
             "expected_symbols": ["gemm_kernel"],
         },
         {
@@ -921,7 +948,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             "sources": [fly_source],
             "expected_framework": "",
             "expected_kind": "flydsl",
-            "expected_fellow": "flydsl-fellow",
+            "expected_kernel_backend": "flydsl",
             "expected_symbols": ["moe_kernel"],
         },
     ]
@@ -941,8 +968,8 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             candidate,
             str(case["kernel"]),
         )
-        fellow = forge_submit._resolve_fellow(case["source_type"], kind)
-        assert fellow is not None
+        kernel_backend = forge_submit._resolve_kernel_backend(case["source_type"], kind)
+        assert kernel_backend is not None
         experiments = tmp_path / f"attempt-{index}" / "forge_experiments"
         experiments.mkdir(parents=True)
         forge_submit._run_loop_via_cli(
@@ -954,7 +981,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
             branch=f"forge/test/{index}",
             gpu_target="gfx950",
             gpu_type="mi355x",
-            fellow=fellow,
+            kernel_backend=kernel_backend,
             program_md_file="",
             invocation_spec_file="",
             experiments_dir=experiments,
@@ -970,7 +997,7 @@ def test_generated_argv_matches_triton_wrapper_ck_and_flydsl_contracts(
         command = commands[-1]
         assert command[command.index("--operator-name") + 1] == (forge_submit._logical_operator(candidate))
         assert command[command.index("--source-files") + 1] == ",".join(source_values)
-        assert command[command.index("--fellow") + 1] == case["expected_fellow"]
+        assert command[command.index("--kernel-backend") + 1] == case["expected_kernel_backend"]
         assert kind == case["expected_kind"]
         assert framework == case["expected_framework"]
         assert symbols == case["expected_symbols"]
@@ -1022,8 +1049,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         checkpoint_json.write_text(json.dumps({"experiment_id": "hyperloom", "checkpoint": fresh}))
         return "partial stdout", "partial stderr"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", TimeoutPopen)
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
 
@@ -1036,7 +1062,7 @@ def test_cli_timeout_recovers_only_this_run_s_checkpoint(tmp_path, monkeypatch):
         branch="forge/session/kernel",
         gpu_target="gfx950",
         gpu_type="mi355x",
-        fellow="triton-fellow",
+        kernel_backend="triton",
         program_md_file="",
         invocation_spec_file="",
         experiments_dir=experiments,
@@ -1104,14 +1130,14 @@ def test_forced_termination_escalates_to_sigkill_and_keeps_partial_output(monkey
     assert stdout == "partial stdout\nfinal stdout"
     assert stderr == "partial stderr\nfinal stderr"
     # SIGTERM, SIGKILL once the grace period expires, then a final sweep of the
-    # group after the parent is reaped (a re-parented fellow child would
+    # group after the parent is reaped (a re-parented kernel backend child would
     # otherwise survive its parent).
     assert signals == [
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
         (process.pid, signal.SIGKILL),
     ]
-    # The escalation also sweeps captured descendants, so a fellow's own
+    # The escalation also sweeps captured descendants, so a kernel backend's own
     # grandchildren cannot outlive the group.
     assert killed == [(descendants, signal.SIGKILL)]
 
@@ -1927,8 +1953,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
     def forbidden_popen(*_args, **_kwargs):
         raise AssertionError("a campaign must not start on unclearable artifacts")
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", forbidden_popen)
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -1941,7 +1966,7 @@ def test_unclearable_stale_artifact_aborts_before_starting_a_campaign(
             branch="forge/session/kernel",
             gpu_target="gfx950",
             gpu_type="mi355x",
-            fellow="triton-fellow",
+            kernel_backend="triton",
             program_md_file="",
             invocation_spec_file="",
             experiments_dir=experiments,
@@ -2194,7 +2219,7 @@ def test_nogit_scratch_uses_supplied_non_main_branch(tmp_path):
 def _capabilities_payload(**overrides) -> dict:
     """One capability payload, spelled exactly as the producer emits it.
 
-    Copied from ``kernel_agents.rewrite_by_flydsl.protocol.capabilities()``.
+    Copied from ``kernelforge.rewrite_by_flydsl.protocol.capabilities()``.
     ``test_capability_payload_matches_the_installed_producer`` re-derives it from
     a real producer when one is on disk, so a rename on either side cannot leave
     these tests passing against a payload nobody emits.
@@ -2310,10 +2335,10 @@ def _rewrite_route_kwargs(tmp_path, **overrides) -> dict:
 def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
     captured = _stub_capability_process(
         monkeypatch,
-        stdout="loading kernel_agents...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
+        stdout="loading kernelforge...\n" + json.dumps(_capabilities_payload()) + "\ndone\n",
     )
 
-    capabilities = _flydsl_rewrite.probe_capabilities(forge_root="/forge/src")
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True
     assert capabilities.reason == "capability_ok"
@@ -2322,11 +2347,14 @@ def test_capability_probe_reads_the_declared_rewrite_contract(monkeypatch):
     assert captured["command"] == [
         sys.executable,
         "-m",
-        "kernel_agents.cli",
+        "kernelforge.cli",
         "forge-rewrite-by-flydsl",
         "--capabilities-json",
     ]
-    assert captured["env"]["PYTHONPATH"].startswith("/forge/src")
+    # The child inherits this process's environment untouched: the producer is
+    # the installed kernelforge, so there is no root left to graft onto
+    # PYTHONPATH.
+    assert captured["env"] == os.environ
 
 
 @pytest.mark.parametrize(
@@ -2366,13 +2394,8 @@ def test_capability_probe_rejects_a_renamed_protocol_field(monkeypatch):
 
 
 def test_installed_producer_capabilities_are_accepted():
-    producer_root = forge_submit._ensure_forge_on_path()
-    if not producer_root:
-        pytest.skip("no KernelForge checkout resolvable from $FORGE_PATH")
-
-    capabilities = _flydsl_rewrite.probe_capabilities(
-        forge_root=producer_root,
-    )
+    """Unstubbed: the producer ships in this distribution, so it is always here."""
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert set(capabilities.frameworks) == {"aiter", "vllm", "sglang"}
@@ -2392,45 +2415,20 @@ def test_capability_probe_reports_a_producer_that_rejects_the_flag(monkeypatch):
     assert "rc=2" in capabilities.detail
 
 
-def _installed_producer_root() -> str:
-    """Return the source root of a KernelForge that speaks the rewrite command.
-
-    Resolves ``$FORGE_PATH`` the same way ``forge_submit`` does, then requires
-    the rewrite command itself: a checkout predating the rewrite route answers
-    the module but not the command, and must skip rather than fail.
-    """
-    root = forge_submit._ensure_forge_on_path()
-    if not root:
-        return ""
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "kernel_agents.cli",
-            _flydsl_rewrite.REWRITE_COMMAND,
-            _flydsl_rewrite.CAPABILITIES_FLAG,
-        ],
-        capture_output=True,
-        text=True,
-        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
-        timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
-    )
-    return root if proc.returncode == 0 else ""
-
-
 def test_capability_payload_matches_the_installed_producer():
     """The real producer must satisfy this consumer, unstubbed.
 
     Every other capability test builds the payload itself, so both halves of
-    this cross-repo contract can drift into agreeing only with their own
-    fixtures. This runs the installed producer and pins its payload against the
-    fixture, which is the one check that catches a rename on either side.
-    """
-    root = _installed_producer_root()
-    if not root:
-        pytest.skip("no KernelForge with forge-rewrite-by-flydsl resolvable from $FORGE_PATH")
+    this contract can drift into agreeing only with their own fixtures. This
+    runs the installed producer and pins its payload against the fixture, which
+    is the one check that catches a rename on either side.
 
-    capabilities = _flydsl_rewrite.probe_capabilities(forge_root=root)
+    It used to resolve the producer from ``$FORGE_PATH`` and skip when that
+    named no checkout carrying the rewrite command -- so in practice it never
+    ran. The producer is part of this distribution now, and a missing rewrite
+    command is a real failure rather than a reason to skip.
+    """
+    capabilities = _flydsl_rewrite.probe_capabilities()
 
     assert capabilities.supported is True, f"{capabilities.reason}: {capabilities.detail}"
     assert capabilities.reason == "capability_ok"
@@ -2447,13 +2445,12 @@ def test_capability_payload_matches_the_installed_producer():
         [
             sys.executable,
             "-m",
-            "kernel_agents.cli",
+            "kernelforge.cli",
             _flydsl_rewrite.REWRITE_COMMAND,
             _flydsl_rewrite.CAPABILITIES_FLAG,
         ],
         capture_output=True,
         text=True,
-        env={**os.environ, "PYTHONPATH": root + os.pathsep + os.environ.get("PYTHONPATH", "")},
         timeout=_flydsl_rewrite.CAPABILITY_PROBE_TIMEOUT_SEC,
     )
     published = _flydsl_rewrite._decode_capability_payload(proc.stdout)
@@ -3170,8 +3167,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
         captured["popen_kwargs"] = kwargs
         return FakeProcess()
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "/forge/src")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", fake_popen)
 
     deadline = time.time() + 7200.0
@@ -3200,7 +3196,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     )
 
     command = captured["command"]
-    assert command[:4] == [sys.executable, "-m", "kernel_agents.cli", "forge-rewrite-by-flydsl"]
+    assert command[:4] == [sys.executable, "-m", "kernelforge.cli", "forge-rewrite-by-flydsl"]
     expected = {
         "--source-kernel": str(kernel),
         "--driver": str(driver),
@@ -3241,7 +3237,7 @@ def test_rewrite_cli_invocation_pins_the_producer_contract(tmp_path, monkeypatch
     # Options that only exist on the generic loop must never be smuggled across.
     for forbidden in (
         "--kernel",
-        "--fellow",
+        "--kernel-backend",
         "--experiment-id",
         "--experience-id",
         "--operator-name",
@@ -3283,8 +3279,7 @@ def test_rewrite_cli_hard_kills_the_producer_at_the_deadline(tmp_path, monkeypat
         terminated["pid"] = proc.pid
         return "partial stdout", "killed"
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: HangingProcess())
     monkeypatch.setattr(forge_submit, "_terminate_forge_process", fake_terminate)
 
@@ -3337,8 +3332,7 @@ def test_rewrite_cli_prefers_the_caller_named_result_file(tmp_path, monkeypatch)
             result_json.write_text(json.dumps({"success": True, "from": "sidecar"}))
             return '__FORGE_RESULT__{"success": true, "from": "sentinel"}', ""
 
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
-    monkeypatch.setattr(forge_submit, "_apply_fellow_env", lambda _env: None)
+    monkeypatch.setattr(forge_submit, "_apply_kernel_backend_env", lambda _env: None)
     monkeypatch.setattr(forge_submit.subprocess, "Popen", lambda command, **kwargs: FakeProcess())
 
     outcome = forge_submit._run_rewrite_via_cli(

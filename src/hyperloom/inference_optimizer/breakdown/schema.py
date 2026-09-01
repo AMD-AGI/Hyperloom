@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from ..session.sbd_v6 import SCHEMA_VERSION_V6
+
 #: Historical collector-only schema retained for archived-reader identification.
 SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
 
@@ -416,7 +418,7 @@ class CapabilityEntry(TypedDict, total=False):
     best_gain_pct: float | None
     reason: str  # human readable, e.g. "geak backend only this run"
     # explore-specific:
-    keep_unstable_count: int  # KEEP'd variants evicted by inlined stack rebench
+    keep_unstable_count: int  # Pre-removal sessions only: KEEP'd variants a confirmation round evicted
     winners_history: int  # cumulative explore_search.winners_history length
     # specialist-row only — per-domain split keyed by SpecialistDomain.key;
     # every catalogue domain is seeded not_attempted for presence-free iteration.
@@ -756,10 +758,19 @@ class KernelBackendAttempt(TypedDict, total=False):
         model (str | None): Model used by the backend, or None.
         ts (str): ISO UTC timestamp of the attempt.
         status (str): Attempt status.
-        decision (str): KEEP / PARTIAL / REVERT / FAILED.
+        decision (str): KEEP / PARTIAL / REVERT / NEEDS_REVIEW / FAILED. The
+            kernel-level verdict on the adopted attempt, the attempt's own
+            otherwise.
         micro_speedup (float | None): Micro-benchmark speedup, or None.
         compile_passed (bool | None): Whether compilation passed, or None.
         correctness_passed (bool | None): Whether correctness passed, or None.
+        correctness_source (str | None): What the correctness verdict was read
+            from (``forge_rewrite_reference`` / ``report_scan`` /
+            ``cli_override`` / ...), or None when nothing recorded one.
+        best_artifact_path (str): The rewritten source the kernel was carried
+            to integrate with. Written on the adopted attempt only; ``""``
+            elsewhere. Distinct from ``optimized_files``, which is the
+            attempt's own output (a stdout log for a real backend run).
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
         error_class (str | None): Failure classification (pre-dispatch markers).
@@ -783,6 +794,8 @@ class KernelBackendAttempt(TypedDict, total=False):
     micro_speedup: float | None
     compile_passed: bool | None
     correctness_passed: bool | None
+    correctness_source: str | None
+    best_artifact_path: str
     optimized_files: list[str]
     error: str | None
     error_class: str | None
@@ -927,7 +940,6 @@ class ParamSearchLedger(TypedDict, total=False):
         accepted (list[ParamSearchEntry]): Variants that were accepted.
         rejected (list[ParamSearchEntry]): Variants that were rejected.
         top_by_gain (list[ParamSearchEntry]): Best variants ordered by gain.
-        winner_history (list[dict[str, Any]]): History of winning variants.
         no_promote_streak (int): Consecutive evaluations without a promotion.
     """
 
@@ -936,7 +948,6 @@ class ParamSearchLedger(TypedDict, total=False):
     accepted: list[ParamSearchEntry]
     rejected: list[ParamSearchEntry]
     top_by_gain: list[ParamSearchEntry]
-    winner_history: list[dict[str, Any]]
     no_promote_streak: int
 
 
@@ -948,14 +959,12 @@ class ParamSearch(TypedDict, total=False):
         backends (ParamSearchLedger): Ledger for the backend-tuning family.
         synergy_attempted (list[str]): Synergy combinations that were attempted.
         discovered_flags (dict[str, Any]): Flags discovered during search.
-        backend_winners_history (list[dict[str, Any]]): History of backend winners.
     """
 
     params: ParamSearchLedger
     backends: ParamSearchLedger
     synergy_attempted: list[str]
     discovered_flags: dict[str, Any]
-    backend_winners_history: list[dict[str, Any]]
 
 
 # Sweep
@@ -1022,6 +1031,12 @@ class Geak(TypedDict, total=False):
     error_class: str | None
     error: str | None
     returncode: int | None
+    # Same-harness adjudication, kept on the result because it is terminal
+    # state: ``geak_pending`` is cleared when the verdict lands, and the final
+    # report still has to say why a measured candidate was dropped.
+    revalidation_status: str | None
+    revalidation_error_class: str | None
+    revalidation_error: str | None
     recovered_from_disk: bool
     handoff: dict[str, Any] | None
     exp_root: str | None
@@ -1062,6 +1077,8 @@ class CriticIteration(TypedDict, total=False):
     """One critic-agent review pass over a proposed change.
 
     Attributes:
+        iteration_id (str): Stable session-unique identity for this persisted
+            review pass, including resume-time reuse of ``iter``.
         iter (int): Iteration index.
         ts (str): ISO UTC timestamp of the review.
         topic (str): What was reviewed (e.g. ``kernel_opt:k001`` / ``backends:flag_X``).
@@ -1072,8 +1089,13 @@ class CriticIteration(TypedDict, total=False):
         judge_bundle_path (str): Path to the judge bundle.
         emit_path (str): Path to the emitted review output.
         review_path (str): Path to the review record.
+        phase (str): Coordinator phase captured with the critic request.
+        macro_cycle (int): Coordinator macro cycle captured with the request.
+        framework_reviews (list[dict[str, Any]]): Durable normalized V6
+            Framework review rows.
     """
 
+    iteration_id: str
     iter: int
     ts: str
     topic: str  # what was reviewed (kernel_opt:k001, backends:flag_X, ...)
@@ -1083,6 +1105,9 @@ class CriticIteration(TypedDict, total=False):
     judge_bundle_path: str
     emit_path: str
     review_path: str
+    phase: str
+    macro_cycle: int
+    framework_reviews: list[dict[str, Any]]
 
 
 class RobustnessSignal(TypedDict, total=False):
@@ -1346,7 +1371,7 @@ class PhaseBreakdown(TypedDict, total=False):
     Attributes:
         prelude (PhaseBreakdownExplore): PRELUDE phase gain (always 0 by definition).
         framework (PhaseBreakdownFramework): FRAMEWORK_AGENT phase gain.
-        explore (PhaseBreakdownExplore): EXPLORE phase gain by domain.
+        explore (PhaseBreakdownExplore): Configuration-lever gain by domain.
         kernel_agent (PhaseBreakdownKernel): KERNEL_AGENT phase gain by
             ``kernel_id``. Unlike ``framework``, which the producer normalizes
             down from ``FRAMEWORK_AGENT``, this bucket keeps the phase name.
@@ -1379,6 +1404,13 @@ class Attribution(TypedDict, total=False):
             ``single_source`` / ``reconstructed`` / ``missing``).
         source_breakdown (SourceBreakdown): Gain split by contributing source.
         phase_breakdown (PhaseBreakdown): Gain split per optimization phase.
+        lever_breakdown (dict[str, float]): Gain split by ``lever_kind``:
+            ``config`` (server args / envs), ``source_patch`` (a diff a
+            specialist wrote), ``upstream_pr`` (a diff fetched from a PR),
+            ``enablement`` (graded on runnability, not throughput) and
+            ``kernel`` (a tuned or authored kernel). ``unattributed`` collects
+            gain no stamp claimed. Two levers share the optimisation phase, so
+            the lever -- not the phase that was live -- says which earned it.
         notes (list[str]): Human-readable caveats about the attribution.
     """
 
@@ -1387,6 +1419,7 @@ class Attribution(TypedDict, total=False):
     method: str
     source_breakdown: SourceBreakdown
     phase_breakdown: PhaseBreakdown
+    lever_breakdown: dict[str, float]
     notes: list[str]  # human-readable caveats
 
 
@@ -1399,7 +1432,7 @@ class PhaseSegment(TypedDict, total=False):
 
     Attributes:
         phase (str): Phase name (``PRELUDE`` / ``FRAMEWORK_AGENT`` /
-            ``EXPLORE`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
+            ``FRAMEWORK_AGENT`` / ``KERNEL_AGENT`` / ``SWEEP`` / ``CLOSE``).
         from_phase (str): Previous phase (empty for the first segment).
         entered_ts (str): ISO UTC timestamp of entry.
         entered_unix (float | None): Unix time of entry, or None.
@@ -1410,7 +1443,7 @@ class PhaseSegment(TypedDict, total=False):
         elapsed_seconds (float | None): Segment duration in seconds, or None.
     """
 
-    phase: str  # PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE
+    phase: str  # PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE
     from_phase: str  # previous phase (empty for first segment)
     entered_ts: str  # iso UTC of entry
     entered_unix: float | None
@@ -2389,7 +2422,7 @@ class TokenUsage(TypedDict, total=False):
         by_component (dict[str, TokenUsageBucket]): Per-agent breakdown
             (orchestration / kernel / critic / specialist / proposal_scorer / ...).
         by_phase (dict[str, TokenUsageBucket]): Per-phase breakdown
-            (PRELUDE / FRAMEWORK_AGENT / EXPLORE / SWEEP / ...).
+            (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / ...).
         attribution (TokenUsageAttribution): Decision-attributed vs unattributed.
         timeline (list[TokenUsageTimelineEntry]): ``action_timeline`` rows with
             their token spend joined on ``task_id``.
@@ -2602,7 +2635,6 @@ class EnablementBreakdown(TypedDict, total=False):
         localization_manifest: Files the localization pass identified.
         build_novelty: Novelty keys of the targeted builds requested.
         human_review_count: Number of logs parked for human review.
-        stack_actions: Candidate stack actions considered this session.
         active_runtime: The currently-promoted attempt runtime, or {} when none.
         attempt_runtimes: Retained attempt-runtime records (capped).
         failure_kind: Last classified enablement failure kind.
@@ -2652,7 +2684,6 @@ class EnablementBreakdown(TypedDict, total=False):
     localization_manifest: list[str]
     build_novelty: list[str]
     human_review_count: int
-    stack_actions: list[EnablementStackActionSummary]
     active_runtime: EnablementAttemptRuntime
     attempt_runtimes: list[EnablementAttemptRuntime]
     failure_kind: str
@@ -2917,6 +2948,140 @@ class Integrity(TypedDict, total=False):
     conflicts: list[dict[str, Any]]
 
 
+class V6MetadataVersions(TypedDict, total=False):
+    """Version identifiers projected into V6 metadata."""
+
+    schema_version: str
+    hyperloom: str
+    framework: str | None
+    framework_version: str | None
+    tools: dict[str, str | None]
+
+
+class V6MetadataSession(TypedDict, total=False):
+    """Session identity and lifecycle fields exposed by V6 metadata."""
+
+    session_id: str
+    claw_session_id: str | None
+    sandbox_user_id: str | None
+    created_at_utc: str
+    start_ts: str
+    ended_at_utc: str
+    host: str
+    session_dir: str
+    user_data_path: str
+    code_revision: str
+    pid: int
+    max_minutes: int
+    elapsed_minutes: float
+    tick_count: int
+    recovery: dict[str, Any]
+
+
+class V6TaskConfig(TypedDict, total=False):
+    """Launch-time workload and model architecture projected into V6."""
+
+    model_name: str
+    model_path: str
+    framework_name: str
+    framework_version: str
+    gpu_type: str
+    tp: int | None
+    conc: int | None
+    isl: int | None
+    osl: int | None
+    precision: str
+    max_model_len: int | None
+    objective: dict[str, Any]
+    launch_env: dict[str, str]
+    launch_server_args: str
+    architecture: dict[str, Any]
+
+
+class V6Metadata(TypedDict, total=False):
+    """V6 task identity, configuration, versions, and trace entrypoint."""
+
+    exported_at_utc: str
+    versions: V6MetadataVersions
+    session: V6MetadataSession
+    task_config: V6TaskConfig
+    langfuse: dict[str, Any]
+    warnings: list[str]
+
+
+class V6OutcomeGainBucket(TypedDict, total=False):
+    """Additive, session-baseline-relative gain for one V6 source bucket."""
+
+    total_gain_pct: float | None
+    keep_count: int
+    non_attributable_keep_count: int
+
+
+class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
+    """Kernel gain with its authoritative GEAK and Forge backend split."""
+
+    by_backend: dict[str, V6OutcomeGainBucket]
+
+
+class V6OutcomeAttributionBySource(TypedDict, total=False):
+    """Canonical ledger gain projected onto the V6 stage vocabulary."""
+
+    warm_replay: V6OutcomeGainBucket
+    framework_agent: V6OutcomeGainBucket
+    kernel: V6OutcomeKernelAttribution
+
+
+class V6OutcomeAttribution(TypedDict, total=False):
+    """Availability and additive gain attribution from the canonical ledger."""
+
+    available: bool
+    by_source: V6OutcomeAttributionBySource
+
+
+class V6OutcomeValidation(TypedDict, total=False):
+    """Reconciliation of final measured gain with canonical KEEP entries."""
+
+    attributed_gain_pct: float
+    unattributed_gain_pct: float
+    reconciliation_gap_pct: float | None
+    attribution: V6OutcomeAttribution
+    notes: list[str]
+
+
+class V6Outcome(TypedDict, total=False):
+    """V6 session result projection for downstream consumers."""
+
+    stop_reason: str
+    status: Literal["completed", "failed", "aborted"]
+    stage_reached: str
+    baseline: dict[str, Any]
+    final: dict[str, Any]
+    validation: V6OutcomeValidation
+
+
+class V6TimelineEvent(TypedDict, total=False):
+    """One ordered V6 business-stage event; CLOSE is intentionally excluded."""
+
+    type: str
+    kind: str
+    status: str
+    start_time: str
+    end_time: str
+    ext: dict[str, Any]
+
+
+class V6Close(TypedDict, total=False):
+    """V6 session finalization result exposed outside the business timeline."""
+
+    status: Literal["succeeded", "failed", "degraded"]
+    start_time: str
+    end_time: str
+    close_sequence_done: bool
+    steps: list[dict[str, Any]]
+    robustness: dict[str, Any]
+    artifacts: dict[str, Any]
+
+
 class SessionBreakdown(TypedDict, total=False):
     """Top-level wire shape of ``session_breakdown.json``.
 
@@ -2940,6 +3105,7 @@ class SessionBreakdown(TypedDict, total=False):
         phase_timeline (list[PhaseEvent]): Flat per-action timeline.
         phase_segments (list[PhaseSegment]): Phase-boundary view.
         capability_summary (CapabilitySummary): Per-capability roll-up.
+        geak (Geak): GEAK route diagnostics and accepted artifacts.
         kernel_lifecycle (KernelLifecycle): Kernels grouped by lifecycle stage.
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
@@ -2978,6 +3144,7 @@ class SessionBreakdown(TypedDict, total=False):
     # flat-list alias for older readers.
     action_timeline: list[PhaseEvent]
     capability_summary: CapabilitySummary
+    geak: Geak
     kernel_lifecycle: KernelLifecycle
     collective: Collective
     # explore_search is the native merged ledger; param_search is a v1 alias.
@@ -3012,6 +3179,10 @@ class SessionBreakdown(TypedDict, total=False):
     versions: dict[str, KernelToolMetadata]
     # Enablement attempt-runtime observability; {} → dashboard hides the block.
     enablement: EnablementBreakdown
+    metadata: V6Metadata
+    outcome: V6Outcome
+    timeline: list[V6TimelineEvent]
+    close: V6Close
 
     warnings: list[str]
     source_files: SourceFiles
@@ -3022,6 +3193,7 @@ __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
+    "SCHEMA_VERSION_V6",
     "Adoption",
     "AdoptedKernel",
     "ArtifactRef",
@@ -3116,6 +3288,18 @@ __all__ = [
     "TokenUsageAttribution",
     "TokenUsageBucket",
     "TokenUsageTimelineEntry",
+    "V6Metadata",
+    "V6MetadataSession",
+    "V6MetadataVersions",
+    "V6Close",
+    "V6OutcomeAttribution",
+    "V6OutcomeAttributionBySource",
+    "V6OutcomeGainBucket",
+    "V6OutcomeKernelAttribution",
+    "V6Outcome",
+    "V6OutcomeValidation",
+    "V6TaskConfig",
+    "V6TimelineEvent",
     "Workload",
     "WorkloadObjective",
 ]

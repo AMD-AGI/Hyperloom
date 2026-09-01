@@ -11,7 +11,7 @@ Design boundary: nothing here ever writes to ``SharedState``, participates
 in the orchestrator's scoring / Objective, or gates any KEEP/REVERT
 decision. On a successful match :func:`target_analyzer.analyze` does write a
 measured ``competitor_target.json`` (``source`` = the API URL) that the
-EXPLORE gap advisory surfaces to specialists as *direction, not a gate* — so
+gap advisory surfaces to specialists as *direction, not a gate* — so
 any reference number reaching a prompt is always API-measured, never
 LLM-authored. Consumers:
 
@@ -20,7 +20,7 @@ LLM-authored. Consumers:
 * :class:`hyperloom.orchestrator.actions.executors.ReportExecutor`
   — reads ``target_analysis/target_baseline.json`` to render the report
   section in ``final.md``.
-* the EXPLORE gap advisory — reads the measured ``competitor_target.json``.
+* the gap advisory — reads the measured ``competitor_target.json``.
 
 Source of upstream data: the InferenceX public benchmarks API
 (https://inferencex.semianalysis.com/api/v1/benchmarks).
