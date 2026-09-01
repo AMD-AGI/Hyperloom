@@ -93,3 +93,33 @@ def test_read_baseline_yaml_benchmark(tmp_path: Path):
 
     # Full chain: baseline yaml -> server args string.
     assert rc._read_baseline_yaml_server_args(state) == "--tp 8"
+
+
+def test_resolve_compute_peak_provenance():
+    # Achievable-table hit wins over the vendor dense peak.
+    achievable = rc.resolve_compute_peak_provenance("mi300x", "bf16")
+    assert achievable == {
+        "compute_peak_convention": "achievable",
+        "compute_peak_tflops": rc._resolve_achievable_tflops("mi300x", "bf16"),
+        "compute_peak_source": "TraceLens arch JSON (max-achievable sustained)",
+    }
+    assert achievable["compute_peak_tflops"] > 0
+
+    # mi308x has no HW_SPECS_ACHIEVABLE entry -> falls back to the vendor
+    # dense peak (mi308x shares mi300x's peak_tflops table).
+    vendor = rc.resolve_compute_peak_provenance("mi308x", "bf16")
+    assert rc._resolve_achievable_tflops("mi308x", "bf16") == 0.0
+    assert vendor == {
+        "compute_peak_convention": "vendor",
+        "compute_peak_tflops": rc._resolve_peak_tflops("mi308x", "bf16"),
+        "compute_peak_source": "vendor dense peak (achievable-table miss fallback)",
+    }
+    assert vendor["compute_peak_tflops"] > 0
+
+    # Unknown gpu/precision misses both tables -> unknown/0.0/"unavailable".
+    unknown = rc.resolve_compute_peak_provenance("h100", "bf16")
+    assert unknown == {
+        "compute_peak_convention": "unknown",
+        "compute_peak_tflops": 0.0,
+        "compute_peak_source": "unavailable",
+    }
