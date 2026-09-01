@@ -22,10 +22,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from hyperloom.common.jsonio import read_jsonl
+
 from ..session.session_paths import (
     recipe_kb_dead_letter_ndjson,
     recipe_kb_flushed_ndjson,
     recipe_kb_pending_ndjson,
+    recipe_snapshot_audit_jsonl,
 )
 from .collectors._common import (
     _dict_rows,
@@ -104,7 +107,62 @@ def _warm_start_origin(recipe: dict[str, Any]) -> dict[str, Any] | None:
     return {"session_id": session_id or None, "gain_pct": gain}
 
 
-def collect_warm_start_event(state: dict[str, Any]) -> dict[str, Any] | None:
+def _recipe_snapshot_reads(session_dir: Path, warnings: list[str]) -> dict[str, Any] | None:
+    """Per-source attribution of this session's Recipe KB reads.
+
+    Read back from the recipe-snapshot audit log: how each T0 lookup resolved,
+    which backend served it, and which source supplied the champion config.
+    ``None`` when the session recorded no readable read, so the block is only
+    attached to ``warm_start`` when it carries something.
+    """
+    path = recipe_snapshot_audit_jsonl(session_dir)
+    if not path.exists():
+        return None
+    try:
+        rows = [row for row in read_jsonl(path) if isinstance(row, dict)]
+    except (OSError, ValueError) as exc:  # noqa: BLE001 — an unreadable audit is "no reads"
+        warnings.append(f"timeline.warm_start.reads: failed to read audit {path}: {exc!r}"[:240])
+        return None
+    if not rows:
+        return None
+    rows = rows[-50:]
+
+    by_resolution: dict[str, int] = {}
+    by_remote: dict[str, int] = {}
+    by_source: dict[str, int] = {}
+    best_config_by_source: dict[str, int] = {}
+    hits = 0
+    for row in rows:
+        resolution = str(row.get("resolution") or "unknown")
+        by_resolution[resolution] = by_resolution.get(resolution, 0) + 1
+        remote = str(row.get("remote") or "unknown")
+        by_remote[remote] = by_remote.get(remote, 0) + 1
+        if row.get("hit"):
+            hits += 1
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        for src in result.get("sources") or []:
+            by_source[str(src)] = by_source.get(str(src), 0) + 1
+        best = result.get("best_config_source")
+        for src in best if isinstance(best, list) else [best] if best else []:
+            best_config_by_source[str(src)] = best_config_by_source.get(str(src), 0) + 1
+
+    return {
+        "count": len(rows),
+        "hits": hits,
+        "by_resolution": by_resolution,
+        "by_remote": by_remote,
+        "by_source": by_source,
+        "best_config_by_source": best_config_by_source,
+        # A short tail of the raw rows: downstream champion-config and donor
+        # resolution read the most recent hit's own result off these.
+        "tail": rows[-10:],
+    }
+
+
+def collect_warm_start_event(
+    state: dict[str, Any],
+    reads: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Project the PRELUDE Recipe KB lookup, or ``None`` when it never ran."""
     warm = _mapping(state.get("warm_start_recipe"))
     context = _mapping(state.get("warm_start_context"))
@@ -161,6 +219,11 @@ def collect_warm_start_event(state: dict[str, Any]) -> dict[str, Any] | None:
         if origin is not None:
             matched["origin"] = origin
         ext["matched"] = matched
+
+    # Read attribution belongs to the T0 read regardless of whether it matched:
+    # a miss still records which backends were consulted and how each resolved.
+    if reads:
+        ext["reads"] = reads
 
     return {
         "type": "warm_start",
@@ -504,7 +567,7 @@ def collect_kb_events(
 ) -> list[dict[str, Any]]:
     """Every KB timeline event this session produced, in execution order."""
     events = [
-        collect_warm_start_event(state),
+        collect_warm_start_event(state, _recipe_snapshot_reads(session_dir, warnings)),
         collect_warm_replay_event(state),
         collect_kb_write_back_event(session_dir, state, warnings),
     ]

@@ -3000,6 +3000,36 @@ class V6WarmStartMatched(TypedDict, total=False):
     experience: dict[str, Any]
 
 
+class V6WarmStartReads(TypedDict, total=False):
+    """``timeline[type=warm_start].ext.reads`` — Recipe KB read attribution.
+
+    Aggregated from the recipe-snapshot audit log (last 50 reads): how the T0
+    lookups resolved, which backend served each, and which source supplied the
+    champion config. Omitted when the session recorded no readable read.
+
+    Attributes:
+        count (int): Number of read rows considered (capped at the last 50).
+        hits (int): How many of those reads returned a usable record.
+        by_resolution (dict[str, int]): Reads counted by resolution outcome.
+        by_remote (dict[str, int]): Reads counted by serving backend
+            (e.g. ``kb-store`` vs local ``recipe_kb``).
+        by_source (dict[str, int]): Contributing-source counts across the reads.
+        best_config_by_source (dict[str, int]): Which source supplied the
+            champion config, counted per source.
+        tail (list[dict[str, Any]]): The most recent raw audit rows; downstream
+            champion-config and donor resolution read the latest hit's own
+            ``result`` off these.
+    """
+
+    count: int
+    hits: int
+    by_resolution: dict[str, int]
+    by_remote: dict[str, int]
+    by_source: dict[str, int]
+    best_config_by_source: dict[str, int]
+    tail: list[dict[str, Any]]
+
+
 class V6WarmStartExt(TypedDict, total=False):
     """``timeline[type=warm_start].ext`` — what was asked for, what came back.
 
@@ -3011,11 +3041,14 @@ class V6WarmStartExt(TypedDict, total=False):
             a plain hit; ``seed_only`` is a hit that could not be executed and
             would otherwise be indistinguishable from a miss.
         matched (V6WarmStartMatched): Omitted unless the status is ``matched``.
+        reads (V6WarmStartReads): Per-source read attribution from the recipe
+            snapshot audit; omitted when no read was recorded.
     """
 
     requested: dict[str, Any]
     match_status: str
     matched: V6WarmStartMatched
+    reads: V6WarmStartReads
 
 
 class V6WarmReplayApplied(TypedDict, total=False):
@@ -3369,6 +3402,7 @@ __all__ = [
     "V6WarmReplayExt",
     "V6WarmStartExt",
     "V6WarmStartMatched",
+    "V6WarmStartReads",
     "Workload",
     "WorkloadObjective",
 ]

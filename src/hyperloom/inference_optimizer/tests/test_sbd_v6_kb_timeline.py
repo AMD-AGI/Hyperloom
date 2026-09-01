@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.kb_timeline import (
+    collect_kb_events,
     collect_kb_write_back_event,
     collect_warm_replay_event,
     collect_warm_start_event,
@@ -151,6 +153,53 @@ def test_warm_start_error_status_maps_to_failed():
         warm_start_context={"status": "error"},
     )
     assert collect_warm_start_event(state)["status"] == "failed"
+
+
+def _write_recipe_audit(session_dir: Path, rows: list[dict]) -> None:
+    from hyperloom.inference_optimizer.session.session_paths import recipe_snapshot_audit_jsonl
+
+    audit = recipe_snapshot_audit_jsonl(session_dir)
+    audit.parent.mkdir(parents=True, exist_ok=True)
+    audit.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+
+def test_warm_start_reads_attribution_migrated_from_recipe_audit(tmp_path: Path):
+    """The retired ``kb_provenance.recipe_snapshot_reads`` now rides warm_start.ext."""
+    _write_recipe_audit(
+        tmp_path,
+        [
+            {
+                "method": "get_recipe",
+                "remote": "kb-store",
+                "resolution": "remote",
+                "hit": True,
+                "result": {"sources": ["kb-store", "recipe_kb"], "best_config_source": "kb-store"},
+            },
+            {
+                "method": "get_recipe",
+                "remote": "recipe_kb",
+                "resolution": "local",
+                "hit": False,
+                "result": {"sources": ["recipe_kb"]},
+            },
+        ],
+    )
+    events = collect_kb_events(tmp_path, _matched_state(), [])
+    warm_start = next(event for event in events if event["type"] == "warm_start")
+    reads = warm_start["ext"]["reads"]
+    assert reads["count"] == 2
+    assert reads["hits"] == 1
+    assert reads["by_remote"] == {"kb-store": 1, "recipe_kb": 1}
+    assert reads["by_resolution"] == {"remote": 1, "local": 1}
+    assert reads["by_source"] == {"kb-store": 1, "recipe_kb": 2}
+    assert reads["best_config_by_source"] == {"kb-store": 1}
+    assert len(reads["tail"]) == 2
+
+
+def test_warm_start_reads_absent_when_no_audit(tmp_path: Path):
+    events = collect_kb_events(tmp_path, _matched_state(), [])
+    warm_start = next(event for event in events if event["type"] == "warm_start")
+    assert "reads" not in warm_start["ext"]
 
 
 # ---------------------------------------------------------------------------
