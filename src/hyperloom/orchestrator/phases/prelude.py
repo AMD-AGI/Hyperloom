@@ -14,6 +14,8 @@ import os
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
+from hyperloom.common.timeutil import now_iso
+
 from . import machine_state as _phase_state
 from ..state.optimization_journal import (
     JournalEntry,
@@ -1651,6 +1653,9 @@ class PreludePhase(PhaseHandler):
         state.warm_replay_attempted = True
         state.warm_replay_outcome = {
             "status": "in_flight",
+            # Bounds the replay for the SBD timeline; the terminal write below
+            # stamps ``settled_at`` against this.
+            "enqueued_at": now_iso(timespec="seconds"),
             "warm_recipe_tier": tier,
             "warm_recipe_conf": conf,
             "config_donor_tier": config_tier,
@@ -2013,6 +2018,9 @@ class PreludePhase(PhaseHandler):
         """
         state = self.shared_state
         outcome = dict(state.warm_replay_outcome or {})
+        # Stamped once up front so every terminal branch below carries it; each
+        # of them re-persists ``outcome`` before returning.
+        outcome["settled_at"] = now_iso(timespec="seconds")
         expected_gain = float(outcome.get("expected_gain_pct") or 0.0)
         if not isinstance(result, dict):
             if not self._require_combined_warm_rollback({}, task, outcome):
@@ -2069,6 +2077,13 @@ class PreludePhase(PhaseHandler):
             state.warm_replay_outcome = outcome
             state.save(self.session_dir)
             return
+        # Recorded before the gates below, not after the KEEP ruling: a replay
+        # rejected on quality or accuracy still produced a real measurement, and
+        # reading what it scored is how a gate rejection is told apart from a
+        # replay that never got that far.
+        measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
+        outcome["actual_gain_pct"] = round(measured_gain, 3)
+        outcome["throughput_after"] = tput
         # warm_replay is an optimization candidate, so it must clear the
         # image-quality gate against the baseline reference before promotion.
         # ``require=False`` keeps a missing/skipped gate non-blocking.
@@ -2095,7 +2110,6 @@ class PreludePhase(PhaseHandler):
         # nothing about whether it still computes correctly here.
         if not self._warm_replay_accuracy_ok(result, task, outcome):
             return
-        measured_gain = (single_round_tput / baseline_tput - 1.0) * 100.0
         result["combined_gain_pct"] = round(measured_gain, 3)
         decision_params = (task.params if task is not None else {}) or {}
         combined_current_contract = bool(decision_params.get("combined_current_contract"))
@@ -2118,8 +2132,6 @@ class PreludePhase(PhaseHandler):
         # Local legacy replay keeps any positive gain. The current combined
         # contract must clear the approved kernel replay threshold.
         reproduced = measured_gain >= keep_threshold if combined_current_contract else measured_gain > 0
-        outcome["actual_gain_pct"] = round(measured_gain, 3)
-        outcome["throughput_after"] = tput
         outcome["keep_threshold_pct"] = keep_threshold
         if expected_gain > 0:
             historical_bar = expected_gain * min_reproduce

@@ -1363,6 +1363,7 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "target_files": ["python/worker.py"],
                 "source_snapshot": "optimization_stack/src/author-task-1",
                 "source_manifest": "optimization_stack/src/author-task-1/manifest.json",
+                "framework_root": "/abs/checkout/sglang",
                 "workspace": "runs/integrate-task-1",
                 "switch_off_parity": {"ran": True, "ok": True},
                 "stack_rebench": {"stable": True},
@@ -1442,6 +1443,8 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
     assert attempt["lever_kind"] == "source_patch"
     assert attempt["route"] == "author_via_specialist"
     assert attempt["status"] == "KEEP"
+    assert attempt["artifacts"]["framework_root"] == "/abs/checkout/sglang"
+    assert attempt["artifacts"]["source_snapshot"] == "optimization_stack/src/author-task-1"
     assert attempt["gates"] == {
         "accuracy_passed": True,
         "keep_threshold_pct": 1.0,

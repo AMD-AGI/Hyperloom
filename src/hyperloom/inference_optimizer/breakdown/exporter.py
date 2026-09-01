@@ -449,19 +449,6 @@ def build(
                 "geak consistency: a promoted geak_e2e stack entry has no positive gain in "
                 "optimizations.summary_by_source.kernel_agent.by_backend.geak"
             )
-    kb_provenance = _pick(
-        "kb_provenance",
-        _safe_collect(
-            "kb_provenance",
-            lambda: collectors.collect_kb_provenance(
-                session_dir,
-                state,
-                manifest,
-                warnings,
-            ),
-            warnings,
-        ),
-    )
     # Specialist sub-agent dispatch records (state + on-disk transcripts).
     specialist_runs = _pick(
         "specialist_runs",
@@ -693,8 +680,6 @@ def build(
         "telemetry": telemetry,
         # Canonical downstream optimization API.
         "optimizations": optimizations,
-        # Recipe KB integration audit.
-        "kb_provenance": kb_provenance,
         "specialist_runs": specialist_runs,
         # Hot-kernel roofline table; empty → hidden.
         "kernel_roofline": kernel_roofline,
@@ -1172,8 +1157,7 @@ def write_minimal_final_report(
         "## Structured detail",
         "",
         f"See `{breakdown_link.name}` (sibling of session root) for the "
-        f"complete `phase_history` / `critic_robustness` / "
-        f"`kb_provenance` blocks.",
+        f"complete `phase_history` / `critic_robustness` blocks.",
         "",
     ]
 

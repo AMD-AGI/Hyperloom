@@ -124,6 +124,7 @@ _PRUNED_DIR_NAMES = frozenset(
         "node_modules",
         "venv",
         "_audit_artifacts",
+        "_bypass_repo_scan_fixture",  # ephemeral kernel-resolver test fixture
         "TraceLens-internal",
         "InferenceX",
     }
@@ -290,12 +291,22 @@ def _scan_tree() -> list[_Violation]:
         root = _REPO_ROOT / root_name
         if not root.is_dir():
             continue
-        for path in sorted(root.rglob("*.py")):
+        try:
+            paths = sorted(root.rglob("*.py"))
+        except OSError:
+            # A parallel test can tear down a fixture directory while this walk
+            # is in flight; skip the root rather than fail the architecture guard.
+            continue
+        for path in paths:
             relative = path.relative_to(_REPO_ROOT)
             posix = relative.as_posix()
             if _is_pruned(relative) or _is_test_file(relative) or posix in _ALLOWLISTED_OWNERS:
                 continue
-            found.extend(_scan_source(path.read_text(encoding="utf-8"), posix))
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            found.extend(_scan_source(text, posix))
     return found
 
 

@@ -102,7 +102,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "phase_segments":              [ /* per-phase segment records */ ],
   "explore_search":              { /* config-arm dedup ledger */ },
   "perfskills":                  { /* perf-skill telemetry */ },
-  "kb_provenance":               { /* KB read/write provenance */ },
   "specialist_runs":             [ /* specialist sub-agent runs */ ],
   "kernel_roofline":             { /* kernel roofline snapshot */ },
   "kernel_optimization_summary": { /* kernel-opt rollup */ },
@@ -332,23 +331,28 @@ than disappeared and are reachable through `adopted_attempt_id`:
 `summary_by_agent`; the gain belonging to no adopted step is
 `validation.unattributed_gain_pct` rather than a bucket inside a breakdown.
 
-When Warm Replay uses a donor recipe, `kb_provenance.warm_replay` also
-preserves the available `donor_canonical_id`, `donor_model`,
-`donor_session_id`, `donor_family_tags`, `donor_gain_pct`, and
-`donor_breakdown_link`. Fields absent from the source recipe remain absent
-rather than being inferred.
+The Recipe KB touchpoints are recorded as ordered `timeline` events rather
+than a standalone `kb_provenance` section (removed in the V5→V6 migration):
+`warm_start` (which identity was requested and what the KB returned),
+`warm_replay` (whether replaying a prior recipe reproduced its gain), and
+`kb_write_back` (whether this session's own recipe reached the KB Store).
 
-`kb_provenance.warm_replay` additionally records what the replay was judged
-on, whether it passed or failed. A replayed recipe is evidence from another
-session on another machine, so reproducing its throughput says nothing about
-whether it still computes correctly here.
+When Warm Replay uses a donor recipe, `timeline[type=warm_replay].ext.donor`
+preserves the available `canonical_id`, `model`, `session_id`, `gain_pct`, and
+`breakdown_link`. Fields absent from the source recipe remain absent rather
+than being inferred.
+
+`timeline[type=warm_replay].ext.accuracy` records what the replay was judged
+on, and whether it passed. A replayed recipe is evidence from another session
+on another machine, so reproducing its throughput says nothing about whether it
+still computes correctly here.
 
 | Field | Type | Description |
 |---|---|---|
-| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay_accuracy` `0.0`) from a replay nothing checked (`eval_ran` false, `replay_accuracy` `null`). |
-| `replay_accuracy` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
-| `baseline_accuracy` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
-| `eval_error` | string \| null | Why no score could be read. Distinguishes a contract with the eval switched off, an eval that produced an unreadable file, and a results file carrying no metric this parser knows. |
+| `eval_ran` | bool | Whether an eval produced output for this replay. Separates a model that answered nothing (`eval_ran` true, `replay` `0.0`) from a replay nothing checked (`eval_ran` false, `replay` `null`). |
+| `replay` | float \| null | Score measured on the replayed config. `null` when no score could be read — not a score of zero. |
+| `baseline` | float \| null | Reference the replay was compared against. `null` when the session recorded none, in which case the replay is judged against an absolute floor instead of a relative drop. |
+| `passed` | bool \| null | Whether the replay cleared the accuracy gate. `null` when no verdict could be reached (no eval ran). |
 
 A replay whose accuracy could not be measured is still promoted — a failed
 measurement is not evidence the config broke the model — so `eval_ran` is what
