@@ -430,13 +430,20 @@ downstream consumers:
 
 | Field                              | Meaning                                                                                   |
 |------------------------------------|-------------------------------------------------------------------------------------------|
-| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number.                                 |
-| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.         |
+| `throughput_tok_s_per_gpu`         | Validated end-of-session throughput. The headline number. See the scope note below.        |
+| `cumulative_gain_pct_validated`    | Validated cumulative gain vs `baseline.throughput_tok_s_per_gpu`. The headline %.          |
 | `action_path`                      | Ordered list of `action:variant` labels that made the final stack — the recipe.            |
 | `extra_server_args`                | The exact extra args needed to reproduce the final config.                                 |
 | `extra_envs`                       | The exact env overrides needed to reproduce the final config (allowlisted, no secrets).    |
 | `invocation`                       | Same shape as `baseline.invocation`; lets a consumer replay the final benchmark.          |
 | `closing_phase_entered`            | True iff Coordinator entered the closing phase cleanly (vs SIGTERM exit).                  |
+
+> **Scope of `throughput_tok_s_per_gpu`: whole-server total in `throughput_unit`, not per-GPU.**
+> The key name is a misnomer held fixed by this contract. Both the baseline and the final
+> producer write the benchmark's own output throughput verbatim, and no code path divides it
+> by a GPU count — so do not divide it by one either, and do not multiply it by one. On a TP=8
+> server, treating it as per-GPU misreads the headline number by 8x.
+> `cumulative_gain_pct_validated` is a ratio of two whole-server numbers and is unaffected.
 
 > Consumer best practice: index on
 > `(session.session_id, final.throughput_tok_s_per_gpu,

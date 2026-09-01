@@ -625,7 +625,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--target-tput",
         type=float,
         default=None,
-        help="Stop when current best reaches N (serving: tok/s/GPU; xDiT: img/s)",
+        help=(
+            "Stop when current best reaches N, measured the way the benchmark reports it: "
+            "whole-server total, NOT divided by GPU count (serving: tok/s; xDiT: img/s). "
+            "A TP=8 server asked for a per-GPU number would stop at an eighth of it"
+        ),
     )
     grp.add_argument(
         "--target-baseline-dir", type=str, default=None, help="Stop when current best matches the baseline in DIR"

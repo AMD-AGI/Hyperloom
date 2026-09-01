@@ -1089,6 +1089,9 @@ def collect_baseline(
     from ... import framework_registry
 
     return {
+        # Whole-server total, not per-GPU: ``baseline_tput`` is the benchmark's
+        # own output throughput and nothing divides it by a GPU count. The key
+        # name is a misnomer held fixed by the session-breakdown wire contract.
         "throughput_tok_s_per_gpu": _to_float(state.get("baseline_tput")) or 0.0,
         # Framework-dependent unit (serving = tok/s, scriptable xDiT = img/s).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
@@ -1282,6 +1285,7 @@ def collect_final(
     from ... import framework_registry
 
     return {
+        # Whole-server total, not per-GPU -- see the baseline collector above.
         "throughput_tok_s_per_gpu": _to_float(cb.get("tput")),
         # True throughput unit (tok/s vs img/s for scriptable xDiT).
         "throughput_unit": framework_registry.throughput_unit(state.get("framework")),
