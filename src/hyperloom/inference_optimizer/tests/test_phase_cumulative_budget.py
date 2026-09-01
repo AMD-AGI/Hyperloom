@@ -11,8 +11,15 @@ every entry. A real 24h session entered KERNEL_AGENT three times, burned a fresh
 3.6h each time, and finished at 288% of a cap that never fired.
 
 These tests pin the fixed contract: ``phase_cumulative_seconds`` totals every
-entry, the cap/budget guards read that total, and ``phase_elapsed_seconds``
-keeps its per-entry meaning for renderers and evidence dicts.
+entry, the absolute cap (``phase_cap_exceeded``) reads that total, and
+``phase_elapsed_seconds`` keeps its per-entry meaning for renderers, evidence
+dicts, and the per-cycle budget.
+
+The lifetime ceiling is the cap's job alone. ``phase_budget_remaining_seconds``
+is subtracted from a charge-back allotment that is already reconstructed from
+the current entry, so charging it the cumulative total too billed earlier
+entries twice and starved every re-entry of budget — which skipped the phase on
+each macro-cycle instead of pacing it.
 
 They also pin the resume half of it: a phase entry is not closed by the process
 exiting, so the current entry spans the idle gap between two run legs unless the
@@ -124,23 +131,29 @@ def test_per_entry_elapsed_keeps_its_meaning():
     assert ps.phase_cumulative_seconds(state, now_unix=live) == pytest.approx(3 * ENTRY_SEC + 1800.0)
 
 
-def test_phase_budget_remaining_charges_every_entry():
+def test_phase_budget_remaining_charges_only_the_current_entry():
     state = _kernel_state()
     state.start_ts = T0_ISO
     now = _three_kernel_entries(state)
     _enter(state, ps.PHASE_KERNEL_AGENT, now)
 
     total = ps._phase_budget_total_seconds(state, now_unix=now)
-    remaining = ps.phase_budget_remaining_seconds(state, now_unix=now)
     assert total is not None and total > 0.0
-    # The per-entry numerator this used to subtract is zero at a fresh entry, so
-    # the old contract handed the phase its whole allotment back on re-entry.
+    # The allotment is already charged back against the clock at this entry, so
+    # the three banked entries are paid for by a smaller `total` — not by a
+    # second subtraction on top of it.
     assert ps.phase_elapsed_seconds(state, now_unix=now) == 0.0
-    assert remaining == pytest.approx(total - 3 * ENTRY_SEC)
-    assert remaining < total
+    assert ps.phase_budget_remaining_seconds(state, now_unix=now) == pytest.approx(total)
+
+    mid = now + 900.0
+    assert ps.phase_budget_remaining_seconds(state, now_unix=mid) == pytest.approx(
+        ps._phase_budget_total_seconds(state, now_unix=mid) - 900.0
+    )
 
 
-def test_phase_budget_remaining_hits_zero_once_the_share_is_spent():
+def test_the_absolute_cap_is_what_stops_a_phase_that_spent_its_share():
+    # The per-cycle budget no longer carries the lifetime ceiling, so the cap has
+    # to be the thing that ends a phase which already outspent its share.
     state = _kernel_state()
     state.start_ts = T0_ISO
     long_entry = 4 * 3600.0
@@ -152,7 +165,62 @@ def test_phase_budget_remaining_hits_zero_once_the_share_is_spent():
         now += GAP_SEC
     _enter(state, ps.PHASE_KERNEL_AGENT, now)
 
-    assert ps.phase_budget_remaining_seconds(state, now_unix=now) == 0.0
+    assert ps.phase_cumulative_seconds(state, now_unix=now) == pytest.approx(3 * long_entry)
+    assert ps.phase_cumulative_seconds(state, now_unix=now) > KERNEL_CAP_SEC
+    assert ps.phase_cap_exceeded(state, now_unix=now) is True
+    # exit_normal_kernel checks both, so the phase still ends on this entry.
+    result = ps.exit_normal_kernel(state, now_unix=now)
+    assert result is not None and result[0] in {"kernel_budget_cap", "kernel_phase_budget_exhausted"}
+
+
+def test_a_macro_cycle_reentry_gets_budget_while_the_session_has_time_left():
+    """A re-entered phase under its absolute cap must be able to work again.
+
+    Reproduces an 18h AgentX session: FRAMEWORK_AGENT spent 27567s in cycle 0,
+    then `cycle_reloop` re-entered it with 27584s of session still unspent and
+    the 51840s absolute cap nowhere near. Charging the cumulative total against
+    a per-entry allotment returned 0, so the dispatcher paused new work
+    (`_dispatch_paused_for_phase_budget`) and the phase exited in ~60s on each
+    of the next two cycles — the run closed `global_converged` at 0.00% gain
+    with 7.5h unspent.
+    """
+    session_sec = 18 * 3600.0
+    prelude_sec = 9579.0
+    cycle0_sec = 27567.0
+    sweep_sec = 67.0
+
+    state = SharedState()
+    state.max_minutes = session_sec / 60.0
+    state.start_ts = T0_ISO
+    # The shares a `--no-kernel` run lands on after redistribute_budget_pct.
+    state.phase_budget_pct = {
+        ps.PHASE_PRELUDE: 0.03,
+        ps.PHASE_FRAMEWORK_AGENT: 0.80,
+        ps.PHASE_KERNEL_AGENT: 0.0,
+        ps.PHASE_SWEEP: 0.10555555555555557,
+        ps.PHASE_CLOSE: 0.02,
+    }
+
+    now = T0
+    _enter(state, ps.PHASE_PRELUDE, now)
+    now += prelude_sec
+    _enter(state, ps.PHASE_FRAMEWORK_AGENT, now)
+    now += cycle0_sec
+    _enter(state, ps.PHASE_SWEEP, now)
+    now += sweep_sec
+    _enter(state, ps.PHASE_FRAMEWORK_AGENT, now)
+
+    assert ps.phase_cumulative_seconds(state, now_unix=now) == pytest.approx(cycle0_sec)
+    # Plenty of session left, and the phase is far from its absolute ceiling.
+    assert ps.session_remaining_seconds(state, now_unix=now) > 7 * 3600.0
+    assert ps.phase_cap_exceeded(state, now_unix=now) is False
+
+    remaining = ps.phase_budget_remaining_seconds(state, now_unix=now)
+    assert remaining is not None
+    # It gets its share of what is left, not zero.
+    assert remaining > 6 * 3600.0
+    # And the phase does not immediately exit on a budget it does have.
+    assert ps.exit_normal_optimize(state, now_unix=now) is None
 
 
 def test_totals_accumulate_for_every_phase_not_just_explore():

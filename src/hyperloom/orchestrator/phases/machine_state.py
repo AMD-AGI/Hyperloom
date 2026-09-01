@@ -1241,13 +1241,25 @@ def phase_budget_remaining_seconds(
 ) -> float | None:
     """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited).
 
-    Charges the phase's CUMULATIVE spend (:func:`phase_cumulative_seconds`), not
-    just the current entry: the budget fraction is the phase's share of the run,
-    so a phase re-entered on a later macro-cycle resumes from what it has already
-    spent instead of being handed its whole allotment again. Note the allotment
-    itself (:func:`_phase_budget_total_seconds`) still reconstructs the base from
-    the CURRENT entry — it charges back against the clock at this entry's start,
-    which is a per-entry quantity by construction.
+    Charges the CURRENT entry (:func:`phase_elapsed_seconds`), because the
+    allotment it is subtracted from is itself a per-entry quantity:
+    :func:`_phase_budget_total_seconds` charges back against the clock at this
+    entry's start, so it already shrinks by whatever earlier entries spent.
+    Subtracting the cumulative total as well charges those entries twice, and a
+    phase whose first entry saturated its share then reads ``0`` on every later
+    one — no macro-cycle can hand it budget again no matter how much session is
+    left. Measured on an 18h run: at the cycle-1 re-entry the session still had
+    27584s and the phase's own allotment for that entry was 23842s, but the
+    27567s cycle-0 spend drove this to 0, so cycles 1 and 2 lasted 64s and 78s
+    and the run closed ``global_converged`` with 7.5h unspent.
+
+    This is a per-cycle planning number, NOT the guard against a phase
+    monopolising the run. That guard is :func:`phase_cap_exceeded`, which
+    compares :func:`phase_cumulative_seconds` against the absolute
+    :func:`phase_cap_seconds` ceiling; every exit predicate that consumes this
+    function checks it in the same breath (``exit_normal_optimize`` /
+    ``exit_normal_kernel`` / ``exit_normal_sweep``), so lifetime spend stays
+    bounded across re-entries.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -1256,14 +1268,14 @@ def phase_budget_remaining_seconds(
         now_unix (float | None): Override for the current time.
 
     Returns:
-        float | None: Non-negative seconds left in the current phase's budget,
-        or ``None`` when the budget window is unlimited or the phase has no
-        allocated fraction.
+        float | None: Non-negative seconds left in the current phase entry's
+        budget, or ``None`` when the budget window is unlimited or the phase has
+        no allocated fraction.
     """
     total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     if total is None:
         return None
-    return max(0.0, total - phase_cumulative_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:
