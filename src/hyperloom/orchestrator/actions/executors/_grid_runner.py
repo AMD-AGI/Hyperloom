@@ -1772,11 +1772,31 @@ async def run_grid(
         # clamped down to the (too-small) remaining budget by
         # ``session_clamped_timeout_sec`` -- reproducing the mid-warmup kill
         # this module's AgentX cap-raise exists to prevent.
-        required_sec = (
-            float(variant_expected_sec) * rounds_left
-            if variant_expected_sec is not None
-            else float(agentx_variant_timeout_sec(variant_timeout_sec))
-        )
+        # Under AgentX the estimate branch has to clear the raised cap too, not
+        # just the no-estimate one. An estimate is only as good as the shape it
+        # was made on, and every estimate in this tree is sized for the
+        # synthetic 1024/1024 round -- the very thing the cap-raise exists to
+        # correct. Admitting on a synthetic estimate (say 1500s against 2000s
+        # remaining) grants the raised cap, then lets
+        # ``session_clamped_timeout_sec`` squeeze it back to the 2000s that are
+        # actually left, and the round dies mid-warmup anyway. Taking the max
+        # only ever skips EARLIER: losing a variant costs one data point, while
+        # admitting one that gets killed costs the same data point plus the GPU
+        # time spent on it.
+        #
+        # Gated on the cap having actually been RAISED, which only happens with
+        # AgentX on -- ``agentx_variant_timeout_sec`` returns its argument
+        # untouched otherwise. Without that gate the default path would start
+        # charging every variant its full backstop instead of its expected cost,
+        # skipping variants that fit comfortably. The estimate stays the
+        # admission price on the default path, exactly as before.
+        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec))
+        _cap_was_raised = _raised > float(variant_timeout_sec)
+        if variant_expected_sec is None:
+            required_sec = _raised
+        else:
+            estimated_sec = float(variant_expected_sec) * rounds_left
+            required_sec = max(estimated_sec, _raised) if _cap_was_raised else estimated_sec
         if remaining_sec >= required_sec:
             return False
         log.warning(

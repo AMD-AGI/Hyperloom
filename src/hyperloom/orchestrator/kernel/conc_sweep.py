@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir, run
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    agentx_variant_timeout_sec,
     run_grid,
 )
 from ..actions.executors._workload_envs import (
@@ -63,6 +64,34 @@ DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
 # ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
+
+
+def _granted_cap_sec(variant_timeout_sec: int) -> float:
+    """What a variant will actually be granted, for budget arithmetic.
+
+    Every budget gate in this module used to price a variant at the DECLARED
+    ``variant_timeout_sec`` -- 1800s, sized for the synthetic 1024/1024 shape.
+    ``run_grid`` does not hand the round that number: under AgentX it raises the
+    cap to what an agentic round needs before launching. Pricing at 1800s while
+    granting 10800s admits a variant the budget cannot pay for, and the round
+    then has its cap clamped back down to the remaining time and is killed
+    mid-warmup -- the exact failure the cap-raise exists to prevent, just moved
+    from the grid runner into the sweep's admission check.
+
+    The same number is also the ceiling on the session soft deadline, for the
+    same reason: a soft deadline of 1800s ends an agentic round that has not
+    reached its measurement window yet.
+
+    With AgentX off this returns ``variant_timeout_sec`` untouched, so the
+    synthetic sweep prices and paces exactly as it did before.
+
+    Args:
+        variant_timeout_sec: The declared per-variant hard timeout, in seconds.
+
+    Returns:
+        float: The cap the round will actually be granted, in seconds.
+    """
+    return float(agentx_variant_timeout_sec(variant_timeout_sec))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -696,7 +725,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     arm_results.append(skip_r)
                     _all_results_ref.append(skip_r)
                 break
-            if has_budget and _reuse_remaining is not None and _reuse_remaining < float(variant_timeout_sec):
+            if has_budget and _reuse_remaining is not None and _reuse_remaining < _granted_cap_sec(variant_timeout_sec):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
                 _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
@@ -861,7 +890,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             arm_results.append(skip_r)
             _all_results_ref.append(skip_r)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < float(variant_timeout_sec):
+        if has_budget and _ob_rem is not None and _ob_rem < _granted_cap_sec(variant_timeout_sec):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
@@ -1274,7 +1303,7 @@ async def run_conc_sweep(
         if _sr is not None:
             _sr_sec = _sr * 60.0
             _clamped = max(0.0, _sr_sec - _SESSION_CLOSE_RESERVE_SEC)
-            _session_soft_dl = min(float(variant_timeout_sec), _clamped) if _clamped > 0 else None
+            _session_soft_dl = min(_granted_cap_sec(variant_timeout_sec), _clamped) if _clamped > 0 else None
 
     results: list[VariantResult] = []
     budget_exhausted = False
@@ -1321,7 +1350,7 @@ async def run_conc_sweep(
             for v in skip_grid_fn():
                 results.append(_budget_skip_result(v))
             continue
-        if has_budget and _arm_remaining is not None and _arm_remaining < float(variant_timeout_sec):
+        if has_budget and _arm_remaining is not None and _arm_remaining < _granted_cap_sec(variant_timeout_sec):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
