@@ -12,7 +12,7 @@ Per-variant flow:
    ``explore_search`` results are evidence, never an eligibility gate.
 2. Render the variant's Magpie YAML, run E2E bench.
 3. Immediate KEEP/REVERT decision (``DEFAULT_KEEP_THRESHOLD_PCT`` gain
-   threshold + accuracy gate when ``is_high_accuracy_risk``).
+   threshold + accuracy gate on every variant that has a reference).
 
 Follows the "one change at a time" rule (single-tenant serving GPU).
 ``provenance`` passes through to the ledger unchanged so the specialist
@@ -53,7 +53,6 @@ from ..stop_attribution import (
 )
 from ._accuracy_gate import (
     accuracy_passed,
-    is_high_accuracy_risk,
     parse_eval_results,
 )
 from . import _framework_switch_manifest as _switch_manifest
@@ -768,11 +767,18 @@ class ExploreExecutor:
         base_unset_envs = to_str_list(params.get("base_unset_envs"))
         base_args_mode = str(params.get("base_args_mode") or "append").strip().lower()
         base_tput = float(params.get("base_tput") or 0.0)
-        baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
-            params.get("baseline_accuracy") or 0.0
-        )
-        if baseline_accuracy <= 0 and ss is not None:
-            baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0)
+        # The measured baseline outranks a proposed one. ``accuracy_baseline`` is
+        # offered to the LLM in the action schema while every in-tree writer only
+        # copies ``SharedState.baseline_accuracy``, so a proposed figure that
+        # disagrees is a hallucination -- and now that every variant carrying a
+        # reference is gated, one bad number fails a whole grid where it used to
+        # reach only the few variants a flag catalogue called risky. params stay
+        # as the fallback for an external invocation that has no state.
+        baseline_accuracy = float(getattr(ss, "baseline_accuracy", 0.0) or 0.0) if ss is not None else 0.0
+        if baseline_accuracy <= 0:
+            baseline_accuracy = float(params.get("accuracy_baseline") or 0.0) or float(
+                params.get("baseline_accuracy") or 0.0
+            )
         keep_threshold_pct = float(
             params.get(
                 "keep_threshold_pct",
@@ -1494,24 +1500,23 @@ class ExploreExecutor:
                         outcome = "REVERT"
                         reason = "gain_below_threshold"
                     else:
-                        # Accuracy gate. For serving it runs only for high-risk
-                        # variants. For scriptable frameworks the image-quality
-                        # gate is the sole correctness signal, so every variant is
-                        # gated and a missing gate fails closed.
+                        # Accuracy gate. Every variant is gated: the round already
+                        # ran the eval, so the score is on disk and the flag
+                        # catalogue that used to decide whether to read it only
+                        # discarded numbers already paid for -- and missed atom's
+                        # precision knobs entirely. A session that opted out of
+                        # eval has no baseline accuracy, which is what leaves
+                        # serving ungated below. For scriptable frameworks the
+                        # image-quality gate is the sole correctness signal, so a
+                        # missing gate fails closed.
                         from hyperloom.inference_optimizer import framework_registry
 
                         scriptable = framework_registry.is_scriptable(framework)
                         accuracy_ok = True
                         accuracy_value: float | None = None
-                        # Scriptable: gate every variant. Serving: only high-risk
-                        # variants, and only when a baseline accuracy was recorded.
-                        if scriptable or (
-                            baseline_accuracy > 0
-                            and is_high_accuracy_risk(
-                                extra_args=gv.extra_server_args,
-                                extra_envs=gv.extra_envs,
-                            )
-                        ):
+                        # Serving still needs a measured baseline to compare
+                        # against; scriptable compares against a fixed 1.0.
+                        if scriptable or baseline_accuracy > 0:
                             eval_out = parse_eval_results(slot, framework=framework)
                             accuracy_value = eval_out.get("accuracy")
                             if isinstance(accuracy_value, (int, float)):
@@ -1526,8 +1531,8 @@ class ExploreExecutor:
                             else:
                                 # No eval result. Both scriptable and serving
                                 # fail closed: a gated variant (scriptable, or a
-                                # high-risk serving variant with a baseline) that
-                                # yields no accuracy verdict likely broke the eval
+                                # serving variant with a baseline) that yields no
+                                # accuracy verdict likely broke the eval
                                 # path, so the change is reverted. The former
                                 # serving throughput-only skip is removed. Baseline
                                 # is where a missing accuracy result halts the run;

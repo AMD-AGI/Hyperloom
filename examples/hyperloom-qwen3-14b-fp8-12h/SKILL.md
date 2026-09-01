@@ -197,7 +197,10 @@ and the stop reason. Never print API keys, tokens, or custom header values.
    and critic subprocesses can import `hyperloom.agents` after changing cwd.
 3. Run in background with `setsid nohup`.
 4. Pass all required optimize CLI flags in the `python -m hyperloom.inference_optimizer.cli optimize` command. Do not rely on `.env` alone for `TP`, `CONC`, `ISL`, `OSL`, or `PRECISION`; CLI defaults can otherwise override the intended workload.
-5. Report the session ID, log path, PID, and initial health check result.
-6. Monitor the process every 300 seconds until work is done.
-7. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
-8. If `stop_reason` in the current session `state.json` is final, stop and exit.
+5. Include `--max-minutes-framework-pct 0.43` and `--max-minutes-kernel-pct 0.42`
+   in the optimize command. Do **not** pass `--no-framework-agent` or `--no-kernel` —
+   this demo runs the full OPTIMIZE phase (FRAMEWORK_AGENT + KERNEL_AGENT).
+6. Report the session ID, log path, PID, and initial health check result.
+7. Monitor the process every 300 seconds until work is done.
+8. To recover an unexpected crash, only run `optimize --resume-from "$SESSION_DIR"` against the same session dir. After the first launch, never start a new `optimize`; that creates a new `<UTC_ts>` session and is forbidden.
+9. If `stop_reason` in the current session `state.json` is final, stop and exit.

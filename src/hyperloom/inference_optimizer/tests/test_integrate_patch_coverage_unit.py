@@ -741,7 +741,9 @@ def _FakeVR(**kw):
     was wrong. The stand-in made the bug untestable and then broke when it was
     fixed, so the fake is gone and the dataclass is used directly.
     """
-    kw.setdefault("workspace", "/tmp/rd")
+    # Leave workspace empty unless a test sets it: a fake under /tmp makes
+    # _bench_patch search all of /tmp for eval sidecars under xdist.
+    kw.setdefault("workspace", "")
     return variant_result(**kw)
 
 

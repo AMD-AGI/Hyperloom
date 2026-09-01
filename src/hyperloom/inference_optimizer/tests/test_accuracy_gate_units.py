@@ -13,32 +13,6 @@ import pytest
 from hyperloom.orchestrator.actions.executors import _accuracy_gate as ag
 
 
-class TestIsHighAccuracyRisk:
-    def test_no_risk_when_empty(self):
-        assert ag.is_high_accuracy_risk("", None) is False
-        assert ag.is_high_accuracy_risk(None or "", {}) is False
-
-    @pytest.mark.parametrize(
-        "args",
-        [
-            "--kv-cache-dtype fp8_e4m3",
-            "--enforce-eager",
-            "--compilation-config '{\"x\": 1}'",
-            "--attention-backend aiter",
-            "--decode-attention-backend triton",
-        ],
-    )
-    def test_high_risk_cli_flags(self, args):
-        assert ag.is_high_accuracy_risk(args, None) is True
-
-    def test_high_risk_env_keys(self):
-        assert ag.is_high_accuracy_risk("", {"VLLM_ROCM_USE_AITER": "1"}) is True
-        assert ag.is_high_accuracy_risk("", {"SGLANG_USE_AITER": "1"}) is True
-
-    def test_neutral_inputs_are_low_risk(self):
-        assert ag.is_high_accuracy_risk("--max-num-seqs 64", {"FOO": "BAR"}) is False
-
-
 class TestParseEvalResults:
     def test_returns_error_when_no_results_dir(self, tmp_path):
         out = ag.parse_eval_results(tmp_path)

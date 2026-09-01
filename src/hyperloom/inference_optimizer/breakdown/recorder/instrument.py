@@ -3103,6 +3103,15 @@ def record_kernel_backend_result(
     collapsed. Mirrors the attempt ladder in ``result['attempts']`` and carries
     the per-attempt timing + tool metadata when the kernel-agent surfaced them.
 
+    An attempt row as the backend writes it holds only how the run went --
+    ``status`` / ``optimized_path`` / ``error``. The verdict
+    (``proposal.decision``), the compile/correctness gates and the source
+    artifact are computed once per kernel and live beside ``attempts`` on the
+    result, so they are folded onto the attempt ``verification`` adopted and
+    onto no other. A losing backend keeps its own status, an unknown gate
+    stays unknown, and a failed attempt with no verdict of its own is recorded
+    as ``FAILED``.
+
     Args:
         session_dir (Path | str | None): the session directory; a falsy value is
             a no-op.
@@ -3128,6 +3137,20 @@ def record_kernel_backend_result(
         verification = result.get("verification") if isinstance(result.get("verification"), dict) else {}
         best_attempt_id = _best_attempt_id(attempts, verification)
         kernel_micro_speedup = to_float(verification.get("micro_speedup"))
+        # The verdict and the verification evidence are kernel-level facts: a
+        # backend attempt carries only status/optimized_path/error, while
+        # ``proposal.decision``, the compile/correctness gates and the source
+        # artifact all live beside ``attempts`` on the result. They belong to
+        # the attempt verification actually adopted, so they are stamped onto
+        # that one and no other -- the same rule
+        # :func:`record_kernel_invocations` applies to the invocation lanes.
+        # Without an explicit ``best_attempt_id`` nothing was adopted, so no
+        # attempt inherits them (``_best_attempt_id``'s speedup fallback would
+        # otherwise hand a failed kernel's REVERT to an arbitrary row).
+        proposal = result.get("proposal") if isinstance(result.get("proposal"), dict) else {}
+        kernel_decision = str(proposal.get("decision") or "").upper()
+        adopted_attempt_id = str(verification.get("best_attempt_id") or "")
+        kernel_artifact_path = str(verification.get("best_artifact_path") or "")
         legacy_only = str(route_strategy or "") == "legacy_only"
         geak_internal = str(route_strategy or "") == "geak_internal"
         if geak_internal:
@@ -3175,6 +3198,22 @@ def record_kernel_backend_result(
                 and attempt_id == best_attempt_id
             ):
                 micro_speedup = kernel_micro_speedup
+            is_adopted = bool(attempt_id) and attempt_id == adopted_attempt_id
+            status_lower = str(att.get("status") or "").lower()
+            decision = str(att.get("decision") or "").upper()
+            if not decision and status_lower in _FAILED_STATUSES:
+                decision = "FAILED"
+            if is_adopted and kernel_decision:
+                decision = kernel_decision
+            compile_passed = _to_bool(att.get("compile_passed"))
+            correctness_passed = _to_bool(att.get("correctness_passed"))
+            correctness_source = att.get("correctness_source")
+            if is_adopted:
+                if compile_passed is None:
+                    compile_passed = _to_bool(verification.get("compile_passed"))
+                if correctness_passed is None:
+                    correctness_passed = _to_bool(verification.get("correctness_passed"))
+                correctness_source = correctness_source or verification.get("correctness_source")
             payload = {
                 "kernel_id": kid,
                 "attempt_id": attempt_id,
@@ -3182,11 +3221,16 @@ def record_kernel_backend_result(
                 "backend": backend,
                 "model": att.get("model"),
                 "ts": str(att.get("ts") or att.get("started_at") or att.get("created_at") or ""),
-                "status": str(att.get("status") or "").lower(),
-                "decision": str(att.get("decision") or "").upper(),
+                "status": status_lower,
+                "decision": decision,
                 "micro_speedup": micro_speedup,
-                "compile_passed": _to_bool(att.get("compile_passed")),
-                "correctness_passed": _to_bool(att.get("correctness_passed")),
+                "compile_passed": compile_passed,
+                "correctness_passed": correctness_passed,
+                "correctness_source": str(correctness_source) if correctness_source else None,
+                # The source artifact the kernel was carried to integrate with.
+                # ``optimized_files`` is the attempt's own output path, which
+                # for a real backend run is its stdout log -- not the rewrite.
+                "best_artifact_path": kernel_artifact_path if is_adopted else "",
                 "optimized_files": [str(optimized)] if optimized else [],
                 "error": att.get("error") or att.get("error_message"),
                 "error_class": str(att.get("error_type") or "") or None,
@@ -3197,9 +3241,10 @@ def record_kernel_backend_result(
             recorded_any = True
             if operation_id:
                 canonical_attempt_id = attempt_id or _stable_id("attempt", operation_id, run_id, backend)
-                correctness_source = (
-                    att.get("correctness_source") or verification.get("correctness_source") or "partial:not_provided"
-                )
+                # Resolved above: kernel-level evidence only reaches the
+                # adopted attempt, so a losing backend's gates stay unknown
+                # rather than inheriting the winner's.
+                canonical_correctness_source = correctness_source or "partial:not_provided"
                 canonical_attempts.append(
                     {
                         "attempt_id": canonical_attempt_id,
@@ -3208,18 +3253,18 @@ def record_kernel_backend_result(
                         "started_at": str(att.get("started_at") or att.get("created_at") or ""),
                         "ended_at": str(att.get("ended_at") or ""),
                         "outputs": {
-                            "decision": str(att.get("decision") or ""),
-                            "compile_passed": _to_bool(att.get("compile_passed")),
-                            "correctness_passed": _to_bool(att.get("correctness_passed")),
-                            "correctness_source": correctness_source,
+                            "decision": decision,
+                            "compile_passed": compile_passed,
+                            "correctness_passed": correctness_passed,
+                            "correctness_source": canonical_correctness_source,
                             "verification_status": verification.get("status"),
                         },
                         "error": att.get("error") or att.get("error_message"),
                     }
                 )
                 for gate_name, gate_value, gate_kind in (
-                    ("compile", _to_bool(att.get("compile_passed")), "compile"),
-                    ("correctness", _to_bool(att.get("correctness_passed")), "correctness"),
+                    ("compile", compile_passed, "compile"),
+                    ("correctness", correctness_passed, "correctness"),
                 ):
                     canonical_gates.append(
                         {
@@ -3232,7 +3277,7 @@ def record_kernel_backend_result(
                             if gate_value is False
                             else "partial",
                             "decision": "allow" if gate_value is True else "deny" if gate_value is False else "review",
-                            "evidence": {"source": correctness_source, "value": gate_value},
+                            "evidence": {"source": canonical_correctness_source, "value": gate_value},
                         }
                     )
                 numeric_speedup = to_float(att.get("micro_speedup") or att.get("speedup"))
@@ -3500,6 +3545,17 @@ def record_kernel_e2e(
             "patch_path": patch_path,
             "target_file": target_file,
             "extra_server_args": str(extra_server_args or ""),
+            # The deploy/apply root the integrated kernel landed in, the kernel
+            # analogue of the framework column's apply root. Absolute; empty when
+            # the integrate named no repo (e.g. an env-only adoption). Read off
+            # the integrate result, falling back to the deploy-root ledger keys.
+            "kernel_repo": str(
+                evidence.get("kernel_repo")
+                or evidence.get("deploy_repo_root")
+                or evidence.get("last_deploy_repo_root")
+                or ""
+            )
+            or None,
             "ts": _now_iso_safe(),
             # Carried on the record so the replay paths that re-record this
             # outcome from state pass the same value back instead of counting
@@ -4143,7 +4199,7 @@ def record_singleton_section(
         return
     try:
         _recorder(session_dir, producer).record_singleton(section, payload)
-        if section.startswith("kb_") or section in {"warm_replay", "kb_provenance"}:
+        if section.startswith("kb_") or section in {"warm_replay"}:
             operation_id = _stable_id(
                 "op",
                 section,

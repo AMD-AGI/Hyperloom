@@ -22,6 +22,7 @@ from ...session.paths import is_path_within
 
 
 _FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
+_KERNEL_PHASES = frozenset({"KERNEL_AGENT"})
 _AUTHORING_TASK_KINDS = frozenset(
     {
         "explore_apply_retry",
@@ -361,6 +362,29 @@ def _safe_get(d: Any, *keys: str, default: Any = None) -> Any:
             return default
         cur = cur[k]
     return cur if cur is not None else default
+
+
+def _operation_task_id(operation: Any) -> str:
+    """Return the orchestrator task id a recorded operation was run under.
+
+    Producers stamp it in one of three places depending on which recorder
+    entry point they went through, so all three are consulted before giving
+    up. Empty string when the operation carries none.
+
+    Args:
+        operation (Any): One recorded-operation mapping.
+
+    Returns:
+        str: The task id, or ``""`` when the operation does not carry one.
+    """
+    return str(
+        _first(
+            _safe_get(operation, "extensions", "task_id"),
+            _safe_get(operation, "outputs", "task_id"),
+            _safe_get(operation, "metadata", "extras", "task_id"),
+        )
+        or ""
+    )
 
 
 def _parse_iso_unix(ts: Any) -> float | None:

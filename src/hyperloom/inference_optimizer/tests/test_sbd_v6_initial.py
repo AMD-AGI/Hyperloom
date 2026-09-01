@@ -29,6 +29,17 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _framework_events(timeline: list[dict]) -> list[dict]:
+    """Keep only the ``framework_agent`` events.
+
+    A state that walks the macro loop also produces ``kernel`` events (and a
+    baseline throughput produces a ``baseline`` one). The tests below are
+    scoped to the Framework Agent projection, so they filter rather than
+    assert over the whole timeline.
+    """
+    return [event for event in timeline if event["type"] == "framework_agent"]
+
+
 def _gate_args(model: Path, **overrides) -> argparse.Namespace:
     values = {
         "model": str(model),
@@ -157,8 +168,13 @@ def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
     assert after["outcome"]["status"] == "completed"
     assert after["outcome"]["stage_reached"] == "close"
     assert "token_usage" not in after["outcome"]
-    assert [event["type"] for event in after["timeline"]] == ["install", "model_gate"]
-    assert after["close"] == {}
+    # ``baseline`` rides along because ``state.baseline_tput`` is a real
+    # measurement; it sorts last since nothing timestamps it here.
+    assert [event["type"] for event in after["timeline"]] == ["install", "model_gate", "baseline"]
+    # No CLOSE step was ever recorded, so the close-out has no evidence.
+    assert after["close"]["status"] == "failed"
+    assert after["close"]["steps"] == []
+    # ``close`` is a top-level key, never a timeline event.
     assert all(event["type"] != "close" for event in after["timeline"])
 
 
@@ -1197,8 +1213,9 @@ def test_framework_timeline_merges_legacy_framework_and_explore(tmp_path):
 
     timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
 
-    assert [event["type"] for event in timeline] == ["framework_agent"]
-    event = timeline[0]
+    events = _framework_events(timeline)
+    assert [event["type"] for event in events] == ["framework_agent"]
+    event = events[0]
     assert event["start_time"] == "2026-08-27T01:00:00+00:00"
     assert event["end_time"] == "2026-08-27T01:20:00+00:00"
     assert "summary" not in event
@@ -1346,6 +1363,7 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "target_files": ["python/worker.py"],
                 "source_snapshot": "optimization_stack/src/author-task-1",
                 "source_manifest": "optimization_stack/src/author-task-1/manifest.json",
+                "framework_root": "/abs/checkout/sglang",
                 "workspace": "runs/integrate-task-1",
                 "switch_off_parity": {"ran": True, "ok": True},
                 "stack_rebench": {"stable": True},
@@ -1425,6 +1443,8 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
     assert attempt["lever_kind"] == "source_patch"
     assert attempt["route"] == "author_via_specialist"
     assert attempt["status"] == "KEEP"
+    assert attempt["artifacts"]["framework_root"] == "/abs/checkout/sglang"
+    assert attempt["artifacts"]["source_snapshot"] == "optimization_stack/src/author-task-1"
     assert attempt["gates"] == {
         "accuracy_passed": True,
         "keep_threshold_pct": 1.0,
@@ -1563,7 +1583,9 @@ def test_framework_timeline_ignores_kernel_specialist_without_framework_evidence
         }
     ]
 
-    assert collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations) == []
+    timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
+
+    assert _framework_events(timeline) == []
 
 
 def test_framework_timeline_recovers_direct_upstream_patch_source(tmp_path):
@@ -1687,8 +1709,9 @@ def test_framework_timeline_keeps_macro_cycles_isolated(tmp_path):
 
     timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
 
-    assert [event["ext"]["macro_cycle"] for event in timeline] == [0, 1]
-    assert [event["ext"]["config_arm"]["rounds"][0]["round_id"] for event in timeline] == [
+    events = _framework_events(timeline)
+    assert [event["ext"]["macro_cycle"] for event in events] == [0, 1]
+    assert [event["ext"]["config_arm"]["rounds"][0]["round_id"] for event in events] == [
         "round-0",
         "round-1",
     ]
@@ -1991,7 +2014,10 @@ def test_framework_timeline_assigns_critic_reviews_from_request_cycle(tmp_path):
 
     timeline = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=operations)
 
-    assert [[review["proposal_msg_id"] for review in event["ext"]["critic_reviews"]] for event in timeline] == [
+    assert [
+        [review["proposal_msg_id"] for review in event["ext"]["critic_reviews"]]
+        for event in _framework_events(timeline)
+    ] == [
         ["proposal-cycle-0"],
         ["proposal-cycle-1"],
     ]
@@ -2095,7 +2121,7 @@ def test_framework_timeline_treats_empty_discovery_as_executed_work(tmp_path):
         ],
     }
 
-    events = collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[])
+    events = _framework_events(collect_v6_timeline(tmp_path, [], state=state, recorded_operations=[]))
 
     assert len(events) == 1
     assert events[0]["status"] == "succeeded"

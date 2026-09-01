@@ -1101,9 +1101,9 @@ def phase_cumulative_seconds(
     """Return wall-clock seconds spent in ``phase``, summed over EVERY entry.
 
     :func:`phase_elapsed_seconds` measures the CURRENT entry only, because
-    ``phase_started_unix`` is reset on every phase entry. Each phase is re-entered
-    once per macro-cycle, so a budget guard built on it hands the phase a fresh
-    full allotment on every re-entry. This reads the durable
+    ``phase_started_unix`` is reset on every phase entry. The absolute cap
+    (:func:`phase_cap_exceeded`) bounds the whole run, so it needs this total
+    rather than one entry's clock. This reads the durable
     ``phase_elapsed_totals`` banked at each transition out of the phase and adds
     the live segment when ``phase`` is the phase currently running.
 
@@ -1239,15 +1239,16 @@ def phase_budget_remaining_seconds(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> float | None:
-    """Return seconds remaining in the current phase's budget (``None`` when budget window 0 = unlimited).
+    """Return seconds left in the current phase ENTRY's budget (``None`` when budget window 0 = unlimited).
 
-    Charges the phase's CUMULATIVE spend (:func:`phase_cumulative_seconds`), not
-    just the current entry: the budget fraction is the phase's share of the run,
-    so a phase re-entered on a later macro-cycle resumes from what it has already
-    spent instead of being handed its whole allotment again. Note the allotment
-    itself (:func:`_phase_budget_total_seconds`) still reconstructs the base from
-    the CURRENT entry — it charges back against the clock at this entry's start,
-    which is a per-entry quantity by construction.
+    Charges :func:`phase_elapsed_seconds`, matching the allotment's basis:
+    :func:`_phase_budget_total_seconds` charges back against the clock at this
+    entry's start, so earlier entries are already priced into it. Subtracting
+    the cumulative total as well bills them twice, which pins a re-entered phase
+    at ``0`` for the rest of the run however much session is left.
+
+    Lifetime spend is bounded by :func:`phase_cap_exceeded` instead; every exit
+    predicate that reads this checks that cap alongside it.
 
     Args:
         state (Any): Frozen SharedState view.
@@ -1256,14 +1257,14 @@ def phase_budget_remaining_seconds(
         now_unix (float | None): Override for the current time.
 
     Returns:
-        float | None: Non-negative seconds left in the current phase's budget,
-        or ``None`` when the budget window is unlimited or the phase has no
+        float | None: Non-negative seconds left in this entry's budget, or
+        ``None`` when the budget window is unlimited or the phase has no
         allocated fraction.
     """
     total = _phase_budget_total_seconds(state, budget_pct=budget_pct, now_unix=now_unix)
     if total is None:
         return None
-    return max(0.0, total - phase_cumulative_seconds(state, now_unix=now_unix))
+    return max(0.0, total - phase_elapsed_seconds(state, now_unix=now_unix))
 
 
 def effective_max_minutes(state: Any) -> float:

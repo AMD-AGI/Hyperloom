@@ -61,22 +61,6 @@ AGENT_BY_LEVER = {
     LEVER_KERNEL: "kernel_agent",
 }
 
-#: Lever -> the published knowledge section that owns what it produced. The
-#: section names are the phases that used to own each lever; they are on the
-#: wire, and they were always really "configuration" and "source" under a
-#: phase's name. ``kernel`` is absent: it publishes through its own section
-#: rather than through an owner's.
-SECTION_BY_LEVER = {
-    LEVER_CONFIG: "explore",
-    LEVER_SOURCE_PATCH: "framework",
-    LEVER_UPSTREAM_PR: "framework",
-    LEVER_ENABLEMENT: "framework",
-}
-
-#: Section <-> the owner label the stack and the staging outbox spell it with.
-OWNER_BY_SECTION = {"explore": "EXPLORE", "framework": "FRAMEWORK_AGENT"}
-SECTION_BY_OWNER = {owner: section for section, owner in OWNER_BY_SECTION.items()}
-
 #: Lever kinds whose phase is not in doubt. ``source_patch`` and ``config`` are
 #: absent on purpose: either can be dispatched from more than one phase, so the
 #: lever alone does not name one and the older evidence still decides.
@@ -140,11 +124,6 @@ def agent_from_lever(value: Any) -> str:
     return AGENT_BY_LEVER.get(str(value or "").strip().lower(), "")
 
 
-def owner_from_lever(value: Any) -> str:
-    """Map a lever kind to the owner label its section is staged under."""
-    return OWNER_BY_SECTION.get(SECTION_BY_LEVER.get(str(value or "").strip().lower(), ""), "")
-
-
 def patch_owner_phase(evidence: Mapping[str, Any] | None) -> str:
     """Resolve the immutable authoring phase from recorded ownership evidence."""
     evidence = evidence or {}
@@ -190,12 +169,8 @@ __all__ = [
     "LEVER_KINDS",
     "LEVER_SOURCE_PATCH",
     "LEVER_UPSTREAM_PR",
-    "OWNER_BY_SECTION",
-    "SECTION_BY_LEVER",
-    "SECTION_BY_OWNER",
     "UNATTRIBUTED",
     "agent_from_lever",
-    "owner_from_lever",
     "agent_from_phase",
     "patch_author",
     "patch_lever_kind",

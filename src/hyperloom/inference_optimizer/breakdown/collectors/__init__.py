@@ -174,8 +174,6 @@ from .telemetry import (
     _aggregate_gpu_monitor as _aggregate_gpu_monitor,
     _collect_lane_timeline as _collect_lane_timeline,
     collect_telemetry as collect_telemetry,
-    collect_kb_provenance as collect_kb_provenance,
-    _collect_flusher_status as _collect_flusher_status,
     _coerce_round_id as _coerce_round_id,
     collect_specialist_runs as collect_specialist_runs,
     _normalize_specialist_domain_breakdown as _normalize_specialist_domain_breakdown,
@@ -191,6 +189,13 @@ from .v6 import (
     collect_v6_outcome as collect_v6_outcome,
     collect_v6_timeline as collect_v6_timeline,
 )
+from .v6_close import collect_v6_close as collect_v6_close
+from .v6_stages import (
+    project_baseline_event as project_baseline_event,
+    project_conc_sweep_event as project_conc_sweep_event,
+    project_kernel_events as project_kernel_events,
+    project_sweep_event as project_sweep_event,
+)
 
 __all__ = [
     "collect_attribution",
@@ -200,7 +205,6 @@ __all__ = [
     "collect_decision_trace",
     "collect_final",
     "collect_explore_search",
-    "collect_kb_provenance",
     "collect_kernel_invocations",
     "collect_kernel_lifecycle",
     "collect_collective",
@@ -214,9 +218,14 @@ __all__ = [
     "collect_sweep",
     "collect_telemetry",
     "collect_token_usage",
+    "collect_v6_close",
     "collect_v6_metadata",
     "collect_v6_outcome",
     "collect_v6_timeline",
+    "project_baseline_event",
+    "project_conc_sweep_event",
+    "project_kernel_events",
+    "project_sweep_event",
     "collect_workload",
     "collect_model_info",
     "collect_recorded_optimizations",

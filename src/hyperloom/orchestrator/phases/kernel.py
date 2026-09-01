@@ -59,6 +59,23 @@ _CONTAINER_AITER_CONFIG_DIR = Path("/sgl-workspace/aiter/aiter/configs")
 # an optimization that never happened.
 _GEAK_RESIDUAL_MIN_RATIO = 1.001
 
+# How many times a session re-runs forge-fusion after it aborted on
+# infrastructure (no git workspace, harness could not be authored). Such a run
+# judged nothing, so reporting it as a result would be wrong and it has to stay
+# retryable -- but the causes do not all heal mid-session, and a retry re-runs
+# LLM discovery before failing in the same place. Two is one free recovery from
+# a transient cause plus the original attempt.
+MAX_FUSION_INFRA_RETRIES = 2
+
+
+def _as_int(value: object) -> int:
+    """Read a counter that round-tripped through JSON, defaulting to 0."""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 # Which table each aiter config env var is resolved under at serving time. Two
 # callers need it: the merge step, which has to find the runtime table to merge
 # our candidate into, and the apply check, which has to recognise our artifact
@@ -3687,8 +3704,9 @@ class KernelPhase(PhaseHandler):
         """Gate the forge-fusion step in KERNEL entry.
 
         Runs only when: not disabled by ``HYPERLOOM_SKIP_FUSION``, the framework is
-        fusion-eligible (sglang/vllm), a decode trace exists to discover from, and no
-        fusion already succeeded this session (idempotent re-entry).
+        fusion-eligible (sglang/vllm), a decode trace exists to discover from, no
+        fusion already succeeded this session (idempotent re-entry), and forge-fusion
+        has not spent its retries aborting on infrastructure.
         """
         import os
 
@@ -3704,6 +3722,24 @@ class KernelPhase(PhaseHandler):
         last = getattr(self.shared_state, "last_fusion", None)
         if isinstance(last, dict) and str(last.get("status") or "").strip() in ("ok", "complete", "kept"):
             return False
+        if isinstance(last, dict) and last.get("infrastructure_abort"):
+            # An abort judged nothing, so it must stay retryable -- but not
+            # forever. ``no_git_workspace`` does not heal mid-session, and every
+            # retry re-runs LLM discovery before failing in the same place, so an
+            # uncapped retry spends gateway budget to relearn the same answer.
+            #
+            # Capping is not the old bug returning: the record still reads
+            # ``failed`` with an ``error_class``, so the run is reported as
+            # infrastructure that gave up, not as "this model has no fusion
+            # opportunity".
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            if spent >= MAX_FUSION_INFRA_RETRIES:
+                log.info(
+                    "KERNEL entry: skip forge-fusion (aborted on infrastructure %d time(s): %s)",
+                    spent,
+                    last.get("error_class") or "unknown",
+                )
+                return False
         return True
 
     async def _maybe_run_forge_fusion_before_kernel_opt(self) -> None:
@@ -4338,9 +4374,28 @@ class KernelPhase(PhaseHandler):
 
         Hands a KEPT fusion (source patch + env flags) to ``integrate_handler``
         for the real e2e re-baseline / adopt decision.
+
+        Stamps a ``fusion_run_id`` before the state write. ``last_fusion`` is
+        overwritten on every run while ``last_fusion_integrate`` is only
+        overwritten when integration actually runs, so without an id shared by
+        the pair a later run silently inherits the previous round's e2e
+        verdict. Readers must treat the two as one run only when the ids match.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
+        if isinstance(result, dict) and result.get("infrastructure_abort"):
+            # Counted on the session, not on the record: ``last_fusion`` is
+            # replaced by every run, so a timeout or a handler crash landing
+            # between two aborts would carry no count forward and hand the cap
+            # back a clean slate on every other entry.
+            spent = _as_int(getattr(self.shared_state, "fusion_infra_aborts", 0))
+            try:
+                self.shared_state.fusion_infra_aborts = spent + 1
+            except Exception:  # noqa: BLE001 - state shape tolerant, as below
+                pass
         try:
+            if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+                cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
@@ -4438,6 +4493,12 @@ class KernelPhase(PhaseHandler):
         log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
         self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
+            if isinstance(integ, dict):
+                # The fusion run this verdict adjudicates. Both fields are
+                # last-write-wins singletons, and this one is written only when
+                # integration runs, so the id is what tells a reader whether
+                # the verdict belongs to the fusion sitting in ``last_fusion``.
+                integ = {**integ, "fusion_run_id": str(result.get("fusion_run_id") or "")}
             self.shared_state.last_fusion_integrate = integ
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001

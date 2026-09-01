@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -9,19 +10,28 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 
 from ..agent_ownership import LEVER_KINDS
 from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
+from ..kb_timeline import collect_kb_events
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
     _FRAMEWORK_PHASES,
+    _KERNEL_PHASES,
     _dict_rows,
     _first,
     _mapping,
+    _operation_task_id,
     _optional_bool,
     _parse_iso_unix as _timestamp_number,
     _safe_get as _nested,
     _string_list,
     _to_float as _optional_float,
     _to_int as _optional_int,
+)
+from .v6_stages import (
+    project_baseline_event,
+    project_conc_sweep_event,
+    project_kernel_events,
+    project_sweep_event,
 )
 
 
@@ -265,17 +275,6 @@ def _is_framework_specialist(row: dict[str, Any], *, allow_legacy: bool) -> bool
     return allow_legacy
 
 
-def _operation_task_id(operation: dict[str, Any]) -> str:
-    return str(
-        _first(
-            _nested(operation, "extensions", "task_id"),
-            _nested(operation, "outputs", "task_id"),
-            _nested(operation, "metadata", "extras", "task_id"),
-        )
-        or ""
-    )
-
-
 def _candidate_id(value: Any) -> str:
     candidate = _mapping(value)
     return str(
@@ -314,7 +313,7 @@ def _is_framework_operation(operation: dict[str, Any]) -> bool:
     return name.startswith("specialist") and _is_framework_specialist(operation, allow_legacy=True)
 
 
-def _new_framework_window(cycle: int, start_time: str = "") -> dict[str, Any]:
+def _new_phase_window(cycle: int, start_time: str = "") -> dict[str, Any]:
     return {
         "cycle": cycle,
         "start_time": start_time,
@@ -324,10 +323,27 @@ def _new_framework_window(cycle: int, start_time: str = "") -> dict[str, Any]:
     }
 
 
-def _framework_windows(
+def _phase_windows(
     state: dict[str, Any],
-    recorded_operations: list[dict[str, Any]],
+    phases: frozenset[str],
 ) -> list[dict[str, Any]]:
+    """Cut ``state.phase_history`` into one window per stay inside ``phases``.
+
+    A stage that the macro loop re-enters (Framework Agent, Kernel Agent) needs
+    each visit kept apart, because V6 disambiguates repeats by
+    ``ext.macro_cycle``. Entering the phase set opens a window, leaving it
+    closes one, and a transition that stays inside the set (``EXPLORE`` ->
+    ``FRAMEWORK_AGENT``) extends the open window rather than starting a new one.
+
+    Args:
+        state (dict[str, Any]): The V5 ``state.json`` mapping.
+        phases (frozenset[str]): Upper-case phase names forming the stage.
+
+    Returns:
+        list[dict[str, Any]]: Windows sorted by ``(cycle, start_time)``, each
+        ``{cycle, start_time, end_time, rows, exit_row}``. ``end_time`` is
+        empty for a window the session never left.
+    """
     windows: list[dict[str, Any]] = []
     active: dict[str, Any] | None = None
     history = _dict_rows(state.get("phase_history"))
@@ -339,20 +355,20 @@ def _framework_windows(
         cycle = _row_cycle(row)
         if cycle is None:
             cycle = int(state.get("macro_cycle") or 0)
-        from_framework = from_phase in _FRAMEWORK_PHASES
-        to_framework = to_phase in _FRAMEWORK_PHASES
-        if to_framework and not from_framework:
-            active = _new_framework_window(cycle, str(row.get("ts") or ""))
+        from_inside = from_phase in phases
+        to_inside = to_phase in phases
+        if to_inside and not from_inside:
+            active = _new_phase_window(cycle, str(row.get("ts") or ""))
             active["rows"].append(row)
             windows.append(active)
             continue
-        if from_framework and to_framework:
+        if from_inside and to_inside:
             if active is None or int(active["cycle"]) != cycle:
-                active = _new_framework_window(cycle)
+                active = _new_phase_window(cycle)
                 windows.append(active)
             active["rows"].append(row)
             continue
-        if from_framework and not to_framework:
+        if from_inside and not to_inside:
             if active is None or int(active["cycle"]) != cycle:
                 active = next(
                     (
@@ -363,7 +379,7 @@ def _framework_windows(
                     None,
                 )
             if active is None:
-                active = _new_framework_window(cycle)
+                active = _new_phase_window(cycle)
                 windows.append(active)
             active["rows"].append(row)
             active["end_time"] = str(row.get("ts") or "")
@@ -372,10 +388,24 @@ def _framework_windows(
             continue
     current_phase = str(state.get("phase") or "").strip().upper()
     current_cycle = int(state.get("macro_cycle") or 0)
-    if current_phase in _FRAMEWORK_PHASES and not any(
+    if current_phase in phases and not any(
         int(window["cycle"]) == current_cycle and not window["end_time"] for window in windows
     ):
-        windows.append(_new_framework_window(current_cycle, str(state.get("phase_started_ts") or "")))
+        windows.append(_new_phase_window(current_cycle, str(state.get("phase_started_ts") or "")))
+    windows.sort(
+        key=lambda window: (
+            int(window["cycle"]),
+            _timestamp_number(window.get("start_time")) or float("inf"),
+        )
+    )
+    return windows
+
+
+def _framework_windows(
+    state: dict[str, Any],
+    recorded_operations: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    windows = _phase_windows(state, _FRAMEWORK_PHASES)
 
     evidence_rows: list[dict[str, Any]] = []
     for operation in recorded_operations:
@@ -403,7 +433,7 @@ def _framework_windows(
         cycle = _row_cycle(row)
         if cycle is None or cycle in known_cycles:
             continue
-        windows.append(_new_framework_window(cycle))
+        windows.append(_new_phase_window(cycle))
         known_cycles.add(cycle)
 
     windows.sort(
@@ -1402,6 +1432,7 @@ def _source_attempt(
             "patches_applied": _string_list(outputs.get("patches_applied")),
             "source_snapshot": _first(outputs.get("source_snapshot"), None),
             "source_manifest": _first(outputs.get("source_manifest"), None),
+            "framework_root": _first(outputs.get("framework_root"), None),
             "workspace": _first(outputs.get("workspace"), None),
         },
         "failure": {
@@ -1907,6 +1938,42 @@ def _framework_event(
     }
 
 
+def _projected(
+    stage: str,
+    project: Callable[[], Any],
+    warnings: list[str],
+) -> list[dict[str, Any]]:
+    """Run one stage projector so its failure costs only its own events.
+
+    The exporter already wraps this whole collector, but that granularity is
+    too coarse to honor what V6 promises. A single ``_safe_collect`` around the
+    lot means one projector raising on a malformed field discards the durable
+    ``install`` / ``model_gate`` events read moments earlier and every other
+    stage that projected cleanly — so a session that failed at the model gate,
+    whose gate event is the only thing worth reporting, can lose it to a
+    kernel-stage bug it never reached.
+
+    Args:
+        stage (str): Stage name, used to name the projector in the warning.
+        project (Callable[[], Any]): Returns one event, a list of events, or
+            ``None``.
+        warnings (list[str]): V6 warning sink (mutated in place).
+
+    Returns:
+        list[dict[str, Any]]: The projected events, or ``[]`` on failure.
+    """
+    try:
+        result = project()
+    except Exception as exc:  # noqa: BLE001 — one stage must not cost the timeline
+        warnings.append(f"v6.timeline.{stage}: projection failed ({type(exc).__name__}: {exc}); stage omitted")
+        return []
+    if result is None:
+        return []
+    if isinstance(result, dict):
+        return [result]
+    return [event for event in result if isinstance(event, dict)]
+
+
 def collect_v6_timeline(
     session_dir: Path,
     warnings: list[str],
@@ -1914,25 +1981,67 @@ def collect_v6_timeline(
     state: dict[str, Any] | None = None,
     recorded_operations: list[dict[str, Any]] | None = None,
     critic_iterations: list[dict[str, Any]] | None = None,
+    baseline: Any = None,
+    sweep: Any = None,
+    conc_sweep_summary: Any = None,
+    phase_timeline: Any = None,
+    optimizations: Any = None,
+    kernel_journey: Any = None,
+    collective: Any = None,
+    geak: Any = None,
 ) -> list[dict[str, Any]]:
-    """Load durable events and project framework work without mutating V5 state."""
+    """Load durable events and project stage work without mutating V5 state.
+
+    ``install`` and ``model_gate`` are read back from the durable event
+    directory because they run before the Coordinator exists. Everything else
+    is projected here from V5 sections the exporter has already built, so the
+    keyword arguments are all optional: a caller that passes none still gets
+    the durable events plus the framework projection.
+
+    Every projection is isolated (see :func:`_projected`). The durable events
+    are read first and are never discarded by a later stage's failure.
+    """
     timeline = read_timeline_events(session_dir, warnings=warnings)
     state = state if isinstance(state, dict) else {}
     operations = [row for row in recorded_operations or [] if isinstance(row, dict)]
     critic_iterations = [row for row in critic_iterations or [] if isinstance(row, dict)]
-    windows = _framework_windows(state, operations)
-    for window in windows:
-        timeline.append(
-            _framework_event(
-                session_dir,
-                state,
-                operations,
-                critic_iterations,
-                warnings,
-                window,
-                len(windows),
-            )
+
+    def _framework_events() -> list[dict[str, Any]]:
+        windows = _framework_windows(state, operations)
+        return [
+            _framework_event(session_dir, state, operations, critic_iterations, warnings, window, len(windows))
+            for window in windows
+        ]
+
+    def _kernel_events() -> list[dict[str, Any]]:
+        return project_kernel_events(
+            state,
+            _phase_windows(state, _KERNEL_PHASES),
+            warnings,
+            optimizations=optimizations,
+            kernel_journey=kernel_journey,
+            collective=collective,
+            geak=geak,
+            baseline=baseline,
+            recorded_operations=operations,
         )
+
+    timeline.extend(_projected("framework_agent", _framework_events, warnings))
+    timeline.extend(
+        _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
+    )
+    timeline.extend(
+        _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
+    )
+    timeline.extend(
+        _projected(
+            "conc_sweep",
+            lambda: project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
+            warnings,
+        )
+    )
+    timeline.extend(_projected("kernel", _kernel_events, warnings))
+    timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
@@ -2041,6 +2150,44 @@ def collect_v6_outcome(
     validation = optimizations.get("validation")
     if not isinstance(validation, dict):
         validation = {}
+    summary = optimizations.get("summary_by_source")
+    attribution_available = optimizations.get("available") is not False and isinstance(summary, dict)
+    summary = summary if isinstance(summary, dict) else {}
+
+    def _gain_bucket(*rows: Any, include_non_attributable: bool = False) -> dict[str, Any]:
+        buckets = [row for row in rows if isinstance(row, dict)]
+        result = {
+            "total_gain_pct": (
+                round(sum(_optional_float(row.get("total_gain_pct")) or 0.0 for row in buckets), 6)
+                if attribution_available
+                else None
+            ),
+            "keep_count": sum(_optional_int(row.get("keeps")) or 0 for row in buckets),
+        }
+        if include_non_attributable:
+            result["non_attributable_keep_count"] = sum(
+                _optional_int(row.get("non_attributable_keeps")) or 0 for row in buckets
+            )
+        return result
+
+    kernel_summary = _mapping(summary.get("kernel_agent"))
+    kernel_backends = _mapping(kernel_summary.get("by_backend"))
+    attribution = {
+        "available": attribution_available,
+        "by_source": {
+            "warm_replay": _gain_bucket(summary.get("warm_replay")),
+            # V6 folds the old Explore phase into Framework Agent, so its two
+            # V5 ledger buckets are combined at this projection boundary.
+            "framework_agent": _gain_bucket(summary.get("framework_agent"), summary.get("explore")),
+            "kernel": {
+                **_gain_bucket(kernel_summary),
+                "by_backend": {
+                    "geak": _gain_bucket(kernel_backends.get("geak"), include_non_attributable=True),
+                    "forge": _gain_bucket(kernel_backends.get("forge"), include_non_attributable=True),
+                },
+            },
+        },
+    }
     return {
         "stop_reason": stop_reason,
         "status": outcome_status,
@@ -2062,6 +2209,7 @@ def collect_v6_outcome(
             "attributed_gain_pct": validation.get("attributed_total_gain_pct", 0.0),
             "unattributed_gain_pct": validation.get("unattributed_gain_pct", 0.0),
             "reconciliation_gap_pct": validation.get("reconciliation_gap_pct"),
+            "attribution": attribution,
             "notes": list(validation.get("notes") or []),
         },
     }
