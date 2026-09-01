@@ -31,6 +31,7 @@ from hyperloom.orchestrator.knowledge.remote_recipe import (
     read_remote_recipe as _read_remote_recipe,
     write_final_remote_recipe,
 )
+from hyperloom.orchestrator.knowledge.remote_recipe.values import _Files, merge_staged_sections
 from hyperloom.orchestrator.knowledge.remote_recipe._vendor import kb_store_client
 from hyperloom.orchestrator.knowledge.remote_recipe.client import (
     _champion,
@@ -2007,6 +2008,35 @@ def test_a_staged_file_is_published_under_its_own_section(tmp_path: Path) -> Non
     published = {artifact.path for artifact in bundle.artifacts}
     assert refs[0] in published
     assert (tmp_path / "files" / refs[0]).is_file()
+
+
+def test_merge_staged_sections_unions_and_dedups_prior_refs(tmp_path: Path) -> None:
+    """Replay refs already on the section must union with newly staged refs, without duplicates."""
+    patch_a = tmp_path / "authored_a.patch"
+    patch_b = tmp_path / "authored_b.patch"
+    patch_a.write_text("authored_a", encoding="utf-8")
+    patch_b.write_text("authored_b", encoding="utf-8")
+    sections = _sections(tmp_path)
+    staged_refs = PatchKB(sections).stage_patches([patch_a, patch_b], stack_index=2)
+    staged_ref_a, staged_ref_b = staged_refs[0], staged_refs[1]
+    prior_patch = "patch/overlays/000000/00-replayed.patch"
+    prior_artifact = "patch/artifacts/prior.bin"
+    # before = [prior, staged_ref_a]; after = [staged_ref_a, staged_ref_b].
+    # Union must keep prior, dedup the overlap, and append staged_ref_b.
+    # `if not before and after:` at values.py (discard after when before is
+    # non-empty) silently drops staged_ref_b — this shape turns that red.
+    after_patches = list(sections.staged("patch").knowledge.get("patches") or [])
+    assert after_patches == [staged_ref_a, staged_ref_b]
+    value = {
+        "patch": {
+            "patches": [prior_patch, staged_ref_a],
+            "artifacts": [prior_artifact],
+        }
+    }
+    merged = merge_staged_sections(value, sections, _Files(tmp_path / "files"))
+    assert merged == ["patch"]
+    assert value["patch"]["patches"] == [prior_patch, staged_ref_a, staged_ref_b]
+    assert value["patch"]["artifacts"] == [prior_artifact]
 
 
 def test_non_overlay_owner_patch_ref_fails_before_publish(
