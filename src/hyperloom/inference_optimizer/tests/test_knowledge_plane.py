@@ -21,6 +21,12 @@ def test_plane_disabled_pr_returns_empty_mcp_url():
     )
     assert plane.pr_monitor_enabled is False
     assert plane.specialist_mcp_url() == ""
+    assert plane.config is not None and plane.config.pr_monitor_enabled is False
+    child_env: dict[str, str] = {}
+    assert plane.kernel_experience is not None
+    plane.kernel_experience.configure_child_env(child_env)
+    assert child_env["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert "KB_STORE_URL" not in child_env
 
 
 def test_plane_enabled_pr_returns_mcp_url():

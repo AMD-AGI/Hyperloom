@@ -63,6 +63,7 @@ _DEFAULT_SESSION_TIMEOUT_SEC = 90 * 60
 # PR KB settings forwarded to the MCP child.
 _PR_KB_CHILD_ENV_VARS = (
     "KB_STORE_URL",
+    "HYPERLOOM_PR_MONITOR_ENABLED",
     "PR_KB_TIMEOUT_SEC",
     "PR_KB_BUDGET_SEC",
     "PR_KB_TOP_K",

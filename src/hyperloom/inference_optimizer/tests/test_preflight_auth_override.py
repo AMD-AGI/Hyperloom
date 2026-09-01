@@ -2188,6 +2188,7 @@ def _fake_run_writes_marker(marker_path: Path, **marker_kwargs):
 def marker_path(tmp_path, monkeypatch) -> Path:
     user_data = tmp_path / "user_data"
     monkeypatch.setenv("USER_DATA_PATH", str(user_data))
+    monkeypatch.delenv("HYPERLOOM_PR_MONITOR_ENABLED", raising=False)
     return user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
 
 
@@ -2324,6 +2325,39 @@ def test_ir3_preflight_does_not_inject_recipe_kb_url(marker_path, monkeypatch):
     assert "RECIPE_KB_KB_URL" not in seen_env
     assert args.recipe_kb_enabled is True
     assert args.kb_degraded_reason is None
+
+
+def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypatch):
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    args = _ns()
+    seen_env: dict = {}
+
+    def _runner(cmd, env=None, check=False, timeout=None):
+        seen_env.update(env or {})
+        _write_marker(
+            marker_path,
+            kb_reachable=False,
+            pr_reachable=False,
+            kb_skipped=True,
+            pr_failure_reason="timeout",
+        )
+        return subprocess.CompletedProcess(cmd, 1)
+
+    with patch.object(cli_preflight.subprocess, "run", side_effect=_runner):
+        outcome = cli_preflight._run_ir3_preflight(args)
+
+    assert seen_env["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
+    assert args.recipe_kb_enabled is True
+    assert args.pr_monitor_enabled is False
+    assert args.pr_degraded_reason == "ir3_auto"
+    assert os.environ["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert outcome["detail"]["pr_monitor"] == {
+        "enabled": False,
+        "reason": "ir3_unreachable",
+    }
 
 
 def test_cli_parser_exposes_degraded_flags():

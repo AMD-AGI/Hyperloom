@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from .config import KnowledgeConfig, KnowledgeStoreMode
@@ -54,6 +54,10 @@ class KnowledgePlane:
             KnowledgePlane: The constructed facade.
         """
         resolved = config or KnowledgeConfig.from_env()
+        resolved = replace(
+            resolved,
+            pr_monitor_enabled=bool(pr_monitor is not None and pr_monitor.enabled),
+        )
         return cls(
             pr_monitor=pr_monitor,
             pr_monitor_mcp_url=(pr_monitor_mcp_url or "").strip(),

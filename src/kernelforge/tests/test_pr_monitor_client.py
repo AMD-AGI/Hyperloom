@@ -69,9 +69,19 @@ def test_normalize_base_url_reads_env(monkeypatch):
 
 
 def test_client_requires_kb_store_url(monkeypatch):
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "remote")
     monkeypatch.delenv("KB_STORE_URL", raising=False)
     client = PRMonitorClient()
     with pytest.raises(PRMonitorError, match="KB_STORE_URL"):
+        client.get("/repos")
+
+
+def test_runtime_disable_marker_prevents_default_network_requests(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_PR_MONITOR_ENABLED", "0")
+    client = PRMonitorClient()
+
+    assert client.base_url == ""
+    with pytest.raises(PRMonitorError, match="disabled by runtime preflight"):
         client.get("/repos")
 
 

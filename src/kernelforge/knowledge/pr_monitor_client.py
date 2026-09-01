@@ -18,7 +18,7 @@ from concurrent.futures import ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import Any
 
-from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
+from hyperloom.common.pr_monitor_urls import pr_monitor_base_url, pr_monitor_enabled
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ class PRMonitorClient:
     def _url(self, path: str, params: dict[str, Any] | None = None) -> str:
         """Build one absolute ``/v1`` URL, dropping parameters left as None."""
         if not self._base:
+            if not pr_monitor_enabled():
+                raise PRMonitorError("PR Monitor is disabled by runtime preflight")
             raise PRMonitorError("KB_STORE_URL is required when PR Monitor knowledge is enabled")
         url = f"{self._base}/v1{path}"
         if params:

@@ -23,3 +23,13 @@ def test_local_mode_uses_default_kb_store_url() -> None:
 def test_remote_mode_does_not_default_missing_kb_store_url() -> None:
     env = {"KNOWLEDGE_STORE_MODE": "remote"}
     assert pr_monitor_base_url(env=env) == ""
+
+
+def test_runtime_disable_marker_suppresses_all_pr_monitor_urls() -> None:
+    env = {
+        "KB_STORE_URL": "https://kb.example/knowledge-base",
+        "HYPERLOOM_PR_MONITOR_ENABLED": "0",
+    }
+    assert pr_monitor_base_url(env=env) == ""
+    assert pr_monitor_rest_url(env=env) == ""
+    assert pr_monitor_mcp_url(env=env) == ""

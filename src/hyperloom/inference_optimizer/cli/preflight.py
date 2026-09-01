@@ -35,6 +35,7 @@ from hyperloom.common.llm_config import (
 )
 from hyperloom.common.gpu_identity import AMD_GPU_DISPATCH_IDENTITIES
 from hyperloom.common.platform_probe import probe_cpu_platform
+from hyperloom.common.pr_monitor_urls import PR_MONITOR_ENABLED_ENV, kb_store_url
 from hyperloom.common.provenance import (
     RESOLVED_FRAMEWORK_ENV,
     RESOLVED_FRAMEWORK_PYTHON_ENV,
@@ -3046,6 +3047,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     args.pr_degraded_reason = "explicit_flag" if explicit_pr else None
 
     if explicit_kb and explicit_pr:
+        os.environ[PR_MONITOR_ENABLED_ENV] = "0"
         return {
             "status": "skipped",
             "skip_reason": "explicit_flag",
@@ -3059,6 +3061,13 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
     marker_path = user_data / "runtime" / "recipe_kb" / ".kb_preflight.json"
     script = Path(__file__).resolve().parent.parent / "assets" / "preflight_kb.sh"
     env = os.environ.copy()
+    resolved_kb_store_url = kb_store_url(env=env)
+    if resolved_kb_store_url:
+        # Local mode may derive the default without exporting KB_STORE_URL.
+        # Pass the effective value to IR-3 so an unreachable default disables
+        # PR Monitor instead of being mistaken for an intentionally skipped
+        # probe.
+        env["KB_STORE_URL"] = resolved_kb_store_url
     if explicit_pr:
         env["SKIP_PR_PROBE"] = "1"
 
@@ -3093,6 +3102,7 @@ def _run_ir3_preflight(args: argparse.Namespace) -> dict[str, Any]:
         args.pr_monitor_enabled = False
         args.pr_degraded_reason = "ir3_auto"
     enabled = bool(args.pr_monitor_enabled)
+    os.environ[PR_MONITOR_ENABLED_ENV] = "1" if enabled else "0"
     status = "skipped" if explicit_pr else "applied" if enabled else "warned"
     event_reason = "explicit_flag" if explicit_pr else "ir3_unreachable" if not enabled else None
     return {

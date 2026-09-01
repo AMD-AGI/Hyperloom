@@ -7,8 +7,17 @@ from collections.abc import Mapping
 
 
 KB_STORE_URL_ENV = "KB_STORE_URL"
+PR_MONITOR_ENABLED_ENV = "HYPERLOOM_PR_MONITOR_ENABLED"
 PR_MONITOR_MOUNT = "pr-monitor"
 DEFAULT_KB_STORE_URL = "https://global.primus-safe.amd.com/knowledge-base"
+
+
+def pr_monitor_enabled(env: Mapping[str, str] | None = None) -> bool:
+    """Return whether runtime preflight left PR Monitor enabled."""
+
+    source = os.environ if env is None else env
+    value = str(source.get(PR_MONITOR_ENABLED_ENV, "")).strip().lower()
+    return value not in {"0", "false", "no", "off"}
 
 
 def kb_store_url(
@@ -18,7 +27,7 @@ def kb_store_url(
 ) -> str:
     """Return the KB Service URL used by PR Monitor.
 
-    Local Recipe mode falls back to the public KB Service so PR discovery works
+    Local Recipe mode falls back to the default KB Service so PR discovery works
     without extra configuration. Remote Recipe mode stays strict: its write
     credentials must include an explicit URL and token.
     """
@@ -38,6 +47,8 @@ def pr_monitor_base_url(
 ) -> str:
     """Return the co-hosted PR Monitor service root."""
 
+    if not pr_monitor_enabled(env):
+        return ""
     base = kb_store_url(value, env=env)
     return f"{base}/{PR_MONITOR_MOUNT}" if base else ""
 
@@ -67,9 +78,11 @@ def pr_monitor_mcp_url(
 __all__ = [
     "DEFAULT_KB_STORE_URL",
     "KB_STORE_URL_ENV",
+    "PR_MONITOR_ENABLED_ENV",
     "PR_MONITOR_MOUNT",
     "kb_store_url",
     "pr_monitor_base_url",
+    "pr_monitor_enabled",
     "pr_monitor_mcp_url",
     "pr_monitor_rest_url",
 ]
