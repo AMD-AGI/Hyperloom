@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
 _BACKENDS_DIR = Path(__file__).resolve().parent.parent / "tools" / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
 import forge_submit  # noqa: E402
@@ -159,7 +161,7 @@ def test_remote_child_env_missing_kb_store_credentials_degrades_once(
         forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KERNELFORGE_GBRAIN_ENABLED"] == "false"
-    assert "KB_STORE_URL" not in env
+    assert env["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
     assert "KB_STORE_TOKEN" not in env
     assert caplog.text.count("Forge knowledge configuration is invalid") == 1
 
@@ -203,6 +205,7 @@ def test_unset_mode_defaults_local_and_uses_user_data_path(
     forge_submit._apply_kernel_backend_env(env)
     assert env["KNOWLEDGE_STORE_MODE"] == "local"
     assert env["KNOWLEDGE_LOCAL_ROOT"] == "/data/user/knowledge"
+    assert env["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
     assert "GBRAIN_BASE_URL" not in env
     assert "GBRAIN_TOKEN" not in env
 
@@ -229,5 +232,5 @@ def test_child_env_cannot_seed_process_config_cache(
     assert str(cached.local_root) == "/process/knowledge"
     assert child["KNOWLEDGE_STORE_MODE"] == "local"
     assert child["KNOWLEDGE_LOCAL_ROOT"] == "/process/knowledge"
-    assert "KB_STORE_URL" not in child
+    assert child["KB_STORE_URL"] == DEFAULT_KB_STORE_URL
     assert "KB_STORE_TOKEN" not in child
