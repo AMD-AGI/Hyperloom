@@ -197,7 +197,9 @@ def _emit_quality_warnings(analyze: dict[str, Any], warnings: list[dict[str, Any
         )
 
 
-#: Opt-in env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1).
+#: Env gate for the variant-discriminating TraceShapeManifest (P0-A/WP-1). On by
+#: default: forge calls the manifest its preferred dense-shape source, and with
+#: the gate off Hyperloom produced one for nobody. Set to 0/off/false to skip.
 _SHAPE_MANIFEST_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST"
 #: Optional gfx-arch provenance override (WP-1 stub; superseded by WP-0/WP-7).
 _GFX_ENV = "HYPERLOOM_GFX_ARCH"
@@ -219,8 +221,13 @@ _VARIANT_RE = re.compile(r"(bs_\d+)", re.IGNORECASE)
 #: ``bs_<batch>`` token anywhere (both SGLang layouts) or the vLLM prefix whose
 #: batch/mode arrive via execution_details.json.
 _CAPTURE_FILE_RE = re.compile(r"bs_\d+|\Agraph_capture", re.IGNORECASE)
-#: Optional cap on how many capture files to index (0 = all). Logged when hit.
+#: Cap on how many capture files to index; 0 means all. Each shard costs a full
+#: ``analyze_trace`` pass plus a sha256, so an uncapped default would put that
+#: cost on every trace analysis now that the manifest is built by default. The
+#: cap is a budget, not a filter: shards are taken in discovery order and the
+#: drop is logged.
 _MAX_CAPTURES_ENV = "HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES"
+_DEFAULT_MAX_CAPTURES = 64
 
 
 def _sha256_file(path: str | Path) -> str:
@@ -364,24 +371,25 @@ def _maybe_build_shape_manifest(
 ) -> dict[str, Any]:
     """Optionally build + write the variant-discriminating TraceShapeManifest.
 
-    Opt-in via ``HYPERLOOM_TRACE_SHAPE_MANIFEST`` (off by default -> returns
-    ``{"status": "disabled"}`` and writes nothing, so a run without the flag is
-    byte-for-byte unchanged). When enabled, capture shards are indexed per
+    Built by default; ``HYPERLOOM_TRACE_SHAPE_MANIFEST=0`` returns
+    ``{"status": "disabled"}`` and writes nothing. When enabled, capture shards
+    are indexed per
     ``bs_<batch>`` variant; with no capture shards it falls back to an eager
     manifest built from the main analysis. Never raises -- any failure degrades
     to ``{"status": "error: ..."}`` and is logged to stderr.
     """
-    flag = os.environ.get(_SHAPE_MANIFEST_ENV, "0").strip().lower()
-    if flag not in {"1", "true", "yes", "on"}:
+    flag = os.environ.get(_SHAPE_MANIFEST_ENV, "1").strip().lower()
+    if flag in {"0", "false", "no", "off"}:
         return {"status": "disabled"}
     try:
         main_trace = analyze.get("trace_file", "") or ""
         main_hash = _sha256_file(main_trace) if main_trace else ""
         shards = _discover_capture_shards(args.trace_input, args.capture_folder or "")
         try:
-            max_caps = int(os.environ.get(_MAX_CAPTURES_ENV, "0") or 0)
+            raw_caps = os.environ.get(_MAX_CAPTURES_ENV, "")
+            max_caps = int(raw_caps) if str(raw_caps).strip() else _DEFAULT_MAX_CAPTURES
         except ValueError:
-            max_caps = 0
+            max_caps = _DEFAULT_MAX_CAPTURES
         if max_caps > 0 and len(shards) > max_caps:
             print(
                 f"[trace_shape_manifest] capping capture files {len(shards)}->{max_caps} "
@@ -896,8 +904,8 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:  # noqa: BLE001 - best-effort sidecar, never blocks the run
             diffusion_roofline_path = None
 
-    # Optional variant-discriminating TraceShapeManifest (P0-A / WP-1; opt-in via
-    # HYPERLOOM_TRACE_SHAPE_MANIFEST). Off by default -> disabled, writes nothing.
+    # Variant-discriminating TraceShapeManifest (P0-A / WP-1). On by default;
+    # HYPERLOOM_TRACE_SHAPE_MANIFEST=0 disables it and writes nothing.
     shape_manifest = _maybe_build_shape_manifest(args, analyze, bypass_dir, generated_at=utc_now(timespec="seconds"))
 
     hot_kernels = candidates.get("hot_kernels", [])

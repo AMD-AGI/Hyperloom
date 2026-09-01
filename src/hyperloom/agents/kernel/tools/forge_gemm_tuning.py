@@ -59,6 +59,15 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "untuned_csv", "--untuned-csv")
     _add_opt(cmd, args, "moe_untuned_csv", "--moe-untuned-csv")
     _add_opt(cmd, args, "shapes_json", "--shapes-json")
+    # forge calls the manifest its preferred dense-shape source, and Hyperloom
+    # has produced one since WP-1 -- but nothing forwarded it, so the file was
+    # written and never read. Same for --demand: forge can reconstruct demand
+    # from --kernel-signature-log, and does, but a demand.json the evidence
+    # step already computed is both cheaper and not subject to picking the
+    # wrong log. Both degrade safely: forge's ``_safe_is_file`` drops a path
+    # that is not there, with a warning.
+    _add_opt(cmd, args, "shapes_manifest", "--shapes-manifest")
+    _add_opt(cmd, args, "demand_json", "--demand")
     _add_opt(cmd, args, "tunableop_input", "--tunableop-input")
     _add_opt(cmd, args, "kernel_signature_log", "--kernel-signature-log")
     _add_opt(cmd, args, "gpu_ids", "--gpu-ids")

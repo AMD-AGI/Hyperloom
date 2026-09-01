@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import bypass_trace_analysis as bta  # noqa: E402
@@ -760,11 +762,45 @@ def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
     assert "RuntimeError" in res["status"]
 
 
-def test_maybe_build_shape_manifest_disabled_by_default(tmp_path, monkeypatch):
+def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
+    # The gate used to default off, so forge's preferred dense-shape source was
+    # produced for nobody. On by default now.
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+    assert res["status"] == "ok"
+    assert (tmp_path / "trace_shape_manifest.json").is_file()
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF"])
+def test_maybe_build_shape_manifest_can_still_be_turned_off(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", value)
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res == {"status": "disabled"}
     assert not (tmp_path / "trace_shape_manifest.json").exists()
+
+
+def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):
+    # Each shard costs an analyze_trace pass plus a sha256; with the manifest
+    # now built on every run, an uncapped default would put that cost on all of
+    # them. The cap is a budget, not a filter -- the drop is logged.
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", raising=False)
+    n = bta._DEFAULT_MAX_CAPTURES + 10
+    monkeypatch.setattr(
+        bta,
+        "_discover_capture_shards",
+        lambda _trace, _folder: [(Path(f"/tmp/bs_{i}.json"), f"bs_{i}", "decode") for i in range(n)],
+    )
+    analyzed: list[object] = []
+
+    def _analyze(path, **kw):
+        analyzed.append(path)
+        return {"status": "empty"}
+
+    monkeypatch.setattr(bta._reader, "analyze_trace", _analyze)
+    bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+
+    assert len(analyzed) == bta._DEFAULT_MAX_CAPTURES
 
 
 def _prov_args(**kw):
