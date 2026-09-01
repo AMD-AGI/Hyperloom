@@ -37,8 +37,11 @@ from ..loop.coordinator_helpers import (
     _geak_has_accepted_kernel,
     _resolve_roofline_watermark_ratio,
     _accepted_config_as_variant,
+    _coerce_tp,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_tp,
     _resolve_serving_fidelity,
 )
 from .base import PhaseHandler
@@ -782,11 +785,13 @@ class KernelPhase(PhaseHandler):
         # The materializer clamps TP to the visible GPU count, so a stale
         # $TP=8 on a 4-card pod would otherwise ship `tp: 8` alongside four
         # gpu_ids and GEAK would launch sglang with --tp 8 and fail to load.
-        try:
-            _tp = int(str(_recipe_envs.get("TP") or "").strip() or os.environ.get("TP", "1") or 1)
-        except (TypeError, ValueError):
-            _tp = int(os.environ.get("TP", "1") or 1)
-        _tp = max(_tp, 1)
+        # Recipe TP first, process env as the fallback; both guarded, so a
+        # non-numeric $TP cannot raise out of the fallback itself.
+        _tp = _coerce_tp(_recipe_envs.get("TP"), os.environ.get("TP"))
+        # gpu_ids is capped at the pin's mask width; tp follows it down so the
+        # two can never disagree (e.g. ROCR=6 with TP=2 ships tp=1, not tp=2).
+        _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
+        _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -805,8 +810,9 @@ class KernelPhase(PhaseHandler):
         handoff = {
             # v2 adds ``baseline_env_spec`` (the full layered env of current_best);
             # v1-only consumers ignore it and degrade to the flags/env-only baseline.
-            # v3 adds ``gpu_pin`` (the run's actual visible-devices mask); older
-            # consumers ignore it and keep reading ``gpu_ids`` exactly as before.
+            # v3 adds ``gpu_pin`` (the run's actual visible-devices mask) and
+            # ``gpu_ids_space``; older consumers ignore both and keep reading
+            # ``gpu_ids`` exactly as before.
             "schema_version": 3,
             "model_path": str(getattr(state, "model_path", "") or os.environ.get("MODEL_PATH", "")),
             "framework": str(os.environ.get("FRAMEWORK", "") or "sglang"),
@@ -840,7 +846,13 @@ class KernelPhase(PhaseHandler):
             # The serving/optimization device set, as HIP-level ids (what the
             # consumer exports as HIP_VISIBLE_DEVICES). Logical positions inside
             # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
-            "gpu_ids": _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp),
+            "gpu_ids": _gpu_ids,
+            # Which coordinate system ``gpu_ids`` is in: "logical" (positions
+            # inside the ROCR mask the child inherits) or "absolute" (whole-
+            # machine device ids). Exporting them as HIP_VISIBLE_DEVICES is
+            # correct either way; a consumer that instead writes ROCR itself
+            # needs to know which it was handed.
+            "gpu_ids_space": _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin),
         }
         if gpu_pin:
             # ABSOLUTE ids + the var they came from, so a consumer that writes

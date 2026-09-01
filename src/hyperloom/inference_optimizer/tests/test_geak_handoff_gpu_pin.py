@@ -22,11 +22,15 @@ from __future__ import annotations
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator_helpers import (
+    _coerce_tp,
     _is_autofilled_rocr,
     _parse_device_list,
     _resolve_gpu_pin,
     _resolve_handoff_gpu_ids,
+    _resolve_handoff_gpu_ids_space,
+    _resolve_handoff_tp,
 )
+from hyperloom.common.visible_devices import VISIBLE_DEVICE_VARS
 
 
 def _autofilled(tp: int) -> dict[str, object]:
@@ -39,7 +43,7 @@ def _autofilled(tp: int) -> dict[str, object]:
     return {"TP": tp, "ROCR_VISIBLE_DEVICES": ",".join(str(i) for i in range(tp))}
 
 
-_MASK_VARS = ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES")
+_MASK_VARS = VISIBLE_DEVICE_VARS
 
 
 @pytest.fixture(autouse=True)
@@ -158,8 +162,16 @@ def test_autofilled_recipe_rocr_leaves_an_unpinned_run_unpinned() -> None:
 def test_a_real_recipe_rocr_pin_survives_the_autofill_check() -> None:
     assert not _is_autofilled_rocr(value="4,5", recipe_envs={"TP": 2})
     assert _is_autofilled_rocr(value="0,1", recipe_envs={"TP": 2})
-    # No resolved TP => cannot claim it was synthesized; keep the mask.
-    assert not _is_autofilled_rocr(value="0,1", recipe_envs={})
+    # A recipe that records no TP still gets the materializer's mask written
+    # into it, so fall back to the SHAPE of the autofill (0..n-1). Requiring a
+    # recipe TP here left the synthetic mask posing as a pin for exactly the
+    # recipes that never recorded one.
+    assert _is_autofilled_rocr(value="0,1", recipe_envs={})
+    assert _is_autofilled_rocr(value="0", recipe_envs={"TP": "not-a-number"})
+    # A real pin is still a pin, with or without a TP to compare against.
+    assert not _is_autofilled_rocr(value="4,5", recipe_envs={})
+    assert not _is_autofilled_rocr(value="6", recipe_envs={})
+    assert not _is_autofilled_rocr(value="1,0", recipe_envs={})
 
 
 def test_variable_precedence_is_global_not_per_source() -> None:
@@ -214,6 +226,52 @@ def test_gpu_ids_cuda_pin_is_verbatim() -> None:
     assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=1) == "3"
 
 
+def test_gpu_ids_forwards_a_non_numeric_hip_mask_instead_of_recentring_on_card_0() -> None:
+    """A UUID HIP/CUDA mask parses to no numeric ids but is still a real pin.
+
+    Re-serializing from ``ids`` alone yielded ``0..tp-1`` here, which moves the
+    servers onto cards ``0..tp-1`` — the #1312 failure, reintroduced for anyone
+    who pins by UUID. The tokens are forwarded as-is instead.
+    """
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"HIP_VISIBLE_DEVICES": "GPU-a1b2c3,GPU-d4e5f6"})
+    assert pin["ids"] == []
+    assert pin["count"] == 2
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "GPU-a1b2c3,GPU-d4e5f6"
+
+
+def test_handoff_tp_never_exceeds_the_advertised_device_count() -> None:
+    """``tp`` follows ``gpu_ids`` down so the two cannot disagree.
+
+    ``gpu_ids`` is capped at the mask width, so a stale ``$TP`` used to ship
+    alongside fewer ids and GEAK would launch ``--tp N`` against fewer visible
+    cards and fail to load weights.
+    """
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "6"})
+    ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2)
+    assert ids == "0"
+    assert _resolve_handoff_tp(gpu_ids=ids, tp=2) == 1
+    # A four-card pin with a stale TP=8 clamps to the four cards it can see.
+    pin4 = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "4,5,6,7"})
+    ids4 = _resolve_handoff_gpu_ids(gpu_pin=pin4, tp=8)
+    assert ids4 == "0,1,2,3"
+    assert _resolve_handoff_tp(gpu_ids=ids4, tp=8) == 4
+    # An unpinned run is unaffected.
+    assert _resolve_handoff_tp(gpu_ids="0,1", tp=2) == 2
+
+
+def test_coerce_tp_never_raises_out_of_its_own_fallback() -> None:
+    """A non-numeric ``$TP`` must not escape as a ValueError.
+
+    The previous form called a bare ``int()`` inside the ``except`` that was
+    handling the identical failure, so a junk ``$TP`` raised during handling.
+    """
+    assert _coerce_tp("2", "8") == 2
+    assert _coerce_tp(None, "8") == 8
+    assert _coerce_tp("", "  ") == 1
+    assert _coerce_tp("not-a-number", "also-junk") == 1
+    assert _coerce_tp("0", "-3", "4") == 4
+
+
 def test_gpu_ids_never_empty_for_a_blank_mask() -> None:
     """A present-but-empty mask must not produce an empty device list."""
     pin = {"var": "ROCR_VISIBLE_DEVICES", "value": "", "ids": [], "count": 0, "source": "process_env"}
@@ -253,3 +311,146 @@ def test_gpu_ids_are_absolute_for_a_recipe_only_rocr_pin() -> None:
     """
     pin = _resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": "6,7"}, environ={})
     assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "6,7"
+
+
+# --------------------------------------------------------------------------- #
+# Legacy mask spellings, empty masks, nested masks, coordinate space
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("var", "expect_logical"),
+    [
+        ("ROCR_VISIBLE_DEVICES", True),
+        ("HSA_VISIBLE_DEVICES", True),
+        ("HIP_VISIBLE_DEVICES", False),
+        ("CUDA_VISIBLE_DEVICES", False),
+        ("GPU_DEVICE_ORDINAL", False),
+    ],
+)
+def test_every_mask_spelling_counts_as_a_pin(
+    monkeypatch: pytest.MonkeyPatch, var: str, expect_logical: bool
+) -> None:
+    """A run pinned with a legacy spelling is pinned; omitting it read as unpinned."""
+    monkeypatch.setenv(var, "6")
+    pin = _resolve_gpu_pin(recipe_envs=_autofilled(1))
+    assert pin["var"] == var
+    assert pin["ids"] == [6]
+    # ROCr-level masks renumber the child's devices, HIP-level ones index into them.
+    assert (_resolve_handoff_gpu_ids_space(gpu_pin=pin) == "logical") is expect_logical
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=1) == ("0" if expect_logical else "6")
+
+
+def test_a_recipe_autofill_is_ignored_under_the_legacy_rocr_spelling_too() -> None:
+    """``HSA_VISIBLE_DEVICES`` gets the same autofill test as its modern name."""
+    pin = _resolve_gpu_pin(
+        recipe_envs={"TP": 2, "HSA_VISIBLE_DEVICES": "0,1"},
+        environ={},
+    )
+    assert pin == {}
+
+
+def test_an_empty_mask_reports_zero_devices_rather_than_unpinned() -> None:
+    """``ROCR_VISIBLE_DEVICES=""`` is "no cards", not "whole machine"."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": ""})
+    assert pin["var"] == "ROCR_VISIBLE_DEVICES"
+    assert pin["count"] == 0
+    assert pin["ids"] == []
+    # gpu_ids still must not be blank: GEAK reads a falsy gpu_ids as "unset" and
+    # falls straight back to 0..tp-1 (interface/run_e2e.py). The zero-device
+    # state is carried by the pin, and the inherited empty mask means the child
+    # sees no cards regardless of what ids we name.
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "0,1"
+
+
+def test_a_real_pin_outranks_an_earlier_empty_mask() -> None:
+    """An empty ROCR must not shadow a real HIP pin further down the chain."""
+    pin = _resolve_gpu_pin(
+        recipe_envs={},
+        environ={"ROCR_VISIBLE_DEVICES": "", "HIP_VISIBLE_DEVICES": "4,5"},
+    )
+    assert pin["var"] == "HIP_VISIBLE_DEVICES"
+    assert pin["ids"] == [4, 5]
+
+
+def test_a_hip_mask_nested_in_a_rocr_pin_is_forwarded_not_overwritten() -> None:
+    """ROCR=4,5,6,7 + HIP=2,3 is cards 6,7 — advertising 0,1 would move the servers."""
+    pin = _resolve_gpu_pin(
+        recipe_envs={},
+        environ={"ROCR_VISIBLE_DEVICES": "4,5,6,7", "HIP_VISIBLE_DEVICES": "2,3"},
+    )
+    assert pin["var"] == "ROCR_VISIBLE_DEVICES"
+    assert pin["inner"]["var"] == "HIP_VISIBLE_DEVICES"
+    assert pin["inner"]["ids"] == [2, 3]
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "2,3"
+
+
+def test_a_nested_hip_mask_pointing_outside_the_rocr_set_is_dropped() -> None:
+    """HIP ids beyond the ROCr width name devices the child cannot see."""
+    pin = _resolve_gpu_pin(
+        recipe_envs={},
+        environ={"ROCR_VISIBLE_DEVICES": "6", "HIP_VISIBLE_DEVICES": "3"},
+    )
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=1) == "0"
+
+
+def test_no_inner_mask_is_recorded_for_a_hip_level_pin() -> None:
+    """``inner`` only means "nested inside a ROCr slice"; a HIP pin has no inside."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"HIP_VISIBLE_DEVICES": "4,5"})
+    assert "inner" not in pin
+
+
+def test_gpu_ids_space_is_absolute_when_unpinned() -> None:
+    assert _resolve_handoff_gpu_ids_space(gpu_pin={}) == "absolute"
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=None) == "absolute"
+
+
+def test_a_recipe_rocr_pin_is_not_inherited_so_its_ids_stay_absolute() -> None:
+    """The child inherits the process env, not the recipe's envs."""
+    pin = _resolve_gpu_pin(recipe_envs={"TP": 1, "ROCR_VISIBLE_DEVICES": "6"}, environ={})
+    assert pin["source"] == "baseline_recipe"
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "absolute"
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=1) == "6"
+
+
+def test_a_yaml_sequence_mask_is_joined_not_stringified() -> None:
+    """``ROCR_VISIBLE_DEVICES: [4, 5]`` in YAML must not become ``"[4, 5]"``."""
+    pin = _resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": [4, 5]}, environ={})
+    assert pin["value"] == "4,5"
+    assert pin["ids"] == [4, 5]
+    assert pin["count"] == 2
+
+
+# --------------------------------------------------------------------------- #
+# count / ids cardinality agreement
+# --------------------------------------------------------------------------- #
+
+
+def test_a_repeated_ordinal_does_not_inflate_the_device_count() -> None:
+    """ROCR="3,3,2" exposes two devices; logical index 2 would abort the server."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "3,3,2"})
+    assert pin["count"] == 2
+    assert pin["ids"] == [3, 2]
+    assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=3) == "0,1"
+
+
+def test_a_negative_ordinal_is_not_counted_as_a_device() -> None:
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "-1,2"})
+    assert pin["count"] == 1
+    assert pin["ids"] == [2]
+
+
+def test_a_repeated_hip_ordinal_keeps_ids_and_count_in_agreement() -> None:
+    """The mirror of the count case: gpu_ids must not deflate below ``count``."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"HIP_VISIBLE_DEVICES": "4,4"})
+    gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2)
+    assert gpu_ids == "4"
+    assert len(gpu_ids.split(",")) == pin["count"] == 1
+    # tp follows gpu_ids down, so GEAK is never told "tp=2" alongside one device.
+    assert _resolve_handoff_tp(gpu_ids=gpu_ids, tp=2) == 1
+
+
+def test_a_yaml_sequence_element_is_stripped_before_it_reaches_value() -> None:
+    """``[' 4', 5]`` must not produce ``" 4,5"`` — ROCm's parser rejects the token."""
+    pin = _resolve_gpu_pin(recipe_envs={"TP": 2, "ROCR_VISIBLE_DEVICES": [" 4", 5]}, environ={})
+    assert pin["value"] == "4,5"

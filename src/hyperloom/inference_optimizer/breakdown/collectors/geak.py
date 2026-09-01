@@ -632,11 +632,11 @@ def _handoff_gpu_fields(handoff: Mapping[str, Any] | None) -> dict[str, Any]:
         handoff: The parsed ``geak/handoff.json``, or ``None``.
 
     Returns:
-        A mapping with ``gpu_ids`` / ``gpu_pin`` for whichever keys the handoff
-        carries; ``{}`` when it carries neither.
+        A mapping with ``gpu_ids`` / ``gpu_ids_space`` / ``gpu_pin`` for
+        whichever keys the handoff carries; ``{}`` when it carries none.
     """
     out: dict[str, Any] = {}
-    for key in ("gpu_ids", "gpu_pin"):
+    for key in ("gpu_ids", "gpu_ids_space", "gpu_pin"):
         val = (handoff or {}).get(key)
         if val is not None:
             out[key] = val
@@ -1037,14 +1037,21 @@ def collect_geak(
     # from ``geak_result``, which never carried them — and recorded on THIS
     # path, not just the crash-recovery one, because the outcome that needs
     # disambiguating (`no_gain`) is a completed run.
-    _gpu_fields = _handoff_gpu_fields(
-        read_json(
-            session_dir / "geak" / "handoff.json",
-            default={},
-            require_dict=True,
-            on_error=lambda exc: warnings.append(f"geak: handoff read failed: {exc}"),
+    # An absent handoff is the normal shape for a run that never reached the
+    # handoff write (and for every pre-v3 session on disk), so it must not cost
+    # a stat+read or raise a warning — only a handoff that EXISTS and cannot be
+    # parsed is worth reporting.
+    _handoff_path = session_dir / "geak" / "handoff.json"
+    _gpu_fields: dict[str, Any] = {}
+    if _handoff_path.is_file():
+        _gpu_fields = _handoff_gpu_fields(
+            read_json(
+                _handoff_path,
+                default={},
+                require_dict=True,
+                on_error=lambda exc: warnings.append(f"geak: handoff read failed: {exc}"),
+            )
         )
-    )
 
     section: dict[str, Any] = {
         "engaged": True,

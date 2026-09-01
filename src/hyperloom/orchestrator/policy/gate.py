@@ -21,6 +21,7 @@ from ..bus.gpu_pool import (
     resolve_gpu_specialist_devices,
     resolve_whole_machine_devices,
 )
+from hyperloom.common.visible_devices import COUNTING_VISIBLE_DEVICE_VARS
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
@@ -179,7 +180,7 @@ def detect_gpu_count() -> int:
             ``CUDA_VISIBLE_DEVICES`` env masks (first one set wins), else the
             count parsed from ``rocm-smi``; 0 when nothing can be probed.
     """
-    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+    for env_name in COUNTING_VISIBLE_DEVICE_VARS:
         raw = os.environ.get(env_name)
         if raw is None:
             continue

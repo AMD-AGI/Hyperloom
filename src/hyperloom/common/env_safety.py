@@ -10,6 +10,8 @@ package import cycles.
 
 from __future__ import annotations
 
+from hyperloom.common.visible_devices import GPU_MASK_ENV_NAMES as _GPU_MASK_ENV_NAMES
+
 import os
 import re
 from collections.abc import Mapping
@@ -208,15 +210,8 @@ KERNEL_AGENT_ENV_EXACT_ALLOWLIST: frozenset[str] = frozenset(
 )
 
 # GPU visibility masks: setting one selects the hardware rather than tuning it.
-GPU_MASK_ENV_NAMES: frozenset[str] = frozenset(
-    {
-        "CUDA_VISIBLE_DEVICES",
-        "GPU_DEVICE_ORDINAL",
-        "HIP_VISIBLE_DEVICES",
-        "HSA_VISIBLE_DEVICES",
-        "ROCR_VISIBLE_DEVICES",
-    }
-)
+# Single definition in ``hyperloom.common.visible_devices``.
+GPU_MASK_ENV_NAMES = _GPU_MASK_ENV_NAMES
 
 # Env names an untrusted external source (reference recipe, framework-switch
 # manifest) may never set: shell-unsafe vars plus the workload/benchmark keys the

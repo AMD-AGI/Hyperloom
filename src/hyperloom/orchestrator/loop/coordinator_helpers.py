@@ -21,6 +21,14 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
+from hyperloom.common.visible_devices import (
+    HIP_LEVEL_VARS,
+    effective_mask_tokens,
+    VISIBLE_DEVICE_VARS,
+    is_rocr_level,
+    mask_tokens,
+    parse_device_list,
+)
 
 from ..specialists.patch_safety import (
     ADVISE_VERDICT,
@@ -1547,68 +1555,23 @@ def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
 
 
 #: Visible-device env masks, in the repo's ROCm precedence order.
-#: ``ROCR_VISIBLE_DEVICES`` is canonical on ROCm (the CLI preflight drops
-#: ``HIP_VISIBLE_DEVICES`` when ROCR is set); HIP/CUDA cover CUDA-style and
-#: legacy pins. Same ORDER as ``gpu_pool._visible_device_mask`` /
-#: ``policy.gate.detect_gpu_count`` / ``cli.preflight``.
-#: The order agrees; the empty-mask semantics deliberately do not. Those layers
-#: read ``VAR=""`` as "zero devices visible" because they are counting capacity;
-#: this resolver is answering "where is the run pinned", and an empty string
-#: pins nothing, so it falls through to the next variable.
-#: (Kept local rather than imported from ``gpu_pool``: this module is the pure
-#: helper layer and ``gpu_pool`` drags in the SQLite connection. The duplication
-#: is real — lifting the tuple and the parser into a dependency-free shared
-#: module is the right cleanup, but it touches all four call sites and does not
-#: belong in a bugfix.)
-_VISIBLE_DEVICE_VARS: tuple[str, ...] = (
-    "ROCR_VISIBLE_DEVICES",
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
-)
+#: The pin-resolution chain, imported rather than re-declared: the same tuple
+#: and the same parser had five copies in this repo (``bus/gpu_pool``,
+#: ``policy/gate``, ``actions/executors/_ray_serving``, ``common/env_safety``,
+#: and this module) and their empty-mask semantics had already drifted apart.
+#: ``hyperloom.common.visible_devices`` is now the single definition and is
+#: dependency-free, so this pure-helper layer can use it without dragging in
+#: the SQLite connection ``gpu_pool`` owns.
+#:
+#: Note this resolver uses the FULL chain, not the three vars the
+#: capacity-counting layers read: it answers "where is this run pinned", and a
+#: run pinned with ``HSA_VISIBLE_DEVICES`` or ``GPU_DEVICE_ORDINAL`` is really
+#: pinned. Those layers keep their narrower :data:`COUNTING_VISIBLE_DEVICE_VARS`
+#: because widening them would change GPU accounting repo-wide.
+_VISIBLE_DEVICE_VARS: tuple[str, ...] = VISIBLE_DEVICE_VARS
 
-
-def _mask_tokens(raw: Any) -> list[str]:
-    """Split a visible-devices mask into its device tokens.
-
-    Tokens are NOT required to be numeric: ROCm accepts GPU UUID masks
-    (``ROCR_VISIBLE_DEVICES=GPU-a1b2c3,GPU-d4e5f6``), and those still tell us
-    how MANY devices the child will see, which is all the logical-index
-    arithmetic needs.
-
-    Args:
-        raw: A ``,``/``;``-separated mask, or an already-parsed YAML sequence.
-
-    Returns:
-        Non-empty tokens in order, duplicates preserved.
-    """
-    if isinstance(raw, (list, tuple)):
-        parts = [str(p) for p in raw]
-    else:
-        parts = str(raw if raw is not None else "").replace(";", ",").split(",")
-    return [tok for tok in (p.strip() for p in parts) if tok]
-
-
-def _parse_device_list(raw: Any) -> list[int]:
-    """Parse a visible-devices mask into absolute NUMERIC GPU ids.
-
-    Args:
-        raw: A ``,``/``;``-separated mask (``"4,5,6,7"``) or a YAML sequence;
-            ``None`` and malformed entries are tolerated.
-
-    Returns:
-        Unique non-negative ids in first-seen order; ``[]`` for an empty mask
-        and for a well-formed but non-numeric one (e.g. a UUID mask), which is
-        why callers that need a device COUNT must use :func:`_mask_tokens`.
-    """
-    out: list[int] = []
-    for tok in _mask_tokens(raw):
-        try:
-            idx = int(tok)
-        except ValueError:
-            continue
-        if idx >= 0 and idx not in out:
-            out.append(idx)
-    return out
+_mask_tokens = mask_tokens
+_parse_device_list = parse_device_list
 
 
 def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
@@ -1627,21 +1590,89 @@ def _is_autofilled_rocr(*, value: str, recipe_envs: Mapping[str, Any]) -> bool:
     that is harmless, because the unpinned path emits the same ``gpu_ids`` and
     merely omits ``gpu_pin``.
 
+    When the recipe carries no usable ``TP`` — a hand-written or pre-clamp YAML
+    — there is no width to compare against, so the test falls back to the SHAPE
+    the materializer always produces: a mask that is exactly ``0..n-1`` for its
+    own length. Returning ``False`` there instead would let the synthetic mask
+    pose as a pin for precisely the recipes that never recorded a TP, which is
+    the hole this function exists to close.
+
     Args:
         value: The recipe's ROCR mask, already stripped.
         recipe_envs: The recipe's ``benchmark.envs`` (read for its resolved TP).
 
     Returns:
         ``True`` when the value equals the ``0..tp-1`` the materializer would
-        have synthesized.
+        have synthesized — or, absent a recipe TP, the ``0..n-1`` shape of one.
     """
+    tokens = _mask_tokens(value)
+    if not tokens:
+        return False
     try:
         tp = int(str(recipe_envs.get("TP") or 0))
     except (TypeError, ValueError):
-        return False
+        tp = 0
     if tp <= 0:
-        return False
-    return _mask_tokens(value) == [str(i) for i in range(tp)]
+        tp = len(tokens)
+    return tokens == [str(i) for i in range(tp)]
+
+
+def _mask_value(raw: Any) -> str:
+    """Normalize a raw mask (string or YAML sequence) to its string form.
+
+    A YAML ``ROCR_VISIBLE_DEVICES: [4, 5]`` reaches us as a list, and
+    ``str([4, 5])`` would produce ``"[4, 5]"`` — a value no consumer can export.
+
+    Args:
+        raw: The value as read from the env mapping or the recipe.
+
+    Returns:
+        The comma-joined, stripped mask; ``""`` for an empty or blank one.
+    """
+    if isinstance(raw, (list, tuple)):
+        return ",".join(str(p).strip() for p in raw if str(p).strip())
+    return str(raw if raw is not None else "").strip()
+
+
+def _resolve_inner_hip_mask(
+    *,
+    var: str,
+    env: Mapping[str, str],
+    recipe: Mapping[str, Any],
+) -> dict[str, Any]:
+    """The HIP-level mask nested inside a winning ROCr-level pin, if any.
+
+    ``ROCR_VISIBLE_DEVICES=4,5,6,7`` with ``HIP_VISIBLE_DEVICES=2,3`` does not
+    mean "cards 2 and 3": HIP indexes INTO what ROCr exposed, so the run is on
+    absolute cards 6 and 7. Dropping the inner mask and advertising
+    ``0..tp-1`` would move the servers to cards 4 and 5 — a quieter version of
+    the same #1312 bug, so the inner mask travels with the pin.
+
+    Args:
+        var: The winning mask variable.
+        env: Process environment mapping.
+        recipe: The baseline recipe's ``benchmark.envs``.
+
+    Returns:
+        ``{"var", "value", "ids", "count", "source"}`` for the innermost
+        HIP-level mask, or ``{}`` when the winner is not ROCr-level or no
+        HIP-level mask is set.
+    """
+    if not is_rocr_level(var):
+        return {}
+    for hip_var in HIP_LEVEL_VARS:
+        for source, table in (("process_env", env), ("baseline_recipe", recipe)):
+            value = _mask_value(table.get(hip_var))
+            if not value:
+                continue
+            return {
+                "var": hip_var,
+                "value": value,
+                "ids": _parse_device_list(value),
+                "count": len(effective_mask_tokens(value)),
+                "source": source,
+            }
+    return {}
 
 
 def _resolve_gpu_pin(
@@ -1670,36 +1701,56 @@ def _resolve_gpu_pin(
         environ: Environment mapping to read; defaults to ``os.environ``.
 
     Returns:
-        ``{"var", "value", "ids", "count", "source"}`` for the winning mask,
-        where ``ids`` are ABSOLUTE device ids (empty for a UUID mask, hence
-        ``count``) and ``source`` is ``"process_env"`` or ``"baseline_recipe"``.
-        ``{}`` when no mask is set anywhere — meaning "whole machine visible",
-        not "pinned to 0".
+        ``{"var", "value", "ids", "count", "source"}`` for the winning mask.
+        ``ids`` are the ABSOLUTE NUMERIC device ids and ``count`` is how many
+        devices the mask exposes; both derive from
+        :func:`effective_mask_tokens`, so ``count >= len(ids)`` always, and
+        they differ only when the mask is (partly) non-numeric — a UUID mask
+        gives ``ids == []`` with a non-zero ``count``. ``source`` is
+        ``"process_env"`` or ``"baseline_recipe"``.
+        A mask that is SET BUT EMPTY yields ``count == 0`` (zero devices
+        visible) rather than ``{}``; when the winner is a ROCr-level mask and a
+        HIP-level mask is also in force, the latter travels under ``"inner"``
+        because it selects a subset *within* the ROCr-visible set.
+        ``{}`` only when no mask is set anywhere — meaning "whole machine
+        visible", not "pinned to 0".
     """
     env = os.environ if environ is None else environ
     recipe = dict(recipe_envs or {})
+    blank: dict[str, Any] = {}
     for var in _VISIBLE_DEVICE_VARS:
         for source, table in (("process_env", env), ("baseline_recipe", recipe)):
             raw = table.get(var)
             if raw is None:
                 continue
-            value = str(raw).strip() if not isinstance(raw, (list, tuple)) else ",".join(str(p) for p in raw)
+            value = _mask_value(raw)
             if not value:
+                # Present but empty: a real "zero devices visible" state, not an
+                # absent mask. Remember the first one and keep looking — a real
+                # pin further down the chain still outranks it — but if nothing
+                # else is set, report it as a zero-device pin rather than as
+                # "unpinned", which reads as "whole machine".
+                if not blank:
+                    blank = {"var": var, "value": "", "ids": [], "count": 0, "source": source}
                 continue
             if (
                 source == "baseline_recipe"
-                and var == "ROCR_VISIBLE_DEVICES"
+                and is_rocr_level(var)
                 and _is_autofilled_rocr(value=value, recipe_envs=recipe)
             ):
                 continue
-            return {
+            pin: dict[str, Any] = {
                 "var": var,
                 "value": value,
                 "ids": _parse_device_list(value),
-                "count": len(_mask_tokens(value)),
+                "count": len(effective_mask_tokens(value)),
                 "source": source,
             }
-    return {}
+            inner = _resolve_inner_hip_mask(var=var, env=env, recipe=recipe)
+            if inner:
+                pin["inner"] = inner
+            return pin
+    return blank
 
 
 def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> str:
@@ -1709,19 +1760,32 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     ``HIP_VISIBLE_DEVICES``/``CUDA_VISIBLE_DEVICES`` for the servers it
     launches, and HIP indexes into the ROCr-visible set. So:
 
-      * pinned with ``ROCR_VISIBLE_DEVICES`` — the child inherits that mask, so
-        the ids must be LOGICAL positions inside it (``ROCR=6`` → ``"0"``),
-        capped at ``tp`` as before (``ROCR=4,5,6,7`` with ``tp=2`` → ``"0,1"``)
-        and at the mask width when ``tp`` overshoots it. Counted from the mask
-        TOKENS, so a UUID mask resolves to the right number of logical slots;
-      * pinned with ``HIP``/``CUDA`` — ROCr still shows every card, so the ids
-        pass through uncapped, as before this change (``HIP=4,5`` → ``"4,5"``).
-        They are re-serialized from the parsed list, so whitespace and repeats
-        are normalized (``" 4, 4 ,5"`` → ``"4,5"``);
+      * pinned with a ROCr-level mask the child INHERITS — that mask renumbers
+        the child's devices, so the ids must be LOGICAL positions inside it
+        (``ROCR=6`` → ``"0"``), capped at ``tp`` (``ROCR=4,5,6,7`` with
+        ``tp=2`` → ``"0,1"``) and at the mask width when ``tp`` overshoots it.
+        Counted from :func:`effective_mask_tokens`, so a UUID mask resolves to
+        the right number of logical slots and a repeated ordinal does not
+        invent one. A HIP-level mask nested inside the ROCr slice is already in
+        logical coordinates and is forwarded instead (``ROCR=4,5,6,7`` +
+        ``HIP=2,3`` is cards 6 and 7, so ``"2,3"``);
+      * any other pin — ROCr still shows every card, so the mask's own tokens
+        pass through uncapped (``HIP=4,5`` → ``"4,5"``). They come from
+        :func:`effective_mask_tokens`, the same list ``gpu_pin["count"]`` is
+        derived from, so whitespace is normalized without the id list and the
+        advertised device count ever disagreeing. A NON-NUMERIC mask (a UUID
+        list) is forwarded token for token rather than collapsed to
+        ``0..tp-1``, which would silently move the servers onto cards
+        ``0..tp-1`` — the #1312 failure this resolver exists to prevent;
       * not pinned — ``0..tp-1``, unchanged.
 
-    The absolute pin travels separately in ``handoff["gpu_pin"]`` for consumers
-    that write ``ROCR_VISIBLE_DEVICES`` themselves.
+    The absolute pin travels separately in ``handoff["gpu_pin"]``, and
+    :func:`_resolve_handoff_gpu_ids_space` says which of the two coordinate
+    systems the result is in. A consumer that exports the result as
+    ``HIP_VISIBLE_DEVICES`` without touching ROCr is correct in both; a
+    consumer that re-applies ``gpu_pin["value"]`` as ``ROCR_VISIBLE_DEVICES``
+    has just renumbered the devices itself and must use ``0..count-1``, NOT
+    these ids, for the inner HIP mask.
 
     Args:
         gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
@@ -1738,15 +1802,118 @@ def _resolve_handoff_gpu_ids(*, gpu_pin: Mapping[str, Any] | None, tp: int) -> s
     # process-env ROCR mask is inherited and its ids are logical; a mask that
     # only exists in the recipe is not, ROCr shows every card, and the absolute
     # ids are the correct HIP indices.
-    if str(pin.get("var") or "") == "ROCR_VISIBLE_DEVICES" and str(pin.get("source") or "") == "process_env":
+    if _pin_is_inherited_rocr(pin):
         # Token count, not len(ids): a UUID mask parses to zero numeric ids but
         # still exposes that many cards to the child.
         visible = int(pin.get("count") or len(ids) or 0)
         if visible > 0:
+            # A HIP-level mask nested inside the ROCr pin is ALREADY expressed
+            # in the child's logical coordinates, so it is forwarded as-is
+            # rather than overwritten with ``0..n-1``. Out-of-range entries are
+            # dropped: they name devices the ROCr mask never exposed.
+            inner = _mask_tokens((pin.get("inner") or {}).get("value"))
+            kept = [tok for tok in inner if not tok.isdigit() or int(tok) < visible]
+            if kept:
+                return ",".join(kept[:width])
             return ",".join(str(i) for i in range(min(visible, width)))
-    if not ids:
-        return ",".join(str(i) for i in range(width))
-    return ",".join(str(i) for i in ids)
+    # Forward the EFFECTIVE tokens, not a re-serialization of the parsed ints:
+    # a UUID mask has no ints to re-serialize and would otherwise collapse to
+    # ``0..tp-1`` (the #1312 failure), and ``pin["count"]`` is derived from this
+    # same list, so the id list and the advertised device count cannot disagree.
+    tokens = effective_mask_tokens(pin.get("value"))
+    if tokens:
+        return ",".join(tokens)
+    return ",".join(str(i) for i in range(width))
+
+
+def _pin_is_inherited_rocr(pin: Mapping[str, Any] | None) -> bool:
+    """Will the GEAK child inherit this pin as a ROCr-level device slice?
+
+    Only then are the handoff's ``gpu_ids`` logical. The phase launches GEAK
+    with ``dict(os.environ)``, so a process-env ROCr mask is inherited and
+    renumbers the child's devices; a mask that only exists in the recipe is
+    not, ROCr shows every card, and absolute ids are the correct HIP indices.
+
+    Args:
+        pin: The :func:`_resolve_gpu_pin` result.
+
+    Returns:
+        ``True`` for a process-env ROCr-level pin.
+    """
+    pin = pin or {}
+    return is_rocr_level(str(pin.get("var") or "")) and str(pin.get("source") or "") == "process_env"
+
+
+def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
+    """Which coordinate system the handoff's ``gpu_ids`` are expressed in.
+
+    ``gpu_ids`` alone is ambiguous: ``"0,1"`` is either "the first two cards of
+    the inherited ROCr mask" or "absolute cards 0 and 1", and a consumer that
+    guesses wrong re-pins the servers onto physical GPU 0 — issue #1312. This
+    field makes the distinction explicit so a consumer that composes masks
+    itself (rather than exporting ``gpu_ids`` verbatim into HIP) can tell which
+    it was handed. Consumers that ignore it keep the old, correct behaviour of
+    exporting ``gpu_ids`` as ``HIP_VISIBLE_DEVICES``, which is a HIP-level
+    variable in both spaces.
+
+    Args:
+        gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
+
+    Returns:
+        ``"logical"`` when the ids index into an inherited ROCr mask,
+        ``"absolute"`` otherwise (including unpinned).
+    """
+    return "logical" if _pin_is_inherited_rocr(gpu_pin) else "absolute"
+
+
+def _coerce_tp(*args: Any, default: int = 1) -> int:
+    """First positional that parses as a positive int, else ``default``.
+
+    Every candidate is guarded, so no caller has to wrap ``int()`` in a
+    ``try`` whose handler then calls ``int()`` again on a value that can raise
+    the same exception it is handling.
+
+    Args:
+        *args: Candidate TP values in precedence order (``None``/blank skipped).
+        default: Returned when nothing parses; floored at 1.
+
+    Returns:
+        A TP of at least 1.
+    """
+    for cand in args:
+        text = str(cand if cand is not None else "").strip()
+        if not text:
+            continue
+        try:
+            val = int(text)
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            return val
+    return max(int(default), 1)
+
+
+def _resolve_handoff_tp(*, gpu_ids: str, tp: int) -> int:
+    """Clamp ``tp`` to the number of devices the handoff actually advertises.
+
+    ``gpu_ids`` is capped at the pin's mask width, so a run whose ``$TP``
+    overshoots its pin (``ROCR=6`` with ``TP=2``, or a stale ``TP=8`` against a
+    materializer-clamped 4-card recipe) would otherwise ship ``tp`` and
+    ``gpu_ids`` that disagree — and GEAK would launch ``--tp N`` against fewer
+    visible cards and fail to load weights. Deriving both from the same resolved
+    mask makes that state unrepresentable.
+
+    Args:
+        gpu_ids: The resolved handoff ``gpu_ids`` string.
+        tp: The TP resolved from the recipe/process env.
+
+    Returns:
+        ``min(tp, len(gpu_ids))``, never below 1.
+    """
+    advertised = len(_mask_tokens(gpu_ids))
+    if advertised <= 0:
+        return max(int(tp or 1), 1)
+    return max(min(int(tp or 1), advertised), 1)
 
 
 def _parse_server_arg_value(server_args: str, flag: str) -> str | None:
