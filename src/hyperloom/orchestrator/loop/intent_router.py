@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+    patch_lever_kind,
     patch_owner_phase,
 )
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
@@ -41,6 +42,7 @@ from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ..bus.message_bus import Message
 from ..policy.gate import (
+    patch_verdict_subject,
     PolicyDenied,
     PRUNE_BRANCH_SCOPE_FAMILY,
     PRUNE_BRANCH_SCOPE_QUEUED,
@@ -49,6 +51,7 @@ from ..policy.gate import (
 from ..state.shared_state import inject_stack_base_params
 from ..state.task_registry import IllegalTransition, TaskNotFound
 from ..kernel.request_handlers import KERNEL_REQUEST_HANDLERS, get_handler
+from ..phases.machine_state import KERNEL_HEARTBEAT_SEC as _KERNEL_HEARTBEAT_SEC
 
 # ``Coordinator`` is intentionally NOT imported (avoids a module-level import
 # cycle with coordinator.py); it is held as a back-reference and the annotation
@@ -75,8 +78,22 @@ _INTENT_DISPATCH: dict[IntentType, str] = {
 }
 
 
-# Half the robustness stall threshold, so one dropped beat cannot trip it.
-_KERNEL_HEARTBEAT_SEC: float = 150.0
+def _is_upstream_pr_candidate(pending: Any) -> bool:
+    """True for an ``integrate_patch`` proposal that pre-screens a PR candidate.
+
+    The candidate pre-screen and an authored patch are the same action now;
+    a top-level ``framework_agent_candidate_id`` is what distinguishes the
+    pre-screen, whose approval means "spend a bench on this candidate".
+
+    Args:
+        pending: The pending proposal.
+
+    Returns:
+        True when this proposal is a candidate pre-screen.
+    """
+    if getattr(pending, "action_name", "") != "integrate_patch":
+        return False
+    return bool((getattr(pending, "payload", None) or {}).get("framework_agent_candidate_id"))
 
 
 class IntentRouter:
@@ -90,19 +107,34 @@ class IntentRouter:
         return getattr(object.__getattribute__(self, "_coord"), name)
 
     def _stamp_specialist_owner(self, params: dict[str, Any]) -> str:
-        """Freeze patch ownership when a specialist task is created."""
+        """Freeze patch ownership when a specialist task is created.
+
+        Stamps the phase that owns the work, and the lever only where the
+        mandate already names one. A mandate that names neither a PR nor an
+        enablement flag does not know which lever its specialist will move, and
+        a guess written here would outrank the delivery that settles it.
+        """
+        lever = patch_lever_kind(params)
+        if lever:
+            params["lever_kind"] = lever
         owner = patch_owner_phase(params)
         if not owner:
             gap_layer = str(params.get("gap_layer") or "").strip().lower()
             active_phase = str(getattr(self.shared_state, "phase", "") or "").strip().upper()
+            # Layer first, phase last: both lanes share one phase, so the live
+            # phase no longer says which lever a specialist moves. The phase
+            # stays as the fallback when the mandate named neither.
+            #
+            # ``EXPLORE`` below is an owner namespace, not a phase this build
+            # can enter: it is the published KB section name for the
+            # configuration lever, and renaming it would orphan the overlays
+            # every record already stores under that prefix.
             if gap_layer == "framework":
                 owner = "FRAMEWORK_AGENT"
-            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
-                owner = "FRAMEWORK_AGENT"
-            elif active_phase == "EXPLORE":
-                owner = "EXPLORE"
             elif gap_layer in {"explore", "perf_explore"} or params.get("domain"):
                 owner = "EXPLORE"
+            elif active_phase in {"FRAMEWORK", "FRAMEWORK_AGENT"}:
+                owner = "FRAMEWORK_AGENT"
         if owner:
             params["source_phase"] = owner
         return owner
@@ -135,6 +167,9 @@ class IntentRouter:
             "gap_layer",
             "framework_agent_authoring",
             "framework_agent_candidate_id",
+            # The lever the specialist was dispatched against; the patch that
+            # lands is the same lever, so it is copied rather than re-derived.
+            "lever_kind",
         ):
             value = specialist_params.get(key)
             if value not in (None, "", [], {}):
@@ -458,7 +493,7 @@ class IntentRouter:
         """
         pending.decided = True
         pending.verdict = verdict
-        if pending.action_name == "framework_agent":
+        if _is_upstream_pr_candidate(pending):
             await self._record_observation(
                 "coordinator",
                 "observation",
@@ -501,7 +536,8 @@ class IntentRouter:
             pa_params = {}
         sid_candidate = ""
         if pending.action_name == "integrate_patch":
-            sid_candidate = str(pa_params.get("specialist_task_id") or "").strip()
+            # A pre-screen carries its candidate id at the top level, not in params.
+            sid_candidate = patch_verdict_subject({**pa_params, **(pending.payload or {})})
         elif pending.action_name == "specialist":
             # Critic verdict on the specialist proposal counts as the verdict on its patches; task_id is the key.
             sid_candidate = str(pa_params.get("task_id") or "").strip()
@@ -524,8 +560,8 @@ class IntentRouter:
                 pending,
                 approved_variant_names=approved_variant_names,
             )
-        elif verdict == "reject" and pending.action_name == "framework_agent":
-            # Record the critic_denied row so the framework_agent pump advances.
+        elif verdict == "reject" and _is_upstream_pr_candidate(pending):
+            # Record the critic_denied row so the candidate pump advances.
             await self._coord._record_framework_agent_critic_denied(
                 pending,
                 reasoning,
@@ -746,9 +782,15 @@ class IntentRouter:
             started (float): ``time.monotonic()`` at the step's start.
         """
 
+        # Re-stamped per beat rather than once at the start, so a stamp that
+        # outlives its process expires instead of muting the KERNEL idle guard.
+        def _mark_running() -> None:
+            self.shared_state.kernel_inline_step_seen_unix = time.time()
+
         async def _beat() -> None:
             while True:
                 await asyncio.sleep(_KERNEL_HEARTBEAT_SEC)
+                _mark_running()
                 await self.bus.append_and_seq(
                     Message.new(
                         "orchestration",
@@ -762,6 +804,7 @@ class IntentRouter:
                     )
                 )
 
+        _mark_running()
         task = asyncio.create_task(_beat())
         try:
             yield
@@ -769,6 +812,7 @@ class IntentRouter:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
+            self.shared_state.kernel_inline_step_seen_unix = 0.0
 
     def _record_request_failure(self, *, kind: str, request_msg_id: str, result: dict[str, Any]) -> None:
         """Append a failed kernel request to the log the FAILURE RECOVERY prompt block reads.
@@ -1228,7 +1272,7 @@ class IntentRouter:
             ESCALATE_HINT_EXTEND_EXPLORE_BUDGET,
             ESCALATE_HINT_EXTEND_KERNEL_BUDGET,
             ESCALATE_HINT_SKIP_TO_CLOSE,
-            PHASE_EXPLORE,
+            PHASE_FRAMEWORK_AGENT,
             PHASE_KERNEL_AGENT,
             apply_escalate_budget_bump,
             is_valid_escalate_hint,
@@ -1263,7 +1307,7 @@ class IntentRouter:
         if hint == ESCALATE_HINT_EXTEND_EXPLORE_BUDGET:
             self.shared_state.phase_budget_pct = apply_escalate_budget_bump(
                 self.shared_state.phase_budget_pct,
-                phase=PHASE_EXPLORE,
+                phase=PHASE_FRAMEWORK_AGENT,
             )
             self.shared_state.last_consumed_escalate_hint = hint
             self.shared_state.last_consumed_escalate_hint_ts = now_ts

@@ -64,8 +64,9 @@ The following variables configure filesystem paths for Hyperloom's runtime depen
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_CU`<br>`RRENT_S`<br>`ESSION_DIR` | No (set by CLI) | Set at session boot | Absolute path to the active session directory. Written by the CLI when a session starts and inherited by every benchmark subprocess; session-path resolution prefers it over scanning `USER_DATA_PATH`. Do not set by hand. |
 | `HYPERLOOM_ROOT`                          | No                   | `$HYPER`<br>`LOOM_R`<br>`UNTIME_`<br>`DIR/sou`<br>`rce-mirrors`                            | Legacy source-mirror root kept for compatibility. Current open-source dependency checkouts default to the repo-local cache root (`${HYPER`<br>`LOOM_CA`<br>`CHE_DIR:-`<br>`$REPO_ROOT`<br>`/.cache}`), not this path. |
 | `HYPERLOOM`<br>`_CACHE_`<br>`DIR`                          | No                   | `$REPO_ROOT`<br>`/.cache`                      | Writable, repo-local base for auto-cloned open-source deps (TraceLens, Magpie, etc.), cloned per revision as `<name>@<sha>`. Not under `$TMPDIR` so a reaper cannot wipe it mid-run. |
+| `KERNELFORGE`<br>`_PROJECT_`<br>`ROOT`              | No                   | `$USER_DATA_PATH/kernelforge`, else `~/.cache/hyperloom/kernelforge` | Writable root for forge's own state and for resource-tree overrides. Holds the learned knowledge base (`knowledge_base/<backend>/learned/`), the tuning DB, postmortems and `forge_experiments/`. A subtree placed here also **overrides the copy packaged inside `kernelforge`** — a `serving_patches/` or `examples/` directory under this root wins over the shipped one, which is the supported way to try a patch or a task without editing site-packages. Must be writable: it deliberately never resolves to the installed package directory or to the cwd. **This is the replacement for the removed `FORGE_PATH`**, which nothing reads any more — a stale `FORGE_PATH` is still forwarded (the `FORGE_` prefix is on the dotenv allowlist) and then ignored. |
+| `SKIP_FORGE`<br>`_PROFILING`               | No                   | Unset (the extra is installed) | Set to `1` to make `install.sh` skip `pip install -e "$REPO_ROOT[forge-profiling]"`. That extra is rocprof-compute's own dependency set (~20 wheels, including the exact `kaleido==0.2.1` / `astunparse==1.6.2` pins ROCm 7.2.x requires); without it forge's profiler degrades to the lightweight PMC path instead of System Speed-of-Light + roofline. Installed by default on purpose — the previous gate made this a silent skip on every pod. |
 | `MAGPIE_PATH`                              | No                   | Resolved from installed `Magpie` package unless explicitly set                               | Magpie package root for benchmark wrappers and patch inspection.                                                                                                                                            |
-| `FORGE_PATH`                               | Conditional          | Unset                                                              | KernelForge checkout root, and the single canonical variable for it. Required whenever the forge kernel backend is enabled (`KERNEL_OPT_BACKEND_ORDER=forge`): `forge_submit.py` prepends it to `sys.path` to import `kernel_agents`, and resolves the vendor-playbook task bundles beneath it. Unset with `kernel_agents` already installed still imports, but the playbook bundles are then unresolvable. |
 | `INFERENCE_`<br>`OPTIMIZER`<br>`_MODEL_PATH_ROOTS` | No | Built-in model roots such as `/models` and `/shared_nfs` | `os.pathsep`-separated allowlist for absolute model paths restored from `state.json` during a resume. HuggingFace-style repo IDs remain allowed. Set this when production models live outside the built-in roots. |
 | `SESSION_DIR`                             | No (robustness-agent)| Scan known paths                                                   | Path containing `storage/coordinator.db`; the robustness FindingSink writes under `{session_`<br>`dir}/ag`<br>`ents/ro`<br>`bustne`<br>`ss/fin`<br>`dings/`<br>`{sess`<br>`ion_id}.jsonl`.                                       |
 | `INFERENCE_`<br>`OPTIMI`<br>`ZER_SES`<br>`SION_DIR` | No (monitor / multi-node) | Unset                                                   | Explicit session directory for the Robustness Monitor (`tools/robustness_`<br>`monitor.sh.example`), which prefers it over `.session_dir` in the launch-info JSON. Multi-node crash-log collection reads it as a last-resort session root. Point it at one session dir, never at `$USER_DATA_PATH`. |
@@ -96,7 +97,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
-  `--no-explore`, `--no-eval`.
+  `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
 - **Session / resume:** `--resume-from`, `--force-resume`, `--reset-state`.
 - **Quantization:** `--quantize`, `--quantize-scheme`.
@@ -425,6 +426,129 @@ multi-node runs or when the Ray backend is disabled.
 
 ---
 
+## Compute partitioning (AMD)
+
+An MI300-series card can be split into independent partitions (`SPX`, `DPX`,
+`QPX`, `CPX`). Splitting it trades per-request latency for aggregate throughput,
+so a partitioned measurement is not comparable with a whole-card one.
+
+**The optimizer does not set the mode.** Changing it is privileged, disruptive to
+every process holding a GPU context, and not something an optimization loop
+should be doing between benchmark rounds. The card is put in its mode before
+launch — by the operator or the provisioning platform — and `optimize` only
+observes what it is in, refuses a session that cannot work in that shape, and
+hands the shape to the benchmark entrypoint that places work across partitions.
+
+Two CLI flags configure this, both optional:
+
+- `--compute-partition-mode {SPX,DPX,QPX,CPX}` **asserts** the mode the card is
+  already in. It is a check, not a request: if the card is in a different mode
+  the session is refused rather than silently measuring the wrong topology. If
+  the card cannot be read at all, a declared mode is also a refusal — the flag
+  exists to catch an external set that did not take, and an unverifiable
+  assertion is not a satisfied one.
+- `--streams-per-partition N` (default `2`) is how many concurrent streams the
+  benchmark places on each partition. One stream leaves each partition idle
+  through the fixed per-pass cost; beyond two, on the workloads measured so far,
+  only queueing is added. A value below `1` is refused rather than replaced by
+  the default, so `0` is a usage error instead of a silent `2`.
+
+At launch the per-stream HBM footprint is checked against one partition's
+memory. A workload that provably will not fit is refused in milliseconds instead
+of failing out of memory hours in. The footprint is the checkpoint's weight bytes
+— a lower bound, since each stream holds its own copy of the weights, which is
+why a "does not fit" verdict from it is trustworthy and a "fits" verdict proves
+nothing. When the checkpoint cannot be sized the session runs with a warning.
+
+The check only applies where streams will actually share a partition: with a
+serving framework and no partition flags, the shape is recorded and nothing is
+refused, because nothing in that session places work per partition and, since
+whole cards enumerate before partitions, its benchmark may not even land on one.
+
+Multi-node sessions (`--nodes >= 2`) record no shape at all. The card this
+process can read is not the card the benchmark runs on, and a shape recorded from
+the wrong node is the exact mislabelling this feature exists to prevent. A
+declared mode there is a usage error rather than a silently unchecked assertion.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HYPERLOOM_PARTITION_GPU` | `0` | Which GPU's partition state describes this session. A value that is not a GPU id falls back to `0` with a warning rather than silently — the fallback reads a different card, and every number the session files afterwards would carry that card's shape. |
+
+### Runtime hand-off
+
+Published once at launch by the CLI and read by the benchmark entrypoint. Do not
+set these by hand: they are overwritten at every launch, and clearing them first
+is what stops a second session in the same shell from inheriting a shape that
+was not asked for.
+
+The first three describe the card and are published for every session on a
+readable card, because `platform_fingerprint()` reads them back from here — it
+runs on the crash path, where spawning `amd-smi` is not acceptable. The last two
+are instructions to a benchmark that places work on each partition, so they are
+published only when one will.
+
+| Variable | Published | Description |
+|----------|-----------|-------------|
+| `HYPERLOOM_PARTITION_MODE` | Always | The observed mode. Also recorded in the platform fingerprint, so a result is never filed under a topology it was not measured on. |
+| `HYPERLOOM_PARTITION_COUNT` | Always | Partitions the card presents in that mode. |
+| `HYPERLOOM_PARTITION_CU` | Always | Compute units per partition. The entrypoint selects partition devices by matching this exactly — HIP enumerates whole cards before partitions, so an index list computed at launch would be wrong in the one case that matters, and wrong invisibly. |
+| `HYPERLOOM_PARTITION_STREAMS_PER_PARTITION` | Fan-out only | Streams to place on each partition. |
+| `HYPERLOOM_PARTITION_TOTAL_STREAMS` | Fan-out only | `count × streams`; the total concurrency the entrypoint should drive if it fans out across every partition. |
+
+Only scriptable frameworks (`xdit`, `custom`) place work per partition. A serving
+session is handed no fan-out instruction rather than a concurrency nothing will
+drive, and passing the flags with one warns. Its shape is still recorded in the
+report and the fingerprint — that is provenance, not a hand-off — and the report
+states plainly that the figure cannot be read as an aggregate.
+
+### Choosing the mode: `scripts/partition_mode_sweep.py`
+
+`optimize` treats the mode as fixed and asserts it. Deciding *which* mode to be
+in is a separate job, done before the session, by
+`python3 scripts/partition_mode_sweep.py`. It sets each mode on one card in
+turn, runs the same benchmark on every partition that mode creates, sums the
+result, and restores the card's entry mode on the way out.
+
+```bash
+# what it would do, nothing set
+python3 scripts/partition_mode_sweep.py --benchmark-config bench.yaml --dry-run
+
+# sweep every mode the card reports, skipping any that cannot hold the workload
+python3 scripts/partition_mode_sweep.py \
+    --benchmark-config bench.yaml --output-dir /shared/sweep \
+    --per-stream-gib 20.7 --sudo
+```
+
+The fan-out is the point rather than a detail: a benchmark that loads one
+partition and ignores the rest measures a fraction of the card, which makes
+`CPX` look eight times worse than it is. The sweep therefore launches every
+partition at once, and reports a mode only when all of its partitions returned
+a measurement — a mode with six of eight reporting is unmeasured, not slow.
+
+It publishes the same `HYPERLOOM_PARTITION_*` variables as a session, so a
+benchmark entrypoint written against the table above works unchanged under
+either. It pins each process with `ROCR_VISIBLE_DEVICES` and removes any
+inherited `HIP_VISIBLE_DEVICES`, because two masks apply in sequence and the
+second indexes into the first.
+
+The privileged `amd-smi set` lives here and nowhere else. An operator-run script
+between benchmarks is a reasonable place for a card-wide mutation that evicts
+every GPU context; an optimization loop that also runs agent-authored code is
+not. Before setting anything it refuses if a process holds a context on the card
+being swept — and only that card, since no other card is repartitioned. A
+neighbour's benchmark on a shared node is not a reason to stop. If `amd-smi`
+reports its process list in a shape the script cannot read, that is also a
+refusal rather than an assumption that the card is idle: `--allow-busy` is the
+way past both, and `--dry-run` never asks.
+
+Exit codes: `0` swept, `1` nothing measurable, `2` refused before anything
+changed, `3` swept but the card could not be restored to its entry mode, `4`
+stopped on an error it does not model. Every path out of a started sweep goes
+through the restore and the report, so a mode that fails unexpectedly costs its
+own result and nothing else.
+
+---
+
 ## Multi-node / prefill-decode (PD)
 
 Use CLI flags for multi-node topology and prefill-decode configuration:
@@ -563,9 +687,9 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
-| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its combined config, ordered Explore/Framework overlays, and Kernel section, then writes one final session at CLOSE. |
+| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its Config column, ordered Patch column overlays, and Kernel column, then writes one final session at CLOSE. |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
-| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where out-of-process agents stage their section knowledge and files. Hyperloom creates and exports it; operators must not set it. The facade is inactive when it is absent. |
+| `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
 | `GBRAIN_BASE_URL`                     | Unset                  | Optional GBrain endpoint for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
 | `GBRAIN_TOKEN`                        | Unset                  | Optional GBrain bearer token for Framework PR capabilities. It never enables or satisfies Recipe remote mode. |
@@ -596,7 +720,7 @@ Primary switch (default **off**) for live Langfuse trace push.
 - **Live push**: when set to `1/true/yes/on` and the three `LANGFUSE_*` credentials are present, every in-process LLM call is mirrored into Langfuse while the run is live. A session-end flush backfills out-of-process children (geak, forge, robustness, specialist) and KEEP/REVERT decision Scores.
 - **Local ledger**: `reports/trace/*.jsonl` is always written regardless of this flag. If the SDK is unavailable, live push degrades to a no-op.
 - **Correlation**: the Langfuse trace ID and `session_id` grouping are derived from `claw_session_id` (env `CLAW_SESSION_ID`), falling back to the internal session ID for standalone runs. Live push and the offline `backfill_langfuse` CLI collapse onto one trace per Primus-Claw session.
-- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/EXPLORE/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
+- **Span layout**: `trace → phase span (PRELUDE/FRAMEWORK_AGENT/KERNEL_AGENT/SWEEP/…) → agent span (component: orchestration/kernel/specialist/critic/geak/forge/…) → Generation`. Each KEEP/REVERT/`gain_pct` Score attaches to the agent span that produced the decision, with a trace-level fallback when no matching span exists.
 - **Recipe-KB spans**: under the `recipe_kb` agent span, local reads/writes and remote KB Store publish attempts are recorded from `runtime/recipe_snapshot/.audit.jsonl`. Read spans use `kb:recipe_snapshot:<method>`; write spans use `kb:recipe_write:<generator>`, where the generator distinguishes normal `close` from `t4_fallback`. Remote rows report `written`, `skipped`, or `error` without recording credentials or payload bodies.
 - **Receipt**: every session records a `langfuse` section in `session_breakdown.json` (and `reports/trace/langfuse_receipt.json`) noting:
   - Whether push was enabled (or the `disabled_reason`)
@@ -680,7 +804,7 @@ env var controls it; it is always present (zeroed on pre-trace sessions).
 * `by_component`: per-agent breakdown (orchestration / kernel / critic /
   specialist / proposal_scorer / geak / forge / …), each with the same
   convenience totals.
-* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / EXPLORE / KERNEL_AGENT / SWEEP / CLOSE).
+* `by_phase`: per-phase breakdown (PRELUDE / FRAMEWORK_AGENT / KERNEL_AGENT / SWEEP / CLOSE).
 * `attribution`: `attributed_to_decisions` vs `unattributed` split plus
   `attributed_calls_pct`. Only calls that carry a `task_id` / `dyn_id` joining
   to a KEEP/REVERT or dynamic_action decision (for example, specialist subprocess

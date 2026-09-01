@@ -256,7 +256,7 @@ async def _noop_phase_side_effects(c):
 
 def _arm_explore_to_sweep(st):
     now = datetime.now(timezone.utc)
-    st.phase = ps.PHASE_EXPLORE
+    st.phase = ps.PHASE_FRAMEWORK_AGENT
     st.phase_started_ts = (now - timedelta(minutes=5)).isoformat()
     st.phase_started_unix = (now - timedelta(minutes=5)).timestamp()
     st.start_ts = (now - timedelta(minutes=10)).isoformat()
@@ -282,7 +282,7 @@ async def test_phase_transition_cancels_queued_specialist(cyclic_coordinator):
     updated = await c.tasks.get(queued.task_id)
     assert c.shared_state.phase == ps.PHASE_SWEEP
     assert updated.state == "cancelled"
-    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:EXPLORE->SWEEP"
+    assert updated.history[-1]["evidence"]["reason"] == "phase_transition:FRAMEWORK_AGENT->SWEEP"
 
 
 @pytest.mark.asyncio
@@ -404,7 +404,7 @@ async def test_phase_transition_preserves_target_phase_queued_task(cyclic_coordi
 async def test_phase_transition_preserves_close_report_task(cyclic_coordinator):
     c = cyclic_coordinator
     await _noop_phase_side_effects(c)
-    c.shared_state.phase = ps.PHASE_EXPLORE
+    c.shared_state.phase = ps.PHASE_FRAMEWORK_AGENT
     c.shared_state.set_stop_reason("target_reached")
 
     queued = await c.tasks.create(

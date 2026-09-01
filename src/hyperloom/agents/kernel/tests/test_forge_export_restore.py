@@ -442,7 +442,6 @@ def test_submit_salvages_validated_best_after_timeout(tmp_path, monkeypatch):
         "_prepare_worktree",
         lambda *_args, **_kwargs: (repo, str(kernel), base_commit),
     )
-    monkeypatch.setattr(forge_submit, "_ensure_forge_on_path", lambda: "")
     monkeypatch.setattr(
         forge_submit,
         "_resolve_gpu_target",

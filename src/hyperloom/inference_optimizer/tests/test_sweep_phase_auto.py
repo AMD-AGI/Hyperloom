@@ -1173,7 +1173,7 @@ async def test_phase_transition_explore_to_sweep_no_kernel_mode(tmp_path: Path):
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "evidence": {}, "reason": "test_forced"},
     ]
-    await coord._on_phase_entered(from_phase="EXPLORE", to_phase="SWEEP")
+    await coord._on_phase_entered(from_phase="FRAMEWORK_AGENT", to_phase="SWEEP")
     rows = await coord.tasks.db.fetchall(
         "SELECT * FROM tasks WHERE idempotency_key=?",
         ("internal-conc_sweep-phase_entry",),

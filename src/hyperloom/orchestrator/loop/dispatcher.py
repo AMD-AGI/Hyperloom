@@ -32,6 +32,7 @@ from ..bus.message_bus import Message
 from ..kernel.request_handlers import get_handler
 from ..policy.gate import (
     INTEGRATE_PATCH_PERMISSIVE_VERDICTS,
+    patch_verdict_subject,
     PolicyDenied,
     SPECIALIST_FROM_AGENT_PREFIX,
 )
@@ -452,7 +453,9 @@ class DispatcherCollaborator:
         """Re-queue integrate_patch rows cancelled at dispatch when policy now passes.
 
         Covers the resume gap where ``coordinator.db`` retained a cancelled task
-        but ``SharedState.specialist_patch_verdicts`` was restored later. Only
+        but ``SharedState.specialist_patch_verdicts`` was restored later. The
+        row is re-keyed by its review subject, so a pre-screened upstream-PR
+        candidate reconciles the same way an authored patch does. Only
         ``integrate_patch_requires_critic_verdict`` denials are retried; forged
         params that still fail :meth:`PolicyGate.validate_dispatched_task` are
         left terminal.
@@ -484,7 +487,7 @@ class DispatcherCollaborator:
             if str(evidence.get("rule") or "") != "integrate_patch_requires_critic_verdict":
                 continue
             params = dict(task.params or {})
-            sid = str(params.get("specialist_task_id") or "").strip()
+            sid = patch_verdict_subject(params)
             if not sid:
                 continue
             verdict = str(get_verdict(sid) or "").strip().lower()
@@ -1183,6 +1186,10 @@ class DispatcherCollaborator:
                         "specialist auto-retry hook failed for task=%s",
                         task.task_id,
                     )
+            if isinstance(result.result, dict):
+                reauthor_attempt = (getattr(task, "params", None) or {}).get("reauthor_attempt")
+                if reauthor_attempt not in (None, ""):
+                    result.result.setdefault("reauthor_attempt", reauthor_attempt)
             try:
                 await self.bus.append_and_seq(
                     Message.new(
@@ -1218,6 +1225,7 @@ class DispatcherCollaborator:
                             task=task,
                             done_payload=done_payload,
                             source=(f"{SPECIALIST_FROM_AGENT_PREFIX}{task.task_id}"),
+                            run_error=str(result.error or ""),
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
@@ -1239,23 +1247,19 @@ class DispatcherCollaborator:
                             "FRAMEWORK authoring empty-outcome bridge failed for task=%s",
                             task.task_id,
                         )
-                    # FRAMEWORK config-exploration: harvest a generation
-                    # specialist's config proposal_set into the pending grid.
+                    # Harvest a discovery specialist's candidates into the
+                    # source arm's batch.
                     try:
-                        self._ingest_framework_config_generation(
+                        self._ingest_candidate_discovery(
                             task=task,
                             done_payload=done_payload,
+                            run_error=str(result.error or ""),
                         )
                     except Exception:  # noqa: BLE001 — defensive
                         log.exception(
-                            "framework_config: generation ingest failed for task=%s",
+                            "FRAMEWORK: candidate discovery ingest failed for task=%s",
                             task.task_id,
                         )
-                # Bump the per-EXPLORE specialist dispatch counter.
-                try:
-                    self.shared_state.bump_specialist_dispatched()
-                except Exception:  # noqa: BLE001
-                    log.exception("bump_specialist_dispatched failed")
             # intervention-mix ledger: log change_type for explore/integrate_patch.
             if task.kind in ("explore", "integrate_patch"):
                 try:
@@ -1357,17 +1361,6 @@ class DispatcherCollaborator:
             # explore-round gap update: append per-variant KEEP/REVERT, then re-run the global refresh.
             if task.kind == "explore":
                 result_dict = result.result if isinstance(result.result, dict) else {}
-                if str((task.params or {}).get("source") or "") == "framework_config_exploration":
-                    try:
-                        self._record_framework_config_exploration_result(
-                            task=task,
-                            result=result_dict,
-                        )
-                    except Exception:  # noqa: BLE001 — defensive
-                        log.exception(
-                            "framework_config: result bookkeeping failed for task=%s",
-                            task.task_id,
-                        )
                 try:
                     self._record_explore_round_gaps(
                         task=task,
@@ -1661,7 +1654,7 @@ class DispatcherCollaborator:
     def _gemm_tuning_required_before_kernel_opt(self) -> bool:
         """Decide whether GEMM tuning must run before kernel_opt.
 
-        When using the forge-gemm-tune backend: eligible on any supported
+        When using the kernelforge gemm-tune backend: eligible on any supported
         framework (sglang / vllm / vllm-aiter), with no precision or MoE
         pre-filter. When using GEAK: only FP8 + SGLang (legacy behavior).
 
@@ -1680,7 +1673,7 @@ class DispatcherCollaborator:
         backend = _resolve_gemm_tuning_backend({})
 
         if backend == "forge":
-            # forge-gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
+            # kernelforge gemm-tune handles any precision (bf16/fp16/fp8/fp4/mxfp4),
             # dense or MoE, on sglang/vllm. Real e2e KEEPs span all of these —
             # including bf16 *dense* (+11.1%) — so we must NOT pre-filter on
             # precision/MoE here, or a category that can optimize gets silently

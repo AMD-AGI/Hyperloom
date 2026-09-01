@@ -339,7 +339,7 @@ def test_the_codes_carry_no_blank_entry():
 
 
 # ---- advisory_rules_govern -------------------------------------------------
-@pytest.mark.parametrize("action_name", ["specialist", "explore", "framework_agent"])
+@pytest.mark.parametrize("action_name", ["specialist", "explore"])
 def test_the_rules_govern_the_proposal_kinds_they_are_written_about(action_name):
     """``proposal_set[*]`` reaches review as a specialist proposal or the explore
     grid it is materialised into; the framework candidate is the one the
@@ -476,3 +476,23 @@ def test_grounding_root_prefers_a_declared_source_root():
 
 def test_grounding_root_declines_for_an_empty_set():
     assert runner._grounding_explicit_root(declared="", patches=[], patch_roots={}) is None
+
+
+def test_a_deleted_line_that_looks_like_a_header_is_not_a_path():
+    """A hunk body line is not a header, whatever it starts with.
+
+    Deleting a source line that begins with ``--`` renders as ``--- ...`` in
+    the diff. Reading lines independently cannot tell that from a header, and
+    a comment naming an absolute path got the whole patch rejected as a
+    traversal.
+    """
+    for body in ("-- /etc/hosts is read at startup", "-- ../legacy/foo is gone"):
+        diff = f"--- a/x.sql\n+++ b/x.sql\n@@ -1,2 +1,1 @@\n-{body}\n keep\n"
+        assert ps.patch_escapes_tree(diff) is None
+
+
+def test_the_escape_check_reads_the_paths_the_applier_resolves():
+    """Both sides of every header pair, normalised the way ``-p1`` strips them."""
+    assert ps.patch_escapes_tree("--- a/ok.py\n+++ b//etc/passwd\n") == "/etc/passwd"
+    assert ps.patch_escapes_tree("--- a/../../escape.py\n+++ b/ok.py\n") == "../../escape.py"
+    assert ps.patch_escapes_tree("--- /dev/null\n+++ b/new.py\n@@ -0,0 +1 @@\n+x\n") is None

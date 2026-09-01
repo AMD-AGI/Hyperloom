@@ -58,8 +58,8 @@ write source patches. The new contract is:
 
 ## When to delegate
 
-Specialist is available in `EXPLORE`, `FRAMEWORK_AGENT`, and
-`KERNEL_AGENT`.  Inside EXPLORE the Orchestration LLM should dispatch
+Specialist is available in `FRAMEWORK_AGENT` and `KERNEL_AGENT`.
+Inside FRAMEWORK_AGENT the Orchestration LLM should dispatch
 specialists as the **primary** entry into a round:
 
 1. Read `SharedState.gaps[]` (or fall back to `last_action_failures` +

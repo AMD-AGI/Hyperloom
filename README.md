@@ -86,6 +86,12 @@ feedback on how to improve Hyperloom by completing the
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`
+- Compute-partition sweep: `python3 scripts/partition_mode_sweep.py` — sets each
+  AMD partition mode (`SPX`/`DPX`/`QPX`/`CPX`) on one card in turn, runs the same
+  benchmark on every partition that mode creates, sums the throughput and restores
+  the entry mode. Answers which shape a workload wants before a session commits to
+  one; `optimize` itself only ever reads the mode. Needs privilege for the set, so
+  it is a script rather than part of the loop.
 - Platform tuning audit: `python3 scripts/platform_audit.py` — checks the host CPU
   tuning that silently changes benchmark results. Judges Core Performance Boost and
   the cpufreq governor against [AMD's BIOS & Workload Tuning Guide for EPYC 9004][58011];
@@ -126,6 +132,11 @@ that Hyperloom invokes are governed by their own separate license terms
 and are NOT covered by the MIT license above — see the "Third-Party
 Tools and Agents" section in [`LICENSE`](LICENSE). You are responsible
 for reviewing and complying with each tool's individual license.
+
+A few files distributed *inside* Hyperloom are also third-party — reference
+kernels and a Triton oracle carried in forge's knowledge base and examples.
+They keep their own licences; [`THIRD_PARTY.md`](THIRD_PARTY.md) lists them and
+`REUSE.toml` carries the machine-readable form.
 
 For security-relevant issues, see [`SECURITY.md`](SECURITY.md). For
 contribution conventions, see [`CONTRIBUTING.md`](CONTRIBUTING.md).

@@ -25,6 +25,13 @@ In docker mode:
   the container environment.
 - Do not run `python -m hyperloom.inference_optimizer.cli optimize` on the host.
 
+### Prior workload cleanup (required)
+
+Before any replacement launch after a failed or abandoned demo run (`docker run`,
+`install.sh`, or a new/fresh `optimize`), follow **IR-1 — Prior workload cleanup
+gate** in `@${HYPERLOOM_SKILL_PATH}`. Run all probes on the **docker host**; never
+skip the user-approval step (#1314).
+
 Suggested Docker images:
 
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
@@ -77,8 +84,7 @@ Required optimize CLI flags:
 - `--precision fp8`
 - `--target-gain 50`
 - `--max-hours 12`
-- `--max-minutes-framework-pct 0.01`
-- `--max-minutes-explore-pct 0.42`
+- `--max-minutes-framework-pct 0.43`
 - `--max-minutes-kernel-pct 0.42`
 
 Before launch, read the repository-root `.env` file if it exists and load the needed environment variables from it, such as LLM API keys/base URLs, `FRAMEWORK`, and `HF_TOKEN`. Do not copy secret values into the prompt, terminal output, reports, or logs. Do not modify `USER_DATA_PATH`.

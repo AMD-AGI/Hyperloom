@@ -10,11 +10,32 @@ leased-card reporting, env-pair parsing, result shapes, and the CLI ``main``.
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
-
 import pytest
 
+from hyperloom.orchestrator.actions.executors._grid_base import VariantResult
 from hyperloom.orchestrator.specialists import rebench as sr
+
+
+def _variant_result(**overrides) -> VariantResult:
+    """A real ``VariantResult``, which is what ``run_grid`` returns.
+
+    Built from the dataclass rather than a namespace so a field the production
+    code reads under the wrong name fails here instead of silently yielding
+    ``None`` in the emitted result.
+    """
+    fields = {
+        "name": "rebench",
+        "extra_server_args": "",
+        "extra_envs": {},
+        "status": "succeeded",
+        "output_throughput": 1234.5,
+        "ttft_mean_ms": 10.0,
+        "tpot_mean_ms": 2.0,
+        "error": "",
+        "nonfatal_warnings": ["w1"],
+    }
+    fields.update(overrides)
+    return VariantResult(**fields)
 
 
 def test_resolve_port_auto_and_explicit() -> None:
@@ -41,15 +62,7 @@ def test_parse_env_pairs() -> None:
 
 @pytest.mark.asyncio
 async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
-    fake = SimpleNamespace(
-        status="succeeded",
-        output_throughput=1234.5,
-        ttft_ms=10.0,
-        itl_ms=2.0,
-        workspace=str(tmp_path / "ws"),
-        error="",
-        nonfatal_warnings=["w1"],
-    )
+    fake = _variant_result(workspace=str(tmp_path / "ws"))
     seen: dict = {}
 
     async def _fake_run_grid(**kwargs):
@@ -81,9 +94,11 @@ async def test_run_specialist_rebench_success(tmp_path, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 async def test_run_specialist_rebench_failed_status(tmp_path, monkeypatch) -> None:
-    fake = SimpleNamespace(
+    fake = _variant_result(
         status="failed",
         output_throughput=None,
+        ttft_mean_ms=None,
+        tpot_mean_ms=None,
         workspace="",
         error="boom",
         nonfatal_warnings=[],

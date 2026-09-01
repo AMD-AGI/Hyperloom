@@ -54,7 +54,7 @@ def spare_geak_rebench_on_phase_transition(*, target_phase: str, kind: str, para
 
     Deny-list rather than allow-list: only ``CLOSE`` kills the rebench, every
     other target spares it. The window that actually matters is KERNEL through
-    SWEEP (plus the SWEEP re-loop back into EXPLORE), so an allow-list would be
+    SWEEP (plus the SWEEP re-loop back into FRAMEWORK_AGENT), so an allow-list would be
     tighter — but the phase set changes over time and a missing entry silently
     reintroduces the audit-only bug this whole path exists to prevent, whereas a
     surplus entry costs at most one wasted bench.

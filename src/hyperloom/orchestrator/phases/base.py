@@ -3,24 +3,18 @@
 
 """Base class for per-phase handler collaborators.
 
-Each phase's coordinator methods live in a ``PhaseHandler`` subclass that holds
-a back-reference to its owning ``Coordinator`` and delegates every attribute it
-does not define itself back to that coordinator via ``__getattr__``. Method
-bodies keep using ``self.shared_state`` / ``self.bus`` / sibling ``self._foo``
-calls, which resolve onto the coordinator. State rebinds land on the coordinator
-via ``self._coord.<attr> = ...``.
+Each phase's coordinator methods live in a ``PhaseHandler`` subclass. The
+attribute delegation it relies on lives in
+:class:`~hyperloom.orchestrator.collaborator.CoordinatorCollaborator`; this
+subclass exists to say that the collaborator is bound to one phase of the
+state machine, which the ``_on_enter_*`` dispatch in ``phases/machine.py``
+keys on.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from ..collaborator import CoordinatorCollaborator
 
 
-class PhaseHandler:
+class PhaseHandler(CoordinatorCollaborator):
     """A coordinator collaborator that owns one phase's methods."""
-
-    def __init__(self, coordinator) -> None:
-        self._coord = coordinator
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(object.__getattribute__(self, "_coord"), name)

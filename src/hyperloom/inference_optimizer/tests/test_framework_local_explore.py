@@ -3,13 +3,10 @@
 
 """Unit tests for the FRAMEWORK_AGENT local-exploration arm.
 
-Covers:
-- the phase-budget re-split (FRAMEWORK 20 / EXPLORE 35 / KERNEL 35, sum == 1.0);
-- the selectable phase-audit LLM policy (off / on / auto) + uncertainty gate;
-- the candidate-free local-exploration pseudo-candidate + id sequencing;
-- the discovery-exhaustion pivot to a local-exploration specialist (instead of
-  flipping ``framework_agent_phase_done``);
-- the resident arm offering the pseudo-candidate to the ranker.
+Covers the phase-budget split, the candidate-free pseudo-candidate and its id
+sequencing, the discovery-exhaustion pivot to a local-exploration specialist
+(instead of flipping ``framework_agent_phase_done``), and the resident arm
+offering the pseudo-candidate to the ranker.
 """
 
 from __future__ import annotations
@@ -24,93 +21,43 @@ import pytest
 from hyperloom.orchestrator.framework import client as _fa_client
 from hyperloom.orchestrator.phases import machine_state as _phase_state
 from hyperloom.orchestrator.phases.framework import FrameworkPhase
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+from ._optimize_fixtures import FakeCoordinator, optimize_state
 
 
-# --------------------------------------------------------------------------- #
-# 1. Budget re-split
-# --------------------------------------------------------------------------- #
-def test_phase_budget_resplit_values_and_sum():
-    """FRAMEWORK 20 / EXPLORE 35 / KERNEL 35 / SWEEP 5; the split still sums to 1.0."""
-    b = _phase_state.DEFAULT_PHASE_BUDGET_PCT
-    assert b[_phase_state.PHASE_FRAMEWORK_AGENT] == pytest.approx(0.20)
-    assert b[_phase_state.PHASE_EXPLORE] == pytest.approx(0.35)
-    # KERNEL was raised 0.28 -> 0.35 (funded by SWEEP 0.12 -> 0.05) because
-    # MI355X GEMM tuning pays a one-time ~20min JIT before any benchmarking.
-    assert b[_phase_state.PHASE_KERNEL_AGENT] == pytest.approx(0.35)
-    assert b[_phase_state.PHASE_SWEEP] == pytest.approx(0.05)
-    assert sum(b.values()) == pytest.approx(1.0)
+def test_every_phase_gets_a_budget_share_and_the_shares_sum_to_one():
+    """The split covers exactly the phases that exist, and spends the session.
 
-
-# --------------------------------------------------------------------------- #
-# 2. Audit LLM policy
-# --------------------------------------------------------------------------- #
-@pytest.mark.parametrize(
-    "env_val,expected",
-    [
-        ("", "auto"),
-        ("auto", "auto"),
-        ("on", "on"),
-        ("1", "on"),
-        ("true", "on"),
-        ("always", "on"),
-        ("off", "off"),
-        ("0", "off"),
-        ("false", "off"),
-        ("never", "off"),
-        ("garbage", "auto"),
-    ],
-)
-def test_audit_use_llm_mode(monkeypatch: pytest.MonkeyPatch, env_val: str, expected: str):
-    if env_val:
-        monkeypatch.setenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM", env_val)
-    else:
-        monkeypatch.delenv("INFERENCE_OPTIMIZER_FRAMEWORK_AUDIT_USE_LLM", raising=False)
-    assert FrameworkPhase._framework_audit_use_llm_mode() == expected
-
-
-@pytest.mark.parametrize(
-    "audit,uncertain",
-    [
-        (None, True),
-        ({}, True),
-        ({"semantic_status": "unknown", "confidence": 0.99}, True),
-        ({"semantic_status": "", "confidence": 0.99}, True),
-        ({"semantic_status": "already_equivalent", "confidence": 0.2}, True),
-        ({"semantic_status": "already_equivalent", "confidence": 0.9}, False),
-        ({"semantic_status": "not_present", "confidence": 0.6}, False),
-        ({"semantic_status": "not_present", "confidence": "bad"}, True),
-    ],
-)
-def test_audit_verdict_uncertain(audit: dict[str, Any] | None, uncertain: bool):
-    assert FrameworkPhase._framework_audit_verdict_uncertain(audit) is uncertain
+    Stated over ``PHASE_NAMES`` rather than as a list of numbers: a phase added
+    to the machine without a budget row would otherwise run to whatever it
+    costs, which is how PRELUDE once took 73% of a three-hour session.
+    """
+    budget = _phase_state.DEFAULT_PHASE_BUDGET_PCT
+    assert set(budget) == set(_phase_state.PHASE_NAMES)
+    assert sum(budget.values()) == pytest.approx(1.0)
+    # How the two work phases divide their share is a tuning call; that the
+    # session is spent on them rather than on setup and wind-down is not.
+    work = budget[_phase_state.PHASE_FRAMEWORK_AGENT] + budget[_phase_state.PHASE_KERNEL_AGENT]
+    overhead = budget[_phase_state.PHASE_PRELUDE] + budget[_phase_state.PHASE_CLOSE]
+    assert work >= 0.8
+    assert overhead <= 0.1
 
 
 # --------------------------------------------------------------------------- #
 # Shared stub for the arm behavior
 # --------------------------------------------------------------------------- #
-class _State:
-    def __init__(self, *, authoring: bool, local_explore: bool) -> None:
-        self.phase = "FRAMEWORK_AGENT"
-        self.framework = "sglang"
-        self.gpu_type = "MI300X"
-        self.model_class = "dense"
-        self.precision = "fp8"
-        self.model = "test-model"
-        self.last_profile_kernel_breakdown = None
-        self.framework_agent_authoring_enabled = authoring
-        self.framework_local_explore_enabled = local_explore
-        self.framework_agent_phase_done = False
-        self.framework_agent_discover_failures = 0
-        self.framework_agent_empty_discoveries = 0
-        self.framework_agent_batches: list[dict[str, Any]] = []
-        self.framework_agent_phase_progress: list[dict[str, Any]] = []
-        self.framework_agent_specialist_candidate_map: dict[str, str] = {}
-        self.phase_history: list[dict[str, Any]] = []
-        self.gaps: list[dict[str, Any]] = []
-        self._saves = 0
-
-    def save(self, _session_dir: Path) -> None:
-        self._saves += 1
+def _state(*, authoring: bool, local_explore: bool) -> SharedState:
+    """Real ``SharedState`` with both arms' switches set."""
+    return optimize_state(
+        framework_agent_authoring_enabled=authoring,
+        framework_local_explore_enabled=local_explore,
+        framework="sglang",
+        gpu_type="MI300X",
+        model_class="dense",
+        precision="fp8",
+        model="test-model",
+    )
 
 
 class _Tasks:
@@ -143,49 +90,35 @@ class _Tasks:
         return task, False
 
 
-class _Stub:
-    """Binds the FrameworkPhase local-explore surface; overrides GPU/warm/lanes."""
+class _Bus:
+    def __init__(self) -> None:
+        self.messages: list[Any] = []
 
-    _LOCAL_EXPLORE_KIND = FrameworkPhase._LOCAL_EXPLORE_KIND
-    _framework_candidate_key = staticmethod(FrameworkPhase._framework_candidate_key)
-    _framework_local_explore_arm_enabled = FrameworkPhase._framework_local_explore_arm_enabled
-    _compose_framework_local_explore_gap = FrameworkPhase._compose_framework_local_explore_gap
-    _authoring_specialist_domain = FrameworkPhase._authoring_specialist_domain
-    _render_rewrite_evidence_for_prompt = FrameworkPhase._render_rewrite_evidence_for_prompt
-    _next_local_explore_candidate_id = FrameworkPhase._next_local_explore_candidate_id
-    _make_local_explore_pseudo_candidate = FrameworkPhase._make_local_explore_pseudo_candidate
-    _maybe_dispatch_local_explore = FrameworkPhase._maybe_dispatch_local_explore
-    _enqueue_framework_agent_local_explore_specialist = FrameworkPhase._enqueue_framework_agent_local_explore_specialist
-    _framework_processed_candidate_keys = FrameworkPhase._framework_processed_candidate_keys
-    _unprocessed_framework_agent_candidates = FrameworkPhase._unprocessed_framework_agent_candidates
-    _select_best_framework_agent_candidate = FrameworkPhase._select_best_framework_agent_candidate
+    async def append_and_seq(self, msg: Any) -> Any:
+        self.messages.append(msg)
+        return msg
+
+    async def tail(self, n: int = 200, **_: Any) -> list[Any]:
+        return list(reversed(self.messages[-n:]))
+
+
+class _Stub(FakeCoordinator):
+    """The state the arm reads; the rest resolves to the real collaborators."""
 
     def __init__(self, tmp_path: Path, *, authoring: bool = True, local_explore: bool = True) -> None:
-        self.session_dir = tmp_path
-        self.shared_state = _State(authoring=authoring, local_explore=local_explore)
-        self.state = self.shared_state
-        self.tasks = _Tasks()
-
-    # Overrides to keep the specialist dispatch hermetic (no GPU pool / warmup).
-    def _cycle_idem_suffix(self) -> str:
-        """Macro-cycle 0, as the Coordinator would report it."""
-        return ""
-
-    def _framework_gpu_params(self) -> dict[str, Any]:
-        return {}
+        state = _state(authoring=authoring, local_explore=local_explore)
+        super().__init__(
+            tmp_path,
+            shared_state=state,
+            state=SimpleNamespace(pending_proposals={}),
+            tasks=_Tasks(),
+            # No GPU pool: the specialist dispatch stays on the research lane.
+            framework_gpu_pool=None,
+            bus=_Bus(),
+        )
 
     async def _warm_specialist_params(self, _params: dict[str, Any]) -> None:
         return None
-
-    def _framework_authoring_lanes_ttl(self, _params: dict[str, Any], *, base_ttl_sec: int):
-        return ["research_lane"], int(base_ttl_sec)
-
-    def _build_framework_working_memory(self) -> dict[str, Any]:
-        return {}
-
-    @staticmethod
-    def _render_framework_memory_for_prompt(_memory: dict[str, Any] | None) -> str:
-        return ""
 
     async def _framework_agent_authoring_inflight(self) -> bool:
         return False
@@ -303,57 +236,64 @@ def test_a_candidate_that_keeps_failing_is_left_for_the_phase_to_replace(tmp_pat
 
 
 # --------------------------------------------------------------------------- #
-# 5. Resident arm offers the pseudo-candidate to the ranker
-# --------------------------------------------------------------------------- #
-def test_select_best_offers_local_explore_to_ranker(tmp_path: Path):
-    stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    stub.shared_state.framework_agent_batches = [
-        {
-            "batch_id": "b",
-            "candidates": [
-                {"candidate_id": "pr1", "pr_url": "https://example.com/pr/1", "repo": "a/b", "ref": "x"},
-            ],
-        }
-    ]
-    seen: dict[str, Any] = {}
-
-    async def _rank(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-        seen["ids"] = [c.get("candidate_id") for c in candidates]
-        # Pick the local-explore arm.
-        for c in candidates:
-            if str(c.get("kind") or "") == FrameworkPhase._LOCAL_EXPLORE_KIND:
-                return c
-        return None
-
-    stub._rank_framework_agent_candidates_llm = _rank  # type: ignore[assignment]
-    chosen = asyncio.run(stub._select_best_framework_agent_candidate())
-    # Ranker saw both the real PR and the local-explore pseudo-candidate.
-    assert "pr1" in seen["ids"]
-    assert "local_explore:0" in seen["ids"]
-    assert chosen is not None and chosen["kind"] == FrameworkPhase._LOCAL_EXPLORE_KIND
-
-
-def test_select_best_no_pseudo_when_batch_empty(tmp_path: Path):
-    """No PR batch -> return None (the discovery trigger), never a bare pseudo."""
-    stub = _Stub(tmp_path, authoring=True, local_explore=True)
-    chosen = asyncio.run(stub._select_best_framework_agent_candidate())
-    assert chosen is None
-
-
 # --------------------------------------------------------------------------- #
 # 6. Pump pivot: discovery exhaustion dispatches local-explore, not phase_done
 # --------------------------------------------------------------------------- #
 class _PumpStub(_Stub):
-    """Adds the pump surface with discovery/enablement/audit shimmed out."""
+    """The pump with the enablement lane it shares the tick with shimmed out."""
 
-    _pump_framework_agent_phase = FrameworkPhase._pump_framework_agent_phase
-    _record_framework_agent_phase_done = FrameworkPhase._record_framework_agent_phase_done
+    def __init__(self, tmp_path: Path, **kwargs: Any) -> None:
+        super().__init__(tmp_path, **kwargs)
+        # Discovery has come back empty its full retry budget, so the upstream
+        # lane declines and the tick reaches the arm below it.
+        self.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
 
     async def _maybe_enqueue_enablement_specialist(self) -> str:
         return ""
 
-    async def _discover_next_framework_batch(self) -> bool:
-        return False
+
+@pytest.mark.parametrize(
+    ("empties", "local_explore", "expect"),
+    [
+        # Discovery outranks the arm: while the upstream lane still has budget
+        # to look, the tick belongs to it.
+        (0, True, "candidate_discovery"),
+        (0, False, "candidate_discovery"),
+        # Discovery spent its retries. The arm takes over...
+        (_fa_client.DISCOVER_FAILURE_RETRY_LIMIT, True, "framework_local_explore"),
+        # ...and with the arm off there is nothing left, so the source arm
+        # reports itself dry instead of idling.
+        (_fa_client.DISCOVER_FAILURE_RETRY_LIMIT, False, "phase_done"),
+    ],
+)
+def test_an_empty_pool_walks_discovery_then_the_arm_then_done(
+    tmp_path: Path,
+    empties: int,
+    local_explore: bool,
+    expect: str,
+):
+    """The pump's ladder for an empty candidate pool, in precedence order.
+
+    Each rung must be reachable: while discovery answered "asked again"
+    unconditionally the two below it were dead code, and the source arm had no
+    way to tell ``exit_normal_optimize`` it had plateaued.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=local_explore)
+    stub.shared_state.framework_agent_empty_discoveries = empties
+    stub._maybe_enqueue_enablement_specialist = lambda: _none()  # type: ignore[assignment]
+
+    asyncio.run(stub._pump_framework_agent_phase())
+
+    if expect == "phase_done":
+        assert stub.tasks.created == []
+        assert stub.shared_state.framework_agent_phase_done is True
+    else:
+        assert stub.shared_state.framework_agent_phase_done is False
+        assert [c["params"].get("task_kind") for c in stub.tasks.created] == [expect]
+
+
+async def _none() -> str:
+    return ""
 
 
 def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
@@ -367,45 +307,16 @@ def test_pump_pivots_to_local_explore_on_discovery_failure(tmp_path: Path):
 
 
 def test_pump_falls_back_to_exit_when_arm_disabled(tmp_path: Path):
+    """No candidates, no discovery to be had, arm off -> the source arm is dry.
+
+    The pump must reach a terminal answer rather than idle: with nothing left
+    to dispatch, ``framework_agent_phase_done`` is what lets
+    ``exit_normal_optimize`` consider the source arm plateaued.
+    """
     stub = _PumpStub(tmp_path, authoring=True, local_explore=False)
-    # First (limit-1) empty discoveries retry; the limit-th marks the phase done.
-    for _ in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
-        asyncio.run(stub._pump_framework_agent_phase())
+    asyncio.run(stub._pump_framework_agent_phase())
     assert stub.tasks.created == []
     assert stub.shared_state.framework_agent_phase_done is True
-
-
-def test_pump_routes_ranked_local_explore_candidate(tmp_path: Path):
-    """A resident-arm pick routes to local-explore dispatch, skipping PR audit."""
-    stub = _PumpStub(tmp_path, authoring=True, local_explore=True)
-    stub.shared_state.framework_agent_batches = [
-        {
-            "batch_id": "b",
-            "candidates": [
-                {"candidate_id": "pr1", "pr_url": "https://example.com/pr/1", "repo": "a/b", "ref": "x"},
-            ],
-        }
-    ]
-    audited: dict[str, int] = {"n": 0}
-
-    async def _rank(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
-        for c in candidates:
-            if str(c.get("kind") or "") == FrameworkPhase._LOCAL_EXPLORE_KIND:
-                return c
-        return None
-
-    async def _audit(_candidate: dict[str, Any]) -> dict[str, Any]:
-        audited["n"] += 1
-        return {"recommended_next_step": ""}
-
-    stub._rank_framework_agent_candidates_llm = _rank  # type: ignore[assignment]
-    stub._audit_framework_agent_candidate = _audit  # type: ignore[assignment]
-
-    asyncio.run(stub._pump_framework_agent_phase())
-
-    assert audited["n"] == 0, "local-explore arm must not run the PR semantic audit"
-    assert len(stub.tasks.created) == 1
-    assert stub.tasks.created[0]["params"]["framework_local_explore"] is True
 
 
 def test_forward_enablement_carriers_eval_origin():
@@ -480,3 +391,169 @@ def test_local_explore_dispatch_registers_gap_on_real_state():
     resolved = shared.find_gap(gap_cid)
     assert resolved is not None, f"find_gap({gap_cid!r}) returned None; gap was not registered"
     assert resolved["layer"] == "framework"
+
+
+def test_each_discovery_retry_takes_a_fresh_idempotency_key(tmp_path: Path):
+    """Retries must not collide on one key, or the streak can never advance.
+
+    The registry hands back whatever row a key already names. With a fixed key
+    the second request re-fetches the finished first attempt, no discovery
+    runs, ``framework_agent_empty_discoveries`` stays at 1, and the lane
+    answers "asked again" on every tick forever -- the source arm never goes
+    dry and the phase never leaves.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    keys = []
+    for empties in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+        stub.shared_state.framework_agent_empty_discoveries = empties
+        assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+        keys.append(stub.tasks.created[-1]["idempotency_key"])
+        # The dispatched round settles: nothing is in flight, so the next tick
+        # asks again and the key is all that stands between a real retry and a
+        # re-fetch of the finished one.
+        stub.tasks._queued.clear()
+    assert len(set(keys)) == len(keys)
+
+    # Budget spent: the lane declines so the rungs below it are reachable.
+    stub.shared_state.framework_agent_empty_discoveries = _fa_client.DISCOVER_FAILURE_RETRY_LIMIT
+    assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+
+
+def test_a_failed_discovery_round_is_not_an_empty_one(tmp_path: Path):
+    """A crashed specialist reports nothing about what is out there.
+
+    Counting it toward the empty streak walks the source arm to "exhausted" on
+    the strength of its own failures, and the signal is available at the call
+    site: the dispatcher already reads the task error for the sibling bridge.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+
+    stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="specialist died")
+    assert stub.shared_state.framework_agent_empty_discoveries == 0
+
+    # A round that completed and genuinely found nothing still counts.
+    stub._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
+    assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+
+def test_a_registry_that_cannot_answer_is_not_an_idle_one(tmp_path: Path):
+    """The pump must not read a failed task query as "nothing in flight".
+
+    Treating it as idle dispatches a second candidate on top of a live one.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+
+    async def _boom():
+        raise RuntimeError("registry unavailable")
+
+    stub.tasks.queued = _boom  # type: ignore[method-assign]
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(stub._pump_framework_agent_phase())
+
+
+def test_a_lane_that_cannot_run_retires_on_its_own_budget(tmp_path: Path):
+    """Failed rounds get their own counter, a fresh key, and the same limit.
+
+    Not counting a failure toward the empty streak is right -- it found
+    nothing because it never looked -- but it must still count somewhere. With
+    neither counter moving, the idempotency key never changes, so every retry
+    re-fetches the settled failure and the lane asks forever without running.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+    keys = []
+
+    for _ in range(_fa_client.DISCOVER_FAILURE_RETRY_LIMIT):
+        assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is True
+        keys.append(stub.tasks.created[-1]["idempotency_key"])
+        stub.tasks._queued.clear()
+        stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="no runner")
+
+    assert len(set(keys)) == len(keys)
+    assert stub.shared_state.framework_agent_empty_discoveries == 0
+    assert asyncio.run(stub._maybe_enqueue_candidate_discovery(reason="candidate_pool_empty")) is False
+
+
+def test_a_round_that_ran_clears_the_failure_streak(tmp_path: Path):
+    """Whatever it came back with, it proves the lane works."""
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    task = SimpleNamespace(task_id="t1", params={"candidate_discovery": True})
+
+    stub._ingest_candidate_discovery(task=task, done_payload={}, run_error="no runner")
+    assert stub.shared_state.framework_agent_discover_failures == 1
+
+    stub._ingest_candidate_discovery(task=task, done_payload={"proposal_set": []})
+    assert stub.shared_state.framework_agent_discover_failures == 0
+    assert stub.shared_state.framework_agent_empty_discoveries == 1
+
+
+def test_a_commit_failure_after_a_keep_does_not_rearm_the_author(tmp_path: Path):
+    """The patch applied, benched and was rolled back; only the commit failed.
+
+    Reported as ``apply_failed`` it sent a specialist to rewrite a diff that
+    had already passed the bench and the accuracy gate. Reported as the
+    rollback it is, the rearm skips it on the status alone -- and the ledger,
+    which skips ``apply_failed`` on a perf lane for the retry loop's sake,
+    still records the candidate's outcome.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=False)
+    res = {
+        "status": "reverted",
+        "error_class": "keep_commit_failed",
+        "lane": "perf_framework",
+        "candidate": {"candidate_id": "c1"},
+        "specialist_task_id": "t1",
+    }
+
+    stub._maybe_rearm_authored_lane(res)
+    assert stub.shared_state.apply_fail_retry_pending == []
+
+    # A genuine apply failure on the same lane still queues a retry.
+    stub._maybe_rearm_authored_lane({**res, "status": "apply_failed", "error_class": "patch_did_not_apply"})
+    assert len(stub.shared_state.apply_fail_retry_pending) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_apply_retry_is_scoped_to_the_cycle_that_queued_it(tmp_path: Path):
+    """The gap id and the attempt number both repeat across macro-cycles.
+
+    Without the cycle scope, a second cycle's first retry for the same gap
+    returns the settled task from the first cycle, and the re-author it asked
+    for never runs.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+
+    await stub._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+    stub.shared_state.macro_cycle = 2
+    await stub._enqueue_author_specialist(lane="perf_explore", specialist_task_id="t-spec")
+
+    keys = [c["idempotency_key"] for c in stub.tasks.created]
+    assert len(set(keys)) == 2
+    assert keys[1].endswith("-c2")
+
+
+@pytest.mark.asyncio
+async def test_the_retry_drain_carries_the_batch_the_failure_belonged_to(tmp_path: Path):
+    """The candidate row does not always carry the batch the round ran under.
+
+    The rearm resolves it from the executor result and records it; the drain
+    dropped it, so the re-dispatched specialist keyed its idempotency on an
+    empty batch and collided with every other batch-less retry.
+    """
+    stub = _Stub(tmp_path, authoring=True, local_explore=True)
+    stub.shared_state.apply_fail_retry_pending = [
+        {
+            "cand_id": "c1",
+            "batch_id": "batch-7",
+            "lane": "perf_framework",
+            "attempt": 2,
+            "candidate": {"candidate_id": "c1", "framework": "sglang"},
+        }
+    ]
+
+    await stub._drain_apply_fail_retry_pending()
+
+    keys = [c["idempotency_key"] for c in stub.tasks.created]
+    assert any("batch-7" in k for k in keys), keys

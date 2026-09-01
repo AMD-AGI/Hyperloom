@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 
 from hyperloom.common.provenance import (
     PROVENANCE_SOURCE,
@@ -294,38 +295,158 @@ def test_code_revision_falls_back_when_git_absent(monkeypatch):
 # --- isolated framework venv ------------------------------------------------
 
 
-def _installed(venv_root, name: str, version: str):
-    """A distribution installed under ``venv_root`` and nowhere this process looks."""
+def _installed(venv_root, name: str, version: str) -> str:
+    """A distribution installed under ``venv_root`` and nowhere this process looks.
+
+    Builds the ``bin/python -> python3.12 -> <base>`` symlink chain a real venv
+    has, so a lookup that resolves the interpreter path lands on the base
+    prefix (``/usr``) instead of the venv and finds no ``site-packages``. A
+    fixture of plain non-existent paths cannot catch that: ``Path.resolve()``
+    does not follow symlinks that are not there.
+
+    Returns the interpreter path preflight would publish for that venv.
+    """
     site = venv_root / "lib" / "python3.12" / "site-packages"
     info = site / f"{name}-{version}.dist-info"
     info.mkdir(parents=True)
     (info / "METADATA").write_text(f"Metadata-Version: 2.4\nName: {name}\nVersion: {version}\n")
-    return venv_root
+    bin_dir = venv_root / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    (bin_dir / "python3.12").symlink_to(sys.executable)
+    (bin_dir / "python").symlink_to("python3.12")
+    return str(bin_dir / "python")
 
 
 def test_a_framework_in_its_own_venv_is_still_versioned(tmp_path):
     """``--framework-env isolated`` is the default for vLLM, whose ROCm wheel
     pins its own torch. The orchestrator's interpreter cannot see that venv, so
-    without following ``VLLM_VENV_ROOT`` every bare-metal vLLM report recorded
-    the framework it actually served with as "unknown"."""
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
+    without following the interpreter preflight resolved, every bare-metal vLLM
+    report recorded the framework it actually served with as "unknown"."""
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint(
+        {"HYPERLOOM_RESOLVED_FRAMEWORK": "vllm", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": python_exe}, probe=True
+    )
     assert fp["vllm"] == "0.27.1+rocm723"
 
 
-def test_an_operator_pin_still_wins_over_the_venv(tmp_path):
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root), "VLLM_VERSION": "0.28.0-rc1"}, probe=True)
+def test_an_operator_pin_still_wins_over_the_resolved_interpreter(tmp_path):
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint(
+        {
+            "HYPERLOOM_RESOLVED_FRAMEWORK": "vllm",
+            "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": python_exe,
+            "VLLM_VERSION": "0.28.0-rc1",
+        },
+        probe=True,
+    )
     assert fp["vllm"] == "0.28.0-rc1"
 
 
-def test_a_venv_root_that_is_not_there_is_not_a_failure(tmp_path):
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(tmp_path / "gone")}, probe=True)
+def test_an_interpreter_whose_prefix_yields_nothing_falls_back(tmp_path):
+    """No ``site-packages`` under the prefix means the derivation failed.
+
+    A system prefix keeps packages in ``dist-packages`` and a vanished venv has
+    no tree at all; treating either as an authoritative empty answer would
+    report "unknown" for a framework this process can see. Only a prefix that
+    really yields ``site-packages`` speaks for the run.
+    """
+    fp = _prov.detect_stack_fingerprint(
+        {
+            "HYPERLOOM_RESOLVED_FRAMEWORK": "vllm",
+            "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": str(tmp_path / "gone" / "bin" / "python"),
+        },
+        probe=True,
+    )
+    assert fp["vllm"] == _prov.detect_stack_fingerprint({}, probe=True)["vllm"]
+
+
+def test_a_real_venv_without_the_distribution_is_authoritative(tmp_path):
+    """A resolved venv that genuinely lacks the package must not be papered over.
+
+    This process may well have its own copy, but the run is not served by it.
+    """
+    venv_root = tmp_path / "vllm-venv"
+    (venv_root / "lib" / "python3.12" / "site-packages").mkdir(parents=True)
+    bin_dir = venv_root / "bin"
+    bin_dir.mkdir(parents=True)
+    (bin_dir / "python").symlink_to(sys.executable)
+
+    fp = _prov.detect_stack_fingerprint(
+        {
+            "HYPERLOOM_RESOLVED_FRAMEWORK": "vllm",
+            "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": str(bin_dir / "python"),
+        },
+        probe=True,
+    )
     assert fp["vllm"] == "unknown"
+
+
+def test_an_installer_venv_root_is_not_consulted(tmp_path):
+    """Provenance records a resolution, it does not perform one.
+
+    ``$VLLM_VENV_ROOT`` is host state the installer only ever writes, so on its
+    own it cannot say whether that tree still holds vLLM. Preflight leads its
+    candidate list with it and probes it; only that outcome is published here.
+    Reading the raw variable would be a second, weaker discovery path.
+    """
+    root = tmp_path / "installer-venv"
+    _installed(root, "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=True)
+    assert fp["vllm"] != "0.27.1+rocm723"
 
 
 def test_the_venv_is_not_scanned_under_probe_false(tmp_path):
     """probe=False is the hermetic contract: env only, no filesystem."""
-    root = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
-    fp = _prov.detect_stack_fingerprint({"VLLM_VENV_ROOT": str(root)}, probe=False)
+    python_exe = _installed(tmp_path / "vllm-venv", "vllm", "0.27.1+rocm723")
+    fp = _prov.detect_stack_fingerprint(
+        {"HYPERLOOM_RESOLVED_FRAMEWORK": "vllm", "HYPERLOOM_RESOLVED_FRAMEWORK_PYTHON": python_exe}, probe=False
+    )
     assert fp["vllm"] == "unknown"
+
+
+def test_the_lever_is_what_came_back_not_what_was_asked_for():
+    """A config deliverable is a config lever, whoever dispatched it.
+
+    Observed on a real MI355X session: the local-exploration arm asked for a
+    source patch and the specialist returned ``--max-num-batched-tokens``. It
+    was recorded as a framework source lesson with an empty ``changed_files``,
+    and had it been kept, the source arm would have been credited for a
+    configuration win.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_CONFIG,
+        LEVER_SOURCE_PATCH,
+        patch_lever_kind,
+    )
+
+    config_deliverable = {
+        "framework_agent_candidate_id": "local_explore:0",
+        "specialist_task_id": "t1",
+        "extra_server_args": "--max-num-batched-tokens 16384",
+        "extra_envs": {},
+        "patch_name": "",
+    }
+    assert patch_lever_kind(config_deliverable) == LEVER_CONFIG
+
+    # The same arm, when it really does write a diff.
+    source_deliverable = {
+        "framework_agent_candidate_id": "local_explore:0",
+        "specialist_task_id": "t1",
+        "patches_applied": ["/w/a.patch"],
+        "extra_server_args": "",
+    }
+    assert patch_lever_kind(source_deliverable) == LEVER_SOURCE_PATCH
+
+
+def test_an_explicit_stamp_still_outranks_the_derivation():
+    """Callers that do know the lever keep saying so.
+
+    An upstream PR carries server args in its integrate params on the way to
+    the bench; the fetched diff is still what it moves.
+    """
+    from hyperloom.inference_optimizer.breakdown.agent_ownership import (
+        LEVER_UPSTREAM_PR,
+        patch_lever_kind,
+    )
+
+    assert patch_lever_kind({"lever_kind": "upstream_pr", "extra_server_args": "--x"}) == LEVER_UPSTREAM_PR

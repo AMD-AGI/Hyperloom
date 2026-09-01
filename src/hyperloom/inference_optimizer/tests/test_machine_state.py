@@ -24,33 +24,28 @@ def test_normalize_budget_pct_defaults_and_filters() -> None:
     assert ps.normalize_budget_pct(None) == dict(ps.DEFAULT_PHASE_BUDGET_PCT)
     out = ps.normalize_budget_pct(
         {
-            "EXPLORE": 0.4,
+            ps.PHASE_FRAMEWORK_AGENT: 0.4,
             "BOGUS_PHASE": 0.5,  # unknown phase dropped
-            "KERNEL": "bad",  # non-numeric dropped
-            "SWEEP": 2.0,  # out of (0,1] dropped
+            ps.PHASE_KERNEL_AGENT: "bad",  # non-numeric dropped
+            ps.PHASE_SWEEP: 2.0,  # out of (0,1] dropped
         }
     )
-    assert out["EXPLORE"] == 0.4
+    assert out[ps.PHASE_FRAMEWORK_AGENT] == 0.4
     assert "BOGUS_PHASE" not in out
+    # A dropped entry falls back to its default rather than vanishing: a phase
+    # with no share would run to whatever it costs.
+    assert set(out) == set(ps.PHASE_NAMES)
+    assert out[ps.PHASE_SWEEP] == ps.DEFAULT_PHASE_BUDGET_PCT[ps.PHASE_SWEEP]
 
 
 def test_apply_escalate_budget_bump() -> None:
-    base = {"EXPLORE": 0.3}
+    phase = ps.PHASE_FRAMEWORK_AGENT
+    base = {phase: 0.3}
     assert ps.apply_escalate_budget_bump(base, phase="nope") == base
-    out = ps.apply_escalate_budget_bump(
-        {"EXPLORE": 0.3},
-        phase="explore",
-        delta=0.1,
-        cap=0.8,
-    )
-    assert out["EXPLORE"] == pytest.approx(0.4)
-    capped = ps.apply_escalate_budget_bump(
-        {"EXPLORE": 0.75},
-        phase="explore",
-        delta=0.5,
-        cap=0.8,
-    )
-    assert capped["EXPLORE"] == 0.8
+    out = ps.apply_escalate_budget_bump({phase: 0.3}, phase=phase, delta=0.1, cap=0.8)
+    assert out[phase] == pytest.approx(0.4)
+    capped = ps.apply_escalate_budget_bump({phase: 0.75}, phase=phase, delta=0.5, cap=0.8)
+    assert capped[phase] == 0.8
 
 
 def test_now_unix_injected() -> None:
@@ -93,15 +88,15 @@ def test_phase_budget_remaining_seconds() -> None:
         max_minutes=60,
         phase="UNKNOWN_PHASE",
         phase_started_unix=0.0,
-        phase_budget_pct={"EXPLORE": 0.5},
+        phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )
     assert ps.phase_budget_remaining_seconds(state) is None
     # 60min * 0.5 = 1800s budget, minus elapsed.
     state2 = SimpleNamespace(
         max_minutes=60,
-        phase="EXPLORE",
+        phase=ps.PHASE_FRAMEWORK_AGENT,
         phase_started_unix=1000.0,
-        phase_budget_pct={"EXPLORE": 0.5},
+        phase_budget_pct={ps.PHASE_FRAMEWORK_AGENT: 0.5},
     )
     rem = ps.phase_budget_remaining_seconds(state2, now_unix=1300.0)
     assert rem == pytest.approx(1800.0 - 300.0)
@@ -147,22 +142,30 @@ def test_session_remaining_seconds() -> None:
     )
 
 
-def test_post_prelude_target() -> None:
-    assert ps._post_prelude_target(explore_enabled=True, kernel_enabled=True) == ps.PHASE_EXPLORE
-    assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=True) == ps.PHASE_KERNEL_AGENT
-    assert ps._post_prelude_target(explore_enabled=False, kernel_enabled=False) == ps.PHASE_SWEEP
+@pytest.mark.parametrize(
+    ("optimize", "kernel", "target"),
+    [
+        (True, True, ps.PHASE_FRAMEWORK_AGENT),
+        (True, False, ps.PHASE_FRAMEWORK_AGENT),
+        # --no-framework-agent collapses past the optimisation phase.
+        (False, True, ps.PHASE_KERNEL_AGENT),
+        (False, False, ps.PHASE_SWEEP),
+    ],
+)
+def test_post_prelude_target(optimize: bool, kernel: bool, target: str) -> None:
+    assert ps._post_prelude_target(optimize_enabled=optimize, kernel_enabled=kernel) == target
 
 
 def test_make_history_row() -> None:
     row = ps.make_history_row(
-        from_phase="explore",
+        from_phase="framework_agent",
         to_phase="kernel_agent",
         reason="  plateau  ",
         evidence={"k": 1},
         ts="2026-06-09T00:00:00Z",
         ts_unix=12.0,
     )
-    assert row["from_phase"] == "EXPLORE"
+    assert row["from_phase"] == "FRAMEWORK_AGENT"
     assert row["to_phase"] == "KERNEL_AGENT"
     assert row["reason"] == "plateau"
     assert row["evidence"] == {"k": 1}

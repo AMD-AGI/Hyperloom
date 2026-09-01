@@ -183,16 +183,28 @@ def test_prepare_review_framework_op_emits_empty_approve_requires(reviewer):
     assert constraints["proposal_action_classes"] == {"baseA": "framework_op"}
 
 
-def test_classify_framework_agent_is_framework_op():
-    """FRAMEWORK pre-screen candidates classify as framework_op."""
+def test_classify_candidate_prescreen_is_framework_op():
+    """A pre-screen classifies as framework_op; the same action landing a patch does not.
+
+    Both arrive as ``integrate_patch`` -- one action lands every patch source
+    now -- so the top-level candidate id is the only thing separating "is this
+    candidate worth a bench" from "this patch is applied and measured". Reading
+    the action name alone would drop the patch-landing evidence bar for every
+    real patch.
+    """
     from hyperloom.agents.critic.runtime.decision_reviewer import (
         _APPROVE_REQUIRES_BY_CLASS,
         ACTION_CLASS_FRAMEWORK_OP,
+        ACTION_CLASS_PATCH_LANDING,
         classify_proposal_action,
     )
 
-    assert classify_proposal_action("framework_agent") == ACTION_CLASS_FRAMEWORK_OP
+    prescreen = {"framework_agent_candidate_id": "https://github.com/o/r/pull/7"}
+    assert classify_proposal_action("integrate_patch", prescreen) == ACTION_CLASS_FRAMEWORK_OP
+    assert classify_proposal_action("integrate_patch", {}) == ACTION_CLASS_PATCH_LANDING
+    # Nothing has been applied or measured yet, so the pre-screen carries no bar.
     assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_FRAMEWORK_OP] == ()
+    assert _APPROVE_REQUIRES_BY_CLASS[ACTION_CLASS_PATCH_LANDING] != ()
 
 
 def test_classify_enablement_integrate_patch_is_enablement_landing():
