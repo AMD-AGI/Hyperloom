@@ -1010,6 +1010,12 @@ def collect_geak(
         "error_class": result.get("error_class"),
         "error": result.get("error"),
         "returncode": result.get("returncode"),
+        # Same-harness adjudication is terminal state, not pending work.  Keep
+        # it with the GEAK result so clearing ``state.geak_pending`` does not
+        # erase why a measured candidate was dropped.
+        "revalidation_status": result.get("revalidation_status"),
+        "revalidation_error_class": result.get("revalidation_error_class"),
+        "revalidation_error": result.get("revalidation_error"),
         # Throughput / gain attribution (aggregate output tok/s).
         "baseline_throughput_tok_s": base,
         "final_throughput_tok_s": final,

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -14,6 +15,10 @@ import sys
 import pytest
 
 from hyperloom.common import provenance
+from hyperloom.common.provenance import (
+    RESOLVED_FRAMEWORK_ENV,
+    RESOLVED_FRAMEWORK_PYTHON_ENV,
+)
 from hyperloom.inference_optimizer.cli import preflight
 
 _SKIP_ENV = "HYPERLOOM_SKIP_FRAMEWORK_CHECK"
@@ -31,8 +36,18 @@ def _clear_env(monkeypatch):
         "INFERENCE_OPTIMIZER_NODES",
         "KUBERNETES_SERVICE_HOST",
         "HYPERLOOM_IMAGE",
+        # The check publishes these; without the reset they leak into every
+        # later test in the session and into provenance lookups.
+        RESOLVED_FRAMEWORK_PYTHON_ENV,
+        RESOLVED_FRAMEWORK_ENV,
     ):
         monkeypatch.delenv(key, raising=False)
+    yield
+    # ``delenv`` records no undo for a key that was absent, and the check writes
+    # these through ``os.environ`` rather than the fixture, so monkeypatch never
+    # sees them. Without this they outlive the file.
+    for key in (RESOLVED_FRAMEWORK_PYTHON_ENV, RESOLVED_FRAMEWORK_ENV):
+        os.environ.pop(key, None)
 
 
 def _args(framework: str | None = None) -> argparse.Namespace:
@@ -709,3 +724,113 @@ def test_the_remedy_matches_the_documented_setup_invocation(framework):
     assert documented, f"no documented setup line for {framework}"
 
     assert preflight._setup_install_command(framework) in documented
+
+
+# --- the resolved-interpreter publish contract -----------------------------
+
+
+def test_a_resolved_interpreter_is_published_with_its_framework(monkeypatch):
+    """provenance reads the pair; an unlabelled interpreter is unusable.
+
+    The scan answers for one framework, and ``sglang`` is the default, so the
+    name has to travel with the path or a vLLM lookup would read an SGLang
+    interpreter as its own answer.
+    """
+    _probe_result(monkeypatch, importable=True)
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert os.environ[RESOLVED_FRAMEWORK_PYTHON_ENV] == "/usr/bin/python3"
+    assert os.environ[RESOLVED_FRAMEWORK_ENV] == "vllm"
+
+
+def test_a_refuted_build_is_not_published(monkeypatch):
+    """A candidate proven to be the wrong build must not become the answer.
+
+    The check exits on a refuted build; the point here is that nothing was
+    published on the way out.
+    """
+    _probe_result(monkeypatch, importable=True, rocm=False)
+    monkeypatch.setattr(preflight, "_in_container", lambda: False)
+
+    with pytest.raises(SystemExit):
+        preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert RESOLVED_FRAMEWORK_PYTHON_ENV not in os.environ
+    assert RESOLVED_FRAMEWORK_ENV not in os.environ
+
+
+def test_a_rocm_probe_timeout_still_publishes(monkeypatch):
+    """The timeout is in the ROCm verdict, not in importability.
+
+    ``_resolve_framework_build`` proves the candidate importable before probing
+    the build at all, and the check keeps serving with it after a warning.
+    Withholding it here would send provenance back to this process and record
+    the orchestrator's own version for a run served by the isolated venv.
+    """
+    calls: list[list[str]] = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    monkeypatch.setattr(preflight.subprocess, "run", lambda cmd, *a, **k: (calls.append(list(cmd)), _Proc())[1])
+    monkeypatch.setattr(
+        preflight,
+        "_probe_rocm_build",
+        lambda _fw, _py: preflight._Probe(None, timed_out=True),
+    )
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert os.environ.get(RESOLVED_FRAMEWORK_PYTHON_ENV) == "/usr/bin/python3"
+    assert os.environ.get(RESOLVED_FRAMEWORK_ENV) == "vllm"
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        pytest.param(lambda mp: mp.setenv(_SKIP_ENV, "1"), id="skip_env"),
+        pytest.param(lambda mp: mp.setenv("BENCHMARK_BASE_URL", "http://serving-host:8888"), id="remote_url"),
+        pytest.param(
+            lambda mp: (
+                mp.setenv("HYPERLOOM_MN_EXT_SERVICE_URL", "http://claw-rayjob:8000"),
+                mp.setenv("INFERENCE_OPTIMIZER_NODES", "2"),
+            ),
+            id="external_multi_node",
+        ),
+    ],
+)
+def test_an_exempt_path_publishes_nothing(monkeypatch, setup):
+    """Serving is not local on these paths, so there is no resolution to publish."""
+    setup(monkeypatch)
+    _refuse_probe(monkeypatch)
+
+    preflight._check_serving_framework(_args("vllm"), "/usr/bin/python3")
+
+    assert RESOLVED_FRAMEWORK_PYTHON_ENV not in os.environ
+    assert RESOLVED_FRAMEWORK_ENV not in os.environ
+
+
+def test_a_non_venv_interpreter_does_not_force_unknown(monkeypatch, tmp_path):
+    """A system prefix keeps packages in ``dist-packages``, not ``site-packages``.
+
+    Deriving ``<prefix>/lib/python*/site-packages`` finds nothing there, and
+    treating that as an authoritative empty answer would record "unknown" for a
+    framework this process can see -- the failure mode this whole path exists to
+    remove. Bare-metal Debian/Ubuntu without a venv is a supported layout.
+
+    The prefix is built here rather than probing the host's own ``/usr``: RHEL
+    and several ROCm images do keep ``lib/python*/site-packages`` under it, so
+    asserting against the real one would pass or fail by runner.
+    """
+    (tmp_path / "lib" / "python3.12" / "dist-packages").mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    interpreter = tmp_path / "bin" / "python3"
+    interpreter.touch()
+
+    _probe_result(monkeypatch, importable=True)
+    preflight._check_serving_framework(_args("vllm"), str(interpreter))
+
+    assert provenance._framework_site_packages(os.environ, "vllm") is None

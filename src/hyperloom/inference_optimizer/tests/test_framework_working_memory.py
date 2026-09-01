@@ -1,17 +1,14 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""FRAMEWORK ranker soft-guidance from working memory.
+"""Deterministic working-memory aggregation for FRAMEWORK candidate selection.
 
-Covers the deterministic working-memory aggregation
-(``_build_framework_working_memory``), its prompt rendering
-(``_render_framework_memory_for_prompt``), and that the candidate ranker folds
-the "already tried this session" negative-sample block into its prompt.
+``_build_framework_working_memory`` folds the "already tried this session"
+ledger into the shape the selection path reads, capped and most-recent-first.
 """
 
 from __future__ import annotations
 
-from types import SimpleNamespace
 from typing import Any
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
@@ -46,7 +43,6 @@ class _MemCoord:
 
     def __init__(self) -> None:
         self.shared_state = _StateStub()
-        self.framework_ranker_timeout_sec = 5.0
 
 
 def test_build_working_memory_aggregates_tried_excluded_learnings():
@@ -102,29 +98,3 @@ def test_build_working_memory_caps_tried_rows():
     assert len(mem["tried_and_why"]) == cap
     # Most-recent kept (last cap entries).
     assert mem["tried_and_why"][-1]["ref"] == f"PR:{cap + 4}"
-
-
-class _FakeStream:
-    def __init__(self, text: str) -> None:
-        self._text = text
-
-    def __aiter__(self):
-        async def _gen():
-            yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=self._text))])
-
-        return _gen()
-
-
-class _FakeCompletions:
-    def __init__(self, captured: dict[str, Any], reply: str) -> None:
-        self._captured = captured
-        self._reply = reply
-
-    async def create(self, *, model: str, messages: list[dict[str, Any]], **_kw: Any):
-        self._captured["prompt"] = messages[0]["content"]
-        return _FakeStream(self._reply)
-
-
-class _FakeClient:
-    def __init__(self, captured: dict[str, Any], reply: str) -> None:
-        self.chat = SimpleNamespace(completions=_FakeCompletions(captured, reply))

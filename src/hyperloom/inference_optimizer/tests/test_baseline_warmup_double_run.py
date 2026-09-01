@@ -1969,7 +1969,7 @@ def test_ensure_local_inferencex_noop_for_local_path(tmp_path, monkeypatch):
     src = tmp_path / "InferenceX"
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: False)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: False)
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
 
@@ -1986,7 +1986,7 @@ def test_ensure_local_inferencex_mirrors_network_path(tmp_path, monkeypatch):
     (src / "utils" / "marker.txt").write_text("payload")
 
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2013,7 +2013,7 @@ def test_ensure_local_inferencex_isolates_per_task_mirrors(
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched lib")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2034,7 +2034,7 @@ def test_ensure_local_inferencex_disabled_by_env(tmp_path, monkeypatch):
     src = tmp_path / "wekafs_InferenceX"
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# stub")
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_LOCAL_INFERENCEX", "1")
 
     assert bl._ensure_local_inferencex(str(src)) == str(src)
@@ -2053,7 +2053,7 @@ def test_ensure_local_inferencex_falls_back_on_copy_failure(
     (src / "benchmarks").mkdir(parents=True)
     (src / "benchmarks" / "benchmark_lib.sh").write_text("# patched")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2080,7 +2080,7 @@ def test_ensure_local_inferencex_falls_back_when_mirror_incomplete(
     (src / "utils").mkdir(parents=True)
     (src / "utils" / "marker.txt").write_text("payload")
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",
         str(local_root),
@@ -2119,7 +2119,7 @@ def test_baseline_points_magpie_at_local_inferencex(tmp_path, monkeypatch):
         "}\n"
     )
     local_root = tmp_path / "local_cache"
-    monkeypatch.setattr(bl, "_is_network_fs", lambda p: True)
+    monkeypatch.setattr(bl, "is_network_fs", lambda p: True)
     monkeypatch.setenv("INFERENCEX_PATH", str(ix_src))
     monkeypatch.setenv(
         "INFERENCE_OPTIMIZER_LOCAL_INFERENCEX_ROOT",

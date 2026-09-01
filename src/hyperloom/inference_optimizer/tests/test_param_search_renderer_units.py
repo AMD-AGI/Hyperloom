@@ -56,16 +56,6 @@ class TestParamSearchRenderer:
         assert any("discovered_flags[sglang]" in f and "param=1" in f for f in out.key_facts)
         assert out.skipped is False
 
-    def test_winners_history_truncated_to_last_five(self):
-        winners = [
-            {"round_id": i, "action": "backends", "base_tput": 100.0 + i, "best": {"name": f"v{i}", "gain_pct": 2.5}}
-            for i in range(8)
-        ]
-        out = _render({"backend_winners_history": winners})
-        assert "Backend winners history" in out.markdown_block
-        assert "v7" in out.markdown_block
-        assert "| v0 |" not in out.markdown_block
-
     def test_synergy_truncation_marker(self):
         synergy = [f"combo_{i}" for i in range(25)]
         out = _render({"synergy_attempted": synergy})

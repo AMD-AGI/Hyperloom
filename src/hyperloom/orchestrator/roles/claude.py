@@ -215,6 +215,12 @@ class ClaudeBackend:
     raw_completion: bool = False
     # Role's allowed intent set for the output-format suffix. None = all IntentType values.
     allowed_intents: frozenset[IntentType] | None = None
+    # Attribution labels for the spend this backend's turns produce. One class
+    # serves several roles -- ``executors`` reuses it for in-process specialists
+    # -- so a fixed label would file their spend under orchestration and leave
+    # the rollup unable to tell the two apart. Defaults keep the orchestrator's.
+    attribution_component: str = "orchestration"
+    attribution_operation: str = "orchestrate_turn"
     # Idle timeout for one ``run()`` call: max wall-clock gap allowed BETWEEN
     # streamed SDK messages before the turn is aborted. Env override:
     # ``INFERENCE_OPTIMIZER_CLAUDE_CALL_TIMEOUT_SEC``.
@@ -812,8 +818,8 @@ class ClaudeBackend:
         kwargs.update(
             claude_sdk_env_options(
                 model=self.model,
-                component="orchestration",
-                operation="orchestrate_turn",
+                component=self.attribution_component,
+                operation=self.attribution_operation,
             )
         )
 

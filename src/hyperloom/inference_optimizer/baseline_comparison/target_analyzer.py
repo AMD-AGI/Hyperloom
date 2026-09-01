@@ -25,7 +25,7 @@ Flow:
    * ``target_analysis/target_analysis_report.md`` — short human note
 
    and, on success, a measured ``competitor_target.json`` (``source`` = the
-   live API URL) so the EXPLORE advisory gap is driven by real InferenceX
+   live API URL) so the advisory gap is driven by real InferenceX
    data rather than any LLM-authored estimate.
 
 All paths derived via :mod:`session_paths` — no hand-rolled string
@@ -227,7 +227,7 @@ def _format_report_md(summary: BaselineSummary) -> str:
     lines.append(
         "> Advisory only. This InferenceX-measured reference never feeds the "
         "Objective, scoring, or any KEEP/REVERT gate; a matching row is "
-        "surfaced to the EXPLORE gap advisory as direction only."
+        "surfaced to the gap advisory as direction only."
     )
     return "\n".join(lines) + "\n"
 
@@ -313,7 +313,7 @@ def _write_measured_competitor_target(
 ) -> bool:
     """Persist a measured ``competitor_target.json`` (``source`` = live API URL).
 
-    This is the advisory feed: the EXPLORE gap block reads this file, so
+    This is the advisory feed: the gap block reads this file, so
     writing only API-measured rows here guarantees optimization direction is
     guided by real InferenceX numbers, never LLM-authored estimates. The
     interactivity field mirrors ``gap_analysis``' own ``1000 / tpot_ms``
@@ -367,7 +367,7 @@ def _clear_competitor_target(session_dir: Path) -> None:
     Only a successful, dimension-aligned InferenceX match may leave a
     competitor target on disk. On every skip / no_match outcome we drop a
     stale file (e.g. a scout-authored one left by an older run or a resumed
-    session) so the EXPLORE gap advisory can never read a non-API source.
+    session) so the gap advisory can never read a non-API source.
 
     Args:
         session_dir: Session directory whose competitor target should be cleared.

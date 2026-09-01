@@ -18,7 +18,12 @@ from ._invocation import render_invocation_block
 
 # ``geak_pending.status`` values meaning the candidate was measured but its
 # revalidation never landed, so the win was abandoned rather than judged.
-_GEAK_DROPPED_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
+_GEAK_DROPPED_PENDING_STATUSES: frozenset[str] = frozenset({"rebench_cancelled", "rebench_unavailable"})
+
+# ``geak_result.revalidation_status`` values with the same meaning, but settled:
+# the rebench ran and could not produce a verdict. ``no_material`` / ``no_promote``
+# are deliberately absent — those ARE verdicts, so the candidate was judged.
+_GEAK_DROPPED_RESULT_STATUSES: frozenset[str] = frozenset({"failed", "fallback_failed"})
 
 
 @register_renderer("final")
@@ -50,6 +55,7 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
     revalidation_pending = bool(f.get("revalidation_pending"))
     # Self-reported GEAK candidate excluded from the headline; surfaced as an audit-only note.
     geak_pending = f.get("geak_pending") if isinstance(f.get("geak_pending"), dict) else {}
+    geak = breakdown.get("geak") if isinstance(breakdown.get("geak"), dict) else {}
     pending_awaiting = geak_pending.get("status") == "awaiting_rebench"
     # Gain is provisional when a cross-harness revalidation is pending with no confirmed validated number.
     is_provisional = revalidation_pending and not (isinstance(gain_v, (int, float)) and gain_v > 0)
@@ -92,7 +98,10 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             )
         )
     geak_pending_status = str(geak_pending.get("status") or "")
-    if geak_pending and geak_pending_status in _GEAK_DROPPED_STATUSES:
+    geak_revalidation_status = str(geak.get("revalidation_status") or "")
+    # ``action_path`` entries are ``action`` or ``action:variant``.
+    geak_in_final_stack = any(str(step).split(":", 1)[0] == "geak_e2e" for step in action_path)
+    if geak_pending and geak_pending_status in _GEAK_DROPPED_PENDING_STATUSES:
         self_gain = geak_pending.get("self_reported_gain_pct")
         self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
         drop_reason = str(geak_pending.get("revalidation_error") or "").strip() or "reason not recorded"
@@ -121,6 +130,31 @@ def render(breakdown: dict[str, Any]) -> RenderedSection:
             "kept out of current_best / action_path / the validated gain. Its "
             "self-reported number is audit-only and must not be presented as the "
             "headline result."
+        )
+    # Last: a settled ``failed`` on ``geak_result`` outlives the pending slot it
+    # was recorded from, so a LIVE candidate in a later macro-cycle must win over
+    # a terminal status left behind by an earlier one. ``render.py`` orders the
+    # same three cases the same way.
+    #
+    # ``not geak_in_final_stack`` is the same guard one step further: a 2b
+    # rebench that failed stamps ``failed``, and nothing clears it when the 2a
+    # GEAK-harness fallback then promotes the candidate for real. The claim
+    # here is that the candidate is ABSENT from the final stack, so read that
+    # off the stack rather than trusting a status no writer retracts.
+    elif geak_revalidation_status in _GEAK_DROPPED_RESULT_STATUSES and not geak_in_final_stack:
+        self_gain = geak.get("gain_pct")
+        self_gain_str = fmt_pct(self_gain, plus=True) if isinstance(self_gain, (int, float)) else "unknown"
+        drop_reason = str(geak.get("revalidation_error") or "").strip() or "reason not recorded"
+        facts.append(
+            f"GEAK candidate (self-reported {self_gain_str}) was DROPPED without "
+            f"revalidation (status=rebench_{geak_revalidation_status}, {drop_reason})."
+        )
+        warnings.append(
+            "A measured GEAK e2e candidate was abandoned because its same-harness "
+            f"revalidation failed ({drop_reason}). It was never judged on merit, "
+            "so this session's gain may understate what the optimizer actually "
+            "found — the candidate's artefacts are on disk but absent from "
+            "current_best / action_path / the validated gain."
         )
     if action_path:
         facts.append("Final stack: " + " → ".join(f"`{p}`" for p in action_path))

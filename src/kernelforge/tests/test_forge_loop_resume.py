@@ -1475,17 +1475,20 @@ def test_resume_rejects_repeated_campaign_inputs(tmp_path, monkeypatch):
     assert "already has immutable configuration" in result.output
 
 
-def test_forge_loop_reports_unknown_option_instead_of_aborting(tmp_path, monkeypatch):
-    """An option this version does not declare is dropped, named and reported.
+def test_forge_loop_rejects_an_unknown_option(tmp_path, monkeypatch):
+    """An option this version does not declare is fatal, not silently dropped.
 
-    A caller can be ahead of the installed producer, and aborting during argument
-    parsing turned one stale flag into a dead campaign the caller could only
-    diagnose from an exit code. The run proceeds instead.
+    forge-loop used to tolerate unknown options: it dropped them, warned on
+    stderr and recorded them on the result, so that a consumer shipping from a
+    separate repository could stay ahead of the installed producer. Vendoring
+    put producer and consumer in one tree and one wheel, so that skew can no
+    longer happen -- and the tolerance only ever silently absorbed typos, which
+    is how seven shipped examples ran an inferred kernel backend for a while.
 
     ``--max-hour`` is used deliberately: it is a typo of ``--max-hours``, which
-    tolerance cannot distinguish from an option that does not exist yet. Nothing
-    here corrects it -- the point is that the drop is stated on stderr and carried
-    on the result, which is the only way a caller can still catch it.
+    tolerance could not distinguish from an option that did not exist yet. It
+    must now cost an exit code before any work starts, not an hour of GPU time
+    spent on the ``--max-hours`` default.
     """
     _install_cli_fakes(monkeypatch, tmp_path)
 
@@ -1496,35 +1499,8 @@ def test_forge_loop_reports_unknown_option_instead_of_aborting(tmp_path, monkeyp
         include_campaign_inputs=False,
     )
 
-    assert result.exit_code == 0
-    assert "No such option" not in result.output
-    assert "--max-hour" in result.stderr
-    assert _result_payload(result.output)["ignored_cli_options"] == [
-        "--max-hour",
-        "2",
-    ]
-
-
-def test_forge_loop_result_omits_ignored_options_for_a_conforming_call(
-    tmp_path,
-    monkeypatch,
-):
-    """A call that uses only declared options produces no tolerance key.
-
-    Reported only when something was dropped, so a consumer reading a conforming
-    result never has to learn a field that conforming call does not emit.
-    """
-    _install_cli_fakes(monkeypatch, tmp_path)
-
-    result, _workspace = _invoke_forge_loop(
-        tmp_path,
-        ["--resume"],
-        existing_config=True,
-        include_campaign_inputs=False,
-    )
-
-    assert result.exit_code == 0
-    assert "ignored_cli_options" not in _result_payload(result.output)
+    assert result.exit_code != 0
+    assert "No such option" in result.output
 
 
 def test_forge_loop_still_rejects_an_invalid_value_on_a_declared_option(
@@ -1575,9 +1551,17 @@ def test_fresh_campaign_contains_no_shape_metadata(tmp_path, monkeypatch):
     assert captured["agent_fn_kwargs"]["bench_timeout_sec"] == 300
 
 
-def test_a_retired_iteration_cap_is_accepted_and_ignored(tmp_path, monkeypatch):
-    """The option is gone; a caller still passing it must not lose the run."""
-    captured = _install_cli_fakes(monkeypatch, tmp_path)
+def test_a_retired_iteration_cap_is_rejected(tmp_path, monkeypatch):
+    """A retired option now costs an exit code instead of being absorbed.
+
+    It used to be accepted and ignored so that a caller still passing it would
+    not lose the run. Nothing passes it: this repo is the only consumer, and its
+    own argv tests assert ``--max-iters`` is never sent (see
+    ``test_forge_collective`` and ``test_forge_long_horizon_cli``). What the
+    tolerance actually bought was a run that silently ignored what the caller
+    asked for, so it is refused at parse time instead.
+    """
+    _install_cli_fakes(monkeypatch, tmp_path)
     workspace, kernel, driver = _initialize_workspace(tmp_path)
 
     result = CliRunner().invoke(
@@ -1589,10 +1573,8 @@ def test_a_retired_iteration_cap_is_accepted_and_ignored(tmp_path, monkeypatch):
         ],
     )
 
-    assert result.exit_code == 0, result.output
-    config = captured["loops"][0].ic
-    assert config.supervise_after == 3
-    assert not hasattr(config, "max_interventions")
+    assert result.exit_code != 0
+    assert "No such option" in result.output
 
 
 def test_fresh_cli_rejects_existing_state_before_git_or_warmstart(tmp_path, monkeypatch):

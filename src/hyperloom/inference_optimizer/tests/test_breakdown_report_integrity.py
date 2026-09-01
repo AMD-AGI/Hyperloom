@@ -209,6 +209,70 @@ def test_pending_verdict_loses_to_a_decided_one() -> None:
     assert cap["forge"].get("pending_integrate", 0) == 0
 
 
+def test_geak_result_marks_capability_attempted_without_native_run_dir() -> None:
+    """GEAK e2e does not use the native kernel-agent invocation layout."""
+    geak = {
+        "engaged": True,
+        "status": "ok",
+        "kernels_attempted": [{"kernel_id": "k1"}],
+        "accepted_kernels": [],
+    }
+
+    cap = collectors.collect_capability_summary({}, [], [], geak=geak)
+
+    assert cap["geak"]["attempts"] == 1
+    assert cap["geak"]["keeps"] == 0
+    assert cap["geak"]["status"] == "attempted"
+
+
+def test_geak_configured_without_result_remains_not_attempted() -> None:
+    """Selecting the backend is not evidence that its route actually ran."""
+    geak = {
+        "engaged": True,
+        "status": "missing",
+        "error_class": "no_result",
+        "accepted_kernels": [],
+        "accepted_heads": [],
+    }
+
+    cap = collectors.collect_capability_summary(
+        {"kernel_optimizer": "geak"},
+        [],
+        [],
+        geak=geak,
+    )
+
+    assert cap["geak"]["attempts"] == 0
+    assert cap["geak"]["keeps"] == 0
+    assert cap["geak"]["status"] == "not_attempted"
+
+
+def test_promoted_geak_route_marks_capability_kept() -> None:
+    """A promoted GEAK route must not still report ``not_attempted``."""
+    state = {
+        "optimization_stack": [
+            {
+                "action": "geak_e2e",
+                "variant_name": "geak_e2e",
+                "source": "geak_e2e",
+            }
+        ]
+    }
+    geak = {
+        "engaged": True,
+        "status": "ok",
+        "accepted_kernels": [{"kernel_id": "k1"}, {"kernel_id": "k2"}],
+    }
+
+    cap = collectors.collect_capability_summary(state, [], [], geak=geak)
+
+    assert cap["geak"]["attempts"] == 2
+    # ONE promotion is ONE keep. The canonical ledger books a single adoption
+    # for the route-level win, and the two counters must not disagree.
+    assert cap["geak"]["keeps"] == 1
+    assert cap["geak"]["status"] == "kept"
+
+
 # Fragment identity
 
 

@@ -41,12 +41,14 @@ import json
 import logging
 import os
 import re
+import sys
 from dataclasses import dataclass
 from typing import Iterable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 from hyperloom.common.coerce import to_int as _to_int
 from hyperloom.common.llm_attribution import call_headers as _attribution_headers
+from hyperloom.common.llm_attribution import gateway_selected as _gateway_selected
 from hyperloom.common.llm_attribution import inject_env as _inject_attribution_env
 
 log = logging.getLogger(__name__)
@@ -930,6 +932,70 @@ def _chat_completion_result(resp: object) -> ChatCompletionResult:
     )
 
 
+#: Call sites already warned about an untagged request, keyed by code location.
+#: These helpers run once per LLM request, so without this an uninstrumented
+#: caller would repeat the same line for the length of a run.
+_UNTAGGED_SITES: set[str] = set()
+_THIS_FILE = os.path.abspath(__file__)
+
+
+def _headers_for(component: str, operation: str) -> dict[str, str]:
+    """Render the attribution headers, saying so when a call site names nothing.
+
+    An empty ``component`` is how a call site that was never instrumented looks
+    from here, and skipping it quietly is what let several of them reach
+    production: the spend simply arrives under no component and nothing in the
+    logs connects it to the code that made it. Reported once per call site, and
+    only when a gateway is actually selected -- a deployment that emits no
+    attribution at all has nothing to fix.
+
+    Args:
+        component: Producer label for the call; ``""`` yields no headers.
+        operation: What this particular call does.
+
+    Returns:
+        Header name to value; empty when unattributed for any reason.
+    """
+    if component:
+        return _attribution_headers(component=component, operation=operation)
+    # Gated on a gateway actually being selected, not merely on the variable
+    # being set: a misspelled preset emits nothing either, and blaming the call
+    # site for that would send someone to instrument code that is already fine.
+    if _gateway_selected():
+        site = _first_caller_outside_this_module()
+        if site not in _UNTAGGED_SITES:
+            _UNTAGGED_SITES.add(site)
+            log.warning(
+                "LLM call from %s names no attribution component, so its spend "
+                "will roll up under none; pass component= at this call site",
+                site,
+            )
+    return {}
+
+
+def _first_caller_outside_this_module() -> str:
+    """Locate the call site to report, skipping this module's own frames.
+
+    The helpers between a caller and here vary in depth, so a fixed offset would
+    name ``chat_completion`` rather than whoever called it -- which is the one
+    thing the message needs to get right to be actionable.
+
+    Walks the live frames rather than building a formatted traceback: this runs
+    on the request path of every untagged call, and only the first one at each
+    site produces any output, so materializing the whole stack to then discard
+    it would charge every later call for a line it will not print.
+
+    Returns:
+        ``path:line`` of the nearest frame outside this file.
+    """
+    frame = sys._getframe(1)
+    while frame is not None:
+        if os.path.abspath(frame.f_code.co_filename) != _THIS_FILE:
+            return f"{frame.f_code.co_filename}:{frame.f_lineno}"
+        frame = frame.f_back
+    return "an unknown call site"
+
+
 def _tag_request(params: dict[str, object], component: str, operation: str = "") -> dict[str, object]:
     """Merge the attribution header into an OpenAI-SDK request, in place.
 
@@ -945,7 +1011,7 @@ def _tag_request(params: dict[str, object], component: str, operation: str = "")
     Returns:
         The same ``params`` mapping, for call-site brevity.
     """
-    headers = _attribution_headers(component=component, operation=operation) if component else {}
+    headers = _headers_for(component, operation)
     if headers:
         existing = params.get("extra_headers") or {}
         params["extra_headers"] = {**existing, **headers}  # type: ignore[dict-item]
@@ -1131,7 +1197,7 @@ def _attribution_tag_kwargs(component: str, operation: str = "") -> dict[str, ob
     Returns:
         ``{"headers": {...}}``, or ``{}`` when there is nothing to tag with.
     """
-    headers = _attribution_headers(component=component, operation=operation) if component else {}
+    headers = _headers_for(component, operation)
     return {"headers": headers} if headers else {}
 
 

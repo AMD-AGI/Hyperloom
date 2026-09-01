@@ -119,63 +119,6 @@ def _shape_ledger(
     }
 
 
-def _patch_winners_history(
-    rows: list[Any],
-    baseline_tput: float | None,
-) -> list[dict[str, Any]]:
-    """Fix ``backend_winners_history`` data gaps: fall back to session ``baseline_tput`` for a 0 ``base_tput`` and compute missing per-winner ``gain_pct``.
-
-    Effectively a no-op today: the only call site passes an empty list, since
-    the ``state.backend_winners_history`` source field no longer exists.
-
-    Args:
-        rows (list[Any]): Raw ``backend_winners_history`` rows.
-        baseline_tput (float | None): Session baseline throughput used to
-            patch a zero / missing ``base_tput``.
-
-    Returns:
-        list[dict[str, Any]]: The patched rows with repaired ``base_tput`` and
-        back-filled per-winner ``gain_pct`` where derivable.
-    """
-    out: list[dict[str, Any]] = []
-    for r in rows:
-        if not isinstance(r, dict):
-            continue
-        row = dict(r)
-        try:
-            bt = float(row.get("base_tput") or 0.0)
-        except (TypeError, ValueError):
-            bt = 0.0
-        if bt <= 0 and baseline_tput and baseline_tput > 0:
-            row["base_tput"] = float(baseline_tput)
-            row["base_tput_source"] = "session_baseline"
-            bt = float(baseline_tput)
-        if bt > 0:
-            winners = list(row.get("winners") or [])
-            new_winners: list[dict[str, Any]] = []
-            for w in winners:
-                if not isinstance(w, dict):
-                    continue
-                w2 = dict(w)
-                if w2.get("gain_pct") in (None, "") and w2.get("tput") is not None:
-                    try:
-                        w2["gain_pct"] = (float(w2["tput"]) - bt) / bt * 100.0
-                    except (TypeError, ValueError, ZeroDivisionError):
-                        pass
-                new_winners.append(w2)
-            row["winners"] = new_winners
-            best = row.get("best")
-            if isinstance(best, dict) and best.get("gain_pct") in (None, "") and best.get("tput") is not None:
-                try:
-                    best = dict(best)
-                    best["gain_pct"] = (float(best["tput"]) - bt) / bt * 100.0
-                    row["best"] = best
-                except (TypeError, ValueError, ZeroDivisionError):
-                    pass
-        out.append(row)
-    return out
-
-
 def _shape_winners_history(
     explore_search: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -236,23 +179,19 @@ def collect_explore_search(
     explore_ledger = _shape_ledger(state.get("explore_search"))
     # Persist provenance+fingerprint winners_history for offline recompute.
     explore_ledger["winners_history"] = _shape_winners_history(state.get("explore_search"))
-    explore_ledger["winner_history"] = []
     explore_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     params_ledger = _shape_ledger(state.get("params_search"))
-    params_ledger["winner_history"] = []
     params_ledger["no_promote_streak"] = int(state.get("params_no_promote_streak") or 0)
 
     backends_ledger = _shape_ledger(state.get("backends_search"))
 
-    baseline_tput = _to_float(state.get("baseline_tput"))
     return {
         "explore": explore_ledger,
         "params": params_ledger,
         "backends": backends_ledger,
         "synergy_attempted": list((state.get("explore_search") or {}).get("synergy_attempted") or []),
         "discovered_flags": dict(state.get("discovered_flags") or {}),
-        "backend_winners_history": _patch_winners_history([], baseline_tput),
     }
 
 

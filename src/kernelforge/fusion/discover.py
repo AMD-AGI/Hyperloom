@@ -48,7 +48,7 @@ from kernelforge.llm import (
     resolve_anthropic_gateway,
     resolve_openai_gateway,
 )
-from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy
+from kernelforge.agent_backends.base import AgentRunSpec, AgentToolPolicy, watchdog_timeout_sec
 from kernelforge.resources import resource_path
 
 from .diagnose import LAUNCH_BOUND_CATEGORIES, categories_in_text, categorize_kernel_name
@@ -1298,7 +1298,7 @@ def _run_agent_discovery_once(
     async def _run() -> Any:
         return await asyncio.wait_for(
             backend.run(spec),
-            timeout=max(1, int(timeout_s)),
+            timeout=watchdog_timeout_sec(max(1, int(timeout_s))),
         )
 
     try:

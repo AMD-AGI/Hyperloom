@@ -21,7 +21,54 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 from ...session.paths import is_path_within
 
 
+_FRAMEWORK_PHASES = frozenset({"FRAMEWORK_AGENT", "EXPLORE"})
+_AUTHORING_TASK_KINDS = frozenset(
+    {
+        "explore_apply_retry",
+        "framework_authoring",
+        "framework_local_explore",
+    }
+)
+
+
 # Shared helpers
+def _mapping(value: Any) -> dict[str, Any]:
+    """Return ``value`` when it is a dict, otherwise an empty mapping."""
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_rows(value: Any) -> list[dict[str, Any]]:
+    """Keep only dictionary rows from a list-shaped value."""
+    return [row for row in value if isinstance(row, dict)] if isinstance(value, list) else []
+
+
+def _first(*values: Any) -> Any:
+    """Return the first value that is neither ``None`` nor an empty string."""
+    return next((value for value in values if value is not None and value != ""), None)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    """Coerce conventional boolean spellings without accepting arbitrary numbers."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on", "passed", "succeeded"}:
+            return True
+        if normalized in {"0", "false", "no", "off", "failed"}:
+            return False
+    return None
+
+
+def _string_list(value: Any) -> list[str]:
+    """Normalize a list-like value to non-empty strings."""
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value if item not in (None, "")]
+
+
 def _load_json_safe(
     path: Path | None,
     warnings: list[str],

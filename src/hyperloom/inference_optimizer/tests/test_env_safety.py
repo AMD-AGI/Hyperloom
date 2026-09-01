@@ -187,3 +187,54 @@ def test_redact_secret_values_masks_assignments_and_bearer_tokens():
     assert "sensitive-value" not in redacted
     assert "sensitive-token" not in redacted
     assert redacted.count("[REDACTED]") == 2
+
+
+def test_redact_secret_values_masks_quoted_assignments():
+    """A quoted value is the common shape: shells quote it, json.dumps escapes it."""
+    double = common_env_safety.redact_secret_values('export MYAPP_PASSWORD="hunter2"')
+    single = common_env_safety.redact_secret_values("export MYAPP_PASSWORD='hunter2'")
+    escaped = common_env_safety.redact_secret_values('{"command": "export MYAPP_PASSWORD=\\"hunter2\\""}')
+
+    assert double == 'export MYAPP_PASSWORD="[REDACTED]"'
+    assert single == "export MYAPP_PASSWORD='[REDACTED]'"
+    assert escaped == '{"command": "export MYAPP_PASSWORD=\\"[REDACTED]\\""}'
+    assert common_env_safety.redact_secret_values(r"PASSWORD=C:\foo\bar") == "PASSWORD=[REDACTED]"
+
+
+def test_redact_secret_values_spares_tokenizer_and_max_tokens():
+    """TOKEN as a name fragment must not mask workload knobs in an optimizer."""
+    for text in (
+        '--tokenizer="/models/x"',
+        "--tokenizer=/models/x",
+        "HYPERLOOM_EVAL_BOUNDS max_tokens=4096 stop=[</s>]",
+        '--max-tokens="4096"',
+        "num_speculative_tokens=5",
+        "TOKENIZERS_PARALLELISM=false",
+        "eos_string=</s>,max_retries=5,tokenized_requests=False,max_length=13312",
+        "HYPERLOOM_EVAL_BOUNDS max_tokens=4096 stop_token_ids=[154820, 154827, 154829]",
+        "token_budget=128",
+        "tokens_per_second=12.3",
+    ):
+        assert common_env_safety.redact_secret_values(text) == text
+
+    still_secret = common_env_safety.redact_secret_values(
+        'HF_TOKEN=abc HF_TOKEN_2=def ANTHROPIC_AUTH_TOKEN="tok-abcdef" api_key=real-secret'
+    )
+    assert "abc" not in still_secret
+    assert "def" not in still_secret
+    assert "tok-abcdef" not in still_secret
+    assert "real-secret" not in still_secret
+    assert still_secret.count("[REDACTED]") == 4
+
+
+def test_redact_secret_values_masks_aws_key_and_jwt_shapes():
+    """AWS access-key ids and compact JWTs are masked by shape, not by assignment."""
+    access_id = "AKIA" + "IOSFODNN7EXAMPLE"
+    jwt = "eyJ" + "hbGciOiJIUzI1NiJ9." + "eyJzdWIiOiIxIn0." + "aaaaaaaaaa"
+    text = f"aws --secret-key {access_id} Authorization: {jwt}"
+
+    redacted = common_env_safety.redact_secret_values(text)
+
+    assert access_id not in redacted
+    assert jwt not in redacted
+    assert redacted.count("[REDACTED]") == 2
