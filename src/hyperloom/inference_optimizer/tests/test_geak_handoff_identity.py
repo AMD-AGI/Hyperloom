@@ -10,7 +10,7 @@ from types import ModuleType
 import pytest
 
 from hyperloom.orchestrator.loop.coordinator import Coordinator
-from hyperloom.orchestrator.loop.coordinator_helpers import _observed_sglang_server_identity_from_log
+from hyperloom.common.launch_log_evidence import observed_sglang_server_identity_from_log
 from hyperloom.orchestrator.loop.writeback import WritebackCollaborator
 from hyperloom.orchestrator.state.shared_state import SharedState
 
@@ -419,7 +419,7 @@ def test_archived_sglang_server_args_log_yields_stable_observed_identity(tmp_pat
         encoding="utf-8",
     )
 
-    identity = _observed_sglang_server_identity_from_log(str(log))
+    identity = observed_sglang_server_identity_from_log(str(log))
 
     assert identity == {
         "attention_backend": "aiter",
@@ -443,7 +443,7 @@ def test_archived_sglang_server_args_after_legacy_line_cap_is_observed(tmp_path:
         encoding="utf-8",
     )
 
-    assert _observed_sglang_server_identity_from_log(str(log)) == {
+    assert observed_sglang_server_identity_from_log(str(log)) == {
         "model_path": "/models/qwen",
         "tp_size": 8,
     }
@@ -453,4 +453,4 @@ def test_archived_sglang_server_args_rejects_executable_log_values(tmp_path: Pat
     log = tmp_path / "server.log"
     log.write_text("server_args=ServerArgs(model_path=__import__('os').getcwd())\n", encoding="utf-8")
 
-    assert _observed_sglang_server_identity_from_log(str(log)) == {}
+    assert observed_sglang_server_identity_from_log(str(log)) == {}

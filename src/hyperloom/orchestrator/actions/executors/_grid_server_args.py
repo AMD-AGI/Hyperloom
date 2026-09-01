@@ -22,6 +22,7 @@ import shlex
 from typing import Any
 
 from hyperloom.common.coerce import optional_positive_int, to_str_list
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 
 log = logging.getLogger(__name__)
@@ -55,32 +56,6 @@ def validate_server_args_shell_safe(server_args: str | None) -> str:
             continue
         raise ValueError("extra_server_args must be argv-like flags, not bare positional arguments")
     return args
-
-
-def server_args_env_name(framework: str | None) -> str:
-    """Return the Magpie env var used to append backend server args.
-
-    Resolution is exact (registry-keyed) with a substring fallback so a
-    framework string carrying a version suffix (e.g. ``"vllm@0.21"``) still
-    maps correctly. Unknown names fall back to the default framework's env.
-
-    Args:
-        framework (str | None): Framework name; matched case-insensitively.
-
-    Returns:
-        str: The ``EXTRA_*_ARGS`` env name for the framework (e.g.
-        ``"EXTRA_XDIT_ARGS"`` for xDiT, ``"EXTRA_SGLANG_ARGS"`` default).
-    """
-    from hyperloom.inference_optimizer import framework_registry
-
-    name = str(framework or "").strip().lower()
-    if framework_registry.is_supported(name):
-        return framework_registry.extra_args_env(name)
-    # Substring fallback for version-suffixed names.
-    for fw in framework_registry.names():
-        if fw in name:
-            return framework_registry.extra_args_env(fw)
-    return framework_registry.extra_args_env(framework_registry.DEFAULT_FRAMEWORK)
 
 
 def merge_server_args(*parts: str | None) -> str:

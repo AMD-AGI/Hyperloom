@@ -60,7 +60,7 @@ _LAUNCH_ARGV_MARKERS: dict[str, str] = {
 }
 
 
-def _split_launch_flags(argv_tail: str) -> str:
+def split_launch_flags(argv_tail: str) -> str:
     """Remove run-specific and profiling flags from a captured launch argv."""
     try:
         tokens = shlex.split(argv_tail)
@@ -82,8 +82,15 @@ def _split_launch_flags(argv_tail: str) -> str:
     return " ".join(kept)
 
 
-def _launch_argv_from_log(path: str, marker: str) -> str:
-    """Extract and normalize the engine launch argv from one benchmark log."""
+def launch_argv_from_log(path: str, framework: str) -> str:
+    """Extract and normalize the engine launch argv from one benchmark log.
+
+    Returns ``""`` when ``framework`` has no registered argv marker, so callers
+    can stay unaware of the per-backend marker table.
+    """
+    marker = _LAUNCH_ARGV_MARKERS.get(str(framework or "").strip().lower())
+    if not marker:
+        return ""
     pattern = re.compile(r"(?:-m\s+\S*" + re.escape(marker) + r"\S*|" + re.escape(marker) + r")\b(.*)$")
     try:
         with open(path, encoding="utf-8", errors="ignore") as handle:
@@ -95,7 +102,7 @@ def _launch_argv_from_log(path: str, marker: str) -> str:
                 if not tail:
                     start = line.find("--")
                     tail = line[start:].strip() if start >= 0 else ""
-                flags = _split_launch_flags(tail)
+                flags = split_launch_flags(tail)
                 if flags:
                     return flags
     except OSError:
@@ -184,7 +191,7 @@ def _bounded_server_args_value(value: Any, *, depth: int = 0) -> Any:
     raise ValueError("ServerArgs value is not JSON-safe")
 
 
-def _observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
+def observed_sglang_server_identity_from_log(path: str) -> dict[str, Any]:
     """Parse a capped archived SGLang ``server_args=ServerArgs(...)`` record."""
     chunks: list[str] = []
     remaining = _SGLANG_SERVER_ARGS_MAX_CHARS

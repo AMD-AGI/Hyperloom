@@ -14,11 +14,10 @@ from typing import Any
 import yaml
 
 from hyperloom.common.launch_log_evidence import (
-    _LAUNCH_ARGV_MARKERS,
-    _launch_argv_from_log,
-    _observed_sglang_server_identity_from_log,
+    launch_argv_from_log,
+    observed_sglang_server_identity_from_log,
 )
-from ._grid_server_args import server_args_env_name
+from hyperloom.inference_optimizer.framework_registry import server_args_env_name
 
 log = logging.getLogger(__name__)
 
@@ -59,10 +58,9 @@ def build_launch_evidence(
     observed_server_identity: dict[str, Any] = {}
     if actual_server_log:
         try:
-            marker = _LAUNCH_ARGV_MARKERS.get(resolved_framework)
-            observed_flags = _launch_argv_from_log(actual_server_log, marker) if marker else ""
+            observed_flags = launch_argv_from_log(actual_server_log, resolved_framework)
             if not observed_flags and resolved_framework == "sglang":
-                observed_server_identity = _observed_sglang_server_identity_from_log(actual_server_log)
+                observed_server_identity = observed_sglang_server_identity_from_log(actual_server_log)
         except Exception:  # noqa: BLE001 - evidence collection must not alter a measurement
             log.debug("launch evidence could not inspect server log %s", actual_server_log, exc_info=True)
 

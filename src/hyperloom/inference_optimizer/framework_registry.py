@@ -195,6 +195,29 @@ def extra_args_env(framework: str | None) -> str:
     return _spec_or_default(framework).extra_args_env
 
 
+def server_args_env_name(framework: str | None) -> str:
+    """Return the Magpie env var used to append backend server args.
+
+    Resolution is exact (registry-keyed) with a substring fallback so a
+    framework string carrying a version suffix (e.g. ``"vllm@0.21"``) still
+    maps correctly. Unknown names fall back to the default framework's env.
+
+    Args:
+        framework (str | None): Framework name; matched case-insensitively.
+
+    Returns:
+        str: The ``EXTRA_*_ARGS`` env name for the framework (e.g.
+        ``"EXTRA_XDIT_ARGS"`` for xDiT, ``"EXTRA_SGLANG_ARGS"`` default).
+    """
+    name = str(framework or "").strip().lower()
+    if is_supported(name):
+        return extra_args_env(name)
+    for fw in names():
+        if fw in name:
+            return extra_args_env(fw)
+    return extra_args_env(DEFAULT_FRAMEWORK)
+
+
 def throughput_unit(framework: str | None) -> str:
     """Return the throughput unit string for ``framework``.
 

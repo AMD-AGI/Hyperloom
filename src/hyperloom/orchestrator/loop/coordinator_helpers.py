@@ -21,7 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from hyperloom.common.env_safety import filter_untrusted_env_mapping, is_allowed_variant_env_key
-from hyperloom.common import launch_log_evidence as _launch_log_evidence
 
 from ..specialists.patch_safety import (
     ADVISE_VERDICT,
@@ -1636,12 +1635,3 @@ def _resolve_serving_fidelity(
         out["mem_fraction"] = mem
 
     return out
-
-
-# Launch-log helpers live in ``common.launch_log_evidence`` so executors do not
-# depend on the Coordinator layer. These imports preserve this module's legacy
-# helper API for existing callers and tests.
-_LAUNCH_ARGV_MARKERS = _launch_log_evidence._LAUNCH_ARGV_MARKERS
-_launch_argv_from_log = _launch_log_evidence._launch_argv_from_log
-_observed_sglang_server_identity_from_log = _launch_log_evidence._observed_sglang_server_identity_from_log
-_split_launch_flags = _launch_log_evidence._split_launch_flags

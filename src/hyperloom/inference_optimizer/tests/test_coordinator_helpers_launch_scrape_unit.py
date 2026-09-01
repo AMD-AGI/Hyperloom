@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from hyperloom.common.launch_log_evidence import launch_argv_from_log, split_launch_flags
 from hyperloom.orchestrator.loop import coordinator_helpers as ch
 
 
@@ -81,37 +82,37 @@ def test_geak_sweep_measured_tput_none_when_no_positive_throughput() -> None:
     assert ch._geak_sweep_measured_tput(res) is None
 
 
-# ── _split_launch_flags ───────────────────────────────────────────────────
+# ── split_launch_flags ────────────────────────────────────────────────────
 
 
 def test_split_launch_flags_strips_run_specific_space_form() -> None:
     argv = "--model-path /models/x --tensor-parallel-size 8 --mem-fraction-static 0.9"
-    assert ch._split_launch_flags(argv) == "--mem-fraction-static 0.9"
+    assert split_launch_flags(argv) == "--mem-fraction-static 0.9"
 
 
 def test_split_launch_flags_strips_equals_form() -> None:
     argv = "--host=0.0.0.0 --port=30000 --disable-radix-cache"
-    assert ch._split_launch_flags(argv) == "--disable-radix-cache"
+    assert split_launch_flags(argv) == "--disable-radix-cache"
 
 
 def test_split_launch_flags_strips_profiling_flags() -> None:
     argv = "--enable-profile --chunked-prefill-size 2048"
-    assert ch._split_launch_flags(argv) == "--chunked-prefill-size 2048"
+    assert split_launch_flags(argv) == "--chunked-prefill-size 2048"
 
 
 def test_split_launch_flags_handles_valueless_run_specific_flag() -> None:
     # ``--pid`` followed by another flag: the run-specific flag is dropped
     # without eating the next flag.
     argv = "--pid --disable-radix-cache"
-    assert ch._split_launch_flags(argv) == "--disable-radix-cache"
+    assert split_launch_flags(argv) == "--disable-radix-cache"
 
 
 def test_split_launch_flags_falls_back_on_shlex_error() -> None:
-    out = ch._split_launch_flags('--mem-fraction-static 0.9 "unterminated')
+    out = split_launch_flags('--mem-fraction-static 0.9 "unterminated')
     assert "--mem-fraction-static" in out
 
 
-# ── _launch_argv_from_log ─────────────────────────────────────────────────
+# ── launch_argv_from_log ──────────────────────────────────────────────────
 
 
 def test_launch_argv_from_log_extracts_and_strips(tmp_path: Path) -> None:
@@ -122,7 +123,7 @@ def test_launch_argv_from_log_extracts_and_strips(tmp_path: Path) -> None:
         "--tensor-parallel-size 8 --mem-fraction-static 0.9\n",
         encoding="utf-8",
     )
-    flags = ch._launch_argv_from_log(str(log), "launch_server")
+    flags = launch_argv_from_log(str(log), "sglang")
     assert flags == "--mem-fraction-static 0.9"
 
 
@@ -131,11 +132,24 @@ def test_launch_argv_from_log_returns_empty_when_marker_absent(
 ) -> None:
     log = tmp_path / "server.log"
     log.write_text("no engine launch here\n", encoding="utf-8")
-    assert ch._launch_argv_from_log(str(log), "launch_server") == ""
+    assert launch_argv_from_log(str(log), "sglang") == ""
 
 
 def test_launch_argv_from_log_returns_empty_for_missing_file(tmp_path: Path) -> None:
-    assert ch._launch_argv_from_log(str(tmp_path / "nope.log"), "launch_server") == ""
+    assert launch_argv_from_log(str(tmp_path / "nope.log"), "sglang") == ""
+
+
+def test_launch_argv_from_log_returns_empty_for_unmarked_framework(
+    tmp_path: Path,
+) -> None:
+    # A framework with no registered argv marker never reads the log.
+    log = tmp_path / "server.log"
+    log.write_text(
+        "+ python3 -m sglang.launch_server --model-path /models/x --mem-fraction-static 0.9\n",
+        encoding="utf-8",
+    )
+    assert launch_argv_from_log(str(log), "xdit") == ""
+    assert launch_argv_from_log(str(log), "") == ""
 
 
 def test_launch_argv_from_log_falls_back_to_double_dash_scan(
@@ -148,5 +162,5 @@ def test_launch_argv_from_log_falls_back_to_double_dash_scan(
         "vllm serve --model-path /models/x --mem-fraction-static 0.9\n",
         encoding="utf-8",
     )
-    flags = ch._launch_argv_from_log(str(log), "vllm")
+    flags = launch_argv_from_log(str(log), "vllm")
     assert "--mem-fraction-static 0.9" in flags

@@ -17,6 +17,10 @@ from types import SimpleNamespace
 from typing import Any, Mapping
 from hyperloom.common.coerce import to_float, to_str_list
 from hyperloom.common.io import append_jsonl
+from hyperloom.common.launch_log_evidence import (
+    launch_argv_from_log,
+    observed_sglang_server_identity_from_log,
+)
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
@@ -59,9 +63,6 @@ from .coordinator_helpers import (
     _geak_revalidation_decision,
     _geak_spec_name,
     _geak_sweep_measured_tput,
-    _LAUNCH_ARGV_MARKERS,
-    _launch_argv_from_log,
-    _observed_sglang_server_identity_from_log,
     _normalize_geak_overlay_dir,
 )
 from ..policy.gate import (
@@ -4436,9 +4437,6 @@ class WritebackCollaborator:
             .strip()
             .lower()
         )
-        marker = _LAUNCH_ARGV_MARKERS.get(framework)
-        if not marker:
-            return ""
         paths = [str(measurement.get("server_log_path") or "").strip()]
         if isinstance(evidence, Mapping):
             paths.append(str(evidence.get("actual_server_log_path") or "").strip())
@@ -4448,7 +4446,7 @@ class WritebackCollaborator:
                 root = Path(workspace)
                 paths.append(str(root / "server.log"))
         for path in dict.fromkeys(path for path in paths if path):
-            flags = _launch_argv_from_log(path, marker)
+            flags = launch_argv_from_log(path, framework)
             if flags:
                 return flags
         return ""
@@ -4521,7 +4519,7 @@ class WritebackCollaborator:
             str((evidence or {}).get("actual_server_log_path") if isinstance(evidence, Mapping) else ""),
         ):
             if path:
-                identity = _observed_sglang_server_identity_from_log(path)
+                identity = observed_sglang_server_identity_from_log(path)
                 if identity:
                     return identity
         return {}
