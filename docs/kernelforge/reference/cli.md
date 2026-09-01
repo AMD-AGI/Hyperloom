@@ -62,6 +62,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--resume` | off | Continue the campaign already stored in that exact workspace. |
 | `--kernel <file>` | none | The kernel file to optimize. This is the anchor the loop edits. |
 | `--driver <file>` | none | The validation/bench driver. |
+| `--auto` | off | Pick the kernel here instead of being handed one. Requires `--nomination-input`, refuses `--kernel` and `--resume`, and makes the result carry a `patches` array plus nomination counts. Off by default, so a run without it is unchanged. |
+| `--nomination-input <file>` | `''` | Nomination request JSON: raw trace path, candidate list path, lane budget and target ceiling. Read only under `--auto`. |
 | `--git-branch <name>` | none | Development branch to optimize on, checked out before the campaign config is snapshotted. |
 | `--program-md-file <file>` | none | Optional task context copied into the campaign. |
 | `--invocation-spec-file <file>` | none | Hyperloom invocation-spec JSON used by task preparation. |
