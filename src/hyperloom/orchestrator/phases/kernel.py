@@ -4296,6 +4296,12 @@ class KernelPhase(PhaseHandler):
 
         Hands a KEPT fusion (source patch + env flags) to ``integrate_handler``
         for the real e2e re-baseline / adopt decision.
+
+        Stamps a ``fusion_run_id`` before the state write. ``last_fusion`` is
+        overwritten on every run while ``last_fusion_integrate`` is only
+        overwritten when integration actually runs, so without an id shared by
+        the pair a later run silently inherits the previous round's e2e
+        verdict. Readers must treat the two as one run only when the ids match.
         """
         status = str(result.get("status") or "unknown") if isinstance(result, dict) else "failed"
         if isinstance(result, dict) and result.get("infrastructure_abort"):
@@ -4309,6 +4315,9 @@ class KernelPhase(PhaseHandler):
             except Exception:  # noqa: BLE001 - state shape tolerant, as below
                 pass
         try:
+            if isinstance(result, dict) and not str(result.get("fusion_run_id") or "").strip():
+                cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+                result["fusion_run_id"] = f"fusion-c{cycle}-{time.time_ns():x}"
             self.shared_state.last_fusion = result if isinstance(result, dict) else {"status": status}
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001 - state shape tolerant (best-effort idempotency record)
@@ -4406,6 +4415,12 @@ class KernelPhase(PhaseHandler):
         log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
         self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
         try:
+            if isinstance(integ, dict):
+                # The fusion run this verdict adjudicates. Both fields are
+                # last-write-wins singletons, and this one is written only when
+                # integration runs, so the id is what tells a reader whether
+                # the verdict belongs to the fusion sitting in ``last_fusion``.
+                integ = {**integ, "fusion_run_id": str(result.get("fusion_run_id") or "")}
             self.shared_state.last_fusion_integrate = integ
             self.shared_state.save(self.session_dir)
         except Exception:  # noqa: BLE001

@@ -758,10 +758,19 @@ class KernelBackendAttempt(TypedDict, total=False):
         model (str | None): Model used by the backend, or None.
         ts (str): ISO UTC timestamp of the attempt.
         status (str): Attempt status.
-        decision (str): KEEP / PARTIAL / REVERT / FAILED.
+        decision (str): KEEP / PARTIAL / REVERT / NEEDS_REVIEW / FAILED. The
+            kernel-level verdict on the adopted attempt, the attempt's own
+            otherwise.
         micro_speedup (float | None): Micro-benchmark speedup, or None.
         compile_passed (bool | None): Whether compilation passed, or None.
         correctness_passed (bool | None): Whether correctness passed, or None.
+        correctness_source (str | None): What the correctness verdict was read
+            from (``forge_rewrite_reference`` / ``report_scan`` /
+            ``cli_override`` / ...), or None when nothing recorded one.
+        best_artifact_path (str): The rewritten source the kernel was carried
+            to integrate with. Written on the adopted attempt only; ``""``
+            elsewhere. Distinct from ``optimized_files``, which is the
+            attempt's own output (a stdout log for a real backend run).
         optimized_files (list[str]): Optimized artifact paths.
         error (str | None): Failure text, or None.
         error_class (str | None): Failure classification (pre-dispatch markers).
@@ -785,6 +794,8 @@ class KernelBackendAttempt(TypedDict, total=False):
     micro_speedup: float | None
     compile_passed: bool | None
     correctness_passed: bool | None
+    correctness_source: str | None
+    best_artifact_path: str
     optimized_files: list[str]
     error: str | None
     error_class: str | None
@@ -2998,6 +3009,45 @@ class V6Metadata(TypedDict, total=False):
     warnings: list[str]
 
 
+class V6OutcomeGainBucket(TypedDict, total=False):
+    """Additive, session-baseline-relative gain for one V6 source bucket."""
+
+    total_gain_pct: float | None
+    keep_count: int
+    non_attributable_keep_count: int
+
+
+class V6OutcomeKernelAttribution(V6OutcomeGainBucket, total=False):
+    """Kernel gain with its authoritative GEAK and Forge backend split."""
+
+    by_backend: dict[str, V6OutcomeGainBucket]
+
+
+class V6OutcomeAttributionBySource(TypedDict, total=False):
+    """Canonical ledger gain projected onto the V6 stage vocabulary."""
+
+    warm_replay: V6OutcomeGainBucket
+    framework_agent: V6OutcomeGainBucket
+    kernel: V6OutcomeKernelAttribution
+
+
+class V6OutcomeAttribution(TypedDict, total=False):
+    """Availability and additive gain attribution from the canonical ledger."""
+
+    available: bool
+    by_source: V6OutcomeAttributionBySource
+
+
+class V6OutcomeValidation(TypedDict, total=False):
+    """Reconciliation of final measured gain with canonical KEEP entries."""
+
+    attributed_gain_pct: float
+    unattributed_gain_pct: float
+    reconciliation_gap_pct: float | None
+    attribution: V6OutcomeAttribution
+    notes: list[str]
+
+
 class V6Outcome(TypedDict, total=False):
     """V6 session result projection for downstream consumers."""
 
@@ -3006,7 +3056,7 @@ class V6Outcome(TypedDict, total=False):
     stage_reached: str
     baseline: dict[str, Any]
     final: dict[str, Any]
-    validation: dict[str, Any]
+    validation: V6OutcomeValidation
 
 
 class V6TimelineEvent(TypedDict, total=False):
@@ -3242,7 +3292,12 @@ __all__ = [
     "V6MetadataSession",
     "V6MetadataVersions",
     "V6Close",
+    "V6OutcomeAttribution",
+    "V6OutcomeAttributionBySource",
+    "V6OutcomeGainBucket",
+    "V6OutcomeKernelAttribution",
     "V6Outcome",
+    "V6OutcomeValidation",
     "V6TaskConfig",
     "V6TimelineEvent",
     "Workload",
