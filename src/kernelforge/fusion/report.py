@@ -59,6 +59,8 @@ def build_manifest(
     verdict_override: str = "",
     compile_pass: Optional[CompilePassOutcome] = None,
     error: Optional[dict[str, Any]] = None,
+    patches: Optional[list[dict[str, Any]]] = None,
+    nomination: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Assemble the JSON manifest dict.
 
@@ -76,6 +78,14 @@ def build_manifest(
     ``fusion`` is the top (selected) recipe; ``fusion_candidates`` lists every
     localized recipe (ranked) for caller visibility. ``error`` is null on every
     normal run.
+
+    ``patches`` is the nomination envelope: one independent sibling patch per kept
+    recipe (design §3.3), each a dict with ``kernel_name`` / ``patch_path`` /
+    ``target_file`` / ``kernel_repo`` / ``snapshot_dir`` / ``base_commit`` /
+    ``micro_speedup``. It is present (possibly empty) on the multi-patch path and
+    omitted (``None``) on the single-combined-patch (combine) path so a legacy
+    consumer reading only ``artifacts`` is byte-unaffected. ``nomination`` is the
+    round's summary counts (``candidates_seen`` / ``resolved`` / ``selected``).
     """
     verdict = verdict_override or ("candidate" if (diagnosis.is_candidate and recipe is not None) else "no_opportunity")
     return {
@@ -98,6 +108,10 @@ def build_manifest(
         "fusion_loop": loop,
         "artifacts": artifacts.to_dict() if artifacts is not None else None,
         "error": dict(error) if error else None,
+        # The nomination contract: N independent sibling patches. None on the
+        # combine path keeps the legacy single-``artifacts`` shape byte-identical.
+        "patches": [dict(p) for p in patches] if patches is not None else None,
+        "nomination": dict(nomination) if nomination else None,
     }
 
 

@@ -670,7 +670,7 @@ def _autoloop_campaign_fn(tmp_path, monkeypatch, *, source: Path, author: bool =
     """
     captured: dict[str, object] = {}
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         captured["config"] = config
         captured["verdict"] = campaign_fn(recipes[0], experience)
         return cli_module.LoopResult(kept=False, best=None, best_recipe=None)
@@ -762,7 +762,7 @@ def test_autoloop_restores_the_baseline_before_every_campaign(tmp_path, monkeypa
             experiment_id="exp-1",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         # Two recipes in sequence is the only shape where the leak was visible:
         # the loop returns the instant one KEEPs.
         campaign_fn(recipes[0], "")
@@ -863,7 +863,7 @@ def test_autoloop_clears_the_loop_state_that_would_reject_the_next_recipe(tmp_pa
             experiment_id="exp-1",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         campaign_fn(recipes[0], "")
         campaign_fn(recipes[0], "")
         return cli_module.LoopResult(kept=False, best=None, best_recipe=None)
@@ -892,7 +892,7 @@ def test_autoloop_records_which_forge_loop_run_answered_each_recipe(tmp_path, mo
             experiment_id="exp-42",
         )
 
-    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config):
+    def fake_run_fusion_loop(recipes, *, framework, campaign_fn, config, on_keep=None):
         recipe = recipes[0]
         campaign_fn(recipe, "")
         return cli_module.LoopResult(

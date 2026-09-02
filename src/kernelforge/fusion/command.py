@@ -28,7 +28,7 @@ import statistics
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import click
 
@@ -60,8 +60,8 @@ from .gpu_arch import canon_arch, detect_arch
 from .harness_contract import harness_contract
 from .llm_failure import LlmUnavailableError
 from .locate import build_recipes, resolve_framework_source_file
-from .loop import FusionAbort, LoopConfig, LoopResult, run_fusion_loop
-from .models import CompilePassOutcome, Recipe, ValidationResult
+from .loop import FusionAbort, LoopConfig, LoopResult, RecipePatch, run_fusion_loop
+from .models import CompilePassOutcome, FusionArtifacts, Recipe, ValidationResult
 from .shadow_repo import ensure_git_workspace
 from .report import LLM_UNAVAILABLE_VERDICT, build_manifest, write_manifest
 from .shapes import load_model_config, resolve_decode_shapes
@@ -754,20 +754,33 @@ def run(
     loop_manifest = None
     compile_pass_outcome: Optional[CompilePassOutcome] = None
     loop_result = None
+    # Multi-patch nomination outputs: patches_out is the list of sibling envelopes
+    # (None on the combine / single-patch escape hatch so build_manifest omits the
+    # key and the legacy shape stays byte-identical); nomination_summary is the
+    # round's counts.
+    patches_out: Optional[list[dict[str, Any]]] = None
+    nomination_summary: Optional[dict[str, Any]] = None
 
     # A claim and an authored kernel are validated and exported by different,
     # non-interchangeable machinery (config A/B vs kernel parity + microbench),
-    # so one run cannot do both. Clearing the flag is what narrows this run to
-    # the claim alone; the authored candidates stay on the manifest for a later
-    # round. Refusing would fail a run the caller cannot fix, the flag being on
-    # by default.
+    # so a single UNIT cannot do both. Under the multi-patch nomination contract
+    # each recipe is an independent sibling patch, so a run that discovers BOTH a
+    # compile-pass claim and authorable fusions runs each pipeline in turn and
+    # nominates every keeper -- the claim through its config A/B, the authored
+    # recipes through the kernel autoloop. ``fuse_all_confirmed`` is now the
+    # explicit combine escape hatch: it folds every recipe into ONE stacked unit
+    # (legacy single ``fusion.patch``). On the combine path the two machineries
+    # still cannot mix, so a claim + authored split narrows the combine run to the
+    # claim alone and defers the authored candidates to a later round.
     claims = [r for r in recipes if r.candidate_kind == "compile_pass"]
     deferred = [r for r in recipes if r.candidate_kind != "compile_pass"]
+    multi_patch = not fuse_all_confirmed
     if fuse_all_confirmed and claims and deferred:
         top_recipe = claims[0]
         fuse_all_confirmed = False
+        multi_patch = False  # combine narrowed to the claim; NOT the multi-patch path
         log.info(
-            "claiming compile pass %s first; deferring %s",
+            "combine: claiming compile pass %s first; deferring %s",
             top_recipe.pattern_id,
             ", ".join(r.pattern_id for r in deferred),
         )
@@ -778,7 +791,9 @@ def run(
         # produced even when the framework is a non-git pip install (git diff would
         # otherwise be empty -> patch=null -> integrate skips the KEPT fusion).
         pristine_dir = _snapshot_fusion_source(repo_root, top_recipe.source_file, out)
-        authored = recipes if fuse_all_confirmed else [top_recipe]
+        # combine folds every recipe into one unit; multi-patch authors each
+        # non-claim recipe as its own sibling and runs any claims separately.
+        authored = recipes if fuse_all_confirmed else (deferred if multi_patch else [top_recipe])
         ab_hint = (
             f"forge-fuse validates at the KERNEL level (compile + SNR parity + "
             f"microbench speedup), decode batch {decode_batch} isl {ab_isl} osl {ab_osl}"
@@ -794,39 +809,72 @@ def run(
 
         exported_ok = False
 
-        if top_recipe.candidate_kind == "compile_pass":
-            # The flip edits a LIVE install, so every exit path must restore it and
-            # the patch must be diffed against the pre-run snapshot (not HEAD, which
-            # would sweep in unrelated uncommitted edits).
-            runtime = resolve_target_runtime(framework, framework_root=framework_root)
-            with _live_file_restored(top_recipe.source_file):
-                compile_pass_outcome = _run_compile_pass(
-                    top_recipe,
-                    runtime=runtime,
-                    model_path=model_path,
-                    gpu=gpu,
-                    validate=validate,
-                    out=out,
-                    isl=ab_isl,
-                    osl=ab_osl,
-                    target_speedup=target_speedup,
+        # The multi-patch nomination runs BOTH pipelines when a run discovered both
+        # kinds: each compile-pass claim through its config A/B, every authored
+        # fusion through the kernel autoloop, and every keeper becomes an
+        # independent sibling in patches[]. It requires validation (a sibling is a
+        # validated patch); an author-only run with no validation falls through to
+        # the legacy single-pass path below.
+        if multi_patch and validate:
+            patches_out, compile_pass_outcome, loop_result = _run_multi_patch_nomination(
+                claims=claims,
+                authored=authored,
+                framework=framework,
+                framework_root=framework_root,
+                out=out,
+                repo_root=repo_root,
+                author=author,
+                gpu=gpu,
+                llm_model=llm_model,
+                target_speedup=target_speedup,
+                model_path=model_path,
+                run_arch=run_arch,
+                agent_backend=agent_backend,
+                agent_sandbox_mode=agent_sandbox_mode,
+                server_extra=server_extra,
+                ab_isl=ab_isl,
+                ab_osl=ab_osl,
+                max_turns=max_turns,
+                pristine_dir=pristine_dir,
+                tp=tp,
+                block_size=block_size,
+                max_model_len=max_model_len,
+                agent_factory=require_agent_backend,
+            )
+            if loop_result is not None:
+                validation = loop_result.best
+                loop_manifest = loop_result.to_dict()
+            # Strongest sibling fills the legacy singular ``artifacts`` slot so the
+            # combine-era salvage / timeout path keeps finding a patch.
+            if patches_out:
+                strongest = patches_out[0]
+                artifacts = FusionArtifacts(
+                    patch=strongest.get("patch_path"),
+                    repo_root=strongest.get("kernel_repo") or repo_root,
                 )
-                log.info(
-                    "compile pass %s: kept=%s speedup=%s note=%s",
-                    top_recipe.compile_pass_flag,
-                    compile_pass_outcome.kept,
-                    compile_pass_outcome.speedup,
-                    compile_pass_outcome.note,
-                )
-                if repo_root and compile_pass_outcome.kept:
-                    artifacts = export_artifacts(
-                        repo_root,
-                        top_recipe.source_file,
-                        out,
-                        pristine_dir=pristine_dir,
-                        snapshot_diff_only=True,
-                    )
-            compile_pass_outcome.reverted = True  # the context manager just did it
+                # Mirror the strongest patch under the legacy ``fusion.patch`` name.
+                _mirror_legacy_patch(strongest.get("patch_path"), out)
+            exported_ok = bool(patches_out)
+            nomination_summary = {
+                "candidates_seen": len(recipes),
+                "resolved": len(claims) + len(authored),
+                "selected": len(patches_out),
+            }
+        elif top_recipe.candidate_kind == "compile_pass":
+            compile_pass_outcome, artifacts = _run_single_compile_pass_claim(
+                top_recipe,
+                framework=framework,
+                framework_root=framework_root,
+                model_path=model_path,
+                gpu=gpu,
+                validate=validate,
+                out=out,
+                isl=ab_isl,
+                osl=ab_osl,
+                target_speedup=target_speedup,
+                repo_root=repo_root,
+                pristine_dir=pristine_dir,
+            )
             exported_ok = compile_pass_outcome.kept
         elif validate:
             # Validate-driven outer loop: per recipe, author -> kernel-validate ->
@@ -924,11 +972,17 @@ def run(
             exported_ok = rc == 0
             log.info("author finished rc=%s (no validation requested)", rc)
 
+        # The multi-patch nomination already exported each sibling and restored the
+        # tree to base inside its own transaction, so the single-patch export /
+        # restore / discard below must not run for it -- it would diff the wrong
+        # (reset) tree and file a bogus discard. ``patches_out is not None`` is set
+        # exactly on that path.
+        did_multi_patch = patches_out is not None
         # Only export a patch when the run produced a USABLE fusion (validate path:
         # kernel parity + speedup AND serving survived). A crashing / near-miss attempt
         # must NOT leave an exported patch behind. The compile-pass branch already
         # exported and restored inside its own transaction.
-        if repo_root and exported_ok and compile_pass_outcome is None:
+        if repo_root and exported_ok and compile_pass_outcome is None and not did_multi_patch:
             artifacts = export_artifacts(repo_root, top_recipe.source_file, out, pristine_dir=pristine_dir)
 
         # The exported patch is taken back out of the framework. Gated on the
@@ -938,12 +992,18 @@ def run(
         # A compile_pass claim is excluded: it exports and restores inside its own
         # ``_live_file_restored`` transaction, so restoring again here would act on
         # a tree it already put back.
-        if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None:
+        if repo_root and artifacts and artifacts.patch and compile_pass_outcome is None and not did_multi_patch:
             restore_exported_changes(repo_root, artifacts, pristine_dir=pristine_dir)
         # A compile_pass claim runs inside its own restore transaction and authors
         # no modules, so this rollback has nothing to do there and would only file
         # a bogus ".failed" attempt.
-        if repo_root and pristine_dir and compile_pass_outcome is None and _needs_discard(exported_ok, artifacts):
+        if (
+            repo_root
+            and pristine_dir
+            and compile_pass_outcome is None
+            and not did_multi_patch
+            and _needs_discard(exported_ok, artifacts)
+        ):
             # Nothing usable came out, so leave the framework exactly as found
             # rather than carrying unvalidated code into whatever runs next.
             _discard_failed_attempt(repo_root, top_recipe.source_file, out, pristine_dir)
@@ -961,6 +1021,8 @@ def run(
         compile_pass=compile_pass_outcome,
         verdict_override=(LLM_UNAVAILABLE_VERDICT if llm_error is not None else ""),
         error=(llm_error.to_dict() if llm_error is not None else None),
+        patches=patches_out,
+        nomination=nomination_summary,
     )
     if selected_agent is not None:
         manifest["agent_backend"] = selected_agent.name
@@ -1011,6 +1073,249 @@ def run(
         # Hyperloom read the whole run as failed and discard exactly the KEEP this
         # deferral exists to preserve.
         raise SystemExit(EXIT_INFRASTRUCTURE_FAILURE)
+
+
+def _recipe_patch_envelope(patch: RecipePatch, *, repo_root: str) -> dict[str, Any]:
+    """One entry of the manifest ``patches[]`` for an authored fusion sibling.
+
+    Design §3.3: each sibling is a self-contained nomination -- the patch, the file
+    it targets, the root that patch applies against, its pre-authoring snapshot and
+    base commit, and the microbench speedup that ranks it. ``target_file`` is the
+    key the landing queue collapses same-file siblings on.
+    """
+    return {
+        "kernel_name": patch.kernel_name,
+        "patch_path": patch.patch_path,
+        "target_file": patch.source_file,
+        "kernel_repo": repo_root,
+        "snapshot_dir": patch.snapshot_dir,
+        "base_commit": patch.base_commit,
+        "micro_speedup": patch.micro_speedup,
+        "kind": "fusion",
+    }
+
+
+def _compile_pass_envelope(claim, outcome, artifacts, *, repo_root: str) -> dict[str, Any]:
+    """One entry of the manifest ``patches[]`` for a claimed compile pass.
+
+    A claim ships a flipped default in the framework's own source, so its patch is a
+    normal sibling in the queue -- same envelope shape as an authored fusion -- but
+    its speedup is a serving tok/s ratio, not a microbench one, and it carries no
+    runtime env flag. Kept distinct by ``kind`` so the consumer can record its
+    provenance. ``micro_speedup`` is left null (the claim was never microbenched);
+    ``serving_speedup`` carries the A/B tok/s ratio the queue ranks it by.
+    """
+    return {
+        "kernel_name": claim.pattern_id,
+        "patch_path": artifacts.patch if artifacts is not None else None,
+        "target_file": claim.source_file,
+        "kernel_repo": repo_root,
+        "snapshot_dir": "",
+        "base_commit": "",
+        "micro_speedup": None,
+        "serving_speedup": outcome.speedup if outcome is not None else None,
+        "kind": "compile_pass",
+    }
+
+
+def _run_single_compile_pass_claim(
+    claim: Recipe,
+    *,
+    framework: str,
+    framework_root: str,
+    model_path: str,
+    gpu: str,
+    validate: bool,
+    out: Path,
+    isl: int,
+    osl: int,
+    target_speedup: float,
+    repo_root: str,
+    pristine_dir: str,
+    patch_name: str = "fusion.patch",
+) -> tuple[CompilePassOutcome, Optional[FusionArtifacts]]:
+    """Claim ONE compile pass: flip the default, A/B it, export its patch, restore.
+
+    Extracted from the inline single-claim path so the multi-patch nomination can
+    run each claim as its own sibling. The flip edits a LIVE install, so it runs
+    inside ``_live_file_restored`` and the patch is diffed against the pre-run
+    snapshot (not HEAD, which would sweep in unrelated uncommitted edits). Returns
+    the outcome and, when kept, the exported artifacts (else ``None``).
+    """
+    runtime = resolve_target_runtime(framework, framework_root=framework_root)
+    artifacts: Optional[FusionArtifacts] = None
+    with _live_file_restored(claim.source_file):
+        outcome = _run_compile_pass(
+            claim,
+            runtime=runtime,
+            model_path=model_path,
+            gpu=gpu,
+            validate=validate,
+            out=out,
+            isl=isl,
+            osl=osl,
+            target_speedup=target_speedup,
+        )
+        log.info(
+            "compile pass %s: kept=%s speedup=%s note=%s",
+            claim.compile_pass_flag,
+            outcome.kept,
+            outcome.speedup,
+            outcome.note,
+        )
+        if repo_root and outcome.kept:
+            artifacts = export_artifacts(
+                repo_root,
+                claim.source_file,
+                out,
+                pristine_dir=pristine_dir,
+                snapshot_diff_only=True,
+                patch_name=patch_name,
+            )
+    outcome.reverted = True  # the context manager just did it
+    return outcome, artifacts
+
+
+def _mirror_legacy_patch(patch_path: Optional[str], out: Path) -> None:
+    """Copy the strongest sibling patch to the legacy ``out/fusion.patch`` name.
+
+    ``salvage_forge_fusion_from_workspace`` and the wrapper's timeout path both read
+    the literal ``fusion.patch``. The multi-patch path writes ``fusion_<id>.patch``
+    per sibling, so mirroring the strongest one keeps those salvage readers valid
+    without them having to learn the sibling naming. A no-op when the strongest
+    sibling already IS ``fusion.patch`` or when there is no patch.
+    """
+    if not patch_path:
+        return
+    src = Path(patch_path)
+    dst = out / "fusion.patch"
+    try:
+        if src.resolve() == dst.resolve():
+            return
+        if src.is_file():
+            shutil.copy2(src, dst)
+    except OSError as exc:
+        log.warning("could not mirror %s to legacy fusion.patch: %s", patch_path, exc)
+
+
+def _run_multi_patch_nomination(
+    *,
+    claims: list[Recipe],
+    authored: list[Recipe],
+    framework: str,
+    framework_root: str,
+    out: Path,
+    repo_root: str,
+    author: bool,
+    gpu: str,
+    llm_model: Optional[str],
+    target_speedup: float,
+    model_path: str,
+    run_arch: str,
+    agent_backend: str,
+    agent_sandbox_mode: str,
+    server_extra: str,
+    ab_isl: int,
+    ab_osl: int,
+    max_turns: int,
+    pristine_dir: str,
+    tp: int,
+    block_size: int,
+    max_model_len: int,
+    agent_factory,
+) -> tuple[list[dict[str, Any]], Optional[CompilePassOutcome], Optional[LoopResult]]:
+    """Run BOTH pipelines and collect every keeper as an independent sibling.
+
+    Each compile-pass claim is A/B'd and exported as its own patch; the authored
+    recipes run through the kernel autoloop (which serving-smokes each keeper and
+    exports its sibling). Returns ``(patches, strongest_kept_claim_outcome,
+    loop_result)`` where ``patches`` is ordered so the landing queue's same-file
+    collapse keeps the right winner: authored siblings first (kernel-validated,
+    ranked by microbench speedup, already strongest-first from the loop), then
+    kept claims (ranked by serving A/B speedup). The two use different, unrelated
+    speedup metrics, so they are ranked WITHIN their kind rather than against each
+    other; a claim and an authored recipe on the same file collapse in the queue
+    with the authored one -- listed first -- winning.
+    """
+    patches: list[dict[str, Any]] = []
+
+    # Authored recipes first: the autoloop owns the shared git workspace, smokes
+    # each keeper, and returns siblings strongest-first.
+    loop_result: Optional[LoopResult] = None
+    if authored:
+        loop_result = _run_fusion_autoloop(
+            authored,
+            framework=framework,
+            out=out,
+            repo_root=repo_root,
+            author=author,
+            gpu=gpu,
+            llm_model=llm_model,
+            target_speedup=target_speedup,
+            keep_threshold=target_speedup,
+            combine=False,  # multi-patch: one sibling per keeper
+            model_path=model_path,
+            gpu_arch=run_arch,
+            agent_backend=agent_backend,
+            agent_sandbox_mode=agent_sandbox_mode,
+            server_extra=server_extra,
+            ab_isl=ab_isl,
+            ab_osl=ab_osl,
+            max_turns=max_turns,
+            agent_factory=agent_factory,
+            pristine_dir=pristine_dir,
+            tp=tp,
+            block_size=block_size,
+            max_model_len=max_model_len,
+        )
+        for patch in loop_result.patches:
+            patches.append(_recipe_patch_envelope(patch, repo_root=repo_root))
+        log.info(
+            "multi-patch: authored loop kept=%s siblings=%d termination=%s",
+            loop_result.kept,
+            len(loop_result.patches),
+            loop_result.termination_reason,
+        )
+
+    # Then the claims, each its own transaction. A claim edits a config default and
+    # runs a full serving A/B, so it cannot share the autoloop's kernel workspace.
+    kept_claims: list[tuple[float, dict[str, Any]]] = []
+    # Report a claim outcome on the manifest's singular ``compile_pass`` slot even
+    # when nothing kept: a REJECTED claim must still be visible as kept=False, not
+    # dropped to null (which reads as "no claim ran"). Prefer the strongest KEPT
+    # claim; otherwise carry the last rejected one so its verdict survives.
+    reported_outcome: Optional[CompilePassOutcome] = None
+    strongest_kept_speedup = -1.0
+    for claim in claims:
+        outcome, arts = _run_single_compile_pass_claim(
+            claim,
+            framework=framework,
+            framework_root=framework_root,
+            model_path=model_path,
+            gpu=gpu,
+            validate=True,
+            out=out,
+            isl=ab_isl,
+            osl=ab_osl,
+            target_speedup=target_speedup,
+            repo_root=repo_root,
+            pristine_dir=pristine_dir,
+            patch_name=f"fusion_{_safe_artifact_id(claim.pattern_id)}.patch",
+        )
+        if outcome.kept and arts is not None and arts.patch:
+            env = _compile_pass_envelope(claim, outcome, arts, repo_root=repo_root)
+            speedup = outcome.speedup if outcome.speedup is not None else -1.0
+            kept_claims.append((speedup, env))
+            if reported_outcome is None or not reported_outcome.kept or speedup > strongest_kept_speedup:
+                reported_outcome = outcome
+                strongest_kept_speedup = speedup
+        elif reported_outcome is None or not reported_outcome.kept:
+            # Only a rejected claim so far; keep the latest so the manifest is not null.
+            reported_outcome = outcome
+    kept_claims.sort(key=lambda item: item[0], reverse=True)
+    patches.extend(env for _key, env in kept_claims)
+
+    return patches, reported_outcome, loop_result
 
 
 def _combined_recipe(recipes: list[Recipe]) -> Recipe:
@@ -1076,6 +1381,22 @@ def _run_fusion_autoloop(
     """
     originals = {r.pattern_id: r for r in recipes}
     loop_recipes = [_combined_recipe(recipes)] if (combine and len(recipes) > 1) else recipes
+
+    # Per-recipe pristine snapshots for the multi-patch export. Each keeper is
+    # exported the instant it keeps -- before the NEXT campaign's reset_to_base()
+    # wipes its edits from the shared live tree -- by diffing the live source
+    # against its own snapshot. Combine folds everything into ONE recipe, so it
+    # keeps the legacy single-``artifacts`` export at the call site and needs no
+    # per-recipe snapshots here.
+    multi_patch = not combine
+    recipe_pristine: dict[str, str] = {}
+    if multi_patch and repo_root:
+        for r in loop_recipes:
+            snap = _snapshot_fusion_source(
+                repo_root, r.source_file, out, subdir=f".pristine_{_safe_artifact_id(r.pattern_id)}"
+            )
+            if snap:
+                recipe_pristine[r.pattern_id] = snap
 
     # The author aims at ``target_speedup`` (raised when a record was inherited);
     # the gate keeps anything above ``keep_threshold`` (absolute). Splitting them
@@ -1176,6 +1497,71 @@ def _run_fusion_autoloop(
             campaign_experiments[recipe.pattern_id] = outcome.experiment_id
         return outcome.result
 
+    def on_keep(recipe, vr):
+        """Export the just-kept recipe's OWN sibling patch before the next reset.
+
+        The kept edits are live in the shared tree only until the next campaign's
+        ``reset_to_base()``; a run that keeps ->  keeps -> keeps would otherwise
+        end with only the last keeper's edits present. So each keeper is exported
+        here, against its per-recipe pristine snapshot, under a distinct file name
+        so siblings do not overwrite each other. Returning None (no snapshot, or an
+        empty diff) drops that keeper from patches[] without aborting the loop.
+        """
+        if not multi_patch or not repo_root:
+            return None
+        pristine = recipe_pristine.get(recipe.pattern_id, "")
+        if not pristine:
+            log.warning("no pristine snapshot for kept recipe %s; cannot export its sibling", recipe.pattern_id)
+            return None
+        # Export the patch FIRST, while this recipe's edits are still live in the
+        # shared tree (the loop has not reset to base yet). A hard serving fault
+        # below then drops the sibling, but the diff is already captured for the
+        # keepers that survive.
+        patch_name = f"fusion_{_safe_artifact_id(recipe.pattern_id)}.patch"
+        arts = export_artifacts(repo_root, recipe.source_file, out, pristine_dir=pristine, patch_name=patch_name)
+        if not (arts and arts.patch):
+            log.warning("kept recipe %s produced no patch on export", recipe.pattern_id)
+            return None
+        # Serving smoke EACH keeper, not just the strongest: a sibling that boots
+        # and crashes real decode only reveals it on a full server boot, and
+        # Hyperloom's integrate lane is serial at ~25 min per patch. Catching a
+        # crasher here keeps it off that lane entirely. The recipe's wiring is on
+        # disk right now, so the smoke exercises the real fused path. A hard fault
+        # (not_wired / serving_crash) drops the sibling from patches[]; ok and
+        # unconfirmed keep it (unconfirmed faulted the environment, not the kernel).
+        disposition, note, _termination = _run_serving_smoke(
+            recipe,
+            base_note=vr.note or "",
+            framework=framework,
+            out=out,
+            gpu=gpu,
+            model_path=model_path,
+            isl=ab_isl,
+            osl=ab_osl,
+            server_extra=server_extra,
+            tp=tp,
+            block_size=block_size,
+            max_model_len=max_model_len,
+        )
+        vr.note = note
+        if disposition in ("not_wired", "serving_crash"):
+            vr.kept = False
+            vr.kernel_speedup = None
+            if disposition == "serving_crash":
+                vr.correctness_passed = False
+            log.warning(
+                "dropping fusion sibling %s from nomination (%s)", recipe.pattern_id, disposition
+            )
+            return None
+        return RecipePatch(
+            kernel_name=recipe.pattern_id,
+            patch_path=arts.patch,
+            source_file=recipe.source_file,
+            micro_speedup=vr.kernel_speedup,
+            snapshot_dir=pristine,
+            base_commit=shadow.base_commit if shadow is not None else "",
+        )
+
     cfg = LoopConfig(
         max_recipes=len(loop_recipes),
         target_speedup=keep_bar,
@@ -1187,8 +1573,20 @@ def _run_fusion_autoloop(
             framework=framework,
             campaign_fn=campaign_fn,
             config=cfg,
+            on_keep=on_keep if multi_patch else None,
         )
-        if result.kept and result.best_recipe is not None:
+        # The combine path folds everything into ONE recipe whose edits are still
+        # live in the tree, so the strongest (only) keeper is smoked here. The
+        # multi-patch path already smoked EACH keeper inside ``on_keep`` while its
+        # edits were live -- by the time the loop returns, ``reset_to_base`` has
+        # wiped every keeper but the last from the tree, so a serving gate on
+        # ``best_recipe`` would boot against the wrong (or unfused) source. Restore
+        # the framework install to base instead: Hyperloom applies the exported
+        # sibling patches itself, and any leftover edits would poison the next lane.
+        if multi_patch:
+            if shadow is not None:
+                shadow.reset_to_base()
+        elif result.kept and result.best_recipe is not None:
             apply_serving_gate(
                 result,
                 framework=framework,
@@ -1258,11 +1656,7 @@ def apply_serving_gate(
     if not (_serving_check_enabled() and model_path and result.best_recipe):
         return
     recipe = result.best_recipe
-    flags = {f: "1" for f in recipe.env_flag.split()}
-    safe_id = _safe_artifact_id(recipe.pattern_id)
     vr = result.best
-    smoke_block = int(block_size) if int(block_size or 0) > 0 else None
-    smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Export BEFORE the smoke, so a forge-fuse killed while serving still leaves an
     # applicable patch. ``pristine_dir`` is what makes that possible on a non-git
     # framework (a pip install has nothing for `git diff` to report), and the
@@ -1281,14 +1675,77 @@ def apply_serving_gate(
             "no fusion patch could be exported for %s; a killed run cannot be salvaged",
             recipe.pattern_id,
         )
+    disposition, note, termination = _run_serving_smoke(
+        recipe,
+        base_note=vr.note,
+        framework=framework,
+        out=out,
+        gpu=gpu,
+        model_path=model_path,
+        isl=isl,
+        osl=osl,
+        server_extra=server_extra,
+        tp=tp,
+        block_size=block_size,
+        max_model_len=max_model_len,
+    )
+    vr.note = note
+    if termination:
+        result.termination_reason = termination
+    # A fusion nothing calls (not_wired) or one that faults CUDA-graph decode
+    # (serving_crash) is not a real KEEP: demote it so Hyperloom never boots it.
+    if disposition in ("not_wired", "serving_crash"):
+        result.kept = False
+        vr.kept = False
+        vr.kernel_speedup = None
+        if disposition == "serving_crash":
+            vr.correctness_passed = False
+        _clear_kernel_keep_checkpoint(out)
+
+
+def _run_serving_smoke(
+    recipe,
+    *,
+    base_note: str,
+    framework: str,
+    out: Path,
+    gpu: str,
+    model_path: str,
+    isl: int,
+    osl: int,
+    server_extra: str = "",
+    tp: int = 1,
+    block_size: int = 0,
+    max_model_len: int = 0,
+) -> tuple[str, str, str]:
+    """Wiring-check + CUDA-graph-ON serving smoke for ONE recipe.
+
+    Extracted from :func:`apply_serving_gate` so the multi-patch path can gate
+    EACH keeper sibling with the same crash detection the combine path applies to
+    ``best_recipe`` -- a sibling that boots-and-crashes only reveals it on a real
+    server boot, so catching it here (off Hyperloom's serial ~25-min-per-patch
+    integrate lane) is strictly cheaper than deferring it. This runs the smoke and
+    reports a verdict WITHOUT mutating any ``LoopResult``; the caller decides what a
+    hard fault means for its own bookkeeping (demote the single KEEP, or drop the
+    sibling from ``patches[]``).
+
+    Returns ``(disposition, note, termination_reason)`` where ``disposition`` is
+    one of ``ok`` / ``unconfirmed`` / ``not_wired`` / ``serving_crash``. ``note`` is
+    ``base_note`` with the smoke outcome appended (the lesson text the autoloop
+    ledger feeds the next author). ``not_wired`` and ``serving_crash`` are hard
+    faults; ``ok`` and ``unconfirmed`` keep the recipe (an unconfirmed smoke faulted
+    the environment, not the kernel, so Hyperloom e2e stays the KEEP/REVERT gate).
+    """
+    flags = {f: "1" for f in recipe.env_flag.split()}
+    safe_id = _safe_artifact_id(recipe.pattern_id)
+    smoke_block = int(block_size) if int(block_size or 0) > 0 else None
+    smoke_mml = int(max_model_len) if int(max_model_len or 0) > 0 else 4096
     # Cheapest gate first, and the only one that catches a fusion nothing calls:
     # the smoke would boot, decode and PASS, because stock code is what ran.
     wired, wiring = fused_symbol_invocation_evidence(getattr(recipe, "source_file", ""))
     if not wired:
-        result.kept = False
-        vr.kept = False
-        vr.kernel_speedup = None
-        vr.note = (
+        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
+        note = (
             f"KERNEL OK but NOT WIRED IN: {wiring}. The microbench measured the fused "
             f"entry point directly, so its speedup says nothing about the served model, "
             f"whose end-to-end gain is exactly zero. | LESSON: authoring the fused module "
@@ -1296,10 +1753,7 @@ def apply_serving_gate(
             f"forward path with a call to the fused entry point, under the same env gate, "
             f"and leave the unfused code as the fallback branch."
         )
-        result.termination_reason = "not_wired"
-        _clear_kernel_keep_checkpoint(out)
-        log.warning("fusion not wired into %s: %s", recipe.pattern_id, wiring)
-        return
+        return "not_wired", note, "not_wired"
     log.info("fusion wiring confirmed for %s: %s", recipe.pattern_id, wiring)
     verdict = serving_smoke_verdict(
         model_path,
@@ -1316,15 +1770,11 @@ def apply_serving_gate(
     )
     reason = verdict.reason
     if verdict.ok:
-        vr.note = f"{vr.note} | SERVING SMOKE OK"
         log.info("serving smoke OK for %s", recipe.pattern_id)
-        return
+        return "ok", f"{base_note} | SERVING SMOKE OK", ""
     if verdict.blames_kernel:
-        result.kept = False
-        vr.kept = False
-        vr.correctness_passed = False
-        vr.kernel_speedup = None
-        vr.note = (
+        log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
+        note = (
             f"KERNEL OK but SERVING CRASHED (CUDA-graph-ON decode): {reason} "
             f"| LESSON: the kernel is NOT CUDA-graph-capture safe. Use a STATIC "
             f"launch grid (no data-dependent grid size), pre-allocate every "
@@ -1332,23 +1782,20 @@ def apply_serving_gate(
             f"torch.empty/zeros/cat), avoid host<->device syncs, and index "
             f"strictly in bounds for every token count. Re-author CUDA-graph safe."
         )
-        result.termination_reason = "serving_crash"
-        _clear_kernel_keep_checkpoint(out)
-        log.warning("serving smoke FAILED for %s: %s", recipe.pattern_id, reason)
-        return
-    vr.note = (
-        f"{vr.note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
-        f"(defer e2e): {reason} | LESSON: the GPU did not fault, so nothing here "
-        f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
-        f"e2e is the KEEP/REVERT gate."
-    )
-    result.termination_reason = "serving_unconfirmed"
+        return "serving_crash", note, "serving_crash"
     log.warning(
         "serving smoke unconfirmed for %s at stage %s (keeping micro KEEP): %s",
         recipe.pattern_id,
         verdict.stage,
         reason,
     )
+    note = (
+        f"{base_note} | SERVING SMOKE UNCONFIRMED at stage {verdict.stage} "
+        f"(defer e2e): {reason} | LESSON: the GPU did not fault, so nothing here "
+        f"is evidence against the kernel. Do not re-author to fix it; Hyperloom "
+        f"e2e is the KEEP/REVERT gate."
+    )
+    return "unconfirmed", note, "serving_unconfirmed"
 
 
 def validate_existing_source(

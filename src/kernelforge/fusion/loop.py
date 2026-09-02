@@ -486,6 +486,15 @@ def run_fusion_loop(
                 note=f"CAMPAIGN FAILED: {type(e).__name__}: {e}",
             )
 
+        # Export + gate the keeper BEFORE recording it, so a hook that demotes the
+        # sibling (e.g. a serving-smoke crash) is reflected in ``history`` and in
+        # the ``best``/``kept_any`` decisions below rather than leaving stale KEEP
+        # state. ``on_keep`` may mutate ``vr`` (flip ``kept`` off, clear speedup)
+        # and returns the exported patch, or None when the sibling is dropped.
+        patch: Optional[RecipePatch] = None
+        if vr.kept and on_keep is not None:
+            patch = on_keep(recipe, vr)
+
         lesson = _default_lesson(vr)
         outcome = _outcome_label(vr)
         ledger.record(label=label, outcome=outcome, error_text=vr.note, lesson=lesson, best_so_far=best_ctx)
@@ -514,13 +523,11 @@ def run_fusion_loop(
             # combine-path callers (which ignore patches[]) still see it.
             if _is_better_fallback(vr, best_result):
                 best_result, best_recipe = vr, recipe
-            if on_keep is not None:
-                patch = on_keep(recipe, vr)
-                if patch is not None:
-                    # None speedup sorts weakest so a measured keeper always
-                    # outranks an unmeasured one.
-                    sort_key = vr.kernel_speedup if vr.kernel_speedup is not None else -1.0
-                    kept_patches.append((sort_key, patch))
+            if patch is not None:
+                # None speedup sorts weakest so a measured keeper always
+                # outranks an unmeasured one.
+                sort_key = vr.kernel_speedup if vr.kernel_speedup is not None else -1.0
+                kept_patches.append((sort_key, patch))
             # Do NOT early-exit: the remaining recipes are independent siblings.
             continue
 

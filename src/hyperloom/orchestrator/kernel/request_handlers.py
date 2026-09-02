@@ -4739,7 +4739,9 @@ async def _run_forge_fusion(payload: dict, *, session_dir: Path) -> HandlerResul
         "max_turns": max_turns,
         "gpu": gpu,
         "timeout": timeout,
-        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", True)),
+        # Multi-patch (one independent sibling per recipe) is the default; the
+        # combine escape hatch (a single merged patch) must be requested explicitly.
+        "fuse_all_confirmed": bool(payload.get("fuse_all_confirmed", False)),
         "verbose": bool(payload.get("verbose", False)),
         **_fusion_session_serve_args(state, payload, framework=framework, model_path=model_path),
     }

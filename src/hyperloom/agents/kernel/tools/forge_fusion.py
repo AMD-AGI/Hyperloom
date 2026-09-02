@@ -165,9 +165,12 @@ def _build_cmd(args: dict[str, Any]) -> list[str]:
     _add_opt(cmd, args, "tp", "--tp")
     _add_opt(cmd, args, "block_size", "--block-size")
     _add_opt(cmd, args, "max_model_len", "--max-model-len")
-    # Author all source-confirmed patterns together by default; set
-    # fuse_all_confirmed=false to author only the top recipe.
-    if bool(args.get("fuse_all_confirmed", True)):
+    # Nominate one independent sibling patch per confirmed pattern by default
+    # (the multi-patch contract). ``fuse_all_confirmed`` is the explicit combine
+    # escape hatch: pass it true to fold every confirmed fusion into ONE stacked
+    # patch. Default False so the auto path stays byte-identical to a run that
+    # never set the flag, and only an explicit combine request appends it.
+    if bool(args.get("fuse_all_confirmed", False)):
         cmd.append("--fuse-all-confirmed")
     if truthy(args.get("verbose", False)):
         cmd.append("--verbose")
@@ -286,10 +289,17 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
 
     loop = m.get("fusion_loop") or {}
     compile_pass = m.get("compile_pass") or {}
+    # The nomination envelope: a list (possibly empty) on the multi-patch path,
+    # None on the combine / single-patch path. When present it is the source of
+    # truth for ``kept`` -- a run keeps when it nominated at least one sibling,
+    # independent of whether the strongest happened to ride in ``fusion_loop`` or
+    # ``compile_pass``.
+    patches = m.get("patches")
+    multi_patch = isinstance(patches, list)
     # KernelForge runs the compile-pass shortcut INSTEAD of the authoring loop, so
     # exactly one of these is populated. ``validation`` is not consulted: it is the
     # same object as ``fusion_loop.best``.
-    kept = bool(loop.get("kept") or compile_pass.get("kept"))
+    kept = bool(patches) if multi_patch else bool(loop.get("kept") or compile_pass.get("kept"))
 
     if str(m.get("verdict") or "").strip().lower() == LLM_UNAVAILABLE_VERDICT and not kept:
         # forge-fusion never reached the model, so this run holds no opinion about the
@@ -371,6 +381,14 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
     artifacts = m.get("artifacts") or {}
     changed = [c.get("path") for c in (artifacts.get("changes") or []) if c.get("path")]
     src_file = str((m.get("fusion") or {}).get("source_file") or "")
+    if multi_patch and patches:
+        # On the multi-patch path the producer mirrors the STRONGEST sibling into the
+        # singular ``artifacts`` slot, but ``fusion.source_file`` still names the
+        # top RECIPE -- which may be a compile-pass claim whose file differs from the
+        # strongest authored patch. Realign the singular target with the mirrored
+        # patch so the singular fallback (salvage / singular-only caller) stays
+        # self-consistent: same patch, same target.
+        src_file = str(patches[0].get("target_file") or patches[0].get("source_file") or src_file)
 
     if compile_pass:
         # The win is a flipped default in the framework's own source, so the patch
@@ -436,6 +454,19 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
             "requires_e2e_validation": kept,
         }
     )
+
+    if multi_patch:
+        # Carry the sibling envelopes through untouched so the consumer can enqueue
+        # each independently. The singular ``patch``/``source_file``/``kernel_repo``
+        # slots above still describe the STRONGEST sibling (the producer mirrors it
+        # into ``artifacts`` for exactly this fallback), so a caller that only reads
+        # the singular contract still lands the best patch; a nomination-aware caller
+        # reads ``patches`` and lands them all. ``nomination`` is a run summary
+        # (candidates_seen / resolved / selected) for reporting only.
+        result["patches"] = [dict(p) for p in patches]
+        nomination = m.get("nomination")
+        result["nomination"] = dict(nomination) if isinstance(nomination, dict) else None
+
     return result
 
 
