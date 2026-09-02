@@ -7,10 +7,13 @@ import asyncio
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import kernelforge.kernel_rewrite_controller.opportunity_agent as opportunity_agent_module
 from kernelforge.agent_backends.base import (
     AgentCapabilities,
     AgentRunResult,
@@ -23,6 +26,7 @@ from kernelforge.kernel_rewrite_controller.opportunity_agent import (
     ANALYSIS_STATUS_TIMED_OUT,
     OpportunityAnalysisAgent,
     _StagingProtection,
+    run_opportunity_analysis,
 )
 from kernelforge.knowledge.kernel_identity import (
     KernelRecipeIdentity,
@@ -142,6 +146,50 @@ def test_agent_publishes_complete_tasks_and_pins_repo_head(tmp_path: Path) -> No
     assert payload["driver_path"] == "driver.py"
     assert backend.spec.tool_policy.shell is False
     assert backend.spec.hooks is not None
+
+
+def test_backend_model_probe_receives_an_existing_agent_directory(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    layout = ControllerLayout(tmp_path / "output")
+    backend = _Backend(lambda _staging: None)
+    runtime = AgentRuntimeConfig(provider="fake", model="fake")
+    config = SimpleNamespace(
+        max_turns=20,
+        agent_runtime=lambda: runtime,
+    )
+
+    monkeypatch.setattr(
+        opportunity_agent_module.Config,
+        "from_env",
+        lambda **_kwargs: config,
+    )
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "with_writable_sandbox",
+        lambda selected: selected,
+    )
+
+    def _create_backend(selected_runtime, *, probe_cwd):
+        assert selected_runtime is runtime
+        assert Path(probe_cwd).is_dir()
+        return backend
+
+    monkeypatch.setattr(
+        opportunity_agent_module,
+        "create_registered_backend",
+        _create_backend,
+    )
+
+    result = run_opportunity_analysis(
+        handoff=_handoff(tmp_path),
+        layout=layout,
+        controller_deadline_unix=time.time() + 60,
+    )
+
+    assert result.status == ANALYSIS_STATUS_COMPLETED
+    assert (layout.agent_root / "analysis-result.json").is_file()
 
 
 def test_agent_failure_still_publishes_a_complete_task(tmp_path: Path) -> None:

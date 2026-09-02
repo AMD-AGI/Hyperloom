@@ -298,6 +298,7 @@ def run_opportunity_analysis(
     """Run the opportunity Agent within the one-hour/controller deadline cap."""
     remaining = max(0.0, float(controller_deadline_unix) - time.time())
     timeout_sec = max(1, int(min(ANALYSIS_BUDGET_SEC, remaining)))
+    layout.agent_root.mkdir(parents=True, exist_ok=True)
     try:
         selected_backend = backend
         config = None
@@ -324,7 +325,6 @@ def run_opportunity_analysis(
             started_at_unix=time.time(),
             finished_at_unix=time.time(),
         )
-        layout.agent_root.mkdir(parents=True, exist_ok=True)
         _write_analysis_result(layout, result)
         return result
 
