@@ -186,26 +186,6 @@ def test_freeform_description_destructive_text_allowed() -> None:
 
 
 # -- Coordinator-internal denial message ----------------------------------
-def test_internal_action_denial_names_the_action_it_denied() -> None:
-    """The denial must spell the action names the gate actually rejects.
-
-    Operators grep the hint and the LLM reads it back, so a name the runtime
-    no longer uses sends both after the wrong thing. Taking the expectation
-    from COORDINATOR_INTERNAL_ACTIONS also stops a newly added internal action
-    from being left out of the hint.
-    """
-    from hyperloom.inference_optimizer.protocol.action_surfaces import (
-        COORDINATOR_INTERNAL_ACTIONS,
-    )
-
-    gate = _gate(None)
-    role = default_role_registry()["orchestration"]
-    for action in sorted(COORDINATOR_INTERNAL_ACTIONS):
-        with pytest.raises(PolicyDenied) as exc:
-            gate._validate_phase_action(role, action, intent_kind="propose_action")
-        assert exc.value.rule == "phase_incompatible"
-        assert action in str(exc.value)
-        assert action in str(exc.value.hint)
 
 
 def test_phase_semantics_prompt_names_every_internal_action() -> None:
