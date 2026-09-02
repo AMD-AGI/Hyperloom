@@ -34,7 +34,7 @@ from hyperloom.agents.kernel.tools._capture_shapes import (
     is_capture_fragment as _shared_is_capture_fragment,
 )
 from hyperloom.common import codex_session, llm_config
-from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy
+from hyperloom.common.env import env_bool, forge_explicitly_enabled, is_truthy, nomination_auto_enabled
 from hyperloom.common.git_safety import safe_directory_args
 from hyperloom.common.io import append_jsonl
 from hyperloom.common.kernel_shape_contract import (
@@ -84,7 +84,9 @@ from ._kernel_decisions import (
     is_collective_candidate as is_collective_candidate,
     unattempted_skip_reason as unattempted_skip_reason,
     SUPPORTED_COLLECTIVE_OPS as SUPPORTED_COLLECTIVE_OPS,
+    enqueue_nominated_patch as enqueue_nominated_patch,
 )
+from .nomination_result import parse_outcome as parse_outcome
 from ..state.kernel_decision_settings import (
     effective_hot_kernel_gpu_pct,
     effective_hot_kernel_min_gpu_pct,
@@ -5816,6 +5818,122 @@ def _write_nomination_request(
     return nomination_request.write_request(Path(session_dir), request)
 
 
+def _land_nomination_outcome(result: dict, *, session_dir: Path) -> int:
+    """Queue every rewrite sibling forge nominated for the shared integrate lane.
+
+    The consumer half of the ``--auto`` contract, mirroring ``_integrate_fusion``
+    (phases/kernel.py) but on the REWRITE lane: parse the forge envelope with the
+    generic ``parse_outcome``, then enqueue each patch as a ``status="pending"``
+    integrate record. The SWEEP-entry drain (``_drain_pending_keep_integrates``)
+    applies, re-benches, and decides KEEP/REVERT per patch later -- nothing is
+    integrated inline here.
+
+    Crucially the lane is ``"rewrite"``, NOT ``"fusion"``: a rewrite patch stamped
+    with the fusion fields would lift as ``action="fusion"`` and be misfiled into
+    the fusion Recipe column (and flip ``last_fusion_integrate``). The rewrite lane
+    omits those fields so the KEEP lifts as the generic ``action="integrate"``.
+
+    Args:
+        result: The raw forge ``--auto`` envelope (``patches[]`` + ``nomination``).
+        session_dir: Session directory whose SharedState the records live in.
+
+    Returns:
+        The number of siblings queued.
+    """
+    from ..state.shared_state import SharedState
+
+    outcome = parse_outcome(result)
+    if outcome.is_empty:
+        return 0
+    state = SharedState.load_or_init(session_dir)
+    queued = 0
+    for patch in outcome.patches:
+        record = enqueue_nominated_patch(state, patch=patch, lane=LANE_REWRITE)
+        if record is not None:
+            queued += 1
+    try:
+        state.save(session_dir)
+    except Exception:  # noqa: BLE001 - best-effort persist; the drain reloads state
+        log.exception("nomination landing: could not persist queued patches")
+    return queued
+
+
+async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> HandlerResult:
+    """Drive the KERNEL rewrite lane through forge self-nomination (``--auto``).
+
+    The ``auto=true`` sibling of the selector path, composed from the producers
+    and the landing glue. It never touches ``_batch_kernel_candidates`` /
+    ``_run_optimization_single`` / the single-kernel stamping -- forge, not
+    Hyperloom, picks the kernels here:
+
+    1. Project the candidate list into the manifest forge reads.
+    2. Derive the rewrite lane's budget from the time actually left; an unbounded
+       session funds nothing, so there is nothing to nominate -- skip cleanly
+       rather than send forge a zero-budget brief.
+    3. Write the request that ties trace + manifest + budget together.
+    4. Run ``forge-loop --auto`` and take back its raw ``patches[]`` envelope.
+    5. Queue each sibling for the shared integrate lane; the SWEEP-entry drain
+       decides KEEP/REVERT later.
+
+    Args:
+        payload: The run_optimization request payload.
+        session_dir: Session directory for state, manifest, request and workspace.
+
+    Returns:
+        A ``HandlerResult`` reporting how many siblings were queued, or a
+        ``skipped``/``failed`` status when there was no budget or no manifest.
+    """
+    from ..state.shared_state import SharedState
+    from ...agents.kernel.tools.backends import forge_submit
+    from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_dir
+
+    manifest_path = _write_forge_candidate_manifest(payload, session_dir=session_dir)
+    if manifest_path is None:
+        return {"status": "skipped", "reason": "no_candidates"}
+
+    state = SharedState.load_or_init(session_dir)
+    allocation = _nomination_lane_budget(state)
+    if not allocation.is_fundable:
+        # Unbounded / exhausted budget -> zero targets. build_request would reject
+        # a zero-budget brief, and forge has nothing to pick, so stop here.
+        return {"status": "skipped", "reason": "no_budget"}
+
+    request_path = _write_nomination_request(
+        payload,
+        session_dir=session_dir,
+        manifest_path=manifest_path,
+        allocation=allocation,
+    )
+
+    workspace_path = payload.get("workspace_path") or str(session_dir)
+    Path(workspace_path).mkdir(parents=True, exist_ok=True)
+    output_dir = kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name)) / "auto"
+    target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
+
+    result = forge_submit.submit_auto(
+        nomination_input=str(request_path),
+        workspace=workspace_path,
+        output_dir=output_dir,
+        timeout_s=_optimization_wrapper_timeout_sec(payload),
+        gpu_type=target_platform,
+    )
+
+    queued = _land_nomination_outcome(result, session_dir=session_dir)
+    nomination = result.get("nomination") if isinstance(result, dict) else None
+    # GUARD (12g): forge nominated N siblings that each land as their own pending
+    # record. This result must NOT carry a single-kernel identity (kernel_id /
+    # kernel_id_pinned / requested_kernel_id) -- there is no one dispatched kernel
+    # here. If a future refactor folds this back through _run_optimization_single,
+    # those stamps would misattribute every sibling to one phantom kernel_id;
+    # test_forge_nomination_dispatch asserts their absence.
+    return {
+        "status": "complete",
+        "auto": True,
+        "queued": queued,
+        "nomination": nomination if isinstance(nomination, dict) else {},
+    }
+
+
 async def run_optimization_handler(
     payload: dict,
     *,
@@ -5846,6 +5964,11 @@ async def run_optimization_handler(
         return data_guard
     if payload.get("_single_kernel"):
         return await _run_optimization_single(payload, session_dir=session_dir)
+    # auto=true: forge picks the kernels via nomination. Off by default, so an
+    # unset env falls straight through to the selector path below unchanged. A
+    # ``_single_kernel`` request (an explicit named kernel) is never auto-routed.
+    if nomination_auto_enabled():
+        return await _run_optimization_auto(payload, session_dir=session_dir)
     dispatch_skips: dict[str, str] = {}
     candidates = _batch_kernel_candidates(
         payload,

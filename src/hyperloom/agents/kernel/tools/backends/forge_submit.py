@@ -5006,3 +5006,171 @@ def submit(
             )
         except Exception:
             log.exception("forge workspace finalization failed")
+
+
+def submit_auto(
+    *,
+    nomination_input: str,
+    workspace: str,
+    output_dir: Path,
+    timeout_s: int = 1800,
+    gpu_target: str = "",
+    gpu_type: str = "",
+    kernel_backend: str = "",
+) -> dict:
+    """Run forge's ``--auto`` self-nomination loop and return its raw envelope.
+
+    Sibling of :func:`submit`, not a variant of it. The named-kernel path is
+    predicated from its first lines on a ``source_file`` + ``candidate`` and a
+    prepared worktree, so ``--auto`` -- which hands forge no kernel and lets it
+    pick from the nomination -- cannot flow through it. This entry instead builds
+    the ``forge-loop`` argv directly, OMITTING ``--kernel``/``--driver``/
+    ``--source-files`` (forge derives the target from the nomination), and adding
+    ``--auto --nomination-input <path>``. The two ends agree only by the static
+    ``PROTOCOL_VERSION`` the request carries; there is no capability probe.
+
+    Containment mirrors :func:`_run_loop_via_cli` -- child env, isolated process
+    group, absolute deadline, escalating termination, ``__FORGE_RESULT__`` /
+    ``--result-json`` parsing. Unlike ``submit``/``_run_loop_via_cli`` it returns
+    the parsed forge envelope UNCHANGED (``{"patches": [...], "nomination": {...},
+    "improved": bool}``) rather than collapsing it to a scalar
+    ``ForgeLoopOutcome``: the handler needs every sibling patch, so nothing may be
+    lost in a single-best normalization.
+
+    Args:
+        nomination_input: Path to the ``forge_nomination_input.json`` request.
+        workspace: Git workspace dir the loop runs in.
+        output_dir: Where diagnostics/checkpoints and the result sidecar live.
+        timeout_s: Wall-clock budget; the child is hard-killed at the deadline.
+        gpu_target: gfx arch override; resolved from env/probe when empty.
+        gpu_type: Hardware model override; resolved from env when empty.
+        kernel_backend: Kernel-backend override; forge picks its own when empty.
+
+    Returns:
+        The forge result envelope on success, or a minimal
+        ``{"status": "failed"|"timeout", "patches": [], "error": ...}`` when the
+        child never produced one.
+    """
+    started = time.time()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    experiments_dir = output_dir / "forge_experiments"
+    experiments_dir.mkdir(parents=True, exist_ok=True)
+    forge_log = output_dir / "forge_loop.log"
+    result_json = experiments_dir.parent / "forge_cli_result.json"
+    try:
+        result_json.unlink(missing_ok=True)
+    except OSError as exc:
+        raise RuntimeError(f"could not clear stale forge result artifact {result_json}: {exc}") from exc
+
+    resolved_target = (gpu_target or "").strip() or _resolve_gpu_target({})
+    resolved_type = (gpu_type or "").strip() or _resolve_gpu_type({})
+    branch = _new_forge_branch(output_dir, "auto-nomination")
+    deadline_unix = max(time.time() + 1.0, started + timeout_s)
+
+    env = dict(os.environ)
+    env["GPU_TARGET"] = resolved_target
+    _apply_gpu_type_env(env, resolved_type)
+    _apply_kernel_backend_env(env)
+    env.setdefault("GIT_AUTHOR_NAME", "forge-bot")
+    env.setdefault("GIT_AUTHOR_EMAIL", "forge-bot@local")
+    env.setdefault("GIT_COMMITTER_NAME", "forge-bot")
+    env.setdefault("GIT_COMMITTER_EMAIL", "forge-bot@local")
+
+    cmd = [
+        sys.executable,
+        "-m",
+        "kernelforge.cli",
+        "forge-loop",
+        "--auto",
+        "--nomination-input",
+        str(Path(nomination_input).resolve()),
+        "--workspace",
+        workspace,
+        "--max-hours",
+        str(max(_FORGE_MIN_BUDGET_SEC / 3600.0, timeout_s / 3600.0)),
+        "--git-branch",
+        branch,
+        "--gpu-target",
+        resolved_target,
+        "--gpu-type",
+        _known_gpu_model(resolved_type),
+        "--experiments-dir",
+        str(experiments_dir),
+        "--experiment-id",
+        _FORGE_EXPERIMENT_ID,
+        "--experience-id",
+        output_dir.name,
+        "--deadline-unix",
+        str(deadline_unix),
+        "--result-json",
+        str(result_json),
+    ]
+    if kernel_backend.strip():
+        cmd += ["--kernel-backend", kernel_backend.strip()]
+
+    from hyperloom.common.llm_config import resolve_forge_llm_model
+
+    if _openai_only_provider():
+        cmd += ["--agent-backend", "codex", "--agent-fallback-provider", "none"]
+        forge_model = resolve_forge_llm_model("codex")
+    else:
+        forge_model = resolve_forge_llm_model("claude")
+    if forge_model:
+        cmd += ["--model", forge_model]
+
+    loop_exc: Exception | None = None
+    out = ""
+    timed_out = False
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=workspace,
+            start_new_session=True,
+        )
+        try:
+            remaining = max(1.0, deadline_unix - time.time())
+            stdout, stderr = proc.communicate(timeout=remaining)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            stdout, stderr = _terminate_forge_process(proc)
+        out = (stdout or "") + "\n" + (stderr or "")
+        if timed_out:
+            loop_exc = RuntimeError(f"forge-loop --auto exceeded absolute deadline after {timeout_s}s")
+        elif proc.returncode != 0:
+            loop_exc = RuntimeError(f"forge-loop --auto exited rc={proc.returncode}: {_forge_failure_tail(out)}")
+    except Exception as exc:  # noqa: BLE001
+        loop_exc = exc
+
+    try:
+        with open(forge_log, "a") as f:
+            f.write("\n=== forge-loop --auto (cli) stdout ===\n")
+            f.write(out)
+            if loop_exc:
+                f.write(f"\n=== forge-loop --auto exception ===\n{loop_exc}\n")
+    except OSError:  # noqa: S110
+        pass
+
+    parsed = None
+    try:
+        if result_json.exists():
+            parsed = json.loads(result_json.read_text())
+    except Exception:
+        parsed = None
+    if parsed is None and "__FORGE_RESULT__" in out:
+        try:
+            parsed = json.loads(out.split("__FORGE_RESULT__")[1])
+        except Exception:
+            parsed = None
+    if isinstance(parsed, dict):
+        # The raw envelope is what the handler lands; forge owns its shape.
+        return parsed
+    return {
+        "status": "timeout" if timed_out else "failed",
+        "patches": [],
+        "error": str(loop_exc) if loop_exc else "forge-loop --auto produced no result",
+    }

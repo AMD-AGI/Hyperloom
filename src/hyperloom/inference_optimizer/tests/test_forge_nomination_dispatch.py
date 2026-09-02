@@ -1,0 +1,249 @@
+# SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
+# SPDX-License-Identifier: MIT
+
+"""The auto=true / auto=false fork in run_optimization_handler, end to end.
+
+These lock in the whole Step-12 wiring: with the nomination env set, the handler
+projects the candidate list into the manifest forge reads, derives the rewrite
+budget, writes the request, runs ``forge-loop --auto`` (mocked at the subprocess
+boundary only) and queues every returned sibling for the shared integrate lane.
+With the env unset, none of that happens and the legacy selector path runs
+unchanged.
+
+Only the subprocess is mocked. The real SharedState, real candidate artifact,
+real producers, and the real ``enqueue_nominated_patch`` queue all run.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+from hyperloom.orchestrator.kernel import request_handlers as krh
+from hyperloom.orchestrator.state.shared_state import SharedState
+
+_AUTO_ENV = "HYPERLOOM_FORGE_NOMINATION_AUTO"
+
+
+def _row(kernel_id: str, **overrides: Any) -> dict[str, Any]:
+    row: dict[str, Any] = {
+        "kernel_id": kernel_id,
+        "name": f"{kernel_id}_kernel",
+        "gpu_pct": 12.0,
+        "source_file": f"/repo/{kernel_id}.py",
+        "reusable_native_kernel": True,
+        "skip_reason": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def _candidates(session_dir: Path, rows: list[dict[str, Any]]) -> Path:
+    path = session_dir / "kernel_candidates.json"
+    path.write_text(json.dumps({"hot_kernels": rows}), encoding="utf-8")
+    return path
+
+
+def _seed_state(session_dir: Path, *, trace: Path, max_minutes: float | None = 600.0) -> None:
+    state = SharedState.load_or_init(session_dir)
+    if max_minutes is not None:
+        state.max_minutes = max_minutes
+    state.last_profile_trace = str(trace)
+    state.save(session_dir)
+
+
+def _canned_envelope(patches: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "patches": patches,
+        "nomination": {"candidates_seen": 3, "resolved": 2, "selected": len(patches)},
+        "improved": bool(patches),
+    }
+
+
+def _patch_entry(kernel: str, *, micro: float) -> dict[str, Any]:
+    """A forge envelope patch row that parse_outcome accepts and that has a real
+    on-disk artifact + target so enqueue_nominated_patch queues it."""
+    return {
+        "kernel_name": f"{kernel}_kernel",
+        "patch_path": f"/repo/{kernel}.patch",
+        "target_file": f"/repo/{kernel}.py",
+        "micro_speedup": micro,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# auto=true
+# --------------------------------------------------------------------------- #
+def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, monkeypatch):
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(
+        tmp_path,
+        [
+            _row("k001", gpu_pct=30.0),
+            # An unroutable row: the manifest must keep it as a superset even
+            # though the selector would drop it.
+            _row("k002", source_file="", reusable_native_kernel=False, skip_reason="source file not resolved"),
+        ],
+    )
+    _seed_state(tmp_path, trace=trace)
+
+    seen: dict[str, Any] = {}
+
+    def _fake_submit_auto(**kwargs: Any) -> dict[str, Any]:
+        seen.update(kwargs)
+        return _canned_envelope([_patch_entry("k001", micro=8.0), _patch_entry("k009", micro=3.0)])
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", _fake_submit_auto)
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+
+    # The handler reports the auto outcome, not a single-kernel result.
+    assert result["status"] == "complete"
+    assert result["auto"] is True
+    assert result["queued"] == 2
+    # No single-kernel stamping leaked onto the auto result (12g invariant).
+    assert "kernel_id" not in result
+    assert "kernel_id_pinned" not in result
+    assert "requested_kernel_id" not in result
+
+    # The manifest was written and keeps the unroutable row (superset).
+    manifest = json.loads((tmp_path / "forge_candidate_manifest.json").read_text(encoding="utf-8"))
+    by_id = {entry["kernel_id"]: entry for entry in manifest["hot_kernels"]}
+    assert set(by_id) == {"k001", "k002"}
+
+    # The request points forge at the MANIFEST, carries a real budget, protocol 1.
+    request = json.loads((tmp_path / "forge_nomination_input.json").read_text(encoding="utf-8"))
+    assert request["lane"] == "rewrite"
+    assert Path(request["candidates_path"]) == (tmp_path / "forge_candidate_manifest.json").resolve()
+    assert request["lane_budget_sec"] > 0
+    assert request["max_kernels"] == request["lane_budget_sec"] // 4500
+    assert request["protocol_version"] == 1
+
+    # submit_auto was handed the request path, not a named kernel.
+    assert Path(seen["nomination_input"]) == (tmp_path / "forge_nomination_input.json")
+
+    # Both siblings landed as pending integrate records on the REWRITE lane (no
+    # fusion stamping), so the drain will lift them as action="integrate".
+    state = SharedState.load_or_init(tmp_path)
+    records = list(state.pending_kernel_integrations.values())
+    assert len(records) == 2
+    for record in records:
+        assert record["status"] == "pending"
+        assert record.get("source") != "forge_fusion"
+        assert "action_label" not in record
+        assert record["task_key"].startswith("forge_rewrite:")
+
+
+def test_auto_true_empty_nomination_queues_nothing(tmp_path, monkeypatch):
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(forge_submit, "submit_auto", lambda **_: _canned_envelope([]))
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result["status"] == "complete"
+    assert result["queued"] == 0
+    state = SharedState.load_or_init(tmp_path)
+    assert not state.pending_kernel_integrations
+
+
+def test_auto_true_unbounded_session_skips_without_calling_forge(tmp_path, monkeypatch):
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    # No max_minutes -> unbounded -> zero budget -> nothing to nominate.
+    _seed_state(tmp_path, trace=trace, max_minutes=None)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    called = {"n": 0}
+
+    def _boom(**_: Any) -> dict[str, Any]:
+        called["n"] += 1
+        raise AssertionError("submit_auto must not run without a budget")
+
+    monkeypatch.setattr(forge_submit, "submit_auto", _boom)
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no_budget"
+    assert called["n"] == 0
+    # A zero-budget brief is never written.
+    assert not (tmp_path / "forge_nomination_input.json").exists()
+
+
+def test_auto_true_without_candidates_path_skips(tmp_path, monkeypatch):
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    # Trace-analyze validation passes off a cached candidates_path, but the
+    # payload itself names none -> the manifest helper has nothing to project and
+    # the auto path skips before ever reaching forge.
+    cached = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    state = SharedState.load_or_init(tmp_path)
+    state.max_minutes = 600.0
+    state.last_profile_trace = str(tmp_path / "t.json")
+    state.last_trace_analyze = {"candidates_path": str(cached)}
+    state.save(tmp_path)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: (_ for _ in ()).throw(AssertionError("must not run")),
+    )
+    result = asyncio.run(krh.run_optimization_handler({}, session_dir=tmp_path))
+    assert result["status"] == "skipped"
+    assert result["reason"] == "no_candidates"
+
+
+# --------------------------------------------------------------------------- #
+# auto=false (env unset)
+# --------------------------------------------------------------------------- #
+def test_auto_false_never_touches_the_nomination_path(tmp_path, monkeypatch):
+    monkeypatch.delenv(_AUTO_ENV, raising=False)
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=tmp_path / "t.json", max_minutes=600.0)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: (_ for _ in ()).throw(AssertionError("auto=false must never call submit_auto")),
+    )
+    # Prove the legacy selector path is entered instead: stub the selector to
+    # return nothing so the handler short-circuits without a real subprocess.
+    selector_calls = {"n": 0}
+
+    def _fake_selector(payload, *, session_dir, skipped_out):
+        selector_calls["n"] += 1
+        return []
+
+    monkeypatch.setattr(krh, "_batch_kernel_candidates", _fake_selector)
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    # The selector ran; no manifest / request / auto result was produced.
+    assert selector_calls["n"] == 1
+    assert result.get("auto") is not True
+    assert not (tmp_path / "forge_candidate_manifest.json").exists()
+    assert not (tmp_path / "forge_nomination_input.json").exists()

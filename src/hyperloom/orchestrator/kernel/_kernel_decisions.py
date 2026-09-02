@@ -267,8 +267,25 @@ def _queue_kernel_keep(
     return queue[integration_id]
 
 
-def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) -> dict[str, Any] | None:
-    """Queue one self-nominated fusion sibling for the shared integrate lane.
+def enqueue_nominated_patch(
+    state, *, patch, lane: str = "fusion", keep_threshold_pct: float = 3.0
+) -> dict[str, Any] | None:
+    """Queue one self-nominated sibling patch for the shared integrate lane.
+
+    Two lanes land through this one queue, distinguished ONLY by whether the
+    record carries the four fusion fields:
+
+    * ``lane="fusion"`` (default -- every pre-existing caller is byte-identical):
+      stamps ``source="forge_fusion"``/``action_label="fusion"`` plus the fusion
+      env flags and keep bar. The drain re-fetches this record from state, its
+      ``source == "forge_fusion"`` gate fires, and the KEEP lifts as
+      ``action="fusion"`` -- feeding the idempotency short-circuit and the
+      remote-recipe fusion exporter.
+    * ``lane="rewrite"`` (the auto-nomination rewrite path): OMITS all four
+      fields. The same gate is then False, so the KEEP lifts as the generic
+      ``action="integrate"`` -- landing in the rewrite Recipe column and staying
+      clear of both fusion consumers. Verified end-to-end: the lane label is
+      never itself read downstream; only the presence of ``source`` decides.
 
     The fusion lane used to integrate inline (apply + e2e re-baseline + KEEP)
     right where the run finished. Under the nomination contract each kept recipe
@@ -329,7 +346,12 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         ),
         "",
     )
-    task_key = f"forge_fusion:{kernel_name}" if kernel_name else f"forge_fusion:{source_file}"
+    # Each lane owns its own task_key / kernel_id namespace so the two lanes get
+    # distinct integration_ids and distinct kernel-rejection identities; the
+    # prefix is a state key only -- no consumer reads it (they gate on the
+    # ``source`` field), so it cannot mis-route.
+    lane_prefix = "forge_fusion" if lane == "fusion" else "forge_rewrite"
+    task_key = f"{lane_prefix}:{kernel_name}" if kernel_name else f"{lane_prefix}:{source_file}"
     integration_id = existing_integration_id or _kernel_integration_id(
         task_key=task_key,
         source_file=source_file,
@@ -342,7 +364,7 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         "task_group_key": "",
         "identity_route": "",
         "legacy_task_group_keys": [],
-        "kernel_id": kernel_name or "forge_fusion",
+        "kernel_id": kernel_name or lane_prefix,
         "source_file": source_file,
         "artifact_path": artifact_path,
         "artifact_bundle": {},
@@ -359,25 +381,31 @@ def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) ->
         "artifact_kind": "",
         "integration_validation_status": "",
         "framework_applyback": {},
-        # Fusion-specific: the generic drain / writeback read these back.
-        "source": "forge_fusion",
-        "action_label": "fusion",
-        "fusion_env_flags": fusion_env_flags,
-        "keep_threshold_pct": float(keep_threshold_pct),
     }
+    if lane == "fusion":
+        # Fusion-only: the generic drain / writeback read these back to lift the
+        # KEEP as action="fusion". Omitting them on the rewrite lane is exactly
+        # what makes that lane land as the generic action="integrate".
+        record["source"] = "forge_fusion"
+        record["action_label"] = "fusion"
+        record["fusion_env_flags"] = fusion_env_flags
+        record["keep_threshold_pct"] = float(keep_threshold_pct)
     if integration_id not in queue:
         queue[integration_id] = record
     else:
-        # Re-enqueue of the same sibling: refresh the fusion-specific fields (the
-        # patch snapshot identity is immutable) so a re-run's env/threshold win.
+        # Re-enqueue of the same sibling: refresh the mutable fields (the patch
+        # snapshot identity is immutable) so a re-run's env/threshold win. The
+        # fusion-specific fields are re-stamped ONLY on the fusion lane, or a
+        # rewrite re-enqueue would resurrect fusion identity onto its record.
         queued = queue[integration_id]
         if isinstance(queued, dict):
             queued["status"] = "pending"
             queued["micro_speedup"] = micro_speedup
-            queued["fusion_env_flags"] = fusion_env_flags
-            queued["keep_threshold_pct"] = float(keep_threshold_pct)
-            queued["source"] = "forge_fusion"
-            queued["action_label"] = "fusion"
+            if lane == "fusion":
+                queued["fusion_env_flags"] = fusion_env_flags
+                queued["keep_threshold_pct"] = float(keep_threshold_pct)
+                queued["source"] = "forge_fusion"
+                queued["action_label"] = "fusion"
     return queue[integration_id]
 
 

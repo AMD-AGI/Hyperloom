@@ -139,4 +139,27 @@ def forge_explicitly_enabled() -> bool:
     return env_str("KERNEL_OPT_BACKEND_ORDER").lower() == "forge"
 
 
-__all__ = ["is_truthy", "env_bool", "env_int", "env_float", "env_str", "forge_explicitly_enabled"]
+def nomination_auto_enabled() -> bool:
+    """Whether forge self-nomination (``--auto``) drives the KERNEL rewrite lane.
+
+    A single opt-in env, off by default, mirroring
+    :func:`forge_explicitly_enabled`: it reads one variable, touches no
+    SharedState schema, and when unset the KERNEL phase serializes byte-for-byte
+    as it did before the nomination contract landed. Set to route ``auto=true``
+    through forge's own kernel selection instead of the Hyperloom selector.
+
+    Returns:
+        True for any truthy ``HYPERLOOM_FORGE_NOMINATION_AUTO``.
+    """
+    return env_bool("HYPERLOOM_FORGE_NOMINATION_AUTO", default=False)
+
+
+__all__ = [
+    "is_truthy",
+    "env_bool",
+    "env_int",
+    "env_float",
+    "env_str",
+    "forge_explicitly_enabled",
+    "nomination_auto_enabled",
+]
