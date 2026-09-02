@@ -5755,7 +5755,10 @@ class WritebackCollaborator:
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=unique_runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            # A kernel-lane re-benchmark, not a dispatched action: it borrows the
+            # ``integrate`` workspace namespace under a task id that names it,
+            # as the stack re-validation and the GEAK integrate rebench do.
+            output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts
