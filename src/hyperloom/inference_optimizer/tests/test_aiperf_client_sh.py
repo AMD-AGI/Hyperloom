@@ -77,7 +77,10 @@ _FAKE_CURL = r"""#!/usr/bin/env bash
 # /start_profile call so tests can assert what was (or was not) forwarded.
 for a in "$@"; do case "$a" in *v1/models*) echo '{"data":[{"id":"m"}]}'; exit 0;; esac; done
 for a in "$@"; do
-  case "$a" in *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";; esac
+  case "$a" in
+    *start_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_MARKER:-/dev/null}";;
+    *stop_profile*) printf '%s\n' "$@" > "${AGENTX_CURL_STOP_MARKER:-/dev/null}";;
+  esac
 done
 exit 0
 """
@@ -91,13 +94,20 @@ if sys.argv[1] == "pick-port":
     print("19090")
     raise SystemExit(0)
 if sys.argv[1] == "wait-phase":
+    marker = os.environ.get("AGENTX_PHASE_GATE_ARGS_MARKER")
+    if marker:
+        with open(marker, "w", encoding="utf-8") as handle:
+            json.dump(sys.argv, handle)
     if os.environ.get("FAKE_PHASE_GATE_FAIL") == "1":
         print("fake phase gate failure", file=sys.stderr)
         raise SystemExit(1)
     print("123456789")
     raise SystemExit(0)
 if sys.argv[1] == "wait-capture-stop":
-    print('{"stop_reason":"request_coverage","requests_completed_delta":2}')
+    if os.environ.get("FAKE_CAPTURE_GATE_FAIL") == "1":
+        print("fake capture gate failure", file=sys.stderr)
+        raise SystemExit(1)
+    print('{"stop_reason":"wall_clock_limit","elapsed_seconds":0}')
     raise SystemExit(0)
 if sys.argv[1] == "write-capture-status":
     def value(name):
@@ -568,7 +578,24 @@ def test_profile_enables_the_aiperf_progress_api(tmp_path):
     assert argv[argv.index("--api-host") + 1] == "127.0.0.1"
     assert argv[argv.index("--api-port") + 1] == "19090"
     assert "AIPerf measured phase started" in (r.stdout + r.stderr)
-    assert '"stop_reason":"request_coverage"' in (r.stdout + r.stderr)
+    assert '"stop_reason":"wall_clock_limit"' in (r.stdout + r.stderr)
+
+
+def test_profile_phase_wait_covers_dataset_configuration_and_warmup(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    marker = tmp_path / "phase-gate-args.json"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_DATASET_CONFIG_TIMEOUT="7",
+        AGENTX_WARMUP_GRACE_PERIOD="11",
+        AGENTX_PHASE_GATE_ARGS_MARKER=str(marker),
+    )
+    assert r.returncode == 0, r.stderr
+    argv = json.loads(marker.read_text())
+    assert argv[argv.index("--timeout-seconds") + 1] == "18"
 
 
 def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
@@ -594,6 +621,32 @@ def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
     assert "without trace capture" in (r.stdout + r.stderr)
     capture = json.loads((res / "agentx_profile_capture.json").read_text())
     assert capture == {"status": "failed", "reason": "profiling_phase_unavailable"}
+
+
+def test_capture_gate_failure_still_stops_profiler(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    stop_marker = tmp_path / "stop.txt"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FAKE_CAPTURE_GATE_FAIL="1",
+        AGENTX_CURL_STOP_MARKER=str(stop_marker),
+    )
+    assert r.returncode == 0, r.stderr
+    assert stop_marker.exists()
+    assert "stopping the profiler immediately" in (r.stdout + r.stderr)
+
+
+def test_missing_phase_gate_still_writes_capture_status(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    (bench / "aiperf_phase_gate.py").unlink()
+    r = _run_profile(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    assert capture["status"] == "failed"
+    assert capture["reason"] == "profiling_phase_unavailable"
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):
@@ -1104,6 +1157,25 @@ def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
     # Crucially, it must not have entered the polling loop at all: the default
     # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
     assert "waiting for the profiler trace" not in out
+
+
+def test_configured_trace_dir_is_waited_on_before_it_exists(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    configured = tmp_path / "profiler-output-created-during-flush"
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        SGLANG_TORCH_PROFILER_DIR=str(configured),
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="1",
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="1",
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "waiting for the profiler trace" in out
+    assert "no trace file appeared" in out
+    assert "no profiler output directory is configured" not in out
 
 
 def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):

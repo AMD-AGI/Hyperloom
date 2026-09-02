@@ -313,6 +313,40 @@ async def test_profile_failed_without_trace_never_calls_trace_analyze(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_primary_rank_missing_is_not_retried(tmp_path):
+    calls = 0
+
+    async def fake_profile(_ctx):
+        nonlocal calls
+        calls += 1
+        return {
+            "status": "failed",
+            "error_class": "primary_rank_trace_missing",
+            "error": "no rank-0 trace",
+            "trace_input_ready": False,
+            "trace_files": ["/tmp/merged.trace.json.gz"],
+        }
+
+    state = _state()
+    executor = RooflineExecutor(shared_state=state)
+    with (
+        patch(
+            "hyperloom.orchestrator.actions.executors.profile.profile_executor",
+            new=fake_profile,
+        ),
+        patch(
+            "hyperloom.orchestrator.kernel.request_handlers.trace_analyze_handler",
+            side_effect=AssertionError("trace_analyze must not run"),
+        ),
+    ):
+        result = await executor(_ctx(tmp_path))
+
+    assert calls == 1
+    assert result["status"] == "failed"
+    assert "no rank-0 trace" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_profile_no_trace_path(tmp_path):
     """Profile succeeded but result lacks main_trace_path / trace_files."""
     state = _state()

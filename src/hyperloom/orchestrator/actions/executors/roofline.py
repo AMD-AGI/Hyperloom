@@ -39,6 +39,7 @@ from ._multi_node_env import is_multi_node
 log = logging.getLogger(__name__)
 
 _PROFILE_MAX_ATTEMPTS = 3
+_NON_RETRYABLE_PROFILE_ERRORS = frozenset({"primary_rank_trace_missing"})
 
 # Settle time after reclaiming GPUs before the next profile attempt. A SIGKILLed
 # server's VRAM is not returned by the KFD the instant the process dies, so an
@@ -526,6 +527,8 @@ class RooflineExecutor:
                     break
                 last_phase = "profile"
                 last_error = str(profile_result.get("error") or "profile sub-step failed")
+                if profile_result.get("error_class") in _NON_RETRYABLE_PROFILE_ERRORS:
+                    return _failed("profile", last_error, sub_result=profile_result)
                 log.warning(
                     "roofline profile attempt %d/%d failed: %s",
                     attempt,

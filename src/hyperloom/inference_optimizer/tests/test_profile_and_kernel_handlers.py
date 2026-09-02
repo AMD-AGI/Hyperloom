@@ -2036,6 +2036,12 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
         rank_zero.write_bytes(b"rank-zero")
         rank_one.write_bytes(b"rank-one")
         merged.write_bytes(b"merged")
+        stale_status = workspace / "agentx_profile_capture.json"
+        stale_status.write_text(
+            json.dumps({"status": "failed", "reason": "stale"}),
+            encoding="utf-8",
+        )
+        os.utime(stale_status, (1, 1))
         return {
             "status": "succeeded",
             "framework": "sglang",
@@ -2060,6 +2066,7 @@ async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, mon
     assert res.result["profile_trace_selection_reason"] == "primary_rank_trace"
     assert res.result["merged_trace_paths"] == [str(trace_dir / "merged-177.trace.json.gz")]
     assert sorted(res.result["rank_trace_paths"]) == ["0", "1"]
+    assert "trace_capture_status" not in res.result
     db.close()
 
 
@@ -4932,6 +4939,7 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
         ("177-TP-0-DECODE.trace.json.gz", 0),
         ("worker-rank-3.pt.trace.json.gz", 3),
         ("rank_5/trace.pt.trace.json.gz", 5),
+        ("benchmark_sglang_tp_8/torch_trace/trace.pt.trace.json.gz", None),
         ("merged-177.trace.json.gz", None),
     ],
 )
@@ -4941,13 +4949,19 @@ def test_trace_rank_supports_framework_naming(relative_path, rank):
 
 def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
     trace_dir = tmp_path / "torch_trace"
+    trace_dir.mkdir()
     merged = trace_dir / "merged-177.trace.json.gz"
-    rank_zero = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+    rank_zero_warmup = trace_dir / "100-TP-0-WARMUP.trace.json.gz"
+    rank_zero = trace_dir / "900-TP-0-DECODE.trace.json.gz"
     rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
+    merged.write_bytes(b"merged")
+    rank_zero_warmup.write_bytes(b"x")
+    rank_zero.write_bytes(b"x" * 100)
+    rank_one.write_bytes(b"rank-one")
 
     selected = _preferred_main_trace_path(
         trace_dir,
-        [merged, rank_one, rank_zero],
+        [rank_zero_warmup, merged, rank_one, rank_zero],
         require_single_rank=True,
         tensor_parallel_size=2,
     )

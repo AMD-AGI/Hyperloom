@@ -157,28 +157,6 @@ def check_aiperf_capability(
             "AIPERF_BIN to an aiperf with AgentX (weka-trace) support."
         )
 
-    probe = probe or _default_probe
-    try:
-        help_text = probe(aiperf_bin)
-    except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
-        raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
-    scenario_flags = [
-        flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")
-    ]
-    if scenario_flags:
-        raise AgentXPreflightError(
-            f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
-            f"{', '.join(scenario_flags)}); install the pinned SemiAnalysisAI/aiperf "
-            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
-        )
-    api_flags = [flag for flag in ("--api-host", "--api-port") if flag not in (help_text or "")]
-    if require_progress_api and api_flags:
-        raise AgentXPreflightError(
-            f"aiperf at {aiperf_bin!r} cannot expose phase progress "
-            f"(missing: {', '.join(api_flags)}); install the pinned "
-            "SemiAnalysisAI/aiperf build via install.sh."
-        )
-
     runtime_env = os.environ if env is None else env
     override = (runtime_env.get("AGENTX_DATASET") or "").strip() or (
         runtime_env.get("WEKA_LOADER_OVERRIDE") or ""
@@ -215,21 +193,49 @@ def check_aiperf_capability(
                 f"allowlist of the aiperf at {aiperf_bin!r}. Permitted: "
                 f"{', '.join(sorted(loaders))}."
             )
-        return
+        if not require_progress_api:
+            return
 
-    # Allowlist unreadable: fall back to the old flag probe, and say that the
-    # real check did not run so a stale build is not silently blessed.
-    print(
-        f"WARNING: could not read the {SCENARIO_NAME!r} loader allowlist from "
-        f"{aiperf_bin!r}; falling back to a flag-presence check, which cannot "
-        f"tell the pinned build from an older one carrying the same flags"
-        + (
-            f", and cannot confirm that the pinned corpus {override!r} is one this "
-            f"scenario admits -- an unpermitted or misspelled name will now surface "
-            f"only after the server boots"
-            if override
-            else ""
+    if loaders is None:
+        # Allowlist unreadable: fall back to the old flag probe, and say that the
+        # real check did not run so a stale build is not silently blessed.
+        print(
+            f"WARNING: could not read the {SCENARIO_NAME!r} loader allowlist from "
+            f"{aiperf_bin!r}; falling back to a flag-presence check, which cannot "
+            f"tell the pinned build from an older one carrying the same flags"
+            + (
+                f", and cannot confirm that the pinned corpus {override!r} is one this "
+                f"scenario admits -- an unpermitted or misspelled name will now surface "
+                f"only after the server boots"
+                if override
+                else ""
+            )
+            + ".",
+            file=sys.stderr,
         )
-        + ".",
-        file=sys.stderr,
-    )
+
+    probe = probe or _default_probe
+    try:
+        help_text = probe(aiperf_bin)
+    except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
+        raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
+
+    if loaders is None:
+        scenario_flags = [
+            flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")
+        ]
+        if scenario_flags:
+            raise AgentXPreflightError(
+                f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
+                f"{', '.join(scenario_flags)}); install the pinned SemiAnalysisAI/aiperf "
+                "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
+            )
+
+    if require_progress_api:
+        api_flags = [flag for flag in ("--api-host", "--api-port") if flag not in (help_text or "")]
+        if api_flags:
+            raise AgentXPreflightError(
+                f"aiperf at {aiperf_bin!r} cannot expose phase progress "
+                f"(missing: {', '.join(api_flags)}); install the pinned "
+                "SemiAnalysisAI/aiperf build via install.sh."
+            )

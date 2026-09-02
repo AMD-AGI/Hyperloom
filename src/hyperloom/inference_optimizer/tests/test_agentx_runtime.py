@@ -91,6 +91,31 @@ def test_profile_config_requires_progress_api(tmp_path, monkeypatch):
     assert seen == [{"require_progress_api": True}]
 
 
+def test_stronger_progress_api_preflight_satisfies_later_basic_check(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: seen.append(k))
+    profile_cfg = tmp_path / "profile.yaml"
+    profile_cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "benchmark_script": "aiperf_client.sh",
+                    "envs": {"PROFILE": "1"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_cfg = _cfg(tmp_path, "aiperf_client.sh")
+
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=profile_cfg)
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=baseline_cfg)
+
+    assert seen == [{"require_progress_api": True}]
+
+
 def test_incapable_bin_not_memoized(tmp_path, monkeypatch):
     n = {"p": 0}
 

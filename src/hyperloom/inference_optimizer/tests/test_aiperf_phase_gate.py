@@ -116,20 +116,20 @@ def test_wait_for_phase_times_out_without_phase():
         thread.join(timeout=2)
 
 
-def test_capture_stops_after_one_completed_request_per_lane():
-    class CoverageHandler(_ProgressHandler):
+def test_capture_stops_when_phase_completes():
+    class PhaseCompletionHandler(_ProgressHandler):
         requests_seen = 0
 
         def do_GET(self):  # noqa: N802
             type(self).requests_seen += 1
-            completed = min(2, type(self).requests_seen - 1)
             body = json.dumps(
                 {
                     "phases": {
                         "profiling": {
                             "start_ns": 1,
-                            "requests_completed": completed,
-                            "requests_end_ns": None,
+                            "requests_end_ns": (
+                                123456789 if type(self).requests_seen >= 3 else None
+                            ),
                         }
                     }
                 }
@@ -140,7 +140,7 @@ def test_capture_stops_after_one_completed_request_per_lane():
             self.end_headers()
             self.wfile.write(body)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 0), CoverageHandler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), PhaseCompletionHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -149,7 +149,6 @@ def test_capture_stops_after_one_completed_request_per_lane():
             phase="profiling",
             pid=os.getpid(),
             max_window_seconds=2,
-            target_completed_requests=2,
             poll_interval_seconds=0.01,
         )
     finally:
@@ -157,8 +156,7 @@ def test_capture_stops_after_one_completed_request_per_lane():
         server.server_close()
         thread.join(timeout=2)
 
-    assert result["stop_reason"] == "request_coverage"
-    assert result["requests_completed_delta"] == 2
+    assert result["stop_reason"] == "phase_complete"
 
 
 def test_capture_stops_at_wall_clock_limit_without_request_coverage():
@@ -183,7 +181,6 @@ def test_capture_stops_at_wall_clock_limit_without_request_coverage():
             phase="profiling",
             pid=os.getpid(),
             max_window_seconds=0.05,
-            target_completed_requests=2,
             poll_interval_seconds=0.01,
         )
     finally:
@@ -192,6 +189,43 @@ def test_capture_stops_at_wall_clock_limit_without_request_coverage():
         thread.join(timeout=2)
 
     assert result["stop_reason"] == "wall_clock_limit"
+
+
+def test_process_alive_rejects_zombie_state(monkeypatch):
+    monkeypatch.setattr(
+        phase_gate.Path,
+        "read_text",
+        lambda _self, **_kwargs: "42 (python) Z 1 2 3",
+    )
+    assert phase_gate.process_alive(42) is False
+
+
+def test_wait_for_phase_retries_transient_http_protocol_errors(monkeypatch):
+    responses = iter(
+        [
+            phase_gate.http.client.BadStatusLine("partial"),
+            {"start_ns": 123},
+        ]
+    )
+
+    def _phase_stats(*_args, **_kwargs):
+        value = next(responses)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(phase_gate, "phase_stats", _phase_stats)
+    monkeypatch.setattr(phase_gate, "process_alive", lambda _pid: True)
+    assert (
+        phase_gate.wait_for_phase(
+            api_url="http://127.0.0.1:1",
+            phase="profiling",
+            pid=42,
+            timeout_seconds=1,
+            poll_interval_seconds=0.01,
+        )
+        == 123
+    )
 
 
 def test_write_capture_status_is_structured_and_atomic(tmp_path):

@@ -325,8 +325,10 @@ done < <(env)
 # Dataset load + reconstruct + mmap runs 4-14 min on the Weka corpus; aiperf's
 # stock 900s Configure-Profiling timeout trips under parallel /tmp contention.
 # aiperf validates SERVICE_PROFILE_CONFIGURE_TIMEOUT >= DATASET_CONFIGURATION_TIMEOUT.
-export AIPERF_DATASET_CONFIGURATION_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
-export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+DATASET_CONFIG_TIMEOUT="${AGENTX_DATASET_CONFIG_TIMEOUT:-1800}"
+_require_uint AGENTX_DATASET_CONFIG_TIMEOUT "$DATASET_CONFIG_TIMEOUT"
+export AIPERF_DATASET_CONFIGURATION_TIMEOUT="$DATASET_CONFIG_TIMEOUT"
+export AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT="$DATASET_CONFIG_TIMEOUT"
 # TCP_USER_TIMEOUT bounds how long Linux tolerates an established connection
 # making no progress -- and an agentic turn against a long-context model makes
 # no TCP progress for as long as the server is prefill-bound. aiperf's stock
@@ -510,7 +512,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
   PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
-  PHASE_WAIT_TIMEOUT=$(( WARMGRACE + DURATION ))
+  PHASE_WAIT_TIMEOUT=$(( DATASET_CONFIG_TIMEOUT + WARMGRACE ))
   CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
   rm -f "$CAPTURE_STATUS_FILE"
   AIPERF_API_PORT=""
@@ -519,15 +521,30 @@ if [ "${PROFILE:-0}" = "1" ]; then
     _reason="$2"
     _phase_start_ns="${3:-0}"
     _decision="${4:-}"
+    _written=0
     if [ -f "$PHASE_GATE" ]; then
-      python3 "$PHASE_GATE" write-capture-status \
+      if python3 "$PHASE_GATE" write-capture-status \
         --output "$CAPTURE_STATUS_FILE" \
         --status "$_status" \
         --reason "$_reason" \
         --phase-start-ns "$_phase_start_ns" \
         --requested-window-seconds "$PWIN" \
-        --decision-json "$_decision" \
-        || log "WARN failed to write trace-capture status"
+        --decision-json "$_decision"; then
+        _written=1
+      fi
+    fi
+    if [ "$_written" -ne 1 ]; then
+      _status_tmp="${CAPTURE_STATUS_FILE}.tmp.$$"
+      if printf '{"schema_version":1,"status":"%s","reason":"%s","phase":"profiling","phase_start_ns":%s,"requested_window_seconds":%s}\n' \
+        "$_status" "$_reason" "$_phase_start_ns" "$PWIN" > "$_status_tmp"; then
+        if ! mv -f "$_status_tmp" "$CAPTURE_STATUS_FILE"; then
+          rm -f "$_status_tmp"
+          log "WARN failed to publish trace-capture status"
+        fi
+      else
+        rm -f "$_status_tmp"
+        log "WARN failed to write trace-capture status"
+      fi
     fi
   }
   if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
@@ -556,11 +573,17 @@ if [ "${PROFILE:-0}" = "1" ]; then
   # teardown run. Bounded, and loud on timeout -- a truncated trace that is
   # reported as a trace is worse than no trace, because TraceLens will read it.
   _trace_dirs() {
-    printf '%s\n' \
-      "${SGLANG_TORCH_PROFILER_DIR:-}" \
-      "${VLLM_TORCH_PROFILER_DIR:-}" \
-      "${RESULT_DIR}/torch_trace" \
-      | while IFS= read -r d; do [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"; done
+    _seen="|"
+    for d in "${SGLANG_TORCH_PROFILER_DIR:-}" "${VLLM_TORCH_PROFILER_DIR:-}"; do
+      [ -n "$d" ] || continue
+      case "$_seen" in *"|${d}|"*) continue ;; esac
+      printf '%s\n' "$d"
+      _seen="${_seen}${d}|"
+    done
+    d="${RESULT_DIR}/torch_trace"
+    if [ -d "$d" ]; then
+      case "$_seen" in *"|${d}|"*) ;; *) printf '%s\n' "$d" ;; esac
+    fi
   }
   _trace_stat() {  # -> "<count> <total bytes>"
     _tc=0; _tb=0
@@ -650,15 +673,18 @@ if [ "${PROFILE:-0}" = "1" ]; then
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
-      CAPTURE_RESULT="$(
+      if CAPTURE_RESULT="$(
         python3 "$PHASE_GATE" wait-capture-stop \
           --api-url "http://127.0.0.1:${AIPERF_API_PORT}" \
           --phase profiling \
           --pid "$APID" \
-          --max-window-seconds "$PWIN" \
-          --target-completed-requests "$CONC"
-      )"
-      log "profile capture stop decision: ${CAPTURE_RESULT}"
+          --max-window-seconds "$PWIN"
+      )"; then
+        log "profile capture stop decision: ${CAPTURE_RESULT}"
+      else
+        CAPTURE_RESULT='{"stop_reason":"capture_gate_failed"}'
+        log "WARN capture stop gate failed; stopping the profiler immediately"
+      fi
       STOP_OK=0
       if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
         STOP_OK=1

@@ -150,6 +150,15 @@ def test_pinned_allowlist_passes():
     _check(_NEW)
 
 
+def test_pinned_allowlist_does_not_require_help_probe():
+    check_aiperf_capability(
+        "/venv/bin/aiperf",
+        loader_probe=lambda _b: _NEW,
+        probe=lambda _b: (_ for _ in ()).throw(OSError("help unavailable")),
+        env={},
+    )
+
+
 def test_stale_build_is_rejected():
     """The exact case a flag probe waves through."""
     with pytest.raises(AgentXPreflightError) as ei:

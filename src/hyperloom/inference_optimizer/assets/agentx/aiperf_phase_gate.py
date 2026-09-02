@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import socket
@@ -15,6 +16,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
@@ -27,6 +29,13 @@ def pick_loopback_port() -> int:
 
 def process_alive(pid: int) -> bool:
     """Return whether a process still exists."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+        fields = stat.rsplit(")", 1)
+        if len(fields) == 2 and fields[1].strip().split(maxsplit=1)[0] == "Z":
+            return False
+    except (OSError, IndexError):
+        pass
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -80,10 +89,10 @@ def wait_for_phase(
                 return start_ns
             last_error = ""
         except (
+            http.client.HTTPException,
             OSError,
             TimeoutError,
             ValueError,
-            json.JSONDecodeError,
             urllib.error.URLError,
         ) as exc:
             last_error = f"{type(exc).__name__}: {exc}"
@@ -97,13 +106,10 @@ def wait_for_capture_stop(
     phase: str,
     pid: int,
     max_window_seconds: float,
-    target_completed_requests: int,
     poll_interval_seconds: float,
 ) -> dict[str, Any]:
-    """Wait until request coverage or a lifecycle safety bound ends capture."""
+    """Wait until the phase ends or the wall-clock safety bound is reached."""
     started = time.monotonic()
-    baseline_completed: int | None = None
-    completed = 0
 
     while True:
         elapsed = time.monotonic() - started
@@ -111,55 +117,26 @@ def wait_for_capture_stop(
             return {
                 "stop_reason": "wall_clock_limit",
                 "elapsed_seconds": round(elapsed, 3),
-                "requests_completed": completed,
-                "requests_completed_delta": (
-                    max(0, completed - baseline_completed) if baseline_completed is not None else 0
-                ),
-                "target_completed_requests": target_completed_requests,
             }
         if not process_alive(pid):
             return {
                 "stop_reason": "aiperf_exited",
                 "elapsed_seconds": round(elapsed, 3),
-                "requests_completed": completed,
-                "requests_completed_delta": (
-                    max(0, completed - baseline_completed) if baseline_completed is not None else 0
-                ),
-                "target_completed_requests": target_completed_requests,
             }
 
         try:
             stats = phase_stats(api_url, phase, timeout_seconds=max(1.0, poll_interval_seconds))
             if stats is not None:
-                raw_completed = stats.get("requests_completed")
-                if isinstance(raw_completed, int) and not isinstance(raw_completed, bool):
-                    completed = max(0, raw_completed)
-                    if baseline_completed is None:
-                        baseline_completed = completed
-                    completed_delta = max(0, completed - baseline_completed)
-                    if target_completed_requests > 0 and completed_delta >= target_completed_requests:
-                        return {
-                            "stop_reason": "request_coverage",
-                            "elapsed_seconds": round(elapsed, 3),
-                            "requests_completed": completed,
-                            "requests_completed_delta": completed_delta,
-                            "target_completed_requests": target_completed_requests,
-                        }
                 if stats.get("requests_end_ns") is not None:
                     return {
                         "stop_reason": "phase_complete",
                         "elapsed_seconds": round(elapsed, 3),
-                        "requests_completed": completed,
-                        "requests_completed_delta": (
-                            max(0, completed - baseline_completed) if baseline_completed is not None else 0
-                        ),
-                        "target_completed_requests": target_completed_requests,
                     }
         except (
+            http.client.HTTPException,
             OSError,
             TimeoutError,
             ValueError,
-            json.JSONDecodeError,
             urllib.error.URLError,
         ):
             pass
@@ -229,7 +206,6 @@ def build_parser() -> argparse.ArgumentParser:
     capture_parser.add_argument("--phase", default="profiling")
     capture_parser.add_argument("--pid", required=True, type=int)
     capture_parser.add_argument("--max-window-seconds", required=True, type=float)
-    capture_parser.add_argument("--target-completed-requests", required=True, type=int)
     capture_parser.add_argument("--poll-interval-seconds", default=0.2, type=float)
 
     status_parser = subparsers.add_parser(
@@ -260,7 +236,6 @@ def main(argv: list[str] | None = None) -> int:
             phase=args.phase,
             pid=args.pid,
             max_window_seconds=args.max_window_seconds,
-            target_completed_requests=args.target_completed_requests,
             poll_interval_seconds=args.poll_interval_seconds,
         )
         print(json.dumps(result, sort_keys=True))
@@ -275,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
                 requested_window_seconds=args.requested_window_seconds,
                 decision_json=args.decision_json,
             )
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             print(f"aiperf phase gate failed: {exc}", file=sys.stderr)
             return 1
         return 0

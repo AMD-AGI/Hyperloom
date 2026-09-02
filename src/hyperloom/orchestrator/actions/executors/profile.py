@@ -509,10 +509,12 @@ _TRACE_RANK_RE = re.compile(
 
 def _trace_rank(path: Path) -> int | None:
     """Return the rank encoded in a framework trace path, when present."""
-    for part in reversed(path.parts):
-        match = _TRACE_RANK_RE.search(part)
-        if match:
-            return int(match.group(1))
+    match = _TRACE_RANK_RE.search(path.name)
+    if match:
+        return int(match.group(1))
+    parent_match = _TRACE_RANK_RE.fullmatch(path.parent.name)
+    if parent_match:
+        return int(parent_match.group(1))
     return None
 
 
@@ -553,7 +555,7 @@ def _preferred_main_trace_path(
     if require_single_rank:
         preferred = [path for path in trace_files if _trace_rank(path) == preferred_rank]
         if preferred:
-            return preferred[0]
+            return max(preferred, key=_trace_size_bytes)
 
         non_merged = [path for path in trace_files if not path.name.startswith("merged-")]
         if tensor_parallel_size == 1 and len(non_merged) == 1:
@@ -1146,7 +1148,7 @@ class ProfileExecutor(BaselineExecutor):
         capture_status: dict[str, Any] | None = None
         if workspace_str:
             capture_status_path = Path(workspace_str) / "agentx_profile_capture.json"
-            if capture_status_path.is_file():
+            if capture_status_path.is_file() and safe_mtime(capture_status_path) >= int(task_started_unix):
                 try:
                     parsed_capture_status = json.loads(capture_status_path.read_text(encoding="utf-8"))
                     if isinstance(parsed_capture_status, dict):
@@ -1162,6 +1164,14 @@ class ProfileExecutor(BaselineExecutor):
                     }
                     result["trace_capture_status"] = "failed"
                     result["trace_capture"] = capture_status
+            elif capture_status_path.is_file():
+                log.warning(
+                    "profile_executor: ignoring stale AgentX capture status %s "
+                    "(mtime %.0f < round start second %d)",
+                    capture_status_path,
+                    safe_mtime(capture_status_path),
+                    int(task_started_unix),
+                )
         from ._workload_envs import agentx_enabled
 
         agentx_profile = capture_status is not None or "submission_valid" in result or agentx_enabled()
