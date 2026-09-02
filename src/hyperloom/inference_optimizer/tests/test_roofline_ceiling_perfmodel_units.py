@@ -440,6 +440,64 @@ def test_select_peak_and_bound_ignores_a_projection_it_could_not_compute(mem, cm
     assert peak == max(mem, cmp)
 
 
+# ---- resolve_runtime_dtype ----
+
+
+def test_resolve_runtime_dtype_prefers_the_quantization_server_arg(tmp_path):
+    """``--quantization`` is the truest signal: the run really quantized the weights."""
+    bench = _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--quantization fp8 --dtype bfloat16")
+    rt = rc.resolve_runtime_dtype(_state(tmp_path, bench), _dense_meta(weight_dtype_bytes=4.0))
+
+    assert (rt.weight_dtype_bytes, rt.weight_dtype_tag) == (1.0, "fp8")
+    assert rt.quantization == "fp8"
+    assert rt.source == "server_args_quantization"
+    assert rt.compute_precision_tag == "fp8"
+    # Activation dtype tracks --dtype separately and is never sub-bf16.
+    assert rt.activation_dtype_bytes == 2.0
+
+
+def test_resolve_runtime_dtype_falls_back_to_a_prequantized_checkpoint(tmp_path):
+    """No ``--quantization`` flag, but the on-disk weights are already sub-bf16."""
+    bench = _serving_benchmark(tmp_path / "m")
+    rt = rc.resolve_runtime_dtype(_state(tmp_path, bench), _dense_meta(weight_dtype_bytes=1.0))
+
+    assert rt.weight_dtype_bytes == 1.0
+    assert rt.weight_dtype_tag == "quantization_config"
+    assert rt.source == "quantization_config"
+    assert rt.compute_precision_tag == "fp8"
+
+
+def test_resolve_runtime_dtype_uses_the_dtype_server_arg_when_not_quantized(tmp_path):
+    """A dense ``--dtype`` run with no quantization signal drives both dtypes."""
+    bench = _serving_benchmark(tmp_path / "m", EXTRA_SGLANG_ARGS="--dtype float16")
+    rt = rc.resolve_runtime_dtype(_state(tmp_path, bench), _dense_meta(weight_dtype_bytes=4.0))
+
+    assert (rt.weight_dtype_bytes, rt.weight_dtype_tag) == (2.0, "float16")
+    assert rt.quantization == "none"
+    assert rt.source == "server_args_dtype"
+    assert rt.activation_dtype_bytes == 2.0
+
+
+def test_resolve_runtime_dtype_floors_the_config_dtype_at_bf16(tmp_path):
+    """No server-arg or checkpoint quantization signal: fp32 weights are still served bf16."""
+    bench = _serving_benchmark(tmp_path / "m")
+    rt = rc.resolve_runtime_dtype(_state(tmp_path, bench), _dense_meta(weight_dtype_bytes=4.0))
+
+    assert (rt.weight_dtype_bytes, rt.weight_dtype_tag) == (2.0, "config_torch_dtype")
+    assert rt.quantization == "none"
+    assert rt.source == "config_torch_dtype"
+    assert rt.compute_precision_tag == "bf16"
+
+
+def test_resolve_runtime_dtype_ignores_workload_precision(tmp_path):
+    """A ``precision=fp8`` tag with no --quantization must not shrink the weight IO."""
+    bench = _serving_benchmark(tmp_path / "m")
+    bench["precision"] = "fp8"
+    rt = rc.resolve_runtime_dtype(_state(tmp_path, bench, precision="fp8"), _dense_meta(weight_dtype_bytes=4.0))
+    assert rt.weight_dtype_bytes == 2.0
+    assert rt.source == "config_torch_dtype"
+
+
 def test_resolve_runtime_dtype_priority_and_ignores_workload_precision(tmp_path):
     """Recognized --quantization wins; unrecognized quant falls through; precision tags do not."""
     meta_fp32 = _dense_meta(weight_dtype_bytes=4.0)
