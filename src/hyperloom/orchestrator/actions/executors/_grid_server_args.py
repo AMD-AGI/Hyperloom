@@ -189,7 +189,12 @@ def remove_server_args(server_args: str | None, remove_args: Any) -> str:
     here with a non-empty denylist, so a lossy round trip would corrupt a
     sibling ``--compilation-config`` even for a variant that removes nothing.
     """
-    args = str(server_args or "").strip()
+    # Normalized up front as well as inside the tokenizer, so the
+    # nothing-to-remove early return below hands back the same shape a caller
+    # with a non-empty denylist would get. Invalid substrings are preserved
+    # byte-for-byte, and the pass is idempotent, so the second application
+    # inside :func:`_split_args_preserving_json` is a no-op.
+    args = _reserialize_json_blobs(str(server_args or "").strip())
     removes = to_str_list(remove_args)
     if not args or not removes:
         return args
