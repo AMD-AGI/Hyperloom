@@ -813,8 +813,12 @@ def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypat
     forward = _run(shards)
     assert len(forward) == 4
     assert forward == _run(list(reversed(shards)))  # order-independent
-    # ...and it spans the range rather than hugging the decode end.
-    assert int(forward[-1].split("_")[1]) >= 256, forward
+    # ...and it spans the range rather than hugging the decode end. Both ends
+    # inclusive: an even but half-open slice stops short of the tail, dropping
+    # the widest batch -- the one prefill variant the spread exists to keep.
+    assert forward[0] == "bs_1", forward
+    assert forward[-1] == f"bs_{batches[-1]}", forward
+    assert len(set(forward)) == 4, forward
 
 
 def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):

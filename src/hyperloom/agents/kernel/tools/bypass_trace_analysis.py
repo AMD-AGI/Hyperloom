@@ -421,8 +421,18 @@ def _maybe_build_shape_manifest(
             # and -- once sorted -- would have kept only the small-batch end,
             # indexing 64 decode variants and no prefill one. Each dropped shard
             # costs a full analyze_trace + sha256, which is why the cap exists.
-            step = len(shards) / max_caps
-            shards = [shards[int(i * step)] for i in range(max_caps)]
+            #
+            # Spaced inclusive of BOTH ends. A plain ``int(i * len / max_caps)``
+            # is even but half-open: its last index is short of the tail, so the
+            # widest batch -- the one prefill variant the spread exists to keep --
+            # was the single shard guaranteed to be dropped. With one slot there
+            # is no spread to speak of; take the widest, since a decode variant
+            # is the one the eager fallback can stand in for.
+            last = len(shards) - 1
+            if max_caps == 1:
+                shards = [shards[last]]
+            else:
+                shards = [shards[round(i * last / (max_caps - 1))] for i in range(max_caps)]
         capture_variants: list[tuple[str, dict[str, Any]]] = []
         capture_hashes: dict[str, str] = {}
         variant_meta: dict[str, dict[str, Any]] = {}
