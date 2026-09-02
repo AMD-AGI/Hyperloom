@@ -24,6 +24,7 @@ from typing import Any
 
 from hyperloom.inference_optimizer.breakdown.collectors.kernels import (
     _collect_adopted_kernels,
+    collect_collective,
 )
 from hyperloom.orchestrator.loop.coordinator_helpers import (
     _geak_accepted_kernel_specs,
@@ -338,3 +339,49 @@ def test_a_non_dict_result_records_no_candidate() -> None:
     # Returns without touching state rather than raising on a malformed payload.
     KernelPhase._record_geak_candidate(phase, None)
     assert phase.shared_state.kernel_integrate_attempts == {}
+
+
+# --------------------------------------------------------------------------
+# The top-level ``collective`` breakdown section
+# --------------------------------------------------------------------------
+
+
+def test_a_lane_that_never_ran_yields_an_empty_section() -> None:
+    # No ``collective_attempts`` and no ``last_collective`` means the lane
+    # never ran; the section must be omitted (``{}``), not a hollow envelope.
+    assert collect_collective({}) == {}
+    assert collect_collective({"collective_attempts": [], "last_collective": {}}) == {}
+
+
+def test_malformed_lane_fields_are_treated_as_absent() -> None:
+    # A corrupted ``state.json`` (wrong types) must not raise; it degrades to
+    # "the lane never ran" rather than surfacing a stale/garbage envelope.
+    assert collect_collective({"collective_attempts": "not-a-list", "last_collective": "not-a-dict"}) == {}
+
+
+def test_attempts_are_normalized_and_non_dict_rows_are_dropped() -> None:
+    section = collect_collective(
+        {
+            "collective_only_mode": True,
+            "collective_attempts": [
+                {
+                    "collective_attempt_id": "att-1",
+                    "kernel_id": "all_reduce_k",
+                    "collective_op": "all_reduce",
+                    "world_size": "8",
+                    "engine": "rccl",
+                    "kept": True,
+                    "kernel_speedup": "1.5",
+                },
+                "not-a-dict-row",
+            ],
+        }
+    )
+    assert section["only_mode"] is True
+    assert len(section["attempts"]) == 1
+    row = section["attempts"][0]
+    assert row["collective_attempt_id"] == "att-1"
+    assert row["world_size"] == 8  # coerced from the string in state.json
+    assert row["kept"] is True
+    assert row["kernel_speedup"] == 1.5
+    assert "last" not in section  # no last_collective was supplied
