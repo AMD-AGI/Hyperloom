@@ -176,6 +176,19 @@ def test_materialize_config_with_envs_forces_generic_without_override(tmp_path):
     assert cfg["benchmark"]["benchmark_script"] == "sglang_mi300x.sh"
 
 
+def test_materialize_writes_operator_extra_env_into_vllm_yaml(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "INFERENCE_OPTIMIZER_EXTRA_ENV",
+        '{"VLLM_USE_BREAKABLE_CUDAGRAPH": "0"}',
+    )
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    out = tmp_path / "out"
+    out.mkdir()
+    envs = yaml.safe_load(materialize_config_with_envs(base, out, gpu_type="mi355x").read_text())["benchmark"]["envs"]
+    assert envs["VLLM_USE_BREAKABLE_CUDAGRAPH"] == "0"
+
+
 def test_kimi_materialize_enables_remote_client_trust(tmp_path):
     base = tmp_path / "base.yaml"
     _write_yaml(base, model="/path/models/moonshotai-Kimi-K2.6")

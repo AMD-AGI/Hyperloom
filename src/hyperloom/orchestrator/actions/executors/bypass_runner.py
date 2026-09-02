@@ -234,7 +234,7 @@ def run_benchmark(
         )
 
     # server_lifecycle.server_ready_timeout_s (injected by inject_lifecycle,
-    # default 2700s / INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the
+    # default SERVER_READY_TIMEOUT_SEC / INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC) is the
     # server-boot budget for lifecycle rounds. It only bounds waiting for the
     # server to come up; the client benchmark still uses timeout_seconds. When
     # absent (non-lifecycle run) fall back to timeout_s so behavior is unchanged.
