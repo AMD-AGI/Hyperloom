@@ -55,6 +55,8 @@ class ControllerRunState:
     reason: str = ""
     analysis_status: str = ""
     analysis_reason: str = ""
+    analysis_published_task_count: int = 0
+    analysis_rejected_task_count: int = 0
     task_count: int = 0
     patch_count: int = 0
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
@@ -95,6 +97,8 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
         f"- **Patch count:** `{state.patch_count}`",
         f"- **Analysis status:** `{state.analysis_status or 'not started'}`",
         f"- **Analysis reason:** {state.analysis_reason or 'none'}",
+        f"- **Analysis published tasks:** `{state.analysis_published_task_count}`",
+        f"- **Analysis rejected tasks:** `{state.analysis_rejected_task_count}`",
         "",
     ]
     patches = published_operator_dirs(layout)
@@ -174,6 +178,9 @@ def run_controller(
     elif analysis.status != ANALYSIS_STATUS_COMPLETED:
         status = CONTROLLER_STATUS_PARTIAL
         reason = analysis.reason or "opportunity analysis was incomplete"
+    elif schedule.task_count == 0 and patch_count == 0 and analysis.rejected_task_count:
+        status = CONTROLLER_STATUS_NO_RESULT
+        reason = "opportunity analysis produced only invalid tasks"
     elif schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_NO_OPPORTUNITY
         reason = "no prepared operator tasks are available"
@@ -194,6 +201,8 @@ def run_controller(
             "reason": reason,
             "analysis_status": analysis.status,
             "analysis_reason": analysis.reason,
+            "analysis_published_task_count": analysis.published_task_count,
+            "analysis_rejected_task_count": analysis.rejected_task_count,
             "task_count": schedule.task_count,
             "patch_count": patch_count,
         }
