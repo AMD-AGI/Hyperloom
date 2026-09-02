@@ -96,6 +96,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
+  `--conc-sweep-timeout-sec`, `--conc-sweep-total-budget-sec`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.

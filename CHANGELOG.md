@@ -92,6 +92,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **SWEEP is one concurrency sweep, and it produces the chart a submission is
+  read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
+  three axes carried nothing under an agentic replay — request shapes come from
+  the trace corpus, so ISL and OSL are inert placeholders — and the concurrency
+  axis is what `conc_sweep` already swept. `conc_sweep` is now the only sweep,
+  on by default for both workloads, and every rung carries `intvty_p90`,
+  `input_throughput` and `tpot_p90_ms` alongside the output-axis figures. The
+  chart it renders follows the payload's `benchmark_mode`: an agentic run is
+  plotted on p90 interactivity against token throughput per chip — the pair
+  InferenceX ranks a submission by — and anything else keeps the previous
+  output-throughput pair unchanged.<br/>
+  **Operator note**: the default ladder is now per workload —
+  `256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under
+  `HYPERLOOM_AGENTX`, where a request carries a measured ISL p50 near 108k
+  tokens and the same card saturates two orders of magnitude lower.
+  `--conc-sweep-concs` still overrides both. The sweep is no longer off by
+  default under AgentX, and its budget default is sized at the ladder it has to
+  fund (seven rungs on each of two arms); `--conc-sweep-total-budget-sec` is
+  still a ceiling the session's own remaining time clamps. The `sweep` action
+  is gone from the LLM catalogue, the executor registry and the phase contract,
+  and the SWEEP exit reasons `conc_sweep_done` / `conc_sweep_failed` collapse
+  into `sweep_done` / `sweep_failed` with no alias for the old spelling — a
+  resumed session carrying one will not map to a clean exit code.
+
+- **Each concurrency-sweep rung is bounded by its own concurrency.** The inner
+  benchmark cap, the client's `--warmup-grace-period` and the variant
+  subprocess cap all derived from the session's `CONC`, so a ladder rung at 64
+  was given the bound of a session sitting at 8 while having to drain eight
+  times the warmup. All three now take the rung's own concurrency, and the five
+  budget gates that admit a rung price it at the same number. Inert unless the
+  operator has declared both `AGENTX_WARMUP_GRACE_PERIOD` and
+  `AGENTX_WARMUP_GRACE_CONC`.
+
 - **The AgentX baseline overhead is derived from the warmup bound instead of a
   flat constant.** `AGENTX_BASELINE_OVERHEAD_SEC` was a single measured number
   (7200s, calibrated on GLM-5.2/Qwen3.8) covering setup, corpus load, warmup and
