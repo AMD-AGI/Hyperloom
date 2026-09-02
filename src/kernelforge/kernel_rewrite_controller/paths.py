@@ -81,6 +81,10 @@ class ControllerLayout:
         return self.result_root / "patches"
 
     @property
+    def patch_versions_root(self) -> Path:
+        return self.patches_root / ".versions"
+
+    @property
     def summary_md(self) -> Path:
         return self.result_root / "summary.md"
 

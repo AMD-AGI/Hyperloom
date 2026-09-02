@@ -166,3 +166,29 @@ def test_runner_terminates_the_child_process_group_at_deadline(tmp_path: Path) -
 
     assert outcome.timed_out is True
     assert time.monotonic() - started < 10
+
+
+def test_runner_polls_for_durable_checkpoints_while_child_is_running(tmp_path: Path) -> None:
+    result_json = tmp_path / "result.json"
+    payload = {"improved": True, "best_commit": "b" * 40}
+    script = (
+        "import json, pathlib, sys, time; "
+        f"pathlib.Path(sys.argv[1]).write_text(json.dumps({payload!r})); "
+        "time.sleep(60)"
+    )
+    callbacks: list[float] = []
+    invocation = ForgeLoopInvocation(
+        command=(sys.executable, "-c", script, str(result_json)),
+        workspace=tmp_path,
+        result_json=result_json,
+        deadline_unix=time.time() + 1.5,
+    )
+
+    outcome = run_forge_loop(
+        invocation,
+        on_checkpoint=lambda: callbacks.append(time.monotonic()),
+    )
+
+    assert outcome.timed_out is True
+    assert outcome.result == payload
+    assert callbacks

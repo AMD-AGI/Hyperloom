@@ -23,6 +23,17 @@ from kernelforge.kernel_rewrite_controller.dispatcher import (
 )
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout
+from kernelforge.kernel_rewrite_controller.publisher import (
+    OperatorPublication,
+    PublicationError,
+    publish_operator_result,
+    published_operator_dirs,
+)
+from kernelforge.kernel_rewrite_controller.recovery import (
+    RecoveryResult,
+    recover_all_task_results,
+    recover_task_result,
+)
 from kernelforge.kernel_rewrite_controller.scheduler import (
     ANALYSIS_BUDGET_SEC,
     FORGE_LOOP_BUDGET_SEC,
@@ -43,6 +54,9 @@ __all__ = [
     "ControllerLayout",
     "FORGE_LOOP_BUDGET_SEC",
     "MIN_TASK_START_REMAINING_SEC",
+    "OperatorPublication",
+    "PublicationError",
+    "RecoveryResult",
     "ScheduleResult",
     "ControllerRunError",
     "ControllerRunState",
@@ -61,7 +75,11 @@ __all__ = [
     "dispatch_prepared_tasks",
     "load_task",
     "parse_task_payload",
+    "publish_operator_result",
+    "published_operator_dirs",
     "read_handoff",
+    "recover_all_task_results",
+    "recover_task_result",
     "run_controller",
     "sort_tasks",
 ]

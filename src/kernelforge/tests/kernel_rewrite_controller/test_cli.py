@@ -111,6 +111,11 @@ def test_controller_summary_counts_prepared_task_results(
             ),
         ),
     )
+    monkeypatch.setattr(
+        controller,
+        "published_operator_dirs",
+        lambda _layout: (tmp_path / "output" / "result" / "patches" / "operator",),
+    )
 
     state = run_controller(
         handoff_dir=_handoff(tmp_path),

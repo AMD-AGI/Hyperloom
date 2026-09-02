@@ -15,6 +15,8 @@ from pathlib import Path
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
+from kernelforge.kernel_rewrite_controller.publisher import published_operator_dirs
+from kernelforge.kernel_rewrite_controller.recovery import recover_all_task_results
 from kernelforge.kernel_rewrite_controller.scheduler import dispatch_prepared_tasks
 
 CONTROLLER_STATE_SCHEMA_VERSION = 1
@@ -87,6 +89,11 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
         f"- **Patch count:** `{state.patch_count}`",
         "",
     ]
+    patches = published_operator_dirs(layout)
+    if patches:
+        lines.extend(["## Published Operator Patches", ""])
+        lines.extend(f"- `{path.name}`" for path in patches)
+        lines.append("")
     atomic_write_text(layout.summary_md, "\n".join(lines))
 
 
@@ -128,10 +135,13 @@ def run_controller(
 
     try:
         read_handoff(handoff_path)
+        recover_all_task_results(layout)
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
         )
+        recover_all_task_results(layout)
+        patch_count = len(published_operator_dirs(layout))
     except Exception as error:
         failed = ControllerRunState(
             **{
@@ -145,13 +155,13 @@ def run_controller(
         _write_summary(layout, failed)
         raise ControllerRunError(failed.reason) from error
 
-    if schedule.task_count == 0:
+    if schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_NO_OPPORTUNITY
         reason = "no prepared operator tasks are available"
     elif schedule.stopped_for_budget:
         status = CONTROLLER_STATUS_PARTIAL
         reason = "controller stopped admitting tasks because less than 30 minutes remained"
-    elif schedule.succeeded_count:
+    elif patch_count:
         status = CONTROLLER_STATUS_COMPLETED
         reason = "all prepared operator tasks were processed"
     else:
@@ -164,7 +174,7 @@ def run_controller(
             "finished_at": _now_iso(),
             "reason": reason,
             "task_count": schedule.task_count,
-            "patch_count": schedule.succeeded_count,
+            "patch_count": patch_count,
         }
     )
     _write_state(layout, completed)

@@ -13,6 +13,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
 
 _RESULT_SENTINEL = "__FORGE_RESULT__"
 _TERMINATE_GRACE_SEC = 5.0
+_CHECKPOINT_POLL_SEC = 1.0
 
 
 @dataclass(frozen=True)
@@ -161,7 +163,18 @@ def _read_result(path: Path, stdout: str) -> dict[str, Any] | None:
     return None
 
 
-def run_forge_loop(invocation: ForgeLoopInvocation) -> ForgeLoopOutcome:
+def _notify_checkpoint(callback: Callable[[], None] | None) -> None:
+    if callback is None:
+        return
+    with contextlib.suppress(Exception):
+        callback()
+
+
+def run_forge_loop(
+    invocation: ForgeLoopInvocation,
+    *,
+    on_checkpoint: Callable[[], None] | None = None,
+) -> ForgeLoopOutcome:
     """Run forge-loop until completion or the controller task deadline."""
     remaining = invocation.deadline_unix - time.time()
     if remaining <= 0:
@@ -183,11 +196,18 @@ def run_forge_loop(invocation: ForgeLoopInvocation) -> ForgeLoopOutcome:
         start_new_session=True,
     )
     timed_out = False
-    try:
-        stdout, stderr = process.communicate(timeout=remaining)
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        stdout, stderr = _terminate_process_group(process)
+    while True:
+        remaining = invocation.deadline_unix - time.time()
+        if remaining <= 0:
+            timed_out = True
+            stdout, stderr = _terminate_process_group(process)
+            break
+        try:
+            stdout, stderr = process.communicate(timeout=min(remaining, _CHECKPOINT_POLL_SEC))
+            break
+        except subprocess.TimeoutExpired:
+            _notify_checkpoint(on_checkpoint)
+    _notify_checkpoint(on_checkpoint)
     return ForgeLoopOutcome(
         returncode=int(process.returncode if process.returncode is not None else -1),
         stdout=stdout,

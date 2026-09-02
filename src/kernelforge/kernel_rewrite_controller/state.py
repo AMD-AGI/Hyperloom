@@ -126,5 +126,24 @@ class TaskStateStore:
         self.save(state)
         return state
 
+    def mark_recovered_success(
+        self,
+        *,
+        result_patch_dir: str,
+        reason: str,
+    ) -> TaskState:
+        """Publish a recovered success even when the interrupted state was terminal."""
+        current = self.load()
+        state = TaskState(
+            status=TASK_STATUS_SUCCEEDED,
+            reason=str(reason or ""),
+            started_at=current.started_at if current is not None else "",
+            finished_at=_now_iso(),
+            workspace_dir=current.workspace_dir if current is not None else "",
+            result_patch_dir=str(result_patch_dir),
+        )
+        self.save(state)
+        return state
+
 
 __all__ = ["TaskStateStore"]

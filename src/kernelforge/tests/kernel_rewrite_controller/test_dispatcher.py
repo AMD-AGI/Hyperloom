@@ -8,6 +8,7 @@ from pathlib import Path
 from kernelforge.kernel_rewrite_controller import ControllerLayout, TaskStateStore
 from kernelforge.kernel_rewrite_controller import dispatcher
 from kernelforge.kernel_rewrite_controller.forge_runner import ForgeLoopOutcome
+from kernelforge.kernel_rewrite_controller.recovery import RecoveryResult
 from kernelforge.kernel_rewrite_controller.worktree import OperatorWorktree
 
 
@@ -36,7 +37,7 @@ def test_dispatch_single_task_records_success_and_controller_base_patch(
     monkeypatch.setattr(
         dispatcher,
         "run_forge_loop",
-        lambda invocation: ForgeLoopOutcome(
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
             returncode=0,
             stdout="",
             stderr="",
@@ -45,10 +46,18 @@ def test_dispatch_single_task_records_success_and_controller_base_patch(
             command=invocation.command,
         ),
     )
+    patch_dir = layout.patches_root / "published"
+    patch_dir.mkdir(parents=True)
+    (patch_dir / "change.patch").write_text("diff\n", encoding="utf-8")
     monkeypatch.setattr(
         dispatcher,
-        "export_patch_from_base",
-        lambda worktree, best_commit: "diff --git a/sglang/kernels/fused_moe.py b/sglang/kernels/fused_moe.py\n",
+        "recover_task_result",
+        lambda *_args, **_kwargs: RecoveryResult(
+            operator_id="published",
+            published=True,
+            patch_dir=patch_dir,
+            best_commit="b" * 40,
+        ),
     )
 
     result = dispatcher.dispatch_single_task(
@@ -59,7 +68,7 @@ def test_dispatch_single_task_records_success_and_controller_base_patch(
     )
 
     assert result.status == "succeeded"
-    assert result.patch_path == task_dir / "controller-result.patch"
+    assert result.patch_path == patch_dir / "change.patch"
     assert result.patch_path.is_file()
     state = TaskStateStore(task_dir).load()
     assert state is not None
@@ -77,13 +86,22 @@ def test_dispatch_single_task_contains_forge_failure(
     monkeypatch.setattr(
         dispatcher,
         "run_forge_loop",
-        lambda invocation: ForgeLoopOutcome(
+        lambda invocation, **_kwargs: ForgeLoopOutcome(
             returncode=2,
             stdout="",
             stderr="driver preparation failed",
             result=None,
             timed_out=False,
             command=invocation.command,
+        ),
+    )
+    monkeypatch.setattr(
+        dispatcher,
+        "recover_task_result",
+        lambda *_args, **_kwargs: RecoveryResult(
+            operator_id="missing",
+            published=False,
+            reason="no trusted forge-loop best result",
         ),
     )
 
