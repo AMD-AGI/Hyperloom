@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collecto
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.session.sbd_v6 import write_timeline_event
+from hyperloom.orchestrator.phases.machine_state import GEAK_TERMINAL_STATUSES
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -2327,6 +2328,85 @@ def test_the_geak_echo_is_still_reported_inside_a_real_visit(tmp_path):
     run = _events(timeline, "kernel")[0]["ext"]["geak_runs"][0]
     # One normalizer feeds both fields, so they cannot contradict each other.
     assert (run["status"], run["outcome"]) == ("failed", "FAILED")
+
+
+def _geak_run_row(tmp_path, geak_status: str) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak={"engaged": True, "status": geak_status, "accepted_kernels": []},
+    )
+    return _events(timeline, "kernel")[0]["ext"]["geak_runs"][0], warnings
+
+
+@pytest.mark.parametrize("geak_status", sorted(GEAK_TERMINAL_STATUSES))
+def test_no_terminal_geak_status_reaches_the_normalizer_as_drift(tmp_path, geak_status):
+    """Every status the runtime declares terminal must already be known here.
+
+    Read off the producer's own set rather than restated, so a status added to
+    ``GEAK_TERMINAL_STATUSES`` and to nothing else fails here instead of
+    surfacing months later as a drift warning on a run that worked. That is how
+    ``no_gain`` and ``baseline_reproduction_failed`` were both missed: the first
+    vocabulary was assembled from what production had already written, which
+    cannot contain a status nothing has hit yet.
+    """
+    run, warnings = _geak_run_row(tmp_path, geak_status)
+
+    assert run["status"] in {"succeeded", "failed", "skipped"}
+    assert not [w for w in warnings if "unrecognized geak_runs status" in w]
+
+
+@pytest.mark.parametrize(
+    ("geak_status", "expected_status", "expected_outcome"),
+    [
+        ("ok", "succeeded", "NEEDS_REVIEW"),
+        # A completed run that found nothing, and the third most common status
+        # in production -- 212 sessions against 115 ``ok``. Reported as a GEAK
+        # fault until the alias existed.
+        ("no_gain", "succeeded", "NEEDS_REVIEW"),
+        # The runner's baseline reference did not reproduce the orchestrator's,
+        # so the run's gain is non-comparable and ``phases/kernel.py`` refuses
+        # to promote it. A real failure, and one the runtime names.
+        ("baseline_reproduction_failed", "failed", "FAILED"),
+        ("failed", "failed", "FAILED"),
+        ("error", "failed", "FAILED"),
+        ("missing", "failed", "FAILED"),
+        ("no_result_recovered_from_disk", "failed", "FAILED"),
+        # Reaches the field from the runner without being terminal: 95 sessions.
+        ("timeout", "failed", "FAILED"),
+        ("skipped", "skipped", "SKIPPED"),
+    ],
+)
+def test_every_geak_status_maps_to_its_own_classification(tmp_path, geak_status, expected_status, expected_outcome):
+    """The classification each status lands on, not merely that it is known.
+
+    Union of two sources, because neither is complete on its own:
+    ``GEAK_TERMINAL_STATUSES`` is what the runtime declares, and the corpus of
+    2404 sessions carrying a geak block is what it has actually written --
+    ``missing`` (1503), ``timeout`` (95) and the collector's disk-recovery word
+    appear only in the second.
+    """
+    run, _ = _geak_run_row(tmp_path, geak_status)
+
+    assert (run["status"], run["outcome"]) == (expected_status, expected_outcome)
+
+
+def test_the_pinned_vocabulary_covers_the_producer_set(tmp_path):
+    """The parametrization above must not fall behind the producer's set."""
+    pinned = {
+        "ok",
+        "no_gain",
+        "baseline_reproduction_failed",
+        "failed",
+        "error",
+        "missing",
+        "no_result_recovered_from_disk",
+        "timeout",
+        "skipped",
+    }
+    assert GEAK_TERMINAL_STATUSES <= pinned
 
 
 def test_a_skipped_geak_spelling_does_not_contradict_itself(tmp_path):
