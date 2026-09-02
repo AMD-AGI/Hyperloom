@@ -51,7 +51,6 @@ _AGENT_ENV = (
     "CODEX_MODEL",
     "FORGE_API_KEY",
     "FORGE_AGENT_SANDBOX_MODE",
-    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "SAFE_API_KEY",
@@ -177,23 +176,7 @@ def test_explicit_secure_sandbox_mode_is_wired(
     assert captured["sandbox_mode"] == mode
 
 
-def test_unconfirmed_bypass_is_rejected_before_backend_construction(
-    clean_agent_env,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        cli_module,
-        "resolve_agent_runtime",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("runtime must not be resolved before bypass confirmation")
-        ),
-    )
-    with pytest.raises(click.UsageError, match="HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1"):
-        _create_agent_backend("codex", "gpt-explicit", "bypass")
-
-
-def test_confirmed_bypass_is_wired(clean_agent_env, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+def test_bypass_is_wired(clean_agent_env, monkeypatch):
     captured = {}
 
     def fake_resolve(provider, **kwargs):

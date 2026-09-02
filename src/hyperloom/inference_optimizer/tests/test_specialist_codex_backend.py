@@ -805,8 +805,9 @@ def test_codex_usage_returns_none_when_no_counters_are_reported(tmp_path: Path) 
 
 
 def _enable_codex_bypass(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Select canonical bypass with both required operator opt-ins."""
+    """Select Codex sandbox bypass for unattended specialist runs."""
     monkeypatch.setenv("HYPERLOOM_CODEX_SANDBOX_MODE", "bypass")
+
 
 def _successful_codex_script(path: Path) -> Path:
     """Write a fake Codex CLI that consumes stdin and completes the contract."""
