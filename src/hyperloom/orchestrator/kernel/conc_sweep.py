@@ -27,6 +27,7 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir, run
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    agentx_variant_timeout_sec,
     run_grid,
 )
 from ..actions.executors._workload_envs import (
@@ -55,11 +56,55 @@ DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
 DEFAULT_NUM_PROMPTS_FACTOR = 5
 
 # Per-variant timeout (seconds); override via ``--conc-sweep-timeout-sec``.
+# Synthetic-sized, like every other variant-timeout default here; under AgentX
+# ``agentx_variant_timeout_sec`` raises it at the point of use, so this number
+# is a floor for the synthetic sweep rather than a bound on an agentic round.
 DEFAULT_VARIANT_TIMEOUT_SEC = 1800
 
 # Total wall-clock budget (seconds); override via ``--conc-sweep-total-budget-sec``.
 # ``None`` disables the gate; ``<=0`` means no time is left to spend.
 DEFAULT_TOTAL_BUDGET_SEC = 9000
+
+# How many rungs the AgentX floor below buys when the default budget cannot fund
+# even one. Two, not the full ladder: the point is to make the sweep produce a
+# comparison instead of nothing, not to silently authorize twelve hours of GPU.
+# A caller who wants the whole ladder passes --conc-sweep-total-budget-sec.
+_AGENTX_MIN_FUNDED_RUNGS = 2
+
+
+def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None) -> float:
+    """What a variant will actually be granted, for budget arithmetic.
+
+    Every budget gate in this module used to price a variant at the DECLARED
+    ``variant_timeout_sec`` -- 1800s, sized for the synthetic 1024/1024 shape.
+    ``run_grid`` does not hand the round that number: under AgentX it raises the
+    cap to what an agentic round needs before launching. Pricing at 1800s while
+    granting 10800s admits a variant the budget cannot pay for, and the round
+    then has its cap clamped back down to the remaining time and is killed
+    mid-warmup -- the exact failure the cap-raise exists to prevent, just moved
+    from the grid runner into the sweep's admission check.
+
+    The same number is also the ceiling on the session soft deadline, for the
+    same reason: a soft deadline of 1800s ends an agentic round that has not
+    reached its measurement window yet.
+
+    With AgentX off this returns ``variant_timeout_sec`` untouched, so the
+    synthetic sweep prices and paces exactly as it did before.
+
+    ``shared_state`` carries the durable AgentX signal. A session resumed into a
+    shell that lost HYPERLOOM_AGENTX would otherwise price every rung as
+    synthetic here and then have the round granted the raised cap anyway -- the
+    two sides disagreeing again, in the direction that admits a rung the budget
+    cannot pay for.
+
+    Args:
+        variant_timeout_sec: The declared per-variant hard timeout, in seconds.
+        shared_state: Session state; consulted only when the env var is absent.
+
+    Returns:
+        float: The cap the round will actually be granted, in seconds.
+    """
+    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -693,7 +738,11 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
                     arm_results.append(skip_r)
                     _all_results_ref.append(skip_r)
                 break
-            if has_budget and _reuse_remaining is not None and _reuse_remaining < float(variant_timeout_sec):
+            if (
+                has_budget
+                and _reuse_remaining is not None
+                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state)
+            ):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
                 _budget_state["budget_remaining_sec"] = max(0.0, float(_reuse_remaining))
@@ -858,7 +907,7 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             arm_results.append(skip_r)
             _all_results_ref.append(skip_r)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < float(variant_timeout_sec):
+        if has_budget and _ob_rem is not None and _ob_rem < _granted_cap_sec(variant_timeout_sec, state):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
@@ -1252,6 +1301,38 @@ async def run_conc_sweep(
             workspace=str(workspace),
         )
 
+    # The module default is synthetic-sized and cannot fund a single AgentX rung.
+    # ``_granted_cap_sec`` prices a rung at what ``run_grid`` will actually grant
+    # it, which under AgentX is the raised cap (10800s at canonical settings) --
+    # larger than DEFAULT_TOTAL_BUDGET_SEC (9000s) on its own. Left alone, the
+    # first rung trips "insufficient_remaining_for_variant" and the whole ladder
+    # is skipped with zero measurements, which reads like a benchmark failure
+    # rather than a budget that was never sized for this workload.
+    #
+    # The CLI already raises this knob for AgentX; a caller that reaches
+    # ``run_conc_sweep`` directly (SDK, tests, any path that does not go through
+    # ``_apply_agentx_budget_profile``) got the synthetic default. Give it the
+    # same floor here, and only when the caller left the default in place -- a
+    # number the operator chose is never overridden. Safe to raise: this is the
+    # action's own slice, and the session deadline still clamps it via
+    # ``_session_soft_dl`` below.
+    if total_budget_sec is not None and int(total_budget_sec) == DEFAULT_TOTAL_BUDGET_SEC:
+        _rung_cost = _granted_cap_sec(variant_timeout_sec, state)
+        if _rung_cost > float(total_budget_sec):
+            _raised = int(_rung_cost * _AGENTX_MIN_FUNDED_RUNGS)
+            log.warning(
+                "conc_sweep: the default total budget %ds cannot fund even one rung at "
+                "the granted cap %.0fs, so every rung would be skipped as "
+                "insufficient_remaining_for_variant. Raising the budget to %ds (%d rungs) "
+                "for this AgentX sweep. Pass --conc-sweep-total-budget-sec to size it "
+                "yourself; the session deadline still clamps whatever is set here.",
+                total_budget_sec,
+                _rung_cost,
+                _raised,
+                _AGENTX_MIN_FUNDED_RUNGS,
+            )
+            total_budget_sec = _raised
+
     has_budget = total_budget_sec is not None
     started_at = time.time()
     deadline = started_at + total_budget_sec if has_budget else None
@@ -1271,7 +1352,7 @@ async def run_conc_sweep(
         if _sr is not None:
             _sr_sec = _sr * 60.0
             _clamped = max(0.0, _sr_sec - _SESSION_CLOSE_RESERVE_SEC)
-            _session_soft_dl = min(float(variant_timeout_sec), _clamped) if _clamped > 0 else None
+            _session_soft_dl = min(_granted_cap_sec(variant_timeout_sec, state), _clamped) if _clamped > 0 else None
 
     results: list[VariantResult] = []
     budget_exhausted = False
@@ -1318,7 +1399,7 @@ async def run_conc_sweep(
             for v in skip_grid_fn():
                 results.append(_budget_skip_result(v))
             continue
-        if has_budget and _arm_remaining is not None and _arm_remaining < float(variant_timeout_sec):
+        if has_budget and _arm_remaining is not None and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))

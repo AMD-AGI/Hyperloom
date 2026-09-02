@@ -32,6 +32,110 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   on. `host_origin` is the one sanitizer-exempt subtree allowed to carry
   absolute paths (secret-named keys are still dropped there).
 
+### Fixed
+
+- **The AgentX baseline overhead is derived from the warmup bound instead of a
+  flat constant.** `AGENTX_BASELINE_OVERHEAD_SEC` was a single measured number
+  (7200s, calibrated on GLM-5.2/Qwen3.8) covering setup, corpus load, warmup and
+  first-compile. Warmup is the share that actually varies by model, and it
+  already has an operator-visible bound in the client:
+  `AGENTX_WARMUP_GRACE_PERIOD`. A model whose warmup runs long is therefore a
+  model whose operator has already raised that knob — a raw aiperf run against
+  Kimi-K3 at concurrency 64 measured warmup alone at ~12075s, past the entire
+  flat cap. The overhead is now `5400s non-warmup + AGENTX_WARMUP_GRACE_PERIOD`,
+  and every input is logged at INFO so a field timeout can be read back to the
+  values that produced it.<br/>
+  **Operator note**: at canonical settings the cap is unchanged
+  (5400 + 1800 = 7200), so nothing moves for existing synthetic or GLM-5.2-class
+  runs. Raising `AGENTX_WARMUP_GRACE_PERIOD` now also raises the baseline
+  timeout by the same amount — which is the point, but it means the round's
+  worst-case wall clock grows with that knob. `AGENTX_BASELINE_OVERHEAD_SEC`
+  still overrides the derivation outright, and the "nothing has been tuned for
+  this model" warning now fires only when *neither* knob is set.
+
+- **Overriding `HYPERLOOM_PROFILE_MAX_ITERS` under AgentX no longer lifts the
+  host-RAM capture bound silently.** The AgentX branch clamps captured profile
+  steps to 8 because an agentic step carries orders of magnitude more profiler
+  events than the synthetic shape the normal cap is sized against — at the stock
+  cap a DeepSeek-V4 round was OOM-killed mid-capture three times in a row. The
+  operator override is applied afterwards and wins, which is intended, but the
+  two existing warnings could not report it: `cap` defaults to 128, so the
+  obvious `HYPERLOOM_PROFILE_MAX_ITERS=128` was neither below the steady-state
+  floor nor above the cap and restored the full exposure without printing
+  anything. The override is still honoured verbatim; it now warns.
+
+- **`AIPERF_HTTP_TCP_USER_TIMEOUT` is re-stated after the `AIPERF_*` scrub.**
+  `TCP_USER_TIMEOUT` bounds how long Linux tolerates an established connection
+  making no progress, and an agentic turn against a long-context model makes
+  none for as long as the server is prefill-bound. aiperf's stock 30s therefore
+  aborts otherwise-live connections mid-prefill, surfacing as a warmup failure
+  with no server-side error to match it. Upstream's Kimi-K3 and DSv4 recipes all
+  export `900000` (15 min); Hyperloom scrubs every inherited `AIPERF_*` except
+  `AIPERF_BIN`, so an operator setting it had no effect and the client ran on
+  the stock bound. Now exported after the scrub, tunable via
+  `AGENTX_HTTP_TCP_USER_TIMEOUT`.
+
+- **A loosened `AGENTX_FAILED_REQUEST_THRESHOLD` is flagged as a non-canonical
+  workload.** Raising the abort ratio keeps alive a run that upstream's 0.10
+  would have aborted, and the surviving requests are then mapped as an ordinary
+  measurement. aiperf stamps no scenario marker for it — the threshold is the
+  client's own safety net, not part of the scenario — so the round came back
+  `submission_valid=true`. Only a *larger* ratio is flagged; tightening it
+  measures a strictly cleaner run.<br/>
+  **Operator note**: a run that raises this knob is now stamped
+  `submission_valid=false` with `failed_request_threshold=<v>(canonical 0.10)`
+  in `submission_invalid_reasons`, and `benchmark_result.py` will refuse the
+  measurement. Rounds that previously passed on a raised threshold will now be
+  rejected — which is the intended correction, not a regression.
+
+- **The AgentX warmup bound scales with concurrency, and both layers read the
+  same number.** The client builds warmup as `CANON_WARMUP_PER_LANE` requests
+  per lane across `CONC` lanes, so the work is linear in concurrency by
+  construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
+  measured at one concurrency under-budgets every higher one (measured on
+  Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
+  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
+  lives in one function that both consumers call: this process derives the
+  subprocess cap from it, and `apply_agentx_switch` exports its result into the
+  benchmark env so the client's `--warmup-grace-period` — the thing that
+  actually stops the warmup — cannot disagree with the cap. A sweep variant
+  re-derives from its own `CONC` after the variant envs are merged, since the
+  switch runs before that concurrency exists.<br/>
+  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
+  grace was measured at and defaults to 8, so every existing configuration
+  derives exactly what it derived before. Declare it when you measured
+  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
+  passed in without the anchor is read as an 8-anchored number and doubled.
+  The floor only ever raises a bound.
+
+- **Budget admission prices a variant at the cap it will actually be granted.**
+  Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the
+  sweep's session soft deadline compared the remaining budget against the
+  *declared* `variant_timeout_sec`. Under AgentX the round is granted the raised
+  cap instead, so a variant was admitted that the budget could not pay for, had
+  its timeout clamped back to the remaining time, and died mid-warmup — the
+  exact failure the cap-raise exists to prevent. All five now use the raised
+  cap; with AgentX off the helper is the identity and the synthetic path prices
+  and paces exactly as before.
+
+- **An AgentX benchmark timeout is never lowered below what the config
+  declared.** The inner-timeout raise was an unconditional assignment, so a
+  config declaring more than the AgentX derivation had its timeout cut
+  (`profile_sglang.yaml`'s 14400s became 10800s). It now takes the maximum and
+  logs when the config's own number wins.
+
+- **The AgentX client holds the server connection open, and validates its
+  numeric knobs.** `AIPERF_HTTP_TCP_USER_TIMEOUT` gave the client a 900s
+  tolerance, but nothing raised the server's keep-alive (vLLM defaults to 5s),
+  so the server closed idle connections mid-warmup and the round failed with
+  `ServerDisconnectedError` after a full weight load. The wrapper now defaults
+  the framework's own knob (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE` /
+  `SGLANG_TIMEOUT_KEEP_ALIVE`) to the same tolerance, overridable via
+  `AGENTX_HTTP_KEEP_ALIVE_S` and never overwriting an explicit setting.
+  Separately, `AGENTX_FAILED_REQUEST_THRESHOLD` was interpolated into an awk
+  program body, making its value executable; the three measurement knobs are now
+  validated as numbers and the comparison passes them through `awk -v`.
+
 ### Added
 
 - **Session breakdown exports now include the additive V6 startup contract.**

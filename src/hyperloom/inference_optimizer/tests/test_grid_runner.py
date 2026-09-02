@@ -1838,6 +1838,42 @@ class TestSessionBudgetAdmission:
         assert recorded == []
         assert [r.status for r in results] == ["skipped"]
 
+    @pytest.mark.asyncio
+    async def test_without_an_estimate_agentx_gates_on_its_raised_cap(self, tmp_path, monkeypatch):
+        """The AgentX-raised cap, not the declared one, must gate admission.
+
+        Gating on the declared ``variant_timeout_sec`` (600) would admit this
+        variant with 700s left on the clock; the round is then handed the
+        AgentX-raised cap (10800s) by ``_round_timeout_sec``, which
+        ``session_clamped_timeout_sec`` immediately clamps back down to the
+        ~700s actually remaining -- reproducing the mid-warmup kill this
+        AgentX cap-raise exists to prevent.
+        """
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        monkeypatch.setenv("AGENTX_DURATION", "3600")
+        monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "7200")
+        monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+        base = tmp_path / "base.yaml"
+        _write_baseline_yaml_overrides(base)
+        recorded: list[dict] = []
+
+        with patch(
+            "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+            side_effect=_capture_launches(recorded),
+        ):
+            results = await run_grid(
+                base_yaml_path=base,
+                base_extra_args="",
+                grid=[GridVariant("v0")],
+                output_root=tmp_path / "out",
+                variant_timeout_sec=600,
+                session_deadline_sec=time.monotonic() + 700.0,
+                variant_expected_sec=None,
+            )
+
+        assert recorded == []
+        assert [r.status for r in results] == ["skipped"]
+
 
 class TestSessionBudgetTimeoutClamp:
     """A granted cap never exceeds what the session can still pay for.
@@ -2486,6 +2522,63 @@ class TestRemoveServerArgsPreservesJson:
         out = _grid_runner.remove_server_args(raw, ["--port"])
         assert json.loads(out.split("--compilation-config ", 1)[1].strip()) == {"cudagraph_mode": "FULL"}
 
+    def test_sign_prefixed_custom_op_survives_removal(self):
+        """A ``+``/``-`` prefixed custom-op value must survive the round trip.
+
+        Live regression: every variant of an explore round died at vLLM argv
+        parse with ``Invalid JSON: key must be a string`` -- including a control
+        leg that added one env var and zero args, because
+        ``strip_benchmark_harness_flags`` routes EVERY composed variant through
+        ``remove_server_args`` with a non-empty denylist. The old POSIX
+        ``shlex.split``/rejoin stripped the JSON quotes, and the bareword repair
+        heuristic could not re-quote ``+fused_rms_norm_gated`` (its ``+`` was
+        outside the charset), so the corruption reached the server verbatim.
+        """
+        raw = (
+            "--compilation-config "
+            '{"mode":3,"custom_ops":["+fused_rms_norm_gated"],'
+            '"cudagraph_capture_sizes":[1,2,3]} --port 8888'
+        )
+        out = _grid_runner.remove_server_args(raw, ["--port"])
+        assert "--port" not in out
+        blob = json.loads(out.split("--compilation-config ", 1)[1].strip())
+        assert blob["custom_ops"] == ["+fused_rms_norm_gated"]
+        assert blob["cudagraph_capture_sizes"] == [1, 2, 3]
+
+    def test_compose_preserves_json_for_every_args_mode(self):
+        """All four variant shapes keep both JSON flags ``json.loads``-able."""
+        cc = '{"mode":3,"custom_ops":["+fused_rms_norm_gated"]}'
+        sc = '{"method":"mtp","num_speculative_tokens":2}'
+        base = f"--max-num-seqs 20 --compilation-config {cc} --speculative-config {sc}"
+
+        def _blob(text, flag):
+            toks = text.split()
+            return json.loads(toks[toks.index(flag) + 1])
+
+        for kwargs in (
+            {"inherited_args": base},
+            {"inherited_args": base, "remove_args": ["--max-num-seqs"]},
+            {"base_extra_args": base, "args_mode": "replace"},
+        ):
+            out = _grid_runner.compose_server_args(**kwargs)
+            assert _blob(out, "--compilation-config") == json.loads(cc)
+            assert _blob(out, "--speculative-config") == json.loads(sc)
+        # Removing the JSON flag and supplying a variant replacement.
+        repl = '{"mode":3,"custom_ops":["-rms_norm"]}'
+        out = _grid_runner.compose_server_args(
+            inherited_args=base,
+            remove_args=["--compilation-config"],
+            variant_extra_args=f"--compilation-config {repl}",
+        )
+        assert out.count("--compilation-config") == 1
+        assert _blob(out, "--compilation-config") == json.loads(repl)
+        assert _blob(out, "--speculative-config") == json.loads(sc)
+
+    def test_shell_quoted_plain_operand_loses_its_wrappers(self):
+        """Magpie expands ``EXTRA_*_ARGS`` unquoted, so wrappers must not persist."""
+        out = _grid_runner.remove_server_args("--tool-call-parser 'kimi_k3' --port 8888", ["--port"])
+        assert out == "--tool-call-parser kimi_k3"
+
 
 # ---------------------------------------------------------------------------
 # benchmark_report settling (real-run race)
@@ -2577,3 +2670,73 @@ async def test_report_read_does_not_wait_when_the_process_already_failed(tmp_pat
         )
     assert reads["n"] == 1
     assert not measurement.get("valid_measurement")
+
+
+# --- the JSON-preserving tokenizer is on the DEFAULT path, not just AgentX -----
+
+
+class TestServerArgTokenizerOnTheSyntheticPath:
+    """``strip_benchmark_harness_flags`` runs for every variant, AgentX or not.
+
+    The PR note "AgentX-off is a no-op" does not hold in this file:
+    ``compose_server_args`` always calls ``strip_benchmark_harness_flags``, which
+    is ``remove_server_args`` with a non-empty denylist, so every synthetic grid
+    variant goes through the replaced tokenizer. These lock the behaviour that
+    matters there, with HYPERLOOM_AGENTX unset.
+    """
+
+    def _off(self, monkeypatch):
+        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+
+    def test_a_plain_synthetic_arg_string_round_trips(self, monkeypatch):
+        self._off(monkeypatch)
+        args = "--tensor-parallel-size 8 --gpu-memory-utilization 0.9 --max-num-seqs 512"
+        assert _grid_runner.compose_server_args(base_extra_args=args) == args
+
+    def test_the_denylisted_flag_is_still_dropped(self, monkeypatch):
+        self._off(monkeypatch)
+        out = _grid_runner.compose_server_args(base_extra_args="--no-enable-prefix-caching --max-num-seqs 512")
+        assert "--no-enable-prefix-caching" not in out
+        assert "--max-num-seqs 512" in out
+
+    def test_quoted_operands_do_not_keep_their_wrappers(self, monkeypatch):
+        """Magpie expands EXTRA_*_ARGS unquoted, so a wrapper reaches argv literally."""
+        self._off(monkeypatch)
+        out = _grid_runner.compose_server_args(base_extra_args="--quantization 'fp8' --max-num-seqs 512")
+        assert out == "--quantization fp8 --max-num-seqs 512"
+
+    def test_an_unbalanced_quote_leaves_the_string_alone(self, monkeypatch):
+        """Untokenizable input is returned untouched rather than guessed at."""
+        self._off(monkeypatch)
+        broken = "--served-model-name 'oops --max-num-seqs 512"
+        assert _grid_runner.remove_server_args(broken, ["--max-num-seqs"]) == broken
+
+    def test_a_synthetic_json_value_survives_a_removal(self, monkeypatch):
+        """Synthetic runs carry JSON flags too (compilation-config, and friends)."""
+        self._off(monkeypatch)
+        args = '--compilation-config {"mode":3} --max-num-seqs 512'
+        out = _grid_runner.remove_server_args(args, ["--max-num-seqs"])
+        assert out == '--compilation-config {"mode":3}'
+
+
+def test_the_json_tripwire_sees_damage_from_the_removal_pass(caplog):
+    """The window must cover ``remove_server_args``, which is what it is about.
+
+    It compared ``composed`` (already that function's output) against the final
+    string, so damage done during removal made the "before" side unparseable
+    too, ``healthy_before`` False, and the tripwire silent on precisely the
+    failure it was written for.
+    """
+    from hyperloom.orchestrator.actions.executors import _grid_server_args as gsa
+
+    real = gsa.remove_server_args
+
+    def _lossy(server_args, remove_args):
+        out = real(server_args, remove_args)
+        return out.replace('{"mode":3}', "{mode:3}")
+
+    args = '--compilation-config {"mode":3} --max-num-seqs 512'
+    with patch.object(gsa, "remove_server_args", side_effect=_lossy):
+        with caplog.at_level("ERROR"):
+            gsa.compose_server_args(base_extra_args=args, remove_args=["--max-num-seqs"])
+    assert any("CORRUPTED" in r.getMessage() for r in caplog.records), [r.getMessage() for r in caplog.records]

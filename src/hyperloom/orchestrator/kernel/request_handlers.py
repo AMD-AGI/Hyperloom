@@ -7705,6 +7705,56 @@ def _grade_integrate_accuracy(
     }
 
 
+def _agentx_rebaseline_timeout(resolved_sec: int, *, shared_state: Any = None) -> int:
+    """Raise a re-baseline timeout to what an AgentX round needs.
+
+    Same shape, and the same root cause, as
+    :func:`_cold_start_rebaseline_timeout`: the explicit ``timeout_sec`` that
+    integrate passes suppresses the baseline executor's own AgentX branch, so a
+    value sized for the synthetic shape becomes the only budget the round gets.
+    Observed values are 7200s and 9000s; a canonical AgentX warmup is 10
+    requests per lane over real agentic traces and does not fit either.
+
+    Measured on Qwen3.8: a round whose server answered all 685
+    chat/completions with 200 was cut at exactly its 7200s param, mid-warmup,
+    after which the client could no longer connect. Nothing in the abort reason
+    names the timeout -- aiperf reports the cancelled warmup credit as
+    ``warmup_failure``, so it reads as a workload problem.
+
+    Raised here, where the param is produced, rather than in the executor that
+    consumes it: ``_resolve_timeout`` deliberately lets an explicit param
+    outrank the AgentX derivation, and that contract has a test on it. AgentX
+    is an opt-in branch, so with it disabled this returns ``resolved_sec``
+    untouched and the default path is unaffected.
+
+    Args:
+        resolved_sec: The timeout the payload/contract resolved to.
+        shared_state: Session state, so a persisted ``benchmark_mode`` still
+            triggers the raise when this integrate call runs in a subprocess
+            that did not inherit ``HYPERLOOM_AGENTX``.
+
+    Returns:
+        int: ``resolved_sec``, or the AgentX-derived cap when that is larger.
+    """
+    from ..actions.executors._workload_envs import agentx_active
+
+    if not agentx_active(shared_state):
+        return resolved_sec
+    from ..actions.executors.baseline import agentx_baseline_timeout_sec
+
+    agentx_sec = agentx_baseline_timeout_sec()
+    if agentx_sec <= resolved_sec:
+        return resolved_sec
+    log.warning(
+        "integrate_handler: raising re-baseline timeout %ds -> %ds "
+        "(AgentX: AGENTX_DURATION + overhead; a synthetic-sized param cannot "
+        "cover a canonical agentic warmup and kills the round mid-warmup)",
+        resolved_sec,
+        agentx_sec,
+    )
+    return agentx_sec
+
+
 def _cold_start_rebaseline_timeout(resolved_sec: int) -> int:
     """Raise a re-baseline timeout to the cold-start cap when the JIT cache is empty.
 
@@ -7950,11 +8000,35 @@ async def integrate_handler(
     fake_task_id = f"integrate-{kernel_id or 'anon'}"
     workspace = unique_runs_dir(session_dir, "integrate", fake_task_id)
     baseline_executor = BaselineExecutor(session_dir=session_dir)
-    rebaseline_timeout_sec = _cold_start_rebaseline_timeout(
-        _integrate_rebaseline_timeout_sec(
-            payload,
-            default_timeout_sec=baseline_executor.default_timeout_sec,
+    from ..state.shared_state import SharedState
+
+    # Read-only, and only to learn whether this session is AgentX. A strict load
+    # that raises here lands AFTER the kernel patch has been applied, so a
+    # truncated or concurrently-written state.json would throw away work that
+    # already succeeded -- to answer an advisory question. Fall back to the env
+    # signal instead: ``agentx_active(None)`` consults HYPERLOOM_AGENTX, which is
+    # the same answer in every case except a run resumed into a shell that lost
+    # the variable, and there the cost is the un-raised timeout we had before.
+    try:
+        _state_for_mode = SharedState.load_or_init(session_dir)
+    except Exception as exc:  # noqa: BLE001 - advisory read, never fatal
+        log.warning(
+            "integrate: could not read session state to detect the benchmark mode "
+            "(%s: %s); falling back to the HYPERLOOM_AGENTX env signal. The applied "
+            "patch is unaffected.",
+            type(exc).__name__,
+            exc,
         )
+        _state_for_mode = None
+
+    rebaseline_timeout_sec = _agentx_rebaseline_timeout(
+        _cold_start_rebaseline_timeout(
+            _integrate_rebaseline_timeout_sec(
+                payload,
+                default_timeout_sec=baseline_executor.default_timeout_sec,
+            )
+        ),
+        shared_state=_state_for_mode,
     )
     fake_task = Task(
         task_id=fake_task_id,

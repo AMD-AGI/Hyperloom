@@ -667,6 +667,23 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # NOT re-derived per variant. The variant's own CONC only exists as of the
+    # merge above, and it is tempting to re-scale AGENTX_WARMUP_GRACE_PERIOD from
+    # it -- a conc sweep walks 256..2 while the session sits at one value, so a
+    # high-CONC variant runs with a grace sized for the session's concurrency.
+    #
+    # Doing that here is WRONG while the two caps above it are session-scaled.
+    # ``apply_agentx_switch`` sets ``bench["timeout_seconds"]`` and
+    # ``agentx_variant_timeout_sec`` sets the subprocess cap, both from
+    # os.environ's session CONC. Raising only the client's grace makes the round
+    # wait inside a bound its own caps do not cover: at session CONC=8 with the
+    # ladder at 256 the grace would become 57600s against a 10800s cap, so the
+    # round is SIGKILLed at 10800s while warmup is still draining -- strictly
+    # worse than leaving the grace alone, which is what shipped before.
+    #
+    # The real fix is to make the caps variant-aware too (thread the merged CONC
+    # into ``agentx_variant_timeout_sec`` / ``_round_timeout_sec``); until then
+    # all three numbers stay session-scaled and consistent with each other.
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.
@@ -1295,6 +1312,62 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
+def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None) -> int:
+    """Raise a variant's hard cap to what an AgentX round actually needs.
+
+    Every variant cap in the tree is sized for the synthetic 1024/1024 shape --
+    7800s for integrate, 2400s for explore, 1800s for the conc sweep. A
+    canonical AgentX warmup is 10 requests per lane against real agentic
+    traces, which on a 700B-class model runs well past two hours before the
+    measured round even begins, so those caps kill the round mid-warmup.
+    Measured on GLM-5.2: a variant launched 09:47:41 was killed at
+    11:47:41.575, twenty-plus connections dropping in the same millisecond
+    while the server was still prefilling with 55 requests running. Downstream
+    that reads as a warmup failure, because aiperf treats a cancelled root
+    warmup credit as terminal -- so the real cause (a subprocess kill) is
+    invisible in the abort reason.
+
+    ``baseline`` already derives an AgentX-aware cap; only that one path got
+    it. This reuses the same derivation rather than introducing a second number
+    to keep in sync, and never lowers a cap, so an operator who asked for
+    longer keeps it.
+
+    AgentX is an opt-in benchmark branch: with it disabled this returns ``cap``
+    untouched and the default path is unaffected.
+
+    ``shared_state`` is what makes the check survive a lost env var. The
+    original report is exactly that case: a session resumed into a shell without
+    HYPERLOOM_AGENTX, or a variant round driven from a subprocess that did not
+    inherit it, reads as synthetic here and the round is killed by the synthetic
+    cap mid-warmup -- the failure this function exists to prevent, reached by the
+    one route it did not cover. ``benchmark_mode`` is stamped at seed for
+    precisely this, so a caller holding the session state should pass it.
+
+    Known gap: ``run_grid``'s own call sites do not pass it yet. Threading state
+    through nine call sites in six files is a change of its own, and
+    ``agentx_active(None)`` is exactly today's behaviour, so those paths are no
+    worse than before while the sweep -- which already holds the state -- gets
+    the durable signal.
+
+    Args:
+        cap: The declared hard timeout for the round, in seconds.
+        shared_state: Session state, when the caller has one. Consulted only
+            when the env var is absent.
+
+    Returns:
+        int: ``cap``, or the AgentX-derived cap when that is larger.
+    """
+    # Local import: baseline imports from this module, and the rest of the file
+    # already resolves _workload_envs this way.
+    from ._workload_envs import agentx_active
+
+    if not agentx_active(shared_state):
+        return cap
+    from .baseline import agentx_baseline_timeout_sec
+
+    return max(cap, agentx_baseline_timeout_sec())
+
+
 def session_clamped_timeout_sec(
     cap: int,
     session_deadline_sec: float | None,
@@ -1577,7 +1650,20 @@ async def run_grid(
         Returns:
             int: The hard timeout to grant this round, in seconds.
         """
-        cap = int(variant_timeout_sec)
+        declared = int(variant_timeout_sec)
+        cap = agentx_variant_timeout_sec(declared)
+        if cap != declared:
+            log.info(
+                "grid_runner: variant %d/%d name=%s %s cap raised %ds -> %ds "
+                "(AgentX: AGENTX_DURATION + overhead; the synthetic default "
+                "cannot cover a canonical agentic warmup)",
+                idx + 1,
+                len(grid),
+                name,
+                round_label,
+                declared,
+                cap,
+            )
         clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=reserve_sec)
         if clamped == cap:
             return cap
@@ -1713,12 +1799,38 @@ async def run_grid(
             return False
         remaining_sec = session_deadline_sec - time.monotonic()
         # Falls back to a single ``variant_timeout_sec`` when no estimate was
-        # given, which is what callers that cannot estimate already got.
-        required_sec = (
-            float(variant_expected_sec) * rounds_left
-            if variant_expected_sec is not None
-            else float(variant_timeout_sec)
-        )
+        # given, which is what callers that cannot estimate already got. Must
+        # be the AgentX-raised cap, not the declared one: the declared cap
+        # understates what the round will actually be granted, so this check
+        # would admit a variant it cannot fit, which then gets its timeout
+        # clamped down to the (too-small) remaining budget by
+        # ``session_clamped_timeout_sec`` -- reproducing the mid-warmup kill
+        # this module's AgentX cap-raise exists to prevent.
+        # Under AgentX the estimate branch has to clear the raised cap too, not
+        # just the no-estimate one. An estimate is only as good as the shape it
+        # was made on, and every estimate in this tree is sized for the
+        # synthetic 1024/1024 round -- the very thing the cap-raise exists to
+        # correct. Admitting on a synthetic estimate (say 1500s against 2000s
+        # remaining) grants the raised cap, then lets
+        # ``session_clamped_timeout_sec`` squeeze it back to the 2000s that are
+        # actually left, and the round dies mid-warmup anyway. Taking the max
+        # only ever skips EARLIER: losing a variant costs one data point, while
+        # admitting one that gets killed costs the same data point plus the GPU
+        # time spent on it.
+        #
+        # Gated on the cap having actually been RAISED, which only happens with
+        # AgentX on -- ``agentx_variant_timeout_sec`` returns its argument
+        # untouched otherwise. Without that gate the default path would start
+        # charging every variant its full backstop instead of its expected cost,
+        # skipping variants that fit comfortably. The estimate stays the
+        # admission price on the default path, exactly as before.
+        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec))
+        _cap_was_raised = _raised > float(variant_timeout_sec)
+        if variant_expected_sec is None:
+            required_sec = _raised
+        else:
+            estimated_sec = float(variant_expected_sec) * rounds_left
+            required_sec = max(estimated_sec, _raised) if _cap_was_raised else estimated_sec
         if remaining_sec >= required_sec:
             return False
         log.warning(
@@ -2240,6 +2352,7 @@ async def run_grid(
         # leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
+        measure_cap_sec = _round_timeout_sec(i, variant.name, round_label="measure")
         try:
             rc, stdout, stderr = await _reported_magpie(
                 i,
@@ -2247,7 +2360,7 @@ async def run_grid(
                 magpie_python=magpie_python,
                 config_path=cfg_path,
                 output_dir=slot,
-                timeout_sec=_round_timeout_sec(i, variant.name, round_label="measure"),
+                timeout_sec=measure_cap_sec,
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
@@ -2268,7 +2381,7 @@ async def run_grid(
                 i + 1,
                 len(grid),
                 variant.name,
-                variant_timeout_sec,
+                measure_cap_sec,
                 exc,
             )
             _write_variant_abort_marker(

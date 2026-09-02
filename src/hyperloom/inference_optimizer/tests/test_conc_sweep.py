@@ -23,9 +23,11 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    DEFAULT_VARIANT_TIMEOUT_SEC,
     _build_arm_grid,
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
+    _granted_cap_sec,
     _has_optimization,
     _order_concs_desc,
     conc_sweep_declined_to_run,
@@ -1872,3 +1874,44 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     assert all(p["status"] == "skipped" for p in all_points)
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
+
+
+# --- budget arithmetic must price a variant at the cap it will be granted -------
+
+
+def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Zero regression: with AgentX off the sweep prices variants exactly as before."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC) == float(DEFAULT_VARIANT_TIMEOUT_SEC)
+
+
+def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
+    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for.
+
+    The round is then clamped back to the remaining budget and killed mid-warmup
+    -- the failure the cap-raise exists to prevent, moved into the sweep's own
+    admission check.
+    """
+    from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
+
+    for k in (
+        "AGENTX_BASELINE_TIMEOUT_SEC",
+        "AGENTX_BASELINE_OVERHEAD_SEC",
+        "AGENTX_WARMUP_GRACE_PERIOD",
+        "CONC",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    raised = _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC)
+    assert raised == float(agentx_baseline_timeout_sec())
+    assert raised > float(DEFAULT_VARIANT_TIMEOUT_SEC)
+
+
+def test_the_admission_price_never_lowers_an_operator_raised_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An operator who asked for longer than AgentX derives keeps what they asked for."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert _granted_cap_sec(99_999) == 99_999.0

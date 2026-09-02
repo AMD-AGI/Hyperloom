@@ -683,6 +683,183 @@ BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
 AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
 
+# The warmup share of that overhead is not a constant either, and it is the
+# share that actually varies by model: aiperf_client.sh bounds the warmup drain
+# with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a model
+# whose operator has already had to raise that knob for the round to complete at
+# all. Splitting the flat 7200 at its canonical grace lets the cap follow that
+# same knob instead of asking for a second, independent number that means the
+# same thing -- which is how the constant came to be wrong for Kimi-K3 (a raw
+# aiperf run measured warmup alone at ~12075s, past this entire cap). At
+# canonical settings the sum is unchanged, so the measured GLM-5.2/Qwen3.8
+# calibration this number carries is preserved exactly.
+AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
+_AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+
+# ...and the warmup share does not only vary by model, it varies by CONCURRENCY,
+# which the grace knob cannot express because it is one flat number. The client
+# builds warmup as CANON_WARMUP_PER_LANE requests per lane across CONC lanes, so
+# the work is linear in CONC *by construction*; a grace chosen at one
+# concurrency is arithmetically wrong at another. Measured on Kimi-K3:
+#
+#     conc=8   ->  87 warmup requests, ~3000s        (10.9 req/lane)
+#     conc=16  -> 177 warmup requests, ~5000s        (11.1 req/lane)
+#     conc=64  -> the 12075s warmup the warning below cites
+#
+# Left flat, a conc=32 round derives its cap from a conc=8 budget and is killed
+# mid-warmup -- the exact failure this module's cap-raise exists to prevent, just
+# moved one axis over. So the warmup share carries a CONC-scaled FLOOR.
+#
+# A ratio needs BOTH concurrencies, so the grace has to say which one it was
+# measured at. This is the default answer, not the only one: 8 is the lowest
+# concurrency this repo has a measured agentic warmup for, so defaulting to it
+# leaves every previously-validated round with its exact cap. But an operator
+# who measured at some other concurrency declares that via
+# ``AGENTX_WARMUP_GRACE_CONC`` instead of hand-converting their measurement into
+# an 8-anchored number -- which is what a hardcoded anchor forces, and which
+# silently doubles a conc=16 measurement.
+#
+# The floor only ever RAISES the cap. That asymmetry is deliberate: a cap that is
+# too large costs nothing but a longer wait on a genuinely hung round (and the
+# session budget clamps it anyway via ``session_clamped_timeout_sec``), while a
+# cap that is too small kills a round that would have finished.
+AGENTX_CANON_WARMUP_CONC = 8
+
+# Seen (warning, scaling) payloads, so a conc sweep does not reprint them once
+# per rung per arm. Both lines below are derivation commentary: the FIRST one is
+# the diagnosis, the fiftieth is noise that buries the per-variant progress the
+# same session is emitting. Keyed on the formatted payload rather than on a bare
+# flag, so a configuration that actually changes still speaks up.
+_AGENTX_SAID: set[tuple] = set()
+
+
+def _say_once(emit, key: tuple) -> None:
+    """Call ``emit`` the first time this exact payload appears in the process."""
+    if key in _AGENTX_SAID:
+        return
+    _AGENTX_SAID.add(key)
+    emit()
+
+
+def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
+    """Read a positive integer from ``src``; 0 when unset or unusable.
+
+    A whole number written with a decimal point (``"16.0"``, ``"3600.0"``) is
+    accepted. ``int()`` alone rejects it, and rejecting is not a safe default
+    here: these knobs feed a ratio, so discarding a declared anchor of ``16.0``
+    silently re-anchors the grace at 8 and doubles it -- the exact failure
+    ``AGENTX_WARMUP_GRACE_CONC`` exists to prevent. A fractional value
+    (``"8.5"``) is still rejected, because a non-integral concurrency or second
+    count is a typo rather than an intent.
+    """
+    raw = (src.get(name) or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        try:
+            as_float = float(raw)
+        except ValueError:
+            return 0
+        if not as_float.is_integer():
+            return 0
+        value = int(as_float)
+    return value if value > 0 else 0
+
+
+def _agentx_conc(src: "Mapping[str, str]") -> int:
+    """Concurrency for the round, from CONC; 0 when unset/unparseable."""
+    return _agentx_positive_int(src, "CONC")
+
+
+def agentx_warmup_grace_conc(env: "Mapping[str, str] | None" = None) -> int:
+    """The concurrency ``AGENTX_WARMUP_GRACE_PERIOD`` was measured at.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The declared anchor, or the repo default when unset/unusable.
+    """
+    src = os.environ if env is None else env
+    return _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC") or AGENTX_CANON_WARMUP_CONC
+
+
+def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
+    """The warmup bound for this round: the operator's grace, scaled by CONC.
+
+    ONE function because there are TWO consumers that must agree. This module
+    sizes the subprocess cap that has to outlast the warmup, and
+    ``aiperf_client.sh`` passes ``--warmup-grace-period`` to aiperf, which is
+    what actually cuts the warmup off. They read the same env var, and the
+    docstring of the cap has always claimed they stay consistent -- but the
+    CONC scaling used to live inside the cap's own body, so the client kept
+    seeing the UNSCALED number.
+
+    Measured consequence on a Kimi-K3 conc=32 round: the cap budgeted 14400s of
+    warmup while the client was still bounded at 3600s, so warmup would have
+    been cut at 106 of 354 requests with the working set barely populated --
+    the round survives, and reports a prefix-reuse figure taken before the
+    cache had anything in it. Exporting this value to the client is what makes
+    the two layers agree.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The warmup grace in seconds, never below the operator's own value.
+    """
+    src = os.environ if env is None else env
+    measured = _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_PERIOD")
+    if not measured:
+        # Nothing was measured, so there is nothing to scale. The canonical
+        # 1800s is a CONSTANT, not an observation of this model at this
+        # concurrency, and multiplying it by CONC/anchor would invent a bound
+        # nobody stands behind: at CONC=64 an untuned round would silently get
+        # 14400s of warmup share and a 23400s cap where the documented
+        # canonical total is 10800s. Return it flat so the canonical invariant
+        # holds at EVERY concurrency, and let the "nothing has been tuned for
+        # this model" warning below do the talking.
+        return AGENTX_CANON_WARMUP_GRACE_SEC
+    grace = measured
+    # Scaling requires the anchor to be DECLARED, not assumed. A ratio needs two
+    # numbers, and defaulting the second one to 8 turns a grace whose
+    # concurrency nobody stated into a multiplied bound: writing the canonical
+    # AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to yield a 23400s cap at
+    # CONC=64 while leaving it unset yielded 10800s -- the same value meaning two
+    # different things depending on whether it was typed. The conc sweep then
+    # prices every rung against the inflated number and skips most of the ladder.
+    #
+    # So: no anchor, no scaling. An operator who wants the floor says which
+    # concurrency their measurement came from, which is the whole point of
+    # AGENTX_WARMUP_GRACE_CONC and costs them one line.
+    if not _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC"):
+        return grace
+    # The client's warmup is linear in CONC by construction (per-lane requests x
+    # CONC lanes), but the grace knob is a flat number, so a grace measured at
+    # one concurrency under-budgets every higher one. Scale, never shrink, and
+    # stay identity at or below the anchor so previously-validated rounds keep
+    # their exact bound.
+    anchor = agentx_warmup_grace_conc(src)
+    conc = _agentx_conc(src)
+    if conc <= anchor:
+        return grace
+    scaled = (grace * conc) // anchor
+    _say_once(
+        lambda: log.info(
+            "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
+            "(warmup work is linear in CONC; the grace is declared as measured at "
+            "CONC=%d via AGENTX_WARMUP_GRACE_CONC). The floor only raises the bound -- "
+            "an over-large one costs a longer wait on a hung round, an under-sized one "
+            "kills a warmup that would have finished.",
+            grace,
+            scaled,
+            conc,
+            anchor,
+        ),
+        ("grace-scaled", grace, scaled, conc, anchor),
+    )
+    return scaled
+
 
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """Resolve the AgentX baseline cap: explicit, else duration + overhead.
@@ -695,20 +872,73 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """
     src = os.environ if env is None else env
 
+    # One parser for every knob in this module. Two of them would drift: a
+    # grace of "3600.0" that ``agentx_warmup_grace_sec`` accepts but a local
+    # ``int()`` rejects would be scaled AND reported as "nothing has been
+    # tuned", which is how the suppressed-warning mismatch got here the first
+    # time.
     def _int(name: str, default: int) -> int:
-        raw = (src.get(name) or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return default
-        return value if value > 0 else default
+        return _agentx_positive_int(src, name) or default
+
+    def _is_valid_override(name: str) -> bool:
+        return _agentx_positive_int(src, name) > 0
 
     explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
     if explicit:
         return explicit
-    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
-        "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
+
+    # Same validity bar as `_int` itself (parses to a positive int) rather than
+    # "non-empty string" -- otherwise an invalid override (e.g. "abc" or "-1")
+    # both silently falls back to the default AND suppresses the warning meant
+    # to flag exactly that case.
+    if _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
+        overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
+        grace = None
+    else:
+        # Derive the warmup share from the same knob that bounds it in the
+        # client, via the same helper the client's value is exported from, so
+        # the cap and the client's --warmup-grace-period cannot drift apart.
+        grace = agentx_warmup_grace_sec(src)
+        overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
+        if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
+            # Nothing has been tuned for this model at all. The derivation
+            # above is only as good as its warmup bound, and at the canonical
+            # grace that bound is the GLM-5.2/Qwen3.8 measurement (4774s/6676s
+            # warmup+compile). A raw aiperf run against Kimi-K3 (conc=64, ISL
+            # ~115k avg) measured warmup alone draining in ~12075s -- past this
+            # whole cap before profiling starts. Nothing here can tell such a
+            # model apart, so say so rather than let the round be killed
+            # mid-warmup by a cap nobody chose.
+            _say_once(
+                lambda: log.warning(
+                    "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
+                    "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
+                    "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
+                    "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
+                    "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
+                    "at concurrency=64 measured warmup alone taking ~12075s. Raise "
+                    "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
+                    "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
+                    overhead,
+                    _AGENTX_NON_WARMUP_OVERHEAD_SEC,
+                    AGENTX_CANON_WARMUP_GRACE_SEC,
+                ),
+                ("untuned-overhead", overhead),
+            )
+    duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
+    total = duration + overhead
+    # Log every input, so a timeout in the field can be read back to the value
+    # that produced it instead of guessing which knob was in play.
+    log.info(
+        "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
+        total,
+        duration,
+        overhead,
+        "explicit AGENTX_BASELINE_OVERHEAD_SEC"
+        if grace is None
+        else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
     )
+    return total
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported

@@ -64,8 +64,12 @@ def variant_fingerprint(
 
 
 # Single home for the grid-level defaults every graded executor shares. They
-# were previously redefined per executor with identical values, which is how
-# they drifted apart.
+# were previously redefined per executor with identical values, which is how the
+# stack-rebench floors drifted apart.
+# Sized for the synthetic ISL/OSL shape: an AgentX round does not fit it, and is
+# not meant to -- see ``agentx_variant_timeout_sec`` in ``_grid_runner``, which
+# raises whatever cap reaches it rather than expecting this default to cover both
+# workloads.
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
 # It is the only bar a variant clears. This default sits above grid noise, but

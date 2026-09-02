@@ -303,3 +303,234 @@ def test_verdict_gate_spares_scriptable_runs_under_agentx(monkeypatch):
     """
     _on(monkeypatch)
     assert _valid(_measurement()) is True
+
+
+# --- inner Magpie timeout follows the AgentX cap ------------------------------
+
+
+def test_agentx_switch_raises_the_inner_magpie_timeout(monkeypatch):
+    """The flat Magpie ``timeout_seconds`` must follow the raised AgentX cap.
+
+    The flat cap covers server boot + warmup + the measurement window + export
+    as one deadline. At the model's native context AgentX's boot+warmup alone
+    overruns the synthetic 7200s default, so the benchmark is SIGKILLed before
+    aiperf writes its result -- a 0-tput baseline that fails the session. The
+    switch lifts the inner cap to the same budget the outer subprocess timeout
+    uses, so the two layers stay consistent.
+    """
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_baseline_timeout_sec,
+    )
+
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == agentx_baseline_timeout_sec()
+    assert bench["timeout_seconds"] > 7200
+    assert bench["benchmark_script"] == "aiperf_client.sh"
+
+
+def test_agentx_switch_leaves_the_inner_timeout_alone_without_agentx(monkeypatch):
+    """The default (synthetic) cap must be untouched when AgentX is off."""
+    _off(monkeypatch)
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == 7200
+    assert "benchmark_script" not in bench
+
+
+def test_agentx_switch_skips_scriptable_inner_timeout(monkeypatch):
+    """A scriptable framework returns early, so its cap is never rewritten."""
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "25200")
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert bench["timeout_seconds"] == 7200
+
+
+# --- the client's warmup bound must be the SCALED grace, not the raw one ------
+
+
+def _switched(monkeypatch, **env):
+    """Run the AgentX switch over a vllm bench and hand back its envs."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    return bench.get("envs", {})
+
+
+def test_the_client_is_handed_the_conc_scaled_grace(monkeypatch):
+    """One number, two layers.
+
+    ``aiperf_client.sh`` reads AGENTX_WARMUP_GRACE_PERIOD and passes it to
+    aiperf as ``--warmup-grace-period`` -- that is what actually stops the
+    warmup. This process scales the same knob by CONC to size the subprocess
+    cap. Forwarding the operator's RAW value bounds the client below what the
+    cap pays for: measured on a Kimi-K3 conc=32 round, a 14400s cap against a
+    3600s client bound would have cut warmup at 106 of 354 requests, and the
+    round would then report a prefix-reuse figure taken before the cache held
+    anything.
+    """
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", AGENTX_WARMUP_GRACE_CONC="8", CONC="32")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "14400"
+
+
+def test_at_or_below_the_anchor_the_operators_grace_round_trips(monkeypatch):
+    """Zero drift for every concurrency the old behaviour was validated at."""
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", CONC="8")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "3600"
+
+
+def test_the_exported_grace_matches_what_the_cap_budgeted(monkeypatch):
+    """The invariant itself, asserted directly rather than via two constants."""
+    from hyperloom.orchestrator.actions.executors.baseline import (
+        agentx_warmup_grace_sec,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="1800", CONC="64")
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(agentx_warmup_grace_sec())
+
+
+def test_nothing_is_exported_on_the_default_synthetic_path(monkeypatch):
+    """AgentX off: no envs block, no grace, no benchmark_script -- untouched.
+
+    The switch returns early before any of this runs, so the synthetic path
+    cannot pick up an AgentX-shaped warmup bound.
+    """
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    _off(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    bench = {"framework": "vllm", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert "envs" not in bench
+    assert "benchmark_script" not in bench
+    assert bench["timeout_seconds"] == 7200
+
+
+def test_a_scriptable_framework_gets_no_grace_either(monkeypatch):
+    """The other early return: scriptable frameworks never reach the switch."""
+    from hyperloom.orchestrator.actions.executors._workload_envs import (
+        apply_agentx_switch,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    bench = {"framework": "xdit", "model": "/models/x", "timeout_seconds": 7200}
+    apply_agentx_switch(bench)
+    assert "envs" not in bench
+
+
+# --- a sweep variant's warmup bound must follow ITS concurrency ----------------
+
+
+def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="3600", grace_conc=None):
+    """Materialize one grid variant and hand back the envs it will run with."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        GridVariant,
+        _build_variant_yaml,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", anchor)
+    monkeypatch.setenv("CONC", str(session_conc))
+    if grace_conc is None:
+        monkeypatch.delenv("AGENTX_WARMUP_GRACE_CONC", raising=False)
+    else:
+        monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(grace_conc))
+
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/m/x", "timeout_seconds": 7200, "envs": {}}}),
+        encoding="utf-8",
+    )
+    variant = GridVariant(
+        name="v0",
+        extra_server_args="",
+        extra_envs={"CONC": str(variant_conc)},
+    )
+    out = tmp_path / "v0"
+    out.mkdir(exist_ok=True)
+    cfg_path = _build_variant_yaml(base, "", variant, output_subdir=out)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    return cfg["benchmark"]["envs"]
+
+
+def test_a_sweep_variant_keeps_the_session_scaled_grace(monkeypatch, tmp_path):
+    """The variant's grace must stay in step with the caps that bound it.
+
+    Re-scaling it from the variant's own CONC is tempting -- the ladder walks
+    256..2 while the session sits at one value -- but ``bench["timeout_seconds"]``
+    and the subprocess cap are both derived from the SESSION concurrency. Raising
+    only the client's grace makes the round wait inside a bound its own caps do
+    not cover: at session CONC=8 with the ladder at 256 the grace becomes 57600s
+    against a 10800s cap, so the round is SIGKILLed mid-warmup. Leaving the grace
+    alone is strictly better until the caps are variant-aware too.
+    """
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128)
+    assert envs["CONC"] == "128"
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "3600"
+
+
+def test_the_session_scaled_grace_still_reaches_a_variant(monkeypatch, tmp_path):
+    """What the switch exported must survive the variant merge untouched."""
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2, grace_conc=8)
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 32 // 8)
+
+
+def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):
+    """AgentX off: a synthetic variant's env must carry no warmup grace at all."""
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        GridVariant,
+        _build_variant_yaml,
+    )
+
+    _off(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "8")
+
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/m/x", "timeout_seconds": 7200, "envs": {}}}),
+        encoding="utf-8",
+    )
+    out = tmp_path / "v0"
+    out.mkdir(exist_ok=True)
+    cfg_path = _build_variant_yaml(
+        base, "", GridVariant(name="v0", extra_server_args="", extra_envs={"CONC": "128"}), output_subdir=out
+    )
+    envs = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["envs"]
+    assert "AGENTX_WARMUP_GRACE_PERIOD" not in envs
+    assert envs["CONC"] == "128"
