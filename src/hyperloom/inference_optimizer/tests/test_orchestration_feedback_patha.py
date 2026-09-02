@@ -727,7 +727,7 @@ def test_short_session_reloop_boundary():
         cumulative_gain_validated=5.0,
         gain_at_cycle_start=0.0,
     )
-    st.last_sweep = {"status": "succeeded"}
+    st.last_conc_sweep = {"status": "succeeded"}
     start_unix = datetime.fromisoformat(st.start_ts).timestamp()
 
     # Effective floor for 2h = min(10800, 2*3600*0.15) = 1080s.

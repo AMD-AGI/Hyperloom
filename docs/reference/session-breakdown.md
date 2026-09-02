@@ -84,7 +84,6 @@ The following JSON structure shows all top-level fields in `session_breakdown.js
   "geak":               { /* GEAK route diagnostics; {} when GEAK never ran */ },
   "kernel_lifecycle":   { /* §11 4+1-stage kernel lifecycle */ },
   "param_search":       { /* §12 ParamSearch */ },
-  "sweep":              { /* §13 Sweep */ },
   "critic_robustness":  { /* §14 Critic iterations + Robustness signals */ },
   "telemetry":          { /* §15 Telemetry artefact paths */ },
   "optimizations":      { /* canonical adopted-optimization API */ },
@@ -460,7 +459,7 @@ T+90 min" charts.
 
 ## `capability_summary` — `CapabilitySummary`
 
-One card per live capability (`geak`, `forge`, `explore`, `sweep`,
+One card per live capability (`geak`, `forge`, `explore`,
 `specialist`) with: `status`, `attempts`, `keeps`, `micro_only_keeps`,
 `pending_integrate`, `reverts`, `e2e_gain_pct`, `tested`, `best_gain_pct`,
 `reason`. Legacy `backends`, `params`, and `validate_stack` rows can appear
@@ -541,24 +540,6 @@ The canonical field is `explore_search` (the native merged ledger), with
 `params` and `backends` are older compatibility aliases emitted for archived
 sessions and old readers. The section also includes
 `synergy_attempted`, `discovered_flags`, and `backend_winners_history`.
-
----
-
-## `sweep`
-
-Final concurrency / input sequence length (ISL) / output sequence length (OSL) sweep. Always includes `all_variants`
-(a `SweepPoint[]`) and `best_overall`. `best_for_each_conc` and
-`pareto_front` are populated when the sweep grid is large enough.
-
-Each `all_variants` row carries `status`:
-
-* `ok` — a readable JSON object was loaded from `benchmark_report.json` and its `success` field was not `false`. Metrics may still be `null` (for example an empty object, or `success: true` with throughput 0); `ok` means the measurement landed, not that it is selectable.
-* `failed` — the report recorded a failure, the file existed but could not be read as a JSON object (truncated, empty, or a non-object top-level value), or no report was found but `abort_reason.json` is present (the grid runner's tested-but-failed marker).
-* `skipped` — neither `benchmark_report.json` nor `abort_reason.json` was found for that variant.
-
-`error` is present on every row and is always a non-empty string when `status` is `failed` (singular `error`, Magpie-compatible `errors` list, abort marker, or a fixed fallback). It is `null` on `ok` / `skipped` rows. Downstream consumers can rely on a stable key set across `ok` / `failed` / `skipped` rows.
-
-This `status` tightening does not bump `schema_version`. No field is renamed or removed; `error` is additive; the value set remains `ok` / `failed` / `skipped`. The change restores the stability guarantee that missing measurements are not fabricated as success.
 
 ---
 
@@ -856,7 +837,6 @@ The following example shows a complete `session_breakdown.json` for a finished G
     "state": "state.json",
     "baseline_report": "runs/baseline/report.json",
     "profile_reports": ["runs/profile/report.json"],
-    "sweep_reports": ["runs/sweep/grid.json"],
     "kernel_attempts": ["kernel-agent/runs/sess-20260517-1130/optimization_attempts.jsonl"],
     "critic_workdir": "critic-workdir",
     "robustness_workdir": "agents/robustness"

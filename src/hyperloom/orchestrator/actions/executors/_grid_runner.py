@@ -629,6 +629,7 @@ def _build_variant_yaml(
         model_path=model_path,
         gpu_type=gpu_type,
         benchmark_script=benchmark_script,
+        conc=variant_conc(variant),
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
@@ -667,23 +668,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    # NOT re-derived per variant. The variant's own CONC only exists as of the
-    # merge above, and it is tempting to re-scale AGENTX_WARMUP_GRACE_PERIOD from
-    # it -- a conc sweep walks 256..2 while the session sits at one value, so a
-    # high-CONC variant runs with a grace sized for the session's concurrency.
-    #
-    # Doing that here is WRONG while the two caps above it are session-scaled.
-    # ``apply_agentx_switch`` sets ``bench["timeout_seconds"]`` and
-    # ``agentx_variant_timeout_sec`` sets the subprocess cap, both from
-    # os.environ's session CONC. Raising only the client's grace makes the round
-    # wait inside a bound its own caps do not cover: at session CONC=8 with the
-    # ladder at 256 the grace would become 57600s against a 10800s cap, so the
-    # round is SIGKILLed at 10800s while warmup is still draining -- strictly
-    # worse than leaving the grace alone, which is what shipped before.
-    #
-    # The real fix is to make the caps variant-aware too (thread the merged CONC
-    # into ``agentx_variant_timeout_sec`` / ``_round_timeout_sec``); until then
-    # all three numbers stay session-scaled and consistent with each other.
+    # The three AgentX bounds took this rung's CONC through ``variant_conc``
+    # above, not through this merge: raising the client's grace alone would make
+    # the round wait inside a cap that did not move with it.
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.
@@ -1395,7 +1382,21 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None) -> int:
+def variant_conc(variant: Any) -> int | None:
+    """The concurrency a variant will run at, or ``None`` when it names none.
+
+    A grid variant carries ``CONC`` in ``extra_envs`` and it is the only place
+    the rung's own concurrency exists before the YAML is written.
+    """
+    raw = (getattr(variant, "extra_envs", None) or {}).get("CONC")
+    try:
+        conc = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return conc if conc > 0 else None
+
+
+def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
     """Raise a variant's hard cap to what an AgentX round actually needs.
 
     Every variant cap in the tree is sized for the synthetic 1024/1024 shape --
@@ -1442,13 +1443,13 @@ def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None) -> int:
     """
     # Local import: baseline imports from this module, and the rest of the file
     # already resolves _workload_envs this way.
-    from ._workload_envs import agentx_active
+    from ._workload_envs import agentx_active, agentx_env_for_conc
 
     if not agentx_active(shared_state):
         return cap
     from .baseline import agentx_baseline_timeout_sec
 
-    return max(cap, agentx_baseline_timeout_sec())
+    return max(cap, agentx_baseline_timeout_sec(agentx_env_for_conc(conc)))
 
 
 def session_clamped_timeout_sec(
@@ -1734,7 +1735,7 @@ async def run_grid(
             int: The hard timeout to grant this round, in seconds.
         """
         declared = int(variant_timeout_sec)
-        cap = agentx_variant_timeout_sec(declared)
+        cap = agentx_variant_timeout_sec(declared, conc=variant_conc(grid[idx]))
         if cap != declared:
             log.info(
                 "grid_runner: variant %d/%d name=%s %s cap raised %ds -> %ds "
@@ -1907,7 +1908,7 @@ async def run_grid(
         # charging every variant its full backstop instead of its expected cost,
         # skipping variants that fit comfortably. The estimate stays the
         # admission price on the default path, exactly as before.
-        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec))
+        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec, conc=variant_conc(grid[idx])))
         _cap_was_raised = _raised > float(variant_timeout_sec)
         if variant_expected_sec is None:
             required_sec = _raised
@@ -2909,7 +2910,6 @@ async def run_grid(
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 input_throughput=measurement.get("input_throughput"),
-                total_throughput=measurement.get("total_token_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),
                 intvty_p90=measurement.get("intvty_p90"),
                 workspace=str(workspace),

@@ -60,7 +60,6 @@ _SESSION_SKELETON: tuple[str, ...] = (
     "runs/profile",
     "runs/backends",
     "runs/params",
-    "runs/sweep",
     "runs/integrate",
     "runs/kernel_opt",
     "kernel-agent-workspace",

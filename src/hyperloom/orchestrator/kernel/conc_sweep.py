@@ -23,6 +23,7 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -31,6 +32,7 @@ from ..actions.executors._grid_runner import (
     _kill_stale_servers,
     agentx_variant_timeout_sec,
     run_grid,
+    variant_conc,
 )
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
@@ -51,8 +53,27 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 
-# Default ladder (override via ``--conc-sweep-concs``).
+# Default ladders, one per workload (override via ``--conc-sweep-concs``).
+# The synthetic ladder halves from a concurrency the 1024/1024 shape saturates;
+# an agentic request carries a measured ISL p50 near 108k tokens, so the same
+# card runs out of KV cache two orders of magnitude lower and its rungs are
+# spaced across the interactivity range the chart is drawn over.
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
+AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
+
+
+def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
+    """The ladder a mode sweeps when the operator names none.
+
+    Args:
+        benchmark_mode: ``SharedState.benchmark_mode``; anything that is not
+            ``agentx`` reads as the synthetic workload.
+
+    Returns:
+        A copy of the ladder, safe for the caller to mutate.
+    """
+    return list(AGENTX_DEFAULT_CONCS if is_agentx_mode(benchmark_mode) else DEFAULT_CONCS)
+
 
 # Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
@@ -74,7 +95,7 @@ DEFAULT_TOTAL_BUDGET_SEC = 9000
 _AGENTX_MIN_FUNDED_RUNGS = 2
 
 
-def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None) -> float:
+def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: int | None = None) -> float:
     """What a variant will actually be granted, for budget arithmetic.
 
     Every budget gate in this module used to price a variant at the DECLARED
@@ -99,14 +120,18 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None) -> floa
     two sides disagreeing again, in the direction that admits a rung the budget
     cannot pay for.
 
+    ``conc`` prices the rung about to launch rather than the session; omitted
+    where the gate guards a whole arm rather than a single rung.
+
     Args:
         variant_timeout_sec: The declared per-variant hard timeout, in seconds.
         shared_state: Session state; consulted only when the env var is absent.
+        conc: The rung's concurrency, when the gate guards one rung.
 
     Returns:
         float: The cap the round will actually be granted, in seconds.
     """
-    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state))
+    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state, conc=conc))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -157,6 +182,10 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
 
     Returns:
         A dict of the variant's metrics keyed for the curve row.
+
+    ``intvty_p90`` and ``total_token_throughput`` are the pair an agentic run is
+    plotted on; they are null on a synthetic run, which is plotted on the
+    output-throughput pair instead.
     """
     envs = v.extra_envs or {}
     try:
@@ -170,6 +199,9 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         "output_throughput": v.output_throughput,
         "request_throughput": v.request_throughput,
         "total_token_throughput": v.total_token_throughput,
+        "input_throughput": v.input_throughput,
+        "intvty_p90": v.intvty_p90,
+        "tpot_p90_ms": v.tpot_p90_ms,
         "ttft_mean_ms": v.ttft_mean_ms,
         "e2el_mean_ms": v.e2el_mean_ms,
         "duration_seconds": v.duration_seconds,
@@ -222,6 +254,9 @@ def _write_csv(csv_path: Path, points: list[dict[str, Any]]) -> None:
         "output_throughput",
         "request_throughput",
         "total_token_throughput",
+        "input_throughput",
+        "intvty_p90",
+        "tpot_p90_ms",
         "ttft_mean_ms",
         "e2el_mean_ms",
         "duration_seconds",
@@ -743,7 +778,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             if (
                 has_budget
                 and _reuse_remaining is not None
-                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state)
+                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
             ):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
@@ -909,7 +944,11 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             arm_results.append(skip_r)
             _all_results_ref.append(skip_r)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < _granted_cap_sec(variant_timeout_sec, state):
+        if (
+            has_budget
+            and _ob_rem is not None
+            and _ob_rem < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
+        ):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))
@@ -1151,6 +1190,7 @@ def _flush_partial_conc_sweep_report(  # noqa: PLR0913
             "isl": isl,
             "osl": osl,
             "tp": int(getattr(state, "tp", 0) or 0),
+            "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
             "concs_requested": concs,
             "baseline": {"extra_server_args": "", "extra_envs": {}, "points": b_pts},
             "optimized": {"extra_server_args": opt_args, "extra_envs": opt_envs, "points": o_pts},
@@ -1241,7 +1281,7 @@ async def run_conc_sweep(
     """
     session_dir = Path(session_dir)
     # ``None`` → default ladder; an explicit empty list short-circuits below.
-    concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
+    concs = list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", ""))
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
     baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
@@ -1511,6 +1551,9 @@ async def run_conc_sweep(
         "isl": isl,
         "osl": osl,
         "tp": int(getattr(state, "tp", 0) or 0),
+        # Names the axis pair the points are drawn on, so a reader never has to
+        # infer it from whether intvty_p90 happens to be null.
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "concs_requested": concs,
         "baseline": {
             "extra_server_args": "",
@@ -1554,6 +1597,7 @@ async def run_conc_sweep(
 
 
 __all__ = [
+    "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
@@ -1564,5 +1608,6 @@ __all__ = [
     "_flush_partial_conc_sweep_report",
     "_order_concs_desc",
     "conc_sweep_declined_to_run",
+    "default_concs_for_mode",
     "run_conc_sweep",
 ]

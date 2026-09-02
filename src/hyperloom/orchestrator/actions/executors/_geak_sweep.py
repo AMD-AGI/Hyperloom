@@ -24,7 +24,6 @@ from typing import Any
 
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
-from ._grid_base import pareto_front
 from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
@@ -314,26 +313,15 @@ async def sweep_via_geak(
             )
             entries.append(entry)
 
-    front = pareto_front(entries, latency_key="ttft_mean_ms")
-    best_for_each_conc: dict[str, dict[str, Any]] = {}
-    for e in entries:
-        if e["status"] != "succeeded":
-            continue
-        cur = best_for_each_conc.get(str(e["conc"]))
-        if cur is None or (
-            isinstance(e.get("output_throughput"), (int, float))
-            and e["output_throughput"] > cur.get("output_throughput", 0)
-        ):
-            best_for_each_conc[str(e["conc"])] = e
-
+    # The replay runs one (conc, isl, osl) repeated, so the fastest succeeded
+    # point is the headline.
     succeeded = [e for e in entries if e["status"] == "succeeded"]
-    promotion_measurement = next(iter(best_for_each_conc.values()), {})
+    measured = [e for e in succeeded if isinstance(e.get("output_throughput"), (int, float))]
+    promotion_measurement = max(measured, key=lambda e: e["output_throughput"], default={})
     return {
         "status": "succeeded" if succeeded else "failed",
         "grid_size": len(entries),
-        "sweep_grid": entries,
-        "pareto_front": front,
-        "best_for_each_conc": best_for_each_conc,
+        "points": entries,
         "workspace": output_root.as_posix(),
         "source": "geak",
         "replay_mode": "final_launch_script" if use_final_launch else "bench_e2e_fallback",

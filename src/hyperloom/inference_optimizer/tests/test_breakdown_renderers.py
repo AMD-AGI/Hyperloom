@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Unit tests for the data-provenance, sweep, and kernel-lifecycle breakdown
+"""Unit tests for the data-provenance and kernel-lifecycle breakdown
 renderers."""
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ from hyperloom.inference_optimizer.breakdown.reporters._renderers import (
     data_provenance as dp,
     kernel_lifecycle as kl,
     optimizations as opt,
-    sweep as sw,
 )
 
 
@@ -197,75 +196,6 @@ def test_data_provenance_full_table():
     assert "roofline" in out.markdown_block
     assert any("empty" in f for f in out.key_facts)
     assert any("partial" in f for f in out.key_facts)
-
-
-# ---- sweep ----------------------------------------------------------------
-def test_sweep_skipped_when_no_variants():
-    out = sw.render({})
-    assert out.skipped is True
-    assert out.decisions[0].kind == "not_attempted"
-
-
-def test_sweep_full_with_best_point():
-    variants = [
-        {
-            "conc": 32,
-            "isl": 128,
-            "osl": 128,
-            "status": "ok",
-            "output_throughput_tok_s": 800.0,
-            "ttft_mean_ms": 50,
-            "e2el_mean_ms": 1000,
-        },
-        {
-            "conc": 64,
-            "isl": 128,
-            "osl": 128,
-            "status": "ok",
-            "output_throughput_tok_s": 950.0,
-            "ttft_mean_ms": 40,
-            "e2el_mean_ms": 900,
-        },
-        {
-            "conc": 128,
-            "isl": 128,
-            "osl": 128,
-            "status": "failed",
-            "output_throughput_tok_s": None,
-            "error": "oom" * 40,
-        },
-    ]
-    out = sw.render({"sweep": {"grid_size": 3, "all_variants": variants}})
-    assert out.skipped is False
-    assert out.decisions[0].kind == "kept"
-    assert any("Best point" in f for f in out.key_facts)
-
-
-def test_sweep_truncates_over_max_rows():
-    variants = [{"conc": i, "status": "ok", "output_throughput_tok_s": float(i)} for i in range(sw._MAX_ROWS + 5)]
-    out = sw.render({"sweep": {"all_variants": variants}})
-    assert f"first {sw._MAX_ROWS}" in out.markdown_block
-
-
-def test_sweep_non_dict_variant_coerced():
-    out = sw.render({"sweep": {"all_variants": ["raw-variant"]}})
-    assert out.skipped is False
-
-
-def test_sweep_ot_handles_bad_value():
-    assert sw.render  # ensure module import
-    out = sw.render(
-        {
-            "sweep": {
-                "all_variants": [
-                    {"status": "ok", "output_throughput_tok_s": "NaNish"},
-                ]
-            }
-        }
-    )
-    assert out.skipped is False
-    assert out.decisions[0].kind == "attempted"
-    assert not any("Best point" in f for f in out.key_facts)
 
 
 # ---- kernel_lifecycle -----------------------------------------------------

@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 
 from hyperloom.orchestrator.loop.coordinator import (
     Coordinator,
@@ -180,34 +178,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
     assert Coordinator._skip_gemm_tuning() is True
     monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "")
     assert Coordinator._skip_gemm_tuning() is False
-
-
-def test_build_sweep_params_skill_defaults():
-    """No recipe → SKILL defaults marker and list-shaped sweep params."""
-    st = SimpleNamespace(warm_start_recipe=None)
-    p = Coordinator._build_sweep_params_from_recipe(st)
-    assert p["source"] == "skill_md_default"
-    assert isinstance(p["conc_values"], list) and p["conc_values"]
-    assert isinstance(p["isl_osl_configs"], list)
-
-
-def test_build_sweep_params_from_recipe_grid():
-    """Recipe sweep_grid overrides defaults when fields are well-formed."""
-    st = SimpleNamespace(
-        warm_start_recipe={
-            "sweep_grid": {
-                "conc_values": [4, 8],
-                "isl_osl_configs": ["1:1", [32, 64]],
-                "num_prompts_factor": 3,
-            },
-        },
-    )
-    p = Coordinator._build_sweep_params_from_recipe(st)
-    assert p["source"] == "recipe_kb"
-    assert p["conc_values"] == [4, 8]
-    assert p["isl_osl_configs"][0] == "1:1"
-    assert p["isl_osl_configs"][1] == "32:64"
-    assert p["num_prompts_factor"] == 3
 
 
 def test_gap_layer_for_action_mapping():

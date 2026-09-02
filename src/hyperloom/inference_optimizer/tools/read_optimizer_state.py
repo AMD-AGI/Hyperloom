@@ -25,7 +25,6 @@ SUMMARY_KEYS = (
     "current_best",
     "last_kernel_opt",
     "last_trace_analyze",
-    "last_sweep",
 )
 
 

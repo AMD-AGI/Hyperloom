@@ -190,7 +190,7 @@ async def test_sweep_via_geak_marks_variant_failed_on_subprocess_error(
     )
 
     assert result["status"] == "failed"
-    entry = result["sweep_grid"][0]
+    entry = result["points"][0]
     assert entry["status"] == "failed"
     assert "cannot spawn bench process" in entry["error"]
 

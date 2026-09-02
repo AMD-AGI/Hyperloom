@@ -374,7 +374,6 @@ def build(
         "explore_search",
         _safe_collect("explore_search", lambda: collectors.collect_explore_search(state, warnings), warnings),
     )
-    sweep = _pick("sweep", _safe_collect("sweep", lambda: collectors.collect_sweep(sd, state, warnings), warnings))
     critic_robustness = _pick(
         "critic_robustness",
         _safe_collect("critic_robustness", lambda: collectors.collect_critic_robustness(sd, warnings), warnings),
@@ -575,11 +574,7 @@ def build(
             sd,
             baseline.get("benchmark_report_path"),
             telemetry.get("profile_report_paths") or [],
-            [
-                p.get("benchmark_report_path")
-                for p in (sweep.get("all_variants") or [])
-                if p.get("benchmark_report_path")
-            ],
+            [],
         ),
         warnings,
         default={},
@@ -599,7 +594,6 @@ def build(
                 critic_robustness.get("critic_iterations", []) if isinstance(critic_robustness, dict) else []
             ),
             baseline=baseline,
-            sweep=sweep,
             conc_sweep_summary=conc_sweep_summary,
             phase_timeline=phase_timeline,
             optimizations=optimizations,
@@ -675,7 +669,6 @@ def build(
         # which never reaches ``optimizations``.
         "collective": collective,
         "param_search": explore_search,
-        "sweep": sweep,
         "critic_robustness": critic_robustness,
         "telemetry": telemetry,
         # Canonical downstream optimization API.
@@ -1088,7 +1081,7 @@ def write_minimal_final_report(
 
         Args:
             d (dict[str, Any] | None): The attempt record (or ``None``).
-            label (str): The bullet label (e.g. ``"last_sweep"``).
+            label (str): The bullet label (e.g. ``"last_baseline"``).
 
         Returns:
             str: A markdown bullet line; ``"(none)"`` when the record is
@@ -1117,15 +1110,6 @@ def write_minimal_final_report(
         if isinstance(cb_tput, (int, float))
         else "-"
     )
-    last_sweep = state.last_sweep or {}
-    if last_sweep:
-        sw_grid = last_sweep.get("grid_size", 0)
-        sw_best = last_sweep.get("best_overall") or {}
-        sw_tput = sw_best.get("output_throughput")
-        sw_line = f"grid_size={sw_grid} best_tput={(f'{sw_tput:.2f}' if isinstance(sw_tput, (int, float)) else '-')}"
-    else:
-        sw_line = "(none)"
-
     lines = [
         "# Inference Optimizer — emergency final report",
         "",
@@ -1145,14 +1129,12 @@ def write_minimal_final_report(
         f"- current_best   : `{cb_action}` @ `{cb_metric_s}`",
         f"- cumul_gain     : `{state.cumulative_gain_validated:.2f}%` (validated)",
         f"- stack_entries  : `{len(state.optimization_stack or [])}`",
-        f"- sweep summary  : {sw_line}",
         "",
         "## Last action attempts",
         "",
         _fmt_attempt(getattr(state, "last_baseline", None), "last_baseline"),
         _fmt_attempt(getattr(state, "last_profile", None), "last_profile"),
         _fmt_attempt(getattr(state, "last_explore", None), "last_explore"),
-        _fmt_attempt(state.last_sweep, "last_sweep"),
         "",
         "## Structured detail",
         "",

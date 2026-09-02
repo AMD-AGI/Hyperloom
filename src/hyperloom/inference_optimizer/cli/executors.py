@@ -25,7 +25,6 @@ from hyperloom.orchestrator.actions.executors import (
     recover_executor,
     report_executor,
     session_breakdown_executor,
-    sweep_executor,
 )
 from hyperloom.orchestrator.actions.executors.integrate_patch import IntegratePatchExecutor
 from hyperloom.orchestrator.actions.executors.targeted_build_executor import TargetedBuildExecutor
@@ -50,8 +49,8 @@ _REAL_EXECUTORS_FULL: dict[str, Any] = {
     # profile: Coordinator-internal; PolicyGate denies LLM-proposed delegate.
     "profile": profile_executor,
     "explore": explore_executor,
-    "sweep": sweep_executor,
-    # conc_sweep: Coordinator-internal post-sweep concurrency comparison.
+    # conc_sweep: the Coordinator-internal CONC-ladder benchmark, and the only
+    # sweep there is.
     "conc_sweep": conc_sweep_executor,
     "report": report_executor,
     "session_breakdown": session_breakdown_executor,

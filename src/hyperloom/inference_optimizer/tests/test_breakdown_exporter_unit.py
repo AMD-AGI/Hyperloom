@@ -181,13 +181,11 @@ def test_write_minimal_final_report_with_attempts(tmp_path):
     from hyperloom.orchestrator.state.shared_state import SharedState
 
     state = SharedState.load_or_init(tmp_path)
-    state.last_sweep = {"grid_size": 3, "best_overall": {"output_throughput": 99.5}, "ts": "t0"}
     state.last_baseline = {"tput": 50.0, "ts": "t0"}
     state.save(tmp_path)
 
     target = ex.write_minimal_final_report(tmp_path)
     text = target.read_text()
-    assert "grid_size=3" in text
     assert "last_baseline" in text
 
 
@@ -475,30 +473,6 @@ def test_recorder_snapshot_leaves_the_workload_contract_intact(tmp_path):
     assert workload["tp"] is None
 
 
-def test_recorder_snapshot_leaves_the_sweep_variants_intact(tmp_path):
-    """Only the collector can scan the variant points off disk."""
-    from types import SimpleNamespace
-
-    from hyperloom.inference_optimizer.breakdown.recorder import instrument
-
-    (tmp_path / "state.json").write_text(
-        json.dumps({"session_id": "s", "last_sweep": {"grid_size": 2}}),
-        encoding="utf-8",
-    )
-    instrument.snapshot_state_sections(
-        tmp_path,
-        SimpleNamespace(
-            session_id="s",
-            last_sweep={"grid_size": 2},
-            framework="sglang",
-            model_name="m",
-            model_path="",
-        ),
-    )
-
-    assert "all_variants" in ex.build(tmp_path)["sweep"]
-
-
 # ---- session_meta duration ----
 
 
@@ -760,7 +734,7 @@ def test_the_newest_close_of_the_leg_supplies_the_end(tmp_path):
         "session_id": "sess-1178",
         "start_ts": (now - timedelta(hours=4)).isoformat(),
         "phase_history": [
-            {"to_phase": "CLOSE", "reason": "conc_sweep_done", "ts": (now - timedelta(hours=3)).isoformat()},
+            {"to_phase": "CLOSE", "reason": "sweep_done", "ts": (now - timedelta(hours=3)).isoformat()},
             {"to_phase": "EXPLORE", "reason": "cycle_reloop", "ts": (now - timedelta(hours=2)).isoformat()},
             {"to_phase": "CLOSE", "reason": "target_reached", "ts": (now - timedelta(minutes=10)).isoformat()},
         ],
@@ -886,7 +860,7 @@ def test_a_failing_collector_does_not_abort_the_build(tmp_path, monkeypatch):
 def test_collector_arguments_are_evaluated_inside_the_isolation(tmp_path, monkeypatch):
     """A drifted section must not raise while building a collector's arguments."""
     (tmp_path / "state.json").write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(ex.collectors, "collect_sweep", lambda *_a, **_kw: {"all_variants": ["not-a-dict"]})
+    monkeypatch.setattr(ex.collectors, "collect_baseline", lambda *_a, **_kw: "not-a-mapping")
 
     out = ex.build(tmp_path)
 

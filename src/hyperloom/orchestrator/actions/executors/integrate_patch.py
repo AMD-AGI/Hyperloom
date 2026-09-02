@@ -1713,7 +1713,7 @@ class IntegratePatchExecutor:
                     "specialist integrate_patch is not supported in "
                     "multi-node mode (no git-diff pod fan-out); skipped "
                     "without applying any patch. Other actions "
-                    "(baseline/profile/explore/sweep/roofline) continue "
+                    "(baseline/profile/explore/conc_sweep/roofline) continue "
                     "normally. Use the kernel-agent integrate path (which "
                     "fans out via `multi_node apply-patch`) or run single-node."
                 ),

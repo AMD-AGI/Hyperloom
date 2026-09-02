@@ -1544,7 +1544,7 @@ class ExploreExecutor:
                         {
                             "output_throughput": r.output_throughput,
                             "input_throughput": r.input_throughput,
-                            "total_throughput": r.total_throughput,
+                            "total_throughput": r.total_token_throughput,
                             "intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
                         }
@@ -1568,7 +1568,7 @@ class ExploreExecutor:
                                 "grading on output throughput",
                                 gv.name,
                                 r.intvty_p90,
-                                r.total_throughput,
+                                r.total_token_throughput,
                             )
                         gain = gain_pct(r.output_throughput, running_base_tput)
                     if not reason:
@@ -1635,7 +1635,7 @@ class ExploreExecutor:
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
                         "input_throughput": r.input_throughput,
-                        "total_throughput": r.total_throughput,
+                        "total_throughput": r.total_token_throughput,
                         "intvty_p90": r.intvty_p90,
                         "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
@@ -1730,7 +1730,7 @@ class ExploreExecutor:
                             # current_best becomes the next round's anchor, and
                             # an anchor without them degrades the session.
                             "input_throughput": r.input_throughput,
-                            "total_throughput": r.total_throughput,
+                            "total_throughput": r.total_token_throughput,
                             "intvty_p90": r.intvty_p90,
                             "tpot_p90_ms": r.tpot_p90_ms,
                             "single_workspace": r.workspace,

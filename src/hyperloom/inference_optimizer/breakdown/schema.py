@@ -451,7 +451,6 @@ class CapabilitySummary(TypedDict, total=False):
     explore: CapabilityEntry
     backends: CapabilityEntry
     params: CapabilityEntry
-    sweep: CapabilityEntry
     validate_stack: CapabilityEntry
     specialist: CapabilityEntry
 
@@ -969,62 +968,6 @@ class ParamSearch(TypedDict, total=False):
     backends: ParamSearchLedger
     synergy_attempted: list[str]
     discovered_flags: dict[str, Any]
-
-
-# Sweep
-class SweepPoint(TypedDict, total=False):
-    """One measured point in a concurrency/shape sweep grid.
-
-    Attributes:
-        variant_name (str): Name of the swept variant.
-        conc (int | None): Concurrency at this point, or None.
-        isl (int | None): Input sequence length, or None.
-        osl (int | None): Output sequence length, or None.
-        output_throughput_tok_s (float | None): Throughput (tok/s), or None.
-        ttft_mean_ms (float | None): Mean time-to-first-token (ms), or None.
-        tpot_mean_ms (float | None): Mean time-per-output-token (ms), or None.
-        e2el_mean_ms (float | None): Mean end-to-end latency (ms), or None.
-        status (str): Point status. ``ok`` when a readable JSON object was
-            read and ``success`` was not false; ``failed`` when the report
-            says failure, was unreadable, or ``abort_reason.json`` is
-            present with no report; ``skipped`` when neither file exists.
-        error (str | None): Non-empty failure reason when ``status`` is
-            ``failed``, else None. Present on every row so table-shaped
-            consumers see a stable key set.
-        benchmark_report_path (str | None): Path to the benchmark report, or None.
-    """
-
-    variant_name: str
-    conc: int | None
-    isl: int | None
-    osl: int | None
-    output_throughput_tok_s: float | None
-    ttft_mean_ms: float | None
-    tpot_mean_ms: float | None
-    e2el_mean_ms: float | None
-    status: str  # ok / skipped / failed
-    error: str | None
-    benchmark_report_path: str | None
-
-
-class Sweep(TypedDict, total=False):
-    """Results of the concurrency/shape sweep across the variant grid.
-
-    Attributes:
-        grid_size (int): Number of points in the sweep grid.
-        best_overall (dict[str, Any]): Best-performing point overall.
-        best_for_each_conc (list[dict[str, Any]]): Best point per concurrency level.
-        pareto_front (list[dict[str, Any]]): Pareto-optimal sweep points.
-        all_variants (list[SweepPoint]): All measured sweep points.
-        config_path (str | None): Path to the sweep config, or None.
-    """
-
-    grid_size: int
-    best_overall: dict[str, Any]
-    best_for_each_conc: list[dict[str, Any]]
-    pareto_front: list[dict[str, Any]]
-    all_variants: list[SweepPoint]
-    config_path: str | None
 
 
 class Geak(TypedDict, total=False):
@@ -2122,9 +2065,13 @@ class ConcSweepSummary(TypedDict, total=False):
     isl: int
     osl: int
     tp: int
+    benchmark_mode: str  # "agentx" / "synthetic"; names the axis pair the points carry
     concs_requested: list[int]
-    baseline: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
-    optimized: dict[str, Any]  # {extra_server_args, extra_envs, points[]}
+    # {extra_server_args, extra_envs, points[]}. A point carries the pair its
+    # mode is plotted on: output_throughput + e2el_mean_ms synthetic,
+    # total_token_throughput + intvty_p90 agentic.
+    baseline: dict[str, Any]
+    optimized: dict[str, Any]
     comparison: list[dict[str, Any]]  # per-CONC paired rows (feeds the dual curve + speedup bars)
     summary: dict[str, Any]  # {successful_pairs, failed_pairs, best_conc, best_speedup, median_speedup, mean_speedup}
     workspace: str
@@ -3211,7 +3158,6 @@ class SessionBreakdown(TypedDict, total=False):
         collective (Collective): Collective-lane campaigns and their E2E
             verdicts; empty {} when the lane never ran.
         param_search (ParamSearch): Merged explore-search ledger.
-        sweep (Sweep): Concurrency/shape sweep results.
         critic_robustness (CriticRobustness): Critic reviews and robustness signals.
         telemetry (Telemetry): Telemetry artifacts and aggregated metrics.
         optimizations (Optimizations): Canonical adopted-optimization read
@@ -3250,7 +3196,6 @@ class SessionBreakdown(TypedDict, total=False):
     # explore_search is the native merged ledger; param_search is a v1 alias.
     param_search: ParamSearch
     explore_search: ParamSearch
-    sweep: Sweep
     critic_robustness: CriticRobustness
     telemetry: Telemetry
     # Single downstream read model for every formally adopted optimization.
@@ -3376,8 +3321,6 @@ __all__ = [
     "SourceBreakdown",
     "SourceFiles",
     "StackGainEntry",
-    "Sweep",
-    "SweepPoint",
     "Telemetry",
     "TokenBucket",
     "TokenRollup",

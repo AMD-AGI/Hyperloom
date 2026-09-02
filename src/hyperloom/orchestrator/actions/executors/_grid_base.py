@@ -4,9 +4,9 @@
 """Shared value types and helpers for the ``explore`` executor's grid runs.
 
 Holds :class:`GridVariant` / :class:`VariantResult`, the content-fingerprint
-delegate, ``extra_envs`` coercion, the Pareto filter, and the shared
-per-variant timeout default. The runner that actually invokes Magpie and
-parses ``benchmark_report.json`` lives in :mod:`._grid_runner`.
+delegate, ``extra_envs`` coercion, and the shared per-variant timeout default.
+The runner that actually invokes Magpie and parses ``benchmark_report.json``
+lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations
@@ -248,7 +248,6 @@ class VariantResult:
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
         input_throughput (float | None): Input tokens/sec (prefill), if measured.
-        total_throughput (float | None): Input plus output tokens/sec, if measured.
         tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
         intvty_p90 (float | None): p90 E2E normalized interactivity
             (tok/s/user), if measured.
@@ -293,7 +292,6 @@ class VariantResult:
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
-    total_throughput: float | None = None
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     workspace: str | None = None
@@ -364,44 +362,3 @@ class VariantResult:
             "launch_evidence": self.launch_evidence,
             "launch_evidence_path": self.launch_evidence_path,
         }
-
-
-def pareto_front(
-    entries: list[dict[str, Any]],
-    *,
-    latency_key: str = "e2el_mean_ms",
-) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max ``output_throughput``, min *latency_key*).
-
-    Args:
-        entries (list[dict[str, Any]]): Sweep result entries to filter.
-        latency_key (str): Which latency metric to minimize. The native sweep
-            reads ``e2el_mean_ms``; the GEAK sweep reads ``ttft_mean_ms``
-            because ``bench_summary.json`` carries no e2el.
-
-    Returns:
-        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
-    """
-    succ = [
-        e
-        for e in entries
-        if e["status"] == "succeeded"
-        and isinstance(e.get("output_throughput"), (int, float))
-        and isinstance(e.get(latency_key), (int, float))
-    ]
-    front: list[dict[str, Any]] = []
-    for cand in succ:
-        dominated = False
-        for other in succ:
-            if other is cand:
-                continue
-            if (
-                other["output_throughput"] >= cand["output_throughput"]
-                and other[latency_key] <= cand[latency_key]
-                and (other["output_throughput"] > cand["output_throughput"] or other[latency_key] < cand[latency_key])
-            ):
-                dominated = True
-                break
-        if not dominated:
-            front.append(cand)
-    return front

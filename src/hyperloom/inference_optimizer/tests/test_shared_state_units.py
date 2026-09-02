@@ -501,7 +501,6 @@ class TestPersistence:
     [
         ("baseline", "output_throughput", "output_throughput"),
         ("profile", "output_throughput", "output_throughput"),
-        ("sweep", "output_throughput", "output_throughput"),
         ("explore", "best_gain_pct", "gain_pct"),
     ],
 )
@@ -663,7 +662,6 @@ def test_to_prompt_summary_renders_attempt_lines():
     assert "last_baseline=" in txt
     assert "last_profile=" in txt
     assert "last_explore=" in txt
-    assert "last_sweep=" in txt
     assert "attempts_history=" in txt
     assert "baseline:1(s1,f0)" in txt
     assert "explore:1(s0,f1)" in txt

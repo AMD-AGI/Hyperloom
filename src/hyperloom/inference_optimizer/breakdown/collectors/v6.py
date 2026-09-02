@@ -31,7 +31,6 @@ from .v6_stages import (
     project_baseline_event,
     project_conc_sweep_event,
     project_kernel_events,
-    project_sweep_event,
 )
 
 
@@ -42,7 +41,6 @@ _SUCCESS_STOP_REASONS = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        "conc_sweep_done",
     }
 )
 _ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
@@ -1982,7 +1980,6 @@ def collect_v6_timeline(
     recorded_operations: list[dict[str, Any]] | None = None,
     critic_iterations: list[dict[str, Any]] | None = None,
     baseline: Any = None,
-    sweep: Any = None,
     conc_sweep_summary: Any = None,
     phase_timeline: Any = None,
     optimizations: Any = None,
@@ -2029,9 +2026,6 @@ def collect_v6_timeline(
     timeline.extend(_projected("framework_agent", _framework_events, warnings))
     timeline.extend(
         _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
-    )
-    timeline.extend(
-        _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
     )
     timeline.extend(
         _projected(
@@ -2119,7 +2113,7 @@ def _stage_reached(
             if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning", "last_collective"))
             else "kernel_agent"
         ),
-        "SWEEP": ("conc_sweep" if state.get("last_conc_sweep") or state.get("last_conc_sweep_watermark") else "sweep"),
+        "SWEEP": "conc_sweep",
         "CLOSE": "close",
     }
     if phase in phase_map:

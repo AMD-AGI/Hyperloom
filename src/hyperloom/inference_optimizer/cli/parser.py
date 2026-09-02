@@ -1186,8 +1186,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--conc-sweep-concs",
         dest="conc_sweep_concs",
         type=str,
-        default="256,128,64,32,16,8,4,2",
-        help="Comma-separated CONC ladder for --enable-conc-sweep. Default 256,128,64,32,16,8,4,2 (high-to-low for single-server arm reuse).",
+        default=None,
+        help="Comma-separated CONC ladder for --enable-conc-sweep. Ordered "
+        "high-to-low internally for single-server arm reuse, so the order given "
+        "does not matter. Defaults to the ladder for the workload: "
+        "256,128,64,32,16,8,4,2 synthetic, 1,4,8,10,14,20,28 under "
+        "HYPERLOOM_AGENTX (an agentic request carries orders of magnitude more "
+        "prompt, so the same card saturates far lower).",
     )
     opt.add_argument(
         "--conc-sweep-timeout-sec",

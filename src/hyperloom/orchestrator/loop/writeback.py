@@ -113,7 +113,6 @@ _FRAMEWORK_STACK_ACTION = "framework"
 #: lever buckets contradict ``_geak_contribution`` for the very same row.
 _LEVER_BY_TASK_KIND = {
     "explore": LEVER_CONFIG,
-    "sweep": LEVER_CONFIG,
     "conc_sweep": LEVER_CONFIG,
     "gemm_tuning": LEVER_KERNEL,
     "collective": LEVER_KERNEL,
@@ -790,8 +789,6 @@ class WritebackCollaborator:
             return is_valid_measurement(result)
         if task_kind == "profile":
             return is_valid_measurement(result)
-        if task_kind == "sweep":
-            return result.get("status") == "succeeded"
         # replay_warm_recipe always routes through _promote_warm_replay (owns its own failure bookkeeping).
         if task_kind == "replay_warm_recipe":
             return True
@@ -3112,7 +3109,6 @@ class WritebackCollaborator:
         "roofline": "_promote_roofline",
         "explore": "_promote_explore",
         "integrate_patch": "_promote_integrate_patch",
-        "sweep": "_promote_sweep",
         "conc_sweep": "_promote_conc_sweep",
     }
 
@@ -4388,40 +4384,6 @@ class WritebackCollaborator:
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
-    async def _promote_sweep(
-        self,
-        result: dict,
-        task: "Task | None",
-        outcome: _PromoteOutcome,
-    ) -> None:
-        """Promote a sweep result: self-audit + record_sweep + save; discovery-only, never promotes."""
-        outcome.early_return = True
-        pareto = result.get("pareto_front") or []
-        self.shared_state.record_action_attempt(
-            action="sweep",
-            task_id=getattr(task, "task_id", "") if task is not None else "",
-            status="succeeded",
-            decision="discarded",
-            result=result,
-            extras={
-                "grid_size": result.get("grid_size"),
-                "best_overall": result.get("best_overall"),
-                "best_for_each_conc": result.get("best_for_each_conc"),
-                "pareto_front_size": (len(pareto) if isinstance(pareto, list) else None),
-            },
-        )
-        self.shared_state.record_sweep(result)
-        # Sweep is discovery-only (never promotes) and must not mutate params_no_promote_streak.
-        self.shared_state.save(self.session_dir)
-        # SWEEP post-hook: chain conc_sweep after a succeeded sweep when opted in.
-        if getattr(self.shared_state, "conc_sweep_enabled", False) and result.get("status") == "succeeded":
-            try:
-                await self._enqueue_internal_conc_sweep_task(
-                    reason="post_sweep",
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("conc_sweep: post-sweep enqueue raised (non-fatal)")
-
     async def _promote_conc_sweep(
         self,
         result: dict,
@@ -4448,7 +4410,7 @@ class WritebackCollaborator:
                 "report_path": result.get("report_json_path"),
             },
         )
-        # Write last_conc_sweep so exit_normal_sweep can fire conc_sweep_done.
+        # Write last_conc_sweep so exit_normal_sweep can fire sweep_done.
         self.shared_state.record_conc_sweep(result)
         self.shared_state.save(self.session_dir)
 
@@ -5793,7 +5755,10 @@ class WritebackCollaborator:
             result=ps,
             conc_values=[conc],
             isl_osl_configs=[f"{isl}:{osl}"],
-            output_root=unique_runs_dir(self.session_dir, "sweep", "revalidate_geak"),
+            # A kernel-lane re-benchmark, not a dispatched action: it borrows the
+            # ``integrate`` workspace namespace under a task id that names it,
+            # as the stack re-validation and the GEAK integrate rebench do.
+            output_root=unique_runs_dir(self.session_dir, "integrate", "revalidate_geak"),
             variant_timeout_sec=timeout,
             repeats=3,
             # Single-point validated replay pins the headline protocol (num_prompts
