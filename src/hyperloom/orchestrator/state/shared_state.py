@@ -440,34 +440,6 @@ LATEST_STATE_SCHEMA_VERSION: int = 6
 #: unknown-key filter in ``from_dict`` drops anything not in this table, which
 #: is why an un-migrated resume silently restarted the phase from scratch.
 #: ``framework_pr_max_candidates`` and ``framework_pr_critic_decisions`` are
-#: deliberately absent: both fields have since been removed, so there is
-#: nothing left to migrate them into.
-_FRAMEWORK_FIELD_RENAMES_V5: dict[str, str] = {
-    "framework_phase_enabled": "framework_agent_phase_enabled",
-    "framework_pr_phase_progress": "framework_agent_phase_progress",
-    "framework_pr_batches": "framework_agent_batches",
-    "framework_pr_phase_done": "framework_agent_phase_done",
-    "framework_pr_discover_failures": "framework_agent_discover_failures",
-    "framework_pr_consecutive_empty_discoveries": "framework_consecutive_empty_discoveries",
-    "framework_pr_authoring_enabled": "framework_agent_authoring_enabled",
-    "framework_pr_specialist_candidate_map": "framework_agent_specialist_candidate_map",
-}
-
-#: KERNEL-entry dispatch switch renamed by the auto-dispatch rename, old name ->
-#: current name. The old spelling tied the switch to GEMM tuning, which stopped
-#: being true once the dispatch moved into the shared entry tail. Without this
-#: table the unknown-key filter in ``from_dict`` would drop the old spelling and
-#: a resumed opt-out session would silently start dispatching again.
-_KERNEL_OPT_FIELD_RENAMES_V6: dict[str, str] = {
-    "continue_kernel_after_gemm": "auto_kernel_opt_enabled",
-}
-
-#: Stack action label for FRAMEWORK entries, and the prefix promote used to glue
-#: onto their ``variant_name``. Resume reconciliation keys on the bare candidate
-#: key, so an entry still carrying the prefix reads as an orphaned KEEP and
-#: misses the ``(action, variant_name)`` dedup that stops a second append.
-_FRAMEWORK_STACK_ACTION_V5: str = "framework"
-_FRAMEWORK_VARIANT_PREFIX_V5: str = "framework:"
 
 
 def effective_closing_grace_sec(
@@ -1553,9 +1525,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         Returns:
             A fully-populated, migrated :class:`SharedState` instance.
         """
-        # Unified migration entry point; absent schema_version treated as 1. Idempotent (latest version short-circuits).
-        incoming_version = int(raw.get("schema_version") or 1)
-
         # Filter to known fields; unknown keys dropped, missing keys default.
         # ``fields()`` rather than ``__dataclass_fields__``: the latter also
         # holds ClassVar pseudo-fields, which ``__init__`` does not accept, so a
@@ -1591,60 +1560,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             existing=filtered.get("explore_search"),
         )
 
-        if incoming_version < 4:
-            # Lift flat enablement_* keys from old state.json into EnablementRound.
-            _ENABLEMENT_ROUND_FIELDS = {f.name for f in fields(EnablementRound)}
-            flat = {
-                k[len("enablement_") :]: v
-                for k, v in raw.items()
-                if k.startswith("enablement_") and k[len("enablement_") :] in _ENABLEMENT_ROUND_FIELDS
-            }
-            # Prefer any nested blob already present (from a partial migration).
-            if not isinstance(filtered.get("enablement"), dict):
-                filtered["enablement"] = flat
-            else:
-                for k, v in flat.items():
-                    filtered["enablement"].setdefault(k, v)
-
-        if incoming_version < 5:
-            # Carry the pre-rename FRAMEWORK fields over. Read from ``raw``:
-            # the old spellings are not dataclass fields, so the filter above
-            # has already discarded them. A state holding both spellings is
-            # mid-migration, and the current one wins.
-            for legacy, current in _FRAMEWORK_FIELD_RENAMES_V5.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = raw[legacy]
-
-            # Renaming the fields is not enough: a session that already promoted
-            # a FRAMEWORK KEEP has stack entries whose variant_name still carries
-            # the promote-side prefix, and reconciliation keys on the bare
-            # candidate key. Left alone they read as orphaned KEEPs for the rest
-            # of the session and no longer collide with the dedup key.
-            stack = filtered.get("optimization_stack")
-            if isinstance(stack, list):
-                # Rebuilt rather than edited in place: ``filtered`` is a shallow
-                # copy, so mutating an entry would also rewrite the caller's
-                # ``raw`` — and ``from_dict`` takes a mapping it does not own.
-                filtered["optimization_stack"] = [
-                    {**entry, "variant_name": str(entry["variant_name"])[len(_FRAMEWORK_VARIANT_PREFIX_V5) :]}
-                    if (
-                        isinstance(entry, dict)
-                        and str(entry.get("action") or "") == _FRAMEWORK_STACK_ACTION_V5
-                        and str(entry.get("variant_name") or "").startswith(_FRAMEWORK_VARIANT_PREFIX_V5)
-                    )
-                    else entry
-                    for entry in stack
-                ]
-
-        if incoming_version < 6:
-            # Carry the pre-rename KERNEL-entry dispatch switch over. Same
-            # reasoning as the v5 block: the old spelling is not a dataclass
-            # field, so the filter above has already dropped it, and a state
-            # holding both spellings is mid-migration with the current one
-            # winning.
-            for legacy, current in _KERNEL_OPT_FIELD_RENAMES_V6.items():
-                if legacy in raw and current not in raw:
-                    filtered[current] = bool(raw[legacy])
 
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
