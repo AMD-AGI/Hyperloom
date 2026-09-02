@@ -132,10 +132,17 @@ _GEAK_REVALIDATION_OUTCOMES = {
 # the orchestrator's own rebench, so the outcome ladder below leaves a
 # ``no_gain`` run at ``NEEDS_REVIEW`` unless a writeback or a linked rebench
 # settles it. GEAK's self-report is the claim, not the verdict.
+# ``baseline_reproduction_failed`` is the runner reporting that its baseline
+# reference did not reproduce the orchestrator's, which makes the whole run's
+# gain non-comparable -- ``phases/kernel.py`` reads it as a guard and refuses to
+# promote a phantom-baseline gain. ``failed`` is where the unknown-status
+# default already put it, so this changes no classification; it is listed so a
+# status the runtime declares terminal stops being reported as drift.
 _GEAK_STATUS_ALIASES = {
     "missing": "failed",
     "no_result_recovered_from_disk": "failed",
     "no_gain": "succeeded",
+    "baseline_reproduction_failed": "failed",
 }
 # ``missing`` is the one GEAK status that is not a record of work: it is what
 # ``collect_geak`` returns when ``kernel_optimizer=geak`` was selected, nothing

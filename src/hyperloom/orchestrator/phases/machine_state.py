@@ -1721,15 +1721,20 @@ def _kernel_opt_max_failures() -> int:
     return resolve_kernel_opt_max_failures()
 
 
-def _geak_phase_terminal(state: Any) -> bool:
-    """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
-    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
-        return False
-    result = getattr(state, "geak_result", None) or {}
-    if not isinstance(result, dict):
-        return False
-    status = str(result.get("status") or "").strip().lower()
-    return status in {
+# The statuses a finished GEAK run writes to ``geak_result.status``. Named
+# rather than inlined because the breakdown layer has to agree with it: its
+# ``geak_runs`` projection maps each of these onto a closed enum and warns about
+# anything it does not know, so a status added here and nowhere else surfaces as
+# vocabulary drift on a run that was working exactly as intended. See
+# ``breakdown/collectors/v6_stages._GEAK_STATUS_ALIASES``, which is pinned
+# against this set by test.
+#
+# Not exhaustive of what can appear in the field: the collector adds its own
+# words for a result it could not read back (``missing``,
+# ``no_result_recovered_from_disk``), and ``timeout`` reaches it from the runner
+# without being terminal here.
+GEAK_TERMINAL_STATUSES = frozenset(
+    {
         "ok",
         "no_gain",
         "error",
@@ -1737,6 +1742,17 @@ def _geak_phase_terminal(state: Any) -> bool:
         "skipped",
         "baseline_reproduction_failed",
     }
+)
+
+
+def _geak_phase_terminal(state: Any) -> bool:
+    """Return true once the GEAK-owned KERNEL phase has produced a terminal result."""
+    if str(getattr(state, "kernel_optimizer", "") or "").strip().lower() != "geak":
+        return False
+    result = getattr(state, "geak_result", None) or {}
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status") or "").strip().lower() in GEAK_TERMINAL_STATUSES
 
 
 # Ledger subfields that change when a kernel attempt actually advances. Listed
