@@ -124,7 +124,11 @@ def test_auto_true_produces_manifest_request_and_queues_every_sibling(tmp_path, 
     assert request["lane"] == "rewrite"
     assert Path(request["candidates_path"]) == (tmp_path / "forge_candidate_manifest.json").resolve()
     assert request["lane_budget_sec"] > 0
-    assert request["max_kernels"] == request["lane_budget_sec"] // 4500
+    # Concrete, not a restatement of the impl formula: a 600-min session leaves
+    # ~35 700 phase-sec, the rewrite lane takes 50% (~17 850 sec), and the 4500-sec
+    # admission floor funds floor(17850 / 4500) == 3 targets. Pinning the integer
+    # makes a change to the split or the floor break loudly.
+    assert request["max_kernels"] == 3
     assert request["protocol_version"] == 1
 
     # submit_auto was handed the request path, not a named kernel.
@@ -162,6 +166,67 @@ def test_auto_true_empty_nomination_queues_nothing(tmp_path, monkeypatch):
     assert not state.pending_kernel_integrations
 
 
+def test_auto_true_forge_timeout_is_surfaced_not_reported_complete(tmp_path, monkeypatch):
+    """A crashed/timed-out forge run must not look like a clean empty nomination."""
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    trace = tmp_path / "decode.trace.json"
+    trace.write_text("{}", encoding="utf-8")
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    _seed_state(tmp_path, trace=trace)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: {"status": "timeout", "patches": [], "error": "deadline exceeded"},
+    )
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    # The forge status and its error ride through; NOT collapsed to complete.
+    assert result["status"] == "timeout"
+    assert result["auto"] is True
+    assert result["queued"] == 0
+    assert result["error"] == "deadline exceeded"
+    state = SharedState.load_or_init(tmp_path)
+    assert not state.pending_kernel_integrations
+
+
+def test_auto_true_missing_trace_fails_cleanly_without_leaking_request(tmp_path, monkeypatch):
+    """A funded run with no decode trace becomes a failed result, not an exception.
+
+    The up-front validation only checks that candidates_path exists; it never
+    confirms a trace was captured. build_request then rejects the empty trace, and
+    the auto path must degrade to a failed HandlerResult (the phase caller expects
+    a result, not a raise) rather than leaking a request artifact.
+    """
+    monkeypatch.setenv(_AUTO_ENV, "1")
+    candidates = _candidates(tmp_path, [_row("k001", gpu_pct=30.0)])
+    # Funded budget, but NO last_profile_trace -> _resolve_fusion_decode_trace "".
+    state = SharedState.load_or_init(tmp_path)
+    state.max_minutes = 600.0
+    state.save(tmp_path)
+
+    from hyperloom.agents.kernel.tools.backends import forge_submit
+
+    monkeypatch.setattr(
+        forge_submit,
+        "submit_auto",
+        lambda **_: (_ for _ in ()).throw(AssertionError("must not reach forge without a trace")),
+    )
+
+    result = asyncio.run(
+        krh.run_optimization_handler({"candidates_path": str(candidates)}, session_dir=tmp_path)
+    )
+    assert result["status"] == "failed"
+    assert result["auto"] is True
+    assert "trace" in result["error"].lower()
+    # The request was never written (the producer raised before write_request).
+    assert not (tmp_path / "forge_nomination_input.json").exists()
+
+
 def test_auto_true_unbounded_session_skips_without_calling_forge(tmp_path, monkeypatch):
     monkeypatch.setenv(_AUTO_ENV, "1")
     trace = tmp_path / "decode.trace.json"
@@ -186,8 +251,10 @@ def test_auto_true_unbounded_session_skips_without_calling_forge(tmp_path, monke
     assert result["status"] == "skipped"
     assert result["reason"] == "no_budget"
     assert called["n"] == 0
-    # A zero-budget brief is never written.
+    # No artifact leaks: the budget is checked BEFORE anything is written, so
+    # neither the request nor the manifest is left behind on the skip.
     assert not (tmp_path / "forge_nomination_input.json").exists()
+    assert not (tmp_path / "forge_candidate_manifest.json").exists()
 
 
 def test_auto_true_without_candidates_path_skips(tmp_path, monkeypatch):

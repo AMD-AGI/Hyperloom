@@ -5883,34 +5883,57 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
         A ``HandlerResult`` reporting how many siblings were queued, or a
         ``skipped``/``failed`` status when there was no budget or no manifest.
     """
+    import asyncio
+
     from ..state.shared_state import SharedState
     from ...agents.kernel.tools.backends import forge_submit
     from hyperloom.inference_optimizer.session.session_paths import kernel_agent_runs_dir
+
+    # Check the budget FIRST: an unbounded/exhausted session funds nothing, and we
+    # must not leave a stale forge_candidate_manifest.json behind on that skip.
+    state = SharedState.load_or_init(session_dir)
+    allocation = _nomination_lane_budget(state)
+    if not allocation.is_fundable:
+        # Unbounded / exhausted budget -> zero targets. build_request would reject
+        # a zero-budget brief, and forge has nothing to pick, so stop here before
+        # writing any artifact.
+        return {"status": "skipped", "reason": "no_budget"}
 
     manifest_path = _write_forge_candidate_manifest(payload, session_dir=session_dir)
     if manifest_path is None:
         return {"status": "skipped", "reason": "no_candidates"}
 
-    state = SharedState.load_or_init(session_dir)
-    allocation = _nomination_lane_budget(state)
-    if not allocation.is_fundable:
-        # Unbounded / exhausted budget -> zero targets. build_request would reject
-        # a zero-budget brief, and forge has nothing to pick, so stop here.
-        return {"status": "skipped", "reason": "no_budget"}
-
-    request_path = _write_nomination_request(
-        payload,
-        session_dir=session_dir,
-        manifest_path=manifest_path,
-        allocation=allocation,
-    )
+    # Producers raise a typed error on a missing decode trace or malformed
+    # candidate JSON (the up-front validation only checks candidates_path exists,
+    # not that a trace was captured). Degrade to a failed HandlerResult instead of
+    # letting the exception escape the handler.
+    try:
+        request_path = _write_nomination_request(
+            payload,
+            session_dir=session_dir,
+            manifest_path=manifest_path,
+            allocation=allocation,
+        )
+    except (nomination_request.NominationRequestError, candidate_manifest.CandidateManifestError) as error:
+        log.warning("nomination auto: could not build the forge request: %s", error)
+        return {
+            "status": "failed",
+            "auto": True,
+            "error_class": type(error).__name__,
+            "error": str(error),
+        }
 
     workspace_path = payload.get("workspace_path") or str(session_dir)
     Path(workspace_path).mkdir(parents=True, exist_ok=True)
     output_dir = kernel_agent_runs_dir(session_dir, str(payload.get("session_id") or session_dir.name)) / "auto"
     target_platform = (payload.get("target_platform") or state.gpu_type or "").strip()
 
-    result = forge_submit.submit_auto(
+    # submit_auto blocks on subprocess.communicate for the whole forge run; run it
+    # off the event loop so heartbeat/liveness/cancellation coroutines keep firing,
+    # matching how the selector path offloads kernel_optimization.py via
+    # _run_subprocess.
+    result = await asyncio.to_thread(
+        forge_submit.submit_auto,
         nomination_input=str(request_path),
         workspace=workspace_path,
         output_dir=output_dir,
@@ -5919,6 +5942,18 @@ async def _run_optimization_auto(payload: dict, *, session_dir: Path) -> Handler
     )
 
     queued = _land_nomination_outcome(result, session_dir=session_dir)
+    forge_status = str(result.get("status") or "") if isinstance(result, dict) else ""
+    if forge_status in {"timeout", "failed"}:
+        # A crashed/timed-out forge run returns an empty patches[]; without this we
+        # would report "complete, queued=0" -- indistinguishable from forge having
+        # cleanly nominated nothing. Surface the real outcome and its error.
+        forge_error = str(result.get("error") or "") if isinstance(result, dict) else ""
+        return {
+            "status": forge_status,
+            "auto": True,
+            "queued": queued,
+            "error": forge_error,
+        }
     nomination = result.get("nomination") if isinstance(result, dict) else None
     # GUARD (12g): forge nominated N siblings that each land as their own pending
     # record. This result must NOT carry a single-kernel identity (kernel_id /

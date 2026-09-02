@@ -390,6 +390,19 @@ def enqueue_nominated_patch(
         record["action_label"] = "fusion"
         record["fusion_env_flags"] = fusion_env_flags
         record["keep_threshold_pct"] = float(keep_threshold_pct)
+    elif fusion_env_flags:
+        # Rewrite lane deliberately drops the env flags (it lands as the generic
+        # action="integrate", which does not carry them into the re-baseline). A
+        # rewrite patch is expected to be self-activating (an in-source edit); if
+        # forge ever emits an env-GATED rewrite, the drain would re-bench the
+        # un-activated eager path and REVERT a genuine win. Surface that here so
+        # the contract violation is visible rather than a silent regression.
+        log.warning(
+            "nomination rewrite patch %s carries env_flag %r; rewrite lane cannot "
+            "activate it and the KEEP re-baseline will run the un-gated path",
+            kernel_name or source_file,
+            env_flag,
+        )
     if integration_id not in queue:
         queue[integration_id] = record
     else:
