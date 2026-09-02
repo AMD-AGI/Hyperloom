@@ -113,6 +113,14 @@ _SETUP_CMD_ALLOWLIST: tuple[str, ...] = (
     r"(?:python3?|uv)\s+-m\s+pip\s+install\b",
     r"uv\s+pip\s+install\b",
     r"pip3?\s+uninstall\s+-y\b",
+    # Creating an isolated environment to install INTO. Without these the only
+    # spelling that survived the allowlist was installing into the system
+    # interpreter (``PIP_BREAK_SYSTEM_PACKAGES=1 pip install``), so the gate was
+    # steering repairs toward the less safe of the two options it had to choose
+    # between. Creating a venv directory is bounded; breaking the system's
+    # package manager is not.
+    r"uv\s+venv\b",
+    r"(?:python3?|uv)\s+-m\s+venv\b",
     r"apt(?:-get)?\s+(?:install|update)\b",
     r"npm\s+(?:install|i|ci)\b",
     r"npm\s+install\s+-g\b",
@@ -200,12 +208,39 @@ def _parse_framework_switches(
     return _switch_manifest.parse_manifest(raw, reserved_env=reserved)
 
 
+def _with_skipped_setup_reason(reason: str, setup_result: dict[str, Any]) -> str:
+    """Append the allowlist rejections to a round's ``reason``.
+
+    A rejected setup command was only ever a ``log.warning``. Downstream saw the
+    round's outcome with no link to the cause, so the same authoring attempt was
+    re-dispatched until the budget ran out -- each round proposing the same fix
+    and each round having it silently dropped. Naming the rejection in the reason
+    is what lets the next round (or an operator) see that the proposal was never
+    the problem.
+
+    Args:
+        reason: The round's existing reason text.
+        setup_result: The :func:`_run_setup_commands` result.
+
+    Returns:
+        ``reason`` unchanged when nothing was rejected, else ``reason`` with a
+        one-line summary of the rejected commands appended.
+    """
+    skipped = [str(c) for c in (setup_result.get("skipped") or []) if str(c).strip()]
+    if not skipped:
+        return reason
+    listed = "; ".join(skipped[:_SETUP_CMD_MAX])
+    note = f"{len(skipped)} setup command(s) were REJECTED by the install-only allowlist and never ran: {listed}"
+    return f"{reason} ({note})" if reason else note
+
+
 def _is_allowlisted_setup_command(cmd: str) -> bool:
     """True when ``cmd`` is an install-only command safe to replay.
 
-    Strips a leading ``sudo`` and any ``KEY=VALUE`` env-assignment prefixes, then
-    requires the remainder to start with a known package/tool installer. Rejects
-    anything with shell control operators that could chain an arbitrary payload.
+    Strips a leading ``sudo``, any ``KEY=VALUE`` env-assignment prefixes and the
+    executable's directory, then requires the remainder to start with a known
+    package/tool installer. Rejects anything with shell control operators that
+    could chain an arbitrary payload.
     """
     text = (cmd or "").strip()
     if not text:
@@ -233,6 +268,18 @@ def _is_allowlisted_setup_command(cmd: str) -> bool:
     # Strip a leading sudo and leading KEY=VALUE env assignments.
     text = re.sub(r"^\s*sudo\s+", "", text)
     text = re.sub(r"^(?:\s*[A-Za-z_][A-Za-z0-9_]*=[^\s]*\s+)+", "", text)
+    # Match on the executable's basename. The patterns below are anchored, so
+    # without this ``/opt/venv/bin/uv pip install X`` was REJECTED while
+    # ``uv pip install X`` -- the same operation -- was allowed. Measured: two
+    # sessions hit one missing dependency and got opposite outcomes, decided by
+    # nothing but how the specialist happened to spell the path.
+    #
+    # This does not weaken the gate. What it enforces is which KIND of operation
+    # may replay, not which path a binary was found at -- and the env-assignment
+    # strip above already lets ``PATH=/x pip install`` through, so any argument
+    # that a path prefix was providing protection does not survive contact with
+    # the code as it stands.
+    text = re.sub(r"^\S*/", "", text, count=1)
     return any(re.match(pat, text) for pat in _SETUP_CMD_ALLOWLIST)
 
 
@@ -313,6 +360,10 @@ def _run_setup_commands(commands: list[str], *, cwd: Path, log_dir: Path) -> dic
     for cmd in commands:
         if not _is_allowlisted_setup_command(cmd):
             skipped.append(cmd)
+            # Also carried into the round's ``reason`` by
+            # _with_skipped_setup_reason: a warning alone left the caller with an
+            # outcome and no link to the cause, so the same proposal was
+            # re-authored and re-dropped until the budget ran out.
             log.warning("integrate_patch: skipping non-allowlisted enablement setup command: %s", cmd)
             continue
         log.info("integrate_patch: enablement setup replay: %s", cmd)
@@ -2362,10 +2413,12 @@ class IntegratePatchExecutor:
                 "artifacts_applied": [],
                 "artifact_errors": artifact_resolve_errors,
                 "setup_commands_applied": list(setup_result.get("applied") or []),
-                "reason": (
+                "setup_commands_skipped": list(setup_result.get("skipped") or []),
+                "reason": _with_skipped_setup_reason(
                     "neither patches, config_changes, installable artifacts, nor "
                     "allowlisted setup commands were supplied / discoverable for "
-                    "this specialist task"
+                    "this specialist task",
+                    setup_result,
                 ),
             }
             if params.get("enablement"):
@@ -2977,14 +3030,16 @@ class IntegratePatchExecutor:
                         "advanced": True,
                         "runnable": False,
                         "correctness_verified": False,
-                        "reason": (
+                        "reason": _with_skipped_setup_reason(
                             f"enablement progressed: {run_reason}; boot advanced "
                             f"to a new gap ({after_signature.kind}) — patch recorded "
-                            f"as a base for the next round"
+                            f"as a base for the next round",
+                            setup_result,
                         ),
                         "after_signature": after_signature.to_dict(),
                         "enablement_launch_log": new_log,
                         "setup_commands_applied": list(setup_result.get("applied") or []),
+                        "setup_commands_skipped": list(setup_result.get("skipped") or []),
                         "bench_result": bench_result,
                         "workspace": str(output_root),
                         **eval_provenance,
@@ -3051,8 +3106,9 @@ class IntegratePatchExecutor:
             "runnable": True,
             "correctness_verified": correctness_ok is True,
             "provisional": provisional,
-            "reason": reason,
+            "reason": _with_skipped_setup_reason(reason, setup_result),
             "setup_commands_applied": list(setup_result.get("applied") or []),
+            "setup_commands_skipped": list(setup_result.get("skipped") or []),
             "bench_result": bench_result,
             "workspace": str(output_root),
             # Base YAML only; the env/arg layers live in enablement_effective_config.

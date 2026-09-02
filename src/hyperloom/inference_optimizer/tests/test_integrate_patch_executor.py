@@ -26,6 +26,7 @@ from hyperloom.orchestrator.actions.executors.integrate_patch import (
     _resolve_setup_commands,
     _revert_patches_no_git,
     _run_setup_commands,
+    _with_skipped_setup_reason,
 )
 from hyperloom.orchestrator.loop.sub_agent_runner import RunnerContext
 from hyperloom.orchestrator.state.task_registry import Task
@@ -1141,6 +1142,19 @@ async def test_enablement_stacks_base_patches_before_new(tmp_path: Path, monkeyp
         "pip install -U transformers>=4.58",
         "pip install 'torch<2.11' 'vllm>=0.21,<0.24'",
         "VLLM_ROCM_USE_AITER=1 pip install vllm>=0.21",
+        # An absolute path to the same installer is the same operation. Measured:
+        # two sessions hit one missing dependency and got opposite outcomes
+        # because one specialist wrote the venv's uv by path and the other did
+        # not -- the verdict turned on spelling, not on what the command does.
+        "/opt/venv/bin/uv pip install aiperf",
+        "/opt/venv/bin/pip install aiperf",
+        "/usr/bin/python3 -m pip install aiperf",
+        "sudo /usr/bin/apt-get install -y gh",
+        # Creating an isolated environment to install into. Rejecting these left
+        # PIP_BREAK_SYSTEM_PACKAGES as the only spelling that survived.
+        "uv venv /opt/aiperf-venv",
+        "python3 -m venv /opt/aiperf-venv",
+        "/opt/venv/bin/uv venv /opt/aiperf-venv",
     ],
 )
 def test_setup_allowlist_accepts_installs(cmd: str):
@@ -1166,6 +1180,13 @@ def test_setup_allowlist_accepts_installs(cmd: str):
         "pip install foo | tee /etc/x",
         "echo `whoami`",
         "pip install x $(malicious)",
+        # Basename matching must not turn the allowlist into "anything with a
+        # path": what the gate decides is the KIND of operation, and these are
+        # still not installs.
+        "/usr/bin/rm -rf /tmp/x",
+        "/bin/systemctl restart docker",
+        "./configure --prefix=/usr",
+        "/opt/venv/bin/uv run evil.py",
     ],
 )
 def test_setup_allowlist_rejects_non_installs_and_chaining(cmd: str):
@@ -1198,6 +1219,28 @@ def test_run_setup_commands_skips_non_allowlisted(tmp_path: Path, monkeypatch):
     assert out["skipped"] == ["rm -rf /tmp/x"]
     assert ran == ["pip install -U transformers"]
     assert (tmp_path / "logs" / "enablement_setup.log").exists()
+
+
+def test_skipped_setup_commands_are_named_in_the_round_reason():
+    """A rejected command must reach the conclusion, not just a log line.
+
+    It used to be a lone ``log.warning``. Downstream saw the round's outcome
+    with no link to the cause, so the same proposal was re-authored and
+    re-dropped until the budget ran out -- the fix was never the problem, and
+    nothing in the result said so.
+    """
+    reason = _with_skipped_setup_reason(
+        "authored patch produced no gain",
+        {"applied": [], "skipped": ["/opt/x/uv venv /opt/v", "ln -sf a b"], "failed": []},
+    )
+    assert "authored patch produced no gain" in reason
+    assert "REJECTED" in reason
+    assert "ln -sf a b" in reason
+
+
+def test_reason_is_untouched_when_nothing_was_rejected():
+    base = "authored patch produced no gain"
+    assert _with_skipped_setup_reason(base, {"applied": ["pip install x"], "skipped": [], "failed": []}) == base
 
 
 @pytest.mark.asyncio
