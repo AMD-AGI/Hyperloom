@@ -220,6 +220,45 @@ def test_geometry_only_source_marked_not_dispatchable(monkeypatch):
     assert "not dispatchable" in c["skip_reason"]
 
 
+def test_site_a_partition_skips_reusable_source_resolved_but_non_dispatchable(monkeypatch):
+    # Site A's routability is the STRICT dispatch predicate
+    # (reusable AND source_file AND shape_dispatchable), exercised through the real
+    # build_candidates -- not an inline lambda. A reusable kernel with a resolved
+    # source but only launch-grid geometry is non-dispatchable, so it must land in
+    # skipped_kernels, never routable_kernels. This locks the strict predicate at
+    # the live call site: dropping the shape_dispatchable conjunct would move this
+    # kernel into routable_kernels and fail here (defect 7).
+    monkeypatch.setattr(report, "resolve_source", lambda op, **k: ("/opt/aiter/csrc/k.cu", "op_to_source"))
+    cands = report.build_candidates(
+        _analyze(
+            [
+                {
+                    "name": "_combine_kernel",
+                    "op_name": "aiter::combine",
+                    "gpu_time_us": 100.0,
+                    "count": 1,
+                    "launch_grid": [17, 7, 1],
+                    "launch_block": [256, 1, 1],
+                }
+            ]
+        ),
+        framework="sglang",
+        target_platform="MI300X",
+    )
+    hot = cands["hot_kernels"][0]
+    # Precondition: the kernel really is reusable + source-resolved + NOT dispatchable
+    # -- i.e. it is routable under the coarse (site B) predicate.
+    assert hot["reusable_native_kernel"] is True
+    assert hot["source_file"] == "/opt/aiter/csrc/k.cu"
+    assert hot["shape_dispatchable"] is False
+    # ...yet the STRICT site-A predicate keeps it out of routable and in skipped.
+    routable_ids = {c["kernel_id"] for c in cands["routable_kernels"]}
+    skipped_ids = {c["kernel_id"] for c in cands["skipped_kernels"]}
+    assert hot["kernel_id"] in skipped_ids
+    assert hot["kernel_id"] not in routable_ids
+    assert cands["routable_kernels"] == []
+
+
 def test_workload_roofline_uses_capture_backfill_shape():
     # A graph-replay kernel with no own cpu_op dims but a same-name capture-time
     # backfill shape must still contribute an analytical roofline to the totals.

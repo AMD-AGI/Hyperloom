@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,37 @@ def test_an_unknown_request_field_is_refused(tmp_path: Path) -> None:
     path = _write(tmp_path / "req.json", _request_payload(gpu_capability_hint="gfx950"))
     with pytest.raises(nom.NominationError, match="unknown nomination request field"):
         nom.read_request(path)
+
+
+def test_producer_output_round_trips_through_the_consumer(tmp_path: Path) -> None:
+    """The consumer's hand-maintained ``_KNOWN_REQUEST_KEYS`` must accept every key
+    the real producer writes. The producer derives its key set from the dataclass
+    fields, so if a new field is added there but forgotten here, this round-trip of
+    genuine producer output would over-reject it -- catching the drift the
+    strict-key guard (defect 5) would otherwise turn into a silent skew (defect 5).
+    """
+    from hyperloom.orchestrator.kernel import nomination_request as producer
+
+    # Every key the producer serializes -- exactly its dataclass fields, not a
+    # hand-copied literal -- must be understood by the consumer's allowed-key set.
+    producer_keys = {f.name for f in fields(producer.NominationRequest)}
+    assert producer_keys <= nom._KNOWN_REQUEST_KEYS, (
+        f"producer writes fields the consumer would reject: {sorted(producer_keys - nom._KNOWN_REQUEST_KEYS)}"
+    )
+
+    # And prove it end to end: a request the producer actually writes reads back
+    # cleanly through the consumer, no "unknown field" rejection.
+    request = producer.build_request(
+        lane=producer.LANE_REWRITE,
+        trace_path=str(_write(tmp_path / "trace.json", {})),
+        candidates_path=str(_write(tmp_path / "cand.json", {"hot_kernels": []})),
+        lane_budget_sec=6000,
+        max_kernels=2,
+    )
+    path = producer.write_request(tmp_path, request)
+    parsed = nom.read_request(path)
+    assert parsed.lane == nom.LANE_REWRITE
+    assert parsed.max_kernels == 2
 
 
 def test_unreadable_request_is_refused(tmp_path: Path) -> None:
