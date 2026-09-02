@@ -25,6 +25,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `HYPERLOOM_AGENTX=1`; `HYPERLOOM_PERF_METRIC` overrides in both directions
   (`composite_v1` opts a non-AgentX run in, any other value opts an AgentX run
   out), and `HYPERLOOM_PERF_NOISE_PCT` (default `5.0`) sets the veto band.
+  Either AgentX signal is enough: the ambient `HYPERLOOM_AGENTX` or the session's
+  persisted `benchmark_mode`, so a re-baseline or integrate round driven from a
+  subprocess that never inherited the env var still grades on the agentic axis.
   Scriptable frameworks keep output-throughput grading. Candidate and reference
   are always read off the same axis: a lane whose measurement cannot supply
   both graded axes degrades to output throughput on both sides and logs the
@@ -42,6 +45,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   baseline died to a timeout unrelated to the workload unless the operator
   pinned `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` by hand. A genuinely
   wedged server is still stopped by the per-phase and session budgets.
+
+- **`--extra-env` reaches the benchmark for every framework, and now outranks
+  the config.** The pins were copied into `benchmark.envs` only on the `custom`
+  path; every other framework left them in the orchestrator's own environment,
+  where Magpie -- which forwards `benchmark.envs` and nothing else -- never saw
+  them, so a vLLM Ray worker booted without them.<br/>
+  **Operator note**: on the `custom` path the pins used to be applied with
+  `setdefault`, so a value already present in the YAML won. They are now written
+  last and win outright, which is what an explicit CLI pin should do but is a
+  change in precedence for a `custom` workload whose YAML sets the same key.
+  Names on the untrusted-env denylist (`PATH`, `PYTHONPATH`, `LD_PRELOAD`,
+  credential-shaped names) are still refused on this route and logged.
+
+- **A shell-quoted `--flag=value` operand no longer keeps its wrappers.**
+  Quote-preserving tokenization keeps a JSON blob intact, and a fully-wrapped
+  operand (`--tool-call-parser 'kimi_k3'`) is already unwrapped; the `=` form
+  (`--tool-call-parser='kimi_k3'`) was not, so the quotes survived into Magpie's
+  unquoted `EXTRA_*_ARGS` expansion and reached argv literally. The unwrap is
+  applied to the right-hand side of the first `=` only, so the flag name is never
+  altered and token boundaries cannot shift; a JSON value is left verbatim in
+  both positions.
 
 - **A published Recipe now carries three columns instead of five.**
   `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
