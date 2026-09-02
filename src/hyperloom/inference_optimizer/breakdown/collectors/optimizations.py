@@ -1179,6 +1179,19 @@ def collect_recorded_optimizations(
                 str(session_validation.get("measurement_basis") or "") if session_validation else "ledger_sum"
             ),
             "validation_source": (str(session_validation.get("source") or "") if session_validation else ""),
+            # The axis this figure was actually decided on, and the measurement
+            # that decided it. Both are read off the promotion rather than
+            # re-derived: the configured axis can differ per comparison, and a
+            # revalidation moves the gain without re-promoting the recipe.
+            "graded_on": (str(session_validation.get("graded_on") or "") if session_validation else ""),
+            "graded_degrade_reason": (
+                str(session_validation.get("degrade_reason") or "") if session_validation else ""
+            ),
+            "validated_perf": (
+                dict(session_validation.get("perf") or {})
+                if session_validation and isinstance(session_validation.get("perf"), dict)
+                else {}
+            ),
             "reconciliation_gap_pct": (round(recorded_total - cumulative, 6) if recorded_total is not None else None),
             "attributed_total_gain_pct": round(attributed, 6),
             "unattributed_gain_pct": round(unattributed, 6),

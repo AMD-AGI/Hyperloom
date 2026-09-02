@@ -4566,6 +4566,9 @@ def record_session_validation(
     stack_len: int,
     source: str,
     measurement_basis: str,
+    graded_on: str | None = None,
+    degrade_reason: str | None = None,
+    perf: Mapping[str, Any] | None = None,
     ts: str | None = None,
     producer: str = PRODUCER_COORDINATOR,
 ) -> str | None:
@@ -4594,6 +4597,17 @@ def record_session_validation(
             end to end, ``e2e_decision_round`` when it is an explore round's own
             grading measurement, ``derived_speedup`` when it was inferred from a
             micro-benchmark's speedup.
+        graded_on: The axis this promotion was actually decided on. A session
+            configured for the total axis still grades an individual promotion
+            on output when either side of that comparison cannot supply the
+            axis pair, so the configured axis is not evidence of what happened
+            here.
+        degrade_reason: Why ``graded_on`` is not the configured axis, when it
+            is not.
+        perf: The promoted measurement's axes, recorded beside the gain they
+            produced. Reading them off ``current_best`` later can pair this
+            gain with an older measurement, because a revalidation updates the
+            cumulative figure without re-promoting the recipe.
         ts: Author-time stamp; defaults to now.
         producer: Recorder producer label.
 
@@ -4643,6 +4657,9 @@ def record_session_validation(
             "source": source,
             "measurement_basis": measurement_basis,
             "validated_gain_pct": float(validated_gain_pct),
+            **({"graded_on": str(graded_on)} if graded_on else {}),
+            **({"degrade_reason": str(degrade_reason)} if degrade_reason else {}),
+            **({"perf": {str(k): v for k, v in perf.items()}} if perf else {}),
         },
         producer=producer,
     )

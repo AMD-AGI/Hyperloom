@@ -693,6 +693,8 @@ class WritebackCollaborator:
         try:
             from hyperloom.inference_optimizer.breakdown.recorder import instrument
 
+            from hyperloom.common.perf_metric import graded_axes_of
+
             instrument.record_session_validation(
                 self.session_dir,
                 baseline_tput=graded.reference,
@@ -701,6 +703,14 @@ class WritebackCollaborator:
                 stack_len=self.shared_state.cumulative_gain_validated_stack_len,
                 source=source,
                 measurement_basis=measurement_basis,
+                # What this promotion was actually decided on, beside the
+                # measurement that decided it. The configured axis can differ
+                # per comparison, and a later revalidation moves the gain
+                # without moving current_best, so neither is recoverable from
+                # state once this moment has passed.
+                graded_on=graded.objective,
+                degrade_reason=graded.degrade_reason,
+                perf=graded_axes_of(_graded_source(measurement, new_tput)),
                 ts=ts,
             )
         except Exception as exc:  # noqa: BLE001

@@ -191,9 +191,18 @@ def resolve_graded_comparison(
     interactivity constraint is resolved here as ``vetoed`` because it belongs
     to the total-throughput objective rather than sitting beside it.
 
+    The objective and the veto band come from ``state.grading``, recorded at
+    seed, rather than from the environment. A resume is a new process: reading
+    ``HYPERLOOM_PERF_METRIC`` here would let a shell that lost the variable
+    flip a session back to the total axis mid-run, and a lost
+    ``HYPERLOOM_PERF_NOISE_PCT`` would silently widen a 3.5% veto band back to
+    the 5% default. The KEEP/REVERT rule has to be the one the session started
+    with. Sessions seeded before the field fall back to deriving it.
+
     Args:
-        state: The session state (``current_best`` / ``baseline_tput`` /
-            ``baseline_perf`` / ``framework`` / ``benchmark_mode``).
+        state: The session state (``grading`` / ``current_best`` /
+            ``baseline_tput`` / ``baseline_perf`` / ``framework`` /
+            ``benchmark_mode``).
         measurement: The candidate's measurement mapping.
         against_baseline: Grade against the session baseline (cumulative
             realized gain) rather than the recipe the candidate was composed on.
@@ -214,11 +223,22 @@ def resolve_graded_comparison(
         total_tput_serving_grading_enabled,
     )
 
+    recorded = getattr(state, "grading", None)
+    recorded = recorded if isinstance(recorded, dict) else {}
+    recorded_objective = str(recorded.get("objective") or "").strip()
+    if recorded_objective:
+        on_total = recorded_objective == GRADED_TOTAL
+        noise_pct = recorded.get("intvty_noise_pct")
+        noise_pct = float(noise_pct) if isinstance(noise_pct, (int, float)) else None
+    else:
+        on_total = total_tput_serving_grading_enabled(
+            scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+            benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+        )
+        noise_pct = None
+
     degrade_reason = ""
-    if total_tput_serving_grading_enabled(
-        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
-        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
-    ):
+    if on_total:
         if against_baseline:
             ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
             reason = "" if ref_perf else "baseline_axes_missing"
@@ -230,7 +250,7 @@ def resolve_graded_comparison(
                 objective=GRADED_TOTAL,
                 candidate=total_tput_of(cand_perf),
                 reference=total_tput_of(ref_perf),
-                vetoed=not passes_intvty_gate(cand_perf, ref_perf),
+                vetoed=not passes_intvty_gate(cand_perf, ref_perf, noise_pct=noise_pct),
             )
         degrade_reason = reason or "candidate_axes_missing"
 

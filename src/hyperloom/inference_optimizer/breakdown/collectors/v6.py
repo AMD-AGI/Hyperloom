@@ -200,7 +200,14 @@ def _perf_axes(source: Any) -> dict[str, Any]:
 
 
 def _grading_projection(state: dict[str, Any], workload: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Declare the axis this session's gains were graded on.
+    """Declare the axis this session was configured to grade on.
+
+    This is the session-level setting, not the verdict on any one promotion.
+    ``outcome.final.graded_on`` reports what the run actually decided its last
+    promotion on, read off that promotion; the two differ whenever a
+    comparison could not supply the axis pair and fell back to output. Do not
+    resolve one from the other.
+
 
     An AgentX replay is ranked on total token throughput under an
     interactivity veto, a synthetic run on output throughput alone. On the
@@ -2229,9 +2236,6 @@ def collect_v6_outcome(
     timeline: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Project V5 result sections into the V6 ``outcome`` shape."""
-    # Resolved through the same helper ``metadata.grading`` uses, so the two
-    # blocks cannot drift into naming different axes for the same session.
-    graded_on = _grading_projection(state)["objective"]
     stop_reason = str(session.get("stop_reason") or "").strip()
     outcome_status = _outcome_status(stop_reason)
     for event in reversed(timeline):
@@ -2243,6 +2247,18 @@ def collect_v6_outcome(
     validation = optimizations.get("validation")
     if not isinstance(validation, dict):
         validation = {}
+    # What the run actually graded its last promotion on, not what the session
+    # was configured for. A session set to the total axis still grades an
+    # individual promotion on output whenever either side of that comparison
+    # cannot supply the axis pair, and `cumulative_gain_validated` is then an
+    # output figure. Declaring the configured axis here would put a total
+    # label on an output number.
+    graded_on = str(validation.get("graded_on") or "").strip() or _grading_projection(state)["objective"]
+    # Same reason for the axes: a full-stack revalidation moves the gain
+    # without re-promoting `current_best`, so reading them off `current_best`
+    # can pair this gain with an older measurement.
+    validated_perf = validation.get("validated_perf")
+    final_perf = validated_perf if isinstance(validated_perf, dict) and validated_perf else state.get("current_best")
     summary = optimizations.get("summary_by_source")
     attribution_available = optimizations.get("available") is not False and isinstance(summary, dict)
     summary = summary if isinstance(summary, dict) else {}
@@ -2296,7 +2312,7 @@ def collect_v6_outcome(
             "throughput_tok_s_per_gpu": final.get("throughput_tok_s_per_gpu"),
             "gain_pct": final.get("cumulative_gain_pct_validated", 0.0),
             "graded_on": graded_on,
-            **_perf_axes(state.get("current_best")),
+            **_perf_axes(final_perf),
             "action_path": list(final.get("action_path") or []),
             "extra_envs": dict(final.get("extra_envs") or {}),
             "extra_server_args": str(final.get("extra_server_args") or ""),
