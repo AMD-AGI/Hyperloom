@@ -966,6 +966,18 @@ class TestForgeGemmHelperCoverage:
             == "bypass"
         )
 
+    def test_resolve_forge_fusion_ignores_retired_external_sandbox_env(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {},
+                agent_backend="codex",
+            )
+            == DEFAULT_CODEX_SANDBOX_MODE
+        )
+
     def test_resolve_forge_fusion_claude_sandbox_uses_audit_default_or_override(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _ANTHROPIC_ONLY_ENV)
         # Claude's audit default is stable even if the Codex operator default is narrower.

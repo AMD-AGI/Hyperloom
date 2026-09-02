@@ -194,6 +194,32 @@ def test_bypass_is_wired(clean_agent_env, monkeypatch):
     assert captured["sandbox_mode"] == "bypass"
 
 
+def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
+    """forge-fuse bypass no longer gates on HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
+    captured = {}
+
+    def fake_resolve(provider, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(provider=provider, model=kwargs["model"], sandbox_mode="bypass")
+
+    backend = SimpleNamespace(
+        name="codex",
+        runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
+    )
+    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+
+    assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
+    assert captured["sandbox_mode"] == "bypass"
+
+
+def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
+    """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not substitute bypass mode."""
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+    assert cli_module._resolve_agent_sandbox_mode(None) == "workspace-write"
+
+
 def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monkeypatch):
     monkeypatch.setenv("FORGE_AGENT_SANDBOX_MODE", "read-only")
     assert cli_module._resolve_agent_sandbox_mode(None) == "read-only"

@@ -408,6 +408,18 @@ def test_codex_argv_bypass_requires_mode_opt_in(
     assert "--sandbox" not in bypass_cmd
 
 
+def test_codex_argv_retired_external_sandbox_env_alone_does_not_enable_bypass(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not replace the mode opt-in."""
+    _pin_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+    cmd = _build_cmd(tmp_path, codex_executable="/usr/bin/codex")
+    assert cmd[cmd.index("--sandbox") + 1] == "workspace-write"
+    assert "--dangerously-bypass-approvals-and-sandbox" not in cmd
+
+
 def test_codex_specialist_rejects_read_only_sandbox(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

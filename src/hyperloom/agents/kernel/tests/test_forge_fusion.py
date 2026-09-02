@@ -189,6 +189,19 @@ def test_build_cmd_forwards_bypass_agent_sandbox(tmp_path, monkeypatch):
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
 
 
+def test_build_cmd_forwards_bypass_without_retired_external_sandbox_env(tmp_path, monkeypatch):
+    """forge-fusion bypass must not require HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
+    monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
+    payload = _payload(tmp_path)
+    payload["agent_backend"] = "codex"
+    payload["agent_sandbox_mode"] = "bypass"
+
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
+
+
 def test_build_cmd_rejects_invalid_agent_sandbox_mode(tmp_path):
     payload = _payload(tmp_path)
     payload["agent_sandbox_mode"] = "unconfined"

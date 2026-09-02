@@ -44,6 +44,7 @@ _SECRET = "sk-do-not-leak-this-value"
 # rename of the variable or of an accepted value is a breaking change for every
 # deployment that set it, so it has to fail here.
 _SANDBOX_MODE_ENV = "HYPERLOOM_CODEX_SANDBOX_MODE"
+_LEGACY_EXTERNAL_SANDBOX_ENV = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 _WRITABLE_ROOTS = (Path("/tmp/out"),)
 
 
@@ -496,6 +497,24 @@ def test_resolve_codex_sandbox_mode_reads_the_operator_variable():
 def test_resolve_codex_sandbox_mode_allows_bypass_with_mode_opt_in():
     """Explicit bypass in the deployment environment permits full access."""
     assert cs.resolve_codex_sandbox_mode(env={_SANDBOX_MODE_ENV: "bypass"}) == "bypass"
+
+
+def test_resolve_codex_sandbox_mode_ignores_retired_external_sandbox_env():
+    """The removed confirmation env must not influence sandbox policy."""
+    assert cs.resolve_codex_sandbox_mode(env={_LEGACY_EXTERNAL_SANDBOX_ENV: "1"}) == "workspace-write"
+
+
+def test_resolve_codex_sandbox_mode_bypass_without_retired_external_sandbox_env():
+    """Bypass succeeds with only the operator mode opt-in after EXTERNAL_SANDBOX removal."""
+    assert (
+        cs.resolve_codex_sandbox_mode(
+            env={
+                _SANDBOX_MODE_ENV: "bypass",
+                _LEGACY_EXTERNAL_SANDBOX_ENV: "",
+            }
+        )
+        == "bypass"
+    )
 
 
 def test_resolve_codex_sandbox_mode_requires_the_environment_mode_opt_in_for_bypass():
