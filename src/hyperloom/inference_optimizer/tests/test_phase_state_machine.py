@@ -166,7 +166,7 @@ def test_stop_reason_vocab_includes_v06_and_v08():
         "user_stop_requested",
         "recipe_kb_drain_failed",
         "plateau_explore",
-        "conc_sweep_failed",
+        "sweep_failed",
         "baseline_arg_error",
     ):
         assert phase_state.is_valid_stop_reason(reason), reason

@@ -1595,7 +1595,7 @@ class DispatcherCollaborator:
         # A cancelled conc_sweep never writes last_conc_sweep on its own, so
         # SWEEP would idle until the LLM emits skip_to_close and CI would read
         # that as robustness_escalated. Stamp the skip here so the phase
-        # machine can close on conc_sweep_done.
+        # machine can close on sweep_done.
         if str(task.kind or "") == "conc_sweep":
             try:
                 self._record_session_budget_conc_sweep_skip(denied=denied)

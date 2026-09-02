@@ -417,7 +417,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
         "profile",
-        "sweep",
         "explore",
         # ``roofline`` runs profile + trace_analyze atomically.
         "roofline",
@@ -428,7 +427,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
     "profile": ("output_throughput", "output_throughput"),
-    "sweep": ("output_throughput", "output_throughput"),
     "explore": ("best_gain_pct", "gain_pct"),
     "roofline": ("snapshot_id", "snapshot_id"),
 }
@@ -997,9 +995,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
     explore_variant_timeout_safety_margin: float = 0.5
-    # Most recent workload sweep (CONC/ISL/OSL frontier).
-    last_sweep: dict[str, Any] = field(default_factory=dict)
-    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
+    # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Durable watermark from the last real conc_sweep measurement; survives the
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
@@ -1036,7 +1032,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
-    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Capped roofline audit log with snapshot ids and analysis paths.
@@ -3725,46 +3720,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except Exception:  # noqa: BLE001 — never block record on render concerns
             pass
 
-    def record_sweep(self, result: dict[str, Any]) -> None:
-        """Snapshot the most recent workload sweep into ``last_sweep``.
-
-        Selects the best succeeded grid entry by ``output_throughput`` and
-        records grid size, per-concurrency bests, the Pareto front, and the
-        workspace path.
-
-        Args:
-            result (dict[str, Any]): The sweep executor result envelope. A
-                non-dict result is a no-op.
-        """
-        if not isinstance(result, dict):
-            return
-        grid = result.get("sweep_grid") or []
-        best = None
-        if isinstance(grid, list):
-            best = max(
-                (
-                    e
-                    for e in grid
-                    if isinstance(e, dict)
-                    and e.get("status") == "succeeded"
-                    and isinstance(e.get("output_throughput"), (int, float))
-                ),
-                default=None,
-                key=lambda e: e.get("output_throughput") or 0.0,
-            )
-        self.last_sweep = {
-            "ts": _now_iso(),
-            "grid_size": result.get("grid_size", len(grid) if isinstance(grid, list) else 0),
-            "best_overall": best or {},
-            "best_for_each_conc": result.get("best_for_each_conc") or {},
-            "pareto_front": result.get("pareto_front") or [],
-            "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this manual/full sweep ran.
-            "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
-        }
-
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep). The status field lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE can fire on conc_sweep alone.
+        """Record the concurrency sweep's completion into ``last_conc_sweep``.
+
+        The status field is what lets ``exit_normal_sweep`` return ``sweep_done``:
+        the ladder is the only sweep there is, so its terminal state is the
+        phase's.
 
         Args:
             result (dict[str, Any]): The conc_sweep result envelope; a

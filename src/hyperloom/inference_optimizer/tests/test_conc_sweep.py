@@ -1040,40 +1040,39 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep_watermark == watermark
 
 
-def test_exit_normal_sweep_returns_conc_sweep_done():
-    """SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
+def test_exit_normal_sweep_reads_the_ladder_as_the_sweep():
+    """The concurrency ladder is the only sweep, so its status is the phase's."""
     from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
     class _State:
-        last_sweep = {}  # no sweep recorded
         last_conc_sweep = {}
         phase = "SWEEP"
         phase_started_ts = "2026-06-02T10:00:00+00:00"
         max_minutes = 360
         phase_budget_pct = {"SWEEP": 0.50}
 
-    # No sweep, no conc_sweep => don't exit (budget remaining).
+    # Nothing recorded => don't exit (budget remaining).
     assert exit_normal_sweep(_State()) is None
 
     _State.last_conc_sweep = {"status": "succeeded"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_done", reason
-    assert evidence.get("conc_sweep_status") == "succeeded"
+    assert reason == "sweep_done", reason
+    assert evidence.get("sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (action reached a terminal decision).
+    # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
-        assert result is not None and result[0] == "conc_sweep_done", terminal
+        assert result is not None and result[0] == "sweep_done", terminal
 
     _State.last_conc_sweep = {"status": "failed"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_failed"
-    assert evidence.get("conc_sweep_status") == "failed"
+    assert reason == "sweep_failed"
+    assert evidence.get("sweep_status") == "failed"
 
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
@@ -1088,8 +1087,8 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     )
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
     _, declined = exit_normal_sweep(state)
-    assert declined["conc_sweep_was_skipped"] is True
-    assert declined["conc_sweep_budget_exhausted"] is False
+    assert declined["sweep_was_skipped"] is True
+    assert declined["sweep_budget_exhausted_flag"] is False
 
     state.record_conc_sweep(
         {
@@ -1100,8 +1099,8 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
         }
     )
     _, spent = exit_normal_sweep(state)
-    assert spent["conc_sweep_was_skipped"] is True
-    assert spent["conc_sweep_budget_exhausted"] is True
+    assert spent["sweep_was_skipped"] is True
+    assert spent["sweep_budget_exhausted_flag"] is True
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):

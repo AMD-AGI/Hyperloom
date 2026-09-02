@@ -397,7 +397,6 @@ class _ExploreStateMixin:
         self.specialist_domain_empty_streak = {}
         self.rounds_since_last_specialist = {}
         self.rounds_since_last_keep = {}
-        self.last_sweep = {}
         self.last_conc_sweep = {}
         self.discard_pending_escalate_hint()
 

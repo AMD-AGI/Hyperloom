@@ -201,9 +201,8 @@ PHASE_EXIT_REASONS: frozenset[str] = frozenset(
         "optimize_budget_cap",  # OPTIMIZE → next phase at the absolute per-phase wall-clock cap
         "kernel_budget_cap",  # KERNEL_AGENT → SWEEP at the absolute per-phase wall-clock cap
         "sweep_budget_cap",  # SWEEP → reloop/CLOSE at the absolute per-phase wall-clock cap
-        "sweep_done",
-        "conc_sweep_done",  # SWEEP → CLOSE when conc_sweep settles
-        "conc_sweep_failed",  # SWEEP → CLOSE when conc_sweep reaches a failed terminal result
+        "sweep_done",  # SWEEP → CLOSE when the concurrency ladder settles
+        "sweep_failed",  # SWEEP → CLOSE when the ladder reaches a failed terminal result
         "sweep_budget_exhausted",
         "no_kernel_skipped",  # FRAMEWORK_AGENT → SWEEP when kernel disabled
         "kernel_phase_aborted_no_trace",  # KERNEL_AGENT → SWEEP when profile fails
@@ -270,8 +269,7 @@ STOP_REASON_VOCAB: frozenset[str] = frozenset(
         "plateau_kernel",
         "no_kernel_skipped",
         "sweep_done",
-        "conc_sweep_done",
-        "conc_sweep_failed",
+        "sweep_failed",
         "framework_agent_phase_done",
         "framework_agent_plateau",
         # R7: cyclic phase machine exhausted leverage across macro-cycles.
@@ -1622,24 +1620,18 @@ def compute_plateau_kernel(
     }
 
 
-# Statuses on last_sweep / last_conc_sweep that exit_normal_sweep already
-# treats as SWEEP closeout. skip_to_close must not override those: the LLM
-# emits it when conc_sweep was refused, and mapping that to
-# robustness_escalated turns a successful run into a CI failure.
-_SWEEP_DONE_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed"})
-_CONC_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
+# Statuses on last_conc_sweep that exit_normal_sweep already treats as SWEEP
+# closeout. skip_to_close must not override those: the LLM emits it when the
+# sweep was refused, and mapping that to robustness_escalated turns a
+# successful run into a CI failure.
+_SWEEP_CLOSEOUT_STATUSES: frozenset[str] = frozenset({"succeeded", "partial", "completed", "skipped", "failed"})
 
 
 def _sweep_has_recorded_closeout(state: Any) -> bool:
     """Whether SWEEP already recorded a result the phase machine can close on."""
-    last_sweep = getattr(state, "last_sweep", None) or {}
-    if isinstance(last_sweep, dict):
-        if str(last_sweep.get("status") or "").lower() in _SWEEP_DONE_STATUSES:
-            return True
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
-        if str(last_conc.get("status") or "").lower() in _CONC_SWEEP_CLOSEOUT_STATUSES:
-            return True
+        return str(last_conc.get("status") or "").lower() in _SWEEP_CLOSEOUT_STATUSES
     return False
 
 
@@ -2558,13 +2550,12 @@ def exit_normal_sweep(
     budget_pct: dict[str, float] | None = None,
     now_unix: float | None = None,
 ) -> tuple[str, dict[str, Any]] | None:
-    """SWEEP normal exit: sweep_done, conc_sweep terminal, or budget exhausted.
+    """SWEEP normal exit: the concurrency ladder's terminal state, or budget exhausted.
 
-    Emits an exit on concurrency-sweep completion so a singleton-blocked sweep does not idle.
+    The ladder is the only sweep, so its status is the phase's.
 
     Args:
-        state (Any): Frozen SharedState view exposing ``last_sweep`` and
-            ``last_conc_sweep``.
+        state (Any): Frozen SharedState view exposing ``last_conc_sweep``.
         budget_pct (dict[str, float] | None): Phase-budget overrides; defaults
             to ``state.phase_budget_pct`` when None.
         now_unix (float | None): Override for the current time.
@@ -2573,28 +2564,23 @@ def exit_normal_sweep(
         tuple[str, dict[str, Any]] | None: ``(reason, evidence)`` for the SWEEP
         exit, or ``None`` when SWEEP should continue.
     """
-    last_sweep = getattr(state, "last_sweep", None) or {}
-    if isinstance(last_sweep, dict):
-        status = str(last_sweep.get("status") or "").lower()
-        if status in ("succeeded", "partial", "completed"):
-            return "sweep_done", {"sweep_status": status}
     last_conc = getattr(state, "last_conc_sweep", None) or {}
     if isinstance(last_conc, dict):
-        cs_status = str(last_conc.get("status") or "").lower()
-        if cs_status == "failed":
-            return "conc_sweep_failed", {"conc_sweep_status": cs_status}
-        if cs_status in ("succeeded", "partial", "completed", "skipped"):
-            evidence: dict[str, Any] = {"conc_sweep_status": cs_status}
+        status = str(last_conc.get("status") or "").lower()
+        if status == "failed":
+            return "sweep_failed", {"sweep_status": status}
+        if status in ("succeeded", "partial", "completed", "skipped"):
+            evidence: dict[str, Any] = {"sweep_status": status}
             # A sweep that declined to run is also terminal, and the exit
             # reason alone cannot tell the two apart afterwards. was_skipped
             # covers both declining and spending the whole budget without a
             # comparable pair, so it is only carried with the flag that
             # separates them (see kernel.conc_sweep.conc_sweep_declined_to_run).
             if last_conc.get("was_skipped"):
-                evidence["conc_sweep_was_skipped"] = True
-                evidence["conc_sweep_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
-                evidence["conc_sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
-            return "conc_sweep_done", evidence
+                evidence["sweep_was_skipped"] = True
+                evidence["sweep_budget_exhausted_flag"] = bool(last_conc.get("budget_exhausted"))
+                evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
+            return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(
         state,
         budget_pct=budget_pct,
@@ -2923,7 +2909,7 @@ def compute_next_phase(
             exit_reason, exit_evidence = norm
             # Failed conc_sweep closeout is terminal: preserve the honest
             # stop_reason instead of opening another macro-cycle.
-            if exit_reason == "conc_sweep_failed":
+            if exit_reason == "sweep_failed":
                 return PHASE_CLOSE, exit_reason, exit_evidence
             # R1: open a new macro-cycle while budget remains and the run
             # hasn't globally converged (R7); wind down to CLOSE only when

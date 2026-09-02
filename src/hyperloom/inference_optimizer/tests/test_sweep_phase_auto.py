@@ -39,7 +39,6 @@ class _BareState:
     pending_stack_validation_apply_results: list[dict[str, Any]] = field(default_factory=list)
     kernel_integrate_attempts: dict[str, Any] = field(default_factory=dict)
     optimization_stack: list[dict[str, Any]] = field(default_factory=list)
-    last_sweep: dict[str, Any] = field(default_factory=dict)
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     last_conc_sweep_watermark: dict[str, Any] = field(default_factory=dict)
     cumulative_gain_validated: float = 0.0
@@ -636,196 +635,6 @@ async def test_drain_uses_current_best_tput_not_baseline(
     assert captured_payloads[0]["base_tput"] == 110.0
 
 
-def test_build_sweep_params_defaults_when_no_recipe():
-    """No warm_start_recipe → SKILL.md defaults + source='skill_md_default'."""
-    from hyperloom.orchestrator.actions.executors.sweep import (
-        DEFAULT_CONC_VALUES,
-        DEFAULT_ISL_OSL,
-        DEFAULT_NUM_PROMPTS_FACTOR,
-    )
-
-    state = _BareState()
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "skill_md_default"
-    assert out["conc_values"] == DEFAULT_CONC_VALUES
-    assert out["isl_osl_configs"] == DEFAULT_ISL_OSL
-    assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
-
-
-def test_build_sweep_params_full_recipe_override():
-    """Recipe with all three fields → all three overridden + source=recipe_kb."""
-    state = _BareState(
-        warm_start_recipe={
-            "sweep_grid": {
-                "conc_values": [8, 32, 128],
-                "isl_osl_configs": ["1024:1024", "4096:4096"],
-                "num_prompts_factor": 7,
-            },
-        },
-    )
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "recipe_kb"
-    assert out["conc_values"] == [8, 32, 128]
-    assert out["isl_osl_configs"] == ["1024:1024", "4096:4096"]
-    assert out["num_prompts_factor"] == 7
-
-
-def test_build_sweep_params_partial_recipe_per_field_fallback():
-    """Recipe overriding only conc_values → that field from recipe, the rest from defaults, source=recipe_kb."""
-    from hyperloom.orchestrator.actions.executors.sweep import (
-        DEFAULT_ISL_OSL,
-        DEFAULT_NUM_PROMPTS_FACTOR,
-    )
-
-    state = _BareState(
-        warm_start_recipe={"sweep_grid": {"conc_values": [256]}},
-    )
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "recipe_kb"
-    assert out["conc_values"] == [256]
-    assert out["isl_osl_configs"] == DEFAULT_ISL_OSL
-    assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
-
-
-def test_build_sweep_params_accepts_isl_osl_as_pair_lists():
-    """[[isl, osl], [isl, osl]] form converts to ['isl:osl', ...]."""
-    state = _BareState(
-        warm_start_recipe={
-            "sweep_grid": {"isl_osl_configs": [[2048, 512], [8192, 1024]]},
-        },
-    )
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["isl_osl_configs"] == ["2048:512", "8192:1024"]
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [None, [], "foo", [None], ["a", "b"], "1,2,3"],
-    ids=["none", "empty", "string", "list_of_none", "non_int_strings", "csv_string"],
-)
-def test_build_sweep_params_rejects_malformed_conc_values(bad):
-    """conc_values must be a non-empty list of int-coercible values;
-    anything else → fallback to default."""
-    from hyperloom.orchestrator.actions.executors.sweep import (
-        DEFAULT_CONC_VALUES,
-    )
-
-    state = _BareState(warm_start_recipe={"sweep_grid": {"conc_values": bad}})
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["conc_values"] == DEFAULT_CONC_VALUES
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [None, [], "1024:1024", [None], [{"isl": 1024}], [[1024]]],
-    ids=["none", "empty", "string", "list_of_none", "dict_inside", "list_wrong_arity"],
-)
-def test_build_sweep_params_rejects_malformed_isl_osl(bad):
-    """Non-list / wrong-shape isl_osl_configs → default fallback."""
-    from hyperloom.orchestrator.actions.executors.sweep import (
-        DEFAULT_ISL_OSL,
-    )
-
-    state = _BareState(warm_start_recipe={"sweep_grid": {"isl_osl_configs": bad}})
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["isl_osl_configs"] == DEFAULT_ISL_OSL
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [0, -1, "x", None],
-    ids=["zero", "negative", "string", "none"],
-)
-def test_build_sweep_params_rejects_non_positive_num_prompts_factor(bad):
-    """num_prompts_factor must be a positive int; zero / negative / non-int
-    → default fallback."""
-    from hyperloom.orchestrator.actions.executors.sweep import (
-        DEFAULT_NUM_PROMPTS_FACTOR,
-    )
-
-    state = _BareState(
-        warm_start_recipe={"sweep_grid": {"num_prompts_factor": bad}},
-    )
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["num_prompts_factor"] == DEFAULT_NUM_PROMPTS_FACTOR
-
-
-@pytest.mark.parametrize(
-    "bad",
-    [None, "raw text", 42, [], {"sweep_grid": "not a dict"}],
-    ids=["none", "string", "int", "list", "sweep_grid_not_dict"],
-)
-def test_build_sweep_params_non_dict_recipe_falls_back(bad):
-    """A non-dict recipe (or non-dict sweep_grid) → defaults."""
-    state = _BareState(warm_start_recipe=bad)  # type: ignore[arg-type]
-    out = Coordinator._build_sweep_params_from_recipe(state)
-    assert out["source"] == "skill_md_default"
-
-
-# 2. _enqueue_internal_sweep_task — params inheritance
-@pytest.mark.asyncio
-async def test_enqueue_internal_sweep_task_inherits_baseline_config(coord):
-    coord.shared_state.baseline_config_path = "/tmp/baseline.yaml"
-    coord.shared_state.current_best = {"extra_server_args": "--mla 1"}
-    coord.shared_state.last_baseline = {"benchmark_script": "sglang_mi300x.sh"}
-    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-    assert task.kind == "sweep"
-    assert task.idempotency_key == "internal-sweep-phase_entry"
-    assert task.params["source"] == "skill_md_default"
-    assert task.params["reason"] == "phase_entry"
-    assert task.params["config_path"] == "/tmp/baseline.yaml"
-    assert task.params["base_extra_args"] == "--mla 1"
-    assert task.params["benchmark_script"] == "sglang_mi300x.sh"
-    # Grid params present so executor doesn't fall back to its own defaults
-    assert isinstance(task.params["conc_values"], list)
-    assert isinstance(task.params["isl_osl_configs"], list)
-    assert isinstance(task.params["num_prompts_factor"], int)
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_sweep_task_omits_empty_strings(coord):
-    """Empty extra_server_args / benchmark_script must not land in params."""
-    coord.shared_state.current_best = {"extra_server_args": ""}
-    coord.shared_state.last_baseline = {"benchmark_script": ""}
-    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-    assert "base_extra_args" not in task.params
-    assert "benchmark_script" not in task.params
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_sweep_task_carries_the_arg_mode_controls(coord):
-    """A ``replace`` current_best reaches the sweep, which assembles variants from it.
-
-    ``_build_grid`` honours ``base_args_mode`` / ``base_remove_args``, so omitting
-    them made the sweep append onto flags the champion had deliberately replaced.
-    """
-    coord.shared_state.current_best = {
-        "tput": 1000.0,
-        "extra_server_args": "--mla 1",
-        "remove_args": ["--chunked-prefill-size"],
-        "args_mode": "replace",
-    }
-    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-    assert task.params["base_extra_args"] == "--mla 1"
-    assert task.params["base_remove_args"] == ["--chunked-prefill-size"]
-    assert task.params["base_args_mode"] == "replace"
-
-
-@pytest.mark.asyncio
-async def test_enqueue_internal_sweep_task_recipe_kb_recipe_propagates(coord):
-    """Recipe-driven grid surfaces as source='recipe_kb' on the task."""
-    coord.shared_state.warm_start_recipe = {
-        "sweep_grid": {
-            "conc_values": [128],
-            "isl_osl_configs": ["1024:1024"],
-        },
-    }
-    task = await coord._enqueue_internal_sweep_task(reason="phase_entry")
-    assert task.params["source"] == "recipe_kb"
-    assert task.params["conc_values"] == [128]
-    assert task.params["isl_osl_configs"] == ["1024:1024"]
-
-
 # 3. _on_enter_sweep hook
 @pytest.mark.asyncio
 async def test_on_enter_sweep_enqueues_and_stamps_evidence(coord):
@@ -1091,7 +900,7 @@ async def test_on_enter_sweep_runs_when_validated_gain_improved(coord):
 async def test_on_enter_sweep_first_sweep_runs_without_prior_watermark(coord):
     """The first SWEEP entry dispatches conc_sweep directly."""
     coord.shared_state.cumulative_gain_validated = 0.0
-    coord.shared_state.last_sweep = {}
+    coord.shared_state.last_conc_sweep = {}
     coord.shared_state.phase_history = [
         {"to_phase": "SWEEP", "reason": "plateau_kernel", "evidence": {}},
     ]
@@ -1352,7 +1161,7 @@ def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
     delegate-body sweep-family singleton guard, which keys on
     ``auto_conc_sweep_task_id`` — the auto-enqueued task's OWN id — and denied
     the sole conc_sweep against itself, surfacing as a spurious
-    ``conc_sweep_failed`` that closed the session at 0% gain. Now conc_sweep is
+    ``sweep_failed`` that closed the session at 0% gain. Now conc_sweep is
     a Coordinator-internal action, so it receives path checks only and is not
     re-validated against the singleton guard.
     """

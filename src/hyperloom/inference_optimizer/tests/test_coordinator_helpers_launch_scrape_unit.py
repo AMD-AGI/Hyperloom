@@ -50,18 +50,18 @@ def test_split_env_and_flags_falls_back_on_shlex_error() -> None:
 # ── _geak_sweep_measured_tput ─────────────────────────────────────────────
 
 
-def test_geak_sweep_measured_tput_prefers_best_for_each_conc() -> None:
+def test_geak_sweep_measured_tput_prefers_the_promotion_measurement() -> None:
     res = {
-        "best_for_each_conc": {"32": {"output_throughput": 150.0}},
-        "sweep_grid": [{"status": "succeeded", "output_throughput": 999.0}],
+        "promotion_measurement": {"output_throughput": 150.0},
+        "points": [{"status": "succeeded", "output_throughput": 999.0}],
     }
     assert ch._geak_sweep_measured_tput(res) == 150.0
 
 
-def test_geak_sweep_measured_tput_falls_back_to_sweep_grid() -> None:
+def test_geak_sweep_measured_tput_falls_back_to_the_points() -> None:
     res = {
-        "best_for_each_conc": {},
-        "sweep_grid": [
+        "promotion_measurement": {},
+        "points": [
             {"status": "failed", "output_throughput": 10.0},
             {"status": "succeeded", "output_throughput": 77.5},
         ],
@@ -76,8 +76,8 @@ def test_geak_sweep_measured_tput_none_when_not_dict() -> None:
 
 def test_geak_sweep_measured_tput_none_when_no_positive_throughput() -> None:
     res = {
-        "best_for_each_conc": {"32": {"output_throughput": 0}},
-        "sweep_grid": [{"status": "succeeded", "output_throughput": -1}],
+        "promotion_measurement": {"output_throughput": 0},
+        "points": [{"status": "succeeded", "output_throughput": -1}],
     }
     assert ch._geak_sweep_measured_tput(res) is None
 

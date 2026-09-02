@@ -14,7 +14,6 @@ _CAPABILITY_ORDER = (
     "explore",
     "backends",
     "params",
-    "sweep",
     "geak",
     "validate_stack",
 )

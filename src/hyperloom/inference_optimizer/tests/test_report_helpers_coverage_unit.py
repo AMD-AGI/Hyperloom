@@ -58,7 +58,7 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "session_id": "s1",
             "model_name": "m",
             "model_path": "/models/m",
-            "stop_reason": "conc_sweep_done",
+            "stop_reason": "sweep_done",
             "max_minutes": 360,
             "report_generated_at": "2026-06-23T00:00:00+00:00",
             "baseline_tput": 100.0,

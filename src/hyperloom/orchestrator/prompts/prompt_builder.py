@@ -222,7 +222,7 @@ def _section_phase_semantics(
             "exhausted; the Coordinator validates the hint vocab and routes",
             "the transition on the next tick.",
             "EXCEPTION — normal SWEEP convergence: do NOT emit `skip_to_close`",
-            "once the sweep has completed (sweep_done / conc_sweep_done). The",
+            "once the sweep has completed (sweep_done). The",
             "Coordinator exits SWEEP → CLOSE on its own with an honest terminal",
             "stop_reason (`sweep_done` / `global_converged`). `skip_to_close`",
             "is reserved for genuine early abandonment (e.g. infra is dead and",

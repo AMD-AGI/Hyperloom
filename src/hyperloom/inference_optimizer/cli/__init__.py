@@ -1829,11 +1829,10 @@ _SUCCESS_STOP_REASONS: frozenset[str] = frozenset(
         "global_converged",
         "time_exhausted",
         "max_ticks",
-        # SWEEP finished cleanly. exit_normal_sweep returns sweep_done (shape grid)
-        # or conc_sweep_done (concurrency ladder); both mean the run optimized and
+        # SWEEP finished cleanly: exit_normal_sweep returns sweep_done once the
+        # concurrency ladder settles, which means the run optimized and
         # closed normally (e.g. the no-kernel path), so neither is a CI failure.
         "sweep_done",
-        "conc_sweep_done",
     }
 )
 

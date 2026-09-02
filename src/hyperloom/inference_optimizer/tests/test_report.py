@@ -58,7 +58,7 @@ def test_format_md_shows_validated_gain_when_timestamp_missing():
             "session_id": "s1",
             "model_name": "m",
             "model_path": "/models/m",
-            "stop_reason": "conc_sweep_done",
+            "stop_reason": "sweep_done",
             "max_minutes": 360,
             "report_generated_at": "2026-06-23T00:00:00+00:00",
             "baseline_tput": 100.0,
@@ -256,26 +256,26 @@ class _SweepState:
 
 
 def test_a_skipped_sweep_is_not_described_as_a_finished_one():
-    """``conc_sweep_done`` is also the exit for a sweep that declined to run."""
+    """``sweep_done`` is also the exit for a sweep that declined to run."""
     state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
-    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    msg = rp._explain_stop_reason("sweep_done", state)
     assert "did not run" in msg
     assert "no_optimization_to_compare" in msg
 
 
 def test_a_sweep_that_ran_keeps_the_plain_explanation():
     state = _SweepState({"status": "succeeded", "was_skipped": False})
-    assert rp._explain_stop_reason("conc_sweep_done", state) == rp._explain_stop_reason("conc_sweep_done")
+    assert rp._explain_stop_reason("sweep_done", state) == rp._explain_stop_reason("sweep_done")
 
 
 def test_a_skip_with_no_recorded_reason_still_says_it_was_skipped():
     state = _SweepState({"status": "succeeded", "was_skipped": True, "skip_reason": ""})
-    assert "did not run" in rp._explain_stop_reason("conc_sweep_done", state)
+    assert "did not run" in rp._explain_stop_reason("sweep_done", state)
 
 
 def test_a_session_budget_skip_is_described_as_a_sweep_that_did_not_run():
     state = _SweepState({"status": "skipped", "was_skipped": True, "skip_reason": "session_time_budget"})
-    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    msg = rp._explain_stop_reason("sweep_done", state)
     assert "did not run" in msg
     assert "session_time_budget" in msg
 
@@ -298,7 +298,7 @@ def test_a_sweep_that_spent_its_budget_is_not_reported_as_one_that_never_ran(tmp
     # the two skips has to survive the round trip to be readable at all.
     state = SharedState.load_or_init(tmp_path)
 
-    msg = rp._explain_stop_reason("conc_sweep_done", state)
+    msg = rp._explain_stop_reason("sweep_done", state)
     assert "did not run" not in msg
     assert "budget" in msg
     assert "budget_exhausted_no_successful_pairs" in msg

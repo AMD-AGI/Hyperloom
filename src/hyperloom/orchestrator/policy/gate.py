@@ -809,7 +809,7 @@ class PolicyGate:
         # must NOT be re-validated against the delegate-body sweep-family
         # singleton guard here — that guard keys on auto_conc_sweep_task_id,
         # which is the auto-enqueued task's own id, so it would deny the sole
-        # conc_sweep against itself and surface as a spurious conc_sweep_failed.
+        # conc_sweep against itself and surface as a spurious sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         skip_baseline_singleton = (

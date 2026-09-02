@@ -153,7 +153,6 @@ _GEAK_CONFIG_ECHO_STATUSES = frozenset({"missing"})
 # The run-level lanes spell the same field in their own lowercase vocabulary.
 _CANDIDATE_DECISIONS = frozenset({"candidate", "no_improvement", "failed", "skipped"})
 _STOP_REASONS_SWEEP = frozenset({"sweep_failed", "sweep_unusable", "sweep_timeout"})
-_STOP_REASONS_CONC_SWEEP = frozenset({"conc_sweep_failed", "conc_sweep_unusable", "conc_sweep_timeout"})
 
 
 def _text(value: Any) -> str | None:
@@ -251,26 +250,6 @@ def _attempt_decision(raw: Any, *, warnings: list[str]) -> str:
         return "NEEDS_REVIEW"
     warnings.append(f"v6.timeline.kernel: unrecognized attempt decision {decision!r}; reported as NEEDS_REVIEW")
     return "NEEDS_REVIEW"
-
-
-def _sweep_point_status(raw: Any, *, warnings: list[str]) -> str:
-    """Map a grid point's status onto the sweep enum ``ok | skipped | failed``.
-
-    Kept separate from :func:`_lane_status` because the sweep lane spells
-    success ``ok``. That is not cosmetic: :func:`project_sweep_event` counts
-    usable points by that exact word, so a producer switching to ``succeeded``
-    would not merely look odd — the stage would report ``skipped`` while
-    carrying a full grid of measured points.
-    """
-    status = _lower(raw)
-    if not status or status in _SKIPPED_STATUSES:
-        return "skipped"
-    if status in _OK_STATUSES:
-        return _SWEEP_POINT_OK
-    if status in _FAILED_STATUSES:
-        return "failed"
-    warnings.append(f"v6.timeline.sweep: unrecognized point status {status!r}; reported as failed")
-    return "failed"
 
 
 def _candidate_decision(raw: Any, *, where: str, warnings: list[str], default: str) -> str:
@@ -451,152 +430,6 @@ def project_baseline_event(
     }
 
 
-# ---------------------------------------------------------------------------
-# sweep
-# ---------------------------------------------------------------------------
-def _sweep_variant(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
-    return {
-        # V5 names sweep points, it does not id them; the name is the identity
-        # the rest of the session joins on.
-        "variant_id": _text(point.get("variant_name")),
-        # Sweep points are measured by the grid runner, which does not stamp
-        # an orchestrator task id onto the row it writes.
-        "task_id": _text(point.get("task_id")),
-        "conc": _to_int(point.get("conc")),
-        "isl": _to_int(point.get("isl")),
-        "osl": _to_int(point.get("osl")),
-        "status": _sweep_point_status(point.get("status"), warnings=warnings),
-        "output_throughput_tok_s": _to_float(point.get("output_throughput_tok_s")),
-        "ttft_mean_ms": _to_float(point.get("ttft_mean_ms")),
-        "e2el_mean_ms": _to_float(point.get("e2el_mean_ms")),
-        "benchmark_report_path": _text(point.get("benchmark_report_path")),
-        # The grid runner records failure prose but not a class for it.
-        "error_class": _text(point.get("error_class")),
-        "error": _text(point.get("error")),
-    }
-
-
-def project_sweep_event(
-    sweep: Any,
-    state: Any,
-    baseline: Any,
-    phase_timeline: Any,
-    warnings: list[str],
-) -> dict[str, Any] | None:
-    """Project the multi-dimensional load grid sweep into a V6 event.
-
-    ``collect_sweep`` has already merged ``state.last_sweep`` with its disk
-    scan, so ``all_variants`` is the authoritative point list and the grid in
-    ``ext.plan`` is read back off it rather than off the request that asked
-    for it — a sweep that lost points to a budget cut reports the grid it
-    actually measured.
-
-    ``ext.input_anchor.input_throughput_tok_s_per_gpu`` stays ``None``.
-    Nothing snapshots the entry throughput when SWEEP opens, and
-    ``state.current_best.tput`` is the end-of-session figure, which would
-    misreport the sweep's own starting point whenever anything was adopted
-    after it.
-
-    Args:
-        sweep (Any): The V5 ``sweep`` section.
-        state (Any): The V5 ``state.json`` mapping.
-        baseline (Any): The V5 ``baseline`` section, for the anchor task id.
-        phase_timeline (Any): The V5 ``phase_timeline`` rows.
-        warnings (list[str]): V6 warning sink (mutated in place).
-
-    Returns:
-        dict[str, Any] | None: The timeline event, or ``None`` when the
-        session never swept.
-    """
-    section = _mapping(sweep)
-    state = _mapping(state)
-    last_sweep = _mapping(state.get("last_sweep"))
-    attempts = _dict_rows(state.get("sweep_attempts"))
-    rows = _action_rows(phase_timeline, frozenset({"sweep"}))
-    points = _dict_rows(section.get("all_variants"))
-    if not points and not last_sweep and not attempts and not rows:
-        return None
-
-    variants = [_sweep_variant(point, warnings) for point in points]
-    ok_count = sum(1 for variant in variants if variant["status"] == _SWEEP_POINT_OK)
-    failed_count = sum(1 for variant in variants if variant["status"] == "failed")
-
-    stop_reason = _lower(state.get("stop_reason"))
-    failed_variant = next((variant for variant in reversed(variants) if variant["status"] == "failed"), {})
-    failed_attempt = next(
-        (row for row in reversed(attempts) if _lower(row.get("status")) in _FAILED_STATUSES),
-        {},
-    )
-    # A sweep can fail before it lays down its first grid point, in which case
-    # the only record of it is a failed attempt or a sweep stop reason. Reading
-    # status off the point list alone reports that run as ``skipped`` while the
-    # same event carries ``stop_reason: sweep_failed``.
-    failed_outright = bool(failed_attempt) or stop_reason in _STOP_REASONS_SWEEP
-    if ok_count and (failed_count or failed_outright):
-        status = "degraded"
-    elif ok_count:
-        status = "succeeded"
-    elif failed_count or failed_outright:
-        status = "failed"
-    else:
-        status = "skipped"
-    start_time, end_time = _time_window(rows, attempts, [last_sweep] if last_sweep else [])
-    return {
-        "type": "sweep",
-        "kind": "sweep",
-        "status": status,
-        "start_time": start_time,
-        "end_time": end_time,
-        "ext": {
-            "trigger": {
-                # A phase_history transition into SWEEP is the only trigger
-                # evidence that survives; which business path asked for it
-                # (post-KEEP re-sweep vs. operator forced) is not recorded.
-                "kind": "phase_entry" if rows or last_sweep else None,
-                "source_task_id": None,
-            },
-            "input_anchor": {
-                "baseline_task_id": _text(
-                    _first(
-                        *(
-                            row.get("task_id")
-                            for row in reversed(_dict_rows(_mapping(baseline).get("attempts_history")))
-                        )
-                    )
-                ),
-                # ``current_best`` carries no task id in any recorded shape.
-                "current_best_task_id": None,
-                "input_throughput_tok_s_per_gpu": None,
-            },
-            "plan": {
-                # ``state.last_sweep`` records the grid's contents, never
-                # where the request for it came from.
-                "grid_source": _text(last_sweep.get("grid_source")),
-                "conc_grid": _sorted_grid(variants, "conc"),
-                "isl_grid": _sorted_grid(variants, "isl"),
-                "osl_grid": _sorted_grid(variants, "osl"),
-            },
-            "sweep": {
-                "best_overall": _mapping(_first(section.get("best_overall"), last_sweep.get("best_overall"))) or None,
-                "pareto_front": _dict_rows(_first(section.get("pareto_front"), last_sweep.get("pareto_front"))) or None,
-                "all_variants": variants,
-            },
-            "artifacts": {
-                "sweep_report_paths": _unique_paths([variant["benchmark_report_path"] for variant in variants]),
-                "sweep_dir": _text(last_sweep.get("workspace")),
-            },
-            "failure": {
-                "stop_reason": stop_reason if stop_reason in _STOP_REASONS_SWEEP else None,
-                "failed_task_id": _text(failed_attempt.get("task_id")),
-                "message": _text(_first(failed_variant.get("error"), failed_attempt.get("error"))),
-            },
-        },
-    }
-
-
-# ---------------------------------------------------------------------------
-# conc_sweep
-# ---------------------------------------------------------------------------
 def _conc_point(point: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
     return {
         "conc": _to_int(point.get("conc")),
@@ -760,7 +593,7 @@ def project_conc_sweep_event(
                 "report_path": _text(summary.get("report_path")),
             },
             "failure": {
-                "stop_reason": stop_reason if stop_reason in _STOP_REASONS_CONC_SWEEP else None,
+                "stop_reason": stop_reason if stop_reason in _STOP_REASONS_SWEEP else None,
                 "failed_task_id": None,
                 "message": _text(_first(summary.get("budget_skip_reason"), last.get("skip_reason"))),
             },

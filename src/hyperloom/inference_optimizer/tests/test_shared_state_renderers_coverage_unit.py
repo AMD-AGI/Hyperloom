@@ -136,17 +136,3 @@ def test_to_gaps_summary_max_attempts_shows_rows():
     out = st.to_gaps_summary(max_attempts=5)
     assert "fid1" in out
     assert "attempt:" in out
-
-
-def test_format_last_sweep():
-    st = SharedState()
-    assert st._format_last_sweep() == "(none)"
-    st.last_sweep = {"grid_size": 4}
-    assert "best=(none)" in st._format_last_sweep()
-    st.last_sweep = {
-        "grid_size": 4,
-        "best_overall": {"name": "b", "tput": 100.0, "conc": 8, "isl": 1024, "osl": 512},
-    }
-    out = st._format_last_sweep()
-    assert "grid_size=4" in out
-    assert "best=b" in out
