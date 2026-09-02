@@ -248,7 +248,6 @@ class VariantResult:
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
         input_throughput (float | None): Input tokens/sec (prefill), if measured.
-        total_throughput (float | None): Input plus output tokens/sec, if measured.
         tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
         intvty_p90 (float | None): p90 E2E normalized interactivity
             (tok/s/user), if measured.
@@ -293,7 +292,6 @@ class VariantResult:
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
     input_throughput: float | None = None
-    total_throughput: float | None = None
     tpot_p90_ms: float | None = None
     intvty_p90: float | None = None
     workspace: str | None = None

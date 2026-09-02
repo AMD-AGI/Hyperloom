@@ -2909,7 +2909,6 @@ async def run_grid(
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
                 input_throughput=measurement.get("input_throughput"),
-                total_throughput=measurement.get("total_token_throughput"),
                 tpot_p90_ms=measurement.get("tpot_p90_ms"),
                 intvty_p90=measurement.get("intvty_p90"),
                 workspace=str(workspace),
