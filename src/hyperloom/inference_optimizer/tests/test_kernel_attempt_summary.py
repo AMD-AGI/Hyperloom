@@ -15,12 +15,6 @@ from hyperloom.orchestrator.kernel.attempt_summary import (
     CATEGORY_INTEGRATED,
     CATEGORY_IN_FLIGHT,
     CATEGORY_KEEP_PENDING,
-    CATEGORY_UNATTEMPTED,
-    OUTCOME_SKIP,
-    UNATTEMPTED_BELOW_MIN_GPU_PCT,
-    UNATTEMPTED_NOT_REUSABLE,
-    UNATTEMPTED_NO_BACKEND,
-    UNATTEMPTED_NO_SOURCE,
     build_kernel_optimization_summary,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -121,63 +115,6 @@ def _write_backend_results(
         json.dumps({"kernel_id": kernel_id, "attempts": backends}),
         encoding="utf-8",
     )
-
-
-def test_unattempted_no_source_classifies_vendor_lib_ops(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", name="aten::mm", source_file="", reusable=False, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["totals"]["unattempted"] == 1
-    assert out["totals"]["attempted"] == 0
-    row = out["by_kernel"][0]
-    assert row["category"] == CATEGORY_UNATTEMPTED
-    assert row["unattempted_reason"] == UNATTEMPTED_NO_SOURCE
-    assert "vendor-library" in row["unattempted_detail"].lower() or "vendor" in row["unattempted_detail"].lower()
-
-
-def test_unattempted_not_reusable_distinct_from_no_source(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=False, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NOT_REUSABLE
-
-
-def test_unattempted_no_backend_when_reusable_but_empty_recs(tmp_path: Path) -> None:
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/some/file.py", reusable=True, backends=[])],
-    )
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["by_kernel"][0]["unattempted_reason"] == UNATTEMPTED_NO_BACKEND
-
-
-def test_a_kernel_the_filter_skipped_reads_as_unattempted(tmp_path: Path) -> None:
-    """A dispatch gate is not a failure, and the summary must not call it one.
-
-    The classification keys on the presence of a ledger row, so a row written
-    for a kernel no backend ever saw lands in ``attempted`` with no decision --
-    IN_FLIGHT, whose empty backend ladder rolls up to ``fail``. Recording the
-    skip is what has to be avoided; this pins the report the absence produces.
-    """
-    from hyperloom.orchestrator.kernel.request_handlers import record_kernel_opt
-
-    state = _make_state(
-        top15=[_top15_entry("k001", source_file="/pkg/aiter/gqa.py", gpu_pct=1.0)],
-    )
-    record_kernel_opt(
-        state,
-        {"status": "skipped", "reason": "below_min_gpu_pct=5.0", "kernel_id": "k001"},
-    )
-
-    out = build_kernel_optimization_summary(state, tmp_path)
-
-    assert out["totals"]["attempted"] == 0
-    assert out["totals"]["unattempted"] == 1
-    row = out["by_kernel"][0]
-    assert row["category"] == CATEGORY_UNATTEMPTED
-    assert row["unattempted_reason"] == UNATTEMPTED_BELOW_MIN_GPU_PCT
-    assert row["outcome_class"] == OUTCOME_SKIP
 
 
 def test_attempted_rejected_revert_classifies_correctly(tmp_path: Path) -> None:
@@ -412,95 +349,6 @@ def test_glossary_present_and_documents_efficiency_pct(tmp_path: Path) -> None:
     assert "efficiency_pct" in out["field_glossary"]
     assert "gpu_pct" in out["field_glossary"]
     assert "backend_ladder" in out["field_glossary"]
-
-
-def test_dispatch_skip_reason_surfaced_when_present(tmp_path: Path) -> None:
-    """A no_eligible_kernels dispatch skip rides through to the summary."""
-    state = _make_state(top15=[_top15_entry("k001")])
-    state.last_kernel_opt_dispatch_skip = {
-        "reason": "no_eligible_kernels",
-        "kernels_considered": 5,
-        "message": "no eligible kernels to optimize (...)",
-        "ts": "2026-06-22T00:00:00+00:00",
-    }
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["dispatch_skip_reason"]["reason"] == "no_eligible_kernels"
-    assert out["dispatch_skip_reason"]["kernels_considered"] == 5
-
-
-def test_dispatch_skip_reason_empty_by_default(tmp_path: Path) -> None:
-    """No dispatch skip => empty dict, never a failure marker."""
-    state = _make_state(top15=[_top15_entry("k001")])
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["dispatch_skip_reason"] == {}
-
-
-def test_takeaway_names_the_dispatch_skip_instead_of_guessing(tmp_path: Path) -> None:
-    """With nothing attempted, the takeaway must state the recorded reason.
-
-    The old sentence offered two guesses -- disabled, or nothing qualified --
-    and so could not express the case that actually happened: the candidate
-    table was never produced, so kernel_opt was never asked for. A reader
-    holding six zero buckets and that sentence concluded the workload had no
-    headroom.
-    """
-    state = _make_state(top15=[])
-    state.last_kernel_opt_dispatch_skip = {
-        "reason": "no_candidate_table",
-        "trace_analyze_empty": True,
-        "roofline_failure_streak": 3,
-        "ts": "2026-09-01T00:00:00+00:00",
-    }
-    out = build_kernel_optimization_summary(state, tmp_path)
-    joined = " ".join(out["top_takeaways"])
-    assert "no_candidate_table" in joined
-    assert "no candidates qualified" not in joined
-
-
-def test_takeaway_does_not_claim_a_dispatch_never_happened(tmp_path: Path) -> None:
-    """``no_eligible_kernels`` is written by a dispatch that did happen.
-
-    The two writers of this field disagree about what the skip was: the phase
-    records declining to ask, while this reason records a dispatch whose queue
-    came back empty. A sentence built around "never dispatched" is false for
-    the second, and a confident false statement is worse than the hedge it
-    replaced.
-    """
-    state = _make_state(top15=[])
-    state.last_kernel_opt_dispatch_skip = {
-        "reason": "no_eligible_kernels",
-        "kernels_considered": 7,
-        "ts": "2026-09-01T00:00:00+00:00",
-    }
-    out = build_kernel_optimization_summary(state, tmp_path)
-    joined = " ".join(out["top_takeaways"])
-    assert "no_eligible_kernels" in joined
-    assert "never dispatched" not in joined
-
-
-def test_takeaway_keeps_the_generic_line_without_a_recorded_reason(tmp_path: Path) -> None:
-    """No breadcrumb => the original wording stays (nothing to name)."""
-    state = _make_state(top15=[])
-    out = build_kernel_optimization_summary(state, tmp_path)
-    joined = " ".join(out["top_takeaways"])
-    assert "No kernels were attempted" in joined
-    assert "no candidates qualified" in joined
-
-
-def test_zero_attempts_session_does_not_crash(tmp_path: Path) -> None:
-    state = _make_state(top15=[])
-    out = build_kernel_optimization_summary(state, tmp_path)
-    assert out["totals"] == {
-        "top_candidates": 0,
-        "attempted": 0,
-        "integrated": 0,
-        "keep_pending": 0,
-        "rejected": 0,
-        "in_flight": 0,
-        "unattempted": 0,
-    }
-    assert out["by_kernel"] == []
-    assert out["top_takeaways"][0].startswith("No kernels were attempted")
 
 
 def test_attempt_without_top15_still_listed(tmp_path: Path) -> None:

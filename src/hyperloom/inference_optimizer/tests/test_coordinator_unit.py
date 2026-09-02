@@ -181,10 +181,6 @@ def test_skip_gemm_tuning_env(monkeypatch):
 
 
 def test_gap_layer_for_action_mapping():
-    assert Coordinator._gap_layer_for_action("kernel_opt") == (
-        "kernel_agent",
-        "kernel_switch_specialist",
-    )
     assert Coordinator._gap_layer_for_action("PROFILE")[0] == "kernel_agent"
     assert Coordinator._gap_layer_for_action("sweep")[0] == "framework"
     assert Coordinator._gap_layer_for_action("baseline")[0] == "system"
@@ -201,8 +197,7 @@ def test_gap_layer_for_action_follows_framework_kind():
     )
     assert Coordinator._gap_layer_for_action("sweep", "xdit")[1] == "framework_rewrite_specialist"
     assert Coordinator._gap_layer_for_action("sweep", "sglang")[1] == "serving_specialist"
-    # Kernel and system rows are framework-independent.
-    assert Coordinator._gap_layer_for_action("kernel_opt", "custom")[1] == "kernel_switch_specialist"
+    # System rows are framework-independent.
     assert Coordinator._gap_layer_for_action("baseline", "custom")[1] == "system_specialist"
 
 

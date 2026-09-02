@@ -51,8 +51,7 @@
 /src/hyperloom/orchestrator/actions/executors/profile.py        @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/orchestrator/actions/executors/roofline.py       @devalshahamd @AMD-AGI/SaFE
 
-# Post-TraceLens -> GEAK processing layer + glue
-/src/hyperloom/agents/kernel/tools/kernel_optimization.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
+# Post-TraceLens processing layer + glue
 /src/hyperloom/agents/kernel/tools/source_resolver.py           @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/kernel_source_index.py       @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/source_env.py                @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE

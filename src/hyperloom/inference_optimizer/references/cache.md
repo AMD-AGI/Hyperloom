@@ -15,7 +15,8 @@ for 671B FP8 MoE; later launches reuse the cache in seconds.
 | torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
 
 `sgl_kernel` (`site-packages/sgl_kernel/common_ops.*.so`) is build-time only;
-only `kernel_opt` / `integrate` may rebuild it.
+only the phase-level kernel backend and Hyperloom's integration path may rebuild
+it.
 
 ## Cold-start triggers
 

@@ -31,13 +31,9 @@ from hyperloom.common.env import env_bool
 from ._recorder_trace import trace_recording_skipped
 from ..state.kernel_decision_settings import (
     _DEFAULT_ATTEMPTS_HISTORY,
-    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
     _DEFAULT_KERNEL_OPT_MAX_PARTIAL,
     _MAX_INTEGRATE_FAULT_ATTEMPTS,
     _now_iso,
-    effective_hot_kernel_gpu_pct,
-    effective_hot_kernel_min_gpu_pct,
-    resolve_hot_kernel_min_gpu_pct,
     resolve_kernel_opt_max_failures,
 )
 from ..trace.trace_env import env_flag
@@ -48,35 +44,6 @@ log = logging.getLogger(__name__)
 #: Collective primitives the dedicated lane can measure. Each needs an
 #: independent reference implementation in the generated driver.
 SUPPORTED_COLLECTIVE_OPS = frozenset({"all_reduce", "reduce_scatter", "all_gather"})
-
-#: Batch-filter skip reasons that mean no backend ever saw the kernel. Two
-#: readers depend on the same answer -- the dispatcher reports such a skip
-#: instead of falling through to its validation guards, and
-#: :func:`record_kernel_opt` leaves the attempt ledger alone -- so they read one
-#: table.
-#:
-#: ``not_live_in_flight`` is here and its two siblings are not, which is the
-#: whole reason the liveness check reports which of them applies: a kernel held
-#: back because a sibling dispatch is in flight has had no backend look at it,
-#: while ``not_live_rejected`` and ``not_live_attempts_exhausted`` describe a
-#: kernel that spent its attempts. A single ``not_live`` covered all three, so
-#: this exemption could not take the first without also retiring the last two --
-#: which left the in-flight case charging a kernel for a dispatch that never
-#: happened.
-_UNATTEMPTED_SKIP_PREFIXES: tuple[str, ...] = (
-    "below_min_gpu_pct",
-    "group_exhausted",
-    "group_in_flight",
-    "group_task_complete",
-    "not_live_in_flight",
-    "opfanout_merged_into",
-)
-
-
-def unattempted_skip_reason(reason: str) -> bool:
-    """Whether ``reason`` means the kernel was never handed to a backend."""
-    return str(reason or "").startswith(_UNATTEMPTED_SKIP_PREFIXES)
-
 
 # "Honest E2E" hardening flags. The umbrella flag ``HL_HONEST_E2E`` turns the
 # whole mode on; each fix also has a per-fix override that wins over the umbrella
@@ -362,10 +329,8 @@ def _vendor_playbook_id_from_result(result: dict[str, Any]) -> str:
     """Return the vendor-playbook group id a ``kernel_opt`` result belongs to.
 
     ``forge_submit._submit_vendor_playbook()`` stamps ``vendor_playbook_id``
-    on every raw per-backend attempt dict it returns (winner and reused
-    sibling alike); ``kernel_optimization.py`` carries those attempt dicts
-    through verbatim in ``result["attempts"]``. Empty when this kernel_opt
-    result did not go through the vendor-playbook path.
+    on every raw per-backend attempt dict it returns. Empty when the result did
+    not go through the vendor-playbook path.
     """
     for attempt in result.get("attempts") or []:
         if isinstance(attempt, dict):
@@ -733,33 +698,18 @@ def record_kernel_integrate_result(
 
 
 def record_kernel_opt(state, result: dict[str, Any]) -> None:
-    """Capture the ``run_optimization`` handler result for the next Orch turn.
+    """Capture a kernel rewrite result in the legacy-compatible ledger.
 
     Empty ``kernel_id`` is a no-op, a non-KEEP cannot overwrite a pending KEEP,
     and a ``kernel_id`` is retired after >= ``max_partial`` PARTIALs
     (``INFERENCE_OPTIMIZER_KERNEL_OPT_MAX_PARTIAL``).
 
     Args:
-        result (dict[str, Any]): The ``run_optimization`` handler result
-            envelope; non-dicts and empty ``kernel_id`` are no-ops.
+        result: Kernel rewrite result envelope; non-dicts and empty
+            ``kernel_id`` are no-ops.
     """
     if not isinstance(result, dict):
         return
-    # Capture an empty-queue skip (no eligible kernels) as a non-failure
-    # breadcrumb so the summary can surface it.
-    is_no_eligible_dispatch_skip = (
-        str(result.get("status") or "").lower() == "skipped"
-        and str(result.get("reason") or "") == "no_eligible_kernels"
-    )
-    if is_no_eligible_dispatch_skip:
-        state.last_kernel_opt_dispatch_skip = {
-            "reason": "no_eligible_kernels",
-            "kernels_considered": int(result.get("kernels_considered") or 0),
-            "message": str(result.get("message") or ""),
-            "ts": _now_iso(),
-        }
-    elif str(result.get("kernel_id") or ""):
-        state.last_kernel_opt_dispatch_skip = {}
     # Author-time breakdown capture: record geak/forge invocations before the
     # metadata-less early return so no failed attempt becomes invisible.
     try:
@@ -832,16 +782,6 @@ def record_kernel_opt(state, result: dict[str, Any]) -> None:
     kernel_id = str(result.get("kernel_id") or "")
     if not kernel_id:
         # Metadata-less failure: preserve prior streaming-record KEEP.
-        return
-    # The batch filter dropped this kernel before any backend ran, and it named
-    # the kernel so the report can say which one. Writing a ledger row for it
-    # would spend the one dispatch this kernel gets on a decision nobody made:
-    # the row drops it out of untried_hot_reusable_kernels(), which is what the
-    # KERNEL-entry dispatch and the phase-advance gate both ask, and the summary
-    # reads a row with no decision as IN_FLIGHT and reports it as a failure.
-    if str(result.get("status") or "").lower() == "skipped" and unattempted_skip_reason(
-        str(result.get("reason") or "")
-    ):
         return
     _ensure_kernel_task_state(state)
 
@@ -1436,241 +1376,3 @@ def kernel_opt_attempts_count(state) -> int:
     """
     _ensure_kernel_task_state(state)
     return len(state.kernel_opt_task_attempts or {})
-
-
-def untried_hot_reusable_kernels(
-    state,
-    *,
-    min_gpu_pct: float | None = None,
-    top_n: int | None = None,
-) -> list[str]:
-    """Hot kernels still owing a ``kernel_opt`` attempt (reusable, gpu_pct >= min_gpu_pct, untouched); capped to top_n by gpu_pct, one kernel_id per task_group.
-
-    Args:
-        min_gpu_pct (float | None): Minimum GPU-share threshold; when
-            ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``.
-        top_n (int | None): Cap on enforced kernels by gpu_pct; when
-            ``None`` it is read from ``HYPERLOOM_KERNEL_OPT_GATE_TOP_N``.
-
-    Returns:
-        list[str]: The untried hot-reusable ``kernel_id`` values (one per
-            task_group), sorted strongest-first.
-    """
-    info = state.last_trace_analyze or {}
-    hot = info.get("hot_kernels_top15") or info.get("hot_kernels") or []
-    task_groups = info.get("task_groups") or []
-    if not isinstance(hot, list):
-        return []
-
-    if min_gpu_pct is None:
-        min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
-    if top_n is None:
-        try:
-            top_n = int(
-                os.environ.get(
-                    "HYPERLOOM_KERNEL_OPT_GATE_TOP_N",
-                    _DEFAULT_HOT_KERNEL_GATE_TOP_N,
-                )
-            )
-        except (TypeError, ValueError):
-            top_n = _DEFAULT_HOT_KERNEL_GATE_TOP_N
-    top_n = max(1, int(top_n))
-
-    kid_to_group: dict[str, tuple[list[str], str]] = {}
-    group_key_aliases: dict[str, set[str]] = {}
-    for g in task_groups:
-        if not isinstance(g, dict):
-            continue
-        members = [str(m) for m in (g.get("kernel_ids") or []) if m]
-        group_key = str(g.get("task_group_key") or "")
-        aliases = {
-            group_key,
-            *[str(alias) for alias in (g.get("legacy_task_group_keys") or []) if str(alias)],
-        }
-        group_key_aliases[group_key] = {alias for alias in aliases if alias}
-        for m in members:
-            kid_to_group[m] = (members, group_key)
-
-    integrated_sources = _source_files_in_optimization_stack(state)
-    integrated_entries = [
-        entry
-        for entry in (state.optimization_stack or [])
-        if isinstance(entry, dict) and entry.get("action") in {"integrate", "collective"}
-    ]
-    rejected = set(state.rejected_kernel_ids or [])
-    _ensure_kernel_task_state(state)
-    attempts = state.kernel_opt_task_attempts or {}
-
-    # Sort by gpu_pct desc so dedup picks the strongest member of each
-    # task_group.
-    rows: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
-    for k in hot:
-        if not isinstance(k, dict):
-            continue
-        if k.get("reusable_native_kernel") is not True:
-            continue
-        if is_collective_candidate(k):
-            continue
-        # Bypass path tags a kernel non-dispatchable when its shape is
-        # geometry-only (launch_grid/tile_name) and would fail the kernel-opt
-        # gate. Skip those so they never re-enter the untried queue. Absent field
-        # (TraceLens path) is treated as dispatchable to avoid regressing it.
-        if k.get("shape_dispatchable") is False:
-            continue
-        try:
-            gpu_pct = float(k.get("gpu_pct") or 0.0)
-        except (TypeError, ValueError):
-            gpu_pct = 0.0
-        # Vendor-playbook groups (mori's dispatch+combine) are gated on the
-        # sum of the group's members, not each member's own share, and may
-        # pin a per-playbook floor -- see effective_hot_kernel_gpu_pct's
-        # docstring. Ranking below still sorts on the per-row gpu_pct.
-        if effective_hot_kernel_gpu_pct(k) < effective_hot_kernel_min_gpu_pct(k, min_gpu_pct):
-            continue
-        kid = str(k.get("kernel_id") or "")
-        if not kid:
-            continue
-        src = str(k.get("source_file") or "")
-        group_info = kid_to_group.get(kid)
-        members = sorted(group_info[0]) if group_info else [kid]
-        group_key = group_info[1] if group_info else ""
-        # Identity of the underlying kernel, independent of the synthetic
-        # per-row kernel_id. Used only as a dedup fallback (see below).
-        identity = (src, str(k.get("name") or k.get("operation") or ""), gpu_pct)
-        rows.append((gpu_pct, kid, src, members, group_key, identity))
-    rows.sort(key=lambda x: x[0], reverse=True)
-
-    ranked: list[tuple[float, str, str, list[str], str, tuple[str, str, float]]] = []
-    seen_groups: set[str | tuple[str, ...]] = set()
-    seen_identities: set[tuple[str, str, float]] = set()
-    for row in rows:
-        dedup_key: str | tuple[str, ...] = row[4] or tuple(row[3])
-        if dedup_key in seen_groups:
-            continue
-        # Fallback dedup: when the trace carries no ``task_groups`` metadata
-        # every row degenerates to its own group, so the SAME kernel appearing
-        # under several synthetic ids (identical source_file+name+gpu_pct, e.g.
-        # k001/k002) is treated as several distinct hot kernels. The first gets
-        # attempted and rejected while its twin stays forever "untried", so
-        # kernel_work_pending() never goes False and KERNEL_AGENT spins until
-        # the wall-clock cap -- while the twin is not even in the candidate
-        # registry, so no agent can ever act on it. Collapse by identity.
-        identity = row[5]
-        if identity[0] and identity[1]:
-            if identity in seen_identities:
-                continue
-            seen_identities.add(identity)
-        seen_groups.add(dedup_key)
-        ranked.append(row)
-    ranked = ranked[:top_n]
-
-    untried: list[str] = []
-
-    def _attempt_for_member(member_id: str) -> dict[str, Any]:
-        """Ledger entry covering ``member_id``, tolerating synthetic-id churn.
-
-        ``current_kernel_id`` tracks whichever synthetic id the agent last
-        asked for, so for a kernel that shows up under several ids (k001/k002
-        for one CK GEMM) it flip-flops. Matching on it alone makes the entry
-        invisible under the *other* id, which is exactly how a rejected kernel
-        gets re-reported as untried forever. Fall back to the membership the
-        ledger itself records -- a task_group's members, and the op-fanout
-        siblings the batch filter merged into the row's representative. The
-        latter matters because the merge is reported as an unattempted skip,
-        which writes no row of its own: without it the sibling resolves to no
-        entry at all and stays in this queue for a dispatch that cannot happen.
-        """
-        for value in attempts.values():
-            if not isinstance(value, dict):
-                continue
-            if member_id in {
-                str(value.get("current_kernel_id") or ""),
-                str(value.get("kernel_id") or ""),
-                str(value.get("task_group_primary_kernel_id") or ""),
-            }:
-                return value
-            for key in ("task_group_kernel_ids", "opfanout_collapsed_ids"):
-                if member_id in {str(m) for m in (value.get(key) or []) if m}:
-                    return value
-        return {}
-
-    def _member_is_rejected(member_id: str) -> bool:
-        """True when ``member_id`` (or its ledger twin) is out of play."""
-        if member_id in rejected:
-            return True
-        attempt = _attempt_for_member(member_id)
-        if not attempt:
-            return False
-        if str(attempt.get("rejected_reason") or "").strip():
-            return True
-        return str(attempt.get("integration_status") or "").strip().lower() == "rejected"
-
-    def _matches_current_task(member_id: str, group_key: str, source: str) -> bool:
-        if group_key:
-            aliases = group_key_aliases.get(group_key) or {group_key}
-            return any(
-                isinstance(attempt, dict)
-                and (
-                    str(attempt.get("stable_task_key") or "") == group_key
-                    or str(attempt.get("task_group_key") or "") == group_key
-                    or str(attempt.get("stable_task_key") or "") in aliases
-                    or str(attempt.get("task_group_key") or "") in aliases
-                )
-                for attempt in attempts.values()
-            )
-        attempt = _attempt_for_member(member_id)
-        if not isinstance(attempt, dict) or not attempt:
-            return False
-        recorded_source = str(attempt.get("last_source_file") or "")
-        return not source or not recorded_source or source == recorded_source
-
-    for _pct, kid, src, members, group_key, _identity in ranked:
-        if members and all(
-            _member_is_rejected(member) and _matches_current_task(member, group_key, src) for member in members
-        ):
-            continue
-        if any(
-            _record_matches_task(
-                integrated,
-                kernel_id=member,
-                task_group_key=group_key,
-                source_file=src,
-                task_group_aliases=group_key_aliases.get(group_key),
-            )
-            for member in members
-            for integrated in integrated_entries
-        ):
-            continue
-        if src and src in integrated_sources:
-            continue
-        stable_attempt = next(
-            (
-                attempt
-                for attempt in attempts.values()
-                if group_key
-                and isinstance(attempt, dict)
-                and (
-                    str(attempt.get("stable_task_key") or "") == group_key
-                    or str(attempt.get("task_group_key") or "") == group_key
-                    or str(attempt.get("stable_task_key") or "") in (group_key_aliases.get(group_key) or {group_key})
-                    or str(attempt.get("task_group_key") or "") in (group_key_aliases.get(group_key) or {group_key})
-                )
-            ),
-            None,
-        )
-        if stable_attempt is not None and int(stable_attempt.get("attempts", 0)) > 0:
-            continue
-        # Resolve through ``_attempt_for_member`` rather than comparing ids
-        # inline: a row's own id is not the only id it covers. An op-fanout
-        # representative covers the siblings the batch filter merged into it,
-        # and those merges are reported as unattempted skips that write no row
-        # of their own -- so a sibling compared by id alone finds nothing and
-        # keeps owing an attempt no dispatch will make.
-        if not group_key and any(
-            _matches_current_task(member, group_key, src)
-            and int((_attempt_for_member(member) or {}).get("attempts", 0)) > 0
-            for member in members
-        ):
-            continue
-        untried.append(kid)
-    return untried

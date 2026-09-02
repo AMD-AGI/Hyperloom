@@ -588,11 +588,11 @@ def _section_decision_framework(*, kernel_enabled: bool, phase: str = "", transp
             "      (invariant). ``analysis.md`` / ``last_profile_trace`` arrive",
             "      automatically from the Coordinator-owned analysis task at",
             "      PRELUDE and at every +10% watermark crossing — you do not",
-            "      need a manually-proposed profile before ``kernel_opt``.",
+            "      need a manually-proposed profile before kernel rewrite.",
             "6. **Phase budget awareness**. The `=== Phase ===` block's",
             "   ``budget`` line carries ``remaining_sec`` against the phase's",
             "   ``pct`` share; as it falls, prefer lower-cost / known-good",
-            "   actions (explore over kernel_opt).",
+            "   actions (prefer shorter actions as the budget contracts).",
             "   The Plateau advisory block is informational only for KERNEL. In",
             "   OPTIMIZE it reports each arm separately: BOTH arms dry advances",
             "   to KERNEL_AGENT (``reason=optimize_no_more_leverage``) at the",
@@ -712,73 +712,6 @@ def _idea_generation_lines() -> list[str]:
         "An explore round that produces zero new ideas is a bug — heartbeat",
         "with body_md='idea-pipeline-empty' so Robustness can intervene.",
     ]
-
-
-_KERNEL_OPT_PIPELINE_BODY: str = """\
-## 6. KERNEL-OPT REQUEST REFERENCE (payload templates — NOT a forced ordering)
-
-The four kernel_agent-owned actions are picked per the DECISION FRAMEWORK
-(phase allowed-set + gaps + KB priors); there is no system-side
-priority ranking. Pick the next one by reading these facts in order:
-a `state.gaps[]` `layer='kernel_agent'` gap with attempts left →
-`last_kernel_opt` (KEEP→integrate next; PARTIAL→retry at most
-`_DEFAULT_KERNEL_OPT_MAX_PARTIAL` then rejected; REVERT→rejected) →
-skip ids in `rejected_kernel_ids` → recover from `last_action_failures`.
-A KERNEL_AGENT plateau signal (3 REVERTs across distinct kernels, or low
-recent KEEP gain) is rendered as advisory; KERNEL_AGENT → SWEEP advance is
-driven by the phase budget, an `escalate_strategy_change` hint, or a
-terminal stop_reason. Read the advisory and emit `skip_to_sweep` if
-you want to wind down sooner.
-
-### `trace_analyze` — must precede every `run_optimization`
-
-  request{target_agent: 'kernel_agent', kind: 'trace_analyze',
-          params: {trace_input: <verbatim last_profile_trace>, top_k: 10}}
-
-  Skip if `last_trace_analyze.trace_input` already equals
-  `last_profile_trace` (cached). Explore/sweep/report are NEVER gated on it.
-
-### `gemm_tuning` — `run_gemm_tuning`
-
-  request{target_agent: 'kernel_agent', kind: 'run_gemm_tuning', params={}}
-
-  Current GEAK owns the KERNEL phase by default and decides GEMM applicability
-  internally. Only use this legacy request in explicit per-kernel forge mode
-  (`KERNEL_OPT_BACKEND_ORDER=forge`).
-
-### `kernel_opt` and `gemm_tuning` — not yours to propose
-
-Both lanes are dispatched by the Coordinator once at KERNEL entry, from the
-entry batch and its lane budget. Proposing either is refused: a per-tick
-re-issue would spend time the allocation never granted and target kernels the
-entry-batch selector did not choose. Read `kernel_opt_task_attempts` and
-`pending_keep_kernels` to see what the lanes did; do not try to drive them.
-
-### `integrate` — forced immediately after a KEEP
-
-On `run_optimization_done` with `decision='KEEP'`, integrate is the only
-allowed action until the patch lands on `optimization_stack`:
-
-  request{target_agent: 'kernel_agent', kind: 'integrate',
-          params: {kernel_id, patch_path, target_file, base_tput,
-                   extra_server_args, config_path}}
-
-  Omit `base_tput` / `patch_path` / `source_file` and the Coordinator
-  fills them from `current_best.tput` and the per-kernel
-  `kernel_opt_task_attempts` ledger (this is what drains a multi-KEEP queue).
-  PARTIAL / REVERT → do NOT integrate; pick the next action normally.
-
-  **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
-  lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
-  while it is non-empty. `untried_hot_reusable_kernels` may list kernels the
-  Coordinator's automatic entry pass left unselected; those are not yours to
-  drain.
-
-### KERNEL TARGETING
-
-Only rewrite reusable native sources in the trace. NEVER optimize
-`/tmp/torchinductor*` / `triton_poi_*` / `triton_red_*` runtime-generated
-kernels — they're tied to one compile cache and not reusable."""
 
 
 def _filter_rules_fragment(rules_md: str, *, phase: str = "", transport: str = "") -> str:
@@ -1043,12 +976,6 @@ def build_orchestration_prompt(
         _section_decision_framework(kernel_enabled=kernel_enabled, phase=phase_norm, transport=transport),
         _section_cycle_directive(macro_cycle=macro_cycle, cycle_directive=cycle_directive),
     ]
-    if (
-        kernel_enabled
-        and any(a.name == "kernel_opt" for a in actions)
-        and _renders_in(phase_norm, _KERNEL_REQUEST_PHASES)
-    ):
-        sections.append(_KERNEL_OPT_PIPELINE_BODY.splitlines())
     # The reference index is an index of documents ``read_reference`` pulls;
     # without that tool it is a list the model cannot act on.
     if transport != TRANSPORT_STRUCTURED_OUTPUT:

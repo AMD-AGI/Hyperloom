@@ -75,12 +75,18 @@ def coord(tmp_path: Path, monkeypatch) -> Coordinator:
     c.session_dir = tmp_path
     c.shared_state = SharedState(
         baseline_tput=100.0,
-        kernel_optimizer="native",
+        kernel_optimizer="forge",
     )
     c.tasks = _StubTaskRegistry()
     c.knowledge_plane = None
     c._run_deadline = None
     c._run_started_monotonic = None
+    c._phase_budget_pct = {}
+
+    async def _skip_controller(_handoff_dir: Path) -> None:
+        return None
+
+    monkeypatch.setattr(c.phase_kernel, "_run_kernel_rewrite_controller", _skip_controller)
     return c
 
 
@@ -371,72 +377,30 @@ async def test_on_enter_kernel_skips_gemm_but_still_runs_fusion(coord: Coordinat
 
 
 @pytest.mark.asyncio
-async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord: Coordinator, monkeypatch):
-    """The phase dispatches its own kernel_opt on both entry routes.
-
-    The dispatch sat on the GEMM route alone, so skipping GEMM tuning removed
-    the phase's source-level kernel work too -- two unrelated settings, with
-    nothing in the log connecting them. A run then held eight routable
-    candidates, cleared the dispatch floor, and reached SWEEP having optimized
-    nothing, because the only remaining path was an orchestration request that
-    was never made.
-    """
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-    assert coord._gemm_tuning_required_before_kernel_opt() is False
-
-    dispatched = 0
-
-    async def _skip_reprofile() -> None:
+async def test_kernel_entry_always_hands_rewrite_control_to_controller(
+    coord: Coordinator,
+    monkeypatch,
+) -> None:
+    async def _skip() -> None:
         return None
 
-    async def _dispatch() -> None:
-        nonlocal dispatched
-        dispatched += 1
+    handed_off: list[Path] = []
 
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+    async def _controller(handoff_dir: Path) -> None:
+        handed_off.append(handoff_dir)
 
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_forge_fusion_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_maybe_run_collective_before_kernel_opt", _skip)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_rewrite_controller", _controller)
 
-    assert dispatched == 1
+    await coord.phase_kernel._finish_kernel_entry()
 
-
-@pytest.mark.asyncio
-async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: Coordinator, monkeypatch):
-    """Nothing routable left is the one reason to hand the phase back."""
-    monkeypatch.setenv("INFERENCE_OPTIMIZER_SKIP_GEMM_TUNING", "1")
-    monkeypatch.setattr(coord.phase_machine, "_kernel_enabled", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_geak_enabled", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_fusion_required_before_kernel_opt", lambda: False)
-
-    dispatched = 0
-
-    async def _skip_reprofile() -> None:
-        return None
-
-    async def _dispatch() -> None:
-        nonlocal dispatched
-        dispatched += 1
-
-    monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
-    monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
-
-    await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
-
-    assert dispatched == 0
-    handoff_dir = (
-        coord.session_dir / "kernel-agent" / "forge" / f"cycle-{int(coord.shared_state.macro_cycle or 0)}" / "handoff"
-    )
-    assert {path.name for path in handoff_dir.iterdir()} == {
-        "serving-context.md",
-        "trace-evidence.md",
-        "workload.md",
-    }
+    expected = coord.session_dir / "kernel-agent" / "forge" / "cycle-0" / "handoff"
+    assert handed_off == [expected]
+    assert (expected / "workload.md").is_file()
+    assert (expected / "serving-context.md").is_file()
+    assert (expected / "trace-evidence.md").is_file()
 
 
 @pytest.mark.asyncio

@@ -776,24 +776,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   stays because `moreutils` (`ts`) is a perl program the benchmark wrapper's
   timestamped logging shim pipes through.
 
-- **`--continue-kernel-after-gemm` is now `--auto-kernel-opt`.** The switch gates
-  the KERNEL-entry source-level `kernel_opt` dispatch, which runs on both entry
-  routes — tuning GEMM shape tables and rewriting kernel source are unrelated —
-  so the old name described a dependency that does not exist and read as a no-op
-  on a run that never tunes GEMM. The old spelling still works and still opts
-  out, with a `DeprecationWarning`; the current flag wins when both are passed.
-  `SharedState.continue_kernel_after_gemm` became `auto_kernel_opt_enabled`
-  (state schema v6, migrated on load, so a resumed opt-out keeps opting out).
-  The switch covers that dispatch only: orchestration can still request
-  `kernel_opt`, and the forge-fusion and collective lanes keep their own gates.
-
-- **The hot-kernel dispatch floor defaults to 5% of GPU time, was 10%.** On a
-  decode trace with a flat kernel distribution nothing but a graph-launch
-  wrapper reaches double digits, so the 10% floor admitted no real kernel and
-  left the batch dispatcher idle while the orchestrator picked candidates one at
-  a time. Expect more candidates dispatched per run, and correspondingly more
-  GPU time spent in KERNEL. `HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT` overrides it.
-
 - **The fusion wrapper passes `--model` to `forge-fuse`, not `--llm-model`.**
   KernelForge renamed the option to match the spelling the rest of its CLI
   already used, and `forge-fuse` rejects an unknown option outright rather than
@@ -903,11 +885,6 @@ for the user-facing summary.
   workload-uid env keys was ever set, so the endpoints could only 404; the
   `cluster_fault` and `pod_not_running` symptoms went with them, having had no
   other producer.
-
-- **BREAKING — `kernel_optimization.py` no longer accepts `--test-command` or
-  `--test-harness-path`.** The unittest-harness contract they fed had no
-  reachable caller; an external invoker still passing either flag now fails in
-  argparse rather than being silently ignored.
 
 - **BREAKING — four write-only artifacts are no longer produced**:
   `agent_transcript.jsonl`, `orchestration_turns.jsonl`,

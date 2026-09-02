@@ -190,7 +190,6 @@ def test_run_dispatched_no_gpu_lease_is_noop(coord: Coordinator) -> None:
 
 # -- static / pure helpers -------------------------------------------------
 def test_gap_layer_for_action(coord: Coordinator) -> None:
-    assert coord._gap_layer_for_action("kernel_opt") == ("kernel_agent", "kernel_switch_specialist")
     assert coord._gap_layer_for_action("profile") == ("kernel_agent", "kernel_switch_specialist")
     assert coord._gap_layer_for_action("sweep") == ("framework", "serving_specialist")
     assert coord._gap_layer_for_action("baseline") == ("system", "system_specialist")
@@ -322,15 +321,15 @@ def test_extract_gaps_from_attempts(coord: Coordinator) -> None:
     ss = coord.shared_state
     ss.baseline_tput = 100.0
     ss.last_action_failures = [
-        {"action": "kernel_opt", "error_class": "oom", "variant_name": "v1"},
-        {"action": "kernel_opt", "error_class": "oom", "variant_name": "v2"},
+        {"action": "integrate", "error_class": "oom", "variant_name": "v1"},
+        {"action": "integrate", "error_class": "oom", "variant_name": "v2"},
     ]
     ss.params_no_promote_streak = 6
     ss.explore_search = {"winners_history": []}
     gaps = coord._extract_gaps_from_attempts()
     cids = {g["canonical_id"] for g in gaps}
     # distinct variant_names produce separate gaps; each has one attempt
-    fail_gaps = [g for g in gaps if "fail:kernel_opt:oom" in g["canonical_id"]]
+    fail_gaps = [g for g in gaps if "fail:integrate:oom" in g["canonical_id"]]
     assert len(fail_gaps) == 2
     assert all(len(g["attempts"]) == 1 for g in fail_gaps)
     # explore plateau gap fires at streak >= 3; >= 6 escalates it to high
@@ -515,11 +514,6 @@ def test_gemm_tuning_required_before_kernel_opt(coord: Coordinator, monkeypatch)
     ss.precision = "fp8"
     ss.last_gemm_tuning = {"status": "succeeded"}
     assert coord._gemm_tuning_required_before_kernel_opt() is False
-
-
-def test_kernel_opt_work_remains(coord: Coordinator) -> None:
-    coord.shared_state.auto_kernel_opt_enabled = False
-    assert coord._kernel_opt_work_remains() is False
 
 
 # -- canonical id helpers --------------------------------------------------

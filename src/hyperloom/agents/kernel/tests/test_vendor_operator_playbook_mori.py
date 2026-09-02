@@ -30,7 +30,6 @@ pin, end to end within Hyperloom's own boundary:
 
 from __future__ import annotations
 
-import argparse
 import json
 import logging
 import os
@@ -49,7 +48,6 @@ if str(_BACKENDS_DIR) not in sys.path:
 
 import tracelens_analysis as tla  # noqa: E402
 import forge_submit  # noqa: E402
-import kernel_optimization as ko  # noqa: E402
 from _vendor_operator_playbooks import (  # noqa: E402
     load_vendor_operator_playbooks,
     match_vendor_operator_playbook,
@@ -286,9 +284,8 @@ def test_finalize_candidates_fills_source_file_for_real_vendor_binary_shape():
     source -- TraceLens realistically hands classify_patchability a candidate
     with an *empty* source_file (unlike the fixtures above, which set one for
     unrelated reasons). Confirm _finalize_candidates still fills in a
-    path-shaped stand-in so kernel_optimization.py's CLI gate (which skips
-    any candidate with a falsy source_file as "missing_native_source" before
-    it ever reaches forge_submit.submit()) does not reject the candidate.
+    path-shaped stand-in so downstream rewrite consumers receive a stable
+    source anchor.
     """
     candidates = [
         _mori_dispatch_candidate(source_file=""),
@@ -475,14 +472,6 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
     assert result["vendor_playbook_reused"] is False
     assert result["improved"] is True
     assert result["mean_case_speedup"] == pytest.approx(1.29)
-    # kernel_optimization.py's build_verification() only credits a forge
-    # attempt's speedup when BOTH of these are present on the result dict
-    # (see run_attempt's field copy) -- missing either one silently
-    # downgrades a real KEEP-worthy improvement to PARTIAL. A live e2e run
-    # against the real mori_ep_dispatch_combine bundle on 8 MI300X GPUs
-    # caught this gap: forge-loop measured and committed a validated
-    # 1.21x speedup, but the CLI's own proposal still read PARTIAL /
-    # "no measurable speedup found" because these fields were missing.
     workspace = output_dir / "worktree"
     assert result["total_improved"] is True
     assert result["incremental_improved"] is True
@@ -514,63 +503,6 @@ def test_submit_vendor_playbook_copies_bundle_and_invokes_forge_loop(monkeypatch
     assert call["target_functions"] == ["get_ep_launch_config", "dispatch", "combine"]
     assert call["extra_env"]["KERNELFORGE_INCLUDE_MORI_KB"] == "1"
     assert call["program_md_file"] == str(workspace / "program.md")
-
-    # --- regression: a real measured improvement must actually reach KEEP ---
-    # This is the pipeline stage the live e2e run caught failing: forge_submit's
-    # result dict feeds run_attempt() -> build_verification() -> make_proposal(),
-    # and a gap anywhere in that field handoff silently downgrades a validated,
-    # correctness-passed, 1.2x-speedup KEEP into a PARTIAL "no measurable
-    # speedup" verdict even though forge-loop itself never disagreed.
-    attempt = {
-        "attempt_id": "forge-e2e",
-        "backend": "forge",
-        "status": "completed",
-        "backend_paths": {
-            "output_dir": str(output_dir),
-            "cli_workspace": result["cli_workspace"],
-            "forge_workspace": result["forge_workspace"],
-        },
-        "optimized_path": str(output_dir / "forge-e2e_stdout.log"),
-        "mean_case_speedup": result["mean_case_speedup"],
-        "total_improved": result["total_improved"],
-        "incremental_improved": result["incremental_improved"],
-        "improved": result["improved"],
-        "pristine_baseline_ms": None,
-        "best_ms": result["best_ms"],
-    }
-    # main() converts the CLI's "true"/"false"/"unknown" strings to bool/None
-    # before calling build_verification (see kernel_optimization.py's
-    # correctness = None if ... == "unknown" else ... == "true"); mirror that
-    # here rather than passing the raw CLI string.
-    args = argparse.Namespace(
-        source_file=str(workspace / "mori_ep_config.py"),
-        kernel_repo="",
-        correctness_passed=True,
-        accuracy_passed=None,
-        micro_speedup=None,
-        e2e_gain_pct=None,
-        dry_run=False,
-    )
-    verification = ko.build_verification(args, [attempt], benchmark_available=False)
-    assert verification["micro_speedup_source"] != "default_unmeasured"
-    assert verification["micro_speedup"] == pytest.approx(1.29)
-    assert verification["artifact_valid"] is True, verification["artifact_error"]
-    assert verification["artifact_source"] == "source_file"
-    assert verification["correctness_passed"] is True
-
-    proposal = ko.make_proposal(verification)
-    assert proposal["decision"] == "KEEP", proposal["reasons"]
-
-    # Without an orchestrator-supplied correctness signal (the standalone-CLI
-    # case this e2e test actually exercised), the measured speedup must still
-    # be visible -- NEEDS_REVIEW ("evidence needs confirmation"), never the
-    # misleading PARTIAL "no measurable speedup found" a missing-field
-    # regression would silently produce.
-    args_no_correctness = argparse.Namespace(**{**vars(args), "correctness_passed": None})
-    verification_nc = ko.build_verification(args_no_correctness, [attempt], benchmark_available=False)
-    assert verification_nc["micro_speedup_source"] != "default_unmeasured"
-    proposal_nc = ko.make_proposal(verification_nc)
-    assert proposal_nc["decision"] == "NEEDS_REVIEW", proposal_nc["reasons"]
 
 
 def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(monkeypatch, tmp_path):
@@ -636,55 +568,11 @@ def test_submit_vendor_playbook_dedupes_dispatch_and_combine_into_one_session(mo
     # A second forge worktree/workspace copy is never made for the reused role.
     assert not (tmp_path / "forge" / "session1" / "attempt_combine" / "worktree").exists()
 
-    # --- regression: the reused (combine) attempt must not lose the artifact ---
-    # A real run caught this: kernel_optimization.py's invoke_backend()
-    # unconditionally overwrites result["output_dir"] with THIS attempt's own
-    # (empty, never-populated-by-submit) directory right after submit()
-    # returns; _candidate_artifact_paths() only looks under
-    # cli_workspace/optimized_versions and output_dir/optimized_versions, so
-    # combine's empty tree made artifact_valid=False and make_proposal()
-    # return PARTIAL even though dispatch's speedup fields were present.
     combine_output_dir = tmp_path / "forge" / "session1" / "attempt_combine"
     assert (combine_output_dir / "optimized_versions").is_dir()
     assert list((combine_output_dir / "optimized_versions").iterdir()), (
-        "the reused attempt's own output_dir must carry a physical copy of "
-        "the artifact, since kernel_optimization.py's invoke_backend() "
-        "clobbers backend_paths['output_dir'] to point here regardless of "
-        "what submit() returned"
+        "the reused attempt's output directory must carry a physical artifact copy"
     )
-    combine_attempt = {
-        "attempt_id": "forge-e2e-combine",
-        "backend": "forge",
-        "status": "completed",
-        "backend_paths": {
-            # Mirrors invoke_backend()'s real behavior: output_dir is always
-            # reset to *this* attempt's own directory, while cli_workspace
-            # is copied through verbatim from whatever submit() returned
-            # (the winner's, for a reused result).
-            "output_dir": str(combine_output_dir),
-            "cli_workspace": combine_result["cli_workspace"],
-        },
-        "optimized_path": str(combine_output_dir / "forge-e2e-combine_stdout.log"),
-        "mean_case_speedup": combine_result["mean_case_speedup"],
-        "total_improved": combine_result["total_improved"],
-        "incremental_improved": combine_result["incremental_improved"],
-        "improved": combine_result["improved"],
-        "pristine_baseline_ms": None,
-        "best_ms": combine_result["best_ms"],
-    }
-    combine_args = argparse.Namespace(
-        source_file=str(tmp_path / "forge" / "session1" / "attempt_dispatch" / "worktree" / "mori_ep_config.py"),
-        kernel_repo="",
-        correctness_passed=True,
-        accuracy_passed=None,
-        micro_speedup=None,
-        e2e_gain_pct=None,
-        dry_run=False,
-    )
-    combine_verification = ko.build_verification(combine_args, [combine_attempt], benchmark_available=False)
-    assert combine_verification["artifact_valid"] is True, combine_verification["artifact_error"]
-    combine_proposal = ko.make_proposal(combine_verification)
-    assert combine_proposal["decision"] == "KEEP", combine_proposal["reasons"]
 
 
 def test_submit_vendor_playbook_runs_from_the_packaged_bundle_without_forge_path(monkeypatch, tmp_path):
@@ -867,14 +755,7 @@ def test_resolve_kernel_anchor_path_is_always_absolute(monkeypatch, tmp_path):
 
 
 def test_submit_vendor_playbook_writes_optimization_report_with_correctness_pass(monkeypatch, tmp_path):
-    """The vendor-playbook path reuses one forge-loop run but used to never
-    write ``optimization_report.md``, so ``kernel_optimization.py``'s
-    correctness extraction (which scans ``cli_workspace``/
-    ``optimization_report.md`` for a "[correctness] pass" marker) never
-    found a signal and ``make_proposal()`` could never return KEEP even when
-    SNR validation had already passed inside forge-loop (PR #1191 review
-    finding #5).
-    """
+    """The vendor-playbook path publishes its correctness report."""
     project_root = tmp_path / "kernelforge-project"
     _write_fake_mori_bundle(project_root)
     monkeypatch.setenv("KERNELFORGE_PROJECT_ROOT", str(project_root))

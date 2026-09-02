@@ -185,51 +185,6 @@ def _seed_trace_analyze(coord, *, hot_kernels, task_groups=None):
     }
 
 
-def test_report_allowed_when_hot_reusable_kernels_untried(session_dir):
-    """``report`` is allowed even with untried reusable hot kernels."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(
-        coord,
-        hot_kernels=[
-            {
-                "kernel_id": "k001",
-                "gpu_pct": 23.7,
-                "reusable_native_kernel": True,
-                "source_file": "/sgl/aiter/ops/moe_op.py",
-            },
-            {
-                "kernel_id": "k002",
-                "gpu_pct": 37.3,
-                "reusable_native_kernel": True,
-                "source_file": "/sgl/aiter/ops/moe_op.py",
-            },
-        ],
-    )
-    coord.shared_state.last_trace_analyze["roofline_snapshot_id"] = 1
-    coord.shared_state.explore_attempts = [{"variant_name": "x"}]
-    assert coord._sequence_denial_for_action("report") is None
-    assert coord.shared_state.untried_hot_reusable_kernels()
-
-
-def test_mission_summary_surfaces_untried_hot_kernels(session_dir):
-    """The mission summary surfaces the untried reusable hot kernels as a neutral fact."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _seed_post_baseline(coord)
-    _seed_trace_analyze(
-        coord,
-        hot_kernels=[
-            {"kernel_id": "k001", "gpu_pct": 24.0, "reusable_native_kernel": True, "source_file": "/p/moe_op.py"},
-            {"kernel_id": "k002", "gpu_pct": 37.0, "reusable_native_kernel": True, "source_file": "/p/rmsnorm.py"},
-        ],
-    )
-    summary = coord.shared_state.to_mission_summary()
-    assert "untried_hot_kernels" in summary
-    assert "k001" in summary
-    assert "k002" in summary
-    assert summary.find("k002") < summary.find("k001"), summary
-
-
 def test_report_always_allowed_regardless_of_hot_kernels(session_dir):
     """``report`` is never sequence-denied for hot-kernel reasons."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -261,19 +216,6 @@ def test_trace_analyze_gate_does_not_block_explore_actions(session_dir):
         )
 
 
-def test_run_optimization_request_no_longer_blocked_by_stale_trace_analyze(
-    session_dir,
-):
-    """A stale ``last_trace_analyze`` cache no longer pre-denies ``run_optimization``."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
-
-
 def test_trace_analyze_request_itself_passes(session_dir):
     """A ``trace_analyze`` REQUEST bypasses its own prerequisite check; baseline still applies."""
     coord = Coordinator(session_dir, backends=_backends_full())
@@ -283,29 +225,6 @@ def test_trace_analyze_request_itself_passes(session_dir):
     s.last_profile_trace = "/tmp/profile.tar.gz"
     s.last_trace_analyze = {}
     assert coord._sequence_denial_for_request("kernel_agent", "trace_analyze") is None
-
-
-def test_run_optimization_handler_reports_missing_trace_analyze(session_dir):
-    """No candidates_path + empty cache → handler returns ``missing_trace_analyze``."""
-    import asyncio
-
-    from hyperloom.orchestrator.kernel.request_handlers import (
-        run_optimization_handler,
-    )
-
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {}
-    s.save(session_dir)
-
-    result = asyncio.run(
-        run_optimization_handler({"kernel_id": "k001"}, session_dir=session_dir),
-    )
-    assert result["status"] == "failed"
-    assert result["error_class"] == "missing_trace_analyze"
 
 
 def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
@@ -322,15 +241,26 @@ def test_legacy_select_kernels_request_kind_no_longer_recognised(session_dir):
     assert get_handler("trace_analyze") is not None
 
 
-def test_trace_analyze_gate_clears_run_opt_request_when_cache_fresh(session_dir):
-    """A fresh ``last_trace_analyze`` cache clears the request-layer gate."""
-    coord = Coordinator(session_dir, backends=_backends_full())
-    _write_baseline_json(session_dir)
-    s = coord.shared_state
-    s.baseline_tput = 100.0
-    s.last_profile_trace = "/tmp/profile.tar.gz"
-    s.last_trace_analyze = {
-        "trace_input": "/tmp/profile.tar.gz",
-        "candidates_path": "/tmp/cands.json",
-    }
-    assert coord._sequence_denial_for_request("kernel_agent", "run_optimization") is None
+def test_closing_phase_denies_non_report_proposals():
+    state = SharedState(closing_phase=True)
+    gate = PolicyGate(
+        role_registry=default_role_registry(),
+        shared_state=state,
+    )
+    with pytest.raises(PolicyDenied) as exc:
+        gate.validate_intent(
+            "orchestration",
+            Intent(
+                type=IntentType.PROPOSE_ACTION,
+                payload={"action_name": "baseline", "predicted_gain_pct": 0.0},
+            ),
+        )
+    assert exc.value.rule == "closing_phase_only_report"
+
+    gate.validate_intent(
+        "orchestration",
+        Intent(
+            type=IntentType.PROPOSE_ACTION,
+            payload={"action_name": "report", "predicted_gain_pct": 0.0},
+        ),
+    )

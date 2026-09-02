@@ -599,7 +599,6 @@ def _build_summary_dict(
         # Honesty annotations: surface unfinished/unvalidated work; read
         # defensively for partial-state stubs.
         "has_unvalidated_keeps": _safe_call(state, "optimization_stack_has_unvalidated_keeps", False),
-        "untried_hot_reusable_kernels": list(_safe_call(state, "untried_hot_reusable_kernels", []) or []),
         "pending_keep_kernels": list(_safe_call(state, "pending_keep_kernel_ids", []) or []),
         "crash_count": state.crash_count,
         "server_boot_failures": _count_server_boot_failures(session_dir),
@@ -886,8 +885,7 @@ def _format_compute_partition_section(summary: dict[str, Any]) -> list[str]:
 
 
 def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
-    """Render honesty annotations for work left unfinished (unvalidated
-    KEEPs, untried hot kernels, KEEPs awaiting integrate).
+    """Render honesty annotations for unfinished validation and integration.
 
     Args:
         summary: The summary payload built by :func:`_build_summary_dict`.
@@ -897,9 +895,8 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
         is outstanding.
     """
     unvalidated = bool(summary.get("has_unvalidated_keeps"))
-    untried = list(summary.get("untried_hot_reusable_kernels") or [])
     pending_keeps = list(summary.get("pending_keep_kernels") or [])
-    if not (unvalidated or untried or pending_keeps):
+    if not (unvalidated or pending_keeps):
         return []
     lines: list[str] = ["## Completeness annotations", ""]
     if unvalidated:
@@ -910,8 +907,6 @@ def _format_completeness_annotations(summary: dict[str, Any]) -> list[str]:
         )
     if pending_keeps:
         lines.append(f"- ⚠ kernel_opt KEEPs awaiting integrate: {', '.join(pending_keeps)}.")
-    if untried:
-        lines.append(f"- ⚠ reusable hot kernels with no kernel_opt attempt: {', '.join(untried)}.")
     lines.append("")
     return lines
 

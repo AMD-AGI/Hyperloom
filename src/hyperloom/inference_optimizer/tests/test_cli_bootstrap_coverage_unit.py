@@ -28,7 +28,6 @@ def _args(**overrides):
         osl=1024,
         max_model_len=13312,
         no_kernel=False,
-        auto_kernel_opt=True,
         target_summary="",
         target_gain=60.0,
         target_tput=None,
@@ -139,7 +138,7 @@ def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
-    assert state.kernel_optimizer == "native"
+    assert state.kernel_optimizer == "forge"
 
 
 def _stub_seed_deps(monkeypatch, tmp_path):

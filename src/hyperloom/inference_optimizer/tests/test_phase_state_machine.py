@@ -46,11 +46,9 @@ def test_allowed_actions_disjoint_phases():
         assert "recover" in allowed
     assert "baseline" in phase_state.PHASE_ALLOWED_ACTIONS["PRELUDE"]
     assert "baseline" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    # kernel_opt and gemm_tuning are Coordinator-owned: dispatched once at KERNEL
-    # entry from a lane budget, so they are proposable in no phase at all.
+    # GEMM tuning is Coordinator-owned and is not LLM-proposable.
     assert "integrate" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     for phase in phase_state.PHASE_NAMES:
-        assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
         assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS[phase]
     assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
     assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
@@ -98,6 +96,64 @@ def test_phase_exit_reason_vocabulary_is_closed():
     assert not phase_state.is_valid_phase_exit_reason("")
     # Stripped before comparison, so a stray newline in a history row still matches.
     assert phase_state.is_valid_phase_exit_reason("  prelude_done \n")
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["completed", "failed", "no_opportunity", "no_result", "partial"],
+)
+def test_current_cycle_controller_terminal_result_exits_kernel(status: str) -> None:
+    state = SharedState(
+        phase=phase_state.PHASE_KERNEL_AGENT,
+        kernel_optimizer="forge",
+        macro_cycle=2,
+        kernel_rewrite_controller_result={
+            "macro_cycle": 2,
+            "status": status,
+            "patch_count": 1,
+            "task_count": 3,
+        },
+    )
+
+    assert phase_state.kernel_work_pending(state) is False
+    reason, evidence = phase_state.exit_normal_kernel(state)
+    assert reason == "kernel_controller_done"
+    assert evidence["controller_status"] == status
+    assert evidence["patch_count"] == 1
+
+
+def test_prior_cycle_controller_result_does_not_exit_current_kernel() -> None:
+    state = SharedState(
+        phase=phase_state.PHASE_KERNEL_AGENT,
+        kernel_optimizer="forge",
+        macro_cycle=2,
+        kernel_rewrite_controller_result={
+            "macro_cycle": 1,
+            "status": "completed",
+        },
+    )
+
+    assert phase_state._controller_phase_terminal(state) is False
+
+
+def test_collective_integration_still_blocks_controller_terminal_exit() -> None:
+    state = SharedState(
+        phase=phase_state.PHASE_KERNEL_AGENT,
+        kernel_optimizer="forge",
+        macro_cycle=0,
+        kernel_rewrite_controller_result={
+            "macro_cycle": 0,
+            "status": "completed",
+        },
+        last_collective={
+            "kept": True,
+            "requires_e2e_validation": True,
+            "patch_cleanup_status": "pending",
+        },
+    )
+
+    assert phase_state.kernel_work_pending(state) is True
+    assert phase_state.exit_normal_kernel(state) is None
 
 
 def test_stop_reason_vocab_includes_v06_and_v08():

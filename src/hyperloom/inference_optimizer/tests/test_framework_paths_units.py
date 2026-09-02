@@ -617,13 +617,6 @@ class TestAtomPathPresentInAllThreeLocations:
     def test_atom_present_in_default_source_roots(self):
         assert any("/app/atom/atom" in r.lower() for r in fp._DEFAULT_SOURCE_ROOTS)
 
-    def test_atom_present_in_reusable_source_roots(self):
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        assert any("/app/atom/atom" in r.lower() for r in krh._reusable_source_roots())
-
     def test_atom_present_in_tracelens_reusable_roots(self):
         """The kernel-agent's tracelens_analysis ``_REUSABLE_SOURCE_ROOTS`` must track the orchestrator-side list."""
         ka_path = (
@@ -643,50 +636,6 @@ class TestAtomPathPresentInAllThreeLocations:
             "is out of sync with src/hyperloom/orchestrator/kernel/"
             "request_handlers._REUSABLE_SOURCE_ROOTS (atom missing)"
         )
-
-    def test_kernel_request_handlers_and_tracelens_analysis_atom_paths_in_sync(self):
-        """The orchestrator gate and kernel-agent classifier derive reusable roots from the same source, so their atom subsets must match."""
-        ka_path = (
-            Path(__file__).resolve().parents[4]
-            / "src"
-            / "hyperloom"
-            / "agents"
-            / "kernel"
-            / "tools"
-            / "tracelens_analysis.py"
-        )
-        if not ka_path.is_file():
-            pytest.skip(f"kernel-agent tracelens_analysis not on disk at {ka_path}")
-        from hyperloom.orchestrator.kernel import (
-            request_handlers as krh,
-        )
-
-        orch_atom = frozenset(r.lower() for r in krh._reusable_source_roots() if "/atom/" in r.lower())
-        # Put the tools dir on sys.path: the sister tool imports sibling kernel-agent tools.
-        import importlib.util as _ilu
-        import sys as _sys
-
-        tools_dir = str(ka_path.parent)
-        added = tools_dir not in _sys.path
-        if added:
-            _sys.path.insert(0, tools_dir)
-        try:
-            spec = _ilu.spec_from_file_location(
-                "_tracelens_atom_sync_probe",
-                ka_path,
-            )
-            assert spec is not None and spec.loader is not None
-            mod = _ilu.module_from_spec(spec)
-            # Register before exec so self-referential dataclass annotations resolve.
-            _sys.modules[spec.name] = mod
-            spec.loader.exec_module(mod)
-            ka_atom = frozenset(r.lower() for r in mod._reusable_roots() if "/atom/" in r.lower())
-        finally:
-            if added and tools_dir in _sys.path:
-                _sys.path.remove(tools_dir)
-        assert orch_atom, "orchestrator reusable roots carry no atom entry"
-        assert ka_atom, "tracelens reusable roots carry no atom entry"
-        assert orch_atom == ka_atom, f"atom subsets diverged — orch={sorted(orch_atom)!r} ka={sorted(ka_atom)!r}"
 
 
 # ROCm/HIP enablement source roots (default-on)

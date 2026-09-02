@@ -240,9 +240,11 @@ look very different from Orchestration's side:
   Orchestration does tick until the rebench lands (or the revalidation turns out
   to be unavailable, which drops the pending slot and lets the exit through).
 - **Forge (`KERNEL_OPT_BACKEND_ORDER=forge`)**: the phase runs the deterministic
-  KERNEL-entry ladder — GEMM tuning, the fusion and collective lanes, then
-  per-kernel `kernel_opt` — and Orchestration drives the remaining kernel work
-  through the request channel.
+  KERNEL-entry ladder — GEMM tuning plus the independently gated fusion and
+  collective lanes — then launches one KernelForge rewrite controller with the
+  complete trace/source handoff. The controller independently selects operators
+  and owns scheduling, retries, and rewrite concurrency. Orchestration observes
+  its result rather than dispatching source-level rewrites.
 
 See [Kernel optimization execution path](../reference/kernel-execution-path.md) for the
 entry-hook branch order.
@@ -250,22 +252,20 @@ entry-hook branch order.
 The phase allowlist (`machine_state.PHASE_ALLOWED_ACTIONS[KERNEL_AGENT]`)
 admits these actions:
 
-- `kernel_opt`
 - `integrate`
-- `gemm_tuning`
 - `specialist`
 - `roofline`
 - `profile`
 - `recover`
 
-Within the kernel-agent request channel, the handler dispatches request kinds
-such as `trace_analyze`, `run_optimization`, and `run_gemm_tuning`
-(`request_handlers.py`); these are handler kinds, not phase actions.
+The kernel-agent request channel retains narrow handlers such as
+`trace_analyze` and `integrate`. GEMM, fusion, and collective are
+Coordinator-owned phase-entry lanes. Source-level rewrite has no per-operator
+request kind.
 
 Kernel-owned results are recorded separately from non-kernel action
-attempts. A KEEP must be integrated before the run can proceed to final
-reporting, and hot reusable kernels above the configured threshold must
-be attempted or explicitly rejected before report can close the run.
+attempts. Each patch published by the rewrite controller is integrated through
+the existing E2E validation path before it can be kept.
 
 ## SWEEP
 

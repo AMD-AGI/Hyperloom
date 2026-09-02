@@ -68,9 +68,9 @@ from hyperloom.orchestrator.roles import Backend, MockBackend, ScriptedPlan
 from hyperloom.orchestrator.state.shared_state import SharedState, effective_closing_grace_sec
 from hyperloom.orchestrator.state.task_registry import Task
 
-# An action costing an hour at p50, so a short budget cannot fit it.
-_EXPENSIVE_ACTION = "kernel_opt"
-_EXPENSIVE_COST_MIN = 60.0
+# A requestable benchmark action that a short budget cannot fit.
+_EXPENSIVE_ACTION = "explore"
+_EXPENSIVE_COST_MIN = 12.0
 # Cheap enough to fit anything but a nearly-spent budget.
 _CHEAP_ACTION = "profile"
 # An action the catalogue prices at five minutes, and what one of the two
@@ -148,14 +148,12 @@ class TestTheCostIsAnchoredOnWhatThisSessionMeasured:
         )
         assert cost == pytest.approx(51.0)
 
-    def test_the_catalogue_wins_where_it_prices_more_than_one_round(self):
-        """The measurement is a floor, not a replacement: only the catalogue
-        knows an action benches a whole grid rather than a single variant."""
+    def test_the_measured_round_is_a_floor_for_other_benchmark_actions(self):
         cost = expected_action_cost_minutes(
             ACTION_CATALOGUE[_EXPENSIVE_ACTION],
             measured_baseline_sec=_MEASURED_BASELINE_SEC,
         )
-        assert cost == pytest.approx(_EXPENSIVE_COST_MIN)
+        assert cost == pytest.approx(_MEASURED_BASELINE_SEC / 60.0)
 
     def test_an_action_that_never_benches_keeps_its_own_estimate(self):
         """Writing the report costs what it costs; the model's size is not in it."""
@@ -301,7 +299,7 @@ class TestTimeBudgetGate:
     """The dispatcher gate that turns a fit failure into a refusal."""
 
     def test_an_action_too_big_for_the_budget_is_denied(self, coord: Coordinator):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
         denied = coord._time_budget_denial_for_action(_EXPENSIVE_ACTION)
         assert isinstance(denied, PolicyDenied)
         assert denied.rule == "time_budget"
@@ -309,10 +307,10 @@ class TestTimeBudgetGate:
         assert "report" in str(getattr(denied, "hint", ""))
 
     def test_an_action_that_fits_is_admitted(self, coord: Coordinator):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
         assert coord._time_budget_denial_for_action(_CHEAP_ACTION) is None
 
-    def test_an_unbounded_budget_admits_the_most_expensive_action(self, coord: Coordinator):
+    def test_an_unbounded_budget_admits_a_catalogued_action(self, coord: Coordinator):
         coord.shared_state.max_minutes = 0
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
 
@@ -360,7 +358,7 @@ class TestTimeBudgetGate:
     def test_the_budget_shrinks_the_gate_as_the_session_runs(self, coord: Coordinator):
         _set_budget(coord, minutes=120, elapsed_min=0.0)
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is None
-        _set_budget(coord, minutes=120, elapsed_min=70.0)
+        _set_budget(coord, minutes=120, elapsed_min=110.0)
         assert coord._time_budget_denial_for_action(_EXPENSIVE_ACTION) is not None
 
 
@@ -374,7 +372,7 @@ class TestAdmissionGateOrder:
         assert denied is not None and denied.rule == "execution_order"
 
     def test_the_budget_gate_runs_once_the_sequence_gate_passes(self, coord: Coordinator):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
         denied = coord._admission_denial_for_action(_EXPENSIVE_ACTION)
         assert denied is not None and denied.rule == "time_budget"
 
@@ -399,7 +397,7 @@ class TestIntentPathsAreGated:
         coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
@@ -427,7 +425,7 @@ class TestIntentPathsAreGated:
         coord: Coordinator,
         monkeypatch,
     ):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
         recorded: list[PolicyDenied] = []
 
         async def _rec(source, intent, denied, action_name=None):
@@ -444,7 +442,7 @@ class TestIntentPathsAreGated:
 
     @pytest.mark.asyncio
     async def test_the_inline_runner_reports_the_refusal(self, coord: Coordinator, monkeypatch):
-        _set_budget(coord, minutes=20)
+        _set_budget(coord, minutes=10)
 
         async def _rec(source, intent, denied, action_name=None):
             return None

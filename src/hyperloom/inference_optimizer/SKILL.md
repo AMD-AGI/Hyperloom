@@ -25,8 +25,13 @@ objective progress.
 
 The CLI starts a Python Coordinator that coordinates:
 
-- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, Kernel requests, `report`).
-- Kernel (programmatic, not LLM): the Coordinator dispatches `trace_analyze`, `run_gemm_tuning`, `run_optimization`, `integrate`, and related request kinds directly to Python handlers without an LLM turn. The `run_fusion` and `run_collective` lanes share that handler table but are Coordinator-owned: they run at KERNEL entry behind their own gate and PolicyGate rejects an agent request for either.
+- Orchestration: decides next actions (`baseline`, `explore`, `specialist`, `integrate_patch`, `sweep`, supported Kernel requests, `report`).
+- Kernel (programmatic, not LLM): the Coordinator selects a phase-level backend.
+  GEAK owns the default whole phase; the explicit Forge route launches one
+  KernelForge rewrite controller, which independently analyzes trace/source
+  evidence, selects operators, schedules rewrites, and publishes patches for
+  Hyperloom's E2E integration path. GEMM, fusion, and collective remain
+  independently gated Coordinator-owned lanes.
 - Critic: proposal review (default `--critic-agent`; see
   [Critic Backend Selection](#critic-backend-selection) for modes).
 - Robustness: default `--robustness-agent` — drives the
@@ -325,9 +330,10 @@ source the regenerated
 `${KERNEL_AGENT_ENV:-${USER_DATA_PATH:-/workspace/hyperloom}/runtime/kernel-agent.env.sh}`
 in the **same shell** that will spawn `python -m hyperloom.inference_optimizer.cli optimize`.
 Skipping install strikes silently *after* `baseline` succeeds: missing
-TraceLens/GEAK → `trace_analyze` / `kernel_opt` fail; no live
-Ray head → `kernel_opt` tasks hang; missing `kernel-agent.env.sh` →
-first kernel-opt gateway call returns `401`. `install.sh --check-only` is a
+TraceLens/GEAK breaks analysis or the default whole-phase backend; a missing
+KernelForge installation prevents the rewrite controller from starting; a
+missing `kernel-agent.env.sh` makes the first kernel backend call fail
+authentication. `install.sh --check-only` is a
 *diagnostic*, never a substitute.
 
 **Resume carve-out.** `... optimize --resume-from` may skip install only when
@@ -457,13 +463,11 @@ Rules that look reasonable but break the current flow:
   `patch_source='upstream_pr'`; there is no separate
   `framework_agent` action for the LLM to propose or be denied.
   Use `--no-framework-agent` to skip the phase entirely.
-- **`kernel_opt` sequencing** is no longer gated by an
-  explore-minimum check (the
-  `explore_attempts_minimum_before_kernel_opt` rule was retired
-  in loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt`
-  directly; the `trace_analyze → run_optimization` data
-  dependency (P2_11 handler-level check) and the reusable
-  `kernel_id` validation still keep the inputs valid.
+- **Source-level kernel rewrite is phase-owned.** KERNEL_AGENT launches one
+  whole-phase backend. On the Forge route the rewrite controller consumes the
+  complete handoff, independently selects operators, owns retries and
+  concurrency, and publishes patch artifacts. Orchestration observes the
+  result; it does not select reusable IDs or dispatch per-operator rewrites.
 
 ## Setup
 
@@ -1265,9 +1269,10 @@ export SESSION="${INFERENCE_OPTIMIZER_SESSION_DIR:-$(python3 -c 'import json,sys
 python3 "$REPO_ROOT/src/hyperloom/inference_optimizer/tools/read_optimizer_state.py" "$SESSION"
 ```
 
-It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`, `current_best`,
-`last_kernel_opt`, `last_trace_analyze`, `last_conc_sweep`, `explore_last_round`,
-`phase`, plus the recent lifecycle events.
+It prints `stop_reason`, `baseline_tput`, `cumulative_gain_validated`,
+`current_best`, `kernel_rewrite_controller_result`, kernel backend results,
+`last_trace_analyze`, `last_conc_sweep`,
+`explore_last_round`, `phase`, plus the recent lifecycle events.
 
 Recent action counts from SQLite (last 500 events grouped by category):
 
@@ -1295,8 +1300,10 @@ The optimizer should:
   `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
   `last_trace_analyze`.
-4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
-5. Require compile + correctness + microbench/E2E evidence before KEEP.
+4. Hand the complete trace/source evidence to the phase-level kernel backend;
+  on Forge, the rewrite controller selects and schedules operators itself.
+5. Integrate every published patch through compile, correctness, and E2E
+  validation before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember
   rejected candidates across resume. The ledger keys entries by
   **content fingerprint** (a sha1 hash of sorted `extra_server_args` +
@@ -1325,7 +1332,8 @@ and caches `.so` on disk. First launch of a fresh (model, dtype, TP,
 | torch.compile / Inductor | `/tmp/torchinductor_<user>/` (override `$TORCHINDUCTOR_CACHE_DIR`) | `rm -rf /tmp/torchinductor_root` |
 
 `sgl_kernel` (`site-packages/sgl_kernel/common_ops.*.so`) is build-time only;
-only `kernel_opt` / `integrate` may rebuild it.
+only the phase-level kernel backend and Hyperloom's integration path may rebuild
+it.
 
 ### Cold-start triggers
 
@@ -1364,9 +1372,9 @@ apply/rebuild and ask. Dry-run and analysis are safe.
 
 ## Kernel E2E Retry Discipline
 
-Microbench speedups are not enough. After `run_optimization` returns a candidate
-kernel patch, `integrate` must validate the patch with E2E Magpie throughput and
-record every attempt in `state.json`.
+Microbench speedups are not enough. Every patch published by the phase-level
+kernel backend must pass Hyperloom's E2E Magpie integration path, and every
+attempt must be recorded in `state.json`.
 
 For the same `kernel_id + patch_path + EXTRA_SGLANG_ARGS`:
 

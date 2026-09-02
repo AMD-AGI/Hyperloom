@@ -421,23 +421,6 @@ def test_the_profile_identity_keys_stay_off_disk(tmp_path):
     assert loaded.apply_changes({"PROFILE_WORKLOAD_IDENTITY_KEYS": ["framework"]}, allow_core=False) == {}
 
 
-def test_v6_prefers_the_current_spelling_when_both_are_present(tmp_path):
-    """A mid-migration state holding both keys resolves to the current one."""
-    sd = tmp_path / "session"
-    sd.mkdir()
-    (sd / "state.json").write_text(
-        json.dumps(
-            {
-                "schema_version": 5,
-                "continue_kernel_after_gemm": False,
-                "auto_kernel_opt_enabled": True,
-            }
-        )
-    )
-
-    assert SharedState.load_or_init(sd).auto_kernel_opt_enabled is True
-
-
 def test_v4_nested_enablement_roundtrips(tmp_path):
     """A v4 state.json with nested enablement dict survives save/load_or_init."""
     sd = tmp_path / "session"

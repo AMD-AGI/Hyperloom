@@ -34,16 +34,6 @@ from hyperloom.orchestrator.state.shared_state import (
 )
 
 
-def test_lifecycle_label_resolves_human_labels():
-    # Pipeline names map to the internal step/handler names.
-    assert lifecycle_label("trace_analyze") == "TraceLens"
-    assert lifecycle_label("roofline") == "TraceLens"
-    assert lifecycle_label("run_optimization") == "GEAK"
-    assert lifecycle_label("integrate") == "Integrate"
-    assert lifecycle_label("apply_patch") == "Integrate"
-    assert lifecycle_label("report") == "Report"
-
-
 def test_lifecycle_label_falls_back_to_phase_then_verbatim():
     # A bare phase name resolves to its human label ...
     assert lifecycle_label("KERNEL_AGENT") == "Kernel optimization"
@@ -97,24 +87,6 @@ def test_make_lifecycle_event_omits_duration_when_none():
 def test_lifecycle_statuses_enum():
     # ENTER is the phase-boundary marker; START / END / ERROR are step-level.
     assert LIFECYCLE_STATUSES == frozenset({"START", "END", "ERROR", "ENTER"})
-
-
-def test_record_lifecycle_event_appends_and_defaults_phase():
-    s = SharedState(session_id="abc")
-    s.phase = PHASE_KERNEL_AGENT
-    row = s.record_lifecycle_event(
-        step="run_optimization",
-        status="START",
-        artifacts={"workspace": "/tmp/ws"},
-        detail="kernel tg001",
-    )
-    assert len(s.lifecycle) == 1
-    assert row is s.lifecycle[0]
-    assert row["phase"] == "KERNEL_AGENT"  # defaulted from current phase
-    assert row["label"] == "GEAK"  # defaulted from step
-    assert row["status"] == "START"
-    assert row["artifacts"] == {"workspace": "/tmp/ws"}
-    assert row["seq"] == 0
 
 
 def test_record_lifecycle_event_explicit_phase_and_label_override():

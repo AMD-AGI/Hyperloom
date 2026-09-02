@@ -25,7 +25,6 @@ from hyperloom.orchestrator.prompts.prompt_builder import (
 
 
 # Marker text identifying each phase-scoped prompt module.
-KERNEL_REQUEST_REF = "## 6. KERNEL-OPT REQUEST REFERENCE"
 IDEA_GENERATION = "### IDEA GENERATION"
 BASELINE_FINGERPRINT = "eight params fields"  # now in the reference doc, not in the prompt
 SPECIALIST_DIALS = "### One specialist, four dials"
@@ -97,16 +96,6 @@ def _build(registry: dict, phase: str) -> str:
 # ---------------------------------------------------------------------------
 # Phase-scoped modules render only where the behaviour exists
 # ---------------------------------------------------------------------------
-def test_kernel_request_reference_only_in_kernel_phase(registry):
-    """Kernel REQUEST payload templates are legal only in KERNEL_AGENT."""
-    for phase in _ps.PHASE_NAMES:
-        text = _build(registry, phase)
-        if phase == _ps.PHASE_KERNEL_AGENT:
-            assert KERNEL_REQUEST_REF in text
-        else:
-            assert KERNEL_REQUEST_REF not in text, f"kernel request ref leaked into {phase}"
-
-
 def test_idea_generation_only_in_explore_phase(registry):
     """The explore grid idea pipeline is unreachable outside EXPLORE."""
     for phase in _ps.PHASE_NAMES:
@@ -221,7 +210,6 @@ def test_unscoped_build_renders_every_module(registry):
     """A caller that does not track phases keeps the pre-scoping prompt."""
     text = _build(registry, "")
     for marker in (
-        KERNEL_REQUEST_REF,
         IDEA_GENERATION,
         KERNEL_REQUEST_KINDS,
         ROOFLINE_BLOCK,

@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 _TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
 sys.path.insert(0, str(_TOOLS_DIR))
@@ -15,7 +13,6 @@ from _task_group_contract import (  # noqa: E402
     native_operation_key,
     task_group_shape_cases,
 )
-import kernel_optimization  # noqa: E402
 
 _BACKENDS_DIR = _TOOLS_DIR / "backends"
 sys.path.insert(0, str(_BACKENDS_DIR))
@@ -289,47 +286,6 @@ def test_preserves_raw_argument_order_alongside_tensor_projection(tmp_path):
     assert spec["invocation"]["raw_arg_spec"] == candidate["raw_arg_spec"]
 
 
-def test_forge_invoke_persists_and_passes_operator_spec(tmp_path, monkeypatch):
-    source = tmp_path / "kernel.py"
-    source.write_text("def kernel(x):\n    return x\n", encoding="utf-8")
-    prompt = tmp_path / "prompt.md"
-    prompt.write_text("# Task\n", encoding="utf-8")
-    out_dir = tmp_path / "forge-output"
-    candidate = _candidate(tmp_path)
-    candidate["source_file"] = str(source)
-    candidate["kernel_repo"] = str(tmp_path)
-    captured: dict = {}
-
-    def fake_submit(**kwargs):
-        captured.update(kwargs)
-        return {"returncode": 0, "stdout": "ok", "stdout_tail": "ok", "stderr_tail": ""}
-
-    monkeypatch.setattr(kernel_optimization, "_forge_output_dir", lambda *_args: out_dir)
-    monkeypatch.setattr(
-        kernel_optimization,
-        "_import_backend",
-        lambda _name: SimpleNamespace(submit=fake_submit),
-    )
-
-    result = kernel_optimization.invoke_backend(
-        "forge",
-        prompt,
-        str(source),
-        argparse.Namespace(
-            budget_minutes=60,
-            num_gpus=1,
-            session_id="session",
-        ),
-        candidate=candidate,
-        log_path=tmp_path / "run.log",
-    )
-
-    spec_path = out_dir / "invocation_spec_scaled_gemm.json"
-    assert spec_path.is_file()
-    assert result["invocation_spec_path"] == str(spec_path)
-    assert captured["invocation_spec_file"] == str(spec_path)
-
-
 def test_forge_loop_cli_receives_absolute_spec_path(tmp_path, monkeypatch):
     kernel = tmp_path / "kernel.py"
     kernel.write_text("def kernel(x):\n    return x\n", encoding="utf-8")
@@ -469,52 +425,6 @@ def test_forge_loop_timeout_returns_persisted_checkpoint(tmp_path, monkeypatch):
     assert result.baseline_ms is None
     assert result.best_ms is None
     assert isinstance(result.error, RuntimeError)
-
-
-def test_serialized_candidate_preserves_task_group(tmp_path):
-    path = tmp_path / "candidate_tg001.json"
-    candidate = _candidate(tmp_path)
-    candidate["task_group"] = {
-        "task_group_id": "tg001",
-        "primary_kernel_id": "k002",
-        "kernel_ids": ["k001", "k002"],
-        "rows": [
-            {
-                "kernel_id": "k001",
-                "name": "scaled_gemm",
-                "input_shapes": [
-                    {"shape": "(64,5120) fp8"},
-                    {"shape": "(5120,5120) fp8"},
-                ],
-            },
-            {
-                "kernel_id": "k002",
-                "name": "scaled_gemm",
-                "input_shapes": [
-                    {"shape": "(64,17408) fp8"},
-                    {"shape": "(5120,17408) fp8"},
-                ],
-            },
-        ],
-    }
-    path.write_text(json.dumps(candidate), encoding="utf-8")
-
-    loaded = kernel_optimization.load_candidate_input(str(path), "k002")
-    spec = invocation_spec.build_invocation_spec(loaded)
-
-    assert loaded["task_group"]["task_group_id"] == "tg001"
-    assert spec["workload"]["task_group"]["kernel_ids"] == ["k001", "k002"]
-    assert len(spec["workload"]["task_group"]["cases"]) == 2
-    assert spec["tests"]["driver_contract"] == {
-        "shape_argument": "--shape",
-        "case_selector_key": "CASE_ID",
-        "requires_all_cases": True,
-        "case_selectors": [
-            {"CASE_ID": "case_001", "M": 64, "N": 5120, "K": 17408},
-            {"CASE_ID": "case_002", "M": 64, "N": 5120, "K": 5120},
-        ],
-    }
-    assert kernel_optimization.load_candidate_input(str(path), "k999") is None
 
 
 def test_forge_shapes_include_every_grouped_gemm_case(tmp_path):

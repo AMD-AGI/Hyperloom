@@ -22,8 +22,6 @@ from typing import Any, NamedTuple
 
 from hyperloom.common.coerce import to_float
 
-from ..state.kernel_decision_settings import resolve_hot_kernel_min_gpu_pct
-
 log = logging.getLogger(__name__)
 
 
@@ -32,7 +30,6 @@ CATEGORY_INTEGRATED = "INTEGRATED"
 CATEGORY_KEEP_PENDING = "KEEP_PENDING"
 CATEGORY_ATTEMPTED_REJECTED = "ATTEMPTED_REJECTED"
 CATEGORY_IN_FLIGHT = "IN_FLIGHT"
-CATEGORY_UNATTEMPTED = "UNATTEMPTED"
 
 #: Closed 4-value terminal kernel-outcome bucket the dashboard reads directly.
 #: ``IN_FLIGHT`` (no terminal decision) folds into ``fail``.
@@ -40,22 +37,6 @@ OUTCOME_SUCCESS = "success"
 OUTCOME_FAIL = "fail"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_SKIP = "skip"
-
-#: Sub-reason vocabulary for ``UNATTEMPTED`` kernels, derived from the top15
-#: entry's geometry so the front-end can filter by why.
-UNATTEMPTED_NO_SOURCE = "no_source_file"
-UNATTEMPTED_NOT_REUSABLE = "not_reusable_native_kernel"
-UNATTEMPTED_NO_BACKEND = "no_recommended_backend"
-#: The dispatcher's own gate. Named for the skip reason the batch filter logs
-#: (``below_min_gpu_pct=<threshold>``) so a report row and a run log describe the
-#: same event.
-UNATTEMPTED_BELOW_MIN_GPU_PCT = "below_min_gpu_pct"
-#: Cleared every gate and still never ran. This is the residual bucket, and it
-#: must stay narrow: an 8h run reported five of these while the real cause was a
-#: Coordinator that could not emit the kernel REQUEST at all, and the label sent
-#: the investigation after a priority cutoff that had never fired.
-UNATTEMPTED_NEVER_DISPATCHED = "never_dispatched"
-UNATTEMPTED_UNKNOWN = "unknown"
 
 #: ``kernel_opt_task_attempts`` rejection reasons we surface verbatim into
 #: ``rejection_breakdown`` totals (anything else falls into ``other``).
@@ -450,8 +431,8 @@ def _kernel_outcome_class(
     field across backends:
 
     * ``success`` — kept/integrated (a KEEP reached).
-    * ``skip``    — never dispatched (``UNATTEMPTED``) OR every recorded attempt
-      self-skipped before real work (``skipped`` marker, e.g. forge bailed on a
+    * ``skip``    — every recorded attempt self-skipped before real work
+      (``skipped`` marker, e.g. forge bailed on a
       compile-only/unsupported/non-git kernel).
     * ``timeout`` — at least one attempt timed out (``error_class == timeout``)
       and none of the above.
@@ -468,8 +449,6 @@ def _kernel_outcome_class(
     """
     if category in (CATEGORY_INTEGRATED, CATEGORY_KEEP_PENDING):
         return OUTCOME_SUCCESS
-    if category == CATEGORY_UNATTEMPTED:
-        return OUTCOME_SKIP
     ladder = backend_ladder or []
     # Every recorded attempt self-skipped -> skip; a mixed ladder is not.
     if ladder and all(bool(r.get("skipped")) for r in ladder):
@@ -502,70 +481,6 @@ def _session_kernel_opt_outcome(by_kernel: list[dict[str, Any]]) -> str:
     if OUTCOME_TIMEOUT in classes and OUTCOME_FAIL not in classes:
         return OUTCOME_TIMEOUT
     return OUTCOME_FAIL
-
-
-def _unattempted_reason(
-    top_entry: dict[str, Any],
-    *,
-    min_gpu_pct: float,
-) -> tuple[str, str]:
-    """Pick ``(reason_code, human_detail)`` for an UNATTEMPTED kernel.
-
-    Order mirrors the dispatcher's own gates, cheapest first: source-file
-    resolve, patchability, backend recommendation, then the GPU-share threshold.
-    Only a kernel that cleared all four lands in the residual bucket, so that
-    bucket names the absence of a dispatch rather than inventing a gate.
-
-    Args:
-        top_entry: The kernel's top-list/roofline entry.
-        min_gpu_pct: The threshold the dispatcher applied, from
-            :func:`resolve_hot_kernel_min_gpu_pct`.
-
-    Returns:
-        A ``(reason_code, human_detail)`` tuple.
-    """
-    source = str(top_entry.get("source_file") or "").strip()
-    reusable = bool(top_entry.get("reusable_native_kernel"))
-    recommended = top_entry.get("recommended_backends") or []
-    if not source:
-        return (
-            UNATTEMPTED_NO_SOURCE,
-            "TraceLens could not resolve a rewritable source file "
-            "(typically a vendor-library op like aten::mm backed by "
-            "Tensile / hipBLASLt / rocBLAS). Switch backend via "
-            "sglang flags instead of rewriting the kernel.",
-        )
-    if not reusable:
-        return (
-            UNATTEMPTED_NOT_REUSABLE,
-            "Source resolved but classify_patchability rejected it "
-            "(vendor dispatch wrapper / runtime-generated kernel / "
-            "source outside a reusable framework root).",
-        )
-    if not recommended:
-        return (
-            UNATTEMPTED_NO_BACKEND,
-            "Reusable kernel but no recommended backend in the top-15 row; kernel-agent will not auto-dispatch.",
-        )
-    try:
-        gpu_pct = float(top_entry.get("gpu_pct") or 0.0)
-    except (TypeError, ValueError):
-        gpu_pct = 0.0
-    if gpu_pct < min_gpu_pct:
-        return (
-            UNATTEMPTED_BELOW_MIN_GPU_PCT,
-            f"Eligible but {gpu_pct:.3g}% of GPU time is under the "
-            f"{min_gpu_pct:.3g}% dispatch threshold "
-            "(HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT), so the batch filter skipped it.",
-        )
-    return (
-        UNATTEMPTED_NEVER_DISPATCHED,
-        f"Eligible and at {gpu_pct:.3g}% of GPU time it cleared the "
-        f"{min_gpu_pct:.3g}% threshold, yet no attempt was recorded: the "
-        "Coordinator never issued the kernel REQUEST, or the session ended "
-        "before its turn came up. Check the run log for PolicyGate denials "
-        "and for 'batch candidates filtered'.",
-    )
 
 
 def _summary_integrated(
@@ -954,23 +869,12 @@ def build_kernel_optimization_summary(
     by_kernel: list[dict[str, Any]] = []
     rejection_breakdown: dict[str, int] = {r: 0 for r in KNOWN_REJECTION_REASONS}
     rejection_breakdown["other"] = 0
-    unattempted_breakdown: dict[str, int] = {
-        UNATTEMPTED_NO_SOURCE: 0,
-        UNATTEMPTED_NOT_REUSABLE: 0,
-        UNATTEMPTED_NO_BACKEND: 0,
-        UNATTEMPTED_BELOW_MIN_GPU_PCT: 0,
-        UNATTEMPTED_NEVER_DISPATCHED: 0,
-        UNATTEMPTED_UNKNOWN: 0,
-    }
-    min_gpu_pct = resolve_hot_kernel_min_gpu_pct()
     counts = {
-        "top_candidates": len(top15),
         "attempted": 0,
         "integrated": 0,
         "keep_pending": 0,
         "rejected": 0,
         "in_flight": 0,
-        "unattempted": 0,
     }
 
     # Process top15 kernels first (pre-sorted by gpu_pct desc).
@@ -986,13 +890,6 @@ def build_kernel_optimization_summary(
             continue
         attempt = attempts_map.get(kid)
         if attempt is None:
-            reason_code, reason_detail = _unattempted_reason(
-                top_entry,
-                min_gpu_pct=min_gpu_pct,
-            )
-            counts["unattempted"] += 1
-            unattempted_breakdown[reason_code] = unattempted_breakdown.get(reason_code, 0) + 1
-            by_kernel.append(_render_unattempted_row(top_entry, reason_code, reason_detail))
             continue
         counts["attempted"] += 1
         category = _classify_attempted(
@@ -1054,13 +951,11 @@ def build_kernel_optimization_summary(
         by_kernel.append(_render_collective_attempt_row(collective_attempt, category))
 
     failure_reason_breakdown = _aggregate_failure_reasons(by_kernel)
-    dispatch_skip = dict(getattr(state, "last_kernel_opt_dispatch_skip", {}) or {})
     top_takeaways = _build_top_takeaways(
         counts=counts,
         by_kernel=by_kernel,
         rejection_breakdown=rejection_breakdown,
         failure_reason_breakdown=failure_reason_breakdown,
-        dispatch_skip=dispatch_skip,
     )
 
     return {
@@ -1071,47 +966,10 @@ def build_kernel_optimization_summary(
         "kernel_opt_outcome": _session_kernel_opt_outcome(by_kernel),
         "totals": counts,
         "rejection_breakdown": rejection_breakdown,
-        "unattempted_reason_breakdown": unattempted_breakdown,
         "failure_reason_breakdown": failure_reason_breakdown,
-        # Non-failure breadcrumb for a wholesale dispatch skip; {} otherwise.
-        "dispatch_skip_reason": dispatch_skip,
         "field_glossary": FIELD_GLOSSARY,
         "by_kernel": by_kernel,
         "top_takeaways": top_takeaways,
-    }
-
-
-def _render_unattempted_row(
-    top_entry: dict[str, Any],
-    reason_code: str,
-    reason_detail: str,
-) -> dict[str, Any]:
-    """Build a summary row for a kernel that was not attempted.
-
-    Args:
-        top_entry: The kernel's roofline/top-list entry.
-        reason_code: Machine-readable reason the kernel was skipped.
-        reason_detail: Human-readable explanation of the skip.
-
-    Returns:
-        A row dict tagged with the unattempted category and reason.
-    """
-    return {
-        "kernel_id": str(top_entry.get("kernel_id") or ""),
-        "kernel_name": str(top_entry.get("name") or ""),
-        "kernel_category": str(top_entry.get("kernel_category") or ""),
-        "source_file": str(top_entry.get("source_file") or ""),
-        "gpu_pct": _to_float(top_entry.get("gpu_pct")),
-        "efficiency_pct": _to_float(top_entry.get("efficiency_percent")),
-        "bound_type": str(top_entry.get("bound_type") or ""),
-        "arithmetic_intensity": _to_float(top_entry.get("arithmetic_intensity")),
-        "reusable_native_kernel": bool(top_entry.get("reusable_native_kernel")),
-        "recommended_backends": list(top_entry.get("recommended_backends") or []),
-        "category": CATEGORY_UNATTEMPTED,
-        "outcome_class": OUTCOME_SKIP,
-        "unattempted_reason": reason_code,
-        "unattempted_detail": reason_detail,
-        "summary": f"not attempted: {reason_code}",
     }
 
 
@@ -1304,7 +1162,6 @@ def _build_top_takeaways(
     by_kernel: list[dict[str, Any]],
     rejection_breakdown: dict[str, int],
     failure_reason_breakdown: dict[str, int],
-    dispatch_skip: dict[str, Any] | None = None,
 ) -> list[str]:
     """Deterministic 2-4 sentence summary, no LLM.
 
@@ -1313,9 +1170,6 @@ def _build_top_takeaways(
         by_kernel: The per-kernel summary rows.
         rejection_breakdown: Counts of rejection reasons.
         failure_reason_breakdown: Counts of failure modes.
-        dispatch_skip: The recorded wholesale dispatch-skip breadcrumb, used to
-            name the reason instead of guessing at it.
-
     Returns:
         A list of takeaway sentences.
     """
@@ -1323,31 +1177,13 @@ def _build_top_takeaways(
     attempted = counts.get("attempted", 0)
     integrated = counts.get("integrated", 0)
     rejected = counts.get("rejected", 0)
-    unattempted = counts.get("unattempted", 0)
 
     if attempted > 0:
         out.append(
             f"{integrated} of {attempted} attempted kernels reached KEEP and integrated; {rejected} were rejected."
         )
     else:
-        # The reason is recorded, so state it. Guessing between "disabled" and
-        # "nothing qualified" left the third case -- the candidate table was
-        # never produced, so nothing was ever asked -- unrepresented, and a
-        # reader with every bucket at zero concluded the workload had no
-        # headroom.
-        #
-        # Worded around the skip, not around "never dispatched": the reasons
-        # come from two writers with different meanings. The phase records why
-        # it declined to ask at all, while ``no_eligible_kernels`` comes from a
-        # dispatch that did happen and found nothing eligible.
-        skip_reason = str((dispatch_skip or {}).get("reason") or "")
-        if skip_reason:
-            out.append(f"No kernels were attempted in this session (kernel_opt dispatch skip: {skip_reason}).")
-        else:
-            out.append(
-                "No kernels were attempted in this session "
-                "(check if kernel_opt was disabled or no candidates qualified)."
-            )
+        out.append("No recorded kernel attempts were available for this session.")
 
     ladder_all = failure_reason_breakdown.get("ladder_all_failed", 0)
     if ladder_all >= 1:
@@ -1369,19 +1205,6 @@ def _build_top_takeaways(
             "substantial headroom remains."
         )
 
-    if unattempted > 0:
-        no_src = sum(
-            1
-            for r in by_kernel
-            if r.get("category") == CATEGORY_UNATTEMPTED and r.get("unattempted_reason") == UNATTEMPTED_NO_SOURCE
-        )
-        if no_src > 0:
-            out.append(
-                f"{no_src} top candidate(s) were not attempted because "
-                "no rewritable source file was resolved (vendor-library "
-                "ops); address via backend swap (sglang flags), not "
-                "kernel rewriting."
-            )
     return out
 
 
@@ -1390,8 +1213,7 @@ def _find_highest_impact_missed(
 ) -> dict[str, Any] | None:
     """Pick the missed kernel with the highest ``gpu_pct``.
 
-    "Missed" = anything not ``INTEGRATED`` / ``KEEP_PENDING`` (i.e.
-    ``ATTEMPTED_REJECTED``, ``UNATTEMPTED``, or still ``IN_FLIGHT``).
+    "Missed" = anything not ``INTEGRATED`` / ``KEEP_PENDING``.
 
     Args:
         by_kernel: The per-kernel summary rows.
@@ -1445,12 +1267,5 @@ __all__ = [
     "ERROR_CLASS_UNKNOWN",
     "CATEGORY_ATTEMPTED_REJECTED",
     "CATEGORY_IN_FLIGHT",
-    "CATEGORY_UNATTEMPTED",
-    "UNATTEMPTED_NO_SOURCE",
-    "UNATTEMPTED_NOT_REUSABLE",
-    "UNATTEMPTED_NO_BACKEND",
-    "UNATTEMPTED_BELOW_MIN_GPU_PCT",
-    "UNATTEMPTED_NEVER_DISPATCHED",
-    "UNATTEMPTED_UNKNOWN",
     "FIELD_GLOSSARY",
 ]

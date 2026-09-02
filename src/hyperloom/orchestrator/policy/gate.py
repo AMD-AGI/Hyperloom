@@ -1095,9 +1095,13 @@ class PolicyGate:
                 f"request kind {kind!r} is a Coordinator-owned kernel lane and not LLM-requestable",
                 rule="request_kind",
                 hint=(
-                    "the lane runs at KERNEL entry once its own gate passes and "
-                    "reports as run_collective_done / run_fusion_done; request "
-                    "run_optimization for a source-level kernel instead."
+                    "run_fusion / run_collective are dispatched by the "
+                    "Coordinator at KERNEL entry once their deterministic gate "
+                    "passes; their outcomes arrive as run_fusion_done / "
+                    "run_collective_done responses. Requesting one directly "
+                    "skips that gate, the lane's SharedState accounting, and "
+                    "its integrate step. Source-level rewrites are owned by "
+                    "the phase-level KernelForge controller."
                 ),
             )
         self._validate_gemm_tuning_action(kind, intent_kind="request")

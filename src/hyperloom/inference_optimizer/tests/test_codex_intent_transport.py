@@ -165,9 +165,8 @@ def test_critic_transport_contract_carries_no_orchestration_text() -> None:
 
 _KERNEL_REQUEST_PAYLOAD = {
     "target_agent": "kernel_agent",
-    "kind": "run_optimization",
+    "kind": "integrate",
     "kernel_id": "k001",
-    "backend": "forge",
 }
 
 
@@ -218,30 +217,6 @@ def _stub_turn(monkeypatch: pytest.MonkeyPatch, result: CodexSessionResult | Bas
     monkeypatch.setattr(CodexSession, "turn", _turn)
     monkeypatch.setattr(CodexSession, "aclose", _aclose)
     return captured
-
-
-async def test_request_intent_round_trips_through_the_backend(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The intent the Coordinator could never express now survives end to end."""
-    captured = _stub_turn(
-        monkeypatch,
-        CodexSessionResult(
-            text=_schema_enforced_reply("request", _KERNEL_REQUEST_PAYLOAD),
-            usage={"input_tokens": 120, "output_tokens": 8},
-            thread_id="thread-1",
-        ),
-    )
-    result = await _backend(tmp_path).run("kernel k001 needs optimization", system_prompt="You are the Coordinator.")
-
-    assert set(_intent_type_enum(captured["output_schema"])) == {t.value for t in _ORCHESTRATION_INTENTS}
-    assert len(result.intents) == 1
-    intent = result.intents[0]
-    assert intent.type is IntentType.REQUEST
-    assert intent.payload["target_agent"] == "kernel_agent"
-    assert intent.payload["kind"] == "run_optimization"
-    assert result.metadata["input_tokens"] == 120
 
 
 async def test_system_prompt_and_contract_reach_the_developer_instructions(

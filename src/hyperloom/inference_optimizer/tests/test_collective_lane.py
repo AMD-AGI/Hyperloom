@@ -16,9 +16,6 @@ from hyperloom.orchestrator.kernel.request_handlers import (
     _collective_budget,
     select_collective_candidate,
 )
-from hyperloom.orchestrator.kernel._kernel_decisions import (
-    untried_hot_reusable_kernels,
-)
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
@@ -190,34 +187,6 @@ def test_still_ranks_by_gpu_pct_when_reading_from_disk(tmp_path):
     assert picked["kernel_id"] == "k002"
 
 
-def test_trace_projection_preserves_collective_queue_isolation(tmp_path):
-    """Persisted routing fields must keep collectives out of kernel_opt."""
-    state = SharedState.load_or_init(tmp_path)
-    state.record_trace_analyze(
-        {"trace_input": "/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                _collective_entry(
-                    is_multigpu=True,
-                    candidate_source="nccl_summary",
-                ),
-            ],
-            "trace_health_warnings": [],
-        },
-    )
-
-    projected = state.last_trace_analyze["hot_kernels_top15"][0]
-    assert projected["kernel_contract"]["kind"] == "collective"
-    assert projected["is_multigpu"] is True
-    assert untried_hot_reusable_kernels(state) == []
-    # The prompt offers this list as the kernel_opt target set, so a collective
-    # left in it would dispatch an empty batch on every pick.
-    assert state.last_trace_analyze["reusable_native_kernel_ids"] == []
-    codes = {w.get("code") for w in state.last_trace_analyze["trace_health_warnings"]}
-    assert "collective_lane_withheld_kernels" in codes
-
-
 @pytest.mark.parametrize(
     "entry,reason",
     [
@@ -265,31 +234,6 @@ def test_a_kernel_the_collective_lane_cannot_admit_stays_routable(tmp_path, entr
     )
 
     assert state.last_trace_analyze["reusable_native_kernel_ids"] == ["k007"], reason
-
-
-def test_multigpu_hint_without_collective_contract_stays_routable(tmp_path):
-    """A coarse multi-GPU hint must not suppress a dense candidate."""
-    state = SharedState.load_or_init(tmp_path)
-    state.record_trace_analyze(
-        {"trace_input": "/trace"},
-        {
-            "status": "ok",
-            "hot_kernels": [
-                _collective_entry(
-                    is_multigpu=True,
-                    kernel_contract={"kind": "gemm"},
-                ),
-            ],
-            "trace_health_warnings": [],
-        },
-    )
-
-    assert untried_hot_reusable_kernels(
-        state,
-        min_gpu_pct=0.0,
-        top_n=10,
-    ) == ["k007"]
-    assert state.last_trace_analyze["reusable_native_kernel_ids"] == ["k007"]
 
 
 def test_collective_replay_preserves_completed_integration(tmp_path):

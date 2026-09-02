@@ -14,8 +14,8 @@ from hyperloom.common.timeutil import now_iso
 # for callers that still use that legacy path).
 _now_iso = now_iso
 
-# Default partial-attempt cap for run_optimization; override via env in
-# ``record_kernel_opt`` (1 disables second chance).
+# Default partial-attempt cap retained by the legacy-compatible kernel ledger;
+# override via env in ``record_kernel_opt`` (1 disables second chance).
 _DEFAULT_KERNEL_OPT_MAX_PARTIAL = 2
 
 # Backend ladder infra failures can be transient; require two failed ladders
@@ -40,107 +40,6 @@ def resolve_kernel_opt_max_failures() -> int:
 # retries-after-the-first: a value of 2 means "one initial fault plus one retry,
 # then reject".
 _MAX_INTEGRATE_FAULT_ATTEMPTS = 2
-
-# Minimum GPU share for a reusable hot kernel to still owe a kernel_opt attempt.
-# Holds KERNEL phase-advance open (kernel_work_pending), filters the dispatch
-# batch queue, and drives the advisory 'untried hot kernels' report annotation.
-# It does NOT block ``report``.
-# Tuned for a model whose hot kernels are spread rather than concentrated. A
-# 60-layer sparse-MoE decoder splits its work across so many operators that
-# nothing but a graph-launch wrapper reaches double digits, so a 10% floor
-# admitted no real kernel at all and left the batch dispatcher idle while the
-# orchestrator picked candidates one at a time.
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = 5.0
-
-
-def resolve_hot_kernel_min_gpu_pct() -> float:
-    """Resolve the GPU-share threshold a hot kernel must clear to be dispatched.
-
-    The dispatch batch filter, the phase-advance gate and the report's
-    unattempted-reason breakdown must all name the same number, or the report
-    explains a skip the dispatcher never made.
-
-    Returns:
-        float: The threshold from ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT``, or the
-            shipped default when it is unset or unparseable.
-    """
-    try:
-        return float(
-            os.environ.get(
-                "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT",
-                _DEFAULT_HOT_KERNEL_MIN_GPU_PCT,
-            )
-        )
-    except (TypeError, ValueError):
-        return _DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-
-
-def effective_hot_kernel_gpu_pct(candidate: dict) -> float:
-    """GPU-time share used for the hot-kernel gate.
-
-    A vendor-playbook group (e.g. mori's dispatch+combine, deliberately
-    submitted as one forge-loop session -- see
-    ``agents/kernel/tools/_vendor_operator_playbooks.py``) stamps
-    ``vendor_playbook_aggregate_gpu_pct`` as the summed share across the
-    whole group, so a split load (7% + 5%) is not silently dropped as
-    below-threshold on either member despite the pair clearing it together.
-    Prefer the aggregate over the per-row ``gpu_pct`` whenever it is present
-    and larger (never smaller, so this can only let a grouped row through a
-    gate it would otherwise fail -- it cannot cause an ungrouped row to fail
-    one it would otherwise pass).
-
-    Namespaced field name deliberately: bare ``aggregate_gpu_pct`` is
-    already an existing task_group-level concept (see
-    ``tracelens_skill_runner.py`` / ``_bypass_report.py``); reading that name
-    off a candidate row here would silently change every ordinary group's
-    gating behavior if a future change ever flattened it onto candidate rows
-    (PR #1191 review finding #7).
-
-    Returns:
-        float: The larger of ``gpu_pct`` and
-            ``vendor_playbook_aggregate_gpu_pct`` (when the latter is
-            present and parses); ``gpu_pct`` alone otherwise.
-    """
-    try:
-        row_pct = float(candidate.get("gpu_pct") or 0.0)
-    except (TypeError, ValueError):
-        row_pct = 0.0
-    aggregate = candidate.get("vendor_playbook_aggregate_gpu_pct")
-    if aggregate is None:
-        return row_pct
-    try:
-        return max(row_pct, float(aggregate))
-    except (TypeError, ValueError):
-        return row_pct
-
-
-def effective_hot_kernel_min_gpu_pct(candidate: dict, min_gpu_pct: float) -> float:
-    """Threshold ``candidate`` must clear, honoring a playbook's own floor.
-
-    A vendor playbook may pin a ``min_gpu_pct_floor`` (see
-    ``vendor_operator_playbooks.json``) so its group is never dispatched
-    below that share even when ``HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT`` is
-    loosened for other purposes (e.g. a smaller test fixture) -- the
-    playbook's own forge-loop session is a heavier investment than an
-    ordinary per-file rewrite attempt, so the floor can only raise the
-    effective threshold, never lower it below the caller's own ``min_gpu_pct``.
-
-    Returns:
-        float: The larger of ``min_gpu_pct`` and the candidate's stamped
-            ``vendor_playbook_min_gpu_pct_floor`` (when present and parses);
-            ``min_gpu_pct`` alone otherwise.
-    """
-    floor = candidate.get("vendor_playbook_min_gpu_pct_floor")
-    if floor is None:
-        return min_gpu_pct
-    try:
-        return max(min_gpu_pct, float(floor))
-    except (TypeError, ValueError):
-        return min_gpu_pct
-
-
-# Only the top-N reusable hot kernels are enforced.
-_DEFAULT_HOT_KERNEL_GATE_TOP_N = 5
 
 # Per-action audit history cap (``<action>_attempts`` lists keep most recent N).
 _DEFAULT_ATTEMPTS_HISTORY = 20

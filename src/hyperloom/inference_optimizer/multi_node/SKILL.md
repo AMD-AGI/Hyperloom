@@ -277,15 +277,14 @@ in-flight launch (`MULTI_NODE_RESTART_RESUME_RUNNING=1`, default).
 
 ## Interpreting a low-gain result
 
-* Small validated gain with `kernel_opt_outcome="skip"` /
-  `totals.attempted=0` (`reports/kernel_optimization_summary.json`) → the step
-  was host-bound; TraceLens suppresses kernel candidates on GPU-idle steps, so
-  only structural levers (graph capture + batching) apply.
+* Small validated gain with a rewrite-controller
+  `status="no_opportunity"` / `patch_count=0` → inspect the controller summary
+  and TraceLens evidence. A host-bound, GPU-idle step usually favors structural
+  levers such as graph capture and batching over source-level kernel rewrites.
 * Under PD + DP-attention the per-rank steady-state batch can be bs1 even at
   high client concurrency; if every `tracelens/trace_split/` file is
-  `bs1_conc1`, the trace is host-bound and kernel_opt skips by design. Kernel
-  candidates need a compute-bound profile (steady-state bsN, N>1); multi-node
-  auto-re-profiles with DP-attention stripped (disable with
+  `bs1_conc1`, the trace is host-bound and offers little compute-bound rewrite
+  evidence. Multi-node auto-re-profiles with DP-attention stripped (disable with
   `HYPERLOOM_PROFILE_AUTO_COMPUTE_BOUND=0`).
 
 ## Disaggregated + DP-attention prerequisites

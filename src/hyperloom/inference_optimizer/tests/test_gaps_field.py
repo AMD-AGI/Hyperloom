@@ -282,17 +282,17 @@ async def test_refresh_gaps_dedupes_recurring_failures(coord):
     s = coord.shared_state
     s.baseline_tput = 700.0
     s.last_action_failures = [
-        {"action": "backends", "error_class": "no_report", "ts": "2025-01-01T00:00:00+00:00"},
-        {"action": "backends", "error_class": "no_report", "ts": "2025-01-01T00:01:00+00:00"},
-        {"action": "kernel_opt", "error_class": "compile_failure", "ts": "2025-01-01T00:02:00+00:00"},
+        {"action": "explore", "error_class": "no_report", "ts": "2025-01-01T00:00:00+00:00"},
+        {"action": "explore", "error_class": "no_report", "ts": "2025-01-01T00:01:00+00:00"},
+        {"action": "integrate", "error_class": "compile_failure", "ts": "2025-01-01T00:02:00+00:00"},
     ]
     await coord._refresh_gaps(reason="explore_round")
     by_id = {g["canonical_id"]: g for g in s.gaps}
-    backends_gaps = [g for cid, g in by_id.items() if "#fail:backends:no_report" in cid]
-    kernel_gaps = [g for cid, g in by_id.items() if "#fail:kernel_opt:compile_failure" in cid]
-    assert len(backends_gaps) == 1
-    assert len(backends_gaps[0]["attempts"]) == 2
-    assert backends_gaps[0]["layer"] == "framework"
+    explore_gaps = [g for cid, g in by_id.items() if "#fail:explore:no_report" in cid]
+    kernel_gaps = [g for cid, g in by_id.items() if "#fail:integrate:compile_failure" in cid]
+    assert len(explore_gaps) == 1
+    assert len(explore_gaps[0]["attempts"]) == 2
+    assert explore_gaps[0]["layer"] == "framework"
     assert kernel_gaps and kernel_gaps[0]["layer"] == "kernel_agent"
 
 

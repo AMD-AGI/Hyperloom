@@ -191,50 +191,6 @@ def test_orchestration_prompt_has_no_scoreboard_block():
     assert "Phase-aware action selection" in prompt
 
 
-def test_kernel_opt_body_has_no_scoreboard_vocab():
-    """The kernel-pipeline body must NOT carry scoreboard vocab."""
-    from hyperloom.orchestrator.prompts.prompt_builder import (
-        _KERNEL_OPT_PIPELINE_BODY,
-    )
-
-    haystack = _KERNEL_OPT_PIPELINE_BODY.lower()
-    forbidden = (
-        "scoreboard",
-        "score_mult",
-        "legacy_priors",
-        "effective_score",
-        "eff_score",
-        "cooldown_until_tick",
-        "scoreboard surfaces",
-        "scoreboard decides",
-        "action scores top-12",
-    )
-    for needle in forbidden:
-        assert needle not in haystack, (
-            f"_KERNEL_OPT_PIPELINE_BODY still references retired token {needle!r} (KB_gaps/Dead-D §5.1)"
-        )
-
-
-def test_kernel_opt_body_references_v08_decision_signals():
-    """The body must surface the decision facts."""
-    from hyperloom.orchestrator.prompts.prompt_builder import (
-        _KERNEL_OPT_PIPELINE_BODY,
-    )
-
-    body = _KERNEL_OPT_PIPELINE_BODY
-    for signal in (
-        "state.gaps[]",
-        "last_action_failures",
-        "last_kernel_opt",
-        "KERNEL_AGENT plateau",
-        "rejected_kernel_ids",
-        "_DEFAULT_KERNEL_OPT_MAX_PARTIAL",
-    ):
-        assert signal in body, (
-            f"_KERNEL_OPT_PIPELINE_BODY missing v0.8 decision signal {signal!r} (KB_gaps/Dead-D §5.1)"
-        )
-
-
 def test_orchestration_md_has_no_score_view():
     """The ``orchestration.md`` fragment should be free of score-view directives."""
     from hyperloom.inference_optimizer.session.paths import asset_system_prompts_dir

@@ -18,7 +18,6 @@ from types import SimpleNamespace
 import pytest
 
 from hyperloom.orchestrator.kernel import attempt_summary as kas
-from hyperloom.orchestrator.state import kernel_decision_settings as kds
 
 
 def test_is_real_artifact_path_variants():
@@ -209,70 +208,6 @@ def test_classify_attempted_reads_task_terminal_integration():
     )
 
 
-def _eligible(gpu_pct: float) -> dict:
-    """A top-list entry that clears every gate except the GPU-share threshold."""
-    return {
-        "source_file": "f.py",
-        "reusable_native_kernel": True,
-        "recommended_backends": ["forge"],
-        "gpu_pct": gpu_pct,
-    }
-
-
-def test_unattempted_reason_order():
-    assert kas._unattempted_reason({}, min_gpu_pct=10.0)[0] == kas.UNATTEMPTED_NO_SOURCE
-    assert (
-        kas._unattempted_reason(
-            {"source_file": "f.py", "reusable_native_kernel": False},
-            min_gpu_pct=10.0,
-        )[0]
-        == kas.UNATTEMPTED_NOT_REUSABLE
-    )
-    assert (
-        kas._unattempted_reason(
-            {"source_file": "f.py", "reusable_native_kernel": True, "recommended_backends": []},
-            min_gpu_pct=10.0,
-        )[0]
-        == kas.UNATTEMPTED_NO_BACKEND
-    )
-
-
-def test_unattempted_below_threshold_names_the_gate_that_fired():
-    code, detail = kas._unattempted_reason(_eligible(6.57), min_gpu_pct=10.0)
-    assert code == kas.UNATTEMPTED_BELOW_MIN_GPU_PCT
-    assert "6.57" in detail and "10" in detail
-    assert "HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT" in detail
-
-
-def test_unattempted_above_threshold_reports_a_missing_dispatch():
-    """A kernel that cleared every gate must not be blamed on a cutoff.
-
-    An 8h run reported five of these as ``below_priority_cutoff`` while the real
-    cause was a Coordinator that could not emit the kernel REQUEST at all.
-    """
-    code, detail = kas._unattempted_reason(_eligible(37.2), min_gpu_pct=10.0)
-    assert code == kas.UNATTEMPTED_NEVER_DISPATCHED
-    assert "REQUEST" in detail
-
-
-def test_unattempted_threshold_is_the_dispatcher_s_own(monkeypatch):
-    """The report must read the same env var the batch filter reads."""
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "5.0")
-    assert kds.resolve_hot_kernel_min_gpu_pct() == 5.0
-    assert (
-        kas._unattempted_reason(
-            _eligible(6.57),
-            min_gpu_pct=kds.resolve_hot_kernel_min_gpu_pct(),
-        )[0]
-        == kas.UNATTEMPTED_NEVER_DISPATCHED
-    )
-
-
-def test_unattempted_threshold_falls_back_on_an_unparseable_override(monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "not-a-number")
-    assert kds.resolve_hot_kernel_min_gpu_pct() == kds._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
-
-
 def test_load_backend_ladder_skipped_flag(tmp_path: Path):
     payload = {
         "attempts": [
@@ -292,30 +227,6 @@ def test_load_backend_ladder_skipped_flag(tmp_path: Path):
     assert reason == "" and len(ladder) == 2
     assert ladder[0]["skipped"] is True
     assert "skipped" not in ladder[1]
-
-
-def test_kernel_outcome_class_mapping():
-    assert kas._kernel_outcome_class(kas.CATEGORY_INTEGRATED, []) == kas.OUTCOME_SUCCESS
-    assert kas._kernel_outcome_class(kas.CATEGORY_KEEP_PENDING, []) == kas.OUTCOME_SUCCESS
-
-    assert kas._kernel_outcome_class(kas.CATEGORY_UNATTEMPTED, []) == kas.OUTCOME_SKIP
-
-    all_skipped = [{"skipped": True, "error_class": kas.ERROR_CLASS_AGENT_ERROR}]
-    assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, all_skipped) == kas.OUTCOME_SKIP
-
-    mixed = [
-        {"skipped": True},
-        {"error_class": kas.ERROR_CLASS_COMPILE_FAILED},
-    ]
-    assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, mixed) == kas.OUTCOME_FAIL
-
-    to = [{"error_class": kas.ERROR_CLASS_TIMEOUT}]
-    assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, to) == kas.OUTCOME_TIMEOUT
-
-    fail = [{"error_class": kas.ERROR_CLASS_AGENT_ERROR}]
-    assert kas._kernel_outcome_class(kas.CATEGORY_ATTEMPTED_REJECTED, fail) == kas.OUTCOME_FAIL
-
-    assert kas._kernel_outcome_class(kas.CATEGORY_IN_FLIGHT, []) == kas.OUTCOME_FAIL
 
 
 # CATEGORY_DISPATCH — single source of truth consumed by the summary builder
@@ -772,103 +683,3 @@ def test_render_collective_attempt_row_error_and_backend_status(
         assert "error_class" not in backend_row
     else:
         assert backend_row["error_class"] == expected_error_class
-
-
-def test_build_summary_collective_filtering_and_kernel_deduplication(
-    tmp_path: Path,
-):
-    """Build Collective rows while filtering skips and suppressing dense duplicates."""
-    state = SimpleNamespace(
-        session_id="session-1",
-        model_name="model-1",
-        last_trace_analyze={
-            "kernel_roofline_top15": [
-                {
-                    "kernel_id": "shared-kernel",
-                    "name": "shared_collective",
-                    "source_file": "kernels/shared.py",
-                    "reusable_native_kernel": True,
-                    "recommended_backends": ["forge"],
-                    "gpu_pct": 50.0,
-                },
-                {
-                    "kernel_id": "status-skipped-kernel",
-                    "name": "status_skipped",
-                    "gpu_pct": 25.0,
-                },
-                {
-                    "kernel_id": "decision-skipped-kernel",
-                    "name": "decision_skipped",
-                    "gpu_pct": 10.0,
-                },
-            ],
-            "top15": [{"kernel_id": "wrong-key-kernel"}],
-        },
-        kernel_opt_task_attempts={
-            "shared-kernel": {
-                "kernel_id": "shared-kernel",
-                "last_decision": "KEEP",
-                "attempts": 1,
-            },
-        },
-        collective_attempts=[
-            {
-                "collective_attempt_id": "collective-integrated",
-                "kernel_id": "shared-kernel",
-                "integration_decision": "KEEP",
-                "integration_status": "complete",
-                "status": "succeeded",
-            },
-            {
-                "collective_attempt_id": "collective-reverted",
-                "kernel_id": "shared-kernel",
-                "integration_decision": "REVERT",
-                "integration_status": "complete",
-                "status": "succeeded",
-            },
-            {
-                "collective_attempt_id": "collective-status-skipped",
-                "kernel_id": "status-skipped-kernel",
-                "status": "skipped",
-                "decision": "KEEP",
-            },
-            {
-                "collective_attempt_id": "collective-decision-skipped",
-                "kernel_id": "decision-skipped-kernel",
-                "status": "succeeded",
-                "decision": "SKIP",
-            },
-        ],
-        rejected_kernel_ids=[],
-        optimization_stack=[],
-        last_kernel_opt={},
-    )
-
-    summary = kas.build_kernel_optimization_summary(state, tmp_path)
-
-    assert summary["totals"] == {
-        "top_candidates": 3,
-        "attempted": 2,
-        "integrated": 1,
-        "keep_pending": 0,
-        "rejected": 1,
-        "in_flight": 0,
-        "unattempted": 2,
-    }
-    assert summary["rejection_breakdown"]["other"] == 1
-    assert summary["kernel_opt_outcome"] == kas.OUTCOME_SUCCESS
-    assert "wrong-key-kernel" not in {row["kernel_id"] for row in summary["by_kernel"]}
-
-    collective_rows = [row for row in summary["by_kernel"] if row.get("lane") == "collective"]
-    assert [row["collective_attempt_id"] for row in collective_rows] == [
-        "collective-integrated",
-        "collective-reverted",
-    ]
-    assert all(row["kernel_id"] == "shared-kernel" for row in collective_rows)
-    assert sum(row["kernel_id"] == "shared-kernel" for row in summary["by_kernel"]) == 2
-
-    unattempted_rows = [row for row in summary["by_kernel"] if row["category"] == kas.CATEGORY_UNATTEMPTED]
-    assert {row["kernel_id"] for row in unattempted_rows} == {
-        "status-skipped-kernel",
-        "decision-skipped-kernel",
-    }

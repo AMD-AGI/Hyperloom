@@ -183,11 +183,8 @@ def match_vendor_operator_playbook(candidate: dict[str, Any]) -> dict[str, Any] 
 def resolve_kernel_anchor_path(playbook: dict[str, Any]) -> str:
     """Return a stand-in ``source_file`` path for a vendor-playbook candidate.
 
-    A vendor-playbook candidate has no rewritable device source, but
-    downstream tooling (``kernel_optimization.py``'s CLI, in particular)
-    still gates on a non-empty, path-shaped ``source_file`` before it will
-    dispatch to a backend at all. Point that field at the task bundle's
-    ``kernel_anchor`` file instead of leaving it empty.
+    A vendor-playbook candidate has no rewritable device source. Point its
+    ``source_file`` at the task bundle's stable ``kernel_anchor``.
 
     The bundle now ships inside the installed ``kernelforge`` package, so the
     resolved path is a real file on this host rather than a placeholder. The

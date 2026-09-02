@@ -83,10 +83,8 @@ _CRASH_TIMESTAMP_CAP: int = 200
 
 # Compatibility aliases kept on shared_state for existing callers/tests.
 _DEFAULT_ATTEMPTS_HISTORY = _kernel_decision_settings._DEFAULT_ATTEMPTS_HISTORY
-_DEFAULT_HOT_KERNEL_MIN_GPU_PCT = _kernel_decision_settings._DEFAULT_HOT_KERNEL_MIN_GPU_PCT
 _MAX_INTEGRATE_FAULT_ATTEMPTS = _kernel_decision_settings._MAX_INTEGRATE_FAULT_ATTEMPTS
 _now_iso = _kernel_decision_settings._now_iso
-resolve_hot_kernel_min_gpu_pct = _kernel_decision_settings.resolve_hot_kernel_min_gpu_pct
 resolve_kernel_opt_max_failures = _kernel_decision_settings.resolve_kernel_opt_max_failures
 
 
@@ -629,11 +627,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # Snapshot of the last GEAK e2e run (result.json + final_launch.sh /
     # bench_e2e.sh handles the SWEEP phase reuses).
     geak_result: dict[str, Any] = field(default_factory=dict)
-    # Whether KERNEL entry dispatches the source-level kernel_opt batch itself
-    # (``--no-auto-kernel-opt`` opts out). Independent of GEMM tuning, and it
-    # only governs the entry's own dispatch: orchestration can still request
-    # kernel_opt explicitly, and the fusion/collective lanes have their own gates.
-    auto_kernel_opt_enabled: bool = True
+    # Terminal result of the phase-level KernelForge rewrite controller.
+    kernel_rewrite_controller_result: dict[str, Any] = field(default_factory=dict)
     # SWEEP-phase post-sweep concurrency sweep; opt out via ``--no-enable-conc-sweep``.
     conc_sweep_enabled: bool = True
     # Which benchmark workload this session measures: "agentx" (agentic trace
@@ -1103,13 +1098,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # phase. A timestamp rather than a flag, so one left behind by a process that
     # died mid-step goes stale instead of muting the guard for the next run.
     kernel_inline_step_seen_unix: float = 0.0
-
-    # Which macro cycle's automatic kernel entry pass has run to completion. A
-    # kernel the entry-batch selector examined and left out has no ledger row, so
-    # it stays "untried" forever and the phase-pending predicate never goes
-    # quiet. Stored as the cycle rather than a bare flag so the next cycle
-    # retires it without anyone having to clear it.
-    kernel_auto_pass_cycle: int | None = None
 
     # Search-space expansion ledger surfaced in the Orchestration prompt.
     discovered_flags: dict[str, Any] = field(default_factory=dict)
@@ -2746,19 +2734,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
 
         return _m.kernel_opt_attempts_count(self)
 
-    # Reusable hot kernels still owing a kernel_opt attempt. Advisory only — no PolicyGate rule denies
-    # ``report`` on this basis; feeds kernel_work_pending, the report annotations and the prompt guidance.
-    def untried_hot_reusable_kernels(
-        self,
-        *,
-        min_gpu_pct: float | None = None,
-        top_n: int | None = None,
-    ) -> list[str]:
-        """Forwarding shim — implementation in :mod:`._kernel_decisions`."""
-        from ..kernel import _kernel_decisions as _m
-
-        return _m.untried_hot_reusable_kernels(self, min_gpu_pct=min_gpu_pct, top_n=top_n)
-
     # Per-action audit (kernel parity for non-kernel actions)
     @staticmethod
     def _truncate_excerpt(value: Any, *, limit: int = 1200) -> str | None:
@@ -3389,12 +3364,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         """Build ``(summary, kernel_roofline, reusable_ids, withheld)`` from the
         top-N hot kernels, merging the optional per-kernel rocprof roofline sidecar.
 
-        ``reusable_ids`` drives the kernel_opt target list offered to the LLM,
-        so collective candidates are withheld: they are owned by the dedicated
-        collective lane and ``_batch_kernel_candidates`` drops them, which would
-        otherwise dispatch an empty batch for every id picked from this list.
-        ``withheld`` names them, because a kernel that no lane will touch must
-        not simply vanish from the target list.
+        ``reusable_ids`` is retained as trace-analysis evidence. Collective
+        candidates are withheld because they are owned by the dedicated
+        collective lane; ``withheld`` keeps that ownership visible.
         """
         from ..kernel import _kernel_decisions as _m
 
@@ -3452,15 +3424,8 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
                 "candidate_source": entry.get("candidate_source") or "",
                 "recommended_backends": entry.get("recommended_backends") or [],
                 "recommended_actions": entry.get("recommended_actions") or [],
-                # Vendor-playbook fields (mori's dispatch+combine is the first
-                # case -- see _vendor_operator_playbooks.py). Without these,
-                # effective_hot_kernel_gpu_pct()/effective_hot_kernel_min_gpu_pct()
-                # silently degrade to bare gpu_pct/min_gpu_pct for every caller
-                # that gates off this projection (untried_hot_reusable_kernels()
-                # is the only one -- _batch_kernel_candidates() reads full
-                # candidate dicts off candidates_path instead), losing both the
-                # aggregate gate's intended pass (PR #1191 review finding #3)
-                # and the playbook's own min_gpu_pct_floor enforcement.
+                # Vendor-playbook fields remain part of the trace evidence the
+                # rewrite controller and reporting surfaces consume.
                 "patch_strategy": entry.get("patch_strategy") or "",
                 "vendor_playbook_group_id": entry.get("vendor_playbook_group_id") or "",
                 "vendor_playbook_aggregate_gpu_pct": entry.get("vendor_playbook_aggregate_gpu_pct"),

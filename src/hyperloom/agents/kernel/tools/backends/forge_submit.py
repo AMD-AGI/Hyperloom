@@ -3920,18 +3920,9 @@ def _wait_for_vendor_playbook_result(lock_dir: Path, deadline_unix: float, timeo
 def _stage_vendor_playbook_artifact_for_reuse(cached: dict, output_dir: Path) -> None:
     """Duplicate a reused vendor-playbook result's artifact under ``output_dir``.
 
-    ``kernel_optimization.py``'s ``invoke_backend()`` unconditionally resets
-    ``result["output_dir"]`` to *this* attempt's own directory right after
-    ``submit()`` returns (``result["output_dir"] = str(out_dir)``), and
-    ``_candidate_artifact_paths()`` looks under both ``cli_workspace`` and
-    ``output_dir`` for an ``optimized_versions/`` directory. A cache-hit
-    result's ``cli_workspace``/``output_dir`` fields describe the *winner's*
-    directory (correct at the time they were written to ``result.json``,
-    before that later overwrite mutates the in-memory dict this call
-    returns), so the winner's directory alone would silently stop being
-    reachable for a reused sibling once the caller clobbers ``output_dir``.
-    Physically copying the file(s) here makes the reused result
-    self-contained regardless of that overwrite.
+    A cache-hit result points at the winner's directory. Physically copying the
+    files here makes each reused sibling result self-contained for downstream
+    artifact consumers.
     """
     src_opt = None
     for key in ("cli_workspace", "output_dir"):
@@ -4306,12 +4297,7 @@ def _run_claimed_vendor_playbook(
         "" if loop_outcome.error is None else str(loop_outcome.error),
         time.time() - started,
     )
-    # kernel_optimization.py's build_verification() only recognizes a forge
-    # attempt's measured speedup when total_improved/mean_case_speedup are
-    # BOTH present on the result dict it reads (see run_attempt's field
-    # copy); leaving any of these out silently downgrades a real KEEP-worthy
-    # improvement to PARTIAL ("no measurable speedup found"), even though
-    # forge-loop itself committed and validated a faster config.
+    # Keep the complete structured timing outcome available to every caller.
     result.update(
         {
             # NOTE: cli_workspace intentionally equals output_dir here (the

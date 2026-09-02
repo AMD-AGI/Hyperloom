@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
 
 from hyperloom.common.coerce import to_unix
 from hyperloom.inference_optimizer.cli import bootstrap as cb
@@ -34,7 +33,6 @@ def _args(**overrides):
         osl=1024,
         max_model_len=13312,
         no_kernel=False,
-        auto_kernel_opt=True,
         target_summary="",
         target_gain=60.0,
         target_tput=None,
@@ -217,7 +215,7 @@ def test_seed_shared_state_exact_forge_records_native_kernel_optimizer(
 
     state = cb._seed_shared_state(tmp_path, _args(), session_id="session-forge")
 
-    assert state.kernel_optimizer == "native"
+    assert state.kernel_optimizer == "forge"
 
 
 def test_seed_shared_state_loads_model_arch_from_session_dir(
@@ -345,52 +343,6 @@ def test_resolve_model_display_name_helper() -> None:
 
     empty_override = SimpleNamespace(model="/models/Foo", model_display_name="")
     assert cb.resolve_model_display_name(empty_override) == "Foo"
-
-
-def test_auto_kernel_opt_defaults_to_dispatching() -> None:
-    """Neither spelling passed: the entry dispatches on its own."""
-    unset = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=None)
-    assert cb.resolve_auto_kernel_opt(unset) is True
-    # A caller that predates both dests must not crash on the lookup.
-    assert cb.resolve_auto_kernel_opt(SimpleNamespace()) is True
-
-
-def test_auto_kernel_opt_honours_the_current_flag() -> None:
-    """``--no-auto-kernel-opt`` alone opts out."""
-    opted_out = SimpleNamespace(auto_kernel_opt=False, continue_kernel_after_gemm=None)
-    assert cb.resolve_auto_kernel_opt(opted_out) is False
-
-
-def test_deprecated_gemm_spelling_still_opts_out_and_warns() -> None:
-    """The old flag keeps working, because dropping it would silently opt back in."""
-    legacy = SimpleNamespace(auto_kernel_opt=None, continue_kernel_after_gemm=False)
-    with pytest.warns(DeprecationWarning, match="--auto-kernel-opt"):
-        assert cb.resolve_auto_kernel_opt(legacy) is False
-
-
-def test_current_flag_outranks_the_deprecated_spelling() -> None:
-    """Both passed and disagreeing: the current flag decides."""
-    both = SimpleNamespace(auto_kernel_opt=True, continue_kernel_after_gemm=False)
-    with pytest.warns(DeprecationWarning):
-        assert cb.resolve_auto_kernel_opt(both) is True
-
-
-def test_seed_shared_state_records_the_auto_kernel_opt_optout(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    """The resolved switch lands on the field the KERNEL phase reads."""
-    monkeypatch.setattr(cb, "_load_model_config_tags", lambda _p: {})
-    monkeypatch.setattr(cb, "_load_model_arch", lambda *_a, **_k: {})
-    monkeypatch.setattr(cb, "_resolve_reference_recipe", lambda _args: ("", {}, "", ""))
-
-    state = cb._seed_shared_state(
-        tmp_path,
-        _args(auto_kernel_opt=False),
-        session_id="session-auto-kernel-opt",
-    )
-
-    assert state.auto_kernel_opt_enabled is False
 
 
 def test_target_summary_and_conc_sweep_parser(caplog) -> None:

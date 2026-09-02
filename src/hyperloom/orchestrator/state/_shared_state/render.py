@@ -147,10 +147,6 @@ class _RenderMixin:
             f"(validated_at_len={self.cumulative_gain_validated_stack_len})"
             f"{unvalidated_tag}{resume_revalidation_tag}{geak_pending_tag}",
         ]
-        # Surface reusable hot kernels still owing a kernel_opt attempt.
-        untried_hot = self.untried_hot_reusable_kernels()
-        if untried_hot:
-            lines.append(f"untried_hot_kernels: {', '.join(untried_hot)}")
         lines.append(budget_line)
         return "\n".join(lines)
 

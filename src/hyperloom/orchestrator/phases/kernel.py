@@ -895,6 +895,37 @@ class KernelPhase(PhaseHandler):
         runner_timeout = int(max(0.0, kill_budget - margin))
         return runner_timeout, kill_timeout, True
 
+    def _kernel_rewrite_controller_timeouts(self) -> tuple[int, int]:
+        """Return the Controller soft budget and Hyperloom hard timeout."""
+        candidates: list[float] = []
+        session_remaining = _phase_state.session_remaining_seconds(self.shared_state)
+        if session_remaining is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(session_remaining) - self.shared_state.closing_reserve_sec(),
+                )
+            )
+        phase_remaining = _phase_state.phase_budget_remaining_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_remaining is not None:
+            candidates.append(max(0.0, float(phase_remaining)))
+        phase_cap = _phase_state.phase_cap_seconds(
+            self.shared_state,
+            budget_pct=self._phase_budget_pct,
+        )
+        if phase_cap is not None:
+            candidates.append(
+                max(
+                    0.0,
+                    float(phase_cap) - _phase_state.phase_cumulative_seconds(self.shared_state),
+                )
+            )
+        hard_timeout = int(min(candidates)) if candidates else 90 * 60
+        return max(0, hard_timeout - 30), max(0, hard_timeout)
+
     async def _run_geak_kernel_phase(self, *, from_phase: str) -> None:
         """Delegate the KERNEL_AGENT phase to GEAK (one whole-pipeline e2e run).
 
@@ -3954,24 +3985,18 @@ class KernelPhase(PhaseHandler):
         self._replace_latest_gemm_tuning_attempt(result)
 
     async def _finish_kernel_entry(self) -> None:
-        """Close out KERNEL entry on either route: re-profile, run the
-        independently gated stages, then dispatch whatever kernel_opt work the
-        candidate table already justifies.
-
-        The dispatch used to sit on the GEMM route alone, so skipping GEMM
-        tuning silently removed the phase's own kernel_opt as well. The two
-        settings are unrelated -- one tunes GEMM shape tables, the other
-        rewrites source-level kernels -- and nothing in the log connected them,
-        so a run could hold eight routable candidates, clear the dispatch floor,
-        and still reach SWEEP having optimized nothing, waiting on an
-        orchestration request that never came.
-
-        What the dispatch needs is untried routable candidates. That is what it
-        asks for, on both routes.
-        """
+        """Run gated kernel lanes, write the handoff, and delegate rewrite control."""
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
+        from hyperloom.inference_optimizer.session.session_paths import (
+            forge_handoff_dir,
+        )
+
+        handoff_dir = forge_handoff_dir(
+            self.session_dir,
+            int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+        )
         try:
             from ..kernel.forge_handoff import write_forge_handoff
 
@@ -3988,159 +4013,72 @@ class KernelPhase(PhaseHandler):
             log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
         except Exception:  # noqa: BLE001
             log.exception("KERNEL entry: Forge handoff generation failed")
-        if self._kernel_opt_work_remains():
-            await self._run_kernel_opt_entry_batch()
+        await self._run_kernel_rewrite_controller(handoff_dir)
+
+    async def _run_kernel_rewrite_controller(self, handoff_dir: Path) -> None:
+        """Run one Controller for this macro cycle without preselecting operators."""
+        from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
+        from hyperloom.inference_optimizer.session.session_paths import (
+            forge_cycle_dir,
+        )
+
+        from ..kernel.controller_submit import run_controller_subprocess
+        from .machine_state import (
+            ESCALATE_HINT_SKIP_TO_SWEEP,
+            KERNEL_HEARTBEAT_SEC,
+        )
+
+        cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
+        output_dir = forge_cycle_dir(self.session_dir, cycle)
+        controller_budget_sec, hard_timeout_sec = self._kernel_rewrite_controller_timeouts()
+        if controller_budget_sec <= 0 or hard_timeout_sec <= 0:
+            result = {
+                "status": "no_result",
+                "reason": "no KERNEL phase budget remains for the rewrite controller",
+                "patch_count": 0,
+                "task_count": 0,
+                "output_dir": str(output_dir),
+            }
         else:
-            self._record_kernel_opt_dispatch_skip(self._kernel_opt_dispatch_skip_reason())
 
-    def _kernel_opt_dispatch_skip_reason(self) -> str:
-        """Name why the phase is declining to dispatch kernel_opt itself.
-
-        Separates the three states :meth:`_kernel_opt_work_remains` collapses
-        into one ``False``: the feature is off, no candidate table was ever
-        produced, or the table's hot kernels have all been tried.
-
-        Reads the same field the gate reads. ``last_trace_analyze`` being a
-        non-empty dict does not mean it carries a table -- a trace_analyze that
-        ran and failed leaves ``{"status": "failed", ...}`` behind -- and
-        calling that "the kernels were all tried" states the very conclusion
-        this breadcrumb exists to prevent.
-
-        Returns:
-            str: One of ``auto_kernel_opt_disabled`` /
-                ``no_candidate_table`` / ``no_untried_hot_kernels``.
-        """
-        state = self.shared_state
-        if not bool(getattr(state, "auto_kernel_opt_enabled", True)):
-            return KERNEL_OPT_SKIP_DISABLED
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        hot = cached.get("hot_kernels_top15") or cached.get("hot_kernels") or []
-        if not isinstance(hot, list) or not hot:
-            return KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE
-        return KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS
-
-    def _record_kernel_opt_dispatch_skip(self, reason: str) -> None:
-        """Record why KERNEL entry skipped the whole kernel_opt batch.
-
-        The summary's unattempted buckets each mean "the candidate table listed
-        this kernel and nobody tried it", so a run whose table never
-        materialised counts zero in every bucket and reads as "nothing here was
-        worth optimising". Both skip paths return before ``run_optimization``
-        is called, so ``record_kernel_opt`` -- this field's other writer --
-        never runs to say otherwise.
-
-        The evidence fields carry the state the decision was made on, so the
-        report answers "why was the table empty" without a state.json dig.
-
-        Args:
-            reason: One of the ``KERNEL_OPT_SKIP_*`` reason codes.
-        """
-        state = self.shared_state
-        cached = getattr(state, "last_trace_analyze", None)
-        cached = cached if isinstance(cached, dict) else {}
-        try:
-            streak = int(getattr(state, "roofline_failure_streak", 0) or 0)
-        except (TypeError, ValueError):
-            streak = 0
-        state.last_kernel_opt_dispatch_skip = {
-            "reason": reason,
-            "candidates_path": str(cached.get("candidates_path") or ""),
-            "trace_analyze_empty": not cached,
-            "profile_trace": str(getattr(state, "last_profile_trace", "") or ""),
-            "profile_status": str(getattr(state, "last_profile_status", "") or ""),
-            "roofline_failure_streak": streak,
-            "ts": datetime.now(timezone.utc).isoformat(),
-        }
-        log.info(
-            "KERNEL entry: no kernel_opt dispatch (reason=%s, trace_analyze_empty=%s, roofline_failure_streak=%d)",
-            reason,
-            not cached,
-            streak,
-        )
-        # Persisted here rather than left to whichever later turn happens to
-        # save: the run this breadcrumb is for is the one that spends hours in
-        # the phase and is then killed or wedged, which is exactly when an
-        # unsaved breadcrumb is lost and the report falls back to reading as
-        # "nothing worth optimising".
-        try:
-            state.save(self.session_dir)
-        except Exception:  # noqa: BLE001 — a breadcrumb must never fail the phase
-            log.debug("KERNEL entry: saving the dispatch-skip breadcrumb failed", exc_info=True)
-
-    def _kernel_opt_work_remains(self) -> bool:
-        """Whether KERNEL entry should dispatch source-level kernel_opt itself.
-
-        The switch scopes to this dispatch alone. ``kernel_opt`` stays in the
-        phase's allowed actions either way, so orchestration can still request
-        it; opting out only means the phase stops asking on its own.
-
-        Returns:
-            bool: ``True`` when the ``auto_kernel_opt_enabled`` flag is set and
-                there are untried hot reusable kernels remaining.
-        """
-        if not bool(getattr(self.shared_state, "auto_kernel_opt_enabled", True)):
-            return False
-        return bool(self.shared_state.untried_hot_reusable_kernels())
-
-    async def _run_kernel_opt_entry_batch(self) -> None:
-        """Dispatch the source-level kernel optimization batch at KERNEL entry.
-
-        No ``kernel_id`` is named, so the handler's own filter decides the set:
-        every candidate that clears the dispatch floor and has retries left goes
-        in one batch. Naming one here would put the phase back in the business
-        of picking, which is the part that stalls when nobody picks.
-        """
-        cached = self.shared_state.last_trace_analyze or {}
-        candidates_path = str(cached.get("candidates_path") or "")
-        if not candidates_path:
-            log.info("KERNEL entry: skip kernel_opt; no candidates_path")
-            self._record_kernel_opt_dispatch_skip(KERNEL_OPT_SKIP_NO_CANDIDATES_PATH)
-            return
-        log.info(
-            "KERNEL entry: dispatching the source-level kernel_opt batch",
-        )
-        # A dispatch retires any earlier skip breadcrumb. ``record_kernel_opt``
-        # clears it too, but only for a result naming a ``kernel_id``, and this
-        # batch names none by design -- so an earlier "never dispatched" would
-        # outlive the dispatch and the report would assert it as fact for a
-        # round whose candidates were merely filtered by the handler's floor.
-        self.shared_state.last_kernel_opt_dispatch_skip = {}
-        try:
-            from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
-
-            from ..kernel.request_handlers import run_optimization_handler
-            from .machine_state import KERNEL_HEARTBEAT_SEC
-
-            # This step awaits a subprocess that can run for an hour. Without a
-            # re-stamped progress marker the idle guard cannot tell a working
-            # phase from a stuck one, and the phase is unobservable throughout.
             def _stamp(when: float) -> None:
                 self.shared_state.kernel_inline_step_seen_unix = when
 
-            async with inline_step_heartbeat(stamp=_stamp, interval_sec=KERNEL_HEARTBEAT_SEC):
-                result = await run_optimization_handler(
-                    {
-                        "candidates_path": candidates_path,
-                        "session_id": self.session_dir.name,
-                    },
-                    session_dir=self.session_dir,
-                    record_partial=self._record_kernel_opt_partial,
-                )
-        except Exception as exc:  # noqa: BLE001
-            log.exception("KERNEL entry run_optimization after GEMM failed")
-            result = {
-                "status": "failed",
-                "error_class": exc.__class__.__name__,
-                "error": repr(exc),
-            }
-        finally:
-            # Recorded even for an empty selection or a failure: the phase-exit
-            # predicate hangs on kernels nobody claimed, and a pass that ran is
-            # the only thing that can answer for them.
-            from .machine_state import mark_kernel_auto_pass_complete
+            try:
+                async with inline_step_heartbeat(
+                    stamp=_stamp,
+                    interval_sec=KERNEL_HEARTBEAT_SEC,
+                ):
+                    result = await asyncio.to_thread(
+                        run_controller_subprocess,
+                        handoff_dir=handoff_dir,
+                        output_dir=output_dir,
+                        budget_minutes=controller_budget_sec / 60.0,
+                        hard_timeout_sec=hard_timeout_sec,
+                    )
+            except Exception as error:  # noqa: BLE001
+                log.exception("KERNEL entry: kernel rewrite controller failed")
+                result = {
+                    "status": "failed",
+                    "reason": f"controller invocation failed: {error}",
+                    "patch_count": 0,
+                    "task_count": 0,
+                    "output_dir": str(output_dir),
+                }
 
-            mark_kernel_auto_pass_complete(self.shared_state)
+        result = {
+            **result,
+            "macro_cycle": cycle,
+            "handoff_dir": str(handoff_dir),
+            "budget_minutes": controller_budget_sec / 60.0,
+            "hard_timeout_sec": hard_timeout_sec,
+        }
+        self.shared_state.kernel_optimizer = "forge"
+        self.shared_state.kernel_rewrite_controller_result = result
+        self.shared_state.set_pending_escalate_hint(
+            ESCALATE_HINT_SKIP_TO_SWEEP,
+        )
+        self.shared_state.save(self.session_dir)
         await self.bus.append_and_seq(
             Message.new(
                 "kernel_agent",
@@ -4148,17 +4086,14 @@ class KernelPhase(PhaseHandler):
                 "response",
                 {
                     "in_reply_to": "",
-                    "kind": "run_optimization_done",
-                    "status": result.get("status", "ok") if isinstance(result, dict) else "failed",
+                    "kind": "kernel_rewrite_controller_done",
+                    "status": result.get("status", "failed"),
                     "result": result,
                     "source": "kernel_entry_auto",
                 },
                 priority=1,
             )
         )
-        if isinstance(result, dict) and not result.get("batch_mode"):
-            self.shared_state.record_kernel_opt(result)
-        self.shared_state.save(self.session_dir)
 
     def _fusion_required_before_kernel_opt(self) -> bool:
         """Gate the forge-fusion step in KERNEL entry.

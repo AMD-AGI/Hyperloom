@@ -19,20 +19,6 @@ def test_completeness_annotations_empty():
     assert rp._format_completeness_annotations({}) == []
 
 
-def test_completeness_annotations_full():
-    out = rp._format_completeness_annotations(
-        {
-            "has_unvalidated_keeps": True,
-            "untried_hot_reusable_kernels": ["k1"],
-            "pending_keep_kernels": ["k2"],
-        }
-    )
-    body = "\n".join(out)
-    assert "unvalidated" in body
-    assert "k1" in body
-    assert "k2" in body
-
-
 def test_degraded_mode_section():
     out = rp._format_degraded_mode_section(
         {

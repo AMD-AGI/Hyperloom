@@ -4791,11 +4791,8 @@ def _stamp_candidate_metadata(item: dict[str, Any], op_cat_map: dict[str, str] |
         item["patch_strategy"] = "vendor_playbook"
         item["vendor_operator_playbook"] = playbook
         item["vendor_playbook_role"] = playbook.get("role", "")
-        # kernel_optimization.py's CLI gates on a non-empty, path-shaped
-        # source_file before it will dispatch to any backend; a vendor
-        # playbook candidate has no rewritable device source, so point that
-        # field at the task bundle's anchor file instead of leaving it
-        # empty (which would otherwise fall through as "missing_native_source").
+        # A vendor playbook candidate has no rewritable device source, so point
+        # source_file at the task bundle's stable anchor.
         #
         # The anchor also overrides whatever the grep tier guessed, and does so
         # whether or not the guess was right. A registry match is a curated
@@ -5257,11 +5254,7 @@ def _apply_vendor_operator_playbook_grouping(top: list[dict[str, Any]]) -> None:
             member["vendor_playbook_aggregate_gpu_pct"] = aggregate
             member["vendor_playbook_group_kernel_ids"] = list(member_ids)
             if floor is not None:
-                # Consumed by effective_hot_kernel_min_gpu_pct() in the
-                # orchestrator's hot-kernel gate (_kernel_decisions.py /
-                # request_handlers.py) so a heavier forge-loop-session
-                # playbook isn't dispatched below its own floor even when
-                # HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT is loosened elsewhere.
+                # Preserve the playbook's campaign floor in the handoff.
                 member["vendor_playbook_min_gpu_pct_floor"] = floor
 
 

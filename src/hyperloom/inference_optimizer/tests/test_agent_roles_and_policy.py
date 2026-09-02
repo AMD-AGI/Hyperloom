@@ -108,7 +108,6 @@ def test_robustness_scheduling_police():
 def test_kernel_owned_actions_include_gemm_tuning():
     assert KERNEL_AGENT_OWNED_ACTIONS == frozenset(
         {
-            "kernel_opt",
             "integrate",
             "gemm_tuning",
         }
@@ -171,23 +170,11 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
-def test_gate_orchestration_delegate_kernel_owned_rejected(gate):
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.DELEGATE,
-                payload={"action_name": "kernel_opt"},
-            ),
-        )
-    assert exc.value.rule == "kernel_owned_by_kernel_agent"
-
-
 def test_gate_orchestration_propose_kernel_owned_rejected():
     """Kernel-owned actions are REQUEST-only on both channels: propose_action is denied like delegate."""
     state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
     gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    for action in ("kernel_opt", "gemm_tuning", "integrate"):
+    for action in ("gemm_tuning", "integrate"):
         with pytest.raises(PolicyDenied) as exc:
             gate.validate_intent(
                 "orchestration",
@@ -220,22 +207,6 @@ def test_gate_refuses_a_model_requested_gemm_tuning_run(monkeypatch, precision, 
             Intent(
                 type=IntentType.REQUEST,
                 payload={"target_agent": "kernel_agent", "kind": "run_gemm_tuning", "params": {}},
-            ),
-        )
-    assert exc.value.rule == "phase_incompatible"
-
-
-def test_gate_refuses_a_model_requested_kernel_optimization(monkeypatch):
-    """Same reason as gemm tuning: the Coordinator owns the dispatch."""
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    state = SharedState(phase="KERNEL_AGENT", precision="bf16", framework="sglang")
-    gate = PolicyGate(role_registry=default_role_registry(), shared_state=state, strict_phase=True)
-    with pytest.raises(PolicyDenied) as exc:
-        gate.validate_intent(
-            "orchestration",
-            Intent(
-                type=IntentType.REQUEST,
-                payload={"target_agent": "kernel_agent", "kind": "run_optimization", "params": {}},
             ),
         )
     assert exc.value.rule == "phase_incompatible"

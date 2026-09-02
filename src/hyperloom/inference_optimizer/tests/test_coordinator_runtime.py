@@ -2484,7 +2484,6 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_target_reached_routes_through_sweep_then_close(session_dir):
     """A met objective goes to SWEEP first, then closes on the target.
 

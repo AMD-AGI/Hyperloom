@@ -30,7 +30,6 @@ from tracelens_analysis import (  # noqa: E402
     source_type_for,
 )
 import apply_kernel_patch  # noqa: E402
-import kernel_optimization  # noqa: E402
 
 FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "flydsl_naive_gemm.py"
 FIXTURE_DIR = str(FIXTURE_PATH.parent) + "/"
@@ -93,12 +92,6 @@ class TestFlyDSLNaiveGemmEndToEnd(unittest.TestCase):
         self.assertEqual(params["FLYDSL_TARGET_ARCH"], "gfx950")
         self.assertTrue(params["FLYDSL_USES_SMEM"])
         self.assertTrue(params["FLYDSL_USES_BUFFER_LOAD"])
-
-    def test_geak_kernel_type_mapping(self) -> None:
-        self.assertEqual(
-            kernel_optimization._GEAK_KERNEL_TYPE["flydsl"],
-            "flydsl",
-        )
 
 
 class TestFlyDSLReachesTheApplyGate(unittest.TestCase):

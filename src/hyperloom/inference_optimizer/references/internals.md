@@ -70,11 +70,11 @@ Rules that look reasonable but break the current flow:
 - **No `framework first` ordering rule** in `prompts/orchestration.md` — the
   two arms share one phase and rotate on their own plateau judgement, so a
   fixed priority between them conflicts with the specialist-informed flow.
-- **`kernel_opt` sequencing** is no longer gated by an explore-minimum check
-  (the `explore_attempts_minimum_before_kernel_opt` rule was retired in
-  loosen_plan P1_06). KERNEL_AGENT phase may propose `kernel_opt` directly; the
-  `trace_analyze → run_optimization` data dependency (P2_11 handler-level check)
-  and the reusable `kernel_id` validation still keep the inputs valid.
+- **Source-level kernel rewrite is phase-owned.** On the Forge route, KERNEL_AGENT
+  launches one KernelForge rewrite controller with the complete trace/source
+  handoff. The controller selects operators and owns scheduling, retries, and
+  rewrite concurrency; Orchestration does not select reusable IDs or dispatch
+  per-operator work.
 
 ## SGLang Parameter Search
 
@@ -120,8 +120,10 @@ The optimizer should:
    `## Roofline Comparison` section.
 3. Run `trace_analyze` once per trace/config and cache the result in
    `last_trace_analyze`.
-4. Pick only `reusable_native_kernel_ids` for `run_optimization`.
-5. Require compile + correctness + microbench/E2E evidence before KEEP.
+4. Hand the complete analysis and source context to the phase-level kernel
+   backend; the Forge controller chooses and schedules operators itself.
+5. Integrate every published patch through compile, correctness, and E2E
+   validation before KEEP.
 6. Use `explore_search` to test parameters incrementally and remember rejected
    candidates across resume. The ledger keys entries by **content fingerprint**
    (a sha1 hash of sorted `extra_server_args` + sorted `extra_envs`), so

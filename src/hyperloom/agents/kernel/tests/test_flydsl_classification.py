@@ -275,26 +275,6 @@ class TestKernelCategoryDerivation(unittest.TestCase):
         )
 
 
-class TestGEAKKernelTypeMapping(unittest.TestCase):
-    """``source_type=flydsl`` must map to GEAK's ``kernel_type="flydsl"``."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
-
-        self.mod = kernel_optimization
-
-    def test_flydsl_source_type_maps_to_flydsl(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["flydsl"], "flydsl")
-
-    def test_existing_mappings_preserved(self) -> None:
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["triton"], "triton")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["hip_cpp"], "hip")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["python"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["vendor_binary"], "other")
-        self.assertEqual(self.mod._GEAK_KERNEL_TYPE["unknown"], "other")
-
-
 class TestFlyDSLKernelParams(unittest.TestCase):
     """FlyDSL-specific metadata enrichment for GEAK prompt construction."""
 
@@ -419,29 +399,6 @@ class TestCandidateEnvForwarding(unittest.TestCase):
         self.assertFalse(self.h._candidate_env_allowed("PATH"))
 
 
-class TestOrchestratorReusableRootsInSync(unittest.TestCase):
-    """Orchestrator-side allowlist must stay in sync with the classifier."""
-
-    def setUp(self) -> None:
-        repo_root = Path(__file__).resolve().parents[5]
-        sys.path.insert(0, str(repo_root))
-        from hyperloom.orchestrator.kernel import request_handlers as kernel_request_handlers
-
-        self.handlers = kernel_request_handlers
-
-    def test_orchestrator_allowlist_has_flydsl(self) -> None:
-        roots = self.handlers._reusable_source_roots()
-        self.assertIn("/sgl-workspace/flydsl/", roots)
-
-    def test_orchestrator_honours_dsl2_root_env(self) -> None:
-        extra = "/path/user-local/FlyDSL"
-        with mock.patch.dict(os.environ, {"DSL2_ROOT": extra}):
-            self.assertIn(
-                "/path/user-local/flydsl/",
-                self.handlers._reusable_source_roots(),
-            )
-
-
 class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
     """pseudo_op names must be classified as FlyDSL by name prefix without on-disk source."""
 
@@ -469,38 +426,6 @@ class TestFlyDSLPseudoOpIdentification(unittest.TestCase):
             source_type_for("pseudo_op::moe_fused_aiter", ""),
             "unknown",
         )
-
-
-class TestPseudoOpSourceFallback(unittest.TestCase):
-    """GEAK source resolution must fall back off pseudo-op frame labels (prefer real readable source)."""
-
-    def setUp(self) -> None:
-        sys.path.insert(0, str(ROOT / "tools"))
-        import kernel_optimization
-
-        self.mod = kernel_optimization
-
-    def test_frame_label_candidate_falls_back_to_real_explicit(self) -> None:
-        real = str(Path(__file__).resolve())  # any guaranteed-real file
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file(real, cand, "k001")
-        self.assertEqual(out, real)
-
-    def test_real_candidate_still_wins_over_llm(self) -> None:
-        real = str(Path(__file__).resolve())
-        cand = {"source_file": real}
-        out = self.mod._resolve_source_file("/tmp/some_other.py", cand, "k002")
-        self.assertEqual(out, real)
-
-    def test_empty_candidate_uses_llm(self) -> None:
-        out = self.mod._resolve_source_file("/tmp/x.py", {"source_file": ""}, "k003")
-        self.assertEqual(out, "/tmp/x.py")
-
-    def test_both_unresolvable_returns_candidate(self) -> None:
-        """No real file anywhere -> keep candidate (existing behaviour)."""
-        cand = {"source_file": "aiter/fused_moe.py(986): fused_moe_2stages"}
-        out = self.mod._resolve_source_file("/no/such/file.py", cand, "k004")
-        self.assertEqual(out, "aiter/fused_moe.py(986): fused_moe_2stages")
 
 
 if __name__ == "__main__":

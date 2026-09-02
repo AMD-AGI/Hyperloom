@@ -267,38 +267,19 @@ other, not to wind down. KERNEL plateaus remain advisory only.
 <!-- phase: KERNEL_AGENT -->
 ### KERNEL — phase goal
 
-Integrate KEEP'd kernel patches. Coordinator exits to SWEEP on REVERT streak
-or budget cap. Roofline is auto-managed.
-
-**Drain pending KEEPs first.** When `has_keep_pending_integrate=true`,
-`integrate` each `pending_keep_kernels` entry before emitting any
-`skip_to_*` hint or switching to explore-side work. Un-integrated KEEPs
-are not yet in `optimization_stack` and not e2e validated; benchmarking
-while any KEEP is pending silently omits its contribution.
-
-**No actionable kernel lever → `skip_to_sweep`, do not stall.** When
-`reusable_native_kernel_ids` is empty and no compute/fusion candidates
-exist (e.g. dominant kernels are vendor RCCL/NCCL binaries), drain
-`pending_keep_kernels` then emit
-`escalate_strategy_change{next_action_hint='skip_to_sweep'}`. Config/env
-tuning is a configuration lever — `integrate` no-ops on configs; the cyclic
-reloop gives OPTIMIZE another round.
+Observe the Coordinator-owned GEMM, fusion, collective, and KernelForge rewrite
+controller lanes. The rewrite controller independently investigates the
+available trace/source evidence, selects operators, and returns patch artifacts;
+Orchestration does not choose or dispatch source-level kernels.
 
 **Source-level failures can go straight to a specialist.** A variant
 crash uncovered during KERNEL_AGENT does not need to wait for a reloop;
 `delegate{action_name='specialist', params={scope='freeform', ...}}`
 is allowed here and uses the same GPU pool / lane isolation as in OPTIMIZE.
 
-**Empty `reusable_native_kernel_ids` does NOT by itself mean the collective
-lever is gone.** Vendor RCCL/NCCL kernels are opaque binaries and stay
-unoptimizable, but a source-resolvable custom collective (e.g. a framework's
-own fused all-reduce) is withheld from `reusable_native_kernel_ids` on
-purpose: it belongs to the Coordinator's collective lane, not to
-`kernel_opt`. So an empty list can coexist with a collective campaign that
-is queued or already running. Before you call the phase exhausted, check
-whether a `run_collective_done` / `collective_integrate_done` response is
-still outstanding for this KERNEL entry; skipping while one is in flight
-throws away its gain.
+Before treating KERNEL as finished, check whether a `run_collective_done`,
+`collective_integrate_done`, or `kernel_rewrite_controller_done` response is
+still outstanding.
 
 **Never fabricate a measurement.** Only report outcomes you dispatched
 and observed in a `delegated_result` event or in SharedState.
@@ -386,22 +367,20 @@ on the next tick.
 <!-- phase: KERNEL_AGENT -->
 ### Kernel request kinds
 
-* `kind` MUST be EXACTLY one of `trace_analyze` / `run_gemm_tuning` /
-  `run_optimization` / `integrate` / `apply_patch` — the kinds you may
-  request. `kernel_opt` is NOT a recognised kind — never
-  use it as a request kind. Use `trace_analyze` for candidate analysis.
-  `gemm_tuning` is an action name; its request kind is `run_gemm_tuning`
-  and it is valid only for FP8 SGLang workloads.
-* `run_fusion` and `run_collective` are NOT yours to request: they are
-  Coordinator-owned deterministic lanes, dispatched at KERNEL entry once
-  their own gate passes. PolicyGate REJECTS either kind from you
-  (`request_kind`) because a direct request bypasses that gate, the lane's
-  SharedState accounting and its integrate step. You only OBSERVE them — outcomes land in your inbox as
+* Source-level kernel rewrite has no request kind. The phase-level KernelForge
+  Controller owns operator discovery and dispatch; only observe its result.
+* `run_gemm_tuning`, `run_fusion`, and `run_collective` have programmatic
+  handlers but are
+  NOT yours to request: they are Coordinator-owned deterministic lanes,
+  dispatched at KERNEL entry once their own gate passes. PolicyGate REJECTS
+  either kind from you (`phase_incompatible`) because a direct request
+  bypasses that gate, the lane's SharedState accounting and its integrate
+  step. You only OBSERVE them — outcomes land in your inbox as
   `run_fusion_done` / `run_collective_done`, followed by
   `fusion_integrate_done` / `collective_integrate_done` once a KEEP is
   integrated, at which point `optimization_stack` carries a
   `fusion:forge_fusion` / `collective:forge_collective` entry. Read them as
-  progress; to act on a source-level kernel yourself, propose `kernel_opt`.
+  progress.
 * Never invent a `trace_input` path. ONLY use `SharedState.last_profile_trace`
   verbatim.
 
@@ -421,17 +400,12 @@ On a SEED turn the SharedState dump carries the full TraceLens
 Analysis (snapshot #N, gain = X.XX%) ===` bookends; a delta turn does not
 repeat it, so work from the newest one already in this conversation (the
 `Context` note names any pull tool this session has).
-Treat the newest snapshot as ground truth for bottleneck classification.
+Treat the newest snapshot as evidence rather than an infallible source of truth.
 Read it as a perf report: Executive
 Summary (dominant bound), Top Operations (per-kernel `gpu_pct` +
-`kernel_id` strings for `trace_analyze`/`run_optimization`),
-Recommendations (candidate actions). Priority markers `🔴`/`🟡`/`🟢`
-map to actions — **follow them**:
+`kernel_id` strings), Recommendations (candidate actions). The KernelForge
+Controller receives the full report and independently validates its conclusions.
 
-* **`## Compute Kernel Optimizations` / `## Kernel Fusion Opportunities`**
-  → `kernel_opt` (KERNEL_AGENT phase, `🔴` before `🟡`; fusion rows want a
-  fused rewrite). On FP8 SGLang run `run_gemm_tuning` first when
-  `last_gemm_tuning` is empty.
 * **`## System-Level Optimizations`** → `explore` variants; the text
   names the flag (e.g. "graph capture stalls" → `--cuda-graph-max-bs`).
   Prefer a `provenance='specialist:<domain>'` variant targeting it.

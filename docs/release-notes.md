@@ -165,11 +165,6 @@ This release contains various fixes highlighted below.
   `INFERENCE_OPTIMIZER_RESCUE_PATHS=/workspace/` in your launcher, or update the
   script to write to `$RESULT_DIR`.
 
-- **`kernel_optimization.py` drops `--test-command` and `--test-harness-path`** *(breaking change — callers that pass these flags will now fail at startup)*:
-  The unittest-harness contract they fed had no reachable caller. Remove both
-  flags from any script or tool that invokes `kernel_optimization.py` directly;
-  argparse will exit with an error if either is still present.
-
 ### 1.0.0b1 highlights
 
 - **Remote Recipe KB Store cutover**: Remote Recipe reads and CLOSE writes use

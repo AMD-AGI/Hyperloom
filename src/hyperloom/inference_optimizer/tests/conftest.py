@@ -25,14 +25,6 @@ def _isolate_session_layout_env(monkeypatch, tmp_path_factory):
     monkeypatch.delenv("INFERENCE_OPTIMIZER_NODES", raising=False)
 
 
-@pytest.fixture(autouse=True)
-def _clear_kernel_request_handler_caches():
-    """Clear ``lru_cache`` state on env-bound helpers between tests."""
-    from hyperloom.orchestrator.kernel import request_handlers as krh
-
-    krh._default_kernel_batch_parallel.cache_clear()
-
-
 def _bootstrap_kernel_agent_env() -> None:
     """Point HYPERLOOM_KERNEL_AGENT_ROOT at the in-repo kernel-agent checkout."""
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):

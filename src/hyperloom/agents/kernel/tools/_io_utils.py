@@ -3,8 +3,8 @@
 
 """Shared stdlib-only helpers for the standalone kernel-agent tools.
 
-Deduplicates run-status / log / JSON helpers and small source heuristics
-copied across kernel_optimization.py, tracelens_analysis.py, and siblings.
+Deduplicates run-status, log, JSON, and source helpers used by the standalone
+kernel tools.
 """
 
 from __future__ import annotations

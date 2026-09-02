@@ -478,10 +478,15 @@ def research_hints_json(session_dir: Path) -> Path:
     return Path(session_dir) / "research_hints.json"
 
 
+def forge_cycle_dir(session_dir: Path, macro_cycle: int) -> Path:
+    """Return the output root for one Forge macro cycle."""
+    cycle = max(0, int(macro_cycle))
+    return Path(session_dir) / "kernel-agent" / "forge" / f"cycle-{cycle}"
+
+
 def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
     """Return the handoff directory for one Forge macro cycle."""
-    cycle = max(0, int(macro_cycle))
-    return Path(session_dir) / "kernel-agent" / "forge" / f"cycle-{cycle}" / "handoff"
+    return forge_cycle_dir(session_dir, macro_cycle) / "handoff"
 
 
 def competitor_target_json(session_dir: Path) -> Path:
@@ -901,6 +906,7 @@ __all__ = [
     "manifest_path",
     "patches_dir",
     "failure_evidence_path",
+    "forge_cycle_dir",
     "forge_handoff_dir",
     "enablement_dir",
     "enablement_round_dir",

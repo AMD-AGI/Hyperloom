@@ -13,7 +13,7 @@ ships this script to each GPU pod over SSH and runs ONE subcommand per pod:
 
 Each subcommand emits a single JSON document on stdout (stderr is logs only),
 matching the per-pod shape the Ray scripts produce so the sandbox-side callers
-(apply_kernel_patch.py / kernel_optimization.py) parse it identically. The
+(including apply_kernel_patch.py) parse it identically. The
 sandbox fans this out across pods; this script never enumerates nodes.
 
 Stdlib only — runs in the Infera pod, which has no kernel-agent / ray checkout.

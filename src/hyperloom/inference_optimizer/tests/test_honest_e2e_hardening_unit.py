@@ -216,24 +216,6 @@ def _needs_review_result() -> dict:
     }
 
 
-def test_rank_needs_review_keeps_micro_speedup() -> None:
-    keep, micro = krh._kernel_result_rank(_needs_review_result())
-    assert keep == 0
-    assert micro == 1.5
-
-
-def test_rank_keep_beats_needs_review() -> None:
-    keep_result = _needs_review_result()
-    keep_result["proposal"]["decision"] = "KEEP"
-    keep_result["verification"]["micro_speedup"] = 1.1
-    assert krh._kernel_result_rank(keep_result) > krh._kernel_result_rank(_needs_review_result())
-
-
-def test_rank_invalid_result_is_zero() -> None:
-    assert krh._kernel_result_rank(None) == (0, 0.0)
-
-
-# -- C2a op-fanout de-dup in _batch_kernel_candidates ---------------------
 def _write_candidates(tmp_path: Path) -> str:
     """Two ungrouped reusable rows sharing one source_file (op-fanout)."""
     data = {
@@ -258,33 +240,6 @@ def _write_candidates(tmp_path: Path) -> str:
     return str(p)
 
 
-def test_opfanout_off_keeps_both_rows(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")
-    monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
-    sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
-    assert sorted(c["kernel_id"] for c in sel) == ["k1", "k2"]
-
-
-def test_opfanout_on_collapses_and_sums(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HL_KERNEL_OPFANOUT_DEDUP", "1")
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
-    sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
-    assert len(sel) == 1
-    rep = sel[0]
-    assert rep["kernel_id"] == "k1"  # highest-gpu_pct representative
-    assert rep["gpu_pct"] == 9.0  # summed fanned share
-    assert set(rep["opfanout_collapsed_ids"]) == {"k1", "k2"}
-
-
-def test_opfanout_on_via_umbrella(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.delenv("HL_KERNEL_OPFANOUT_DEDUP", raising=False)
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "1.0")
-    sel = krh._batch_kernel_candidates({"candidates_path": _write_candidates(tmp_path)})
-    assert len(sel) == 1
-
-
 # -- high-impact infra-retry cap (the dominant root-cause fix) -------------
 def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
     """An infra non-finish record (no verdict, status failed) at max_failures."""
@@ -295,49 +250,3 @@ def _infra_entry(failure_count: int, gpu_pct: float) -> dict:
         "rejected_reason": "",
         "last_gpu_pct": gpu_pct,
     }
-
-
-def test_infra_retry_off_retires_at_max_failures(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "0")
-    monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
-    # failure_count == max_failures => legacy retires (cap collapses to default 1).
-    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)
-    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
-
-
-def test_infra_retry_on_widens_for_high_impact(monkeypatch) -> None:
-    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
-    monkeypatch.delenv("HL_INFRA_RETRY_MIN_GPU_PCT", raising=False)
-    monkeypatch.delenv("HL_INFRA_RETRY_MAX", raising=False)
-    # 26.7%-GPU kernel that infra-failed twice still gets attempts up to infra_max (4).
-    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 26.7), max_failures=2)
-    assert cap == 4
-
-
-def test_infra_retry_on_via_umbrella(monkeypatch) -> None:
-    monkeypatch.setenv("HL_HONEST_E2E", "1")
-    monkeypatch.delenv("HL_INFRA_RETRY_HIGH_IMPACT", raising=False)
-    assert krh._kernel_dispatch_attempt_cap(_infra_entry(2, 8.0), max_failures=2) == 4
-
-
-def test_infra_retry_low_impact_not_widened(monkeypatch) -> None:
-    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
-    # 1%-GPU kernel below the 5% threshold: not widened, retires as legacy.
-    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(2, 1.0), max_failures=2)
-    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
-
-
-def test_infra_retry_does_not_touch_revert(monkeypatch) -> None:
-    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
-    # A real REVERT (has a verdict) is NOT a retryable infra non-finish — unchanged.
-    entry = _infra_entry(2, 26.7)
-    entry["last_decision"] = "REVERT"
-    cap = krh._kernel_dispatch_attempt_cap(entry, max_failures=2)
-    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
-
-
-def test_infra_retry_exhausted_at_infra_max(monkeypatch) -> None:
-    monkeypatch.setenv("HL_INFRA_RETRY_HIGH_IMPACT", "1")
-    # Once failure_count reaches infra_max, even a high-impact kernel retires.
-    cap = krh._kernel_dispatch_attempt_cap(_infra_entry(4, 26.7), max_failures=2)
-    assert cap == krh._DEFAULT_KERNEL_OPT_DISPATCH_ATTEMPTS
