@@ -16,7 +16,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.codex_session import (
-    CODEX_EXTERNAL_SANDBOX_ENV,
     CODEX_SANDBOX_MODE_ENV,
     DEFAULT_CODEX_SANDBOX_MODE,
 )
@@ -41,7 +40,6 @@ _FUSION_PROVIDER_ENV_KEYS = (
     "FORGE_CLAUDE_MODEL",
     "FORGE_CODEX_MODEL",
     CODEX_SANDBOX_MODE_ENV,
-    CODEX_EXTERNAL_SANDBOX_ENV,
 )
 _OPENAI_ONLY_ENV = {
     "OPENAI_BASE_URL": "https://gateway.invalid/Unified/v1",
@@ -956,10 +954,9 @@ class TestForgeGemmHelperCoverage:
             == DEFAULT_CODEX_SANDBOX_MODE
         )
 
-    def test_resolve_forge_fusion_codex_sandbox_accepts_confirmed_bypass(self, monkeypatch):
+    def test_resolve_forge_fusion_codex_sandbox_accepts_bypass(self, monkeypatch):
         _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
         monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-        monkeypatch.setenv(CODEX_EXTERNAL_SANDBOX_ENV, "1")
 
         assert (
             krh._resolve_forge_fusion_sandbox_mode(
@@ -967,6 +964,18 @@ class TestForgeGemmHelperCoverage:
                 agent_backend="codex",
             )
             == "bypass"
+        )
+
+    def test_resolve_forge_fusion_ignores_retired_external_sandbox_env(self, monkeypatch):
+        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
+        monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+
+        assert (
+            krh._resolve_forge_fusion_sandbox_mode(
+                {},
+                agent_backend="codex",
+            )
+            == DEFAULT_CODEX_SANDBOX_MODE
         )
 
     def test_resolve_forge_fusion_claude_sandbox_uses_audit_default_or_override(self, monkeypatch):
@@ -1132,40 +1141,6 @@ class TestForgeGemmHelperCoverage:
 
         assert result["status"] == "failed"
         assert result["error_class"] == "llm_provider_unconfigured"
-        assert result["decision"] == "REVERT"
-        assert result["kept"] is False
-
-    @pytest.mark.asyncio
-    async def test_run_forge_fusion_rejects_unconfirmed_codex_bypass_before_subprocess(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        trace = tmp_path / "decode.trace.json.gz"
-        trace.write_text("{}", encoding="utf-8")
-        SharedState(
-            framework="sglang",
-            model_path="/models/zaya",
-            last_profile_trace=str(trace),
-        ).save(tmp_path)
-        _pin_fusion_provider_env(monkeypatch, _OPENAI_ONLY_ENV)
-        monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-        monkeypatch.delenv(CODEX_EXTERNAL_SANDBOX_ENV, raising=False)
-        monkeypatch.setattr(krh, "_forge_fusion_available", lambda: True)
-
-        async def _should_not_run(*_args, **_kwargs):
-            raise AssertionError("forge-fusion must not run with unconfirmed bypass")
-
-        monkeypatch.setattr(krh, "_run_subprocess", _should_not_run)
-
-        result = await krh._run_forge_fusion(
-            {"agent_sandbox_mode": "bypass"},
-            session_dir=tmp_path,
-        )
-
-        assert result["status"] == "failed"
-        assert result["error_class"] == "invalid_agent_sandbox_mode"
-        assert CODEX_EXTERNAL_SANDBOX_ENV in result["error"]
         assert result["decision"] == "REVERT"
         assert result["kept"] is False
 

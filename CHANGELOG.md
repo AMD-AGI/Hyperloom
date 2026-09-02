@@ -7,6 +7,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Codex sandbox bypass uses a single env var.** Set
+  `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
+  enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
+  Hyperloom and KernelForge.
+
 - **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
   `${KB_STORE_URL}/pr-monitor/v1` and MCP
   `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,

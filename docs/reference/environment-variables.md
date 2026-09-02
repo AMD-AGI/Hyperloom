@@ -396,20 +396,17 @@ container prevents it from establishing the sandbox, `workspace-write` and
 `read-only` fail closed before the app-server starts. There is no automatic
 fallback to `bypass`.
 
-`bypass` is a deliberate double opt-in. Set both
-`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
-`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
-external container or sandbox already enforces the required isolation. It does
-not create that boundary. A confirmed bypass maps to Codex full access even
-when no writable roots are declared, because the external sandbox is
-authoritative. Under the contained modes, no writable roots remains
-`read-only`. Unknown modes and incomplete bypass configuration fail
+`bypass` is an explicit operator opt-in. Set
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external container or sandbox
+already enforces the required isolation. Hyperloom does not create that
+boundary. A confirmed bypass maps to Codex full access even when no writable
+roots are declared, because the external sandbox is authoritative. Under the
+contained modes, no writable roots remains `read-only`. Unknown modes fail
 immediately.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
-| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access when an external sandbox already enforces isolation. |
 
 ---
 

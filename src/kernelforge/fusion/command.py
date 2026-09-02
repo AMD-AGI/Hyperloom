@@ -92,7 +92,6 @@ EXIT_LLM_UNAVAILABLE = 3
 # setup/environment problem from a genuine "nothing to fuse" answer.
 EXIT_INFRASTRUCTURE_FAILURE = 4
 _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
-_EXTERNAL_SANDBOX_CONFIRMATION = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 
 
 def _credential_shape() -> tuple[bool, bool]:
@@ -147,10 +146,6 @@ def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
     if mode not in _AGENT_SANDBOX_MODES:
         choices = ", ".join(sorted(_AGENT_SANDBOX_MODES))
         raise click.UsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
-    if mode == "bypass" and os.environ.get(_EXTERNAL_SANDBOX_CONFIRMATION, "").strip() != "1":
-        raise click.UsageError(
-            f"--agent-sandbox-mode bypass requires {_EXTERNAL_SANDBOX_CONFIRMATION}=1 to confirm an external sandbox"
-        )
     return mode
 
 
@@ -523,7 +518,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     envvar="FORGE_AGENT_SANDBOX_MODE",
     default="workspace-write",
     show_default=True,
-    help="Agent runtime sandbox. Bypass additionally requires HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1.",
+    help="Agent runtime sandbox. Use bypass only when an external boundary already enforces isolation.",
 )
 @click.option(
     "--model",

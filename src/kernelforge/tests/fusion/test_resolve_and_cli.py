@@ -51,7 +51,6 @@ _AGENT_ENV = (
     "CODEX_MODEL",
     "FORGE_API_KEY",
     "FORGE_AGENT_SANDBOX_MODE",
-    "HYPERLOOM_CODEX_EXTERNAL_SANDBOX",
     "OPENAI_API_KEY",
     "OPENAI_BASE_URL",
     "SAFE_API_KEY",
@@ -177,23 +176,7 @@ def test_explicit_secure_sandbox_mode_is_wired(
     assert captured["sandbox_mode"] == mode
 
 
-def test_unconfirmed_bypass_is_rejected_before_backend_construction(
-    clean_agent_env,
-    monkeypatch,
-):
-    monkeypatch.setattr(
-        cli_module,
-        "resolve_agent_runtime",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("runtime must not be resolved before bypass confirmation")
-        ),
-    )
-    with pytest.raises(click.UsageError, match="HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1"):
-        _create_agent_backend("codex", "gpt-explicit", "bypass")
-
-
-def test_confirmed_bypass_is_wired(clean_agent_env, monkeypatch):
-    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+def test_bypass_is_wired(clean_agent_env, monkeypatch):
     captured = {}
 
     def fake_resolve(provider, **kwargs):
@@ -209,6 +192,32 @@ def test_confirmed_bypass_is_wired(clean_agent_env, monkeypatch):
 
     assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
     assert captured["sandbox_mode"] == "bypass"
+
+
+def test_bypass_is_wired_without_retired_external_sandbox_env(clean_agent_env, monkeypatch):
+    """forge-fuse bypass no longer gates on HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
+    captured = {}
+
+    def fake_resolve(provider, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(provider=provider, model=kwargs["model"], sandbox_mode="bypass")
+
+    backend = SimpleNamespace(
+        name="codex",
+        runtime=SimpleNamespace(provider="codex", model="gpt-explicit", sandbox_mode="bypass"),
+    )
+    monkeypatch.setattr(cli_module, "resolve_agent_runtime", fake_resolve)
+    monkeypatch.setattr(cli_module, "create_registered_backend", lambda runtime: backend)
+
+    assert _create_agent_backend("codex", "gpt-explicit", "bypass") is backend
+    assert captured["sandbox_mode"] == "bypass"
+
+
+def test_retired_external_sandbox_env_does_not_confirm_bypass(clean_agent_env, monkeypatch):
+    """Legacy HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1 must not substitute bypass mode."""
+    monkeypatch.setenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", "1")
+    assert cli_module._resolve_agent_sandbox_mode(None) == "workspace-write"
 
 
 def test_sandbox_mode_explicit_value_wins_over_environment(clean_agent_env, monkeypatch):
