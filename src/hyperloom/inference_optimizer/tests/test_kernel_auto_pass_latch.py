@@ -35,7 +35,7 @@ def test_an_untried_kernel_keeps_the_phase_open_before_a_pass_runs() -> None:
 
 
 def test_the_same_kernel_stops_holding_the_phase_once_a_pass_completed() -> None:
-    """A nominator that looked and passed leaves no ledger row to clear."""
+    """A candidate the entry selector skipped leaves no ledger row to clear."""
     state = _State(untried=["k001"])
     ms.mark_kernel_auto_pass_complete(state)
     assert ms.kernel_work_pending(state) is False

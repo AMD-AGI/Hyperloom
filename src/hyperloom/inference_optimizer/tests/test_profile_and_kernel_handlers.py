@@ -4229,9 +4229,9 @@ async def test_coordinator_refuses_a_model_issued_run_optimization(
     """The lane is Coordinator-owned, so the request never reaches its handler.
 
     It used to arrive from the model and have ``candidates_path`` back-filled
-    from state. Dispatch now happens once at phase entry from a nomination and a
-    lane budget, so a per-tick re-issue is refused rather than topped up: it
-    would spend time the allocation never granted."""
+    from state. Dispatch now happens once at phase entry from the entry batch
+    and its lane budget, so a per-tick re-issue is refused rather than topped
+    up: it would spend time the allocation never granted."""
     c = Coordinator(session_dir, backends=_backends_silent())
     # ``_sequence_denial_for_request`` needs baseline_tput > 0 and
     # last_profile_trace set; simulate the post-baseline + post-profile state.

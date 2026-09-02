@@ -46,7 +46,6 @@ from hyperloom.orchestrator.roles.agent_role import (
 )
 
 from ..actions.stop_attribution import stopped_by_the_run_class
-from .lane_budget import gemm_per_tuner_timeout_sec
 from .patch_lifecycle import cleanup_verdict as _cleanup_verdict
 from ..trace.llm_trace import LLMCallRecord, append_llm_call
 from ..trace.task_progress import heartbeat_while_output_flows
@@ -1690,6 +1689,25 @@ def _gemm_tuning_timeout_sec(payload: dict) -> int:
     except (TypeError, ValueError):
         value = _DEFAULT_GEMM_TUNING_TIMEOUT_SEC
     return max(60, value)
+
+
+_GEMM_PER_TUNER_TIMEOUT_SHARE = 0.5
+
+
+def _gemm_per_tuner_timeout_sec(global_timeout_sec: object) -> int:
+    """Cap one GEMM tuner strictly below its enclosing session budget."""
+    if isinstance(global_timeout_sec, bool) or not isinstance(global_timeout_sec, (int, float)):
+        return 0
+    total = int(global_timeout_sec)
+    if total <= 0:
+        return 0
+    return max(
+        1,
+        min(
+            total - 1,
+            int(total * _GEMM_PER_TUNER_TIMEOUT_SHARE),
+        ),
+    )
 
 
 def _forge_fusion_timeout_sec(payload: dict) -> int:
@@ -4201,7 +4219,7 @@ async def _run_forge_gemm_tuning(
         # min(per_tuner, remaining) an identity, so the first tuner could
         # consume the entire session and every later one was skipped for lack of
         # time. The per-target cap must stay strictly below the global one.
-        "timeout": gemm_per_tuner_timeout_sec(timeout),
+        "timeout": _gemm_per_tuner_timeout_sec(timeout),
         # Bounds the whole session across all tuners.
         "global_timeout": timeout,
         "skip_gpu_check": True,

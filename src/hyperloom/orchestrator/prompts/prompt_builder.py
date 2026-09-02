@@ -748,11 +748,11 @@ you want to wind down sooner.
 
 ### `kernel_opt` and `gemm_tuning` — not yours to propose
 
-Both lanes are dispatched by the Coordinator once at KERNEL entry, from a
-nomination and a lane budget. Proposing either is refused: a per-tick re-issue
-would spend time the allocation never granted and target kernels the nomination
-did not choose. Read `kernel_opt_task_attempts` and `pending_keep_kernels` to
-see what the lanes did; do not try to drive them.
+Both lanes are dispatched by the Coordinator once at KERNEL entry, from the
+entry batch and its lane budget. Proposing either is refused: a per-tick
+re-issue would spend time the allocation never granted and target kernels the
+entry-batch selector did not choose. Read `kernel_opt_task_attempts` and
+`pending_keep_kernels` to see what the lanes did; do not try to drive them.
 
 ### `integrate` — forced immediately after a KEEP
 
@@ -771,7 +771,8 @@ allowed action until the patch lands on `optimization_stack`:
   **Multi-KEEP queue:** `pending_keep_kernels` (sorted strongest-first)
   lists queued KEEPs; integrate `[0]` each tick. Do NOT propose `report`
   while it is non-empty. `untried_hot_reusable_kernels` may list kernels the
-  Coordinator's nomination pass declined; those are not yours to drain.
+  Coordinator's automatic entry pass left unselected; those are not yours to
+  drain.
 
 ### KERNEL TARGETING
 

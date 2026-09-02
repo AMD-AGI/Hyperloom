@@ -83,10 +83,10 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
         }
     ),
     # No kernel_opt or gemm_tuning: the Coordinator dispatches both once at phase
-    # entry, so an LLM re-issuing them per tick would bypass the lane budget and
-    # the nomination it is derived from. ``integrate`` stays -- draining the KEEP
-    # queue is still the model's job. This set is about what may be *proposed*;
-    # what counts as kernel-lane work in flight is ``KERNEL_LANE_TASK_KINDS``.
+    # entry, so an LLM re-issuing them per tick would bypass the entry batch and
+    # its lane budget. ``integrate`` stays -- draining the KEEP queue is still
+    # the model's job. This set is about what may be *proposed*; what counts as
+    # kernel-lane work in flight is ``KERNEL_LANE_TASK_KINDS``.
     PHASE_KERNEL_AGENT: frozenset(
         {
             "integrate",
@@ -1880,7 +1880,7 @@ def collective_integration_pending(state: Any) -> bool:
 
 
 def kernel_auto_pass_complete(state: Any) -> bool:
-    """Whether a nomination pass already ran to completion this macro cycle.
+    """Whether the automatic kernel entry pass completed this macro cycle.
 
     Stored with the cycle it belongs to rather than as a bare flag, so entering
     the next cycle retires it without anyone having to remember to clear it.
@@ -1901,10 +1901,10 @@ def kernel_auto_pass_complete(state: Any) -> bool:
 
 
 def mark_kernel_auto_pass_complete(state: Any) -> None:
-    """Record that this cycle's nomination pass finished, whatever it selected.
+    """Record that this cycle's automatic kernel entry pass finished.
 
-    Called for an empty selection too: "nobody wanted anything" is a completed
-    pass, and it is exactly the case the phase used to hang on.
+    Called for an empty entry batch too: an empty selection is a completed pass,
+    and it is exactly the case the phase used to hang on.
     """
     state.kernel_auto_pass_cycle = int(getattr(state, "macro_cycle", 0) or 0)
 
@@ -1951,11 +1951,11 @@ def kernel_work_pending(state: Any) -> bool:
         # Optional capability probe; treat a failure as 'not available'.
         pass
 
-    # A kernel a nominator looked at and passed over leaves no ledger row, is
-    # not rejected, and shares no source with anything integrated -- so it stays
-    # "untried" forever and this predicate never goes quiet. Once a pass has run
-    # to completion for the cycle, its verdict is what counts: a still-untried
-    # kernel means nobody wants it, not that work is outstanding.
+    # A kernel the entry-batch selector examined and left out has no ledger row,
+    # is not rejected, and shares no source with anything integrated -- so it
+    # stays "untried" forever and this predicate never goes quiet. Once the
+    # automatic pass has completed for the cycle, its selection is what counts:
+    # a still-untried kernel is outside this batch, not outstanding work.
     if not kernel_auto_pass_complete(state):
         try:
             untried_hot = getattr(state, "untried_hot_reusable_kernels", None)
