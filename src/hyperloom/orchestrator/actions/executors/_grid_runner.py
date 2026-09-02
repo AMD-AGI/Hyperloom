@@ -668,13 +668,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
-    # The rung's own CONC reached the three AgentX bounds above through
-    # ``variant_conc``, not through this merge: they have to move together or
-    # not at all. Raising only the client's grace would make a round wait inside
-    # a bound its own caps do not cover -- at session CONC=8 with the ladder at
-    # 256 the grace becomes 57600s against a 10800s cap, so the round is
-    # SIGKILLed while warmup is still draining, which is worse than leaving all
-    # three at the session value.
+    # The three AgentX bounds took this rung's CONC through ``variant_conc``
+    # above, not through this merge: raising the client's grace alone would make
+    # the round wait inside a cap that did not move with it.
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.
@@ -1400,7 +1396,7 @@ def variant_conc(variant: Any) -> int | None:
     return conc if conc > 0 else None
 
 
-def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: Any = None) -> int:
+def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
     """Raise a variant's hard cap to what an AgentX round actually needs.
 
     Every variant cap in the tree is sized for the synthetic 1024/1024 shape --

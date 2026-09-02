@@ -1523,22 +1523,16 @@ def _geak_sweep_measured_tput(res: dict[str, Any]) -> float | None:
 
     The GEAK-harness rebench sources its headline from this rather than from
     GEAK's self-reported speedup, so the leaderboard number is a same-harness
-    measurement. ``promotion_measurement`` is the fastest succeeded point;
-    ``points`` is walked only when the replay returned one without it.
+    measurement. ``promotion_measurement`` is already the fastest succeeded
+    point, so there is nothing left to scan when it carries no throughput.
     """
     if not isinstance(res, dict):
         return None
     best = res.get("promotion_measurement")
-    if isinstance(best, dict):
-        tput = best.get("output_throughput")
-        if isinstance(tput, (int, float)) and tput > 0:
-            return float(tput)
-    for entry in res.get("points") or []:
-        if isinstance(entry, dict) and entry.get("status") == "succeeded":
-            tput = entry.get("output_throughput")
-            if isinstance(tput, (int, float)) and tput > 0:
-                return float(tput)
-    return None
+    if not isinstance(best, dict):
+        return None
+    tput = best.get("output_throughput")
+    return float(tput) if isinstance(tput, (int, float)) and tput > 0 else None
 
 
 def _parse_server_arg_value(server_args: str, flag: str) -> str | None:

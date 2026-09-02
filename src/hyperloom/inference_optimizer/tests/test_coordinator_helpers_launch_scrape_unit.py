@@ -58,17 +58,6 @@ def test_geak_sweep_measured_tput_prefers_the_promotion_measurement() -> None:
     assert ch._geak_sweep_measured_tput(res) == 150.0
 
 
-def test_geak_sweep_measured_tput_falls_back_to_the_points() -> None:
-    res = {
-        "promotion_measurement": {},
-        "points": [
-            {"status": "failed", "output_throughput": 10.0},
-            {"status": "succeeded", "output_throughput": 77.5},
-        ],
-    }
-    assert ch._geak_sweep_measured_tput(res) == 77.5
-
-
 def test_geak_sweep_measured_tput_none_when_not_dict() -> None:
     assert ch._geak_sweep_measured_tput(None) is None
     assert ch._geak_sweep_measured_tput([]) is None  # type: ignore[arg-type]

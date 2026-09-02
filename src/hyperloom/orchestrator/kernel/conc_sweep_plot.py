@@ -8,19 +8,16 @@ produced by :mod:`conc_sweep`.  The function is **best-effort**: any import
 failure (missing ``matplotlib``) or data / IO error is logged and ``None``
 is returned so callers can skip the chart without aborting the report.
 
-The axis pair follows the payload's ``benchmark_mode``, because the two
-workloads are ranked on different quantities and plotting them on one pair
-would mean labelling one of them wrongly.
+Axes follow the payload's ``benchmark_mode``; the two workloads are ranked on
+different quantities.
 
-Agentic (``benchmark_mode="agentx"``) — the pair InferenceX ranks a
-submission by, read straight off the aiperf export:
-  x = intvty_p90              (p90 E2E normalized interactivity, tok/s/user)
-  y = total_token_throughput / tp   (tok/s per chip)
+Agentic — the pair InferenceX ranks a submission by:
+  x = intvty_p90                     (p90 interactivity, tok/s/user)
+  y = total_token_throughput / tp    (tok/s per chip)
 
-Synthetic — no aiperf export, so interactivity is approximated from the
-concurrency the ladder ran at:
-  x = output_throughput / conc  (tok/s per user)
-  y = output_throughput / tp    (tok/s per GPU)
+Synthetic — no aiperf export, so interactivity is approximated from concurrency:
+  x = output_throughput / conc       (tok/s per user)
+  y = output_throughput / tp         (tok/s per GPU)
 
 Rendered on a black background for a high-contrast dashboard look. Colours:
   baseline  — red        ``#FF4C4C``
@@ -36,20 +33,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-log = logging.getLogger(__name__)
+from hyperloom.common.perf_metric import is_agentx_mode
 
-AGENTX_MODE = "agentx"
+log = logging.getLogger(__name__)
 
 
 def _positive(value: Any) -> float | None:
     """Coerce to a strictly positive float, else None."""
-    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    try:
-        coerced = float(value)
-    except (TypeError, ValueError):
-        return None
-    return coerced if coerced > 0 else None
+    return float(value) if value > 0 else None
 
 
 def _agentx_xy(point: Mapping[str, Any], tp_eff: float) -> tuple[float, float] | None:
@@ -82,7 +75,7 @@ class _Axes:
 
 def _resolve_axes(benchmark_mode: Any, tp_eff: float) -> _Axes:
     """Pick the axis pair the payload's mode is ranked on."""
-    if str(benchmark_mode or "").strip().lower() == AGENTX_MODE:
+    if is_agentx_mode(benchmark_mode):
         return _Axes(
             point_xy=_agentx_xy,
             x_label="P90 Interactivity  (tok/s/user)",
@@ -155,23 +148,22 @@ def _load_payload(payload: dict[str, Any] | str | Path) -> dict[str, Any]:
 def _arm_series(
     points: list[dict[str, Any]],
     tp_eff: float,
-    axes: _Axes | None = None,
+    axes: _Axes,
 ) -> tuple[list[float], list[float]]:
-    """Extract (x, y) series for one arm, skipping failed/missing points.
+    """Extract one arm's (x, y) series on *axes*, sorted ascending by x.
 
     Args:
-        points: List of conc-sweep point dicts (``conc``, ``output_throughput``, ...).
+        points: Conc-sweep point dicts.
         tp_eff: Effective TP size for y-axis normalisation (must be >= 1).
-        axes: The pair to read; defaults to the synthetic one.
+        axes: The pair to read.
 
     Returns:
-        ``(xs, ys)`` for the points that carry the pair, sorted ascending by x.
-        A point missing either axis is dropped rather than plotted at zero.
+        ``(xs, ys)``. A point missing either axis is dropped rather than
+        plotted at zero.
     """
-    resolved = axes or _resolve_axes("", tp_eff)
     pairs: list[tuple[float, float]] = []
     for pt in points:
-        xy = resolved.point_xy(pt, tp_eff)
+        xy = axes.point_xy(pt, tp_eff)
         if xy is not None:
             pairs.append(xy)
     pairs.sort(key=lambda p: p[0])

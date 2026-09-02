@@ -1088,7 +1088,7 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
     _, declined = exit_normal_sweep(state)
     assert declined["sweep_was_skipped"] is True
-    assert declined["sweep_budget_exhausted_flag"] is False
+    assert declined["sweep_skip_budget_exhausted"] is False
 
     state.record_conc_sweep(
         {
@@ -1100,7 +1100,7 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     )
     _, spent = exit_normal_sweep(state)
     assert spent["sweep_was_skipped"] is True
-    assert spent["sweep_budget_exhausted_flag"] is True
+    assert spent["sweep_skip_budget_exhausted"] is True
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
@@ -1575,20 +1575,21 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
+    axes = conc_sweep_plot._resolve_axes("synthetic", 2.0)
     xs, ys = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},
-            {"conc": 2, "output_throughput": "300"},
+            {"conc": 2, "output_throughput": 300.0},
             {"conc": 0, "output_throughput": 1000.0},
             {"conc": 1, "output_throughput": None},
-            {"conc": "bad", "output_throughput": 10},
             {"conc": 8, "output_throughput": -1},
         ],
-        tp_eff=2.0,
+        2.0,
+        axes,
     )
     assert xs == [150.0, 200.0]
     assert ys == [150.0, 400.0]
-    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0) == ([], [])
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [])
 
     cx, cy = conc_sweep_plot._ceiling_series(
         {

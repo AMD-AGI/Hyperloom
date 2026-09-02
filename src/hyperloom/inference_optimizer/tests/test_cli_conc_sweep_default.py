@@ -108,31 +108,21 @@ def test_shared_state_seeds_its_ladder_rather_than_restating_one():
 class TestTheLadderFallsBackToTheWorkload:
     """An unset flag resolves against the workload the session actually runs."""
 
-    def _args(self, raw):
+    def _parse(self, raw, mode):
         from argparse import Namespace
 
-        return Namespace(conc_sweep_concs=raw)
-
-    def test_synthetic(self, monkeypatch: pytest.MonkeyPatch):
         from hyperloom.inference_optimizer.cli import bootstrap as cb
 
-        monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
-        assert cb._parse_conc_sweep_concs(self._args(None)) == _EXPECTED_CONCS
+        return cb._parse_conc_sweep_concs(Namespace(conc_sweep_concs=raw), mode)
 
-    def test_agentx(self, monkeypatch: pytest.MonkeyPatch):
-        from hyperloom.inference_optimizer.cli import bootstrap as cb
+    def test_synthetic(self):
+        assert self._parse(None, "synthetic") == _EXPECTED_CONCS
 
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        assert cb._parse_conc_sweep_concs(self._args(None)) == _EXPECTED_AGENTX_CONCS
+    def test_agentx(self):
+        assert self._parse(None, "agentx") == _EXPECTED_AGENTX_CONCS
 
-    def test_a_typed_ladder_outranks_both(self, monkeypatch: pytest.MonkeyPatch):
-        from hyperloom.inference_optimizer.cli import bootstrap as cb
+    def test_a_typed_ladder_outranks_both(self):
+        assert self._parse("4,8,16", "agentx") == [4, 8, 16]
 
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        assert cb._parse_conc_sweep_concs(self._args("4,8,16")) == [4, 8, 16]
-
-    def test_an_all_garbage_ladder_falls_back_to_the_workload(self, monkeypatch: pytest.MonkeyPatch):
-        from hyperloom.inference_optimizer.cli import bootstrap as cb
-
-        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
-        assert cb._parse_conc_sweep_concs(self._args("x,y")) == _EXPECTED_AGENTX_CONCS
+    def test_an_all_garbage_ladder_falls_back_to_the_workload(self):
+        assert self._parse("x,y", "agentx") == _EXPECTED_AGENTX_CONCS

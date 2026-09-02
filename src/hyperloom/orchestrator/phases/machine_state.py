@@ -2578,7 +2578,7 @@ def exit_normal_sweep(
             # separates them (see kernel.conc_sweep.conc_sweep_declined_to_run).
             if last_conc.get("was_skipped"):
                 evidence["sweep_was_skipped"] = True
-                evidence["sweep_budget_exhausted_flag"] = bool(last_conc.get("budget_exhausted"))
+                evidence["sweep_skip_budget_exhausted"] = bool(last_conc.get("budget_exhausted"))
                 evidence["sweep_skip_reason"] = str(last_conc.get("skip_reason") or "")
             return "sweep_done", evidence
     remaining = phase_budget_remaining_seconds(

@@ -23,6 +23,7 @@ from typing import Any, Mapping
 from hyperloom.common import io as _common_io
 from hyperloom.common.gain_math import conc_pair_comparison
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.timeutil import utc_now_compact
 from hyperloom.inference_optimizer.session.session_paths import reports_dir, runs_root
 from ..actions.executors._grid_runner import (
@@ -53,14 +54,10 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = "1.0"
 
 # Default ladders, one per workload (override via ``--conc-sweep-concs``).
-#
-# The synthetic ladder walks powers of two down from a concurrency a fixed
-# 1024/1024 shape can still saturate. An agentic replay cannot: a request
-# carries a measured ISL p50 of ~108k tokens, so the same card runs out of KV
-# cache two orders of magnitude lower, and the leaderboard reads each
-# concurrency as its own row rather than looking for a best one. The agentic
-# rungs are therefore spaced across the interactivity range the chart is drawn
-# over rather than by halving.
+# The synthetic ladder halves from a concurrency the 1024/1024 shape saturates;
+# an agentic request carries a measured ISL p50 near 108k tokens, so the same
+# card runs out of KV cache two orders of magnitude lower and its rungs are
+# spaced across the interactivity range the chart is drawn over.
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
 AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
 
@@ -75,9 +72,7 @@ def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
     Returns:
         A copy of the ladder, safe for the caller to mutate.
     """
-    if str(benchmark_mode or "").strip().lower() == "agentx":
-        return list(AGENTX_DEFAULT_CONCS)
-    return list(DEFAULT_CONCS)
+    return list(AGENTX_DEFAULT_CONCS if is_agentx_mode(benchmark_mode) else DEFAULT_CONCS)
 
 
 # Multiplier applied to each CONC for NUM_PROMPTS.
@@ -100,7 +95,7 @@ DEFAULT_TOTAL_BUDGET_SEC = 9000
 _AGENTX_MIN_FUNDED_RUNGS = 2
 
 
-def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: Any = None) -> float:
+def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: int | None = None) -> float:
     """What a variant will actually be granted, for budget arithmetic.
 
     Every budget gate in this module used to price a variant at the DECLARED
@@ -125,10 +120,8 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: A
     two sides disagreeing again, in the direction that admits a rung the budget
     cannot pay for.
 
-    ``conc`` prices the rung about to launch rather than the session. Warmup is
-    linear in concurrency, so a ladder spanning 1..28 costs materially different
-    amounts at each end and one number cannot describe both. Omitted where the
-    gate guards a whole arm rather than a single rung.
+    ``conc`` prices the rung about to launch rather than the session; omitted
+    where the gate guards a whole arm rather than a single rung.
 
     Args:
         variant_timeout_sec: The declared per-variant hard timeout, in seconds.
@@ -191,10 +184,8 @@ def _point_from_variant(v: VariantResult, *, arm: str) -> dict[str, Any]:
         A dict of the variant's metrics keyed for the curve row.
 
     ``intvty_p90`` and ``total_token_throughput`` are the pair an agentic run is
-    plotted on -- p90 interactivity against token throughput per chip, the axes
-    InferenceX ranks a submission by. They are null on a synthetic run, which
-    has no aiperf export to read them from and is plotted on output throughput
-    against ``output_throughput / conc``.
+    plotted on; they are null on a synthetic run, which is plotted on the
+    output-throughput pair instead.
     """
     envs = v.extra_envs or {}
     try:

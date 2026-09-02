@@ -31,6 +31,7 @@ import yaml
 
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.env import env_int
+from hyperloom.common.perf_metric import is_agentx_mode
 from hyperloom.common.env_safety import (
     BENCHMARK_SECRET_ENV_NAMES,
     BLOCKED_EXTERNAL_ENV_NAMES,
@@ -154,32 +155,26 @@ def agentx_active(shared_state: Any = None) -> bool:
     """
     if agentx_enabled():
         return True
-    return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
+    return is_agentx_mode(getattr(shared_state, "benchmark_mode", ""))
 
 
-def agentx_env_for_conc(conc: Any = None) -> "Mapping[str, str]":
+def agentx_env_for_conc(conc: int | None = None) -> "Mapping[str, str]":
     """The environment the AgentX derivations read, carrying a rung's own CONC.
 
     Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
-    so every bound derived from it is linear in the concurrency being measured
-    rather than in whatever the session was launched at. A concurrency sweep
-    walks a ladder past that session value in both directions, and a bound sized
-    at one rung is wrong at every other.
+    so every bound derived from it is linear in the concurrency being measured,
+    not in the one the session was launched at.
 
     Args:
         conc: The rung's concurrency, or ``None`` to read the session's.
 
     Returns:
         ``os.environ`` unchanged when no rung concurrency is given, else a copy
-        of it with ``CONC`` replaced.
+        with ``CONC`` replaced.
     """
-    try:
-        rung = int(conc)
-    except (TypeError, ValueError):
+    if not conc or conc <= 0:
         return os.environ
-    if rung <= 0:
-        return os.environ
-    return {**os.environ, "CONC": str(rung)}
+    return {**os.environ, "CONC": str(conc)}
 
 
 def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
@@ -210,11 +205,9 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
 def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None, *, conc: Any = None) -> None:
     """Switch serving-framework benchmarks to the AgentX aiperf client.
 
-    ``conc`` is the concurrency this particular round will run at, when the
-    caller knows it. The inner benchmark cap and the client's warmup grace are
-    both derived from how much warmup has to drain, which is linear in that
-    number -- so a sweep rung has to hand its own, or both bounds describe the
-    session's concurrency instead of the one being measured.
+    ``conc`` is the concurrency this round will run at; the inner benchmark cap
+    and the client's warmup grace are both derived from it (see
+    :func:`agentx_env_for_conc`).
     """
     if not agentx_enabled():
         return
@@ -1651,7 +1644,7 @@ def materialize_config_with_envs(
     # --block-size 16 (and the value Magpie bakes in when EXTRA_VLLM_ARGS is
     # empty) has no common block size with it, so KV-cache init aborts with
     # "No common block size for 16" -- baseline, roofline, and every
-    # explore/sweep variant crash at startup. Read the required size from the
+    # explore variant crash at startup. Read the required size from the
     # model config and pin --block-size at this shared choke point so it rides
     # EXTRA_VLLM_ARGS on every path (the roofline path in particular seeds from
     # the current-best delta and would otherwise drop the baseline's block size

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Pre-flight variant filtering and ordering for explore/sweep grids.
+"""Pre-flight variant filtering and ordering for the explore grid.
 
 Operates purely on lists of ``GridVariant``: user skip patterns, multi-node
 invalid-variant drops and prioritisation, aiter-MoE pinning, xDiT env

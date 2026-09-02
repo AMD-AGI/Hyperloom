@@ -1561,7 +1561,7 @@ class Coordinator(metaclass=_CoordinatorMeta):
     CLOSE_POST_OPT_ROOFLINE_TIMEOUT_SEC: float = 600.0
 
     # optimization_stack actions warranting a post-opt roofline; pure
-    # param-search (explore/sweep) is excluded.
+    # param-search (explore) is excluded.
     _POST_OPT_ROOFLINE_ACTIONS = frozenset({"collective", "integrate", "integrate_patch", "gemm_tuning", "geak_e2e"})
 
     async def tick(self, n: int = 1) -> None:

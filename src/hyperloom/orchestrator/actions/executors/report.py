@@ -1213,6 +1213,7 @@ def _render_conc_sweep_curve_for_report(
         Path to the written PNG, or ``None`` when the chart cannot be
         produced (missing data, missing matplotlib, IO error).
     """
+    from hyperloom.common.perf_metric import is_agentx_mode
     from hyperloom.inference_optimizer.session.session_paths import reports_dir as _reports_dir
     from hyperloom.orchestrator.kernel.conc_sweep_plot import render_conc_sweep_curve
 
@@ -1225,14 +1226,9 @@ def _render_conc_sweep_curve_for_report(
         log.debug("report_executor: cannot load conc_sweep_summary.json for plot: %s", exc)
         return None
 
-    # Quick check: at least one arm has to carry the axis the chart is drawn on,
-    # which is not the same axis in both modes -- an agentic ladder is plotted on
-    # total token throughput and would look empty on an output-throughput probe.
-    axis_key = (
-        "total_token_throughput"
-        if str(payload.get("benchmark_mode") or "").strip().lower() == "agentx"
-        else "output_throughput"
-    )
+    # The axis the chart is drawn on differs by mode, so probe the one this
+    # payload will actually use.
+    axis_key = "total_token_throughput" if is_agentx_mode(payload.get("benchmark_mode")) else "output_throughput"
 
     def _has_data(arm_key: str) -> bool:
         pts = (payload.get(arm_key) or {}).get("points") or []

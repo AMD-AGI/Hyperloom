@@ -313,10 +313,8 @@ async def sweep_via_geak(
             )
             entries.append(entry)
 
-    # The fastest succeeded point is the headline. It used to be picked through
-    # a Pareto front and a per-conc best map, which the replay never needed: it
-    # runs one (conc, isl, osl) repeated, so the front is the identity and the
-    # map holds one entry.
+    # The replay runs one (conc, isl, osl) repeated, so the fastest succeeded
+    # point is the headline.
     succeeded = [e for e in entries if e["status"] == "succeeded"]
     measured = [e for e in succeeded if isinstance(e.get("output_throughput"), (int, float))]
     promotion_measurement = max(measured, key=lambda e: e["output_throughput"], default={})

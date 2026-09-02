@@ -334,6 +334,7 @@ def _seed_shared_state(
 
     # Canonical model identity (prefers the quantize prelude's pinned source name).
     _model_identity = resolve_model_display_name(args)
+    benchmark_mode = "agentx" if _agentx_enabled() else "synthetic"
     state = SharedState(
         session_id=session_id,
         claw_session_id=(os.environ.get("CLAW_SESSION_ID") or "").strip(),
@@ -419,9 +420,9 @@ def _seed_shared_state(
         recipe_sediment_enabled=bool(getattr(args, "recipe_sediment", True)),
         # SWEEP-phase concurrency sweep flags (on by default, both workloads).
         conc_sweep_enabled=bool(getattr(args, "enable_conc_sweep", True)),
-        benchmark_mode="agentx" if _agentx_enabled() else "synthetic",
+        benchmark_mode=benchmark_mode,
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
-        conc_sweep_concs=_parse_conc_sweep_concs(args),
+        conc_sweep_concs=_parse_conc_sweep_concs(args, benchmark_mode),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,
         ),
@@ -751,16 +752,16 @@ def _default_target_summary(args: argparse.Namespace) -> str:
     return f"Optimize {Path(args.model).name} for up to {args.max_hours}h (no target)."
 
 
-def _parse_conc_sweep_concs(args: argparse.Namespace) -> list[int]:
+def _parse_conc_sweep_concs(args: argparse.Namespace, benchmark_mode: str) -> list[int]:
     """Parse ``--conc-sweep-concs`` into a list[int]; non-integers warned+dropped.
 
-    An unset flag falls back to the ladder for the workload this session runs,
-    which is why the flag defaults to ``None`` rather than to a ladder string:
-    a typed value must be distinguishable from an omitted one.
+    An unset flag falls back to *benchmark_mode*'s own ladder, which is why the
+    flag defaults to ``None`` rather than to a ladder string: a typed value must
+    be distinguishable from an omitted one.
     """
     from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
 
-    fallback = default_concs_for_mode("agentx" if _agentx_enabled() else "")
+    fallback = default_concs_for_mode(benchmark_mode)
     raw = str(getattr(args, "conc_sweep_concs", "") or "").strip()
     if not raw:
         return fallback
