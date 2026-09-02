@@ -51,8 +51,33 @@ log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = "1.0"
 
-# Default ladder (override via ``--conc-sweep-concs``).
+# Default ladders, one per workload (override via ``--conc-sweep-concs``).
+#
+# The synthetic ladder walks powers of two down from a concurrency a fixed
+# 1024/1024 shape can still saturate. An agentic replay cannot: a request
+# carries a measured ISL p50 of ~108k tokens, so the same card runs out of KV
+# cache two orders of magnitude lower, and the leaderboard reads each
+# concurrency as its own row rather than looking for a best one. The agentic
+# rungs are therefore spaced across the interactivity range the chart is drawn
+# over rather than by halving.
 DEFAULT_CONCS: list[int] = [256, 128, 64, 32, 16, 8, 4, 2]
+AGENTX_DEFAULT_CONCS: list[int] = [1, 4, 8, 10, 14, 20, 28]
+
+
+def default_concs_for_mode(benchmark_mode: Any = "") -> list[int]:
+    """The ladder a mode sweeps when the operator names none.
+
+    Args:
+        benchmark_mode: ``SharedState.benchmark_mode``; anything that is not
+            ``agentx`` reads as the synthetic workload.
+
+    Returns:
+        A copy of the ladder, safe for the caller to mutate.
+    """
+    if str(benchmark_mode or "").strip().lower() == "agentx":
+        return list(AGENTX_DEFAULT_CONCS)
+    return list(DEFAULT_CONCS)
+
 
 # Multiplier applied to each CONC for NUM_PROMPTS.
 DEFAULT_NUM_PROMPTS_FACTOR = 5
@@ -1254,7 +1279,7 @@ async def run_conc_sweep(
     """
     session_dir = Path(session_dir)
     # ``None`` → default ladder; an explicit empty list short-circuits below.
-    concs = list(concs) if concs is not None else list(DEFAULT_CONCS)
+    concs = list(concs) if concs is not None else default_concs_for_mode(getattr(state, "benchmark_mode", ""))
     isl = int(getattr(state, "isl", 0) or 0)
     osl = int(getattr(state, "osl", 0) or 0)
     baseline_tput = float(getattr(state, "baseline_tput", 0.0) or 0.0)
@@ -1570,6 +1595,7 @@ async def run_conc_sweep(
 
 
 __all__ = [
+    "AGENTX_DEFAULT_CONCS",
     "DEFAULT_CONCS",
     "DEFAULT_NUM_PROMPTS_FACTOR",
     "DEFAULT_TOTAL_BUDGET_SEC",
@@ -1580,5 +1606,6 @@ __all__ = [
     "_flush_partial_conc_sweep_report",
     "_order_concs_desc",
     "conc_sweep_declined_to_run",
+    "default_concs_for_mode",
     "run_conc_sweep",
 ]

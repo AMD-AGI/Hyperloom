@@ -26,7 +26,6 @@ from hyperloom.inference_optimizer.cli import (
 )
 from hyperloom.inference_optimizer.cli.bootstrap import (
     AGENTX_MEASUREMENT_EPOCH,
-    _flag_explicitly_set,
     agentx_state_is_stale,
 )
 
@@ -133,23 +132,6 @@ def test_budget_profile_preserves_operator_values(monkeypatch):
 
 
 # --- explicit-flag detection --------------------------------------------------
-
-
-def test_flag_explicitly_set_detects_both_polarities(monkeypatch):
-    args = argparse.Namespace()
-    monkeypatch.setattr("sys.argv", ["optimize"])
-    assert _flag_explicitly_set(args, "enable_conc_sweep") is False
-    monkeypatch.setattr("sys.argv", ["optimize", "--enable-conc-sweep"])
-    assert _flag_explicitly_set(args, "enable_conc_sweep") is True
-    monkeypatch.setattr("sys.argv", ["optimize", "--no-enable-conc-sweep"])
-    assert _flag_explicitly_set(args, "enable_conc_sweep") is True
-    monkeypatch.setattr("sys.argv", ["optimize", "--conc-sweep-timeout-sec=60"])
-    assert _flag_explicitly_set(args, "enable_conc_sweep") is False
-
-
-# --- bypass guard -------------------------------------------------------------
-
-
 def test_bypass_guard_allows_magpie(monkeypatch):
     _on(monkeypatch)
     monkeypatch.delenv("HYPERLOOM_BENCHMARK_BACKEND", raising=False)

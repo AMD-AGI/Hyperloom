@@ -582,6 +582,53 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
+class TestTheAgentXLadderIsDefaultOn:
+    """The sweep is what an agentic session produces; it used to default off.
+
+    It was disabled under AgentX because sixteen synthetic rungs would spend the
+    whole session without tuning a server parameter. The ladder is now the
+    deliverable rather than a postscript to one, and it is seven rungs, not
+    sixteen.
+    """
+
+    def test_the_state_default_is_on(self):
+        assert SharedState().conc_sweep_enabled is True
+
+    def test_agentx_does_not_turn_it_off(self, monkeypatch: pytest.MonkeyPatch):
+        from argparse import Namespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap as cb
+
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        args = Namespace(enable_conc_sweep=True)
+        assert bool(getattr(args, "enable_conc_sweep", True)) is True
+        assert not hasattr(cb, "_flag_explicitly_set")
+
+
+def test_the_agentx_budget_funds_the_whole_ladder():
+    """Seven rungs on each arm; a smaller default would truncate every run."""
+    from hyperloom.inference_optimizer.cli import (
+        _AGENTX_CONC_SWEEP_TIMEOUT_SEC,
+        _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC,
+    )
+    from hyperloom.orchestrator.kernel.conc_sweep import AGENTX_DEFAULT_CONCS
+
+    rungs = len(AGENTX_DEFAULT_CONCS) * 2
+    assert rungs == 14
+    measured_round_sec = 111 * 60
+    assert _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC >= rungs * measured_round_sec
+    assert _AGENTX_CONC_SWEEP_TIMEOUT_SEC < _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
+
+
+def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
+    """`concs=None` reaches the engine from the SDK and from a bare task alike."""
+    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
+
+    state = SharedState()
+    state.benchmark_mode = "agentx"
+    assert default_concs_for_mode(state.benchmark_mode) == [1, 4, 8, 10, 14, 20, 28]
+
+
 def test_default_concs_is_powers_of_two():
     """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
     assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]

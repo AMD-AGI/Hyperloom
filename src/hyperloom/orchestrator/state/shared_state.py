@@ -683,10 +683,9 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
-    # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
-    conc_sweep_concs: list[int] = field(
-        default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
-    )
+    # CONC ladder for conc_sweep, seeded from the workload's own ladder by
+    # ``_parse_conc_sweep_concs``. Empty => skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
     # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
