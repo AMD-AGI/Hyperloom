@@ -1,15 +1,16 @@
 ---
 myst:
     html_meta:
-        "description": "Reference for Hyperloom operator scripts: dump_session_breakdown, dump_session_report, and event_counts. Use these utilities to inspect, export, and report on session data."
-        "keywords": "Hyperloom, operator scripts, session breakdown, session report, event counts, LLM inference, AMD GPU, ROCm, debugging, observability, operator tools"
+        "description": "Reference for Hyperloom operator scripts: dump_session_breakdown, dump_session_report, event_counts, and estimate_no_run. Use these utilities to inspect, export, and report on session data, and to estimate uplift before running."
+        "keywords": "Hyperloom, operator scripts, session breakdown, session report, event counts, uplift estimate, Recipe KB, LLM inference, AMD GPU, ROCm, debugging, observability, operator tools"
 ---
 # Hyperloom operator scripts
 
 A short reference for the operator-facing scripts under
 `src/hyperloom/inference_optimizer/tools/`. These are not part of the agent loop —
-they are utilities you run by hand against a finished or in-progress
-session directory.
+they are utilities you run by hand, most of them against a finished or
+in-progress session directory. The exception is `estimate_no_run.py`, which
+reads the Recipe KB rather than a session.
 
 When no explicit `--session-dir` is given, scripts resolve the active session in
 two steps: `INFERENCE_OPTIMIZER_CURRENT_SESSION_DIR` when set, otherwise the
@@ -172,6 +173,76 @@ shows many `kernel_request:*` and few `kernel_response:*`.
 
 ---
 
+## `estimate_no_run.py`
+
+Estimate uplift for a target from the Recipe KB, without running a session.
+Unlike the scripts above this one reads no session directory at all: it pulls
+per-session envelopes from the KB Store and reports what prior sessions already
+settled for a scope.
+
+Use this when:
+
+* You are triaging a queue of targets and want to know which ones prior
+  sessions suggest are worth GPU hours.
+* You want the parallelism layout that won inside a fixed GPU count for a
+  model/precision/shape you are about to launch.
+* You want a session's expected gain range to sanity-check a result you already
+  have.
+
+### Usage
+
+Use these commands to estimate uplift for a scope.
+
+```bash
+# Whole board, live store, token from a file
+python -m hyperloom.inference_optimizer.tools.estimate_no_run \
+    --kb-store-url https://host/knowledge-base \
+    --kb-store-token-file ~/.secrets/kb_store_token \
+    --hardware mi355x --framework-name sglang
+
+# One replay scope, credentials from the environment
+export KB_STORE_URL=... KB_STORE_TOKEN=...
+python -m hyperloom.inference_optimizer.tools.estimate_no_run \
+    --hardware mi355x --model <MODEL> --precision mxfp4 \
+    --tp 8 --isl 1024 --osl 256
+
+# Named identities instead of a search (repeatable; still reads the store)
+python -m hyperloom.inference_optimizer.tools.estimate_no_run \
+    --canonical-id <CID> --canonical-id <CID2>
+
+# A saved pool of session envelopes, no network at all
+python -m hyperloom.inference_optimizer.tools.estimate_no_run \
+    --input prior_sessions.json --tp 8 --isl 1024 --osl 256
+```
+
+Credentials resolve in the order `--kb-store-token`, then
+`--kb-store-token-file`, then `KB_STORE_TOKEN`; prefer the file form so the
+secret stays out of shell history and `ps`. Exit code 2 when no store URL is
+configured, and no network call is attempted in that case. See
+[Hyperloom authentication and credentials](authentication.md).
+
+### Output
+
+A JSON report on stdout, or to `--output`. It echoes the store URL but never
+the token. The fields to read first:
+
+* `historical`: p50 and p90 validated end-to-end (E2E) gain across the pool.
+* `by_shape`: per `tp/conc/isl/osl` bucket, the p50 gain plus p50 and best
+  throughput. Read this instead of `historical` when the pool spans shapes.
+* `sharding_whatif`: accepted parallelism layouts ranked per replay scope,
+  with the vLLM and SGLang spellings of tp/dp/ep/pp normalized.
+* `pool_warnings`: raised whenever the pool mixes models, boards, frameworks,
+  versions, precisions, or shapes — a median across those is not a prior for
+  any of them.
+* `limitations` and `sessions_scored`: how much the report is actually standing
+  on. Layout arms are frequently `n=1`, so treat rankings as directional.
+
+A KB record keeps only the layout its session settled on, so `sharding_whatif`
+carries `winners_only: true`: a layout that is absent was untried or
+unpublished, not beaten.
+
+---
+
 ## Additional operator tools
 
 The same tools package also contains smaller utilities that are useful during
@@ -199,3 +270,4 @@ Use these resources for related reference information:
 * [`session_breakdown.json` integration in Hyperloom](session-breakdown.md): The schema produced by `dump_session_breakdown.py`.
 * [Hyperloom self-hosting and operations guide](operations.md): Retention recommendations, including which scripts' outputs to back up long-term.
 * [Troubleshooting Hyperloom](troubleshooting.md): Symptoms vs which script to reach for first.
+* [Integrate Recipe knowledge base in Hyperloom](integrate-kb.md): The store `estimate_no_run.py` reads, and what a session publishes to it.
