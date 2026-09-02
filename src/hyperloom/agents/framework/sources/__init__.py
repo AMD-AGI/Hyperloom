@@ -307,7 +307,9 @@ def _run_pr_monitor(request: ExploreRequest) -> list[Candidate]:
     cfg = request.pr_monitor
     if cfg is None:
         raise SourceConfigError(
-            "search_modes contains 'pr_monitor' but no pr_monitor block was provided (nor KB_STORE_URL env var)"
+            "search_modes contains 'pr_monitor', but PR Monitor is unavailable; "
+            "provide pr_monitor.base_url (remote mode requires KB_STORE_URL) or "
+            "remove 'pr_monitor' from search_modes"
         )
     label = cfg.default_label
     requested = max(1, request.max_search_candidates)

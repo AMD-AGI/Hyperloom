@@ -47,8 +47,6 @@ def pr_monitor_base_url(
 ) -> str:
     """Return the co-hosted PR Monitor service root."""
 
-    if not pr_monitor_enabled(env):
-        return ""
     base = kb_store_url(value, env=env)
     return f"{base}/{PR_MONITOR_MOUNT}" if base else ""
 

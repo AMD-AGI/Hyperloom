@@ -2353,11 +2353,39 @@ def test_ir3_unreachable_local_default_disables_pr_monitor(marker_path, monkeypa
     assert args.recipe_kb_enabled is True
     assert args.pr_monitor_enabled is False
     assert args.pr_degraded_reason == "ir3_auto"
-    assert os.environ["HYPERLOOM_PR_MONITOR_ENABLED"] == "0"
+    assert "HYPERLOOM_PR_MONITOR_ENABLED" not in os.environ
     assert outcome["detail"]["pr_monitor"] == {
         "enabled": False,
         "reason": "ir3_unreachable",
     }
+
+
+def test_ir3_real_shell_probes_local_default_url(marker_path, tmp_path, monkeypatch):
+    from hyperloom.common.pr_monitor_urls import DEFAULT_KB_STORE_URL
+
+    monkeypatch.setenv("KNOWLEDGE_STORE_MODE", "local")
+    monkeypatch.delenv("KB_STORE_URL", raising=False)
+    curl_log = tmp_path / "curl.log"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$CURL_LOG"\nprintf \'{"ok":true}\\n__HTTP_CODE__:200\\n\'\n',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o755)
+    monkeypatch.setenv("CURL_LOG", str(curl_log))
+    monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
+
+    args = _ns()
+    outcome = cli_preflight._run_ir3_preflight(args)
+
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert f"{DEFAULT_KB_STORE_URL}/pr-monitor/v1/healthz" in curl_log.read_text(encoding="utf-8")
+    assert marker["pr_reachable"] is True
+    assert marker["pr_skipped"] is False
+    assert args.pr_monitor_enabled is True
+    assert outcome["status"] == "applied"
 
 
 def test_cli_parser_exposes_degraded_flags():

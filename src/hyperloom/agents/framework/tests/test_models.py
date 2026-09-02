@@ -133,6 +133,14 @@ def test_explore_request_derives_pr_monitor_from_kb_store(monkeypatch) -> None:
     assert request.pr_monitor.base_url == "https://kb.example/knowledge-base/pr-monitor"
 
 
+def test_explore_request_respects_runtime_pr_monitor_disable(monkeypatch) -> None:
+    monkeypatch.setenv("HYPERLOOM_PR_MONITOR_ENABLED", "0")
+
+    request = ExploreRequest.from_dict(_minimal_request_dict())
+
+    assert request.pr_monitor is None
+
+
 def test_explore_request_requires_framework_and_repo_url() -> None:
     """from_dict rejects missing framework / repo_url."""
     with pytest.raises(ValueError, match="framework"):

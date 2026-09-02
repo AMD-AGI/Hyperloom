@@ -445,13 +445,11 @@ def _bootstrap_knowledge_plane(
         KnowledgePlane: The wired KnowledgePlane facade.
     """
     from hyperloom.orchestrator.knowledge.knowledge_plane import KnowledgePlane
-    from hyperloom.orchestrator.knowledge.pr_monitor import (
-        PRMonitorClient,
-        pr_monitor_mcp_url,
-    )
+    from hyperloom.common.pr_monitor_urls import pr_monitor_mcp_url
+    from hyperloom.orchestrator.knowledge.pr_monitor import PRMonitorClient
 
     pr_enabled = bool(getattr(args, "pr_monitor_enabled", True))
-    pr_mcp_url = pr_monitor_mcp_url()
+    pr_mcp_url = pr_monitor_mcp_url() if pr_enabled else ""
 
     pr_client = PRMonitorClient.from_args(enabled=pr_enabled)
     if not pr_enabled:

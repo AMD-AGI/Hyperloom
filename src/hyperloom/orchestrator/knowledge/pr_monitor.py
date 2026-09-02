@@ -13,12 +13,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from hyperloom.common.pr_monitor_urls import (
-    pr_monitor_base_url,
-    pr_monitor_mcp_url,
-    pr_monitor_rest_url,
-)
-
 
 @dataclass
 class PRMonitorClient:
@@ -47,7 +41,4 @@ class PRMonitorClient:
 
 __all__ = [
     "PRMonitorClient",
-    "pr_monitor_base_url",
-    "pr_monitor_mcp_url",
-    "pr_monitor_rest_url",
 ]

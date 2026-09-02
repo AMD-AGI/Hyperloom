@@ -22,6 +22,13 @@ from kernelforge.knowledge.pr_monitor_client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _clear_runtime_pr_monitor_state(monkeypatch):
+    """Keep per-run preflight state from leaking between client tests."""
+
+    monkeypatch.delenv("HYPERLOOM_PR_MONITOR_ENABLED", raising=False)
+
+
 class _FakeResponse:
     def __init__(self, body: str):
         self._body = body.encode()

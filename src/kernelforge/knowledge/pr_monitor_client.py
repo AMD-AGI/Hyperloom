@@ -51,6 +51,8 @@ class FetchOutcome:
 
 def normalize_base_url(raw: str = "") -> str:
     """Return the service root without a trailing ``/v1``."""
+    if not pr_monitor_enabled():
+        return ""
     base = (raw or pr_monitor_base_url()).strip()
     base = base.rstrip("/")
     if base.endswith("/v1"):

@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
+from hyperloom.common.pr_monitor_urls import pr_monitor_base_url, pr_monitor_enabled
 
 
 @dataclass(frozen=True)
@@ -398,7 +398,12 @@ def _parse_search_modes(raw: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class ExploreRequest:
-    """Top-level request for `fa explore` / `fa candidates`."""
+    """Top-level request for `fa explore` / `fa candidates`.
+
+    When no ``pr_monitor`` block is supplied, local mode derives the co-hosted
+    PR Monitor from the default KB Service URL. Runtime preflight may suppress
+    that default by marking PR Monitor unavailable.
+    """
 
     framework: str
     repo_url: str
@@ -411,6 +416,7 @@ class ExploreRequest:
     prepare_candidate_env: bool = True
     commands: dict[str, CommandSpec] = field(default_factory=dict)
     outputs: dict[str, str] = field(default_factory=dict)
+    # Explicit config wins; otherwise local mode derives the default KB endpoint.
     pr_monitor: PRMonitorConfig | None = None
     pr_filter: PrFilter = field(default_factory=PrFilter)
     gap_description: str = ""
@@ -472,7 +478,7 @@ class ExploreRequest:
         if isinstance(pr_monitor_raw, dict):
             pr_monitor = PRMonitorConfig.from_dict(pr_monitor_raw)
         elif pr_monitor_raw is None:
-            env_base_url = pr_monitor_base_url()
+            env_base_url = pr_monitor_base_url() if pr_monitor_enabled() else ""
             pr_monitor = PRMonitorConfig(base_url=env_base_url) if env_base_url else None
         else:
             raise ValueError("pr_monitor must be an object when present")

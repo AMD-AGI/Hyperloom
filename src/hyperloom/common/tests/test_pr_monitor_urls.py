@@ -1,6 +1,7 @@
 from hyperloom.common.pr_monitor_urls import (
     DEFAULT_KB_STORE_URL,
     pr_monitor_base_url,
+    pr_monitor_enabled,
     pr_monitor_mcp_url,
     pr_monitor_rest_url,
 )
@@ -25,11 +26,10 @@ def test_remote_mode_does_not_default_missing_kb_store_url() -> None:
     assert pr_monitor_base_url(env=env) == ""
 
 
-def test_runtime_disable_marker_suppresses_all_pr_monitor_urls() -> None:
+def test_runtime_disable_marker_is_separate_from_url_derivation() -> None:
     env = {
         "KB_STORE_URL": "https://kb.example/knowledge-base",
         "HYPERLOOM_PR_MONITOR_ENABLED": "0",
     }
-    assert pr_monitor_base_url(env=env) == ""
-    assert pr_monitor_rest_url(env=env) == ""
-    assert pr_monitor_mcp_url(env=env) == ""
+    assert pr_monitor_enabled(env) is False
+    assert pr_monitor_base_url(env=env) == "https://kb.example/knowledge-base/pr-monitor"
