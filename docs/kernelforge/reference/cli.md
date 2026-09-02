@@ -32,10 +32,25 @@ kernelforge forge-fuse --trace <t> --model-path <d> --framework sglang \
     --output-dir <d> [options]
 kernelforge gemm-tune run --model-path <M> --framework sglang \
     --precision <p> --output-dir <D> [options]
+kernelforge kernel-rewrite-controller --handoff-dir <H> \
+    --budget-minutes <m> --output-dir <D>
 ```
 
 See {doc}`Experience store </kernelforge/reference/experience-store>` for the exact
 local/remote environment contract and durable local layout.
+
+## kernel-rewrite-controller
+
+Initializes one fresh autonomous kernel-rewrite controller run. The current
+skeleton validates the Hyperloom handoff, creates the durable controller/result
+layout, records an absolute deadline, and exits cleanly with `no_opportunity`
+until analysis and task dispatch are added.
+
+| Option | Default | Meaning |
+|:--|:--|:--|
+| `--handoff-dir <dir>` | required | Directory containing `workload.md`, `serving-context.md`, and `trace-evidence.md`. |
+| `--budget-minutes <m>` | required | Positive total wall-clock budget used to derive the controller deadline. |
+| `--output-dir <dir>` | required | Fresh macro-cycle output directory. Existing controller output is refused rather than resumed. |
 
 ## forge-loop
 

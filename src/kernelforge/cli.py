@@ -2677,6 +2677,21 @@ def forge_rewrite(
         raise SystemExit(1)
 
 
+def _register_kernel_rewrite_controller() -> None:
+    """Attach the autonomous kernel rewrite controller command."""
+    from kernelforge.kernel_rewrite_controller.command import (
+        kernel_rewrite_controller_command,
+    )
+
+    main.add_command(
+        kernel_rewrite_controller_command,
+        name="kernel-rewrite-controller",
+    )
+
+
+_register_kernel_rewrite_controller()
+
+
 def _register_forge_fuse() -> None:
     """Attach the fusion pipeline's own Click command under `forge-fuse`.
 

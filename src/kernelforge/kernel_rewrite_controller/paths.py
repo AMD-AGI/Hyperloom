@@ -69,12 +69,20 @@ class ControllerLayout:
         return self.controller_root / "workspaces"
 
     @property
+    def controller_state(self) -> Path:
+        return self.controller_root / "state.json"
+
+    @property
     def result_root(self) -> Path:
         return self.output_dir / "result"
 
     @property
     def patches_root(self) -> Path:
         return self.result_root / "patches"
+
+    @property
+    def summary_md(self) -> Path:
+        return self.result_root / "summary.md"
 
     def task_dir(self, operator_id: str) -> Path:
         return self.tasks_root / safe_operator_id(operator_id)
