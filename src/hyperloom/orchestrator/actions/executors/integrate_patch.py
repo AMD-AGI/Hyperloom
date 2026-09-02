@@ -4460,6 +4460,12 @@ class IntegratePatchExecutor:
                 "error": getattr(r, "error", "") or "",
                 "error_class": getattr(r, "error_class", "") or "",
                 "nonfatal_warnings": list(getattr(r, "nonfatal_warnings", []) or []),
+                # Launch evidence is the immutable proof of the server that
+                # produced this measurement. It must survive the patch result
+                # and current-best promotion so GEAK can verify the handoff.
+                "launch_evidence": dict(getattr(r, "launch_evidence", {}) or {}),
+                "launch_evidence_path": str(getattr(r, "launch_evidence_path", "") or ""),
+                "server_log_path": str(getattr(r, "server_log_path", "") or ""),
                 # Materialized config used for this bench; needed by revalidation.
                 "materialized_config": str(config_path),
                 # Read off the variant so a replay cannot drift from the graded run.

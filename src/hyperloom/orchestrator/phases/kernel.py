@@ -756,9 +756,63 @@ class KernelPhase(PhaseHandler):
         except Exception:  # noqa: BLE001
             log.debug("geak v4 start recording failed", exc_info=True)
         cb = state.current_best or {}
-        accepted_flags = str(cb.get("extra_server_args") or "")
-        extra_envs = cb.get("extra_envs") or {}
+        try:
+            env_spec = self.build_env_spec()
+        except Exception:  # noqa: BLE001 — a legacy handoff remains runnable
+            log.exception("geak: build_env_spec failed; handoff is unverified")
+            env_spec = {}
+        spec_config = env_spec.get("config") if isinstance(env_spec.get("config"), Mapping) else {}
+        accepted_flags = str(spec_config.get("extra_server_args") or cb.get("extra_server_args") or "")
+        extra_envs = spec_config.get("extra_envs") or cb.get("extra_envs") or {}
         accepted_env = " ".join(f"{k}={v}" for k, v in dict(extra_envs).items())
+        state_measurement = getattr(state, "current_best_measurement", None)
+        measurement = (
+            state_measurement
+            if isinstance(state_measurement, Mapping) and state_measurement
+            else (
+                cb.get("measurement") if isinstance(cb, Mapping) and isinstance(cb.get("measurement"), Mapping) else {}
+            )
+        )
+        expected_identity = str(env_spec.get("launch_identity") or "")
+        measured_identity = str(measurement.get("declared_launch_identity") or measurement.get("launch_identity") or "")
+        identity_matches = bool(expected_identity and expected_identity == measured_identity)
+        launch_evidence = measurement.get("launch_evidence")
+        launch_evidence = dict(launch_evidence) if isinstance(launch_evidence, Mapping) else {}
+        observed_flags = str(
+            measurement.get("resolved_server_launch_flags") or launch_evidence.get("observed_server_launch_flags") or ""
+        ).strip()
+        observed_server_identity = measurement.get("observed_server_identity") or launch_evidence.get(
+            "observed_server_identity"
+        )
+        observed_server_identity = (
+            {str(key): value for key, value in sorted(observed_server_identity.items())}
+            if isinstance(observed_server_identity, Mapping)
+            else {}
+        )
+        if identity_matches and (observed_flags or observed_server_identity):
+            reference_verification_status = "verified_observed"
+        elif identity_matches and (
+            str(launch_evidence.get("requested_server_args") or "").strip()
+            or bool(launch_evidence.get("requested_server_env"))
+            or str(launch_evidence.get("recipe_digest") or "").strip()
+        ):
+            reference_verification_status = "verified_declared_only"
+        else:
+            reference_verification_status = "unverified"
+        reference_verified = reference_verification_status == "verified_observed"
+        observed_identity = str(measurement.get("observed_launch_identity") or "")
+        if not observed_identity and identity_matches and (observed_flags or observed_server_identity):
+            observed_payload = json.dumps(
+                {
+                    "declared_launch_identity": measured_identity,
+                    "observed_server_launch_flags": observed_flags,
+                    "observed_server_identity": observed_server_identity,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            observed_identity = f"sha256:{hashlib.sha256(observed_payload).hexdigest()}"
+        same_config_tput = float(measurement.get("tput") or 0.0) if reference_verified else 0.0
         workload = {
             "isl": int(getattr(state, "isl", 0) or int(os.environ.get("ISL", "1024"))),
             "osl": int(getattr(state, "osl", 0) or int(os.environ.get("OSL", "1024"))),
@@ -778,8 +832,9 @@ class KernelPhase(PhaseHandler):
             _baseline_srv_args = read_baseline_server_args(state) or ""
         except Exception:  # noqa: BLE001 — accessor is best-effort
             _baseline_srv_args = ""
+        _current_best_server_args = str(spec_config.get("server_launch_flags") or _baseline_srv_args)
         _serving_fidelity = _resolve_serving_fidelity(
-            baseline_server_args=_baseline_srv_args,
+            baseline_server_args=_current_best_server_args,
             state_max_model_len=int(getattr(state, "max_model_len", 0) or 0),
         )
 
@@ -799,9 +854,22 @@ class KernelPhase(PhaseHandler):
             # Orchestrator throughput of the SAME config GEAK seeds its baseline
             # with, so run_e2e can compute a pure measurement divergence. 0.0 =>
             # no accepted config yet (falls back to raw baseline downstream).
-            "orchestrator_best_tput_same_config": float((state.current_best or {}).get("tput") or 0.0)
-            if isinstance(getattr(state, "current_best", None), dict)
-            else 0.0,
+            "orchestrator_best_tput_same_config": same_config_tput,
+            "same_config_reference_status": "verified" if reference_verified else "unverified",
+            "same_config_reference_identity": measured_identity,
+            "same_config_expected_identity": expected_identity,
+            "same_config_reference_workspace": str(measurement.get("benchmark_workspace") or ""),
+            # Additive identity semantics. Keep the legacy status above for
+            # existing GEAK consumers that only understand verified/unverified.
+            "same_config_reference_verification_status": reference_verification_status,
+            "same_config_reference_declared_identity": measured_identity,
+            "same_config_reference_observed_identity": observed_identity,
+            # GEAK compares this map with its parsed ServerArgs. Keep the
+            # hash alias above for consumers that only understand strings.
+            "same_config_observed_identity": observed_server_identity,
+            "observed_server_identity": observed_server_identity,
+            "measurement_evidence": launch_evidence,
+            "resolved_server_config": dict(measurement.get("resolved_server_config") or {}),
             # Serving-launch fidelity (both optional; unset => GEAK adapter default).
             "max_model_len": int(getattr(state, "max_model_len", 0) or int(os.environ.get("MAX_MODEL_LEN", "0") or 0)),
             "mem_fraction": float(
@@ -827,12 +895,9 @@ class KernelPhase(PhaseHandler):
             handoff["bench_protocol"] = bench_protocol
         # Only forward resolved fidelity knobs; absence => GEAK adapter default.
         handoff.update(_serving_fidelity)
-        # Full layered environment of current_best so GEAK's baseline ref ==
-        # orchestrator best (config + source-patch snapshots + overlay).
-        try:
-            handoff["baseline_env_spec"] = self.build_env_spec()
-        except Exception:  # noqa: BLE001 — env_spec is additive; never block handoff
-            log.exception("geak: build_env_spec failed; handoff stays v1-compatible")
+        # Full layered environment and its matching measurement identity.
+        if env_spec:
+            handoff["baseline_env_spec"] = env_spec
 
         out_dir = self.session_dir / "geak"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -1493,6 +1558,7 @@ class KernelPhase(PhaseHandler):
         measured_tput: float,
         provenance: str = "geak_e2e_promote",
         overlay_loaded: bool | None = None,
+        measurement_provenance: Mapping[str, Any] | None = None,
     ) -> None:
         """Write the GEAK headline from a MEASURED main-flow rebench.
 
@@ -1576,20 +1642,32 @@ class KernelPhase(PhaseHandler):
         entry_extra = self._geak_stack_entry_extra(result, overlay_loaded=overlay_loaded)
         kernel_proven = bool(entry_extra.get("accepted_kernels") or entry_extra.get("accepted_heads"))
 
+        promotion_measurement = {
+            "name": "geak_e2e",
+            "candidate_extra_server_args": accepted_flags,
+            "extra_envs": dict(parsed_envs),
+            "final_overlay": result.get("final_overlay") or "",
+            "source_phase": "KERNEL_AGENT",
+            "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
+            "ttft_mean_ms": result.get("ttft_ms"),
+            "tpot_mean_ms": result.get("tpot_ms"),
+            "workspace": result.get("eval_dir"),
+        }
+        if isinstance(measurement_provenance, Mapping):
+            for key in (
+                "launch_evidence",
+                "launch_evidence_path",
+                "server_log_path",
+                "workspace",
+                "single_workspace",
+            ):
+                value = measurement_provenance.get(key)
+                if value not in (None, "", {}):
+                    promotion_measurement[key] = value
         self._lift_to_current_best(
             "geak_e2e",
             measured,
-            {
-                "name": "geak_e2e",
-                "candidate_extra_server_args": accepted_flags,
-                "extra_envs": dict(parsed_envs),
-                "final_overlay": result.get("final_overlay") or "",
-                "source_phase": "KERNEL_AGENT",
-                "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
-                "ttft_mean_ms": result.get("ttft_ms"),
-                "tpot_mean_ms": result.get("tpot_ms"),
-                "workspace": result.get("eval_dir"),
-            },
+            promotion_measurement,
             entry_extra=entry_extra,
         )
 

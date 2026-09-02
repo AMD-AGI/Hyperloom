@@ -264,6 +264,11 @@ class VariantResult:
         server_log_path (str | None): Absolute path to the variant's
             ``server.log`` when a server was launched; ``None`` for pre-launch
             failures where no server ran.
+        launch_evidence (dict[str, Any]): Structured declared/observed launch
+            evidence persisted beside the variant. Empty when no config was
+            materialized before the failure.
+        launch_evidence_path (str | None): Path to the persisted
+            ``launch_evidence.json`` artifact.
     """
 
     name: str
@@ -296,6 +301,8 @@ class VariantResult:
     # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
     server_log_path: str | None = None
+    launch_evidence: dict[str, Any] = field(default_factory=dict)
+    launch_evidence_path: str | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -340,6 +347,9 @@ class VariantResult:
             "runtime_sec": self.runtime_sec,
             "killed_overtime": self.killed_overtime,
             "estimated_output_throughput": self.estimated_output_throughput,
+            "server_log_path": self.server_log_path,
+            "launch_evidence": self.launch_evidence,
+            "launch_evidence_path": self.launch_evidence_path,
         }
 
 

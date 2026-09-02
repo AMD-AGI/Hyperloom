@@ -207,6 +207,11 @@ def test_baseline_discards_cold_first_round_via_lifecycle(tmp_path, monkeypatch)
     assert result["output_throughput"] == pytest.approx(_HOT_TPUT)
     assert result.get("warmup_round_tput") == pytest.approx(_COLD_TPUT)
     assert "baseline_double_run_discarded_first" in result["nonfatal_warnings"]
+    # The hot pass reuses the warmup server, so its identity evidence must be
+    # carried from the server-owning warmup slot.
+    assert result["launch_evidence_path"].endswith("warmup_round/launch_evidence.json")
+    assert result["launch_evidence"]["warm_reuse"]["reused_ready_server"] is True
+    assert result["launch_evidence"]["warm_reuse"]["provenance"] == "warmup_round"
 
     assert len(captured) == 2
     warmup_lc = captured[0]["benchmark"]["server_lifecycle"]

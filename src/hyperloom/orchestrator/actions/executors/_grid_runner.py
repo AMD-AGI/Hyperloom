@@ -67,6 +67,7 @@ from ._inferencex_patcher import (
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -1659,7 +1660,7 @@ async def run_grid(
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_existing_log_path(server_log),
+                server_log_path=_measurement_server_log_path(server_log, slot=slot),
                 note=variant.note,
             )
         )
@@ -2688,7 +2689,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=nonzero_error,
                     error_class="magpie_nonzero_after_valid_measurement",
-                    server_log_path=_existing_log_path(server_log),
+                    server_log_path=None,
                     note=variant.note,
                 )
             )
@@ -2717,6 +2718,7 @@ async def run_grid(
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
+                server_log_path=None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
@@ -2730,6 +2732,12 @@ async def run_grid(
             results[-1].output_throughput or 0.0,
         )
         await _report_finished_variant(i)
+    _attach_grid_launch_evidence(
+        results,
+        grid=grid,
+        output_root=output_root,
+        caller_reused_ready_server=server_already_ready,
+    )
     return results
 
 
@@ -2787,6 +2795,80 @@ def _existing_log_path(path: Path) -> str | None:
         str | None: The stringified path, or ``None`` when absent.
     """
     return str(path) if path.exists() else None
+
+
+def _measurement_server_log_path(
+    server_log: Path,
+    workspace: Path | None = None,
+    *,
+    slot: Path | None = None,
+) -> str | None:
+    """Return the server log attributable to this variant's measurement.
+
+    This is deliberately shared by success and failure paths. A ready-server
+    reuse leaves the measured workspace without a local log, so the only
+    fallback is this variant's own ``warmup_round`` subtree. It never searches
+    older session history, which could attach a different launch's argv.
+    """
+    owning_slot = slot or server_log.parent
+    direct = _existing_log_path(server_log)
+    if not direct and workspace is not None:
+        direct = _existing_log_path(workspace / "server.log")
+    if direct:
+        return direct
+    warmup_dir = owning_slot / "warmup_round"
+    try:
+        candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
+    except OSError:
+        candidates = []
+    if not candidates:
+        return None
+    try:
+        return str(max(candidates, key=lambda path: path.stat().st_mtime))
+    except OSError:
+        return None
+
+
+def _attach_grid_launch_evidence(
+    results: list[VariantResult],
+    *,
+    grid: list[GridVariant],
+    output_root: Path,
+    caller_reused_ready_server: bool,
+) -> None:
+    """Persist declared and observed launch evidence for each grid result.
+
+    Results stay backward-compatible: the new fields are additive, and a
+    skipped pre-materialization result produces no evidence. Evidence lives in
+    the variant slot, never in an external rescue directory.
+    """
+    for idx, result in enumerate(results):
+        if idx >= len(grid):
+            break
+        # A skipped variant never launched a measurement. Do not materialize a
+        # synthetic evidence directory whose warm-reuse metadata could later be
+        # mistaken for an observed launch.
+        if result.status == "skipped" or result.error_class in {
+            "capability_unsupported",
+            "yaml_build_error",
+            "warmup_yaml_build_error",
+        }:
+            continue
+        slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
+        config_path = slot / "config.yaml"
+        workspace = Path(result.workspace) if result.workspace else None
+        primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
+        actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
+        result.server_log_path = actual_log
+        evidence = build_launch_evidence(
+            config_path=config_path,
+            actual_server_log=actual_log,
+            framework=os.environ.get("FRAMEWORK", ""),
+            slot=slot,
+            caller_reused_ready_server=caller_reused_ready_server,
+        )
+        result.launch_evidence = evidence
+        result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
 
 
 def _safe(name: str) -> str:

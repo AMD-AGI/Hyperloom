@@ -52,6 +52,7 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up
 # in: how a sentinel returncode reads back, how a round's cap is clamped to the
@@ -316,6 +317,34 @@ def _config_framework(config_path: Path | str) -> str:
     except (OSError, yaml.YAMLError):
         return ""
     return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
+
+
+def _attach_baseline_launch_evidence(
+    result: dict[str, Any],
+    *,
+    config_path: Path,
+    output_dir: Path,
+    framework: str,
+) -> None:
+    """Persist the declared and observed server identity for a baseline result.
+
+    Baselines do not run through ``run_grid``, so they need the same evidence
+    contract explicitly. The returned result is later promoted to
+    ``current_best`` and becomes the GEAK handoff reference.
+    """
+    from ._grid_runner import _measurement_server_log_path
+
+    workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
+    actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
+    result["server_log_path"] = actual_log or ""
+    evidence = build_launch_evidence(
+        config_path=config_path,
+        actual_server_log=actual_log,
+        framework=framework,
+        slot=output_dir,
+    )
+    result["launch_evidence"] = evidence
+    result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -3564,6 +3593,27 @@ class BaselineExecutor:
                 result["nonfatal_warnings"].append(
                     "baseline_double_run_discarded_first",
                 )
+                # The measured pass re-attaches to the server launched by the
+                # warmup pass. Its own slot has no fresh launch record, so its
+                # evidence must retain the warmup's observed identity rather
+                # than degrading an otherwise verifiable baseline handoff.
+                for evidence_field in (
+                    "launch_evidence",
+                    "launch_evidence_path",
+                    "server_log_path",
+                ):
+                    if warmup_result.get(evidence_field):
+                        result[evidence_field] = warmup_result[evidence_field]
+                warmup_evidence = result.get("launch_evidence")
+                if isinstance(warmup_evidence, Mapping):
+                    measured_evidence = dict(warmup_evidence)
+                    measured_evidence["warm_reuse"] = {
+                        **dict(warmup_evidence.get("warm_reuse") or {}),
+                        "reused_ready_server": True,
+                        "provenance": "warmup_round",
+                        "source_server_log_path": str(result.get("server_log_path") or ""),
+                    }
+                    result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
                 self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the
@@ -4761,6 +4811,12 @@ class BaselineExecutor:
             # is honored as an intentional opt-out.
             "run_eval_disabled": bool(run_eval_disabled),
         }
+        _attach_baseline_launch_evidence(
+            result,
+            config_path=materialized_config_path,
+            output_dir=output_dir,
+            framework=framework,
+        )
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
         # gate for scriptable frameworks). Pass the framework so scriptable runs

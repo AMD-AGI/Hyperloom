@@ -680,6 +680,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # alone prices a pass that re-attaches. Zero => never measured.
     baseline_post_ready_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
+    # Immutable measurement evidence captured with the current-best promotion.
+    # GEAK may only use its tput after the stored launch identity matches the
+    # configuration it is about to reproduce.
+    current_best_measurement: dict[str, Any] = field(default_factory=dict)
     # Reference launch recipe from the operator's --reference-script: lowest-priority
     # base server args/envs seeding every baseline. Persisted.
     reference_server_args: str = ""

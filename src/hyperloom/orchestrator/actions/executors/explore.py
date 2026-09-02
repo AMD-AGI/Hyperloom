@@ -1310,6 +1310,8 @@ class ExploreExecutor:
                                 "reason": "warmup_failed",
                                 "error_class": w.error_class if w is not None else "",
                                 "server_log_path": w.server_log_path if w is not None else None,
+                                "launch_evidence": dict(w.launch_evidence or {}) if w is not None else {},
+                                "launch_evidence_path": w.launch_evidence_path if w is not None else None,
                                 "stage": FAILURE_STAGE_WARMUP,
                                 "error_excerpt": tail_excerpt(w.error) if w is not None else None,
                                 "workspace": w.workspace if w is not None else None,
@@ -1565,6 +1567,8 @@ class ExploreExecutor:
                         "workspace": r.workspace,
                         "error_class": r.error_class or "",
                         "server_log_path": r.server_log_path,
+                        "launch_evidence": dict(r.launch_evidence or {}),
+                        "launch_evidence_path": r.launch_evidence_path,
                         "stage": FAILURE_STAGE_DECISION,
                     }
                     if gv.name:
@@ -1639,6 +1643,8 @@ class ExploreExecutor:
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
                             "single_workspace": r.workspace,
+                            "launch_evidence": dict(r.launch_evidence or {}),
+                            "launch_evidence_path": r.launch_evidence_path,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),

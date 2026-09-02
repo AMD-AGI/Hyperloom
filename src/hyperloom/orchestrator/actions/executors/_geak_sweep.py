@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import shlex
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ from typing import Any
 from hyperloom.common.env_safety import build_benchmark_env
 from hyperloom.common.jsonio import read_json
 from ._grid_base import pareto_front
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +83,37 @@ def _parse_isl_osl(spec: str) -> tuple[int, int]:
     return int(isl_s or 1024), int(osl_s or 1024)
 
 
+def _accepted_env_mapping(raw_env: str) -> dict[str, str]:
+    """Parse GEAK's shell-style accepted environment without executing it."""
+    try:
+        tokens = shlex.split(raw_env)
+    except ValueError:
+        tokens = raw_env.split()
+    values: dict[str, str] = {}
+    for token in tokens:
+        name, separator, value = token.partition("=")
+        if separator and name:
+            values[name] = value
+    return values
+
+
+def _geak_replay_server_log(out_dir: Path) -> str | None:
+    """Return the newest server log created inside this replay's output only."""
+    candidates = [out_dir / "server.log"]
+    try:
+        candidates.extend(out_dir.glob("replica_*/attempt_*/server.log"))
+    except OSError:
+        # Replay-log discovery is best effort; retain the direct log candidate.
+        logging.debug("Unable to enumerate GEAK replica server logs", exc_info=True)
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        return None
+    try:
+        return str(max(existing, key=lambda path: path.stat().st_mtime))
+    except OSError:
+        return None
+
+
 async def sweep_via_geak(
     *,
     result: dict[str, Any],
@@ -102,16 +135,25 @@ async def sweep_via_geak(
             protocol instead of bench_e2e.sh's per-conc default.
     """
     bench_script = result.get("bench_script") or result.get("geak_bench_script")
+    final_launch_script = str(result.get("final_launch_script") or "").strip()
+    final_launch_path = Path(final_launch_script) if final_launch_script else None
+    use_final_launch = bool(final_launch_path and final_launch_path.is_file() and os.access(final_launch_path, os.X_OK))
+    replay_script = final_launch_path if use_final_launch else Path(str(bench_script or ""))
     overlay = result.get("final_overlay") or ""
     cfg = result.get("accepted_config") or {}
     flags = str(cfg.get("flags") or "")
     env_str = str(cfg.get("env") or "")
 
-    if not bench_script or not Path(bench_script).is_file():
+    if not replay_script.is_file():
         return {
             "status": "failed",
+            # Keep the established error contract: a final launch script is
+            # optional, and unavailable final scripts fall back to bench_e2e.
             "error_class": "missing_bench_script",
-            "error": f"GEAK bench script not found: {bench_script}",
+            "error": (
+                f"GEAK final launch script is not executable ({final_launch_script}); "
+                f"bench script not found: {bench_script}"
+            ),
         }
 
     model = os.environ.get("MODEL_PATH", "").strip()
@@ -184,7 +226,15 @@ async def sweep_via_geak(
             # setdefault: forwarded config/trust apply unless already pinned.
             for _k, _v in protocol_env.items():
                 env.setdefault(_k, _v)
-            cmd = ["bash", str(bench_script)]
+            # Final launch scripts accept the output directory as their first
+            # positional argument. Preserve 2a's existing repeat count through
+            # their shared REPLICAS environment contract; the bench-script
+            # fallback keeps its original command and environment unchanged.
+            if use_final_launch:
+                env["REPLICAS"] = str(repeats)
+                cmd = ["bash", str(replay_script), str(out_dir)]
+            else:
+                cmd = ["bash", str(replay_script)]
 
             def _run() -> subprocess.CompletedProcess:
                 return subprocess.run(
@@ -202,6 +252,8 @@ async def sweep_via_geak(
                 "osl": osl,
                 "variant_name": variant_name,
                 "workspace": str(out_dir),
+                "replay_script": str(replay_script),
+                "replay_mode": "final_launch_script" if use_final_launch else "bench_e2e_fallback",
             }
             ttft = tpot = e2el = None
             tput = None
@@ -230,6 +282,20 @@ async def sweep_via_geak(
             except Exception as exc:  # noqa: BLE001
                 err = repr(exc)
                 entry.update({"status": "failed", "error": err})
+
+            actual_log = _geak_replay_server_log(out_dir)
+            evidence = build_launch_evidence(
+                config_path=replay_script,
+                actual_server_log=actual_log,
+                framework=backend,
+                slot=out_dir,
+                requested_server_args=flags,
+                requested_server_env=_accepted_env_mapping(env_str),
+                model_path=model,
+            )
+            entry["server_log_path"] = actual_log or ""
+            entry["launch_evidence"] = evidence
+            entry["launch_evidence_path"] = persist_launch_evidence(evidence, slot=out_dir)
 
             # Emit a session-breakdown-compatible benchmark_report.json so the
             # sweep collector parses this point like the native sweep;
@@ -261,6 +327,7 @@ async def sweep_via_geak(
             best_for_each_conc[str(e["conc"])] = e
 
     succeeded = [e for e in entries if e["status"] == "succeeded"]
+    promotion_measurement = next(iter(best_for_each_conc.values()), {})
     return {
         "status": "succeeded" if succeeded else "failed",
         "grid_size": len(entries),
@@ -269,4 +336,7 @@ async def sweep_via_geak(
         "best_for_each_conc": best_for_each_conc,
         "workspace": output_root.as_posix(),
         "source": "geak",
+        "replay_mode": "final_launch_script" if use_final_launch else "bench_e2e_fallback",
+        "replay_script": str(replay_script),
+        "promotion_measurement": promotion_measurement,
     }

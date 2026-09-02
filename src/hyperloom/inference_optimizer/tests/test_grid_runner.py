@@ -153,6 +153,28 @@ def test_grid_runner_emits_expected_error_class_labels():
     assert not missing, f"missing error_class labels in run_grid: {missing}"
 
 
+def test_grid_evidence_skips_prelaunch_failure(tmp_path: Path) -> None:
+    """A refused launch has an abort marker, not a measurement evidence record."""
+    output_root = tmp_path / "runs"
+    result = _grid_runner.VariantResult(
+        name="unsupported",
+        extra_server_args="--unsupported",
+        extra_envs={},
+        status="failed",
+        error_class="capability_unsupported",
+    )
+
+    _grid_runner._attach_grid_launch_evidence(
+        [result],
+        grid=[_grid_runner.GridVariant("unsupported")],
+        output_root=output_root,
+        caller_reused_ready_server=False,
+    )
+
+    assert result.launch_evidence == {}
+    assert not (output_root / "variant_00_unsupported" / "launch_evidence.json").exists()
+
+
 def test_variant_result_carries_error_class_field():
     vr = _grid_runner.VariantResult(
         name="x",
@@ -572,6 +594,7 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
         out_idx = cmd.index("--output-dir")
         slot = Path(cmd[out_idx + 1])
         _empty_workspace(slot)
+        (slot / "server.log").write_text("launch evidence\n", encoding="utf-8")
         _write_leak(leak_dir / "inferencex_result.json", tput=1234.0)
         return subprocess.CompletedProcess(cmd, 0, "ok", "")
 
@@ -591,7 +614,99 @@ async def test_run_grid_salvages_fresh_leak_per_variant(tmp_path, monkeypatch):
     r = results[0]
     assert r.status == "succeeded"
     assert r.output_throughput == pytest.approx(1234.0)
+    assert r.server_log_path == str(output_root / "variant_00_vA" / "server.log")
     assert any((w or "").startswith("rescued_from_leaked_path:") for w in r.nonfatal_warnings)
+
+
+@pytest.mark.asyncio
+async def test_run_grid_reused_ready_server_records_warmup_log_evidence(tmp_path, monkeypatch):
+    """A measured round that reuses a ready server must retain its warmup log."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "out"
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        warm_log = slot / "warmup_round" / "variant_00_prior" / "server.log"
+        warm_log.parent.mkdir(parents=True)
+        warm_log.write_text(
+            "INFO server_args=ServerArgs(model_path='/model', tp_size=8, "
+            "mem_fraction_static=0.8, context_length=8192, kv_cache_dtype='fp8', "
+            "attention_backend='aiter', disable_radix_cache=False, trust_remote_code=True)\n",
+            encoding="utf-8",
+        )
+        _fake_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 0, "ok", "")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("reused")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+            server_already_ready=True,
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    warm_log = output_root / "variant_00_reused" / "warmup_round" / "variant_00_prior" / "server.log"
+    assert result.status == "succeeded"
+    assert result.server_log_path == str(warm_log)
+    assert result.launch_evidence["actual_server_log_path"] == str(warm_log)
+    assert result.launch_evidence["warm_reuse"]["provenance"] == "warmup_round"
+    assert result.launch_evidence["observed_server_launch_flags"] == ""
+    assert result.launch_evidence["observed_server_identity"] == {
+        "attention_backend": "aiter",
+        "context_length": 8192,
+        "disable_radix_cache": False,
+        "kv_cache_dtype": "fp8",
+        "mem_fraction_static": 0.8,
+        "model_path": "/model",
+        "tp_size": 8,
+        "trust_remote_code": True,
+    }
+    persisted = json.loads(Path(result.launch_evidence_path).read_text(encoding="utf-8"))
+    assert persisted == result.launch_evidence
+
+
+@pytest.mark.asyncio
+async def test_run_grid_failure_reused_ready_server_uses_same_warmup_fallback(tmp_path, monkeypatch):
+    """Failure paths use the same narrowly scoped ready-server log fallback."""
+    base = tmp_path / "base.yaml"
+    _write_baseline_yaml_mtime(base)
+    output_root = tmp_path / "out"
+
+    def fake_run(cmd, *args, **kwargs):
+        slot = Path(cmd[cmd.index("--output-dir") + 1])
+        warm_log = slot / "warmup_round" / "variant_00_prior" / "server.log"
+        warm_log.parent.mkdir(parents=True)
+        warm_log.write_text("server died\n", encoding="utf-8")
+        _empty_workspace(slot)
+        return subprocess.CompletedProcess(cmd, 1, "", "benchmark failed")
+
+    with patch(
+        "hyperloom.orchestrator.actions.executors._grid_runner.run_with_session_kill",
+        side_effect=fake_run,
+    ):
+        results = await run_grid(
+            base_yaml_path=base,
+            base_extra_args="",
+            grid=[GridVariant("reused_failure")],
+            output_root=output_root,
+            variant_timeout_sec=5,
+            server_already_ready=True,
+            warmup_before_measure=False,
+        )
+
+    result = results[0]
+    assert result.status == "failed"
+    assert result.server_log_path.endswith("warmup_round/variant_00_prior/server.log")
+    assert result.launch_evidence["actual_server_log_path"] == result.server_log_path
+    assert result.launch_evidence["warm_reuse"]["reused_ready_server"] is True
 
 
 def _write_baseline_yaml_overrides(path: Path) -> None:
