@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import os
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -514,16 +513,19 @@ class EnablementParams(CoordinatorCollaborator):
         from hyperloom.agents.framework.enablement_ops import score_enablement_title
         from hyperloom.agents.framework.models import Candidate, ExploreRequest
         from hyperloom.agents.framework.sources import enumerate_candidates
+        from hyperloom.common.pr_monitor_urls import pr_monitor_base_url
 
         max_candidates = int(getattr(req, "max_search_candidates", 5) or 5)
-        # Only search primus_cortex when its URL is configured.
-        primus_url = str(os.environ.get("PRIMUS_CORTEX_PR_API") or "").strip()
-        if primus_url:
-            search_modes = ["primus_cortex", "github"]
-            primus_block: dict[str, Any] = {"primus_cortex": {"base_url": primus_url}}
+        # The PR query service is co-hosted by KB Store.
+        plane = getattr(self, "knowledge_plane", None)
+        pr_enabled = bool(plane is not None and getattr(plane, "pr_monitor_enabled", False))
+        pr_monitor_url = pr_monitor_base_url() if pr_enabled else ""
+        if pr_monitor_url:
+            search_modes = ["pr_monitor", "github"]
+            pr_monitor_block: dict[str, Any] = {"pr_monitor": {"base_url": pr_monitor_url}}
         else:
             search_modes = ["github"]
-            primus_block = {}
+            pr_monitor_block = {}
 
         collected: list[Candidate] = []
         for repo in plan.repos:
@@ -541,7 +543,7 @@ class EnablementParams(CoordinatorCollaborator):
                         "keywords": list(plan.keywords),
                         "pr_states": ["all"],
                         "max_search_candidates": max_candidates,
-                        **primus_block,
+                        **pr_monitor_block,
                     }
                 )
                 collected.extend(enumerate_candidates(explore_req))

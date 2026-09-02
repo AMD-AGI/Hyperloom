@@ -125,6 +125,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
         decision="KEEP",
         patch_path="patches/k001.patch",
         target_file="moe.py",
+        result={"kernel_repo": "/abs/deploy/aiter"},
     )
 
     out = assemble_parts(tmp_path)
@@ -148,6 +149,7 @@ def test_kernel_journey_composes_full_lifecycle(tmp_path: Path) -> None:
     assert k001["backend_attempts"][0]["correctness_passed"] is True
     assert k001["backend_attempts"][0]["duration_sec"] == 120.5
     assert k001["e2e"]["e2e_gain_pct"] == 3.2
+    assert k001["e2e"]["kernel_repo"] == "/abs/deploy/aiter"
 
     k002 = kj["kernels"][1]
     assert k002["outcome"] == "skipped"

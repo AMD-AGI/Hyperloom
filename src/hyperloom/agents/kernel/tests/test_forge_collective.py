@@ -515,7 +515,7 @@ def test_gateway_env_is_derived_from_openai_settings(monkeypatch):
     """Missing author settings are derived without leaking process state."""
     _clear_author_env(monkeypatch)
     monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
-    monkeypatch.setenv("SAFE_API_KEY", "token-1")
+    monkeypatch.setenv("OPENAI_API_KEY", "token-1")
 
     def _root_euid() -> int:
         """Simulate execution as root."""
@@ -542,7 +542,7 @@ def test_gateway_env_preserves_operator_settings(monkeypatch):
     _clear_author_env(monkeypatch)
     values = {
         "OPENAI_BASE_URL": "https://gateway.example/v1",
-        "SAFE_API_KEY": "derived-token",
+        "OPENAI_API_KEY": "derived-token",
         "ANTHROPIC_BASE_URL": "https://anthropic.example",
         "ANTHROPIC_API_KEY": "api-token",
         "ANTHROPIC_AUTH_TOKEN": "auth-token",
@@ -566,6 +566,37 @@ def test_gateway_env_preserves_operator_settings(monkeypatch):
     fc._inject_author_gateway_env()
 
     assert {key: fc.os.environ[key] for key in values} == values
+
+
+def test_a_legacy_key_does_not_outrank_the_openai_key(monkeypatch):
+    """The configured key wins over ``SAFE_API_KEY``, which the installers purge."""
+    _clear_author_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("SAFE_API_KEY", "stale-legacy-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "live-key")
+
+    fc._inject_author_gateway_env()
+
+    assert fc.os.environ["ANTHROPIC_API_KEY"] == "live-key"
+    assert fc.os.environ["ANTHROPIC_AUTH_TOKEN"] == "live-key"
+
+
+def test_a_legacy_key_alone_authenticates_nothing(monkeypatch):
+    """``SAFE_API_KEY`` alone derives no credential.
+
+    The Git identity assertions pin that the rest of the seeding still runs, so
+    this cannot pass by the function doing nothing at all.
+    """
+    _clear_author_env(monkeypatch)
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://gateway.example/v1")
+    monkeypatch.setenv("SAFE_API_KEY", "stale-legacy-key")
+
+    fc._inject_author_gateway_env()
+
+    assert fc.os.environ.get("ANTHROPIC_API_KEY") is None
+    assert fc.os.environ.get("ANTHROPIC_AUTH_TOKEN") is None
+    assert fc.os.environ["ANTHROPIC_BASE_URL"] == "https://gateway.example"
+    assert fc.os.environ["GIT_AUTHOR_NAME"] == "forge-bot"
 
 
 def test_load_input_json_requires_path():

@@ -32,8 +32,17 @@ def _write_exec(path: Path, content: str):
 def _fake_builtin(write_pid: bool) -> str:
     # Emulates the builtin MAGPIE_RUN_PHASE=server phase: (optionally) record a
     # tearable bg pid, then return. Only the server phase is exercised.
+    # Also dumps the keep-alive env it inherited, so a test can assert what the
+    # client exported BEFORE the server booted. Defaults to /dev/null so every
+    # pre-existing test is unaffected.
     pid_line = 'sleep 300 & echo $! > "$MAGPIE_SERVER_PID_FILE"\n' if write_pid else ": no pid written\n"
-    return "#!/usr/bin/env bash\nset -e\n" + pid_line + "exit 0\n"
+    dump = (
+        "{\n"
+        '  echo "VLLM_HTTP_TIMEOUT_KEEP_ALIVE=${VLLM_HTTP_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '  echo "SGLANG_TIMEOUT_KEEP_ALIVE=${SGLANG_TIMEOUT_KEEP_ALIVE:-UNSET}"\n'
+        '} > "${AGENTX_TEST_SERVER_MARKER:-/dev/null}"\n'
+    )
+    return "#!/usr/bin/env bash\nset -e\n" + dump + pid_line + "exit 0\n"
 
 
 _FAKE_AIPERF = r"""#!/usr/bin/env bash
@@ -56,6 +65,7 @@ printf '%s\n' "$@" > "$art/aiperf_args.txt"
   echo "AIPERF_DATASET_CONFIGURATION_TIMEOUT=${AIPERF_DATASET_CONFIGURATION_TIMEOUT:-UNSET}"
   echo "AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT=${AIPERF_SERVICE_PROFILE_CONFIGURE_TIMEOUT:-UNSET}"
   echo "AIPERF_DATASET_MMAP_CACHE_DIR=${AIPERF_DATASET_MMAP_CACHE_DIR:-UNSET}"
+  echo "AIPERF_HTTP_TCP_USER_TIMEOUT=${AIPERF_HTTP_TCP_USER_TIMEOUT:-UNSET}"
   echo "AIPERF_UI_REALTIME_METRICS_ENABLED=${AIPERF_UI_REALTIME_METRICS_ENABLED:-UNSET}"
 } > "${AGENTX_TEST_MARKER}"
 exit "${FAKE_RC:-0}"
@@ -158,6 +168,38 @@ def test_scrub_keeps_aiperf_bin_drops_others(tmp_path):
     marker = (tmp_path / "marker.txt").read_text()
     assert "AIPERF_BIN=" in marker and "UNSET" not in marker.split("AIPERF_BIN=")[1].splitlines()[0]
     assert "AIPERF_FOO=UNSET" in marker  # stray AIPERF_* scrubbed
+
+
+def test_tcp_user_timeout_survives_the_scrub(tmp_path):
+    """The scrub must not leave aiperf on its 30s stock TCP_USER_TIMEOUT.
+
+    That bound is how long Linux tolerates an established connection making no
+    progress, and an agentic turn against a long-context model makes none for
+    as long as the server is prefill-bound. Upstream's Kimi-K3 and DSv4 recipes
+    export 900000; because the scrub above drops any inherited copy, this file
+    has to re-state it or the connection dies mid-prefill and the round fails
+    as a warmup error with no matching server-side fault.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=900000" in (tmp_path / "marker.txt").read_text()
+
+
+def test_tcp_user_timeout_is_tunable_through_the_agentx_name(tmp_path):
+    """Operators tune it through AGENTX_, like every other knob in this file."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_HTTP_TCP_USER_TIMEOUT="1200000")
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=1200000" in (tmp_path / "marker.txt").read_text()
+
+
+def test_inherited_tcp_user_timeout_does_not_win(tmp_path):
+    """An inherited AIPERF_ copy is scrubbed; ours is authoritative."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AIPERF_HTTP_TCP_USER_TIMEOUT="30000")
+    assert r.returncode == 0, r.stderr
+    assert "AIPERF_HTTP_TCP_USER_TIMEOUT=900000" in (tmp_path / "marker.txt").read_text()
 
 
 def test_gpu_type_uppercase_resolves_builtin(tmp_path):
@@ -485,6 +527,54 @@ def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
     assert "-d" not in argv
 
 
+def test_profile_delay_safe_bound_accounts_for_warmup_grace(tmp_path):
+    """The `_pmax` clamp must not treat DURATION as the whole round's clock.
+
+    A large model's warmup drain is bounded by WARMGRACE, not DURATION, and
+    happens *before* the measurement window opens. With WARMGRACE=65,
+    DURATION=5, PWIN=0: the old DURATION-only bound (5 - 0 - 60 = -55, clamped
+    to 0) would force *any* positive PWARM to clamp to 0 and fire immediately
+    -- squarely inside warmup. The WARMGRACE-inclusive bound (65 + 5 - 0 - 60
+    = 10) correctly leaves room for a delay that clears the drain first.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        AGENTX_PROFILE_WARMUP_S="8",
+        AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_DURATION="5",
+        AGENTX_WARMUP_GRACE_PERIOD="65",
+        FAKE_AIPERF_SLEEP="0.2",
+        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "clamping to" not in (r.stdout + r.stderr)
+
+
+def test_profile_delay_is_still_clamped_when_it_exceeds_the_full_bound(tmp_path):
+    """A PWARM that exceeds even WARMGRACE + DURATION is still clamped early."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        PROFILE="1",
+        AGENTX_PROFILE_WARMUP_S="30",
+        AGENTX_PROFILE_WINDOW_S="0",
+        AGENTX_DURATION="5",
+        AGENTX_WARMUP_GRACE_PERIOD="65",
+        FAKE_AIPERF_SLEEP="0.2",
+        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "clamping to 10s" in (r.stdout + r.stderr)
+
+
 def test_agentx_server_script_override_without_framework(tmp_path):
     """An explicit AGENTX_SERVER_SCRIPT still resolves when FRAMEWORK is unset."""
     bench, bind, res = _sandbox(tmp_path, make_builtin=False)
@@ -586,3 +676,455 @@ def test_inherited_noncanonical_marker_does_not_leak_in(tmp_path):
     out = _result(res)
     assert not out["submission_invalid_reasons"]
     assert out["submission_valid"] is not False
+
+
+def test_reduced_warmup_is_flagged_non_canonical(tmp_path):
+    """Warmup is measurement-defining, so trimming it must void submittability.
+
+    Measured on a 743B model: the canonical 10 requests/lane is a ~2h warmup, so
+    an operator reaches for this knob under real time pressure. aiperf has no
+    concept of "enough warmup", so the scenario stamps submission_valid=true and
+    the round looks publishable while having measured a materially emptier cache.
+    Only the client knows the canonical value, so only the client can object.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_REQUESTS_PER_LANE="1")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("warmup_per_lane=1" in x for x in out["submission_invalid_reasons"]), out["submission_invalid_reasons"]
+
+
+def test_reduced_warmup_grace_is_flagged_non_canonical(tmp_path):
+    """Same for the drain window: a shorter grace truncates the warmup it gates."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_GRACE_PERIOD="60")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("warmup_grace=60s" in x for x in out["submission_invalid_reasons"]), out["submission_invalid_reasons"]
+
+
+def test_canonical_warmup_is_not_flagged(tmp_path):
+    """The canonical values must not trip the new check (no false positive)."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_WARMUP_REQUESTS_PER_LANE="10",
+        AGENTX_WARMUP_GRACE_PERIOD="1800",
+    )
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_raised_warmup_grace_is_not_flagged_non_canonical(tmp_path):
+    """A *longer* grace period is more warmup, not less, and must not be flagged.
+
+    An operator raising this so a large model's warmup has room to fully drain
+    (e.g. 4h for Kimi-K3-scale warmup) does not change what gets replayed --
+    only how long the client is willing to wait for it. Flagging it the same
+    as a truncated drain would make the correct run non-submittable.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_GRACE_PERIOD="14400")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_raised_warmup_per_lane_is_not_flagged_non_canonical(tmp_path):
+    """Symmetric with the grace period: more warmup requests is not a deviation."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_WARMUP_REQUESTS_PER_LANE="20")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_raised_failed_request_threshold_is_flagged_non_canonical(tmp_path):
+    """Loosening the abort threshold is measurement-defining and carries no marker.
+
+    Raising it keeps alive a run that upstream's 0.10 would have aborted, and
+    the requests that did survive are then mapped as an ordinary measurement.
+    aiperf stamps nothing for this -- the threshold is the client's own safety
+    net, not part of the scenario -- so without the client objecting the round
+    comes back submission_valid=true.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD="0.5")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert out["submission_valid"] is False
+    assert any("failed_request_threshold=0.5" in x for x in out["submission_invalid_reasons"]), out[
+        "submission_invalid_reasons"
+    ]
+
+
+def test_tightened_failed_request_threshold_is_not_flagged(tmp_path):
+    """A stricter threshold measures a cleaner run, so it is not a deviation."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD="0.01")
+    assert r.returncode == 0, r.stderr
+    out = _result(res)
+    assert not out["submission_invalid_reasons"]
+    assert out["submission_valid"] is not False
+
+
+def test_canonical_failed_request_threshold_is_not_flagged(tmp_path):
+    """Restating the canonical ratio must not trip the check, in either spelling."""
+    for spelling in ("0.10", "0.1"):
+        base = tmp_path / spelling.replace(".", "_")
+        base.mkdir()
+        bench, bind, res = _sandbox(base)
+        r = _run(bench, bind, res, tmp_path, AGENTX_FAILED_REQUEST_THRESHOLD=spelling)
+        assert r.returncode == 0, r.stderr
+        out = _result(res)
+        assert not out["submission_invalid_reasons"], spelling
+        assert out["submission_valid"] is not False, spelling
+
+
+def test_failed_request_threshold_cannot_inject_awk_code(tmp_path):
+    """FRT reaches an awk program; it must be DATA, never program text.
+
+    ``awk "BEGIN{exit !(($FRT) > ($CANON_FRT))}"`` interpolates the value into
+    the program body, so ``AGENTX_FAILED_REQUEST_THRESHOLD='system("...")'``
+    executes inside the container. The switch forwards every AGENTX_* key from
+    the orchestrator's environment verbatim, so anything that can write a config
+    or recipe gets command execution. Worse, the injected program supplies its
+    own exit status, so the non-canonical guard silently stops firing too.
+    """
+    canary = tmp_path / "pwned.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_FAILED_REQUEST_THRESHOLD=f'system("touch {canary}")',
+    )
+    assert not canary.exists(), "awk executed injected code"
+    # And it must be rejected outright rather than silently treated as canonical.
+    assert r.returncode != 0
+    assert not res.joinpath("inferencex_result.json").exists()
+
+
+@pytest.mark.parametrize(
+    "knob,value",
+    [
+        ("AGENTX_WARMUP_REQUESTS_PER_LANE", "1.5"),
+        ("AGENTX_WARMUP_REQUESTS_PER_LANE", "0x2"),
+        ("AGENTX_WARMUP_GRACE_PERIOD", "1.5"),
+        ("AGENTX_WARMUP_GRACE_PERIOD", "abc"),
+        ("AGENTX_FAILED_REQUEST_THRESHOLD", "0.1.2"),
+    ],
+)
+def test_non_integer_measurement_knobs_fail_loud(tmp_path, knob, value):
+    """A malformed measurement-defining knob must stop the round, not be stamped.
+
+    ``[ "$WARMLANE" -lt N ]`` exits 2 on a non-integer, and on the left of ``&&``
+    that status is exempt from ``set -e``: the guard silently does not fire and
+    NONCANON stays empty, so an illegal configuration comes back
+    submission_valid=true. A non-integer grace additionally reaches the ``$(( ))``
+    in the PROFILE branch and aborts an otherwise-complete round there instead.
+    """
+    base = tmp_path / f"{knob}_{value}".replace(".", "_").replace("/", "_")
+    base.mkdir()
+    bench, bind, res = _sandbox(base)
+    r = _run(bench, bind, res, tmp_path, **{knob: value})
+    assert r.returncode != 0, f"{knob}={value} was accepted"
+    assert not res.joinpath("inferencex_result.json").exists()
+
+
+def _server_env(tmp_path, marker: Path) -> dict[str, str]:
+    """Parse the keep-alive env the fake builtin server phase inherited."""
+    return dict(line.split("=", 1) for line in marker.read_text(encoding="utf-8").splitlines() if "=" in line)
+
+
+def test_server_keep_alive_defaults_to_the_client_tolerance(tmp_path):
+    """The server idle timeout must be raised before the server boots.
+
+    Regression: AIPerf pins one pooled keep-alive connection per agentic session
+    and reuses it across turns. vLLM's default idle timeout is 5s
+    (``envs.py: VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5``) while the client is
+    already given 900s via AIPERF_HTTP_TCP_USER_TIMEOUT -- a 180x disagreement.
+    An inter-turn think-time past 5s lets the server close the socket exactly as
+    the client reuses it; aiohttp raises ServerDisconnectedError and AIPerf
+    escalates it to a terminal warmup failure against a healthy server. Measured
+    on a conc=16 K3 round: orderly "Application shutdown complete" at warmup
+    64/177, no error in the server log at all.
+    """
+    marker = tmp_path / "srv.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_TEST_SERVER_MARKER=str(marker))
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "900"
+    # A vllm run must not carry the sglang spelling.
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_server_keep_alive_is_operator_overridable(tmp_path):
+    """AGENTX_HTTP_KEEP_ALIVE_S sets it; an explicit framework knob wins outright."""
+    marker = tmp_path / "knob.txt"
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, AGENTX_TEST_SERVER_MARKER=str(marker), AGENTX_HTTP_KEEP_ALIVE_S="120")
+    assert r.returncode == 0, r.stderr
+    assert _server_env(tmp_path, marker)["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "120"
+
+    pinned = tmp_path / "pinned"
+    pinned.mkdir()
+    marker2 = tmp_path / "pinned.txt"
+    bench, bind, res = _sandbox(pinned)
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        AGENTX_TEST_SERVER_MARKER=str(marker2),
+        AGENTX_HTTP_KEEP_ALIVE_S="120",
+        VLLM_HTTP_TIMEOUT_KEEP_ALIVE="77",
+    )
+    assert r.returncode == 0, r.stderr
+    assert _server_env(tmp_path, marker2)["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "77"
+
+
+def test_server_keep_alive_uses_the_frameworks_own_knob(tmp_path):
+    """sglang names it differently; exporting the vllm spelling would be a no-op."""
+    marker = tmp_path / "sg.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(bench, bind, res, tmp_path, FRAMEWORK="sglang", AGENTX_TEST_SERVER_MARKER=str(marker))
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_keep_alive_follows_the_server_script_not_a_concatenation(tmp_path):
+    """The exact mismatch that reached production.
+
+    ``BUILTIN`` defaults to ``${FRAMEWORK}_${GPU}.sh``, so the two can only
+    disagree through AGENTX_SERVER_SCRIPT -- which is precisely how it happens
+    in the field: a stale FRAMEWORK reaches the client through persisted state
+    while the operator pins the script explicitly.
+
+    The arm used to be chosen by matching ``"${FRAMEWORK}${BUILTIN}"``, so a
+    stale FRAMEWORK=vllm alongside BUILTIN=sglang_mi300x.sh formed
+    ``"vllmsglang_mi300x.sh"``, matched ``*vllm*`` first, and exported the vllm
+    knob -- leaving SGLang on its 5s default while the log reported 900s. The
+    server then closed the socket mid-warmup and the round died as a terminal
+    warmup failure, with the one diagnostic line actively denying the cause.
+
+    BUILTIN is the script that actually boots, so it decides.
+    """
+    marker = tmp_path / "mix.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="vllm",
+        AGENTX_SERVER_SCRIPT="sglang_mi300x.sh",
+        AGENTX_TEST_SERVER_MARKER=str(marker),
+    )
+    assert r.returncode == 0, r.stderr
+    env = _server_env(tmp_path, marker)
+    assert env["SGLANG_TIMEOUT_KEEP_ALIVE"] == "900"
+    assert env["VLLM_HTTP_TIMEOUT_KEEP_ALIVE"] == "UNSET"
+
+
+def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
+    """Resolving it silently in either direction hides a misconfigured round."""
+    marker = tmp_path / "warn.txt"
+    bench, bind, res = _sandbox(tmp_path, make_builtin=False)
+    _write_exec(bench / "sglang_mi300x.sh", _fake_builtin(True))
+    r = _run(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        FRAMEWORK="vllm",
+        AGENTX_SERVER_SCRIPT="sglang_mi300x.sh",
+        AGENTX_TEST_SERVER_MARKER=str(marker),
+    )
+    assert r.returncode == 0, r.stderr
+    assert "disagrees with the server script" in (r.stdout + r.stderr)
+
+
+@pytest.mark.parametrize(
+    "knob,value",
+    [
+        ("AGENTX_PROFILE_WINDOW_S", "20.5"),
+        ("AGENTX_PROFILE_WARMUP_S", "2700s"),
+        ("AGENTX_PROFILE_WARMUP_S", "abc"),
+        ("AGENTX_DURATION", "3600.0"),
+    ],
+)
+def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, knob, value):
+    """Both downstream constructs mishandle a non-integer, in opposite directions.
+
+    ``$(( ))`` aborts the whole round under ``set -e`` -- minutes from the
+    measurement window -- while ``[ -gt ]`` exits 2, which ``set -e`` exempts as
+    an ``if`` condition, so the clamp silently does not fire and the capture
+    lands after the round ended: no trace, and the "exceeds the safe bound"
+    warning never printed. Reject at the door instead, with the knob named.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path, PROFILE="1", **{knob: value})
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert knob in (r.stdout + r.stderr)
+
+
+# --- the trace has to finish writing before the server is torn down -----------
+
+
+def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
+    """A 200 from /stop_profile means "told to stop", not "written to disk".
+
+    MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the first per-rank file
+    appeared 350s after the call returned, all eight were present at 391s, and
+    the set was still growing at 546s on its way to 5.1 GB. ``cleanup`` allows
+    20s before SIGKILL, so every capture before this fix was killed mid-write --
+    eight files of plausible size that all fail ``gzip -t``.
+
+    Here a rank file keeps growing for a few seconds after stop; the client must
+    still be waiting when it settles.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    grower = tmp_path / "grow.sh"
+    grower.write_text(
+        "#!/usr/bin/env bash\n"
+        f"for i in 1 2 3 4 5 6; do printf 'x%.0s' $(seq 1 2000) >> '{trace}/r0.trace.json'; sleep 2; done\n",
+        encoding="utf-8",
+    )
+    grower.chmod(0o755)
+    subprocess.Popen(["bash", str(grower)])
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="1", AGENTX_TRACE_FLUSH_TIMEOUT_S="120")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush complete" in out, out[-1500:]
+    # It must not have declared completion on the first sample, while the file
+    # was still being appended to.
+    assert "waiting for the profiler trace" in out
+
+
+def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
+    """Timing out must be loud, and must name the knob.
+
+    A truncated trace reported as a trace is worse than no trace: TraceLens will
+    read it and produce a kernel table from a half-written capture.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    # Two ranks expected, only one ever appears -> the count gate never passes.
+    (trace / "r0.trace.json").write_text("partial", encoding="utf-8")
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush did not settle" in out, out[-1500:]
+    assert "TRUNCATED" in out
+    assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
+
+
+def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
+    """Ranks serialise one at a time, so "not growing" is not "complete".
+
+    A set that is merely idle between two ranks would otherwise be declared
+    finished with half its files missing.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    (trace / "r0.trace.json").write_text("done", encoding="utf-8")
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush did not settle" in out, out[-1500:]
+    assert "expected 8 ranks" in out
+
+
+def test_the_wait_is_skipped_when_not_profiling(tmp_path):
+    """Measurement rounds must not pay for a capture they never took."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "waiting for the profiler trace" not in (r.stdout + r.stderr)
+
+
+def test_no_configured_trace_dir_is_not_waited_on(tmp_path):
+    """With no profiler output directory there is nothing that can ever settle.
+
+    The stability gate gates on a nonzero file count, so a run where neither
+    SGLANG_TORCH_PROFILER_DIR nor VLLM_TORCH_PROFILER_DIR is set and no
+    ``$RESULT_DIR/torch_trace`` exists can never satisfy it -- the loop would
+    spin out the entire flush budget waiting for files that no profiler was
+    configured to write. Return at once instead.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    assert not (res / "torch_trace").exists()
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "no profiler output directory is configured" in out, out[-1500:]
+    # Crucially, it must not have entered the polling loop at all: the default
+    # AGENTX_TRACE_FLUSH_TIMEOUT_S is 1800s and this test does not lower it.
+    assert "waiting for the profiler trace" not in out
+
+
+def test_a_capture_that_produces_nothing_gives_up_early(tmp_path):
+    """Zero files is a failed capture, not a slow one; bound it separately.
+
+    A rejected /start_profile or an unwritable output dir yields a directory
+    that stays empty forever. Waiting out the full flush budget (1800s by
+    default) buys nothing, and on a sweep it is paid once per profiled round.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    (res / "torch_trace").mkdir()  # exists, but nothing ever lands in it
+
+    r = _run_profile(
+        bench,
+        bind,
+        res,
+        tmp_path,
+        TP="8",
+        AGENTX_TRACE_FLUSH_TIMEOUT_S="600",
+        AGENTX_TRACE_FIRST_FILE_TIMEOUT_S="15",
+    )
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "no trace file appeared within 15s" in out, out[-1500:]
+    # The shorter first-file bound must win over the flush budget, not the
+    # other way round.
+    assert "trace flush did not settle" not in out
+
+
+def test_the_first_file_bound_never_exceeds_the_flush_budget(tmp_path):
+    """An operator who lowers only the flush budget must still get that bound.
+
+    Otherwise the 900s first-file default would silently override a deliberately
+    short AGENTX_TRACE_FLUSH_TIMEOUT_S and the wait would outlast it.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    (res / "torch_trace").mkdir()
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="15")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "first-file bound 15s" in out, out[-1500:]
+    assert "no trace file appeared within 15s" in out

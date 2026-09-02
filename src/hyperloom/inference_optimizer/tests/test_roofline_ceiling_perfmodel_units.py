@@ -282,6 +282,238 @@ def test_load_model_meta_sizes_routed_experts_at_their_own_precision(tmp_path):
     assert meta.expert_weight_bytes > 0
 
 
+#: The Quark MXFP4 shape, verbatim from
+#: ``Qwen3.8-2.4T-A95B-Quark-MXFP4/config.json``: ``quant_method`` names the
+#: toolkit, and the weight precision sits on the nested global weight spec.
+_QUARK_MXFP4_QUANT_CFG = {
+    "quant_method": "quark",
+    "quant_mode": "eager_mode",
+    "global_quant_config": {
+        "input_tensors": {"dtype": "fp4", "is_dynamic": True, "group_size": 32},
+        "weight": {"dtype": "fp4", "is_dynamic": False, "qscheme": "per_group", "group_size": 32},
+        "output_tensors": None,
+    },
+    "layer_quant_config": {},
+}
+
+
+def test_quant_config_weight_bytes_reads_the_nested_quark_weight_spec():
+    """quant_method says "quark"; only the nested weight spec names the precision."""
+    assert rc._resolve_quant_config_weight_bytes(_QUARK_MXFP4_QUANT_CFG) == 0.5
+
+
+def test_quant_config_weight_bytes_still_takes_a_precision_named_method():
+    """The flat HF form keeps working: the method itself is the precision."""
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "fp8"}) == 1.0
+    # ``awq``/``gptq`` name a 4-bit method the dtype table does not carry.
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "awq"}) == 0.5
+
+
+def test_quant_config_weight_bytes_reads_compressed_tensors_bit_widths():
+    cfg = {"quant_method": "compressed-tensors", "config_groups": {"group_0": {"weights": {"num_bits": 4}}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+
+
+def test_quant_config_weight_bytes_takes_the_precision_most_groups_agree_on():
+    """Per-layer groups need not agree, and dict order must not decide.
+
+    A Quark MoE checkpoint stores the routed experts at fp4 and the attention
+    projections at fp8. Returning whichever group iterated first declared that
+    precision for the whole model -- and the answer flipped with dict order.
+    """
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "*.self_attn.q_proj": {"weight": {"dtype": "fp8"}},
+            "*.mlp.experts.*": {"weight": {"dtype": "fp4"}},
+            "*.mlp.experts.down_proj": {"weight": {"dtype": "fp4"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+    # Same groups, opposite majority -> opposite answer, from the counts alone.
+    cfg["layer_quant_config"]["*.mlp.experts.*"] = {"weight": {"dtype": "fp8"}}
+    cfg["layer_quant_config"]["*.mlp.experts.down_proj"] = {"weight": {"dtype": "fp8"}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_quant_config_weight_bytes_breaks_a_tie_toward_the_wider_type():
+    # Undercounting weight bytes raises the roofline and reports a real
+    # regression as "already at ceiling", so a tie resolves upward.
+    cfg = {
+        "quant_method": "quark",
+        "layer_quant_config": {
+            "a": {"weight": {"dtype": "fp4"}},
+            "b": {"weight": {"dtype": "fp8"}},
+        },
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 1.0
+
+
+def test_a_whole_checkpoint_scope_still_outranks_the_per_group_ones():
+    cfg = {
+        "quant_method": "quark",
+        "global_quant_config": {"weight": {"dtype": "fp4"}},
+        "layer_quant_config": {"a": {"weight": {"dtype": "fp8"}}, "b": {"weight": {"dtype": "fp8"}}},
+    }
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.5
+
+
+@pytest.mark.parametrize("quant_cfg", [None, {}, "fp8", {"quant_method": "unknown-toolkit"}])
+def test_quant_config_weight_bytes_is_silent_without_a_decisive_signal(quant_cfg):
+    """No signal returns 0.0 so the caller falls back to the checkpoint dtype."""
+    assert rc._resolve_quant_config_weight_bytes(quant_cfg) == 0.0
+
+
+def test_quant_config_weight_bytes_knows_mxfp8():
+    """MiniMax-M3-MXFP8 names the method ``mxfp8`` with no nested weight spec."""
+    assert rc._resolve_quant_config_weight_bytes({"quant_method": "mxfp8"}) == 1.0
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        ("num_experts_per_tok", 4),  # the common HF spelling
+        ("num_experts_per_token", 16),  # Kimi-K3
+        ("top_k_experts", 8),  # Gemma-4
+    ],
+)
+def test_experts_per_tok_reads_every_alias_in_use(key, expected):
+    assert rc._derive_experts_per_tok({key: expected}) == expected
+
+
+def test_experts_per_tok_prefers_the_canonical_spelling():
+    assert rc._derive_experts_per_tok({"num_experts_per_tok": 2, "top_k_experts": 9}) == 2
+
+
+def test_experts_per_tok_is_zero_when_no_alias_is_present():
+    assert rc._derive_experts_per_tok({"num_experts": 8}) == 0
+
+
+def test_moe_hidden_size_prefers_the_latent_expert_width():
+    """Kimi-K3 runs its experts at ``routed_expert_hidden_size``, not ``hidden_size``."""
+    assert rc._derive_moe_hidden_size({"hidden_size": 7168, "routed_expert_hidden_size": 3584}) == 3584
+
+
+def test_moe_hidden_size_falls_back_to_the_residual_width():
+    assert rc._derive_moe_hidden_size({"hidden_size": 7168}) == 7168
+
+
+def test_moe_decomposition_reads_a_gemma_style_topk_alias():
+    """Regression: ``top_k_experts`` read as 0 degraded a 128-expert model to dense."""
+    cfg = {
+        "num_experts": 128,
+        "top_k_experts": 8,
+        "hidden_size": 2816,
+        "num_hidden_layers": 30,
+        "moe_intermediate_size": 704,
+    }
+    _, total, experts, per_tok = rc._compute_expert_decomposition(cfg, weight_bytes=51_611_872_412, dtype_bytes=2.0)
+    assert (experts, per_tok) == (128, 8)
+    assert total == 30 * 128 * 3 * 2816 * 704 * 2
+
+
+def test_moe_decomposition_sizes_latent_experts_at_their_own_width():
+    """Sizing Kimi-K3's experts at hidden_size doubles them past the checkpoint."""
+    cfg = {
+        "num_experts": 896,
+        "num_experts_per_token": 16,
+        "hidden_size": 7168,
+        "routed_expert_hidden_size": 3584,
+        "num_hidden_layers": 93,
+        "moe_intermediate_size": 3072,
+    }
+    weight_bytes = 1_560_860_324_864
+    _, total, experts, _ = rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, dtype_bytes=0.5)
+    assert experts == 896
+    assert total == int(93 * 896 * 3 * 3584 * 3072 * 0.5)
+    # The residual width would overshoot the checkpoint and safe-degrade.
+    wide = {k: v for k, v in cfg.items() if k != "routed_expert_hidden_size"}
+    assert rc._compute_expert_decomposition(wide, weight_bytes=weight_bytes, dtype_bytes=0.5)[2] == 0
+
+
+def test_perfmodel_sizes_the_moe_op_at_the_latent_expert_width(tmp_path):
+    """A narrower expert width must shrink the MoE op, not just the guard math."""
+
+    def _breakdown(moe_hidden):
+        meta = rc.ModelMeta(
+            weight_bytes=1_000_000,
+            num_layers=4,
+            num_kv_heads=2,
+            head_dim=64,
+            weight_dtype_bytes=0.5,
+            num_experts=128,
+            experts_per_tok=8,
+            expert_weight_dtype_bytes=0.5,
+            hidden_size=4096,
+            moe_intermediate_size=1024,
+            moe_hidden_size=moe_hidden,
+            vocab_size=32000,
+            num_attention_heads=8,
+        )
+        b = rc.compute_roofline_from_perfmodel(
+            meta=meta, gpu_type="mi355x", concurrency=8, isl=1024, osl=128, num_gpus=1, precision_tag="mxfp4"
+        )
+        return next(o for o in b.ops if o.name == "moe_fused")
+
+    assert _breakdown(2048).bytes_moved < _breakdown(0).bytes_moved
+    # 0 means "unset", which must behave exactly like the residual width.
+    assert _breakdown(0).bytes_moved == _breakdown(4096).bytes_moved
+
+
+def test_load_model_meta_keeps_a_quark_moe_checkpoint_decomposed(tmp_path):
+    """Regression: reading only ``quant_method`` sized MXFP4 experts at bf16.
+
+    The 4x overcount pushed ``total_expert_bytes`` past the checkpoint size,
+    tripping the sanity guard and degrading a 512-expert model to dense — which
+    dropped the MoE op from the breakdown entirely.
+    """
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+        "moe_intermediate_size": 2048,
+        "quantization_config": _QUARK_MXFP4_QUANT_CFG,
+    }
+    # Sized as the real checkpoint is: fp4 experts fit, bf16 experts would not.
+    expert_elems = 4 * 512 * 3 * 512 * 2048  # layers * experts * 3 * hidden * moe_inter
+    weight_bytes = int(expert_elems * 0.5 * 1.15)
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=weight_bytes))
+
+    assert meta.weight_dtype_bytes == 0.5
+    assert (meta.num_experts, meta.experts_per_tok) == (512, 10)
+    assert meta.moe_intermediate_size == 2048
+    assert meta.expert_weight_bytes == int(expert_elems * 0.5)
+    # At bf16 the same config degrades to dense, which is the bug being pinned.
+    assert rc._compute_expert_decomposition(cfg, weight_bytes=weight_bytes, dtype_bytes=2.0) == (
+        weight_bytes,
+        0,
+        0,
+        0,
+    )
+
+
+def test_perfmodel_attributes_the_moe_ffn_for_a_quark_checkpoint(tmp_path):
+    """The MoE op must appear, and dominate: it is most of the weight IO."""
+    cfg = {
+        **_DENSE_CFG,
+        "num_experts": 512,
+        "num_experts_per_tok": 10,
+        "moe_intermediate_size": 2048,
+        "quantization_config": _QUARK_MXFP4_QUANT_CFG,
+    }
+    expert_elems = 4 * 512 * 3 * 512 * 2048
+    meta = rc.load_model_meta(_write_model(tmp_path / "m", cfg, weight_bytes=int(expert_elems * 0.5 * 1.15)))
+    breakdown = rc.compute_roofline_from_perfmodel(
+        meta=meta, gpu_type="mi355x", concurrency=64, isl=8192, osl=1024, num_gpus=8, precision_tag="mxfp4"
+    )
+
+    ops = {o.name: o.pct_time for o in breakdown.ops}
+    assert "moe_fused" in ops
+    assert ops["moe_fused"] == max(ops.values())
+    # Dense gate/up/down must not double-count the FFN alongside the MoE op.
+    assert not {"gate_proj", "up_proj", "down_proj"} & set(ops)
+
+
 def test_moe_decomposition_degrades_when_the_experts_exceed_the_checkpoint():
     """An implausible decomposition is dropped rather than published."""
     cfg = {
@@ -636,3 +868,34 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
         )
         == 0.0
     )
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("fp8_e4m3", 1.0),
+        ("fp8_e5m2", 1.0),
+        ("nvfp4", 0.5),
+        ("int8", 1.0),
+        ("w8a8_int8", 1.0),
+        ("int4", 0.5),
+        ("awq", 0.5),
+        ("gptq", 0.5),
+    ],
+)
+def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
+    """The nested path must consult both tables, exactly as the flat one does.
+
+    These eight tags live only in ``_QUANT_WEIGHT_BYTES``, and Quark writes
+    precisely them on ``global_quant_config.weight.dtype`` -- often with no
+    ``num_bits`` beside them. Checking ``_DTYPE_BYTES`` alone returned 0.0, the
+    caller fell back to the checkpoint dtype, and an fp8 checkpoint was costed
+    as bf16: the 2x weight-IO overcount this function exists to remove.
+    """
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": tag}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == expected
+
+
+def test_num_bits_still_wins_when_the_tag_is_unknown():
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "some_new_format", "num_bits": 6}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.75

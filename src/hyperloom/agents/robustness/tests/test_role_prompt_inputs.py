@@ -325,7 +325,7 @@ def test_optimization_stack_size_zero_when_none():
 def test_explore_started_false_when_all_last_explore_keys_are_none():
     """Pre-explore/sweep the lines are all ``(none)`` → flag stays False so ``no_levers_found`` defers."""
     prompt = _prompt(
-        "session_id=s\nlast_explore=(none)\nlast_sweep=(none)\ncrash_count=0\n",
+        "session_id=s\nlast_explore=(none)\ncrash_count=0\n",
         "=== Inbox for robustness ===\n(no new messages)\n",
     )
     ctx = from_coordinator_prompt(prompt)
@@ -333,12 +333,11 @@ def test_explore_started_false_when_all_last_explore_keys_are_none():
 
 
 def test_explore_started_true_when_any_last_explore_key_is_set():
-    """A set ``last_explore`` flips ``explore_started`` to True even while last_sweep is still ``(none)``."""
+    """A set ``last_explore`` flips ``explore_started`` to True."""
     prompt = _prompt(
         "session_id=s\n"
         "last_explore=status=succeeded decision=promoted "
         "tput=600.50 err=- ws=/runs/explore/abc ts=2026-05-22T05:00:00Z\n"
-        "last_sweep=(none)\n"
         "crash_count=0\n",
         "=== Inbox for robustness ===\n(no new messages)\n",
     )
@@ -348,10 +347,7 @@ def test_explore_started_true_when_any_last_explore_key_is_set():
 
 def test_explore_started_true_for_each_individual_explore_family():
     """Each explore-family key flips the flag independently."""
-    for key in (
-        "last_explore",
-        "last_sweep",
-    ):
+    for key in ("last_explore",):
         prompt = _prompt(
             f"session_id=s\n{key}=status=succeeded decision=promoted\ncrash_count=0\n",
             "=== Inbox for robustness ===\n(no new messages)\n",

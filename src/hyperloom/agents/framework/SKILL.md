@@ -2,7 +2,7 @@
 
 > **Purpose**: vllm/sglang source-layer optimisation companion for
 > `inference_optimizer`. It discovers framework / ref candidates
-> (via Primus Cortex + GitHub Search), optionally builds/benchmarks
+> (via PR Monitor + GitHub Search), optionally builds/benchmarks
 > them in isolated worktrees, and serves the Coordinator's
 > FRAMEWORK_AGENT phase. Exposed through the `fa` / `framework-agent`
 > console entry points.
@@ -22,7 +22,7 @@ src/hyperloom/agents/framework/     # hyperloom.agents.framework
 ├── repo_map.py                    # framework -> canonical repo URL
 ├── keywords.py / models.py        # request models + keyword helpers
 ├── logging_setup.py               # shared: structured logging
-├── sources/                       # primus_cortex + github discovery
+├── sources/                       # pr_monitor + github discovery
 └── tests/
 ```
 

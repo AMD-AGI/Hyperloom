@@ -132,7 +132,7 @@ def _arm_sweep_loopback(st):
     st.macro_cycle = 0
     st.cumulative_gain_validated = 7.0
     st.gain_at_cycle_start = 0.0
-    st.last_sweep = {"status": "succeeded"}
+    st.last_conc_sweep = {"status": "succeeded"}
     st.last_conc_sweep = {"status": "succeeded"}
 
 

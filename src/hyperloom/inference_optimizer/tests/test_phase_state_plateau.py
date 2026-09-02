@@ -265,7 +265,7 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     state.specialist_domain_empty_streak = {"serving_specialist": 3}
     state.rounds_since_last_specialist = {"serving_specialist": 4}
     state.rounds_since_last_keep = {"serving_specialist": 5}
-    state.last_sweep = {"status": "succeeded"}
+    state.last_conc_sweep = {"status": "succeeded"}
     state.last_conc_sweep = {"status": "succeeded"}
     state.explore_search = {"tested": {"stable": {"cycle": 0}}}
     state.kernel_integrate_attempts = {"stable": {"attempts": [{"cycle": 0}]}}
@@ -279,7 +279,7 @@ def test_reset_per_cycle_plateau_state_preserves_durable_ledgers():
     assert state.specialist_domain_empty_streak == {}
     assert state.rounds_since_last_specialist == {}
     assert state.rounds_since_last_keep == {}
-    assert state.last_sweep == {}
+    assert state.last_conc_sweep == {}
     assert state.last_conc_sweep == {}
     assert state.explore_search["tested"]["stable"]["cycle"] == 0
     assert state.kernel_integrate_attempts["stable"]["attempts"][0]["cycle"] == 0

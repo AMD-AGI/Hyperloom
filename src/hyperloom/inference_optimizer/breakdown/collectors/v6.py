@@ -10,6 +10,7 @@ from hyperloom.common.jsonio import read_json, read_jsonl
 
 from ..agent_ownership import LEVER_KINDS
 from ..critic_reviews import FRAMEWORK_REVIEW_FIELDS, normalize_framework_reviews
+from ..kb_timeline import collect_kb_events
 from ...session.sbd_v6 import SCHEMA_VERSION_V6, read_timeline_events
 from ._common import (
     _AUTHORING_TASK_KINDS,
@@ -30,7 +31,6 @@ from .v6_stages import (
     project_baseline_event,
     project_conc_sweep_event,
     project_kernel_events,
-    project_sweep_event,
 )
 
 
@@ -41,7 +41,6 @@ _SUCCESS_STOP_REASONS = frozenset(
         "time_exhausted",
         "max_ticks",
         "sweep_done",
-        "conc_sweep_done",
     }
 )
 _ABORTED_STOP_REASONS = frozenset({"signal", "user_stop_requested"})
@@ -1431,6 +1430,7 @@ def _source_attempt(
             "patches_applied": _string_list(outputs.get("patches_applied")),
             "source_snapshot": _first(outputs.get("source_snapshot"), None),
             "source_manifest": _first(outputs.get("source_manifest"), None),
+            "framework_root": _first(outputs.get("framework_root"), None),
             "workspace": _first(outputs.get("workspace"), None),
         },
         "failure": {
@@ -1980,7 +1980,6 @@ def collect_v6_timeline(
     recorded_operations: list[dict[str, Any]] | None = None,
     critic_iterations: list[dict[str, Any]] | None = None,
     baseline: Any = None,
-    sweep: Any = None,
     conc_sweep_summary: Any = None,
     phase_timeline: Any = None,
     optimizations: Any = None,
@@ -2029,9 +2028,6 @@ def collect_v6_timeline(
         _projected("baseline", lambda: project_baseline_event(baseline, phase_timeline, warnings), warnings)
     )
     timeline.extend(
-        _projected("sweep", lambda: project_sweep_event(sweep, state, baseline, phase_timeline, warnings), warnings)
-    )
-    timeline.extend(
         _projected(
             "conc_sweep",
             lambda: project_conc_sweep_event(conc_sweep_summary, state, phase_timeline, warnings),
@@ -2039,6 +2035,7 @@ def collect_v6_timeline(
         )
     )
     timeline.extend(_projected("kernel", _kernel_events, warnings))
+    timeline.extend(_projected("kb", lambda: collect_kb_events(session_dir, state, warnings), warnings))
     indexed = list(enumerate(timeline))
     indexed.sort(
         key=lambda row: (
@@ -2116,7 +2113,7 @@ def _stage_reached(
             if any(state.get(key) for key in ("last_kernel_opt", "last_fusion", "last_gemm_tuning", "last_collective"))
             else "kernel_agent"
         ),
-        "SWEEP": ("conc_sweep" if state.get("last_conc_sweep") or state.get("last_conc_sweep_watermark") else "sweep"),
+        "SWEEP": "conc_sweep",
         "CLOSE": "close",
     }
     if phase in phase_map:

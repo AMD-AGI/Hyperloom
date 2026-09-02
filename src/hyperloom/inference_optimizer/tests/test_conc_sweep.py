@@ -23,11 +23,14 @@ from hyperloom.orchestrator.actions.executors._grid_runner import (
 from hyperloom.orchestrator.kernel.conc_sweep import (
     DEFAULT_CONCS,
     DEFAULT_TOTAL_BUDGET_SEC,
+    DEFAULT_VARIANT_TIMEOUT_SEC,
     _build_arm_grid,
     _flush_conc_sweep_report,
     _flush_partial_conc_sweep_report,
+    _granted_cap_sec,
     _has_optimization,
     _order_concs_desc,
+    _point_from_variant,
     conc_sweep_declined_to_run,
     run_conc_sweep,
 )
@@ -579,6 +582,53 @@ def test_run_conc_sweep_does_not_touch_final_json(
     assert not final_json_path.exists()
 
 
+class TestTheAgentXLadderIsDefaultOn:
+    """The sweep is what an agentic session produces; it used to default off.
+
+    It was disabled under AgentX because sixteen synthetic rungs would spend the
+    whole session without tuning a server parameter. The ladder is now the
+    deliverable rather than a postscript to one, and it is seven rungs, not
+    sixteen.
+    """
+
+    def test_the_state_default_is_on(self):
+        assert SharedState().conc_sweep_enabled is True
+
+    def test_agentx_does_not_turn_it_off(self, monkeypatch: pytest.MonkeyPatch):
+        from argparse import Namespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap as cb
+
+        monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+        args = Namespace(enable_conc_sweep=True)
+        assert bool(getattr(args, "enable_conc_sweep", True)) is True
+        assert not hasattr(cb, "_flag_explicitly_set")
+
+
+def test_the_agentx_budget_funds_the_whole_ladder():
+    """Seven rungs on each arm; a smaller default would truncate every run."""
+    from hyperloom.inference_optimizer.cli import (
+        _AGENTX_CONC_SWEEP_TIMEOUT_SEC,
+        _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC,
+    )
+    from hyperloom.orchestrator.kernel.conc_sweep import AGENTX_DEFAULT_CONCS
+
+    rungs = len(AGENTX_DEFAULT_CONCS) * 2
+    assert rungs == 14
+    measured_round_sec = 111 * 60
+    assert _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC >= rungs * measured_round_sec
+    assert _AGENTX_CONC_SWEEP_TIMEOUT_SEC < _AGENTX_CONC_SWEEP_TOTAL_BUDGET_SEC
+
+
+def test_the_engine_resolves_the_ladder_from_the_session_mode(monkeypatch: pytest.MonkeyPatch):
+    """`concs=None` reaches the engine from the SDK and from a bare task alike."""
+    from hyperloom.orchestrator.kernel.conc_sweep import default_concs_for_mode
+
+    state = SharedState()
+    state.benchmark_mode = "agentx"
+    assert default_concs_for_mode(state.benchmark_mode) == [1, 4, 8, 10, 14, 20, 28]
+
+
 def test_default_concs_is_powers_of_two():
     """Doc-pin: default ladder is [256,128,64,32,16,8,4,2] (high-to-low for single-server reuse)."""
     assert DEFAULT_CONCS == [256, 128, 64, 32, 16, 8, 4, 2]
@@ -990,40 +1040,39 @@ def test_record_conc_sweep_writes_last_conc_sweep():
     assert s.last_conc_sweep_watermark == watermark
 
 
-def test_exit_normal_sweep_returns_conc_sweep_done():
-    """SWEEP→CLOSE must fire on conc_sweep completion, not only sweep_done."""
+def test_exit_normal_sweep_reads_the_ladder_as_the_sweep():
+    """The concurrency ladder is the only sweep, so its status is the phase's."""
     from hyperloom.orchestrator.phases.machine_state import exit_normal_sweep
 
     class _State:
-        last_sweep = {}  # no sweep recorded
         last_conc_sweep = {}
         phase = "SWEEP"
         phase_started_ts = "2026-06-02T10:00:00+00:00"
         max_minutes = 360
         phase_budget_pct = {"SWEEP": 0.50}
 
-    # No sweep, no conc_sweep => don't exit (budget remaining).
+    # Nothing recorded => don't exit (budget remaining).
     assert exit_normal_sweep(_State()) is None
 
     _State.last_conc_sweep = {"status": "succeeded"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_done", reason
-    assert evidence.get("conc_sweep_status") == "succeeded"
+    assert reason == "sweep_done", reason
+    assert evidence.get("sweep_status") == "succeeded"
 
-    # Skipped also counts as "done" (action reached a terminal decision).
+    # Skipped also counts as "done" (the action reached a terminal decision).
     for terminal in ("partial", "completed", "skipped"):
         _State.last_conc_sweep = {"status": terminal}
         result = exit_normal_sweep(_State())
-        assert result is not None and result[0] == "conc_sweep_done", terminal
+        assert result is not None and result[0] == "sweep_done", terminal
 
     _State.last_conc_sweep = {"status": "failed"}
     result = exit_normal_sweep(_State())
     assert result is not None
     reason, evidence = result
-    assert reason == "conc_sweep_failed"
-    assert evidence.get("conc_sweep_status") == "failed"
+    assert reason == "sweep_failed"
+    assert evidence.get("sweep_status") == "failed"
 
 
 def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
@@ -1038,8 +1087,8 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
     )
     state.record_conc_sweep({"status": "skipped", "was_skipped": True, "skip_reason": "no_optimization_to_compare"})
     _, declined = exit_normal_sweep(state)
-    assert declined["conc_sweep_was_skipped"] is True
-    assert declined["conc_sweep_budget_exhausted"] is False
+    assert declined["sweep_was_skipped"] is True
+    assert declined["sweep_skip_budget_exhausted"] is False
 
     state.record_conc_sweep(
         {
@@ -1050,8 +1099,8 @@ def test_the_sweep_exit_evidence_separates_a_skip_from_a_spent_budget():
         }
     )
     _, spent = exit_normal_sweep(state)
-    assert spent["conc_sweep_was_skipped"] is True
-    assert spent["conc_sweep_budget_exhausted"] is True
+    assert spent["sweep_was_skipped"] is True
+    assert spent["sweep_skip_budget_exhausted"] is True
 
 
 def test_on_enter_sweep_drains_pending_keep_integrates(monkeypatch):
@@ -1246,6 +1295,79 @@ def test_flush_conc_sweep_report_writes_json_and_csv(session_dir: Path):
     assert rows[0]["arm"] == "baseline"
 
 
+# --- the chart's data contract ---
+
+
+class TestTheCurveCarriesBothAxisPairs:
+    """A point has to carry whichever pair its mode is plotted on.
+
+    Synthetic is plotted on output throughput against ``output_throughput/conc``;
+    an agentic run on token throughput per chip against p90 interactivity. Both
+    pairs live on the same record because the mode is a property of the session,
+    not of the point.
+    """
+
+    def _variant(self, **kw: Any) -> VariantResult:
+        base: dict[str, Any] = {
+            "name": "optimized_conc8",
+            "extra_server_args": "",
+            "extra_envs": {"CONC": "8"},
+            "status": "succeeded",
+        }
+        base.update(kw)
+        return VariantResult(**base)
+
+    def test_the_agentic_pair_reaches_the_point(self):
+        point = _point_from_variant(
+            self._variant(
+                output_throughput=183.44,
+                total_token_throughput=25984.8,
+                input_throughput=25801.36,
+                intvty_p90=447.2,
+                tpot_p90_ms=2.4,
+            ),
+            arm="optimized",
+        )
+        assert point["total_token_throughput"] == pytest.approx(25984.8)
+        assert point["intvty_p90"] == pytest.approx(447.2)
+        assert point["input_throughput"] == pytest.approx(25801.36)
+        assert point["tpot_p90_ms"] == pytest.approx(2.4)
+
+    def test_the_synthetic_pair_is_unaffected(self):
+        point = _point_from_variant(
+            self._variant(output_throughput=1200.0, e2el_mean_ms=850.0),
+            arm="baseline",
+        )
+        assert point["output_throughput"] == pytest.approx(1200.0)
+        assert point["e2el_mean_ms"] == pytest.approx(850.0)
+        assert point["intvty_p90"] is None
+
+    def test_the_csv_carries_the_agentic_axes_too(self, session_dir: Path):
+        """The CSV is the download button; it has to draw the same chart."""
+        rdir = session_dir / "reports"
+        rdir.mkdir(parents=True, exist_ok=True)
+        json_path = rdir / "conc_sweep_summary.json"
+        csv_path = rdir / "conc_sweep_raw.csv"
+        point = _point_from_variant(
+            self._variant(total_token_throughput=25984.8, intvty_p90=447.2),
+            arm="optimized",
+        )
+        _flush_conc_sweep_report(
+            {
+                "schema_version": "1.0",
+                "status": "succeeded",
+                "report_json_path": str(json_path),
+                "report_csv_path": str(csv_path),
+                "baseline": {"points": []},
+                "optimized": {"points": [point]},
+            },
+            session_dir,
+        )
+        row = next(iter(csv.DictReader(csv_path.open())))
+        assert row["intvty_p90"] == "447.2"
+        assert row["total_token_throughput"] == "25984.8"
+
+
 def test_flush_conc_sweep_report_is_atomic(session_dir: Path, monkeypatch: pytest.MonkeyPatch):
     """_flush_conc_sweep_report silently catches IO errors."""
     rdir = session_dir / "reports"
@@ -1363,6 +1485,66 @@ def test_render_conc_sweep_curve_from_file(tmp_path: Path):
     assert result.exists()
 
 
+class TestTheChartFollowsTheMode:
+    """Two workloads, two rankings, two axis pairs.
+
+    Plotting an agentic ladder on ``output_throughput / conc`` would label a
+    number that is ~1% of the token budget as the thing being optimised.
+    """
+
+    def _payload(self, mode: str) -> dict[str, Any]:
+        return {
+            "benchmark_mode": mode,
+            "baseline": {
+                "points": [
+                    {
+                        "conc": 8,
+                        "output_throughput": 183.44,
+                        "total_token_throughput": 25984.8,
+                        "intvty_p90": 447.2,
+                    }
+                ]
+            },
+            "optimized": {"points": []},
+        }
+
+    def test_agentx_reads_interactivity_and_total(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("agentx", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("agentx")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(447.2)]
+        assert ys == [pytest.approx(25984.8 / 8.0)]
+        assert "P90 Interactivity" in axes.x_label
+        assert "per Chip" in axes.y_label
+
+    def test_synthetic_keeps_the_output_pair(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("synthetic", tp_eff=8.0)
+        xs, ys = plot._arm_series(self._payload("synthetic")["baseline"]["points"], 8.0, axes)
+        assert xs == [pytest.approx(183.44 / 8)]
+        assert ys == [pytest.approx(183.44 / 8.0)]
+
+    def test_an_unset_mode_reads_as_synthetic(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        assert plot._resolve_axes("", tp_eff=1.0).agentic is False
+        assert plot._resolve_axes(None, tp_eff=1.0).agentic is False
+
+    def test_a_rung_missing_its_axis_is_dropped_not_zeroed(self):
+        from hyperloom.orchestrator.kernel import conc_sweep_plot as plot
+
+        axes = plot._resolve_axes("agentx", tp_eff=1.0)
+        points = [
+            {"conc": 8, "total_token_throughput": 25984.8},
+            {"conc": 4, "total_token_throughput": 20000.0, "intvty_p90": 500.0},
+        ]
+        xs, ys = plot._arm_series(points, 1.0, axes)
+        assert xs == [pytest.approx(500.0)]
+        assert ys == [pytest.approx(20000.0)]
+
+
 def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1393,20 +1575,21 @@ def test_render_conc_sweep_curve_missing_matplotlib_returns_none(
 def test_conc_sweep_plot_series_helpers_filter_and_sort_points():
     from hyperloom.orchestrator.kernel import conc_sweep_plot
 
+    axes = conc_sweep_plot._resolve_axes("synthetic", 2.0)
     xs, ys = conc_sweep_plot._arm_series(
         [
             {"conc": 4, "output_throughput": 800.0},
-            {"conc": 2, "output_throughput": "300"},
+            {"conc": 2, "output_throughput": 300.0},
             {"conc": 0, "output_throughput": 1000.0},
             {"conc": 1, "output_throughput": None},
-            {"conc": "bad", "output_throughput": 10},
             {"conc": 8, "output_throughput": -1},
         ],
-        tp_eff=2.0,
+        2.0,
+        axes,
     )
     assert xs == [150.0, 200.0]
     assert ys == [150.0, 400.0]
-    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0) == ([], [])
+    assert conc_sweep_plot._arm_series([{"conc": 0, "output_throughput": 0}], 1.0, axes) == ([], [])
 
     cx, cy = conc_sweep_plot._ceiling_series(
         {
@@ -1872,3 +2055,141 @@ def test_single_server_pre_arm_skip_on_closing_phase(
     all_points = payload["baseline"]["points"] + payload["optimized"]["points"]
     assert all(p["status"] == "skipped" for p in all_points)
     assert payload["budget_skip_reason"] == "session_deadline_reserve"
+
+
+# --- budget arithmetic must price a variant at the cap it will be granted -------
+
+
+def test_the_admission_price_is_the_declared_cap_on_the_synthetic_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Zero regression: with AgentX off the sweep prices variants exactly as before."""
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC) == float(DEFAULT_VARIANT_TIMEOUT_SEC)
+
+
+def test_the_admission_price_follows_the_agentx_raise(monkeypatch: pytest.MonkeyPatch):
+    """Pricing a round at 1800s while granting it 10800s admits what cannot be paid for.
+
+    The round is then clamped back to the remaining budget and killed mid-warmup
+    -- the failure the cap-raise exists to prevent, moved into the sweep's own
+    admission check.
+    """
+    from hyperloom.orchestrator.actions.executors.baseline import agentx_baseline_timeout_sec
+
+    for k in (
+        "AGENTX_BASELINE_TIMEOUT_SEC",
+        "AGENTX_BASELINE_OVERHEAD_SEC",
+        "AGENTX_WARMUP_GRACE_PERIOD",
+        "CONC",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    raised = _granted_cap_sec(DEFAULT_VARIANT_TIMEOUT_SEC)
+    assert raised == float(agentx_baseline_timeout_sec())
+    assert raised > float(DEFAULT_VARIANT_TIMEOUT_SEC)
+
+
+def test_the_admission_price_never_lowers_an_operator_raised_cap(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """An operator who asked for longer than AgentX derives keeps what they asked for."""
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert _granted_cap_sec(99_999) == 99_999.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """After both arms finish (happy path), run_conc_sweep must reap any
+    lingering server via the same broad /proc scan used elsewhere: a
+    per-variant timeout that fires before a server_lifecycle pidfile is
+    written leaves nothing for that pidfile-based teardown to find, so this
+    is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    assert kill_calls["n"] == 1
+
+
+def test_run_conc_sweep_reaps_stale_servers_even_when_an_arm_raises(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The reap must fire from a ``finally`` -- even when an arm blows up
+    with an exception that escapes its own internal handling, not just on
+    the happy path. ``_sweep_one_arm_single_server`` itself is mocked out
+    (rather than the ``run_grid`` it calls) so its own per-variant error
+    handling can't swallow the exception before it reaches run_conc_sweep."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("arm blew up")
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep._sweep_one_arm_single_server", side_effect=_boom),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        with pytest.raises(RuntimeError):
+            asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert kill_calls["n"] == 1
+
+
+def test_run_conc_sweep_skips_reap_under_pytest(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
+    set (pytest always sets it for a running test), mirroring the guard on
+    the per-launch preclean in ``_grid_runner.py``."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"

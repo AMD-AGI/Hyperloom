@@ -20,7 +20,7 @@ _GITHUB_HOST = "github.com"
 class GitHubPr:
     """Lightweight PR record returned by any PR source backend.
 
-    All source backends (primus_cortex, github) map their native payload
+    All source backends (pr_monitor, github) map their native payload
     into this shape so the dispatcher can union them uniformly.
     """
 

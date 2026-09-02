@@ -67,7 +67,7 @@ def test_silent_when_closing_phase():
 
 
 def test_silent_when_stop_reason_set():
-    ctx = _ctx(ticks=20, severity="high", stop_reason="conc_sweep_done")
+    ctx = _ctx(ticks=20, severity="high", stop_reason="sweep_done")
     assert evaluate_conversation_progress_signals(ctx) == []
 
 

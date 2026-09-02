@@ -283,7 +283,7 @@ def _normalize_manifest(output_dir: str, rc: int) -> dict[str, Any]:
         return result
     try:
         m = json.loads(manifest_path.read_text(encoding="utf-8", errors="replace"))
-    except Exception as exc:  # noqa: BLE001
+    except (OSError, json.JSONDecodeError) as exc:
         result["error"] = f"fusion_manifest.json parse error: {exc!r}"
         return result
 

@@ -118,3 +118,40 @@ def test_shell_safe_extra_args_quotes_metacharacters():
 def test_prepare_shell_safe_extra_args_rejects_denied():
     with pytest.raises(sas.ServerArgsRejected):
         sas.prepare_shell_safe_extra_args("--model-path /evil")
+
+
+# --- _unwrap_shell_quotes eq-sign form regression ---
+
+from hyperloom.orchestrator.actions.executors._grid_server_args import (
+    _split_args_preserving_json,
+    _unwrap_shell_quotes,
+)
+
+
+def test_unwrap_plain_quoted_value():
+    assert _unwrap_shell_quotes("'kimi_k3'") == "kimi_k3"
+
+
+def test_unwrap_eq_form_strips_value_quotes():
+    assert _unwrap_shell_quotes("--tool-call-parser='kimi_k3'") == "--tool-call-parser=kimi_k3"
+
+
+def test_unwrap_eq_form_leaves_json_value_intact():
+    token = "--compilation-config='{\"mode\":3}'"
+    result = _unwrap_shell_quotes(token)
+    # The value starts with { so quotes must not be stripped.
+    assert result == token
+
+
+def test_split_args_unwraps_eq_form_plain_value():
+    tokens = _split_args_preserving_json("--tool-call-parser='kimi_k3'")
+    assert tokens is not None
+    assert tokens == ["--tool-call-parser=kimi_k3"]
+
+
+def test_split_args_leaves_json_double_quotes_intact():
+    text = "--compilation-config '{\"mode\":3}'"
+    tokens = _split_args_preserving_json(text)
+    assert tokens is not None
+    # The inner double quotes must survive.
+    assert any('"mode"' in t for t in tokens), tokens

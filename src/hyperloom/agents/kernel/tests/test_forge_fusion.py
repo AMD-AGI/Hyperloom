@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from hyperloom.common.codex_session import (
-    CODEX_EXTERNAL_SANDBOX_ENV,
     CODEX_SANDBOX_MODE_ENV,
 )
 
@@ -192,9 +191,8 @@ def test_build_cmd_forwards_read_only_agent_sandbox(tmp_path):
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "read-only"
 
 
-def test_build_cmd_forwards_confirmed_bypass_agent_sandbox(tmp_path, monkeypatch):
+def test_build_cmd_forwards_bypass_agent_sandbox(tmp_path, monkeypatch):
     monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-    monkeypatch.setenv(CODEX_EXTERNAL_SANDBOX_ENV, "1")
     payload = _payload(tmp_path)
     payload["agent_backend"] = "codex"
     payload["agent_sandbox_mode"] = "bypass"
@@ -204,15 +202,17 @@ def test_build_cmd_forwards_confirmed_bypass_agent_sandbox(tmp_path, monkeypatch
     assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
 
 
-def test_build_cmd_rejects_unconfirmed_bypass_agent_sandbox(tmp_path, monkeypatch):
+def test_build_cmd_forwards_bypass_without_retired_external_sandbox_env(tmp_path, monkeypatch):
+    """forge-fusion bypass must not require HYPERLOOM_CODEX_EXTERNAL_SANDBOX."""
     monkeypatch.setenv(CODEX_SANDBOX_MODE_ENV, "bypass")
-    monkeypatch.delenv(CODEX_EXTERNAL_SANDBOX_ENV, raising=False)
+    monkeypatch.delenv("HYPERLOOM_CODEX_EXTERNAL_SANDBOX", raising=False)
     payload = _payload(tmp_path)
     payload["agent_backend"] = "codex"
     payload["agent_sandbox_mode"] = "bypass"
 
-    with pytest.raises(RuntimeError, match=CODEX_EXTERNAL_SANDBOX_ENV):
-        forge_fusion._build_cmd(payload)
+    cmd = forge_fusion._build_cmd(payload)
+
+    assert cmd[cmd.index("--agent-sandbox-mode") + 1] == "bypass"
 
 
 def test_build_cmd_rejects_invalid_agent_sandbox_mode(tmp_path):

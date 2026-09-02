@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 from ..bus.message_bus import Message
 from ..kernel._kernel_decisions import _entry_by_kernel_id
-from ..state.shared_state import resolve_grading_anchor_tput
+from ..state.shared_state import resolve_graded_comparison
 from ..state.task_registry import Task
 from .base import PhaseHandler
 
@@ -485,14 +485,22 @@ class KernelStackPhase(PhaseHandler):
                 incremental_gain_pct = -100.0
             else:
                 base_tput = float(self.shared_state.baseline_tput or 0.0)
-                # The stack is applied on top of current_best, so the KEEP
-                # decision uses the incremental gain over current_best, not the
-                # total gain over the original baseline.
-                decision_base = resolve_grading_anchor_tput(self.shared_state)
                 new_tput = float(bench_result.get("output_throughput") or 0.0)
                 gain_pct = (new_tput - base_tput) / base_tput * 100.0 if base_tput > 0 else 0.0
-                incremental_gain_pct = (new_tput - decision_base) / decision_base * 100.0 if decision_base > 0 else 0.0
-                decision = "KEEP" if incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT else "REVERT"
+                # The stack is applied on top of current_best, so the KEEP
+                # decision is the incremental gain over current_best rather than
+                # the total gain over the baseline. Reported ``gain_pct`` stays
+                # on the output axis the stack ledger is denominated in.
+                graded = resolve_graded_comparison(self.shared_state, bench_result)
+                if graded.degrade_reason:
+                    log.info("stack-validate: %s graded on output throughput (%s)", stack_id, graded.degrade_reason)
+                incremental_gain_pct = (
+                    (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
+                )
+                if graded.vetoed:
+                    log.info("stack-validate: %s failed the interactivity constraint", stack_id)
+                clears = incremental_gain_pct > KERNEL_STACK_VALIDATION_KEEP_THRESHOLD_PCT
+                decision = "KEEP" if clears and not graded.vetoed else "REVERT"
 
             # bench_result already carries accuracy (RUN_EVAL defaults true here).
             if decision == "KEEP" and isinstance(bench_result, dict):

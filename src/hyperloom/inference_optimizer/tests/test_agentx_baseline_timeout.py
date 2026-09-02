@@ -24,12 +24,17 @@ from __future__ import annotations
 
 import pytest
 
+from hyperloom.orchestrator.actions.executors import baseline as _baseline
 from hyperloom.orchestrator.actions.executors.baseline import (
     AGENTX_BASELINE_OVERHEAD_SEC,
+    AGENTX_CANON_WARMUP_CONC,
+    AGENTX_CANON_WARMUP_GRACE_SEC,
     AGENTX_DEFAULT_DURATION_SEC,
     BASELINE_DEFAULT_TIMEOUT_SEC,
     BaselineExecutor,
     agentx_baseline_timeout_sec,
+    agentx_warmup_grace_conc,
+    agentx_warmup_grace_sec,
 )
 
 _MEASURED_VLLM_SEC = 6676  # the E4 round, warm corpus, no first-compile
@@ -38,11 +43,20 @@ _COLD_CORPUS_SEC = 840  # the client's own "4-14 min" upper bound
 
 
 def _clear(monkeypatch):
+    # The derivation logs each distinct payload once per process so a conc sweep
+    # cannot reprint them per rung. Tests that assert on those lines have to start
+    # from an empty ledger or the second one to use the same inputs sees nothing.
+    _baseline._AGENTX_SAID.clear()
     for k in (
         "HYPERLOOM_AGENTX",
         "AGENTX_DURATION",
         "AGENTX_BASELINE_TIMEOUT_SEC",
         "AGENTX_BASELINE_OVERHEAD_SEC",
+        "AGENTX_WARMUP_GRACE_PERIOD",
+        # An inherited CONC would silently scale the warmup share and make every
+        # cap assertion below concurrency-dependent.
+        "CONC",
+        "AGENTX_WARMUP_GRACE_CONC",
     ):
         monkeypatch.delenv(k, raising=False)
 
@@ -81,6 +95,196 @@ def test_overhead_budget_is_tunable(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
     assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
+
+
+def test_default_overhead_warns_it_may_not_fit_every_model(monkeypatch, caplog):
+    """A raw aiperf run against Kimi-K3 (conc=64) measured warmup alone taking
+    ~12075s -- longer than this whole default cap. Nothing here can tell a
+    long-context/slow-prefill model apart from GLM-5.2/Qwen3.8, the models this
+    constant was measured on, so the gap must be surfaced instead of silently
+    assumed to fit every model.
+    """
+    _clear(monkeypatch)
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+def test_explicit_overhead_override_suppresses_the_warning(monkeypatch, caplog):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "20000")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+def test_overhead_tracks_the_warmup_grace_the_operator_set(monkeypatch):
+    """The knob that bounds the warmup must also size the cap that has to cover it.
+
+    A model whose warmup runs long is a model whose operator has already had to
+    raise AGENTX_WARMUP_GRACE_PERIOD for the round to finish -- the Kimi-K3
+    case, where the flat overhead was smaller than the warmup itself. Deriving
+    from that same knob is what stops the two numbers disagreeing.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    grown = 14400 - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
+
+
+def test_canonical_grace_reproduces_the_measured_constant(monkeypatch):
+    """Splitting the constant must not move it: same inputs, same number."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+def test_explicit_overhead_outranks_the_derivation(monkeypatch):
+    """A pinned overhead is an answer, not an input: the grace must not add to it."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
+    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
+
+
+def test_a_tuned_grace_suppresses_the_uncalibrated_warning(monkeypatch, caplog):
+    """The warning is about nobody having sized this model, not about the default."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    assert not any("AGENTX_BASELINE_OVERHEAD_SEC" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
+def test_unparseable_grace_falls_back_to_canonical(monkeypatch, bad):
+    """A typo in the grace must not shrink the cap below the measured default."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+# --- the CONC-scaled warmup floor ----------------------------------------------
+
+
+@pytest.mark.parametrize("conc", ["1", "4", "8"])
+def test_at_or_below_the_anchor_the_cap_is_unchanged(monkeypatch, conc):
+    """Every round already validated at conc<=8 must keep its exact cap.
+
+    The floor is a floor, not a re-derivation: anchoring at the lowest
+    concurrency this repo has a measured agentic warmup for means the change is
+    provably a no-op for the rounds that were measured with the old arithmetic.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", conc)
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+@pytest.mark.parametrize("conc", [16, 32, 64])
+def test_the_warmup_share_scales_linearly_with_conc(monkeypatch, conc):
+    """Warmup is per-lane requests x CONC lanes, so a MEASURED budget tracks CONC."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
+    monkeypatch.setenv("CONC", str(conc))
+    grown = (AGENTX_CANON_WARMUP_GRACE_SEC * conc) // AGENTX_CANON_WARMUP_CONC - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
+
+
+@pytest.mark.parametrize("conc", [16, 32, 64, 256])
+def test_an_untuned_round_keeps_the_canonical_cap_at_every_conc(monkeypatch, conc):
+    """Nothing measured means nothing to scale.
+
+    The canonical 1800s is a constant, not an observation of this model at this
+    concurrency. Multiplying it invents a bound nobody stands behind: at CONC=64
+    an untouched round would get a 23400s cap where the documented canonical
+    total is 10800s, and the conc sweep would then price every rung against it
+    and skip the lot. The "nothing has been tuned for this model" warning is the
+    correct response, not a 3.2x cap.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", str(conc))
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+def test_the_untuned_warning_decomposition_still_adds_up(monkeypatch, caplog):
+    """The warning prints ``overhead = non-warmup + grace``; it must be arithmetic.
+
+    While the default was being scaled, a CONC=64 round printed
+    ``19800s (= 5400s + 1800s)`` and called the scaled value canonical -- an
+    equation that does not hold, hiding the very inflation it was reporting.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", "64")
+    with caplog.at_level("WARNING"):
+        agentx_baseline_timeout_sec()
+    msgs = [r.getMessage() for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
+    assert msgs, "the untuned warning did not fire"
+    assert f"canonical {AGENTX_BASELINE_OVERHEAD_SEC}s" in msgs[0]
+    assert f"{AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC}s non-warmup" in msgs[0]
+
+
+def test_the_floor_composes_with_an_operator_raised_grace(monkeypatch):
+    """A grace the operator already raised is the thing that gets scaled.
+
+    Scaling the canonical constant instead would throw away the only
+    model-specific measurement in the derivation.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", "32")
+    scaled = (3600 * 32) // AGENTX_CANON_WARMUP_CONC
+    grown = scaled - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
+def test_an_unusable_conc_leaves_the_derivation_alone(monkeypatch, bad):
+    """A missing or malformed CONC must not move the cap in either direction."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", bad)
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC)
+
+
+def test_the_floor_never_shrinks_a_cap(monkeypatch):
+    """Whatever CONC says, the cap may only grow -- an under-sized cap kills a
+    round that would have finished, while an over-sized one costs a longer wait
+    on a round that was hung anyway.
+    """
+    _clear(monkeypatch)
+    base = agentx_baseline_timeout_sec()
+    for conc in (1, 2, 4, 8, 9, 16, 24, 32, 64, 128):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_baseline_timeout_sec() >= base
+
+
+def test_a_pinned_cap_outranks_the_conc_floor(monkeypatch):
+    """The explicit escape hatch stays the last word, as it is for every other input."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "12345")
+    assert agentx_baseline_timeout_sec() == 12345
+
+
+def test_a_pinned_overhead_outranks_the_conc_floor(monkeypatch):
+    """A pinned overhead is an answer, not an input -- same rule as the grace."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("CONC", "64")
+    monkeypatch.setenv("AGENTX_BASELINE_OVERHEAD_SEC", "3600")
+    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + 3600
+
+
+def test_the_scaling_is_announced(monkeypatch, caplog):
+    """A cap that moved silently is a cap nobody can reconcile against a log."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", "32")
+    with caplog.at_level("INFO"):
+        agentx_baseline_timeout_sec()
+    assert any("CONC=32" in r.getMessage() for r in caplog.records)
 
 
 def test_explicit_cap_wins_outright(monkeypatch):
@@ -157,3 +361,230 @@ def test_synthetic_cold_start_bump_is_untouched(monkeypatch):
         lambda: {},
     )
     assert BaselineExecutor()._resolve_timeout({}) == BASELINE_COLD_START_TIMEOUT_SEC
+
+
+# --- the warmup grace both layers must read -------------------------------------
+
+
+def test_the_cap_and_the_clients_bound_come_from_one_function(monkeypatch):
+    """The cap's warmup share IS the client's bound, or the round gets cut early.
+
+    This is the invariant the whole helper exists for: ``aiperf_client.sh``
+    passes this number to aiperf as ``--warmup-grace-period``, and that is what
+    actually stops the warmup. If the cap budgets more than the client is
+    allowed to spend, warmup ends mid-corpus and the round reports a
+    prefix-reuse figure taken before the cache was populated.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", "32")
+    grace = agentx_warmup_grace_sec()
+    _NON_WARMUP = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert grace == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+    assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + _NON_WARMUP + grace)
+
+
+@pytest.mark.parametrize("conc", ["1", "4", "8"])
+def test_the_grace_is_untouched_at_or_below_the_anchor(monkeypatch, conc):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", conc)
+    assert agentx_warmup_grace_sec() == 3600
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-1"])
+def test_an_unusable_grace_falls_back_to_canonical(monkeypatch, bad):
+    """A typo must not hand the client a warmup bound of zero."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", bad)
+    assert agentx_warmup_grace_sec() == AGENTX_CANON_WARMUP_GRACE_SEC
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "0", "-8", "8.5"])
+def test_an_unusable_conc_leaves_the_grace_alone(monkeypatch, bad):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", bad)
+    assert agentx_warmup_grace_sec() == 3600
+
+
+def test_the_grace_never_shrinks(monkeypatch):
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    for conc in (1, 2, 4, 8, 9, 16, 32, 64, 128):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() >= 3600
+
+
+# --- the grace declares which concurrency it was measured at -------------------
+
+
+def test_the_anchor_defaults_to_the_repo_measurement(monkeypatch):
+    """Unset means "8", which is where this repo's measurements start."""
+    _clear(monkeypatch)
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+
+
+@pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
+def test_an_unusable_anchor_disables_scaling_rather_than_dividing_by_it(monkeypatch, bad):
+    """A zero or garbage anchor must not reach the division -- and must not be
+    quietly replaced by the default either.
+
+    Scaling is opt-in on a DECLARED anchor. A typo in that declaration is not a
+    declaration, so the grace is passed through unscaled instead of being
+    multiplied against a number the operator never wrote.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+    assert agentx_warmup_grace_sec() == 3600
+
+
+def test_a_grace_measured_at_a_higher_conc_is_not_double_counted(monkeypatch):
+    """The defect a hardcoded anchor causes, stated as a test.
+
+    An operator who measured 14400s of warmup at CONC=16 and says so must get
+    14400s back at CONC=16 -- not 28800s, which is what an 8-anchored scaler
+    silently produces and what forced the operator to hand-convert instead.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_sec() == 14400
+
+
+def test_the_declared_anchor_drives_the_ratio(monkeypatch):
+    """Both numbers, not one: 14400s at CONC=16 doubles at CONC=32."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 28800
+
+
+def test_below_the_declared_anchor_the_grace_is_untouched(monkeypatch):
+    """Identity holds at the anchor the operator declared, not at a fixed 8."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    for conc in (2, 4, 8, 16):
+        monkeypatch.setenv("CONC", str(conc))
+        assert agentx_warmup_grace_sec() == 14400
+
+
+def test_declaring_the_default_anchor_is_what_enables_the_floor(monkeypatch):
+    """Declaring 8 is not a no-op: it is the statement that turns scaling on.
+
+    The value is the same number the default would have supplied, but supplying
+    it is the operator saying "my grace was measured at concurrency 8". Without
+    that statement there is no ratio to compute, which is what keeps a typed
+    canonical 1800 from meaning something different than an untyped one.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 3600
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
+    assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+
+
+def test_the_cap_follows_the_declared_anchor_too(monkeypatch):
+    """The subprocess cap and the client bound stay one number under any anchor."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16")
+    monkeypatch.setenv("CONC", "32")
+    non_warmup = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+    assert agentx_baseline_timeout_sec() == AGENTX_DEFAULT_DURATION_SEC + non_warmup + 28800
+
+
+def test_a_whole_number_written_with_a_decimal_point_is_honoured(monkeypatch):
+    """ "16.0" is an anchor of 16, not a missing anchor.
+
+    Rejecting it silently re-anchors the grace at the default 8 and doubles it
+    -- the exact failure the anchor exists to prevent.
+    """
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400.0")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "16.0")
+    monkeypatch.setenv("CONC", "16")
+    assert agentx_warmup_grace_conc() == 16
+    assert agentx_warmup_grace_sec() == 14400
+
+
+@pytest.mark.parametrize("bad", ["8.5", "abc", "", "-16.0", "0"])
+def test_a_fractional_or_unparseable_anchor_is_still_rejected(monkeypatch, bad):
+    """A non-integral concurrency is a typo, not an intent."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
+    assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
+
+
+def test_an_exponent_form_whole_number_is_accepted(monkeypatch):
+    """``1e3`` is 1000, unambiguously. The bar is integrality, not notation."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "1e3")
+    assert agentx_warmup_grace_conc() == 1000
+
+
+def test_the_derivation_logs_do_not_repeat_per_rung(monkeypatch, caplog):
+    """A 8-rung, 2-arm sweep must not print the same eight-line warning 16 times.
+
+    The per-variant progress this PR added is what an operator reads to see the
+    ladder advance; drowning it in a constant is a regression in exactly the
+    thing the logs were added for.
+    """
+    _clear(monkeypatch)
+    with caplog.at_level("INFO"):
+        for _ in range(16):
+            agentx_baseline_timeout_sec()
+    untuned = [r for r in caplog.records if "AGENTX_BASELINE_OVERHEAD_SEC" in r.getMessage()]
+    assert len(untuned) == 1, f"warned {len(untuned)} times"
+
+
+def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
+    """Deduping on the payload, not on a bare flag: new numbers are new news."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    with caplog.at_level("INFO"):
+        monkeypatch.setenv("CONC", "16")
+        agentx_warmup_grace_sec()
+        monkeypatch.setenv("CONC", "32")
+        agentx_warmup_grace_sec()
+    scaled = [r for r in caplog.records if "scaling the warmup share" in r.getMessage()]
+    assert len(scaled) == 2, [r.getMessage() for r in scaled]
+
+
+def test_a_grace_without_a_declared_anchor_is_never_scaled(monkeypatch):
+    """A ratio needs two numbers; assuming the second one invents a bound.
+
+    Writing the canonical AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to
+    yield a 23400s cap at CONC=64 while leaving it unset yielded 10800s -- the
+    same value meaning two different things depending on whether it was typed.
+    The conc sweep then prices every rung against the inflated number and skips
+    most of the ladder.
+    """
+    for conc in ("8", "16", "64", "256"):
+        _clear(monkeypatch)
+        monkeypatch.setenv("CONC", conc)
+        unset = agentx_baseline_timeout_sec()
+        monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+        assert agentx_baseline_timeout_sec() == unset, f"CONC={conc}"
+
+
+def test_declaring_the_anchor_is_what_turns_scaling_on(monkeypatch):
+    """The floor is opt-in, and one line buys it."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 3600
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    assert agentx_warmup_grace_sec() == 14400

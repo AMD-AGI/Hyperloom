@@ -154,20 +154,6 @@ def test_format_analysis_md_full(monkeypatch):
     assert "body" in out
 
 
-def test_format_last_sweep():
-    st = SharedState()
-    assert st._format_last_sweep() == "(none)"
-    st.last_sweep = {"grid_size": 4}
-    assert "best=(none)" in st._format_last_sweep()
-    st.last_sweep = {
-        "grid_size": 4,
-        "best_overall": {"name": "b", "tput": 100.0, "conc": 8, "isl": 1024, "osl": 512},
-    }
-    out = st._format_last_sweep()
-    assert "grid_size=4" in out
-    assert "best=b" in out
-
-
 def test_format_last_action_failures_multiline_and_log_path():
     st = SharedState()
     st.last_action_failures = [

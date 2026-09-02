@@ -25,6 +25,7 @@ from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collecto
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
 from hyperloom.inference_optimizer.session.sbd_v6 import write_timeline_event
+from hyperloom.orchestrator.phases.machine_state import GEAK_TERMINAL_STATUSES
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -113,127 +114,6 @@ def test_baseline_without_any_evidence_produces_no_event(tmp_path):
 # ---------------------------------------------------------------------------
 # sweep
 # ---------------------------------------------------------------------------
-def _sweep_section() -> dict:
-    return {
-        "all_variants": [
-            {
-                "variant_name": "variant_c64_i1024_o1024",
-                "conc": 64,
-                "isl": 1024,
-                "osl": 1024,
-                "status": "ok",
-                "output_throughput_tok_s": 130.0,
-                "benchmark_report_path": "runs/sweep/v1/benchmark_report.json",
-            },
-            {
-                "variant_name": "variant_c128_i1024_o512",
-                "conc": 128,
-                "isl": 1024,
-                "osl": 512,
-                "status": "failed",
-                "output_throughput_tok_s": None,
-                "error": "server crashed",
-            },
-        ],
-        "best_overall": {"variant_name": "variant_c64_i1024_o1024"},
-    }
-
-
-def test_sweep_reads_the_grid_back_off_the_points_it_measured(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "last_sweep": {"workspace": "runs/sweep"},
-            "sweep_attempts": [{"ts": "2026-08-27T02:30:00+00:00", "status": "ok", "task_id": "t-sweep"}],
-        },
-        sweep=_sweep_section(),
-        phase_timeline=[{"action": "sweep", "ts": "2026-08-27T02:00:00+00:00", "task_id": "t-sweep"}],
-    )
-
-    event = _event(timeline, "sweep")
-    # One point measured, one lost: the grid ran but did not run whole.
-    assert event["status"] == "degraded"
-    assert event["ext"]["plan"]["conc_grid"] == [64, 128]
-    assert event["ext"]["plan"]["isl_grid"] == [1024]
-    assert event["ext"]["plan"]["osl_grid"] == [512, 1024]
-    # No producer records where the grid came from.
-    assert event["ext"]["plan"]["grid_source"] is None
-    assert event["ext"]["artifacts"]["sweep_dir"] == "runs/sweep"
-    assert event["ext"]["artifacts"]["sweep_report_paths"] == ["runs/sweep/v1/benchmark_report.json"]
-    assert [variant["variant_id"] for variant in event["ext"]["sweep"]["all_variants"]] == [
-        "variant_c64_i1024_o1024",
-        "variant_c128_i1024_o512",
-    ]
-
-
-def test_sweep_input_anchor_does_not_borrow_the_end_of_session_throughput(tmp_path):
-    """``current_best.tput`` is the final figure, not the sweep's entry point."""
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={"last_sweep": {"workspace": "runs/sweep"}, "current_best": {"tput": 175.0}},
-        sweep=_sweep_section(),
-        baseline={"attempts_history": [{"task_id": "t-base", "status": "ok"}]},
-    )
-
-    anchor = _event(timeline, "sweep")["ext"]["input_anchor"]
-    assert anchor["baseline_task_id"] == "t-base"
-    assert anchor["input_throughput_tok_s_per_gpu"] is None
-    assert anchor["current_best_task_id"] is None
-
-
-def test_sweep_without_any_evidence_produces_no_event(tmp_path):
-    timeline = collect_v6_timeline(tmp_path, [], state={}, sweep={"all_variants": []})
-
-    assert _event(timeline, "sweep") is None
-
-
-def test_sweep_that_died_before_its_first_grid_point_is_failed_not_skipped(tmp_path):
-    """A sweep can fail with an empty point list, and did not 'not happen'.
-
-    Deriving status from ``all_variants`` alone reported ``skipped`` on the
-    same event that carried ``stop_reason: sweep_failed``.
-    """
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "stop_reason": "sweep_failed",
-            "sweep_attempts": [
-                {
-                    "task_id": "t-sweep",
-                    "status": "failed",
-                    "error": "server never became ready",
-                    "ts": "2026-08-27T03:00:00+00:00",
-                }
-            ],
-        },
-        sweep={"all_variants": []},
-    )
-
-    event = _event(timeline, "sweep")
-    assert event["status"] == "failed"
-    assert event["ext"]["failure"]["stop_reason"] == "sweep_failed"
-    assert event["ext"]["failure"]["failed_task_id"] == "t-sweep"
-    assert event["ext"]["failure"]["message"] == "server never became ready"
-    assert event["ext"]["sweep"]["all_variants"] == []
-
-
-def test_sweep_with_measured_points_and_a_failed_attempt_is_degraded(tmp_path):
-    timeline = collect_v6_timeline(
-        tmp_path,
-        [],
-        state={
-            "stop_reason": "sweep_failed",
-            "sweep_attempts": [{"task_id": "t-sweep-2", "status": "failed", "ts": "2026-08-27T03:10:00+00:00"}],
-        },
-        sweep={"all_variants": [{"variant_name": "c8", "conc": 8, "status": "ok", "output_throughput": 90.0}]},
-    )
-
-    assert _event(timeline, "sweep")["status"] == "degraded"
-
-
 # ---------------------------------------------------------------------------
 # conc_sweep
 # ---------------------------------------------------------------------------
@@ -2219,7 +2099,7 @@ def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
 
 @pytest.mark.parametrize(
     "projector",
-    ["project_baseline_event", "project_sweep_event", "project_conc_sweep_event", "project_kernel_events"],
+    ["project_baseline_event", "project_conc_sweep_event", "project_kernel_events"],
 )
 def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatch, projector):
     """One stage blowing up must not take the durable events or its peers down.
@@ -2241,7 +2121,6 @@ def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatc
     before = exporter.build(tmp_path)
     stage = {
         "project_baseline_event": "baseline",
-        "project_sweep_event": "sweep",
         "project_conc_sweep_event": "conc_sweep",
         "project_kernel_events": "kernel",
     }[projector]
@@ -2327,6 +2206,85 @@ def test_the_geak_echo_is_still_reported_inside_a_real_visit(tmp_path):
     run = _events(timeline, "kernel")[0]["ext"]["geak_runs"][0]
     # One normalizer feeds both fields, so they cannot contradict each other.
     assert (run["status"], run["outcome"]) == ("failed", "FAILED")
+
+
+def _geak_run_row(tmp_path, geak_status: str) -> tuple[dict, list[str]]:
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak={"engaged": True, "status": geak_status, "accepted_kernels": []},
+    )
+    return _events(timeline, "kernel")[0]["ext"]["geak_runs"][0], warnings
+
+
+@pytest.mark.parametrize("geak_status", sorted(GEAK_TERMINAL_STATUSES))
+def test_no_terminal_geak_status_reaches_the_normalizer_as_drift(tmp_path, geak_status):
+    """Every status the runtime declares terminal must already be known here.
+
+    Read off the producer's own set rather than restated, so a status added to
+    ``GEAK_TERMINAL_STATUSES`` and to nothing else fails here instead of
+    surfacing months later as a drift warning on a run that worked. That is how
+    ``no_gain`` and ``baseline_reproduction_failed`` were both missed: the first
+    vocabulary was assembled from what production had already written, which
+    cannot contain a status nothing has hit yet.
+    """
+    run, warnings = _geak_run_row(tmp_path, geak_status)
+
+    assert run["status"] in {"succeeded", "failed", "skipped"}
+    assert not [w for w in warnings if "unrecognized geak_runs status" in w]
+
+
+@pytest.mark.parametrize(
+    ("geak_status", "expected_status", "expected_outcome"),
+    [
+        ("ok", "succeeded", "NEEDS_REVIEW"),
+        # A completed run that found nothing, and the third most common status
+        # in production -- 212 sessions against 115 ``ok``. Reported as a GEAK
+        # fault until the alias existed.
+        ("no_gain", "succeeded", "NEEDS_REVIEW"),
+        # The runner's baseline reference did not reproduce the orchestrator's,
+        # so the run's gain is non-comparable and ``phases/kernel.py`` refuses
+        # to promote it. A real failure, and one the runtime names.
+        ("baseline_reproduction_failed", "failed", "FAILED"),
+        ("failed", "failed", "FAILED"),
+        ("error", "failed", "FAILED"),
+        ("missing", "failed", "FAILED"),
+        ("no_result_recovered_from_disk", "failed", "FAILED"),
+        # Reaches the field from the runner without being terminal: 95 sessions.
+        ("timeout", "failed", "FAILED"),
+        ("skipped", "skipped", "SKIPPED"),
+    ],
+)
+def test_every_geak_status_maps_to_its_own_classification(tmp_path, geak_status, expected_status, expected_outcome):
+    """The classification each status lands on, not merely that it is known.
+
+    Union of two sources, because neither is complete on its own:
+    ``GEAK_TERMINAL_STATUSES`` is what the runtime declares, and the corpus of
+    2404 sessions carrying a geak block is what it has actually written --
+    ``missing`` (1503), ``timeout`` (95) and the collector's disk-recovery word
+    appear only in the second.
+    """
+    run, _ = _geak_run_row(tmp_path, geak_status)
+
+    assert (run["status"], run["outcome"]) == (expected_status, expected_outcome)
+
+
+def test_the_pinned_vocabulary_covers_the_producer_set(tmp_path):
+    """The parametrization above must not fall behind the producer's set."""
+    pinned = {
+        "ok",
+        "no_gain",
+        "baseline_reproduction_failed",
+        "failed",
+        "error",
+        "missing",
+        "no_result_recovered_from_disk",
+        "timeout",
+        "skipped",
+    }
+    assert GEAK_TERMINAL_STATUSES <= pinned
 
 
 def test_a_skipped_geak_spelling_does_not_contradict_itself(tmp_path):
@@ -2487,20 +2445,6 @@ def test_a_kept_visit_that_then_errored_is_degraded_not_failed(tmp_path):
     assert event["status"] == "degraded"
     # The error is not lost; it is just not the whole verdict.
     assert event["ext"]["failure"]["error_class"] == "TimeoutError"
-
-
-def test_a_sweep_point_status_is_normalized_onto_the_sweep_enum(tmp_path):
-    """The sweep lane counts usable points by the literal word ``ok``."""
-    warnings: list[str] = []
-    timeline = collect_v6_timeline(
-        tmp_path,
-        warnings,
-        sweep={"all_variants": [{"variant_name": "v1", "status": "succeeded", "output_throughput_tok_s": 120.0}]},
-    )
-
-    event = _events(timeline, "sweep")[0]
-    assert event["ext"]["sweep"]["all_variants"][0]["status"] == "ok"
-    assert event["status"] == "succeeded"
 
 
 def test_a_malformed_conc_grid_does_not_raise_out_of_the_projector(tmp_path):

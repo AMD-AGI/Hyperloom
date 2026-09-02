@@ -67,6 +67,7 @@ from ._inferencex_patcher import (
     ensure_eval_probe_patched,
     eval_probe_targets_exist,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # Re-exported from sibling modules to keep the module namespace intact.
 from ._grid_base import (
@@ -628,6 +629,7 @@ def _build_variant_yaml(
         model_path=model_path,
         gpu_type=gpu_type,
         benchmark_script=benchmark_script,
+        conc=variant_conc(variant),
     )
     extra_args_env = server_args_env_name(bench.get("framework"))
 
@@ -666,6 +668,9 @@ def _build_variant_yaml(
         envs.pop(str(k), None)
     for k, v in variant.extra_envs.items():
         envs[str(k)] = str(v)
+    # The three AgentX bounds took this rung's CONC through ``variant_conc``
+    # above, not through this merge: raising the client's grace alone would make
+    # the round wait inside a cap that did not move with it.
     # Authored-kernel overlay: prepend the built-kernel dir onto PYTHONPATH so
     # the relaunched server imports the overlay's kernels. Inert when
     # ``overlay_pythonpath`` is unset.
@@ -816,6 +821,42 @@ def _run_grid_warmup_enabled() -> bool:
     return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:
+    """Resolve ``pid``'s visible-GPU mask from its own environment.
+
+    Mirrors :func:`hyperloom.orchestrator.bus.gpu_pool._visible_device_mask`
+    (``ROCR_VISIBLE_DEVICES``, then ``HIP``/``CUDA``), but reads a foreign
+    process's ``/proc/<pid>/environ`` instead of our own ``os.environ`` --
+    used to scope :func:`_kill_stale_servers` to our own GPU allocation
+    (AMD-AGI/Hyperloom#1354).
+
+    Args:
+        pid: Candidate process id to inspect.
+
+    Returns:
+        ``(ids, present)`` as in ``_visible_device_mask``, or ``None`` when
+        ``/proc/<pid>/environ`` cannot be read (permission, already exited,
+        etc.) -- callers must treat that as "unknown", not "no mask".
+    """
+    from ...bus.gpu_pool import _parse_gpu_list
+
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            raw = fh.read()
+    except (OSError, PermissionError):
+        return None
+    env = {}
+    for entry in raw.split(b"\0"):
+        if b"=" not in entry:
+            continue
+        key, _, value = entry.partition(b"=")
+        env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        if env_name in env:
+            return _parse_gpu_list(env[env_name]), True
+    return [], False
+
+
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
@@ -824,12 +865,24 @@ def _kill_stale_servers() -> None:
     pgrep) to avoid clashing with test subprocess mocks. No-op in multi-node
     mode (servers live in RayJob pods).
 
+    Scoped to our own GPU allocation when one is known: if our own process
+    has a visible-GPU mask (``ROCR_VISIBLE_DEVICES`` et al, set whenever an
+    operator carved us a subset of the machine's cards rather than handing us
+    the whole box), a candidate process is only reaped when its own mask
+    overlaps ours. A candidate whose mask cannot be read (permission,
+    already exited) or that declares no mask at all is skipped rather than
+    reaped -- unknown scope is treated as "not ours", never as "safe to
+    kill" (AMD-AGI/Hyperloom#1354). With no mask on our own side (the whole
+    machine is ours, or nothing is scoping either side), every match is
+    reaped as before.
+
     Note:
         Side-effecting and best-effort: it sends signals to matching processes
         and unlinks stale shared-memory segments, swallowing errors. Returns
         nothing.
     """
     from ._multi_node_env import is_multi_node
+    from ...bus.gpu_pool import _visible_device_mask
 
     if is_multi_node():
         return
@@ -860,6 +913,25 @@ def _kill_stale_servers() -> None:
         my_pgid = os.getpgrp()
     except OSError:
         my_pgid = -1
+    my_gpu_ids, my_gpu_mask_present = _visible_device_mask()
+    my_gpu_id_set = frozenset(my_gpu_ids)
+
+    def _in_our_gpu_scope(pid: int) -> bool:
+        """Whether ``pid`` overlaps our own visible-GPU mask.
+
+        No-op (always True) when we have no mask ourselves -- nothing to
+        scope against. Otherwise conservative: an unreadable or absent mask
+        on the candidate's side is out of scope, not in it.
+        """
+        if not my_gpu_mask_present:
+            return True
+        candidate = _read_pid_gpu_mask(pid)
+        if candidate is None:
+            return False
+        candidate_ids, candidate_present = candidate
+        if not candidate_present:
+            return False
+        return not my_gpu_id_set.isdisjoint(candidate_ids)
 
     def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
         """Detect an orphaned atom ModelRunner worker by its memory maps.
@@ -894,6 +966,7 @@ def _kill_stale_servers() -> None:
         return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
 
     killed_atom = False
+    killed_any = False
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -907,39 +980,54 @@ def _kill_stale_servers() -> None:
             continue
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
         is_atom_server = "atom.entrypoints" in text
-        if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
-            killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
-            # Kill the whole pgrp so atom children die with the leader.
-            try:
-                pgid = os.getpgid(pid)
-                if pgid not in (my_pgid, 0):
-                    os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                # Group gone or not ours; fall through to per-pid kill.
-                pass
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                # Already exited or owned by another user.
-                pass
+        if not (any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline)):
+            continue
+        if not _in_our_gpu_scope(pid):
+            continue
+        killed_any = True
+        killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
+        # Kill the whole pgrp so atom children die with the leader.
+        try:
+            pgid = os.getpgid(pid)
+            if pgid not in (my_pgid, 0):
+                os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            # Group gone or not ours; fall through to per-pid kill.
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # Already exited or owned by another user.
+            pass
 
-    # Clear GPU runtime shared-memory segments that prevent re-binding.
-    for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
-        "/dev/shm/vllm*",
-        "/dev/shm/nccl*",
-        "/dev/shm/cuda*",
-        "/dev/shm/torch*",
-        "/dev/shm/atom*",
-    ):
-        for f in glob.glob(pattern):
-            try:
-                os.remove(f)
-            except OSError:
-                # Already removed or held by another process.
-                pass
+    # Clear GPU runtime shared-memory segments that prevent re-binding. These
+    # files carry no GPU/owner tag we can scope by, so -- unlike the per-pid
+    # reap above -- they are only touched when we have no GPU mask of our own
+    # (whole machine is ours): with a mask set, a co-tenant's otherwise-spared
+    # server could still crash from having its shared-memory segments pulled
+    # out from under it (AMD-AGI/Hyperloom#1354).
+    if not my_gpu_mask_present:
+        for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
+            "/dev/shm/vllm*",
+            "/dev/shm/nccl*",
+            "/dev/shm/cuda*",
+            "/dev/shm/torch*",
+            "/dev/shm/atom*",
+        ):
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                except OSError:
+                    # Already removed or held by another process.
+                    pass
 
-    # Pause for KFD async VRAM release; atom teardown lags past 2s.
-    time.sleep(8 if killed_atom else 2)
+    # Pause for KFD async VRAM release; atom teardown lags past 2s. Skipped
+    # entirely when nothing was actually killed this call -- this function now
+    # runs at 4 call sites (was 1), so paying it unconditionally on the common
+    # "GPU was already clean" case adds up fast (e.g. conc_sweep's own reap
+    # immediately followed by baseline's).
+    if killed_any:
+        time.sleep(8 if killed_atom else 2)
 
 
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:
@@ -1294,6 +1382,76 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
+def variant_conc(variant: Any) -> int | None:
+    """The concurrency a variant will run at, or ``None`` when it names none.
+
+    A grid variant carries ``CONC`` in ``extra_envs`` and it is the only place
+    the rung's own concurrency exists before the YAML is written.
+    """
+    raw = (getattr(variant, "extra_envs", None) or {}).get("CONC")
+    try:
+        conc = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return conc if conc > 0 else None
+
+
+def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None, conc: int | None = None) -> int:
+    """Raise a variant's hard cap to what an AgentX round actually needs.
+
+    Every variant cap in the tree is sized for the synthetic 1024/1024 shape --
+    7800s for integrate, 2400s for explore, 1800s for the conc sweep. A
+    canonical AgentX warmup is 10 requests per lane against real agentic
+    traces, which on a 700B-class model runs well past two hours before the
+    measured round even begins, so those caps kill the round mid-warmup.
+    Measured on GLM-5.2: a variant launched 09:47:41 was killed at
+    11:47:41.575, twenty-plus connections dropping in the same millisecond
+    while the server was still prefilling with 55 requests running. Downstream
+    that reads as a warmup failure, because aiperf treats a cancelled root
+    warmup credit as terminal -- so the real cause (a subprocess kill) is
+    invisible in the abort reason.
+
+    ``baseline`` already derives an AgentX-aware cap; only that one path got
+    it. This reuses the same derivation rather than introducing a second number
+    to keep in sync, and never lowers a cap, so an operator who asked for
+    longer keeps it.
+
+    AgentX is an opt-in benchmark branch: with it disabled this returns ``cap``
+    untouched and the default path is unaffected.
+
+    ``shared_state`` is what makes the check survive a lost env var. The
+    original report is exactly that case: a session resumed into a shell without
+    HYPERLOOM_AGENTX, or a variant round driven from a subprocess that did not
+    inherit it, reads as synthetic here and the round is killed by the synthetic
+    cap mid-warmup -- the failure this function exists to prevent, reached by the
+    one route it did not cover. ``benchmark_mode`` is stamped at seed for
+    precisely this, so a caller holding the session state should pass it.
+
+    Known gap: ``run_grid``'s own call sites do not pass it yet. Threading state
+    through nine call sites in six files is a change of its own, and
+    ``agentx_active(None)`` is exactly today's behaviour, so those paths are no
+    worse than before while the sweep -- which already holds the state -- gets
+    the durable signal.
+
+    Args:
+        cap: The declared hard timeout for the round, in seconds.
+        shared_state: Session state, when the caller has one. Consulted only
+            when the env var is absent.
+
+    Returns:
+        int: ``cap``, or the AgentX-derived cap when that is larger.
+    """
+    # Local import: baseline imports from this module, and the rest of the file
+    # already resolves _workload_envs this way.
+    from ._workload_envs import agentx_active, agentx_env_for_conc
+
+    if not agentx_active(shared_state):
+        return cap
+    from .baseline import agentx_baseline_timeout_sec
+
+    return max(cap, agentx_baseline_timeout_sec(agentx_env_for_conc(conc)))
+
+
 def session_clamped_timeout_sec(
     cap: int,
     session_deadline_sec: float | None,
@@ -1576,7 +1734,20 @@ async def run_grid(
         Returns:
             int: The hard timeout to grant this round, in seconds.
         """
-        cap = int(variant_timeout_sec)
+        declared = int(variant_timeout_sec)
+        cap = agentx_variant_timeout_sec(declared, conc=variant_conc(grid[idx]))
+        if cap != declared:
+            log.info(
+                "grid_runner: variant %d/%d name=%s %s cap raised %ds -> %ds "
+                "(AgentX: AGENTX_DURATION + overhead; the synthetic default "
+                "cannot cover a canonical agentic warmup)",
+                idx + 1,
+                len(grid),
+                name,
+                round_label,
+                declared,
+                cap,
+            )
         clamped = session_clamped_timeout_sec(cap, session_deadline_sec, reserve_sec=reserve_sec)
         if clamped == cap:
             return cap
@@ -1659,7 +1830,7 @@ async def run_grid(
                 runtime_sec=runtime_sec,
                 error=stopped.interrupted,
                 error_class=stopped.error_class,
-                server_log_path=_existing_log_path(server_log),
+                server_log_path=_measurement_server_log_path(server_log, slot=slot),
                 note=variant.note,
             )
         )
@@ -1712,12 +1883,38 @@ async def run_grid(
             return False
         remaining_sec = session_deadline_sec - time.monotonic()
         # Falls back to a single ``variant_timeout_sec`` when no estimate was
-        # given, which is what callers that cannot estimate already got.
-        required_sec = (
-            float(variant_expected_sec) * rounds_left
-            if variant_expected_sec is not None
-            else float(variant_timeout_sec)
-        )
+        # given, which is what callers that cannot estimate already got. Must
+        # be the AgentX-raised cap, not the declared one: the declared cap
+        # understates what the round will actually be granted, so this check
+        # would admit a variant it cannot fit, which then gets its timeout
+        # clamped down to the (too-small) remaining budget by
+        # ``session_clamped_timeout_sec`` -- reproducing the mid-warmup kill
+        # this module's AgentX cap-raise exists to prevent.
+        # Under AgentX the estimate branch has to clear the raised cap too, not
+        # just the no-estimate one. An estimate is only as good as the shape it
+        # was made on, and every estimate in this tree is sized for the
+        # synthetic 1024/1024 round -- the very thing the cap-raise exists to
+        # correct. Admitting on a synthetic estimate (say 1500s against 2000s
+        # remaining) grants the raised cap, then lets
+        # ``session_clamped_timeout_sec`` squeeze it back to the 2000s that are
+        # actually left, and the round dies mid-warmup anyway. Taking the max
+        # only ever skips EARLIER: losing a variant costs one data point, while
+        # admitting one that gets killed costs the same data point plus the GPU
+        # time spent on it.
+        #
+        # Gated on the cap having actually been RAISED, which only happens with
+        # AgentX on -- ``agentx_variant_timeout_sec`` returns its argument
+        # untouched otherwise. Without that gate the default path would start
+        # charging every variant its full backstop instead of its expected cost,
+        # skipping variants that fit comfortably. The estimate stays the
+        # admission price on the default path, exactly as before.
+        _raised = float(agentx_variant_timeout_sec(variant_timeout_sec, conc=variant_conc(grid[idx])))
+        _cap_was_raised = _raised > float(variant_timeout_sec)
+        if variant_expected_sec is None:
+            required_sec = _raised
+        else:
+            estimated_sec = float(variant_expected_sec) * rounds_left
+            required_sec = max(estimated_sec, _raised) if _cap_was_raised else estimated_sec
         if remaining_sec >= required_sec:
             return False
         log.warning(
@@ -2239,6 +2436,7 @@ async def run_grid(
         # leak destinations per-variant.
         slot_workspaces_before = snapshot_workspaces(slot)
         variant_started_unix = time.time()
+        measure_cap_sec = _round_timeout_sec(i, variant.name, round_label="measure")
         try:
             rc, stdout, stderr = await _reported_magpie(
                 i,
@@ -2246,7 +2444,7 @@ async def run_grid(
                 magpie_python=magpie_python,
                 config_path=cfg_path,
                 output_dir=slot,
-                timeout_sec=_round_timeout_sec(i, variant.name, round_label="measure"),
+                timeout_sec=measure_cap_sec,
                 cwd=cwd,
                 result_dir=result_dir,
                 soft_deadline_sec=soft_deadline_sec,
@@ -2267,7 +2465,7 @@ async def run_grid(
                 i + 1,
                 len(grid),
                 variant.name,
-                variant_timeout_sec,
+                measure_cap_sec,
                 exc,
             )
             _write_variant_abort_marker(
@@ -2688,7 +2886,7 @@ async def run_grid(
                     nonfatal_warnings=warnings,
                     error=nonzero_error,
                     error_class="magpie_nonzero_after_valid_measurement",
-                    server_log_path=_existing_log_path(server_log),
+                    server_log_path=None,
                     note=variant.note,
                 )
             )
@@ -2711,12 +2909,16 @@ async def run_grid(
                 ttft_mean_ms=measurement.get("ttft_mean_ms"),
                 e2el_mean_ms=measurement.get("e2el_mean_ms"),
                 tpot_mean_ms=measurement.get("tpot_mean_ms"),
+                input_throughput=measurement.get("input_throughput"),
+                tpot_p90_ms=measurement.get("tpot_p90_ms"),
+                intvty_p90=measurement.get("intvty_p90"),
                 workspace=str(workspace),
                 report_path=str(report_path) if report_path.exists() else None,
                 raw_result_path=measurement.get("raw_result_path"),
                 reported_success=measurement.get("reported_success"),
                 returncode=rc,
                 nonfatal_warnings=warnings,
+                server_log_path=None,
                 note=variant.note,
                 runtime_sec=round(
                     max(0.0, time.time() - variant_started_unix),
@@ -2730,6 +2932,12 @@ async def run_grid(
             results[-1].output_throughput or 0.0,
         )
         await _report_finished_variant(i)
+    _attach_grid_launch_evidence(
+        results,
+        grid=grid,
+        output_root=output_root,
+        caller_reused_ready_server=server_already_ready,
+    )
     return results
 
 
@@ -2787,6 +2995,80 @@ def _existing_log_path(path: Path) -> str | None:
         str | None: The stringified path, or ``None`` when absent.
     """
     return str(path) if path.exists() else None
+
+
+def _measurement_server_log_path(
+    server_log: Path,
+    workspace: Path | None = None,
+    *,
+    slot: Path | None = None,
+) -> str | None:
+    """Return the server log attributable to this variant's measurement.
+
+    This is deliberately shared by success and failure paths. A ready-server
+    reuse leaves the measured workspace without a local log, so the only
+    fallback is this variant's own ``warmup_round`` subtree. It never searches
+    older session history, which could attach a different launch's argv.
+    """
+    owning_slot = slot or server_log.parent
+    direct = _existing_log_path(server_log)
+    if not direct and workspace is not None:
+        direct = _existing_log_path(workspace / "server.log")
+    if direct:
+        return direct
+    warmup_dir = owning_slot / "warmup_round"
+    try:
+        candidates = [path for path in warmup_dir.glob("*/server.log") if path.is_file()]
+    except OSError:
+        candidates = []
+    if not candidates:
+        return None
+    try:
+        return str(max(candidates, key=lambda path: path.stat().st_mtime))
+    except OSError:
+        return None
+
+
+def _attach_grid_launch_evidence(
+    results: list[VariantResult],
+    *,
+    grid: list[GridVariant],
+    output_root: Path,
+    caller_reused_ready_server: bool,
+) -> None:
+    """Persist declared and observed launch evidence for each grid result.
+
+    Results stay backward-compatible: the new fields are additive, and a
+    skipped pre-materialization result produces no evidence. Evidence lives in
+    the variant slot, never in an external rescue directory.
+    """
+    for idx, result in enumerate(results):
+        if idx >= len(grid):
+            break
+        # A skipped variant never launched a measurement. Do not materialize a
+        # synthetic evidence directory whose warm-reuse metadata could later be
+        # mistaken for an observed launch.
+        if result.status == "skipped" or result.error_class in {
+            "capability_unsupported",
+            "yaml_build_error",
+            "warmup_yaml_build_error",
+        }:
+            continue
+        slot = output_root / f"variant_{idx:02d}_{_safe(grid[idx].name)}"
+        config_path = slot / "config.yaml"
+        workspace = Path(result.workspace) if result.workspace else None
+        primary_log = Path(result.server_log_path) if result.server_log_path else slot / "server.log"
+        actual_log = _measurement_server_log_path(primary_log, workspace, slot=slot)
+        result.server_log_path = actual_log
+        evidence = build_launch_evidence(
+            config_path=config_path,
+            actual_server_log=actual_log,
+            framework=os.environ.get("FRAMEWORK", ""),
+            slot=slot,
+            caller_reused_ready_server=caller_reused_ready_server,
+        )
+        result.launch_evidence = evidence
+        result.launch_evidence_path = persist_launch_evidence(evidence, slot=slot)
 
 
 def _safe(name: str) -> str:

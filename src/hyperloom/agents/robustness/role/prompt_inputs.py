@@ -97,17 +97,11 @@ _SCALAR_KEYS = {
     "has_keep_pending_integrate",
     # Aggregated into ``SharedStateSnapshot.explore_started``; ``(none)`` is the never-yet sentinel.
     "last_explore",
-    "last_sweep",
 }
 
 # Subset of ``_SCALAR_KEYS`` whose presence with a non-``(none)`` value
 # flips :attr:`SharedStateSnapshot.explore_started` to True.
-_EXPLORE_FAMILY_KEYS = frozenset(
-    {
-        "last_explore",
-        "last_sweep",
-    }
-)
+_EXPLORE_FAMILY_KEYS = frozenset({"last_explore"})
 
 # Coordinator Time-budget body line; ``budget=0min`` is the "no wall-clock budget" sentinel.
 _TIME_BUDGET_LINE_RE = re.compile(

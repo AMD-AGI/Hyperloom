@@ -52,6 +52,7 @@ from ._aiter_jit import (
     probe_aiter_jit_cache as _probe_aiter_jit_cache,
     sweep_stale_aiter_locks_if_dead,
 )
+from ._launch_evidence import build_launch_evidence, persist_launch_evidence
 
 # The grid module is the namespace the helpers both benching arms share ended up
 # in: how a sentinel returncode reads back, how a round's cap is clamped to the
@@ -268,6 +269,38 @@ def _is_cuda_graph_capture_failure(*texts: str) -> bool:
     return False
 
 
+# Startup-time "the GPUs are already occupied" refusals. The server raises these
+# BEFORE loading weights, so they are distinct from a mid-run OOM: the fix is to
+# free VRAM held by somebody else, not to shrink the workload.
+_GPU_PREOCCUPIED_MARKERS: tuple[str, ...] = (
+    # vLLM: "Free memory on device cuda:0 (84.11/287.98 GiB) on startup is less
+    # than desired GPU memory utilization (0.95, 273.59 GiB). Decrease GPU
+    # memory utilization or reduce GPU memory used by other processes."
+    "on startup is less than desired gpu memory utilization",
+    "reduce gpu memory used by other processes",
+    # sglang: "Not enough memory. Please try to increase --mem-fraction-static."
+    "not enough memory. please try to increase --mem-fraction-static",
+)
+
+
+def _is_insufficient_gpu_memory(*texts: str) -> bool:
+    """True when a server refused to boot because VRAM was already occupied.
+
+    Distinguishes "another process is squatting on the GPUs" from a genuine
+    workload OOM. The former is recoverable by reaping the squatter and
+    retrying; the latter is not, so a naked retry only burns attempts.
+
+    Args:
+        *texts: Log / stdout / stderr blobs to scan.
+
+    Returns:
+        ``True`` when a startup-time GPU-preoccupied refusal is detected,
+        else ``False``.
+    """
+    blob = "\n".join(t for t in texts if t).lower()
+    return any(m in blob for m in _GPU_PREOCCUPIED_MARKERS)
+
+
 # Disable cuda-graph capture per framework: sglang uses --disable-cuda-graph,
 # vllm uses --enforce-eager.
 _DISABLE_CUDA_GRAPH_FLAGS = {
@@ -284,6 +317,34 @@ def _config_framework(config_path: Path | str) -> str:
     except (OSError, yaml.YAMLError):
         return ""
     return str((cfg.get("benchmark") or {}).get("framework") or "").strip().lower()
+
+
+def _attach_baseline_launch_evidence(
+    result: dict[str, Any],
+    *,
+    config_path: Path,
+    output_dir: Path,
+    framework: str,
+) -> None:
+    """Persist the declared and observed server identity for a baseline result.
+
+    Baselines do not run through ``run_grid``, so they need the same evidence
+    contract explicitly. The returned result is later promoted to
+    ``current_best`` and becomes the GEAK handoff reference.
+    """
+    from ._grid_runner import _measurement_server_log_path
+
+    workspace = Path(str(result.get("workspace") or "")) if result.get("workspace") else None
+    actual_log = _measurement_server_log_path(output_dir / "server.log", workspace, slot=output_dir)
+    result["server_log_path"] = actual_log or ""
+    evidence = build_launch_evidence(
+        config_path=config_path,
+        actual_server_log=actual_log,
+        framework=framework,
+        slot=output_dir,
+    )
+    result["launch_evidence"] = evidence
+    result["launch_evidence_path"] = persist_launch_evidence(evidence, slot=output_dir)
 
 
 def _watchdog_server_log_path(output_dir: Path, framework: str) -> str | None:
@@ -622,6 +683,183 @@ BASELINE_DEFAULT_TIMEOUT_SEC = 7800  # WARM-start cap, 130 min
 AGENTX_BASELINE_OVERHEAD_SEC = 7200  # setup + corpus + warmup + first-compile
 AGENTX_DEFAULT_DURATION_SEC = 3600  # mirrors aiperf_client.sh's default
 
+# The warmup share of that overhead is not a constant either, and it is the
+# share that actually varies by model: aiperf_client.sh bounds the warmup drain
+# with AGENTX_WARMUP_GRACE_PERIOD, so a model whose warmup runs long is a model
+# whose operator has already had to raise that knob for the round to complete at
+# all. Splitting the flat 7200 at its canonical grace lets the cap follow that
+# same knob instead of asking for a second, independent number that means the
+# same thing -- which is how the constant came to be wrong for Kimi-K3 (a raw
+# aiperf run measured warmup alone at ~12075s, past this entire cap). At
+# canonical settings the sum is unchanged, so the measured GLM-5.2/Qwen3.8
+# calibration this number carries is preserved exactly.
+AGENTX_CANON_WARMUP_GRACE_SEC = 1800  # aiperf_client.sh's CANON_WARMUP_GRACE
+_AGENTX_NON_WARMUP_OVERHEAD_SEC = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
+
+# ...and the warmup share does not only vary by model, it varies by CONCURRENCY,
+# which the grace knob cannot express because it is one flat number. The client
+# builds warmup as CANON_WARMUP_PER_LANE requests per lane across CONC lanes, so
+# the work is linear in CONC *by construction*; a grace chosen at one
+# concurrency is arithmetically wrong at another. Measured on Kimi-K3:
+#
+#     conc=8   ->  87 warmup requests, ~3000s        (10.9 req/lane)
+#     conc=16  -> 177 warmup requests, ~5000s        (11.1 req/lane)
+#     conc=64  -> the 12075s warmup the warning below cites
+#
+# Left flat, a conc=32 round derives its cap from a conc=8 budget and is killed
+# mid-warmup -- the exact failure this module's cap-raise exists to prevent, just
+# moved one axis over. So the warmup share carries a CONC-scaled FLOOR.
+#
+# A ratio needs BOTH concurrencies, so the grace has to say which one it was
+# measured at. This is the default answer, not the only one: 8 is the lowest
+# concurrency this repo has a measured agentic warmup for, so defaulting to it
+# leaves every previously-validated round with its exact cap. But an operator
+# who measured at some other concurrency declares that via
+# ``AGENTX_WARMUP_GRACE_CONC`` instead of hand-converting their measurement into
+# an 8-anchored number -- which is what a hardcoded anchor forces, and which
+# silently doubles a conc=16 measurement.
+#
+# The floor only ever RAISES the cap. That asymmetry is deliberate: a cap that is
+# too large costs nothing but a longer wait on a genuinely hung round (and the
+# session budget clamps it anyway via ``session_clamped_timeout_sec``), while a
+# cap that is too small kills a round that would have finished.
+AGENTX_CANON_WARMUP_CONC = 8
+
+# Seen (warning, scaling) payloads, so a conc sweep does not reprint them once
+# per rung per arm. Both lines below are derivation commentary: the FIRST one is
+# the diagnosis, the fiftieth is noise that buries the per-variant progress the
+# same session is emitting. Keyed on the formatted payload rather than on a bare
+# flag, so a configuration that actually changes still speaks up.
+_AGENTX_SAID: set[tuple] = set()
+
+
+def _say_once(emit, key: tuple) -> None:
+    """Call ``emit`` the first time this exact payload appears in the process."""
+    if key in _AGENTX_SAID:
+        return
+    _AGENTX_SAID.add(key)
+    emit()
+
+
+def _agentx_positive_int(src: "Mapping[str, str]", name: str) -> int:
+    """Read a positive integer from ``src``; 0 when unset or unusable.
+
+    A whole number written with a decimal point (``"16.0"``, ``"3600.0"``) is
+    accepted. ``int()`` alone rejects it, and rejecting is not a safe default
+    here: these knobs feed a ratio, so discarding a declared anchor of ``16.0``
+    silently re-anchors the grace at 8 and doubles it -- the exact failure
+    ``AGENTX_WARMUP_GRACE_CONC`` exists to prevent. A fractional value
+    (``"8.5"``) is still rejected, because a non-integral concurrency or second
+    count is a typo rather than an intent.
+    """
+    raw = (src.get(name) or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        try:
+            as_float = float(raw)
+        except ValueError:
+            return 0
+        if not as_float.is_integer():
+            return 0
+        value = int(as_float)
+    return value if value > 0 else 0
+
+
+def _agentx_conc(src: "Mapping[str, str]") -> int:
+    """Concurrency for the round, from CONC; 0 when unset/unparseable."""
+    return _agentx_positive_int(src, "CONC")
+
+
+def agentx_warmup_grace_conc(env: "Mapping[str, str] | None" = None) -> int:
+    """The concurrency ``AGENTX_WARMUP_GRACE_PERIOD`` was measured at.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The declared anchor, or the repo default when unset/unusable.
+    """
+    src = os.environ if env is None else env
+    return _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC") or AGENTX_CANON_WARMUP_CONC
+
+
+def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
+    """The warmup bound for this round: the operator's grace, scaled by CONC.
+
+    ONE function because there are TWO consumers that must agree. This module
+    sizes the subprocess cap that has to outlast the warmup, and
+    ``aiperf_client.sh`` passes ``--warmup-grace-period`` to aiperf, which is
+    what actually cuts the warmup off. They read the same env var, and the
+    docstring of the cap has always claimed they stay consistent -- but the
+    CONC scaling used to live inside the cap's own body, so the client kept
+    seeing the UNSCALED number.
+
+    Measured consequence on a Kimi-K3 conc=32 round: the cap budgeted 14400s of
+    warmup while the client was still bounded at 3600s, so warmup would have
+    been cut at 106 of 354 requests with the working set barely populated --
+    the round survives, and reports a prefix-reuse figure taken before the
+    cache had anything in it. Exporting this value to the client is what makes
+    the two layers agree.
+
+    Args:
+        env: Environment to read; defaults to the process environment.
+
+    Returns:
+        The warmup grace in seconds, never below the operator's own value.
+    """
+    src = os.environ if env is None else env
+    measured = _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_PERIOD")
+    if not measured:
+        # Nothing was measured, so there is nothing to scale. The canonical
+        # 1800s is a CONSTANT, not an observation of this model at this
+        # concurrency, and multiplying it by CONC/anchor would invent a bound
+        # nobody stands behind: at CONC=64 an untuned round would silently get
+        # 14400s of warmup share and a 23400s cap where the documented
+        # canonical total is 10800s. Return it flat so the canonical invariant
+        # holds at EVERY concurrency, and let the "nothing has been tuned for
+        # this model" warning below do the talking.
+        return AGENTX_CANON_WARMUP_GRACE_SEC
+    grace = measured
+    # Scaling requires the anchor to be DECLARED, not assumed. A ratio needs two
+    # numbers, and defaulting the second one to 8 turns a grace whose
+    # concurrency nobody stated into a multiplied bound: writing the canonical
+    # AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to yield a 23400s cap at
+    # CONC=64 while leaving it unset yielded 10800s -- the same value meaning two
+    # different things depending on whether it was typed. The conc sweep then
+    # prices every rung against the inflated number and skips most of the ladder.
+    #
+    # So: no anchor, no scaling. An operator who wants the floor says which
+    # concurrency their measurement came from, which is the whole point of
+    # AGENTX_WARMUP_GRACE_CONC and costs them one line.
+    if not _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC"):
+        return grace
+    # The client's warmup is linear in CONC by construction (per-lane requests x
+    # CONC lanes), but the grace knob is a flat number, so a grace measured at
+    # one concurrency under-budgets every higher one. Scale, never shrink, and
+    # stay identity at or below the anchor so previously-validated rounds keep
+    # their exact bound.
+    anchor = agentx_warmup_grace_conc(src)
+    conc = _agentx_conc(src)
+    if conc <= anchor:
+        return grace
+    scaled = (grace * conc) // anchor
+    _say_once(
+        lambda: log.info(
+            "agentx_warmup_grace_sec: scaling the warmup share %ds -> %ds for CONC=%d "
+            "(warmup work is linear in CONC; the grace is declared as measured at "
+            "CONC=%d via AGENTX_WARMUP_GRACE_CONC). The floor only raises the bound -- "
+            "an over-large one costs a longer wait on a hung round, an under-sized one "
+            "kills a warmup that would have finished.",
+            grace,
+            scaled,
+            conc,
+            anchor,
+        ),
+        ("grace-scaled", grace, scaled, conc, anchor),
+    )
+    return scaled
+
 
 def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """Resolve the AgentX baseline cap: explicit, else duration + overhead.
@@ -634,20 +872,80 @@ def agentx_baseline_timeout_sec(env: "Mapping[str, str] | None" = None) -> int:
     """
     src = os.environ if env is None else env
 
+    # One parser for every knob in this module. Two of them would drift: a
+    # grace of "3600.0" that ``agentx_warmup_grace_sec`` accepts but a local
+    # ``int()`` rejects would be scaled AND reported as "nothing has been
+    # tuned", which is how the suppressed-warning mismatch got here the first
+    # time.
     def _int(name: str, default: int) -> int:
-        raw = (src.get(name) or "").strip()
-        try:
-            value = int(raw)
-        except ValueError:
-            return default
-        return value if value > 0 else default
+        return _agentx_positive_int(src, name) or default
+
+    def _is_valid_override(name: str) -> bool:
+        return _agentx_positive_int(src, name) > 0
 
     explicit = _int("AGENTX_BASELINE_TIMEOUT_SEC", 0)
     if explicit:
         return explicit
-    return _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC) + _int(
-        "AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC
+
+    # Same validity bar as `_int` itself (parses to a positive int) rather than
+    # "non-empty string" -- otherwise an invalid override (e.g. "abc" or "-1")
+    # both silently falls back to the default AND suppresses the warning meant
+    # to flag exactly that case.
+    if _is_valid_override("AGENTX_BASELINE_OVERHEAD_SEC"):
+        overhead = _int("AGENTX_BASELINE_OVERHEAD_SEC", AGENTX_BASELINE_OVERHEAD_SEC)
+        grace = None
+    else:
+        # Derive the warmup share from the same knob that bounds it in the
+        # client, via the same helper the client's value is exported from, so
+        # the cap and the client's --warmup-grace-period cannot drift apart.
+        grace = agentx_warmup_grace_sec(src)
+        overhead = _AGENTX_NON_WARMUP_OVERHEAD_SEC + grace
+        if not _is_valid_override("AGENTX_WARMUP_GRACE_PERIOD"):
+            # Nothing has been tuned for this model at all. The derivation
+            # above is only as good as its warmup bound, and at the canonical
+            # grace that bound is the GLM-5.2/Qwen3.8 measurement (4774s/6676s
+            # warmup+compile). A raw aiperf run against Kimi-K3 (conc=64, ISL
+            # ~115k avg) measured warmup alone draining in ~12075s -- past this
+            # whole cap before profiling starts. Nothing here can tell such a
+            # model apart, so say so rather than let the round be killed
+            # mid-warmup by a cap nobody chose.
+            _say_once(
+                lambda: log.warning(
+                    "agentx_baseline_timeout_sec: neither AGENTX_BASELINE_OVERHEAD_SEC nor "
+                    "AGENTX_WARMUP_GRACE_PERIOD is set, so the overhead falls back to the "
+                    "canonical %ds (= %ds non-warmup + %ds canonical warmup grace). That "
+                    "grace is calibrated on GLM-5.2/Qwen3.8 and may be far too small for a "
+                    "long-context or slow-prefill model -- a raw aiperf run against Kimi-K3 "
+                    "at concurrency=64 measured warmup alone taking ~12075s. Raise "
+                    "AGENTX_WARMUP_GRACE_PERIOD (the client honours it too, so the warmup "
+                    "and this cap stay consistent) or pin AGENTX_BASELINE_OVERHEAD_SEC.",
+                    overhead,
+                    _AGENTX_NON_WARMUP_OVERHEAD_SEC,
+                    AGENTX_CANON_WARMUP_GRACE_SEC,
+                ),
+                ("untuned-overhead", overhead),
+            )
+    duration = _int("AGENTX_DURATION", AGENTX_DEFAULT_DURATION_SEC)
+    total = duration + overhead
+    # Log every input, so a timeout in the field can be read back to the value
+    # that produced it instead of guessing which knob was in play. Once per
+    # distinct derivation, not once per call: a concurrency sweep resolves this
+    # for every rung, at each of the cap and budget-gate sites, so an
+    # unconditional line would repeat the same arithmetic tens of times per
+    # ladder and bury the one line per rung that carries information.
+    _say_once(
+        lambda: log.info(
+            "agentx_baseline_timeout_sec: %ds = duration %ds + overhead %ds (%s)",
+            total,
+            duration,
+            overhead,
+            "explicit AGENTX_BASELINE_OVERHEAD_SEC"
+            if grace is None
+            else f"{_AGENTX_NON_WARMUP_OVERHEAD_SEC}s non-warmup + {grace}s warmup grace",
+        ),
+        ("baseline-timeout", total, duration, overhead, grace),
     )
+    return total
 
 
 # Cold-start settings and probes live in ``_aiter_jit`` and are re-exported
@@ -3309,6 +3607,22 @@ class BaselineExecutor:
 
         bench_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(materialized_config_path))
 
+        # Deep-clean any lingering server right before this round actually
+        # boots -- after every earlier gate that can still bail out without
+        # starting a server (budget, warm-patch failure), so a round that
+        # will not run does not pay for a scan it gets no benefit from.
+        # Unconditional (not just double-run): a single-round baseline is the
+        # common path for kernel-phase re-baselining, and it is exactly the
+        # server-start attempt that must not silently OOM against a server a
+        # prior sweep/explore round's timeout left running (setsid'd server
+        # processes escape that round's process-group teardown; see
+        # _grid_runner._kill_stale_servers). Best-effort and idempotent.
+        await self._pre_start_cleanup(
+            pid_dir=output_dir,
+            framework=lifecycle["framework"],
+            port=lifecycle["port"],
+        )
+
         common = {
             "timeout_sec": timeout_sec,
             "override_result_dir": override_result_dir,
@@ -3356,13 +3670,6 @@ class BaselineExecutor:
         # server; task root keeps it per-task isolated.
         pid_dir = output_dir
         try:
-            # Deep-clean zombie listeners + stale pid/meta BEFORE round 1 boots.
-            # Runs once here so round 1's server survives for round 2's re-attach.
-            self._pre_start_cleanup(
-                pid_dir=pid_dir,
-                framework=framework,
-                port=port,
-            )
             # Round 1 (warmup): boot + run, leave running so round 2 can
             # re-attach. Throughput discarded (cold-contaminated).
             warmup_dir = output_dir / "warmup_round"
@@ -3532,6 +3839,27 @@ class BaselineExecutor:
                 result["nonfatal_warnings"].append(
                     "baseline_double_run_discarded_first",
                 )
+                # The measured pass re-attaches to the server launched by the
+                # warmup pass. Its own slot has no fresh launch record, so its
+                # evidence must retain the warmup's observed identity rather
+                # than degrading an otherwise verifiable baseline handoff.
+                for evidence_field in (
+                    "launch_evidence",
+                    "launch_evidence_path",
+                    "server_log_path",
+                ):
+                    if warmup_result.get(evidence_field):
+                        result[evidence_field] = warmup_result[evidence_field]
+                warmup_evidence = result.get("launch_evidence")
+                if isinstance(warmup_evidence, Mapping):
+                    measured_evidence = dict(warmup_evidence)
+                    measured_evidence["warm_reuse"] = {
+                        **dict(warmup_evidence.get("warm_reuse") or {}),
+                        "reused_ready_server": True,
+                        "provenance": "warmup_round",
+                        "source_server_log_path": str(result.get("server_log_path") or ""),
+                    }
+                    result["launch_evidence"] = measured_evidence
                 result["warmup_round_tput"] = warmup_tput
                 self._record_baseline_convergence(result, warmup_tput)
                 # The Coordinator promotes ``subprocess_runtime_sec`` into the
@@ -3923,44 +4251,39 @@ class BaselineExecutor:
             yaml.safe_dump(cfg, f, sort_keys=False)
         return out
 
-    @staticmethod
-    def _port_healthy(port: int, timeout: float = 3.0) -> bool:
-        """Return True when localhost:{port}/health responds HTTP 200.
-
-        Args:
-            port: Local server port to probe.
-            timeout: Per-request timeout in seconds.
-
-        Returns:
-            ``True`` when the health endpoint responds HTTP 200, else
-            ``False``.
-        """
-        import urllib.request
-
-        try:
-            r = urllib.request.urlopen(
-                f"http://127.0.0.1:{port}/health",
-                timeout=timeout,
-            )  # nosec B310 - fixed loopback health check.
-            return r.status == 200
-        except Exception:  # noqa: BLE001
-            return False
-
-    def _pre_start_cleanup(
+    async def _pre_start_cleanup(
         self,
         *,
         pid_dir: Path,
         framework: str,
         port: int,
     ) -> None:
-        """Best-effort startup pre-clean for the double-run path.
+        """Best-effort startup pre-clean, run once before every baseline round.
 
-        Only acts when there is concrete evidence of a zombie: the reuse
-        port responds to /health but the matching metadata file is absent
-        (the exact "Reuse metadata mismatch" trigger). In that case it
-        calls _kill_stale_servers() to reap the orphan listener. Stale
-        pid/json files are always unlinked (without sending signals to
-        potentially-recycled PIDs). Never raises.
+        Unconditionally reaps any lingering vLLM/SGLang/atom server via
+        _kill_stale_servers(). Hyperloom's own scheduling (``gpu_research_lane``,
+        capacity 1) guarantees at most one server-holding task runs at a time,
+        so nothing matching should still be alive at this point, before this
+        task's own server has even booted. A prior sweep/explore round's
+        timeout can leave one running anyway — its setsid'd server process
+        escapes that round's process-group teardown — and this is the safety
+        net that catches it before the new server OOMs against it
+        (AMD-AGI/Hyperloom#1354).
+
+        This used to gate the scan on a "zombie" heuristic: only fire when the
+        reuse port answered /health but had no matching pid/json metadata.
+        That signal was unreliable in both directions and has been dropped:
+        an eligible server_lifecycle port is a freshly OS-assigned ephemeral
+        port (confirmed free at assignment time), so it always reports
+        unhealthy and the scan would never fire; an ineligible port falls
+        back to a fixed default that can coincide with an unrelated
+        co-tenant's server, so the heuristic could also fire on the wrong
+        target.
+
+        Stale pid/json metadata files are always unlinked first (no signal
+        sent to potentially-recycled PIDs). Skipped under pytest, matching
+        the same guard on the per-launch preclean in ``_grid_runner.py``:
+        real ``/proc`` scanning is unsafe there. Never raises.
 
         Args:
             pid_dir: Directory holding the server pid/metadata files.
@@ -3969,34 +4292,16 @@ class BaselineExecutor:
         """
         base = Path(pid_dir)
         tag = f"{framework}_{port}"
-        pid_file = base / f"{tag}.pid"
-        meta_file = base / f"{tag}.json"
-        meta_exists = meta_file.exists()
-        try:
-            port_healthy = self._port_healthy(port)
-        except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
-            log.warning(
-                "baseline_executor: pre-start port probe failed (%s); proceeding.",
-                exc,
-            )
-            port_healthy = False
-        if meta_exists and port_healthy:
-            # A healthy reuse target with metadata is not a zombie; keep the
-            # files so Magpie can reattach.
-            return
-        # Unlink stale metadata/pid files only (no signal to possibly-recycled
-        # PIDs).
-        for p in (pid_file, meta_file):
+        for p in (base / f"{tag}.pid", base / f"{tag}.json"):
             try:
                 if p.exists():
                     p.unlink()
             except OSError:
                 pass
-        # Only deep-clean when the port is occupied by a zombie (healthy
-        # endpoint, no metadata), to avoid killing unrelated servers.
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            return
         try:
-            if not meta_exists and port_healthy:
-                _kill_stale_servers()
+            await asyncio.to_thread(_kill_stale_servers)
         except Exception as exc:  # noqa: BLE001 — best-effort pre-clean
             log.warning(
                 "baseline_executor: pre-start _kill_stale_servers failed (%s); proceeding.",
@@ -4729,6 +5034,12 @@ class BaselineExecutor:
             # is honored as an intentional opt-out.
             "run_eval_disabled": bool(run_eval_disabled),
         }
+        _attach_baseline_launch_evidence(
+            result,
+            config_path=materialized_config_path,
+            output_dir=output_dir,
+            framework=framework,
+        )
 
         # Parse accuracy eval results (GSM8K for serving, or the image-quality
         # gate for scriptable frameworks). Pass the framework so scriptable runs

@@ -648,26 +648,26 @@ async def test_close_sequencer_falls_back_to_time_exhausted(coord):
 async def test_close_sequencer_derives_sweep_done_from_phase_history(coord):
     """Regression: sequencer derives the phase_history reason rather than blanket-stamping time_exhausted."""
     coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "conc_sweep_done", "evidence": {}},
+        {"to_phase": "CLOSE", "reason": "sweep_done", "evidence": {}},
     ]
     assert coord.shared_state.stop_reason == ""
 
     await coord._on_enter_close(from_phase="SWEEP")
 
-    assert coord.shared_state.stop_reason == "conc_sweep_done"
+    assert coord.shared_state.stop_reason == "sweep_done"
 
 
 @pytest.mark.asyncio
 async def test_close_sequencer_preserves_failed_conc_sweep_reason(coord):
     """Failed conc_sweep closeout should stay distinguishable in final stop_reason."""
     coord.shared_state.phase_history = [
-        {"to_phase": "CLOSE", "reason": "conc_sweep_failed", "evidence": {"conc_sweep_status": "failed"}},
+        {"to_phase": "CLOSE", "reason": "sweep_failed", "evidence": {"sweep_status": "failed"}},
     ]
     assert coord.shared_state.stop_reason == ""
 
     await coord._on_enter_close(from_phase="SWEEP")
 
-    assert coord.shared_state.stop_reason == "conc_sweep_failed"
+    assert coord.shared_state.stop_reason == "sweep_failed"
 
 
 @pytest.mark.asyncio

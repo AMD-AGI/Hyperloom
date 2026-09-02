@@ -4,9 +4,9 @@
 """Shared value types and helpers for the ``explore`` executor's grid runs.
 
 Holds :class:`GridVariant` / :class:`VariantResult`, the content-fingerprint
-delegate, ``extra_envs`` coercion, the Pareto filter, and the shared
-per-variant timeout default. The runner that actually invokes Magpie and
-parses ``benchmark_report.json`` lives in :mod:`._grid_runner`.
+delegate, ``extra_envs`` coercion, and the shared per-variant timeout default.
+The runner that actually invokes Magpie and parses ``benchmark_report.json``
+lives in :mod:`._grid_runner`.
 """
 
 from __future__ import annotations
@@ -64,8 +64,12 @@ def variant_fingerprint(
 
 
 # Single home for the grid-level defaults every graded executor shares. They
-# were previously redefined per executor with identical values, which is how
-# they drifted apart.
+# were previously redefined per executor with identical values, which is how the
+# stack-rebench floors drifted apart.
+# Sized for the synthetic ISL/OSL shape: an AgentX round does not fit it, and is
+# not meant to -- see ``agentx_variant_timeout_sec`` in ``_grid_runner``, which
+# raises whatever cap reaches it rather than expecting this default to cover both
+# workloads.
 DEFAULT_VARIANT_TIMEOUT_SEC = 7800  # 130 min; matches BASELINE_DEFAULT_TIMEOUT_SEC
 # Per-variant KEEP threshold (gain-pct + accuracy gate); the grid noise floor.
 # It is the only bar a variant clears. This default sits above grid noise, but
@@ -243,6 +247,10 @@ class VariantResult:
         ttft_mean_ms (float | None): Mean time-to-first-token (ms).
         e2el_mean_ms (float | None): Mean end-to-end latency (ms).
         tpot_mean_ms (float | None): Mean time-per-output-token (ms).
+        input_throughput (float | None): Input tokens/sec (prefill), if measured.
+        tpot_p90_ms (float | None): p90 inter-token latency (ms), if measured.
+        intvty_p90 (float | None): p90 E2E normalized interactivity
+            (tok/s/user), if measured.
         workspace (str | None): Path to the located ``benchmark_*`` workspace.
         report_path (str | None): Path to ``benchmark_report.json`` if present.
         raw_result_path (str | None): Path to the raw result JSON, if salvaged.
@@ -264,6 +272,11 @@ class VariantResult:
         server_log_path (str | None): Absolute path to the variant's
             ``server.log`` when a server was launched; ``None`` for pre-launch
             failures where no server ran.
+        launch_evidence (dict[str, Any]): Structured declared/observed launch
+            evidence persisted beside the variant. Empty when no config was
+            materialized before the failure.
+        launch_evidence_path (str | None): Path to the persisted
+            ``launch_evidence.json`` artifact.
     """
 
     name: str
@@ -278,6 +291,9 @@ class VariantResult:
     ttft_mean_ms: float | None = None
     e2el_mean_ms: float | None = None
     tpot_mean_ms: float | None = None
+    input_throughput: float | None = None
+    tpot_p90_ms: float | None = None
+    intvty_p90: float | None = None
     workspace: str | None = None
     report_path: str | None = None
     raw_result_path: str | None = None
@@ -296,6 +312,8 @@ class VariantResult:
     # informational only, never feeds winner selection.
     estimated_output_throughput: float | None = None
     server_log_path: str | None = None
+    launch_evidence: dict[str, Any] = field(default_factory=dict)
+    launch_evidence_path: str | None = None
 
     @property
     def fingerprint(self) -> str:
@@ -340,45 +358,7 @@ class VariantResult:
             "runtime_sec": self.runtime_sec,
             "killed_overtime": self.killed_overtime,
             "estimated_output_throughput": self.estimated_output_throughput,
+            "server_log_path": self.server_log_path,
+            "launch_evidence": self.launch_evidence,
+            "launch_evidence_path": self.launch_evidence_path,
         }
-
-
-def pareto_front(
-    entries: list[dict[str, Any]],
-    *,
-    latency_key: str = "e2el_mean_ms",
-) -> list[dict[str, Any]]:
-    """Naive O(N²) Pareto for (max ``output_throughput``, min *latency_key*).
-
-    Args:
-        entries (list[dict[str, Any]]): Sweep result entries to filter.
-        latency_key (str): Which latency metric to minimize. The native sweep
-            reads ``e2el_mean_ms``; the GEAK sweep reads ``ttft_mean_ms``
-            because ``bench_summary.json`` carries no e2el.
-
-    Returns:
-        list[dict[str, Any]]: The non-dominated subset of succeeded entries.
-    """
-    succ = [
-        e
-        for e in entries
-        if e["status"] == "succeeded"
-        and isinstance(e.get("output_throughput"), (int, float))
-        and isinstance(e.get(latency_key), (int, float))
-    ]
-    front: list[dict[str, Any]] = []
-    for cand in succ:
-        dominated = False
-        for other in succ:
-            if other is cand:
-                continue
-            if (
-                other["output_throughput"] >= cand["output_throughput"]
-                and other[latency_key] <= cand[latency_key]
-                and (other["output_throughput"] > cand["output_throughput"] or other[latency_key] < cand[latency_key])
-            ):
-                dominated = True
-                break
-        if not dominated:
-            front.append(cand)
-    return front

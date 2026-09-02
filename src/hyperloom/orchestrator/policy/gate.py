@@ -33,7 +33,6 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
 from ..phases.machine_state import (
     PHASE_KERNEL_AGENT,
     PHASE_NAMES,
-    PHASE_SWEEP,
     is_action_allowed_in_phase,
     is_action_llm_proposable_in_phase,
     llm_proposable_actions_for,
@@ -150,11 +149,6 @@ INTEGRATE_PATCH_ACTION_NAME: str = "integrate_patch"
 
 # Merged explore action.
 EXPLORE_ACTION_NAME: str = "explore"
-
-# Full workload sweep action; named constant so the ``sweep_phase_singleton``
-# rule has a single source of truth. (``conc_sweep`` is a Coordinator-internal
-# action gated via COORDINATOR_INTERNAL_ACTIONS, not a singleton rule here.)
-SWEEP_ACTION_NAME: str = "sweep"
 
 # Reference measurement action; named constant for the ``baseline_phase_singleton`` rule.
 BASELINE_ACTION_NAME: str = "baseline"
@@ -819,7 +813,7 @@ class PolicyGate:
         # must NOT be re-validated against the delegate-body sweep-family
         # singleton guard here — that guard keys on auto_conc_sweep_task_id,
         # which is the auto-enqueued task's own id, so it would deny the sole
-        # conc_sweep against itself and surface as a spurious conc_sweep_failed.
+        # conc_sweep against itself and surface as a spurious sweep_failed.
         if kind in COORDINATOR_INTERNAL_ACTIONS:
             return
         skip_baseline_singleton = (
@@ -966,12 +960,6 @@ class PolicyGate:
         # ``integrate_patch`` requires a non-reject Critic verdict.
         if action_name == INTEGRATE_PATCH_ACTION_NAME:
             self._validate_integrate_patch_critic_gate(payload)
-        # sweep_phase_singleton: deny LLM sweep once the auto-enqueue landed.
-        # conc_sweep has no equivalent guard here: it is a Coordinator-internal
-        # action (never LLM-delegated), so _validate_phase_action rejects any LLM
-        # conc_sweep as Coordinator-managed (phase_incompatible) below.
-        if action_name == SWEEP_ACTION_NAME:
-            self._validate_sweep_singleton(payload, intent_kind="delegate")
         if action_name == BASELINE_ACTION_NAME and not skip_baseline_singleton:
             self._validate_baseline_singleton(payload)
         self._validate_gemm_tuning_action(action_name, intent_kind="delegate")
@@ -1051,14 +1039,6 @@ class PolicyGate:
                 f"emit REQUEST(target_agent='kernel_agent', kind='...') instead "
                 f"of propose_action(action_name={action_name!r})",
                 rule="kernel_owned_by_kernel_agent",
-            )
-        # sweep_phase_singleton (defense in depth on the propose_action channel).
-        # conc_sweep is Coordinator-internal (never LLM-proposed); _validate_phase_action
-        # below rejects any LLM conc_sweep as Coordinator-managed (phase_incompatible).
-        if action_name == SWEEP_ACTION_NAME:
-            self._validate_sweep_singleton(
-                payload,
-                intent_kind="propose_action",
             )
         if action_name == BASELINE_ACTION_NAME:
             self._validate_baseline_singleton(payload)
@@ -1334,8 +1314,7 @@ class PolicyGate:
                     "by the Coordinator — PRELUDE bootstrap, +10% watermark refresh, "
                     "warm-recipe replay, FRAMEWORK pump, SWEEP-entry CONC ladder and "
                     "off-loop component builds — and never appear in any phase's "
-                    "LLM-proposable set. Propose ``specialist`` or ``explore`` "
-                    "instead (or ``sweep`` for a full workload grid)."
+                    "LLM-proposable set. Propose ``specialist`` or ``explore`` instead."
                 ),
             )
         state = self.shared_state
@@ -1475,76 +1454,6 @@ class PolicyGate:
             ),
         )
 
-    # ``sweep_phase_singleton``
-    def _validate_sweep_singleton(
-        self,
-        payload: dict[str, Any],
-        *,
-        intent_kind: str,
-    ) -> None:
-        """Deny an LLM workload ``sweep`` once SWEEP auto-dispatched ``conc_sweep``.
-
-        The automatic phase path runs the Coordinator-internal ``conc_sweep``
-        directly on SWEEP entry (recorded as ``auto_conc_sweep_task_id`` in the
-        latest ``phase_history`` evidence), so a later LLM-proposed full
-        ``sweep`` would only burn extra GPU time. Escape:
-        ``params.bypass_sweep_singleton=True``.
-
-        ``conc_sweep`` itself has no singleton guard — it is a
-        Coordinator-internal action (see ``COORDINATOR_INTERNAL_ACTIONS``) that
-        is never LLM-proposed, so an LLM ``conc_sweep`` is rejected earlier by
-        ``_validate_phase_action`` as Coordinator-managed.
-
-        Args:
-            payload (dict[str, Any]): the intent payload;
-                ``params.bypass_sweep_singleton`` opts out of the singleton
-                guard.
-            intent_kind (str): the channel the action arrived on, used in the
-                error hint.
-
-        Raises:
-            PolicyDenied: when the SWEEP phase already carries an auto-enqueued
-                conc_sweep task and no bypass flag is set.
-        """
-        params = payload.get("params") or {}
-        if isinstance(params, dict) and params.get("bypass_sweep_singleton"):
-            return
-        ss = getattr(self, "shared_state", None)
-        if ss is None:
-            return
-        history = getattr(ss, "phase_history", None) or []
-        if not history:
-            return
-        latest = history[-1]
-        if not isinstance(latest, dict):
-            return
-        if str(latest.get("to_phase") or "").strip() != PHASE_SWEEP:
-            return
-        evidence = latest.get("evidence")
-        if not isinstance(evidence, dict):
-            return
-        auto_id = str(evidence.get("auto_conc_sweep_task_id") or "").strip()
-        if not auto_id:
-            return
-        raise PolicyDenied(
-            (
-                f"sweep: SWEEP phase already has an auto-enqueued conc_sweep "
-                f"task (auto_conc_sweep_task_id={auto_id!r}); full workload "
-                f"sweep is no longer part of the automatic closeout path."
-            ),
-            rule="sweep_phase_singleton",
-            hint=(
-                "The Coordinator's SWEEP-entry hook already dispatches "
-                "conc_sweep directly; no full workload sweep proposal is "
-                "needed. Wait for SWEEP→CLOSE. "
-                "If you genuinely need a second grid for debug, "
-                f"set params.bypass_sweep_singleton=True on the "
-                f"{intent_kind} payload (the override is recorded "
-                f"on the audit trail)."
-            ),
-        )
-
-    # ``baseline_phase_singleton`` / ``enablement_round_in_flight``
     def _validate_baseline_singleton(
         self,
         payload: dict[str, Any],

@@ -27,7 +27,8 @@ Fields::
                                 extra_envs, workspace, latency means)
     cumulative_gain_validated float — % over baseline at the last measurement
                                 that promoted (an explore KEEP's decision round,
-                                or a full-stack revalidation)
+                                or a full-stack revalidation), on whichever axis
+                                the session grades (see resolve_graded_comparison)
     stop_reason         str   — set when graceful stop fires
     stop_ts             str   — ISO timestamp of the first stop_reason write
     resumed_ts          str   — ISO timestamp of the most recent --resume
@@ -60,13 +61,16 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from hyperloom.common.coerce import to_str_list, to_unix
 from hyperloom.common.env_safety import redact_secret_values
 from hyperloom.common.io import atomic_write_json
 from hyperloom.common.jsonio import read_json
 from hyperloom.common.profile_args import sanitize_profile_server_args
+
+if TYPE_CHECKING:  # import cycle: perf_metric is imported lazily at call time
+    from hyperloom.common.perf_metric import GradedComparison
 
 from . import kernel_decision_settings as _kernel_decision_settings
 from ._shared_state.enablement_round import EnablementRound
@@ -125,8 +129,22 @@ def resolve_anchor_with_drift(snapshot_tput: float, state: Any) -> tuple[float, 
     return snapshot_tput, False
 
 
+def framework_is_scriptable(framework: str | None) -> bool:
+    """Whether *framework* reports an image-quality gate instead of token throughput.
+
+    An unset name reads as a serving framework: a session that has not resolved
+    one yet is not scriptable until it says so.
+    """
+    name = str(framework or "").strip()
+    if not name:
+        return False
+    from hyperloom.inference_optimizer import framework_registry
+
+    return bool(framework_registry.is_scriptable(name))
+
+
 def resolve_grading_anchor_tput(state: Any) -> float:
-    """Throughput a new candidate must beat: the recipe it is composed on top of.
+    """Output throughput a new candidate is composed on top of.
 
     Candidates are launched with ``current_best``'s args/envs, so grading them
     against ``baseline_tput`` compares a measurement to a configuration it was
@@ -135,13 +153,19 @@ def resolve_grading_anchor_tput(state: Any) -> float:
     ``current_best`` down. ``baseline_tput`` is the fallback only before any
     validated layer exists.
 
+    Always the output axis. This is not the KEEP grader -- that is
+    :func:`resolve_graded_comparison` -- and its consumers are not grading a
+    candidate: the ``base_tput`` seeded into task params, the drift check, and
+    the two objective resolvers, whose targets are operator-supplied output
+    figures.
+
     Args:
         state: Any object exposing ``current_best`` / ``baseline_tput``
             (``None`` and partial test doubles are tolerated).
 
     Returns:
-        ``current_best``'s throughput when positive, else ``baseline_tput``;
-        ``0.0`` when neither is established.
+        ``current_best``'s output throughput when positive, else
+        ``baseline_tput``; ``0.0`` when neither is established.
     """
     if state is None:
         return 0.0
@@ -150,6 +174,75 @@ def resolve_grading_anchor_tput(state: Any) -> float:
         return best
     baseline = getattr(state, "baseline_tput", 0.0)
     return float(baseline) if isinstance(baseline, (int, float)) and baseline > 0 else 0.0
+
+
+def resolve_graded_comparison(
+    state: Any,
+    measurement: Any,
+    *,
+    against_baseline: bool = False,
+) -> "GradedComparison":
+    """Resolve what a KEEP decision grades: candidate and reference, one axis.
+
+    Under total-token-throughput grading both sides come from perf snapshots,
+    which exist only when the axis pair (total, intvty p90) is present, so a
+    lane cannot half-apply the objective. When either side cannot supply the
+    pair both read the output axis and ``degrade_reason`` names why. The
+    interactivity constraint is resolved here as ``vetoed`` because it belongs
+    to the total-throughput objective rather than sitting beside it.
+
+    Args:
+        state: The session state (``current_best`` / ``baseline_tput`` /
+            ``baseline_perf`` / ``framework`` / ``benchmark_mode``).
+        measurement: The candidate's measurement mapping.
+        against_baseline: Grade against the session baseline (cumulative
+            realized gain) rather than the recipe the candidate was composed on.
+
+    Returns:
+        A :class:`GradedComparison` whose ``candidate`` and ``reference`` are
+        on the axis it names.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_OUTPUT,
+        GRADED_TOTAL,
+        GradedComparison,
+        output_tput_of,
+        passes_intvty_gate,
+        perf_snapshot_from_mapping,
+        resolve_grading_anchor_perf,
+        total_tput_of,
+        total_tput_serving_grading_enabled,
+    )
+
+    degrade_reason = ""
+    if total_tput_serving_grading_enabled(
+        scriptable=framework_is_scriptable(getattr(state, "framework", None)),
+        benchmark_mode=str(getattr(state, "benchmark_mode", "") or ""),
+    ):
+        if against_baseline:
+            ref_perf = perf_snapshot_from_mapping(getattr(state, "baseline_perf", None))
+            reason = "" if ref_perf else "baseline_axes_missing"
+        else:
+            ref_perf, reason = resolve_grading_anchor_perf(state)
+        cand_perf = perf_snapshot_from_mapping(measurement)
+        if ref_perf and cand_perf:
+            return GradedComparison(
+                objective=GRADED_TOTAL,
+                candidate=total_tput_of(cand_perf),
+                reference=total_tput_of(ref_perf),
+                vetoed=not passes_intvty_gate(cand_perf, ref_perf),
+            )
+        degrade_reason = reason or "candidate_axes_missing"
+
+    reference = (
+        float(getattr(state, "baseline_tput", 0.0) or 0.0) if against_baseline else resolve_grading_anchor_tput(state)
+    )
+    return GradedComparison(
+        objective=GRADED_OUTPUT,
+        candidate=output_tput_of(measurement),
+        reference=reference,
+        degrade_reason=degrade_reason,
+    )
 
 
 def _normalize_envs(value: Any) -> dict[str, str]:
@@ -324,7 +417,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
     {
         "baseline",
         "profile",
-        "sweep",
         "explore",
         # ``roofline`` runs profile + trace_analyze atomically.
         "roofline",
@@ -335,7 +427,6 @@ _AUDIT_ACTIONS: frozenset[str] = frozenset(
 _KEY_METRIC_MAP: dict[str, tuple[str, str]] = {
     "baseline": ("output_throughput", "output_throughput"),
     "profile": ("output_throughput", "output_throughput"),
-    "sweep": ("output_throughput", "output_throughput"),
     "explore": ("best_gain_pct", "gain_pct"),
     "roofline": ("snapshot_id", "snapshot_id"),
 }
@@ -590,16 +681,18 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
-    # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
-    conc_sweep_concs: list[int] = field(
-        default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
-    )
+    # CONC ladder for conc_sweep, seeded from the workload's own ladder by
+    # ``_parse_conc_sweep_concs``. Empty => skip_reason=empty_conc_list.
+    conc_sweep_concs: list[int] = field(default_factory=list)
     # Total wall-clock budget (s) for conc_sweep. 0 disables the gate.
     conc_sweep_total_budget_sec: int = 9000
     # Per-variant Magpie subprocess timeout (s), clamped to remaining total budget.
     conc_sweep_variant_timeout_sec: int = 1800
     target_summary: str = ""
     baseline_tput: float = 0.0
+    # Baseline AgentX perf snapshot: total tok/s objective plus the intvty p90
+    # the veto is measured against, and the reported axes the summary renders.
+    baseline_perf: dict[str, Any] = field(default_factory=dict)
     # Internal-only baseline cold+hot double-run switch; default-on keeps the optimisation phase
     # warm-decision apples-to-apples with the baseline measurement basis.
     baseline_double_run: bool = True
@@ -680,6 +773,10 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # alone prices a pass that re-attaches. Zero => never measured.
     baseline_post_ready_runtime_sec: float = 0.0
     current_best: dict[str, Any] = field(default_factory=dict)
+    # Immutable measurement evidence captured with the current-best promotion.
+    # GEAK may only use its tput after the stored launch identity matches the
+    # configuration it is about to reproduce.
+    current_best_measurement: dict[str, Any] = field(default_factory=dict)
     # Reference launch recipe from the operator's --reference-script: lowest-priority
     # base server args/envs seeding every baseline. Persisted.
     reference_server_args: str = ""
@@ -898,9 +995,7 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     explore_variant_timeout_sec_override: int = 0
     # Headroom added to kill_ratio for auto-derived hard cap (default 0.5); no effect when override > 0.
     explore_variant_timeout_safety_margin: float = 0.5
-    # Most recent workload sweep (CONC/ISL/OSL frontier).
-    last_sweep: dict[str, Any] = field(default_factory=dict)
-    # Mirrors last_sweep for the conc_sweep post-hook so SWEEP→CLOSE exits on conc_sweep completion.
+    # The concurrency ladder's terminal state; SWEEP→CLOSE exits on it.
     last_conc_sweep: dict[str, Any] = field(default_factory=dict)
     # Durable watermark from the last real conc_sweep measurement; survives the
     # macro-cycle reloop clearing ``last_conc_sweep`` so redundant closeout is
@@ -937,7 +1032,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     baseline_attempts: list[dict[str, Any]] = field(default_factory=list)
     profile_attempts: list[dict[str, Any]] = field(default_factory=list)
     gemm_tuning_attempts: list[dict[str, Any]] = field(default_factory=list)
-    sweep_attempts: list[dict[str, Any]] = field(default_factory=list)
     # explore audit log (capped per _DEFAULT_ATTEMPTS_HISTORY).
     explore_attempts: list[dict[str, Any]] = field(default_factory=list)
     # Capped roofline audit log with snapshot ids and analysis paths.
@@ -3633,46 +3727,12 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
         except Exception:  # noqa: BLE001 — never block record on render concerns
             pass
 
-    def record_sweep(self, result: dict[str, Any]) -> None:
-        """Snapshot the most recent workload sweep into ``last_sweep``.
-
-        Selects the best succeeded grid entry by ``output_throughput`` and
-        records grid size, per-concurrency bests, the Pareto front, and the
-        workspace path.
-
-        Args:
-            result (dict[str, Any]): The sweep executor result envelope. A
-                non-dict result is a no-op.
-        """
-        if not isinstance(result, dict):
-            return
-        grid = result.get("sweep_grid") or []
-        best = None
-        if isinstance(grid, list):
-            best = max(
-                (
-                    e
-                    for e in grid
-                    if isinstance(e, dict)
-                    and e.get("status") == "succeeded"
-                    and isinstance(e.get("output_throughput"), (int, float))
-                ),
-                default=None,
-                key=lambda e: e.get("output_throughput") or 0.0,
-            )
-        self.last_sweep = {
-            "ts": _now_iso(),
-            "grid_size": result.get("grid_size", len(grid) if isinstance(grid, list) else 0),
-            "best_overall": best or {},
-            "best_for_each_conc": result.get("best_for_each_conc") or {},
-            "pareto_front": result.get("pareto_front") or [],
-            "workspace": result.get("workspace", ""),
-            # Watermark of validated gain at the moment this manual/full sweep ran.
-            "cumulative_gain_validated_at_record": float(getattr(self, "cumulative_gain_validated", 0.0) or 0.0),
-        }
-
     def record_conc_sweep(self, result: dict[str, Any]) -> None:
-        """Record conc_sweep task completion (mirrors record_sweep). The status field lets exit_normal_sweep return conc_sweep_done so SWEEP→CLOSE can fire on conc_sweep alone.
+        """Record the concurrency sweep's completion into ``last_conc_sweep``.
+
+        The status field is what lets ``exit_normal_sweep`` return ``sweep_done``:
+        the ladder is the only sweep there is, so its terminal state is the
+        phase's.
 
         Args:
             result (dict[str, Any]): The conc_sweep result envelope; a

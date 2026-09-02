@@ -24,12 +24,15 @@ All outputs are upper bounds.
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from hyperloom.inference_optimizer.model_config_utils import _merge_config_scopes
+
+log = logging.getLogger(__name__)
 
 
 #: GPU per-chip peak specs (keys match ``SharedState.gpu_type``, lowercase).
@@ -93,6 +96,7 @@ _DTYPE_BYTES: dict[str, float] = {
     "float8_e4m3fn": 1.0,
     "float8_e5m2": 1.0,
     "fp8": 1.0,
+    "mxfp8": 1.0,
     # 4-bit (block-scaled).
     "float4": 0.5,
     "fp4": 0.5,
@@ -121,6 +125,7 @@ _QUANT_WEIGHT_BYTES: dict[str, float] = {
     "fp8": 1.0,
     "fp8_e4m3": 1.0,
     "fp8_e5m2": 1.0,
+    "mxfp8": 1.0,
     "fp4": 0.5,
     "mxfp4": 0.5,
     "nvfp4": 0.5,
@@ -130,6 +135,92 @@ _QUANT_WEIGHT_BYTES: dict[str, float] = {
     "awq": 0.5,
     "gptq": 0.5,
 }
+
+
+def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
+    """On-disk weight bytes-per-element declared by an HF ``quantization_config``.
+
+    ``quant_method`` names the *precision* in the flat HF form (``fp8``,
+    ``awq``) but names the *toolkit* in wrapper formats — Quark writes
+    ``quant_method: "quark"`` and puts the real precision on
+    ``global_quant_config.weight.dtype`` (``"fp4"`` for MXFP4). Reading only
+    ``quant_method`` therefore misses the tag and silently falls back to the
+    checkpoint ``dtype`` (bf16), overcounting weight IO 4x — which also trips
+    the ``total_expert_bytes >= weight_bytes`` sanity guard in
+    :func:`_compute_expert_decomposition` and degrades a MoE model to dense.
+
+    Args:
+        quant_cfg: The parsed ``quantization_config`` block, or any non-dict.
+
+    Returns:
+        Bytes per weight element, or ``0.0`` when nothing decisive is found.
+    """
+    if not isinstance(quant_cfg, dict):
+        return 0.0
+    method = str(quant_cfg.get("quant_method", "")).strip().lower()
+    if method in _DTYPE_BYTES:
+        return _DTYPE_BYTES[method]
+    if method in _QUANT_WEIGHT_BYTES:
+        return _QUANT_WEIGHT_BYTES[method]
+
+    def _bits_to_bytes(bits: Any) -> float:
+        """``num_bits`` → bytes-per-element, ``0.0`` when unusable."""
+        try:
+            b = float(bits)
+        except (TypeError, ValueError):
+            return 0.0
+        return b / 8.0 if b > 0 else 0.0
+
+    def _spec_bytes(scope: Any) -> float:
+        """Weight bytes-per-element declared by one quant scope, ``0.0`` if none."""
+        if not isinstance(scope, dict):
+            return 0.0
+        spec = scope.get("weight") or scope.get("weights")
+        if not isinstance(spec, dict):
+            return 0.0
+        tag = str(spec.get("dtype") or spec.get("type") or "").strip().lower()
+        # Both tables, exactly as the flat ``quant_method`` path above does.
+        # ``_QUANT_WEIGHT_BYTES`` is the only one carrying fp8_e4m3, fp8_e5m2,
+        # nvfp4, int8, w8a8_int8, int4, awq and gptq, and a Quark checkpoint
+        # writes precisely those on the nested spec -- often with no
+        # ``num_bits`` beside them. Consulting one table here read
+        # ``global_quant_config.weight.dtype = "fp8_e4m3"`` as "nothing
+        # decisive", fell back to the checkpoint dtype, and reported bf16: the
+        # 2x weight-IO overcount this function was written to remove, which then
+        # trips the ``total_expert_bytes >= weight_bytes`` guard and degrades a
+        # MoE model to dense.
+        if tag in _DTYPE_BYTES:
+            return _DTYPE_BYTES[tag]
+        if tag in _QUANT_WEIGHT_BYTES:
+            return _QUANT_WEIGHT_BYTES[tag]
+        return _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
+
+    # Wrapper toolkits nest the precision on a weight spec: Quark under
+    # global_quant_config, compressed-tensors under config_groups.*.weights.
+    # These two scopes describe the checkpoint as a whole, so either is decisive.
+    for scope in (quant_cfg.get("global_quant_config"), quant_cfg):
+        whole = _spec_bytes(scope)
+        if whole > 0:
+            return whole
+
+    # The per-group containers are different: one entry per layer pattern, and
+    # they need not agree -- a Quark MoE checkpoint routinely stores the routed
+    # experts at fp4 and the attention projections at fp8. Reading whichever
+    # entry the dict happened to yield first declared that precision for the
+    # entire model. Take the value the most groups agree on; ties resolve to the
+    # wider one, because undercounting weight bytes inflates the roofline and
+    # reports a real regression as "already at ceiling".
+    tallies: dict[float, int] = {}
+    for container in (quant_cfg.get("layer_quant_config"), quant_cfg.get("config_groups")):
+        if not isinstance(container, dict):
+            continue
+        for scope in container.values():
+            by = _spec_bytes(scope)
+            if by > 0:
+                tallies[by] = tallies.get(by, 0) + 1
+    if tallies:
+        return max(tallies.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return _bits_to_bytes(quant_cfg.get("bits") or quant_cfg.get("w_bit"))
 
 
 def _parse_server_arg(args: str, flag: str) -> str:
@@ -656,8 +747,23 @@ class ModelMeta:
     intermediate_size: int = 0
     # Per-expert FFN dim for MoE models (0 = dense/unknown; falls back to intermediate_size).
     moe_intermediate_size: int = 0
+    # Routed-expert input dim. Latent-MoE decoders (Kimi-K3
+    # ``routed_expert_hidden_size``) run the experts in a narrower space than
+    # the residual stream. 0 ⇒ same as ``hidden_size``.
+    moe_hidden_size: int = 0
     vocab_size: int = 0
     num_attention_heads: int = 0
+    # How the decoder stack splits between routed-expert FFN layers and plain
+    # dense FFN layers. Real MoE checkpoints are not MoE all the way down:
+    # DeepSeek/GLM run the first ``first_k_dense_replace`` layers as dense FFN,
+    # and Qwen can mark individual layers dense via ``mlp_only_layers``.
+    # Multiplying the MoE op by every layer overstates the largest term in the
+    # breakdown, and dropping the dense FFN entirely loses a real one.
+    # Both default to 0, meaning "not derived": the PerfModel then falls back to
+    # the previous all-or-nothing behaviour, so a hand-built ``ModelMeta`` keeps
+    # working. ``load_model_meta`` fills them from the HF config.
+    moe_layers: int = 0
+    dense_ffn_layers: int = 0
 
 
 def _read_total_size(model_path: Path) -> int | None:
@@ -727,6 +833,43 @@ def _read_hf_config(model_path: Path) -> dict[str, Any] | None:
     return _merge_config_scopes(data)
 
 
+def _derive_experts_per_tok(cfg: dict[str, Any]) -> int:
+    """Routed experts activated per token, across the naming variants in use.
+
+    ``num_experts_per_tok`` is the common HF spelling; Gemma-4 writes
+    ``top_k_experts`` and Kimi-K3 writes ``num_experts_per_token``. Missing the
+    alias reads 0, which safe-degrades the whole MoE decomposition to dense.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+
+    Returns:
+        The per-token routed-expert count, or ``0`` when no alias is present.
+    """
+    for key in ("num_experts_per_tok", "num_experts_per_token", "top_k_experts", "moe_topk"):
+        value = cfg.get(key)
+        if value:
+            return int(value)
+    return 0
+
+
+def _derive_moe_hidden_size(cfg: dict[str, Any]) -> int:
+    """The routed experts' input dimension, which need not be ``hidden_size``.
+
+    Latent-MoE decoders (Kimi-K3) project into a narrower space before the
+    experts and declare it as ``routed_expert_hidden_size``; sizing the experts
+    at the model ``hidden_size`` overcounts their weights (2x for Kimi-K3),
+    which trips the ``total_expert_bytes >= weight_bytes`` safe-degrade.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+
+    Returns:
+        The expert input dimension, falling back to ``hidden_size``.
+    """
+    return int(cfg.get("routed_expert_hidden_size") or cfg.get("moe_hidden_size") or cfg.get("hidden_size") or 0)
+
+
 def _derive_kv_heads(cfg: dict[str, Any]) -> int:
     """GQA-aware: ``num_key_value_heads`` if present, else ``num_attention_heads``.
 
@@ -761,6 +904,67 @@ def _derive_head_dim(cfg: dict[str, Any]) -> int:
     return 0
 
 
+def _derive_moe_layer_counts(cfg: dict[str, Any], num_layers: int, num_experts: int) -> tuple[int, int]:
+    """Split the decoder stack into ``(moe_layers, dense_ffn_layers)``.
+
+    A MoE checkpoint is rarely MoE in every layer. The three mechanisms in the
+    wild:
+
+    * ``first_k_dense_replace`` (DeepSeek, GLM, Kimi) -- the first K layers run
+      a plain dense FFN. GLM-5.3-Flash sets 1, DeepSeek-V3 sets 3.
+    * ``moe_layer_freq`` -- either a per-layer 0/1 list, or an int stride
+      applied after the dense prefix. ``decoder_sparse_step`` is Qwen's name
+      for the same stride.
+    * ``mlp_only_layers`` (Qwen) -- explicit indices that stay dense.
+
+    Anything unrecognised degrades to "every layer after the dense prefix is
+    MoE", which is the common case and matches the previous behaviour when the
+    prefix is 0.
+
+    Args:
+        cfg: Parsed HF ``config.json``.
+        num_layers: ``num_hidden_layers``.
+        num_experts: Routed expert count; ``<= 0`` means the model is dense.
+
+    Returns:
+        ``(moe_layers, dense_ffn_layers)``, summing to ``num_layers``.
+    """
+    if num_layers <= 0:
+        return 0, 0
+    if num_experts <= 0:
+        return 0, num_layers
+
+    freq = cfg.get("moe_layer_freq")
+    if isinstance(freq, (list, tuple)) and len(freq) == num_layers:
+        moe = sum(1 for v in freq if v)
+        return moe, num_layers - moe
+
+    first_dense = int(cfg.get("first_k_dense_replace") or 0)
+    first_dense = max(0, min(first_dense, num_layers))
+
+    # The stride is phased differently by the two upstream implementations, and
+    # both phase it on the ABSOLUTE layer index -- not on the offset from the
+    # dense prefix. DeepSeek/GLM:
+    #     layer_idx >= first_k_dense_replace and layer_idx % moe_layer_freq == 0
+    # Qwen3-MoE:
+    #     layer_idx not in mlp_only_layers and (layer_idx + 1) % decoder_sparse_step == 0
+    # Re-basing to ``(i - first_dense) % stride`` agreed with neither: for
+    # DeepSeek-V3 (first_k_dense_replace=3) any stride > 1 selected a layer set
+    # shifted by 3, and for Qwen it was off by one in the other direction.
+    stride, phase = 1, "deepseek"
+    for raw, kind in ((freq, "deepseek"), (cfg.get("decoder_sparse_step"), "qwen")):
+        if isinstance(raw, bool):
+            continue
+        if isinstance(raw, int) and raw > 0:
+            stride, phase = raw, kind
+            break
+
+    dense_only = {int(i) for i in (cfg.get("mlp_only_layers") or []) if isinstance(i, int)}
+    offset = 1 if phase == "qwen" else 0
+    moe = sum(1 for i in range(first_dense, num_layers) if (i + offset) % stride == 0 and i not in dense_only)
+    return moe, num_layers - moe
+
+
 def _compute_expert_decomposition(
     cfg: dict[str, Any],
     *,
@@ -768,7 +972,7 @@ def _compute_expert_decomposition(
     dtype_bytes: float,
     expert_dtype_bytes: float = 0.0,
 ) -> tuple[int, int, int, int]:
-    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases.
+    """MoE decomposition for the batch-aware roofline; returns ``(active_weight_bytes, total_expert_bytes, num_experts, experts_per_tok)``. Safe-degrades to ``(weight_bytes, 0, 0, 0)``. Handles num_experts / n_routed_experts / num_local_experts aliases, the per-token aliases in :func:`_derive_experts_per_tok`, and the latent-MoE expert width in :func:`_derive_moe_hidden_size`.
 
     ``expert_dtype_bytes`` sizes the routed-expert weights when they are stored
     at a different precision than the rest of the model (e.g. DeepSeek-V4
@@ -789,18 +993,39 @@ def _compute_expert_decomposition(
         experts_per_tok)``, degrading to ``(weight_bytes, 0, 0, 0)``.
     """
     num_experts = int(cfg.get("num_experts") or cfg.get("n_routed_experts") or cfg.get("num_local_experts") or 0)
-    experts_per_tok = int(cfg.get("num_experts_per_tok") or 0)
+    experts_per_tok = _derive_experts_per_tok(cfg)
     if num_experts <= 0 or experts_per_tok <= 0:
         return int(weight_bytes), 0, 0, 0
-    hidden_size = int(cfg.get("hidden_size") or 0)
+    hidden_size = _derive_moe_hidden_size(cfg)
     num_layers = int(cfg.get("num_hidden_layers") or 0)
     moe_inter = int(cfg.get("moe_intermediate_size") or cfg.get("intermediate_size") or 0)
     expert_bpe = expert_dtype_bytes if expert_dtype_bytes > 0 else dtype_bytes
     if hidden_size <= 0 or num_layers <= 0 or moe_inter <= 0 or expert_bpe <= 0:
         return int(weight_bytes), 0, 0, 0
+    # Only the MoE layers hold expert weights. Charging every layer for them
+    # inflates ``total_expert_bytes``, which both overstates the per-token
+    # active bytes and pushes borderline checkpoints over the
+    # ``>= weight_bytes`` safe-degrade that drops the MoE from the ceiling
+    # altogether.
+    moe_layers, _dense_ffn_layers = _derive_moe_layer_counts(cfg, num_layers, num_experts)
+    if moe_layers <= 0:
+        return int(weight_bytes), 0, 0, 0
     expert_bytes_per_layer = num_experts * 3 * hidden_size * moe_inter * expert_bpe
-    total_expert_bytes = int(num_layers * expert_bytes_per_layer)
+    total_expert_bytes = int(moe_layers * expert_bytes_per_layer)
     if total_expert_bytes <= 0 or total_expert_bytes >= int(weight_bytes):
+        # Degrading a MoE model to dense drops the largest op from the
+        # breakdown entirely, so say so: the usual cause is an over-large
+        # ``expert_bpe`` (a quantized checkpoint misread as bf16), not a
+        # genuinely dense model.
+        log.warning(
+            "MoE decomposition degraded to dense: computed expert bytes %.4g >= checkpoint bytes %.4g "
+            "(num_experts=%d, moe_intermediate_size=%d, expert_bytes_per_element=%.4g)",
+            total_expert_bytes,
+            float(weight_bytes),
+            num_experts,
+            moe_inter,
+            expert_bpe,
+        )
         return int(weight_bytes), 0, 0, 0
     non_expert_bytes = int(weight_bytes) - total_expert_bytes
     active_expert_bytes = int((experts_per_tok / num_experts) * total_expert_bytes)
@@ -854,7 +1079,15 @@ def load_model_meta(
     quant_cfg = cfg.get("quantization_config")
     if isinstance(quant_cfg, dict):
         quant_tag = str(quant_cfg.get("quant_method", "")).strip().lower()
-    dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
+    # A declared quantization wins outright: ``quant_method`` alone is not
+    # enough (Quark says ``"quark"``, precision lives on the nested weight
+    # spec), and falling through to the checkpoint ``dtype`` would report
+    # bf16 for a 4-bit checkpoint.
+    quant_bytes = _resolve_quant_config_weight_bytes(quant_cfg)
+    if quant_bytes > 0:
+        dtype_bytes = quant_bytes
+    else:
+        dtype_bytes = _resolve_dtype_bytes(quant_tag or cfg.get("torch_dtype") or cfg.get("dtype") or precision_hint)
     # Routed experts may be stored at a distinct precision (DeepSeek-V4
     # ``expert_dtype: fp4`` under fp8 attention). Fall back to the global dtype
     # when the field is absent (uniform-precision MoE / dense).
@@ -865,6 +1098,9 @@ def load_model_meta(
         weight_bytes=weight_bytes,
         dtype_bytes=dtype_bytes,
         expert_dtype_bytes=expert_dtype_bytes,
+    )
+    n_moe_layers, n_dense_ffn_layers = _derive_moe_layer_counts(
+        cfg, int(cfg.get("num_hidden_layers") or 0), num_experts
     )
     intermediate_size = int(cfg.get("intermediate_size") or 0)
     moe_intermediate_size = int(cfg.get("moe_intermediate_size") or 0)
@@ -884,8 +1120,11 @@ def load_model_meta(
         hidden_size=int(cfg.get("hidden_size") or 0),
         intermediate_size=intermediate_size,
         moe_intermediate_size=moe_intermediate_size,
+        moe_hidden_size=(_derive_moe_hidden_size(cfg) if num_experts > 0 else 0),
         vocab_size=int(cfg.get("vocab_size") or 0),
         num_attention_heads=int(cfg.get("num_attention_heads") or 0),
+        moe_layers=n_moe_layers,
+        dense_ffn_layers=n_dense_ffn_layers,
     )
 
 
@@ -1959,12 +2198,22 @@ def compute_roofline_from_perfmodel(
         ("v_proj", hidden, kv_out, n_layers),
         ("o_proj", q_out, hidden, n_layers),
     ]
-    # Dense FFN: add gate/up/down. MoE FFN is added inside _forward.
-    if ffn and not (meta.num_experts > 0 and meta.moe_intermediate_size > 0):
+    is_moe = meta.num_experts > 0 and meta.moe_intermediate_size > 0
+    # A MoE checkpoint still runs a dense FFN in its ``first_k_dense_replace``
+    # prefix, so the two are not mutually exclusive: gate/up/down repeat over
+    # the dense layers and the MoE op over the MoE layers. Attention and SDPA
+    # stay at n_layers -- every layer has those.
+    if is_moe:
+        n_moe_layers = meta.moe_layers or n_layers
+        n_dense_ffn_layers = meta.dense_ffn_layers
+    else:
+        n_moe_layers = 0
+        n_dense_ffn_layers = meta.dense_ffn_layers or n_layers
+    if ffn and n_dense_ffn_layers > 0:
         linears += [
-            ("gate_proj", hidden, ffn, n_layers),
-            ("up_proj", hidden, ffn, n_layers),
-            ("down_proj", ffn, hidden, n_layers),
+            ("gate_proj", hidden, ffn, n_dense_ffn_layers),
+            ("up_proj", hidden, ffn, n_dense_ffn_layers),
+            ("down_proj", ffn, hidden, n_dense_ffn_layers),
         ]
     if vocab:
         linears.append(("lm_head", hidden, vocab, 1))
@@ -2021,11 +2270,13 @@ def compute_roofline_from_perfmodel(
                 )
             )
         # MoE FFN: FusedMoE formula with batch-aware coupon E_active.
-        if meta.num_experts > 0 and meta.moe_intermediate_size > 0:
-            fl_moe = _fused_moe_flops(M, hidden, meta.moe_intermediate_size, meta.experts_per_tok)
+        if is_moe and n_moe_layers > 0:
+            # Latent-MoE decoders run the experts below the residual width.
+            moe_hidden = meta.moe_hidden_size or hidden
+            fl_moe = _fused_moe_flops(M, moe_hidden, meta.moe_intermediate_size, meta.experts_per_tok)
             by_moe = _fused_moe_bytes(
                 M,
-                hidden,
+                moe_hidden,
                 meta.moe_intermediate_size,
                 meta.num_experts,
                 meta.experts_per_tok,
@@ -2033,16 +2284,16 @@ def compute_roofline_from_perfmodel(
                 act_bpe,
             )
             t_moe, side_moe, t_mem_moe, t_cmp_moe = _roofline_time(fl_moe, by_moe)
-            total_t += t_moe * n_layers
-            total_mem_t += t_mem_moe * n_layers
-            total_cmp_t += t_cmp_moe * n_layers
+            total_t += t_moe * n_moe_layers
+            total_mem_t += t_mem_moe * n_moe_layers
+            total_cmp_t += t_cmp_moe * n_moe_layers
             op_rows.append(
                 OpBreakdown(
                     name="moe_fused",
-                    flops=fl_moe * n_layers,
-                    bytes_moved=by_moe * n_layers,
+                    flops=fl_moe * n_moe_layers,
+                    bytes_moved=by_moe * n_moe_layers,
                     ai=(fl_moe / by_moe if by_moe else 0.0),
-                    time_s=t_moe * n_layers,
+                    time_s=t_moe * n_moe_layers,
                     bound=side_moe,
                     pct_time=0.0,
                 )

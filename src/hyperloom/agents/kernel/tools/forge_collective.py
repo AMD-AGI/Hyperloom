@@ -75,10 +75,10 @@ FORGE_SHUTDOWN_GRACE_SEC = 30
 
 def _inject_author_gateway_env() -> None:
     """Seed missing Forge author credentials and Git identity."""
-    openai_base = str(os.environ.get("OPENAI_BASE_URL") or "").strip()
+    openai_base = os.environ.get("OPENAI_BASE_URL", "").strip()
     if openai_base and not os.environ.get("ANTHROPIC_BASE_URL"):
         os.environ["ANTHROPIC_BASE_URL"] = openai_base[:-3] if openai_base.endswith("/v1") else openai_base
-    token = str(os.environ.get("SAFE_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    token = os.environ.get("OPENAI_API_KEY", "").strip()
     if token:
         os.environ.setdefault("ANTHROPIC_API_KEY", token)
         os.environ.setdefault("ANTHROPIC_AUTH_TOKEN", token)

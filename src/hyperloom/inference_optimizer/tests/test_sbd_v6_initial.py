@@ -761,7 +761,7 @@ def test_ir3_unreachable_uses_v6_reason_without_changing_v5_state_reason(tmp_pat
 
     monkeypatch.setattr(preflight, "_workspace_root_resolve", lambda: tmp_path)
     monkeypatch.setattr(preflight.subprocess, "run", lambda *_args, **_kwargs: None)
-    args = argparse.Namespace(degraded_kb=False, degraded_pr=False, pr_monitor_url="")
+    args = argparse.Namespace(degraded_kb=False, degraded_pr=False)
 
     outcome = preflight._run_ir3_preflight(args)
 
@@ -1363,6 +1363,7 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
                 "target_files": ["python/worker.py"],
                 "source_snapshot": "optimization_stack/src/author-task-1",
                 "source_manifest": "optimization_stack/src/author-task-1/manifest.json",
+                "framework_root": "/abs/checkout/sglang",
                 "workspace": "runs/integrate-task-1",
                 "switch_off_parity": {"ran": True, "ok": True},
                 "stack_rebench": {"stable": True},
@@ -1442,6 +1443,8 @@ def test_framework_timeline_projects_pr1301_source_and_critic_data(tmp_path):
     assert attempt["lever_kind"] == "source_patch"
     assert attempt["route"] == "author_via_specialist"
     assert attempt["status"] == "KEEP"
+    assert attempt["artifacts"]["framework_root"] == "/abs/checkout/sglang"
+    assert attempt["artifacts"]["source_snapshot"] == "optimization_stack/src/author-task-1"
     assert attempt["gates"] == {
         "accuracy_passed": True,
         "keep_threshold_pct": 1.0,

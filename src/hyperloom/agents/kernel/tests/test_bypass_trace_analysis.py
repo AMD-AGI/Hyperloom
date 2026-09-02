@@ -20,6 +20,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import bypass_trace_analysis as bta  # noqa: E402
@@ -760,11 +762,87 @@ def test_maybe_build_shape_manifest_degrades_on_error(tmp_path, monkeypatch):
     assert "RuntimeError" in res["status"]
 
 
-def test_maybe_build_shape_manifest_disabled_by_default(tmp_path, monkeypatch):
+def test_maybe_build_shape_manifest_enabled_by_default(tmp_path, monkeypatch):
+    # The gate used to default off, so forge's preferred dense-shape source was
+    # produced for nobody. On by default now.
     monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+    assert res["status"] == "ok"
+    assert (tmp_path / "trace_shape_manifest.json").is_file()
+
+
+@pytest.mark.parametrize("value", ["0", "false", "no", "off", "OFF", "", "  ", "none", "disabled"])
+def test_maybe_build_shape_manifest_can_still_be_turned_off(tmp_path, monkeypatch, value):
+    # The empty string and "none" belong here: a launcher disables a variable by
+    # exporting it empty at least as often as by unsetting it, and a bare
+    # {"0","false","no","off"} check read every one of those as ENABLED -- the
+    # opposite of what the operator asked for. Same off-vocabulary this file
+    # already documents for --steady-state-mode.
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", value)
     res = bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
     assert res == {"status": "disabled"}
     assert not (tmp_path / "trace_shape_manifest.json").exists()
+
+
+def test_the_cap_keeps_a_deterministic_spread_of_batch_sizes(tmp_path, monkeypatch):
+    """Which variants survive the cap must not depend on directory order.
+
+    Discovery walks the filesystem, so "first N" varied between machines; once
+    sorted, "first N" would instead have kept only the small-batch end -- 64
+    decode variants and no prefill one. Take an evenly spaced slice.
+    """
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    monkeypatch.setenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", "4")
+    batches = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048]
+    shards = [(Path(f"/t/bs_{b}.json"), f"bs_{b}", "decode") for b in batches]
+
+    def _run(order):
+        monkeypatch.setattr(bta, "_discover_capture_shards", lambda *a: list(order))
+        monkeypatch.setattr(bta, "_sha256_file", lambda p: "h")
+        monkeypatch.setattr(bta._reader, "analyze_trace", lambda *a, **k: {"status": "ok"})
+        monkeypatch.setattr(bta, "_build_manifest_provenance", lambda args: {})
+        seen: list[str] = []
+        monkeypatch.setattr(
+            bta._tsm,
+            "build_shape_manifest",
+            lambda **k: (seen.extend(label for label, _an in k["capture_variants"]), {"rows": [], "warnings": []})[1],
+        )
+        bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+        return seen
+
+    forward = _run(shards)
+    assert len(forward) == 4
+    assert forward == _run(list(reversed(shards)))  # order-independent
+    # ...and it spans the range rather than hugging the decode end. Both ends
+    # inclusive: an even but half-open slice stops short of the tail, dropping
+    # the widest batch -- the one prefill variant the spread exists to keep.
+    assert forward[0] == "bs_1", forward
+    assert forward[-1] == f"bs_{batches[-1]}", forward
+    assert len(set(forward)) == 4, forward
+
+
+def test_capture_shards_are_capped_by_default(tmp_path, monkeypatch):
+    # Each shard costs an analyze_trace pass plus a sha256; with the manifest
+    # now built on every run, an uncapped default would put that cost on all of
+    # them. The cap is a budget, not a filter -- the drop is logged.
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST", raising=False)
+    monkeypatch.delenv("HYPERLOOM_TRACE_SHAPE_MANIFEST_MAX_CAPTURES", raising=False)
+    n = bta._DEFAULT_MAX_CAPTURES + 10
+    monkeypatch.setattr(
+        bta,
+        "_discover_capture_shards",
+        lambda _trace, _folder: [(Path(f"/tmp/bs_{i}.json"), f"bs_{i}", "decode") for i in range(n)],
+    )
+    analyzed: list[object] = []
+
+    def _analyze(path, **kw):
+        analyzed.append(path)
+        return {"status": "empty"}
+
+    monkeypatch.setattr(bta._reader, "analyze_trace", _analyze)
+    bta._maybe_build_shape_manifest(_mk_args(), {"trace_file": ""}, tmp_path, generated_at="t0")
+
+    assert len(analyzed) == bta._DEFAULT_MAX_CAPTURES
 
 
 def _prov_args(**kw):
