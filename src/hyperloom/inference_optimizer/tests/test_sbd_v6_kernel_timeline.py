@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for the real-time SBD V6 ``kernel`` timeline event."""
+"""Coverage for the SBD V6 ``kernel`` event: what it records and what it settles."""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any
 
 import pytest
 
-from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
-from hyperloom.orchestrator.actions.executors._kernel_timeline import (
+from hyperloom.inference_optimizer.breakdown.recorder.assembler import kernel_event_parts
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     REBENCH_FALLBACK,
     REBENCH_NO_PROMOTE,
     REBENCH_VALIDATED,
@@ -20,17 +20,27 @@ from hyperloom.orchestrator.actions.executors._kernel_timeline import (
     SOURCE_GEAK_AUTHORED_KERNEL,
     SOURCE_GEAK_ENV_SELECTION,
     SOURCE_KERNEL_REWRITE,
+    assemble_kernel_ext,
+    kernel_event_id,
     make_kernel_recorder,
 )
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+from hyperloom.inference_optimizer.session.session_binding import session_scope
+
+
+@pytest.fixture(autouse=True)
+def _bound_session(tmp_path):
+    """Bind the session the way startup does, so no call below takes a path."""
+    with session_scope(tmp_path):
+        yield tmp_path
 
 
 def _kernel_events(session_dir: Path) -> list[dict[str, Any]]:
     return [event for event in read_timeline_events(session_dir) if event.get("type") == "kernel"]
 
 
-def _forge_recorder(tmp_path: Path):
+def _forge_recorder():
     recorder = make_kernel_recorder(
-        tmp_path,
         macro_cycle=3,
         route=ROUTE_FORGE,
         route_reason="kernel_opt_backend_order=forge",
@@ -47,35 +57,59 @@ def _forge_recorder(tmp_path: Path):
     return recorder
 
 
+def _geak_recorder(*, macro_cycle: int = 1):
+    recorder = make_kernel_recorder(macro_cycle=macro_cycle, route=ROUTE_GEAK)
+    assert recorder is not None
+    recorder.begin(tput_before=900.0)
+    return recorder
+
+
 def test_one_event_per_entry_with_macro_cycle_at_the_top(tmp_path):
-    """The visit identifier belongs to the event, not to either route block."""
-    recorder = _forge_recorder(tmp_path)
+    """The entry identifier belongs to the event, not to either route block."""
+    recorder = _forge_recorder()
     recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
 
     events = _kernel_events(tmp_path)
     assert len(events) == 1
     ext = events[0]["ext"]
     assert events[0]["kind"] == "kernel_agent"
+    assert events[0]["id"] == kernel_event_id(3)
     assert ext["macro_cycle"] == 3
     assert "macro_cycle" not in (ext.get("forge") or {})
     assert ext["entry"]["route"] == ROUTE_FORGE
     assert ext["entry"]["roofline_snapshot_id"] == 4
 
 
-def test_a_running_entry_is_persisted_before_it_concludes(tmp_path):
-    """A session killed mid-phase must still show which stage was in flight."""
-    recorder = _forge_recorder(tmp_path)
+def test_the_event_is_on_the_timeline_before_it_concludes(tmp_path):
+    """A live session shows the entry as soon as it opens, not when it ends."""
+    _forge_recorder()
+
+    events = _kernel_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["status"] == "running"
+    assert "end_time" not in events[0]
+
+
+def test_the_stage_in_flight_is_recoverable_from_the_rows_alone(tmp_path):
+    """A session killed mid-phase is closed out of its fragments by finalize.
+
+    The timeline entry keeps the status and stage it opened with, because
+    rewriting it on every sub-step is the write amplification the fragments
+    exist to avoid. What the kill has to leave behind is enough to *assemble*
+    the stage, and that is a property of the rows rather than of the entry.
+    """
+    recorder = _forge_recorder()
     recorder.enter_stage("gemm_tuning")
 
-    event = _kernel_events(tmp_path)[0]
-    assert event["status"] == "running"
-    assert event["end_time"] == ""
-    assert event["ext"]["in_flight_stage"] == "gemm_tuning"
+    assert _kernel_events(tmp_path)[0]["status"] == "running"
+    ext, status = assemble_kernel_ext(kernel_event_parts(), event=recorder.event_id)
+    assert ext["in_flight_stage"] == "gemm_tuning"
+    assert status == "skipped"
 
 
 def test_a_keep_without_a_rebench_cannot_read_as_adopted(tmp_path):
     """The candidate layer's own verdict never settles end-to-end adoption."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.record_kernel_rewrite(
         run_id="attempt-7",
         kernel_id="k001",
@@ -105,7 +139,7 @@ def test_a_keep_without_a_rebench_cannot_read_as_adopted(tmp_path):
 
 def test_a_validated_rebench_is_what_promotes_a_candidate(tmp_path):
     """Adoption is carried by the rebench row the lane points at."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.record_kernel_rewrite(
         run_id="attempt-7",
         kernel_id="k001",
@@ -151,7 +185,7 @@ def test_a_validated_rebench_is_what_promotes_a_candidate(tmp_path):
 
 def test_a_rebench_that_did_not_promote_rejects_the_candidate(tmp_path):
     """Measured truthfully and did not beat current_best is a rejection."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.record_fusion_run(
         run_id="fusion-1",
         status="success",
@@ -165,16 +199,10 @@ def test_a_rebench_that_did_not_promote_rejects_the_candidate(tmp_path):
         attempt_id="rb-2",
         source_kind="fusion",
         source_ref="fusion-1",
-        idempotency_key="rebench-c3-f",
-        task_id=None,
-        dispatched_at=None,
-        settled_at=None,
         base_tput=1000.0,
         measured_tput=995.0,
         decision=REBENCH_NO_PROMOTE,
-        decision_reason=None,
         status="settled",
-        engagement=None,
     )
     recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
 
@@ -186,7 +214,7 @@ def test_a_rebench_that_did_not_promote_rejects_the_candidate(tmp_path):
 
 def test_net_gain_is_measured_against_the_previous_stage_not_the_baseline(tmp_path):
     """The entry's own gain is relative to what it was handed."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.finish(verdict="adopted", status="succeeded", tput_after=1100.0)
 
     outcome = _kernel_events(tmp_path)[0]["ext"]["outcome"]
@@ -197,9 +225,7 @@ def test_net_gain_is_measured_against_the_previous_stage_not_the_baseline(tmp_pa
 
 def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path):
     """The starting config and the produced config must stay distinguishable."""
-    recorder = make_kernel_recorder(tmp_path, macro_cycle=1, route=ROUTE_GEAK)
-    assert recorder is not None
-    recorder.begin(tput_before=900.0)
+    recorder = _geak_recorder()
     recorder.record_geak_handoff(
         {
             "schema_version": 2,
@@ -232,9 +258,7 @@ def test_geak_handoff_and_product_do_not_share_the_accepted_flags_name(tmp_path)
 
 def test_geak_env_selections_are_recorded_as_their_own_source(tmp_path):
     """A library or env acceptance authors no kernel but still carries gain."""
-    recorder = make_kernel_recorder(tmp_path, macro_cycle=1, route=ROUTE_GEAK)
-    assert recorder is not None
-    recorder.begin(tput_before=900.0)
+    recorder = _geak_recorder()
     recorder.record_geak_claim(
         {"self_reported_gain_pct": 7.5, "geak_status": "ok"},
         specs=[
@@ -274,9 +298,7 @@ def test_geak_env_selections_are_recorded_as_their_own_source(tmp_path):
 
 def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
     """The journey names every kernel considered, including the rejects."""
-    recorder = make_kernel_recorder(tmp_path, macro_cycle=1, route=ROUTE_GEAK)
-    assert recorder is not None
-    recorder.begin(tput_before=900.0)
+    recorder = _geak_recorder()
     recorder.record_geak_attempts(
         {
             "discovery_runs": [{"source": "bypass", "status": "success", "hot_kernels": [1, 2, 3]}],
@@ -312,9 +334,7 @@ def test_geak_attempts_carry_what_it_tried_not_only_what_it_kept(tmp_path):
 
 def test_geak_attempts_are_not_appended_to_the_forge_lane(tmp_path):
     """The two routes stay isolated even though the rows are shaped alike."""
-    recorder = make_kernel_recorder(tmp_path, macro_cycle=1, route=ROUTE_GEAK)
-    assert recorder is not None
-    recorder.begin(tput_before=900.0)
+    recorder = _geak_recorder()
     recorder.record_geak_attempts({"kernels": [{"kernel_id": "k001", "dispatch": {"dispatched": True}}]})
     recorder.finish(verdict="inconclusive", status="succeeded", tput_after=900.0)
 
@@ -323,9 +343,35 @@ def test_geak_attempts_are_not_appended_to_the_forge_lane(tmp_path):
     assert len(ext["geak"]["attempts"]["kernels"]) == 1
 
 
+def test_two_entries_in_one_session_assemble_from_their_own_rows_only(tmp_path):
+    """The event id is what separates two entries sharing one fragment spool."""
+    first = _geak_recorder(macro_cycle=1)
+    first.record_geak_attempts({"kernels": [{"kernel_id": "k001", "dispatch": {"dispatched": True}}]})
+    first.finish(verdict="inconclusive", tput_after=900.0)
+
+    second = _geak_recorder(macro_cycle=2)
+    second.record_geak_attempts(
+        {
+            "kernels": [
+                {"kernel_id": "k002", "dispatch": {"dispatched": True}},
+                {"kernel_id": "k003", "dispatch": {"dispatched": True}},
+            ]
+        }
+    )
+    second.finish(verdict="inconclusive", tput_after=900.0)
+
+    events = {event["id"]: event for event in _kernel_events(tmp_path)}
+    assert set(events) == {kernel_event_id(1), kernel_event_id(2)}
+    assert [row["kernel_id"] for row in events[kernel_event_id(1)]["ext"]["geak"]["attempts"]["kernels"]] == ["k001"]
+    assert [row["kernel_id"] for row in events[kernel_event_id(2)]["ext"]["geak"]["attempts"]["kernels"]] == [
+        "k002",
+        "k003",
+    ]
+
+
 def test_a_phase_crash_closes_the_event_naming_the_stage(tmp_path):
     """A raised phase is distinguishable from a session killed mid-phase."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.enter_stage("forge_fusion")
     recorder.finish_crashed(RuntimeError("boom"))
 
@@ -338,7 +384,7 @@ def test_a_phase_crash_closes_the_event_naming_the_stage(tmp_path):
 
 def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path):
     """A phase-requested analysis has no roofline event to carry its evidence."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.record_trace_analyze_run(
         run_id="ta-1",
         trigger="pre_run_optimization",
@@ -367,26 +413,19 @@ def test_the_trace_analyze_run_records_the_only_legal_kernel_id_source(tmp_path)
 def _geak_rebench(recorder, attempt_id: str, decision: str | None, **overrides: Any) -> None:
     fields: dict[str, Any] = {
         "attempt_id": attempt_id,
-        "source_ref": None,
         "idempotency_key": attempt_id,
         "task_id": attempt_id,
-        "dispatched_at": None,
-        "settled_at": None,
         "base_tput": 900.0,
         "measured_tput": 950.0,
         "decision": decision,
-        "decision_reason": None,
         "status": "settled",
-        "engagement": None,
     }
     fields.update(overrides)
     recorder.record_geak_rebench_attempt(max_attempts=4, **fields)
 
 
-def _geak_with_one_acceptance(tmp_path):
-    recorder = make_kernel_recorder(tmp_path, macro_cycle=1, route=ROUTE_GEAK)
-    assert recorder is not None
-    recorder.begin(tput_before=900.0)
+def _geak_with_one_acceptance():
+    recorder = _geak_recorder()
     recorder.record_geak_claim(
         {"self_reported_gain_pct": 5.0},
         specs=[{"short_name": "dsa_sparse_attn", "op_kind": "attn", "e2e_delta_pct": 4.0, "lane": "headQueue"}],
@@ -405,7 +444,7 @@ def test_conflicting_geak_rebenches_leave_the_candidate_pending(tmp_path, decisi
     the last verdict would let a validation after a rejection read as an
     adoption -- and would make the outcome depend on dispatch order.
     """
-    recorder = _geak_with_one_acceptance(tmp_path)
+    recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", decisions[0])
     _geak_rebench(recorder, "geak-rb-2", decisions[1])
     recorder.finish(verdict="adopted", tput_after=950.0)
@@ -420,28 +459,47 @@ def test_conflicting_geak_rebenches_leave_the_candidate_pending(tmp_path, decisi
 
 def test_agreeing_geak_rebenches_still_settle_the_candidate(tmp_path):
     """Repeated attempts are the normal path; only disagreement is a conflict."""
-    recorder = _geak_with_one_acceptance(tmp_path)
+    recorder = _geak_with_one_acceptance()
     _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
     _geak_rebench(recorder, "geak-rb-2", REBENCH_VALIDATED)
     recorder.finish(verdict="adopted", tput_after=950.0)
 
     ext = _kernel_events(tmp_path)[0]["ext"]
     assert "conflicting_decisions" not in ext["geak"]["rebench"]
+    assert ext["geak"]["rebench"]["attempts_used"] == 2
     assert [row["ref"] for row in ext["outcome"]["adopted"]] == ["dsa_sparse_attn"]
 
 
+def test_the_geak_ledger_stays_out_of_the_forge_ledger(tmp_path):
+    """Which ledger asked for a re-measurement is recorded, not inferred."""
+    recorder = _geak_with_one_acceptance()
+    _geak_rebench(recorder, "geak-rb-1", REBENCH_VALIDATED)
+    recorder.record_rebench_attempt(
+        attempt_id="forge-rb-1",
+        source_kind=SOURCE_KERNEL_REWRITE,
+        source_ref="attempt-7",
+        base_tput=900.0,
+        measured_tput=910.0,
+        decision=REBENCH_VALIDATED,
+        status="settled",
+    )
+    recorder.finish(verdict="adopted", tput_after=950.0)
+
+    ext = _kernel_events(tmp_path)[0]["ext"]
+    assert [row["attempt_id"] for row in ext["geak"]["rebench"]["attempts"]] == ["geak-rb-1"]
+    assert [row["attempt_id"] for row in ext["forge"]["rebench_ledger"]] == ["forge-rb-1"]
+
+
 def test_the_verdict_stays_unstamped_when_nothing_was_adopted(tmp_path):
-    """A visit that adopted nothing concluded nothing about a candidate."""
-    recorder = _forge_recorder(tmp_path)
+    """An entry that adopted nothing concluded nothing about a candidate."""
+    recorder = _forge_recorder()
     recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
     recorder.finish(verdict="adopted", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["ext"]["outcome"]["verdict"] is None
 
 
-def test_a_rebench_concluding_against_the_candidate_still_succeeds_the_visit(tmp_path):
-    """The distinction that matters is measuring, not what was measured."""
-    recorder = _forge_recorder(tmp_path)
+def _forge_rewrite_with_rebench(recorder, **rebench: Any) -> None:
     recorder.record_kernel_rewrite(
         run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"
     )
@@ -449,77 +507,41 @@ def test_a_rebench_concluding_against_the_candidate_still_succeeds_the_visit(tmp
         attempt_id="rb-1",
         source_kind=SOURCE_KERNEL_REWRITE,
         source_ref="attempt-7",
-        idempotency_key="rb-1",
-        task_id="t-1",
-        dispatched_at=None,
-        settled_at=None,
         base_tput=1000.0,
-        measured_tput=995.0,
-        decision=REBENCH_NO_PROMOTE,
-        decision_reason=None,
-        status="settled",
-        engagement=None,
+        **rebench,
     )
+
+
+def test_a_rebench_concluding_against_the_candidate_still_succeeds_the_entry(tmp_path):
+    """The distinction that matters is measuring, not what was measured."""
+    recorder = _forge_recorder()
+    _forge_rewrite_with_rebench(recorder, measured_tput=995.0, decision=REBENCH_NO_PROMOTE, status="settled")
     recorder.finish(verdict="no_gain", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "succeeded"
 
 
-def test_a_candidate_whose_rebench_measured_nothing_leaves_the_visit_degraded(tmp_path):
+def test_a_candidate_whose_rebench_measured_nothing_leaves_the_entry_degraded(tmp_path):
     """The work happened and nothing settled it, which is not a clean run."""
-    recorder = _forge_recorder(tmp_path)
-    recorder.record_kernel_rewrite(
-        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"
-    )
-    recorder.record_rebench_attempt(
-        attempt_id="rb-1",
-        source_kind=SOURCE_KERNEL_REWRITE,
-        source_ref="attempt-7",
-        idempotency_key="rb-1",
-        task_id="t-1",
-        dispatched_at=None,
-        settled_at=None,
-        base_tput=1000.0,
-        measured_tput=None,
-        decision=None,
-        decision_reason=None,
-        status="skipped",
-        engagement=None,
-    )
+    recorder = _forge_recorder()
+    _forge_rewrite_with_rebench(recorder, measured_tput=None, decision=None, status="skipped")
     recorder.finish(verdict="needs_review", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "degraded"
 
 
-def test_a_visit_with_no_candidate_and_no_measurement_is_skipped(tmp_path):
+def test_an_entry_with_no_candidate_and_no_measurement_is_skipped(tmp_path):
     """Nothing was produced, so there is nothing to call degraded."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.finish(verdict="not_run", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "skipped"
 
 
-def test_a_visit_whose_every_rebench_faulted_is_failed(tmp_path):
+def test_an_entry_whose_every_rebench_faulted_is_failed(tmp_path):
     """A faulted rebench is a different operational state from a skipped one."""
-    recorder = _forge_recorder(tmp_path)
-    recorder.record_kernel_rewrite(
-        run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep", rebench_ref="rb-1"
-    )
-    recorder.record_rebench_attempt(
-        attempt_id="rb-1",
-        source_kind=SOURCE_KERNEL_REWRITE,
-        source_ref="attempt-7",
-        idempotency_key="rb-1",
-        task_id="t-1",
-        dispatched_at=None,
-        settled_at=None,
-        base_tput=1000.0,
-        measured_tput=None,
-        decision=None,
-        decision_reason=None,
-        status="failed",
-        engagement=None,
-    )
+    recorder = _forge_recorder()
+    _forge_rewrite_with_rebench(recorder, measured_tput=None, decision=None, status="failed")
     recorder.finish(verdict="needs_review", tput_after=1000.0)
 
     assert _kernel_events(tmp_path)[0]["status"] == "failed"
@@ -534,7 +556,7 @@ def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
     either way. ``no_material`` and ``no_promote`` do reject, because both were
     measured with the configuration engaged.
     """
-    recorder = _geak_with_one_acceptance(tmp_path)
+    recorder = _geak_with_one_acceptance()
     _geak_rebench(
         recorder,
         "geak-rb-1",
@@ -553,7 +575,7 @@ def test_a_fallback_verdict_is_inconclusive_rather_than_a_rejection(tmp_path):
 
 def test_a_lane_that_produced_nothing_stays_empty(tmp_path):
     """An absent lane is an empty list, not an empty shell of a row."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     recorder.record_fusion_run(run_id="fusion-1", status="success", applied=True)
     recorder.finish(verdict="needs_review", tput_after=1000.0)
 
@@ -566,7 +588,7 @@ def test_a_lane_that_produced_nothing_stays_empty(tmp_path):
 
 def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
     """A dispatch and its later verdict describe one attempt, not two."""
-    recorder = _forge_recorder(tmp_path)
+    recorder = _forge_recorder()
     for decision in (None, REBENCH_VALIDATED):
         recorder.record_rebench_attempt(
             attempt_id="rb-1",
@@ -579,9 +601,7 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
             base_tput=1000.0,
             measured_tput=None if decision is None else 1050.0,
             decision=decision,
-            decision_reason=None,
             status="dispatched" if decision is None else "settled",
-            engagement=None,
         )
     recorder.finish(verdict="adopted", status="succeeded", tput_after=1050.0)
 
@@ -589,3 +609,20 @@ def test_recording_the_same_rebench_twice_updates_one_row(tmp_path):
     assert len(ledger) == 1
     assert ledger[0]["decision"] == REBENCH_VALIDATED
     assert ledger[0]["settled_at"] == "2026-09-02T00:09:00"
+
+
+def test_lane_rows_are_ordered_by_when_they_started(tmp_path):
+    """Row order comes from the rows, not from the order they were written in.
+
+    Writing the later run first is exactly the case a fragment envelope's
+    ``seq`` or ``ts`` would sort backwards, since both name the write rather
+    than the run.
+    """
+    recorder = _forge_recorder()
+    recorder.record_fusion_run(run_id="late", status="success", started_at="2026-09-02T00:05:00")
+    recorder.record_fusion_run(run_id="early", status="success", started_at="2026-09-02T00:01:00", applied=True)
+    recorder.finish(verdict="needs_review", tput_after=1000.0)
+
+    lanes = _kernel_events(tmp_path)[0]["ext"]["forge"]["lanes"]["fusion_runs"]
+    assert [row["run_id"] for row in lanes] == ["early", "late"]
+    assert lanes[0]["applied"] is True

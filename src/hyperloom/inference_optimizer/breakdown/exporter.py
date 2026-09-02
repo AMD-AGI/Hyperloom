@@ -22,6 +22,7 @@ from typing import Any
 from hyperloom.common.jsonio import read_json
 
 from . import collectors
+from .recorder.event_finalize import finalize_events
 from .schema import SCHEMA_VERSION_V5
 from ..session.session_paths import manifest_path, state_path
 
@@ -598,6 +599,10 @@ def build(
         default={},
     )
     v6_warnings = list(warnings)
+    # Events whose phase was killed before it could close them are closed here,
+    # before the timeline is read: their fragments are on disk, and an event
+    # left open would otherwise be read back as still running.
+    _safe_collect("timeline_finalize", lambda: finalize_events(sd), v6_warnings, default=[])
     # GEAK is collected only for V6: the V5 payload has no ``geak`` key, and
     # adding one would change the V5 surface, which V6 must not do.
     v6_geak = _safe_collect("geak", lambda: collectors.collect_geak(sd, state, v6_warnings), v6_warnings, default={})

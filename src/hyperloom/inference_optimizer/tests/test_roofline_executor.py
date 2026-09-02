@@ -1470,7 +1470,7 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
     actually ran -- and the main retry loop does row its raising attempts.
     """
     from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
-    from hyperloom.orchestrator.actions.executors._roofline_timeline import PROFILE_ATTEMPT_COMPUTE_BOUND
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import PROFILE_ATTEMPT_COMPUTE_BOUND
 
     md = tmp_path / "analysis.md"
     md.write_text("# Executive Summary\n", encoding="utf-8")
@@ -1506,13 +1506,14 @@ async def test_a_raising_compute_bound_reprofile_still_rows_the_attempt(tmp_path
     assert result["status"] == "succeeded"
 
     event = next(e for e in read_timeline_events(tmp_path) if e.get("type") == "roofline")
-    profile = event["ext"]["profile"]
+    action = event["ext"]["actions"][0]
+    profile = action["profile"]
     assert profile["attempt_count"] == 2
     raised = profile["runs"][-1]
     assert raised["attempt_reason"] == PROFILE_ATTEMPT_COMPUTE_BOUND
     assert raised["status"] == "failed"
     assert "server boot failed" in raised["failure"]["message"]
-    assert event["ext"]["analysis"]["compute_bound_reprofile"]["adopted"] is False
+    assert action["analysis"]["compute_bound_reprofile"]["adopted"] is False
 
 
 @pytest.mark.asyncio

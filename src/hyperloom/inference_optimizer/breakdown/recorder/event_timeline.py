@@ -169,6 +169,11 @@ def open_event(
     second event at close, and one whose fragment was written but whose shell
     was not would be invisible until the phase ended.
 
+    Opening an event twice returns the sequence the first call took rather than
+    writing a second shell, so an event several actions share -- the rooflines
+    one phase dispatched in one cycle, each of which opens the event it belongs
+    to -- stays one entry on the timeline.
+
     Args:
         event_type (str): The timeline event type.
         event (str): The event id.
@@ -191,6 +196,10 @@ def open_event(
             ``event_section`` is declared with a shape other than ``item``.
     """
     from ...session.sbd_v6 import record_write_warning, timeline_sequence, write_timeline_event
+
+    already = _opened_sequence(event, event_section=event_section)
+    if already is not None:
+        return already
 
     envelope = build_envelope(
         event_type=event_type,
@@ -267,6 +276,35 @@ def finish_event(
         log.debug("timeline: failed to close %s event %s", event_type, event, exc_info=True)
         _park(record_write_warning, component=f"timeline.{event_type}.finish", exc=exc)
         return None
+
+
+def _opened_sequence(event: str, *, event_section: str) -> int | None:
+    """Return the sequence an earlier :func:`open_event` took for this event.
+
+    Args:
+        event (str): The event id.
+        event_section (str): The event-level section for this type.
+
+    Returns:
+        int | None: The sequence on the event-level fragment, or ``None`` when
+            the event has not been opened yet or the spool cannot be read.
+    """
+    from ...session.sbd_v6 import timeline_sequence
+
+    from .assembler import event_parts
+
+    try:
+        rows = event_parts((event_section,)).get(event_section) or []
+    except Exception:  # noqa: BLE001 — a spool we cannot read is not a reason to skip the shell
+        log.debug("timeline: cannot read %s to check whether %s is open", event_section, event, exc_info=True)
+        return None
+    for row in rows:
+        if str(row.get(EVENT_ID_FIELD) or "") != str(event):
+            continue
+        sequence = timeline_sequence(row)
+        if sequence is not None:
+            return sequence
+    return None
 
 
 def residual_events(

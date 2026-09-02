@@ -45,11 +45,15 @@ from __future__ import annotations
 
 from . import instrument
 from .assembler import (
+    EVENT_SECTIONS,
     KERNEL_EVENT_SECTIONS,
+    ROOFLINE_EVENT_SECTIONS,
     assemble_parts,
+    event_parts,
     has_parts,
     kernel_event_parts,
     parts_dir,
+    roofline_event_parts,
 )
 from .event_ids import EVENT_ID_SEPARATOR, EventId, event_id, fragment_key, parse_event_id
 from .event_rows import (
@@ -61,6 +65,7 @@ from .event_rows import (
     wire_row,
     wire_rows,
 )
+from .event_finalize import finalize_events
 from .event_sink import EventSink, RecordSink, make_sink
 from .event_timeline import (
     EVENT_STATUS_INTERRUPTED,
@@ -121,7 +126,9 @@ __all__ = [
     "EVENT_ID_SEPARATOR",
     "EVENT_STATUS_INTERRUPTED",
     "EVENT_STATUS_RUNNING",
+    "EVENT_SECTIONS",
     "KERNEL_EVENT_SECTIONS",
+    "ROOFLINE_EVENT_SECTIONS",
     "RESIDUAL_NO_EVENT",
     "RESIDUAL_RUNNING",
     "SCOPE_FIELDS",
@@ -140,13 +147,16 @@ __all__ = [
     "build_envelope",
     "enable_trace",
     "event_id",
+    "finalize_events",
     "finish_event",
     "fragment_key",
     "get_recorder",
     "group_rows",
     "has_parts",
     "instrument",
+    "event_parts",
     "kernel_event_parts",
+    "roofline_event_parts",
     "make_sink",
     "open_event",
     "parse_event_id",

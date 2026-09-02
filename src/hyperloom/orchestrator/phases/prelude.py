@@ -2423,22 +2423,32 @@ class PreludePhase(PhaseHandler):
             streak = 0
         return f"-a{streak}" if streak > 0 else ""
 
-    async def _enqueue_internal_analysis_task(self, *, reason: str) -> Task:
+    async def _enqueue_internal_analysis_task(self, *, reason: str, inline_event: str = "") -> Task:
         """Build + enqueue a Coordinator-internal analysis task (roofline or profile). Idempotency key internal-analysis-<reason>.
 
         Args:
             reason: Tag distinguishing the enqueue site; used in the
                 idempotency key and to select baseline vs current-best args.
+            inline_event: The timeline event this analysis belongs to, passed
+                by a phase that owns one. It travels on the params rather than
+                being looked up by the executor because the phase is the only
+                party that knows whether the run is its own sub-step or an
+                action in its own right, and it stays out of the idempotency
+                key so an event id can never split a reuse.
 
         Returns:
             The created (or existing idempotent) analysis :class:`Task`.
         """
+        from ..actions.executors.roofline import INLINE_EVENT_PARAM
+
         state = self.shared_state
         kind = self._internal_analysis_kind()
         params: dict[str, Any] = {
             "source": "coordinator_internal",
             "reason": str(reason),
         }
+        if inline_event:
+            params[INLINE_EVENT_PARAM] = str(inline_event)
         if reason != "prelude_initial":
             inject_stack_base_params(params, state)
         else:

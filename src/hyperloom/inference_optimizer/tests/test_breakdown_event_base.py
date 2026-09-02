@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from hyperloom.inference_optimizer.breakdown import recorder as rec
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
 from hyperloom.inference_optimizer.session.session_binding import (
     SessionNotBoundError,
     bound_session,
@@ -362,6 +363,67 @@ def test_a_recovered_event_is_marked_interrupted_rather_than_guessed_complete(tm
     event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
     assert event["status"] == rec.EVENT_STATUS_INTERRUPTED
     assert rec.EVENT_STATUS_INTERRUPTED in rec.TERMINAL_EVENT_STATUSES
+
+
+def _killed_kernel_entry(session_dir: Path):
+    """Record a kernel entry that never reaches its closing write."""
+    with session_scope(session_dir):
+        recorder = make_kernel_recorder(macro_cycle=3, route="forge")
+        assert recorder is not None
+        recorder.begin(tput_before=1000.0)
+        recorder.record_kernel_rewrite(run_id="attempt-7", kernel_id="k001", status="success", micro_decision="keep")
+    return recorder
+
+
+def test_finalize_closes_an_event_whose_phase_was_killed_before_it_could(tmp_path):
+    recorder = _killed_kernel_entry(tmp_path)
+
+    assert rec.finalize_events(tmp_path) == [recorder.event_id]
+    event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
+    assert event["status"] == rec.EVENT_STATUS_INTERRUPTED
+    assert event["id"] == recorder.event_id
+
+
+def test_finalize_keeps_the_rows_the_killed_phase_had_already_recorded(tmp_path):
+    # An interrupted event reports no verdict, but everything recorded before
+    # the kill is on the timeline -- that is what the fragments are for.
+    _killed_kernel_entry(tmp_path)
+
+    rec.finalize_events(tmp_path)
+    event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
+    assert [row["kernel_id"] for row in event["ext"]["forge"]["lanes"]["kernel_rewrites"]] == ["k001"]
+
+
+def test_finalize_leaves_an_event_that_closed_itself_alone(tmp_path):
+    with session_scope(tmp_path):
+        recorder = make_kernel_recorder(macro_cycle=3, route="forge")
+        assert recorder is not None
+        recorder.begin(tput_before=1000.0)
+        recorder.finish(verdict="no_gain", status="succeeded", tput_after=1000.0)
+
+    assert rec.finalize_events(tmp_path) == []
+    event = json.loads(_timeline_files(tmp_path)[0].read_text(encoding="utf-8"))
+    assert event["status"] == "succeeded"
+
+
+def test_finalize_recovers_an_event_whose_shell_write_never_landed(tmp_path):
+    # No shell means no sequence to reuse, so finalize allocates an entry.
+    with session_scope(tmp_path):
+        rec.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
+
+    assert rec.finalize_events(tmp_path) == [_EID]
+    files = _timeline_files(tmp_path)
+    assert len(files) == 1
+    assert json.loads(files[0].read_text(encoding="utf-8"))["status"] == rec.EVENT_STATUS_INTERRUPTED
+
+
+def test_finalize_binds_the_session_itself_so_a_re_export_can_run_it(tmp_path):
+    with session_scope(tmp_path):
+        rec.make_sink(_EID, producer="orchestrator").record("kernel_event", {"macro_cycle": 3})
+
+    assert not session_is_bound()
+    assert rec.finalize_events(tmp_path) == [_EID]
+    assert not session_is_bound()
 
 
 # --- session binding -------------------------------------------------------

@@ -25,7 +25,7 @@ from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_KERNEL,
 )
 from ..kernel import collective_recovery as _collective_recovery
-from ..actions.executors._kernel_timeline import (
+from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import (
     ROUTE_COLLECTIVE_ONLY,
     ROUTE_FORGE,
     ROUTE_GEAK,
@@ -405,7 +405,14 @@ class KernelPhase(PhaseHandler):
         idempotency_reason = f"kernel_entry_g{stack_len}_{profile_fingerprint}"
         task_kind = self._internal_analysis_kind()
         try:
-            reprofile_task = await self._enqueue_internal_analysis_task(reason=idempotency_reason)
+            # The re-profile is this entry's own sub-step, not an action of its
+            # own: it exists to decide whether the analysis the lanes will
+            # target is stale, and it is never dispatched by anything else. So
+            # its rows join this event rather than leaving a sibling one.
+            reprofile_task = await self._enqueue_internal_analysis_task(
+                reason=idempotency_reason,
+                inline_event=recorder.event_id if recorder is not None else "",
+            )
             # An idempotent reuse can return a task that already reached a
             # terminal state (its snapshot from a prior cycle is still valid).
             # run_task would then attempt succeeded->running -> IllegalTransition,
@@ -461,6 +468,7 @@ class KernelPhase(PhaseHandler):
             snapshot_landed=bool(snapshot_landed),
             snapshot_id_before=snapshot_id_before,
             snapshot_id_after=snapshot_id_after,
+            task_id=str(getattr(reprofile_task, "task_id", "") or ""),
         )
 
     def _geak_enabled(self) -> bool:
@@ -492,11 +500,10 @@ class KernelPhase(PhaseHandler):
             route_reason: Why that route was selected.
             from_phase: The phase being left; ``resume`` marks a re-entry.
         """
-        from ..actions.executors._kernel_timeline import make_kernel_recorder
+        from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import make_kernel_recorder
 
         state = self.shared_state
         recorder = make_kernel_recorder(
-            self.session_dir,
             macro_cycle=int(getattr(state, "macro_cycle", 0) or 0),
             route=route,
             route_reason=route_reason,

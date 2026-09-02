@@ -27,6 +27,7 @@ import functools
 import logging
 import os
 import time
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -34,10 +35,11 @@ from hyperloom.common.timeutil import now_iso
 from ...loop.sub_agent_runner import RunnerContext
 from ...trace.task_progress import report_progress
 from ._multi_node_env import is_multi_node
-from ._roofline_timeline import (
+from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_COMPUTE_BOUND,
     ANALYSIS_ATTEMPT_INITIAL,
     ANALYSIS_ATTEMPT_N26_RETRY,
+    PRODUCER as _RECORDER_PRODUCER,
     PROFILE_ATTEMPT_AFTER_BAD_RETURN,
     PROFILE_ATTEMPT_AFTER_CAPTURE_ONLY,
     PROFILE_ATTEMPT_AFTER_EXCEPTION,
@@ -47,7 +49,15 @@ from ._roofline_timeline import (
     PROFILE_ATTEMPT_COMPUTE_BOUND,
     PROFILE_ATTEMPT_INITIAL,
     make_roofline_recorder,
+    roofline_event_id,
 )
+
+#: Task param naming the event an inline roofline's rows belong to. A phase
+#: that owns a timeline event puts its event id here when it dispatches the
+#: action, and that one string is the whole of the difference between the
+#: inline and standalone modes: with it the rows join the enclosing event, and
+#: without it the action leaves an event of its own.
+INLINE_EVENT_PARAM = "sbd_event_id"
 
 log = logging.getLogger(__name__)
 
@@ -258,10 +268,33 @@ class RooflineExecutor:
     async def __call__(self, ctx: RunnerContext) -> dict[str, Any]:
         """Run the roofline action, closing its timeline event either way.
 
-        The SBD V6 event is opened here rather than inside ``_execute`` so an
+        The recorder is built here rather than inside ``_execute`` so an
         exception raised anywhere in the action still terminates the event. A
         dangling ``status="running"`` event is then unambiguous: the session was
         killed mid-roofline, rather than the executor having raised.
+
+        The session is bound for the duration of the run when the caller has
+        not bound one. The Coordinator binds at startup, so this covers the
+        callers that reach the executor without going through it -- a directly
+        dispatched action, a test driving the executor on its own -- rather
+        than letting them record nothing.
+
+        Args:
+            ctx: Runner context carrying the task and session metadata.
+
+        Returns:
+            A result dict describing the roofline outcome and artifacts.
+        """
+        from hyperloom.inference_optimizer.session.session_binding import session_is_bound, session_scope
+
+        with ExitStack() as stack:
+            if not session_is_bound():
+                with suppress(Exception):
+                    stack.enter_context(session_scope(self._resolve_session_dir(ctx)))
+            return await self._run_recorded(ctx)
+
+    async def _run_recorded(self, ctx: RunnerContext) -> dict[str, Any]:
+        """Open the event, run the action, and close the event either way.
 
         Args:
             ctx: Runner context carrying the task and session metadata.
@@ -271,12 +304,13 @@ class RooflineExecutor:
         """
         params = ctx.task.params or {}
         recorder = make_roofline_recorder(
-            self._resolve_session_dir(ctx),
+            self._resolve_sink(ctx),
             task_id=str(getattr(ctx.task, "task_id", "") or ""),
             task_kind=str(getattr(ctx.task, "kind", "") or ""),
             reason=str(params.get("reason") or ""),
             framework=self._resolve_framework(ctx),
             params=params,
+            owns_event=not str(params.get(INLINE_EVENT_PARAM) or ""),
         )
         try:
             return await self._execute(ctx, recorder=recorder)
@@ -284,6 +318,36 @@ class RooflineExecutor:
             if recorder is not None:
                 recorder.finish_crashed(exc)
             raise
+
+    def _resolve_sink(self, ctx: RunnerContext) -> Any:
+        """Decide which event this run's rows belong to.
+
+        Args:
+            ctx (RunnerContext): The runner context carrying the task params.
+
+        Returns:
+            Any: A sink writing into the enclosing phase's event when the
+                dispatcher named one, into this action's own event otherwise, or
+                ``None`` when there is no session to record into -- which
+                declines rather than guessing an event id.
+        """
+        from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+        from hyperloom.inference_optimizer.session.session_binding import session_is_bound
+
+        params = ctx.task.params or {}
+        try:
+            if not session_is_bound():
+                log.debug("roofline timeline: no session bound; not recording")
+                return None
+            inline = str(params.get(INLINE_EVENT_PARAM) or "")
+            event = inline or roofline_event_id(
+                str(getattr(self.shared_state, "phase", "") or "unphased"),
+                int(getattr(self.shared_state, "macro_cycle", 0) or 0),
+            )
+            return make_sink(event, producer=_RECORDER_PRODUCER)
+        except Exception:  # noqa: BLE001 — observability cannot change roofline behavior
+            log.debug("roofline timeline: could not resolve an event to record into", exc_info=True)
+            return None
 
     async def _execute(self, ctx: RunnerContext, *, recorder: Any) -> dict[str, Any]:
         """Run the roofline action for the given context.

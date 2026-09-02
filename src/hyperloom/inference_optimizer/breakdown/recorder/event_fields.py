@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Field projections shared by the real-time SBD V6 timeline recorders.
+"""Field projections shared by the SBD V6 event recorders.
 
 The ``roofline`` and ``kernel`` recorders both project the result of
 ``trace_analyze_handler`` -- roofline as its own ``analysis`` sub-step, kernel as
@@ -10,21 +10,38 @@ result must land in the same shape in both, so the projection lives here rather
 than once per recorder: the bounds below carry measured justifications, and a
 second copy of them would drift the moment one recorder's limit is retuned.
 
-Everything here is a pure function over a tool result, plus the one best-effort
-event writer both recorders share.
+Everything here is a pure function over a tool result. Nothing here writes, and
+nothing here knows which event its output ends up in, which is what lets the
+same projection serve a row recorded at author time and the same row replayed
+out of a subprocess's own JSON.
 """
 
 from __future__ import annotations
 
 import functools
 import json
-import logging
-from pathlib import Path
 from typing import Any
 
 from hyperloom.common.timeutil import now_iso
 
-log = logging.getLogger(__name__)
+__all__ = [
+    "MAX_EXT_BLOCK_BYTES",
+    "MAX_HOT_KERNELS",
+    "MAX_WARNING_MESSAGE_CHARS",
+    "analysis_artifacts",
+    "analysis_detail",
+    "as_dict",
+    "as_list",
+    "bounded_block",
+    "clip",
+    "failure_row",
+    "float_or_none",
+    "int_or_none",
+    "now_iso_seconds",
+    "summarize_hot_kernels",
+    "summarize_warnings",
+    "text_or_none",
+]
 
 now_iso_seconds = functools.partial(now_iso, "seconds")
 
@@ -253,29 +270,3 @@ def analysis_detail(result: Any) -> dict[str, Any]:
         "warnings": summarize_warnings(payload.get("trace_health_warnings")),
         "artifacts": analysis_artifacts(payload),
     }
-
-
-def flush_event(session_dir: Path, event: dict[str, Any], *, component: str) -> None:
-    """Persist a timeline event, parking any writer failure for the next export.
-
-    ``write_timeline_event`` stamps its storage sequence onto ``event``, so
-    re-flushing the same object updates the same file rather than appending.
-
-    Args:
-        session_dir: Session root the timeline lives under.
-        event: The event dict, mutated in place with its storage sequence.
-        component: Dotted component name for the write-warning sidecar.
-    """
-    from hyperloom.inference_optimizer.session.sbd_v6 import (
-        record_write_warning,
-        write_timeline_event_at,
-    )
-
-    try:
-        write_timeline_event_at(session_dir, event)
-    except Exception as exc:  # noqa: BLE001 — observability cannot change phase behavior
-        log.debug("timeline: %s flush failed", component, exc_info=True)
-        try:
-            record_write_warning(session_dir, component=component, exc=exc)
-        except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
-            log.debug("timeline: write-warning sidecar failed", exc_info=True)

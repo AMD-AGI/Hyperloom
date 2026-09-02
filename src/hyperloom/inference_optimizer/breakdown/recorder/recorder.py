@@ -132,6 +132,15 @@ SECTION_SHAPES: dict[str, SectionShape] = {
     "kernel_geak_attempt": "item",  # one per kernel geak considered
     "kernel_geak_discovery": "item",  # one per geak hot-kernel discovery run
     "kernel_geak_acceptance": "item",  # one per kernel or env selection geak accepted
+    # SBD v6 roofline substreams. Written by the same executor whether it was
+    # dispatched on its own or called inline by a phase that owns an event, and
+    # the only difference between the two is the event id on the rows: the
+    # sections are the same either way, and which wire position they assemble
+    # into is the assembler's to decide.
+    "roofline_event": "item",  # one per roofline event, holding its timeline sequence
+    "roofline_action": "item",  # one per roofline action, keyed by its task id
+    "roofline_profile_run": "item",  # one per profile attempt within an action
+    "roofline_analysis_run": "item",  # one per trace-analysis attempt within an action
 }
 
 # Sections computed at finalize from in-memory state, never written as

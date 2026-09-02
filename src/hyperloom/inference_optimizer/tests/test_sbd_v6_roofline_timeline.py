@@ -1,22 +1,28 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Coverage for the real-time SBD V6 ``roofline`` timeline event."""
+"""Coverage for the SBD V6 ``roofline`` action, standalone and inline."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
-from hyperloom.orchestrator.actions.executors._roofline_timeline import (
+import pytest
+
+from hyperloom.inference_optimizer.breakdown.recorder.event_sink import make_sink
+from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import (
     ANALYSIS_ATTEMPT_INITIAL,
     ANALYSIS_ATTEMPT_N26_RETRY,
+    PRODUCER,
     PROFILE_ATTEMPT_AFTER_ZERO_OPS,
     PROFILE_ATTEMPT_INITIAL,
     _summarize_trace_files,
     make_roofline_recorder,
+    roofline_event_id,
 )
+from hyperloom.inference_optimizer.session.sbd_v6 import read_timeline_events
+from hyperloom.inference_optimizer.session.session_binding import session_scope
 from hyperloom.orchestrator.actions.executors.profile import (
     CHECK_GRAPH_LAUNCH_COVERAGE,
     CHECK_RANK_SHAPE,
@@ -26,8 +32,40 @@ from hyperloom.orchestrator.actions.executors.profile import (
 from hyperloom.orchestrator.kernel.request_handlers import _analysis_steady_state
 
 
+@pytest.fixture(autouse=True)
+def _bound_session(tmp_path):
+    """Bind the session the way startup does, so no call below takes a path."""
+    with session_scope(tmp_path):
+        yield tmp_path
+
+
 def _roofline_events(session_dir: Path) -> list[dict[str, Any]]:
     return [event for event in read_timeline_events(session_dir) if event.get("type") == "roofline"]
+
+
+def _recorder(
+    *,
+    task_id: str = "t-1",
+    task_kind: str = "",
+    reason: str = "",
+    framework: str = "sglang",
+    phase: str = "prelude",
+    macro_cycle: int = 0,
+):
+    """Build a standalone recorder, the way a dispatched roofline gets one."""
+    recorder = make_roofline_recorder(
+        make_sink(roofline_event_id(phase, macro_cycle), producer=PRODUCER),
+        task_id=task_id,
+        task_kind=task_kind,
+        reason=reason,
+        framework=framework,
+    )
+    assert recorder is not None
+    return recorder
+
+
+def _actions(session_dir: Path, index: int = 0) -> list[dict[str, Any]]:
+    return _roofline_events(session_dir)[index]["ext"]["actions"]
 
 
 def _profile_result(**overrides: Any) -> dict[str, Any]:
@@ -67,21 +105,29 @@ def _ta_result(**overrides: Any) -> dict[str, Any]:
     return result
 
 
-def test_begin_writes_an_in_flight_event(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, task_id="t-1", reason="prelude_initial", framework="sglang")
-    assert recorder is not None
+def test_begin_puts_the_event_on_the_timeline(tmp_path: Path) -> None:
+    """A session killed mid-roofline has to be readable as "this was running"."""
+    recorder = _recorder(reason="prelude_initial")
     recorder.begin(max_profile_attempts=3)
 
     events = _roofline_events(tmp_path)
     assert len(events) == 1
-    event = events[0]
-    # A session killed mid-roofline has to be readable as "the stage was running",
-    # which is the whole point of writing before the work rather than after it.
-    assert event["status"] == "running"
-    assert event["end_time"] == ""
-    assert event["ext"]["in_flight_substep"] == "profile"
-    assert event["ext"]["request"]["arm"] == "baseline"
-    assert event["ext"]["profile"]["max_attempts"] == 3
+    assert events[0]["status"] == "running"
+    assert events[0]["id"] == roofline_event_id("prelude", 0)
+    assert "end_time" not in events[0]
+    assert events[0]["ext"]["in_flight_substep"] == "profile"
+    assert recorder.event_id == roofline_event_id("prelude", 0)
+
+
+def test_the_action_carries_its_own_request_and_budget(tmp_path: Path) -> None:
+    """The retry budget distinguishes exhausting it from stopping early."""
+    recorder = _recorder(reason="prelude_initial")
+    recorder.begin(max_profile_attempts=3)
+    recorder.finish_failed(phase="profile", message="never booted")
+
+    action = _actions(tmp_path)[0]
+    assert action["request"]["arm"] == "baseline"
+    assert action["profile"]["max_attempts"] == 3
 
 
 def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
@@ -92,16 +138,11 @@ def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) ->
     made -- and a consumer counting roofline dispatches would have nothing in the
     event to exclude it by.
     """
-    recorder = make_roofline_recorder(
-        tmp_path,
-        task_id="t-capture-1",
-        task_kind="gemm_shape_capture",
-        framework="vllm",
-    )
-    assert recorder is not None
+    recorder = _recorder(task_id="t-capture-1", task_kind="gemm_shape_capture", framework="vllm")
     recorder.begin(max_profile_attempts=1)
+    recorder.finish_failed(phase="profile", message="stopped")
 
-    request = _roofline_events(tmp_path)[0]["ext"]["request"]
+    request = _actions(tmp_path)[0]["request"]
     assert request["task_kind"] == "gemm_shape_capture"
     assert request["arm"] == ""
 
@@ -112,18 +153,18 @@ def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) 
     The arm is withheld by dispatch kind rather than by an absent reason, so this
     case must not be caught by the shape-capture rule above.
     """
-    recorder = make_roofline_recorder(tmp_path, task_id="t-2", task_kind="roofline", framework="sglang")
-    assert recorder is not None
+    recorder = _recorder(task_id="t-2", task_kind="roofline")
     recorder.begin(max_profile_attempts=3)
+    recorder.finish_failed(phase="profile", message="stopped")
 
-    request = _roofline_events(tmp_path)[0]["ext"]["request"]
+    request = _actions(tmp_path)[0]["request"]
     assert request["task_kind"] == "roofline"
     assert request["arm"] == "current_best"
 
 
-def test_profile_retries_collapse_into_one_event(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+def test_profile_retries_collapse_into_one_action(tmp_path: Path) -> None:
+    """The retry is internal to the action, so it must not read as a second one."""
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(
         run_index=1,
@@ -145,12 +186,17 @@ def test_profile_retries_collapse_into_one_event(tmp_path: Path) -> None:
         profile_result=_profile_result(),
     )
     recorder.adopt_profile_run(run_index=2, profile_result=_profile_result(), params={"reason": "kernel_followup"})
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=3,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1},
+        trace_path="/w/traces/merged-a.pt.trace.json.gz",
+    )
 
-    events = _roofline_events(tmp_path)
-    # Two attempts, one event: the retry is internal to the action, so it must not
-    # look like a second dispatched roofline.
-    assert len(events) == 1
-    profile = events[0]["ext"]["profile"]
+    actions = _actions(tmp_path)
+    assert len(actions) == 1
+    profile = actions[0]["profile"]
     assert profile["attempt_count"] == 2
     assert [row["attempt_reason"] for row in profile["runs"]] == [
         PROFILE_ATTEMPT_INITIAL,
@@ -160,12 +206,10 @@ def test_profile_retries_collapse_into_one_event(tmp_path: Path) -> None:
     assert profile["effective_run_index"] == 2
     assert profile["eager_fallback_applied"] is True
     assert profile["effective_run"]["trace"]["main_path"].endswith("merged-a.pt.trace.json.gz")
-    assert events[0]["ext"]["in_flight_substep"] == "analysis"
 
 
 def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_analysis_run(
         run_index=1,
@@ -189,8 +233,15 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
         ta_result=retried,
     )
     recorder.adopt_analysis_run(run_index=2, ta_result=retried, trace_input="/w/traces/a.gz")
+    recorder.finish_succeeded(
+        snapshot_id=1,
+        hot_kernel_count=1,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": 1},
+        trace_path="/w/traces/a.gz",
+    )
 
-    analysis = _roofline_events(tmp_path)[0]["ext"]["analysis"]
+    analysis = _actions(tmp_path)[0]["analysis"]
     assert analysis["attempt_count"] == 2
     assert analysis["effective_run_index"] == 2
     assert [row["effective"] for row in analysis["runs"]] == [False, True]
@@ -202,46 +253,84 @@ def test_analysis_retry_keeps_both_runs_and_one_conclusion(tmp_path: Path) -> No
     assert effective["preflight"]["trace_file_count"] == 1
 
 
-def test_failed_event_names_the_failing_substep(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="prelude_initial", framework="sglang")
-    assert recorder is not None
+def test_failed_action_names_the_failing_substep(tmp_path: Path) -> None:
+    recorder = _recorder(reason="prelude_initial")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_failed(phase="trace_analyze", message="splitter produced no steady-state chunks")
 
     event = _roofline_events(tmp_path)[0]
     assert event["status"] == "failed"
     assert event["end_time"]
-    assert event["ext"]["failed_substep"] == "analysis"
-    assert event["ext"]["failure"]["phase"] == "trace_analyze"
-    assert event["ext"]["in_flight_substep"] is None
+    action = event["ext"]["actions"][0]
+    assert action["failed_substep"] == "analysis"
+    assert action["failure"]["phase"] == "trace_analyze"
+    assert action["in_flight_substep"] is None
 
 
-def test_each_dispatched_roofline_is_its_own_event(tmp_path: Path) -> None:
-    for reason in ("prelude_initial", "kernel_followup", "close_post_opt"):
-        recorder = make_roofline_recorder(tmp_path, reason=reason, framework="sglang")
-        assert recorder is not None
+def _succeed(recorder, *, snapshot_id: int = 1) -> None:
+    recorder.finish_succeeded(
+        snapshot_id=snapshot_id,
+        hot_kernel_count=3,
+        kernel_attribution_degraded=False,
+        cached={"roofline_snapshot_id": snapshot_id},
+        trace_path="/w/traces/a.gz",
+    )
+
+
+def test_rooflines_of_one_phase_and_cycle_are_actions_of_one_event(tmp_path: Path) -> None:
+    """A phase can dispatch roofline more than once, and the task id separates them.
+
+    The event id names a phase in a macro cycle, which is what a reader looks
+    for; the actions inside it are what a reader counts. Making each dispatch
+    its own event would need the task id in the event id, and then nothing on
+    the timeline would say those two rooflines belonged to the same phase.
+    """
+    for index, reason in enumerate(("kernel_followup", "close_post_opt")):
+        recorder = _recorder(task_id=f"t-{index}", reason=reason, phase="sweep", macro_cycle=2)
         recorder.begin(max_profile_attempts=3)
-        recorder.finish_succeeded(
-            snapshot_id=1,
-            hot_kernel_count=3,
-            kernel_attribution_degraded=False,
-            cached={"roofline_snapshot_id": 1},
-            trace_path="/w/traces/a.gz",
-        )
+        _succeed(recorder, snapshot_id=index + 1)
 
     events = _roofline_events(tmp_path)
-    # Separate dispatches are separate events; only retries fold inward.
-    assert [event["ext"]["request"]["reason"] for event in events] == [
-        "prelude_initial",
+    assert len(events) == 1
+    assert events[0]["id"] == roofline_event_id("sweep", 2)
+    assert [action["request"]["reason"] for action in events[0]["ext"]["actions"]] == [
         "kernel_followup",
         "close_post_opt",
     ]
-    assert all(event["status"] == "succeeded" for event in events)
+    assert events[0]["status"] == "succeeded"
+
+
+def test_a_different_phase_or_cycle_is_a_different_event(tmp_path: Path) -> None:
+    """What separates two events is the phase and the cycle, nothing else."""
+    for phase, cycle in (("prelude", 0), ("sweep", 1), ("sweep", 2)):
+        recorder = _recorder(task_id=f"t-{phase}-{cycle}", phase=phase, macro_cycle=cycle)
+        recorder.begin(max_profile_attempts=3)
+        _succeed(recorder)
+
+    assert sorted(event["id"] for event in _roofline_events(tmp_path)) == [
+        roofline_event_id("prelude", 0),
+        roofline_event_id("sweep", 1),
+        roofline_event_id("sweep", 2),
+    ]
+
+
+def test_one_failed_action_is_not_hidden_by_a_later_success(tmp_path: Path) -> None:
+    """The event takes the worst status of its actions, not the last one."""
+    first = _recorder(task_id="t-0", phase="sweep", macro_cycle=2)
+    first.begin(max_profile_attempts=3)
+    first.finish_failed(phase="profile", message="server never booted")
+    second = _recorder(task_id="t-1", phase="sweep", macro_cycle=2)
+    second.begin(max_profile_attempts=3)
+    _succeed(second)
+
+    event = _roofline_events(tmp_path)[0]
+    assert event["status"] == "failed"
+    assert [action["status"] for action in event["ext"]["actions"]] == ["failed", "succeeded"]
 
 
 def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    """Zero routable candidates is a completed roofline that cannot advance work."""
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_succeeded(
         snapshot_id=2,
@@ -252,10 +341,38 @@ def test_degraded_when_attribution_folded(tmp_path: Path) -> None:
     )
 
     event = _roofline_events(tmp_path)[0]
-    # Zero routable candidates from folded attribution is a completed roofline
-    # that cannot advance kernel work -- distinct from a clean run and from a failure.
     assert event["status"] == "degraded"
-    assert event["ext"]["outcome"]["kernel_attribution_degraded"] is True
+    assert event["ext"]["actions"][0]["outcome"]["kernel_attribution_degraded"] is True
+
+
+def test_an_inline_action_leaves_no_roofline_event(tmp_path: Path) -> None:
+    """The KERNEL entry's re-profile belongs to the kernel event, not beside it.
+
+    A sibling event would claim the inline run is dispatchable on its own, and
+    a reader counting roofline events would count a sub-step of another phase.
+    """
+    from hyperloom.inference_optimizer.breakdown.recorder.assembler import roofline_event_parts
+    from hyperloom.inference_optimizer.breakdown.recorder.kernel_event import kernel_event_id
+    from hyperloom.inference_optimizer.breakdown.recorder.roofline_event import assemble_roofline_action
+
+    event = kernel_event_id(3)
+    recorder = make_roofline_recorder(
+        make_sink(event, producer=PRODUCER),
+        task_id="t-reprofile",
+        task_kind="roofline",
+        reason="kernel_entry_g0_abc",
+        framework="sglang",
+        owns_event=False,
+    )
+    assert recorder is not None
+    recorder.begin(max_profile_attempts=3)
+    _succeed(recorder)
+
+    assert _roofline_events(tmp_path) == []
+    action = assemble_roofline_action(roofline_event_parts(), event=event, task_id="t-reprofile")
+    assert action is not None
+    assert action["status"] == "succeeded"
+    assert action["request"]["reason"] == "kernel_entry_g0_abc"
 
 
 def test_trace_file_summary_stays_bounded_on_multi_rank() -> None:
@@ -416,8 +533,8 @@ def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
 
 
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    """Each attempt keeps the verdict computed against the trace it produced."""
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.record_profile_run(
         run_index=1,
@@ -456,10 +573,9 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
             }
         ),
     )
+    _succeed(recorder)
 
-    runs = _roofline_events(tmp_path)[0]["ext"]["profile"]["runs"]
-    # Each attempt keeps the verdict computed against the trace it produced, so
-    # "attempt 1 was unusable by anything, attempt 2 was not" stays answerable.
+    runs = _actions(tmp_path)[0]["profile"]["runs"]
     assert runs[0]["validate"]["usable_by"] == []
     assert runs[0]["validate"]["failed_check_ids"] == [CHECK_TRACE_HAS_OPS]
     assert runs[1]["validate"]["usable_by"] == ["bypass", "tracelens"]
@@ -468,40 +584,32 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
 
 
 def test_crash_closes_the_event(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    """An executor that raised must not read as a session killed mid-roofline."""
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     recorder.finish_crashed(RuntimeError("record_trace_analyze blew up"))
 
     event = _roofline_events(tmp_path)[0]
-    # An executor that raised must not be indistinguishable from a session that
-    # was killed mid-roofline, which is what a dangling "running" event means.
     assert event["status"] == "failed"
-    assert event["ext"]["failure"]["error_class"] == "RuntimeError"
-    assert event["ext"]["failure"]["phase"] == "profile"
+    action = event["ext"]["actions"][0]
+    assert action["failure"]["error_class"] == "RuntimeError"
+    assert action["failure"]["phase"] == "profile"
 
 
-def test_crash_does_not_overwrite_a_closed_event(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+def test_crash_does_not_overwrite_a_closed_action(tmp_path: Path) -> None:
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
-    recorder.finish_succeeded(
-        snapshot_id=1,
-        hot_kernel_count=4,
-        kernel_attribution_degraded=False,
-        cached={"roofline_snapshot_id": 1},
-        trace_path="/w/traces/a.gz",
-    )
+    _succeed(recorder)
     recorder.finish_crashed(RuntimeError("raised after the result was built"))
 
     event = _roofline_events(tmp_path)[0]
     assert event["status"] == "succeeded"
-    assert event["ext"]["failure"] is None
+    assert event["ext"]["actions"][0]["failure"] is None
 
 
 def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    """A verbose tool must not be able to multiply the SBD payload."""
+    recorder = _recorder(reason="kernel_followup")
     recorder.begin(max_profile_attempts=3)
     bloated = _ta_result()
     bloated["analysis_meta"]["route_ext"] = {
@@ -509,38 +617,32 @@ def test_open_ended_route_ext_is_size_capped(tmp_path: Path) -> None:
         "rank_count": 8,
     }
     recorder.adopt_analysis_run(run_index=1, ta_result=bloated, trace_input="/w/traces/a.gz")
+    _succeed(recorder)
 
-    route_ext = _roofline_events(tmp_path)[0]["ext"]["analysis"]["effective_run"]["route_ext"]
-    # ``route_ext`` is deliberately open, so a verbose tool must not be able to
-    # multiply the SBD payload; the block is replaced by its shape instead.
+    route_ext = _actions(tmp_path)[0]["analysis"]["effective_run"]["route_ext"]
     assert route_ext["omitted"] is True
     assert route_ext["keys"] == ["attribution", "rank_count"]
 
 
-def test_unresolved_session_dir_records_nothing(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.chdir(tmp_path)
-    # ``_resolve_session_dir`` falls back to Path(".") when the runner context
-    # carries no session dir; recording there would scatter events into whatever
-    # the working directory happens to be.
-    assert make_roofline_recorder(Path("."), reason="kernel_followup", framework="sglang") is None
+def test_no_sink_records_nothing(tmp_path: Path) -> None:
+    """A caller with no event to write into declines rather than guessing one."""
+    assert make_roofline_recorder(None, reason="kernel_followup", framework="sglang") is None
     assert not (tmp_path / "reports").exists()
 
 
 def test_recorder_write_failure_does_not_raise(tmp_path: Path, monkeypatch) -> None:
-    recorder = make_roofline_recorder(tmp_path, reason="kernel_followup", framework="sglang")
-    assert recorder is not None
+    """Observability must never change roofline behavior."""
+    recorder = _recorder(reason="kernel_followup")
 
     def _boom(*_args: Any, **_kwargs: Any) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.session.sbd_v6.write_timeline_event_at",
+        "hyperloom.inference_optimizer.session.sbd_v6.write_timeline_event",
         _boom,
     )
-    # Observability must never change roofline behavior, so a writer failure is
-    # parked rather than propagated.
     recorder.begin(max_profile_attempts=3)
     recorder.finish_failed(phase="profile", message="unrelated")
 
     warnings = (tmp_path / "reports" / "sbd_v6" / "write_warnings.jsonl").read_text(encoding="utf-8")
-    assert "roofline.begin" in warnings
+    assert "timeline.roofline.open" in warnings
