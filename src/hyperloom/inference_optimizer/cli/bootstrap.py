@@ -134,6 +134,42 @@ def resolve_model_display_name(args: argparse.Namespace) -> str:
 AGENTX_MEASUREMENT_EPOCH = 1
 
 
+def seed_grading(framework: str, benchmark_mode: str) -> dict[str, Any]:
+    """Resolve the grading axis once, at seed, so it can be recorded.
+
+    The resolution reads ``HYPERLOOM_PERF_METRIC`` and
+    ``HYPERLOOM_PERF_NOISE_PCT`` from the environment. Deriving it again later
+    -- most consequentially in the breakdown exporter, which CLOSE drives from
+    a subprocess that often did not inherit them -- can name an axis the
+    session never graded on. Recording it here is the same reasoning that put
+    ``benchmark_mode`` in the state rather than leaving it to the ambient var.
+
+    Args:
+        framework: The serving framework this session runs.
+        benchmark_mode: ``"agentx"`` or ``"synthetic"``.
+
+    Returns:
+        The recorded grading configuration for ``SharedState.grading``.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_OUTPUT,
+        GRADED_TOTAL,
+        parse_intvty_noise_pct,
+        total_tput_serving_grading_enabled,
+    )
+
+    from .. import framework_registry
+
+    on_total = total_tput_serving_grading_enabled(
+        scriptable=framework_registry.is_scriptable(framework),
+        benchmark_mode=benchmark_mode,
+    )
+    return {
+        "objective": GRADED_TOTAL if on_total else GRADED_OUTPUT,
+        "intvty_noise_pct": parse_intvty_noise_pct(),
+    }
+
+
 def agentx_state_is_stale(state: Any) -> str:
     """Return why a resumed session's AgentX state is unusable, or ``""``.
 
@@ -449,6 +485,10 @@ def _seed_shared_state(
         and not (_agentx_enabled() and not _flag_explicitly_set(args, "enable_conc_sweep")),
         benchmark_mode="agentx" if _agentx_enabled() else "synthetic",
         agentx_epoch=AGENTX_MEASUREMENT_EPOCH if _agentx_enabled() else 0,
+        grading=seed_grading(
+            os.environ.get("FRAMEWORK", "sglang"),
+            "agentx" if _agentx_enabled() else "synthetic",
+        ),
         conc_sweep_concs=_parse_conc_sweep_concs(args),
         conc_sweep_total_budget_sec=int(
             getattr(args, "conc_sweep_total_budget_sec", 9000) or 0,

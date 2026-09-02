@@ -683,6 +683,15 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     # corpus generation, a fixed measurement defect). A resume whose stored
     # epoch differs must not reuse the old KEEPs or baseline anchor.
     agentx_epoch: int = 0
+    # The grading configuration this session was seeded with: {"objective":
+    # "total_throughput"|"output_throughput", "intvty_noise_pct": float}.
+    # Recorded rather than re-derived because the derivation reads
+    # HYPERLOOM_PERF_METRIC / HYPERLOOM_PERF_NOISE_PCT from the environment,
+    # and the breakdown is exported from CLOSE -- frequently a subprocess that
+    # never inherited them. Re-reading there would report an axis the session
+    # never graded on. Empty on sessions predating the field, which fall back
+    # to deriving it.
+    grading: dict[str, Any] = field(default_factory=dict)
     # CONC ladder for conc_sweep (mirrors conc_sweep.DEFAULT_CONCS). Empty => skip_reason=empty_conc_list.
     conc_sweep_concs: list[int] = field(
         default_factory=lambda: [256, 128, 64, 32, 16, 8, 4, 2],
