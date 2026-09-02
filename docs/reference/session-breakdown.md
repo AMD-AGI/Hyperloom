@@ -26,10 +26,6 @@ The authoritative source of truth for the wire shape is
 [`src/hyperloom/inference_optimizer/breakdown/schema.py`](https://github.com/AMD-AGI/Hyperloom/blob/main/src/hyperloom/inference_optimizer/breakdown/schema.py).
 This page describes the contract from a consumer's perspective.
 
-For where each field's value actually comes from — and which ones are
-reconstructed at export time rather than recorded when the fact occurred — see
-[Session breakdown: where each metric comes from](session-breakdown-provenance.md).
-
 ---
 
 ## Versioning
