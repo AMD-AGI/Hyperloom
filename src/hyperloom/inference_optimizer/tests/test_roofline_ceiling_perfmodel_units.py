@@ -868,3 +868,34 @@ def test_compute_compute_bound_ceiling_fallback_and_degrade_to_zero(monkeypatch)
         )
         == 0.0
     )
+
+
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("fp8_e4m3", 1.0),
+        ("fp8_e5m2", 1.0),
+        ("nvfp4", 0.5),
+        ("int8", 1.0),
+        ("w8a8_int8", 1.0),
+        ("int4", 0.5),
+        ("awq", 0.5),
+        ("gptq", 0.5),
+    ],
+)
+def test_a_nested_spec_reads_the_quant_only_tags_too(tag, expected):
+    """The nested path must consult both tables, exactly as the flat one does.
+
+    These eight tags live only in ``_QUANT_WEIGHT_BYTES``, and Quark writes
+    precisely them on ``global_quant_config.weight.dtype`` -- often with no
+    ``num_bits`` beside them. Checking ``_DTYPE_BYTES`` alone returned 0.0, the
+    caller fell back to the checkpoint dtype, and an fp8 checkpoint was costed
+    as bf16: the 2x weight-IO overcount this function exists to remove.
+    """
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": tag}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == expected
+
+
+def test_num_bits_still_wins_when_the_tag_is_unknown():
+    cfg = {"quant_method": "quark", "global_quant_config": {"weight": {"dtype": "some_new_format", "num_bits": 6}}}
+    assert rc._resolve_quant_config_weight_bytes(cfg) == 0.75

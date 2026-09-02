@@ -259,3 +259,93 @@ class TestTheWrapperForwardsTheNewInputs:
 
         cmd = mod._build_cmd({**base, key: "/tmp/x.json"})
         assert cmd[cmd.index(flag) + 1] == "/tmp/x.json"
+
+
+class _StopHere(Exception):
+    """Raised from the MoE CSV writer to end the run at the point under test."""
+
+
+class TestTokensAreDerivedBeforeTheMoeCsvIsBuilt:
+    """Both lanes must see the observed M sweep, not just the dense one.
+
+    ``_write_fmoe_untuned_csv_from_log`` consumes ``tokens`` directly and its
+    fallback for an empty one is ``[1]``. While the serving-log derivation sat
+    below that call, the dense lane got the full sweep and the MoE lane got a
+    one-row table -- which then missed on every prefill and large-batch lookup
+    and was reverted as ``no_shape_key_matched``. That is the exact failure this
+    change set exists to remove, so an ordering regression here would leave the
+    MoE half of it in place.
+    """
+
+    @pytest.mark.asyncio
+    async def test_the_moe_writer_receives_the_serving_log_sweep(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        log_path = _log(tmp_path / "server.log", "".join(HIT.format(m=m) * 4 for m in (1, 64, 2048, 16384)))
+
+        seen: dict[str, str] = {}
+
+        def _writer(_log_path, tokens, _workspace):
+            seen["tokens"] = tokens
+            raise _StopHere
+
+        from hyperloom.common import model_paths
+        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.orchestrator.policy import gate
+
+        monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
+        monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
+        monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
+        monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)
+        monkeypatch.setattr(rh, "_resolve_forge_shapes", lambda *_a, **_k: "")
+        monkeypatch.setattr(rh, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
+        monkeypatch.setattr(rh, "_write_fmoe_untuned_csv_from_log", _writer)
+
+        payload = {
+            "model_path": str(model_dir),
+            "framework": "sglang",
+            "kernel_signature_log": str(log_path),
+        }
+        with pytest.raises(_StopHere):
+            await rh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        assert seen["tokens"] == rh._tokens_from_serving_log(log_path)
+        # Not the ``[1]`` fallback, and not a single value of any kind.
+        assert len(seen["tokens"].split(",")) > 1
+
+    @pytest.mark.asyncio
+    async def test_an_explicit_payload_tokens_value_still_wins(self, tmp_path, monkeypatch):
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        log_path = _log(tmp_path / "server.log", HIT.format(m=999))
+
+        seen: dict[str, str] = {}
+
+        def _writer(_log_path, tokens, _workspace):
+            seen["tokens"] = tokens
+            raise _StopHere
+
+        from hyperloom.common import model_paths
+        from hyperloom.inference_optimizer import model_config_utils
+        from hyperloom.orchestrator.policy import gate
+
+        monkeypatch.setattr(rh, "_forge_gemm_tune_available", lambda: True)
+        monkeypatch.setattr(rh, "_resolve_forge_precision_and_quant", lambda *_a, **_k: ("bf16", ""))
+        monkeypatch.setattr(model_paths, "resolve_serving_model_path", lambda p: str(p))
+        monkeypatch.setattr(model_config_utils, "resolve_local_model_dir", lambda _p: model_dir)
+        monkeypatch.setattr(gate, "detect_gpu_count", lambda: 8)
+        monkeypatch.setattr(rh, "_resolve_forge_shapes", lambda *_a, **_k: "")
+        monkeypatch.setattr(rh, "_resolve_forge_untuned_csv", lambda *_a, **_k: "")
+        monkeypatch.setattr(rh, "_write_fmoe_untuned_csv_from_log", _writer)
+
+        payload = {
+            "model_path": str(model_dir),
+            "framework": "sglang",
+            "kernel_signature_log": str(log_path),
+            "tokens": "1,2,4",
+        }
+        with pytest.raises(_StopHere):
+            await rh._run_forge_gemm_tuning(payload, session_dir=tmp_path)
+
+        assert seen["tokens"] == "1,2,4"

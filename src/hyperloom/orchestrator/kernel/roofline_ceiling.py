@@ -179,8 +179,20 @@ def _resolve_quant_config_weight_bytes(quant_cfg: Any) -> float:
         if not isinstance(spec, dict):
             return 0.0
         tag = str(spec.get("dtype") or spec.get("type") or "").strip().lower()
+        # Both tables, exactly as the flat ``quant_method`` path above does.
+        # ``_QUANT_WEIGHT_BYTES`` is the only one carrying fp8_e4m3, fp8_e5m2,
+        # nvfp4, int8, w8a8_int8, int4, awq and gptq, and a Quark checkpoint
+        # writes precisely those on the nested spec -- often with no
+        # ``num_bits`` beside them. Consulting one table here read
+        # ``global_quant_config.weight.dtype = "fp8_e4m3"`` as "nothing
+        # decisive", fell back to the checkpoint dtype, and reported bf16: the
+        # 2x weight-IO overcount this function was written to remove, which then
+        # trips the ``total_expert_bytes >= weight_bytes`` guard and degrades a
+        # MoE model to dense.
         if tag in _DTYPE_BYTES:
             return _DTYPE_BYTES[tag]
+        if tag in _QUANT_WEIGHT_BYTES:
+            return _QUANT_WEIGHT_BYTES[tag]
         return _bits_to_bytes(spec.get("num_bits") or spec.get("bits"))
 
     # Wrapper toolkits nest the precision on a weight spec: Quark under

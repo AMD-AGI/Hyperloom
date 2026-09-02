@@ -3299,8 +3299,14 @@ class KernelPhase(PhaseHandler):
             model_supports_aiter_ck_fused_moe,
         )
 
-        triton_moe_inert = (
-            any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and self._runtime_uses_aiter_fused_moe()
+        # ``_runtime_uses_aiter_fused_moe`` resolves the serving log -- which now
+        # byte-scans the whole runs/ tree for aiter evidence -- and then reads it
+        # whole, ~17MB on the fleet. This function is a coroutine on the
+        # orchestrator's only event loop, so doing that inline stalls every other
+        # coroutine, heartbeats included, for the duration. The short-circuit is
+        # kept: no Triton candidate means no reason to look at all.
+        triton_moe_inert = any(c.get("tuner") == "vllm_moe_triton" for c in candidates) and await asyncio.to_thread(
+            self._runtime_uses_aiter_fused_moe
         )
 
         for cand in candidates:
@@ -3501,7 +3507,10 @@ class KernelPhase(PhaseHandler):
             # not run.
             apply_blockers: list[str] = []
 
-            coverage = self._gemm_tuned_config_coverage(tuner_name, env)
+            # Off the event loop for the same reason: this reads the integrate
+            # run's server.log in full and parses every tuned CSV named in the
+            # candidate env.
+            coverage = await asyncio.to_thread(self._gemm_tuned_config_coverage, tuner_name, env)
             if coverage is not None:
                 cand = {**cand, "tuned_config_coverage": coverage}
                 if not coverage.get("artifact_applied") and coverage.get("conclusive", True):

@@ -4044,6 +4044,23 @@ async def _run_forge_gemm_tuning(
                 resolved_model_path,
             )
 
+    # forge's own fallback derives --tokens from ``conc``, which is a guess
+    # about M. The serving log records the M values the model actually ran, so
+    # prefer those whenever a log with dispatch evidence was resolved.
+    #
+    # This has to happen BEFORE the MoE untuned CSV is built, not just before
+    # the payload is assembled: ``_write_fmoe_untuned_csv_from_log`` consumes
+    # ``tokens`` directly, and its fallback for an empty one is ``[1]``. Derive
+    # afterwards and the dense lane got the full observed sweep while the MoE
+    # lane got a table with a single M=1 row -- which then missed on every
+    # prefill and large-batch lookup and was reverted as no_shape_key_matched.
+    # That is precisely the failure this change set exists to remove, so leaving
+    # it in place on the MoE side would have fixed one lane and not the other.
+    if not tokens and kernel_sig_log:
+        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
+        if tokens:
+            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
+
     # MoE shapes come from the runtime, never from inference. The dispatch tuple
     # in the server log states the quantisation pair, the per-partition inter_dim
     # and the EP-inflated expert/topk counts; none of the three is recoverable
@@ -4177,14 +4194,6 @@ async def _run_forge_gemm_tuning(
     demand_json = str(payload.get("demand_json") or "").strip()
     if demand_json and not _path_is_existing_file(demand_json):
         demand_json = ""
-
-    # forge's own fallback derives --tokens from ``conc``, which is a guess
-    # about M. The serving log records the M values the model actually ran, so
-    # prefer those whenever a log with dispatch evidence was resolved.
-    if not tokens and kernel_sig_log:
-        tokens = _normalize_tokens(await asyncio.to_thread(_tokens_from_serving_log, kernel_sig_log))
-        if tokens:
-            log.info("GEMM: derived --tokens=%s from observed M in %s", tokens, kernel_sig_log)
 
     timeout = _gemm_tuning_timeout_sec(payload)
     session_max_min = float(getattr(state, "max_minutes", 0) or 0)
