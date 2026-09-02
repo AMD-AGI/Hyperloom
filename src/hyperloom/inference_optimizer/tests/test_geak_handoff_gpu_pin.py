@@ -337,9 +337,7 @@ def test_gpu_ids_are_absolute_for_a_recipe_only_rocr_pin() -> None:
         ("GPU_DEVICE_ORDINAL", False),
     ],
 )
-def test_every_mask_spelling_counts_as_a_pin(
-    monkeypatch: pytest.MonkeyPatch, var: str, expect_logical: bool
-) -> None:
+def test_every_mask_spelling_counts_as_a_pin(monkeypatch: pytest.MonkeyPatch, var: str, expect_logical: bool) -> None:
     """A run pinned with a legacy spelling is pinned; omitting it read as unpinned."""
     monkeypatch.setenv(var, "6")
     pin = _resolve_gpu_pin(recipe_envs=_autofilled(1))

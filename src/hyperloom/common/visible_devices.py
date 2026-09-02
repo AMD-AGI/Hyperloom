@@ -34,6 +34,18 @@ from __future__ import annotations
 
 from typing import Any
 
+__all__ = [
+    "COUNTING_VISIBLE_DEVICE_VARS",
+    "GPU_MASK_ENV_NAMES",
+    "HIP_LEVEL_VARS",
+    "ROCR_LEVEL_VARS",
+    "VISIBLE_DEVICE_VARS",
+    "effective_mask_tokens",
+    "is_rocr_level",
+    "mask_tokens",
+    "parse_device_list",
+]
+
 #: ROCr-level masks: these slice the device set and renumber it ``0..N-1``.
 #: ``HSA_VISIBLE_DEVICES`` is the legacy spelling; ``ROCR_VISIBLE_DEVICES``
 #: wins when both are set.
@@ -118,6 +130,22 @@ def mask_tokens(raw: Any) -> list[str]:
     return [tok for tok in (p.strip() for p in parts) if tok]
 
 
+def _is_negative_ordinal(tok: str) -> bool:
+    """Is ``tok`` a negative device ordinal, i.e. a token that names no device?
+
+    Written as a positive test rather than ``int(tok) < 0`` in a ``try`` so the
+    non-numeric case (a GPU UUID) is an ordinary ``False`` rather than a
+    swallowed ``ValueError``.
+
+    Args:
+        tok: One already-stripped mask token.
+
+    Returns:
+        ``True`` only for a leading ``-`` followed by digits.
+    """
+    return tok.startswith("-") and tok[1:].isdigit()
+
+
 def effective_mask_tokens(raw: Any) -> list[str]:
     """The devices a mask actually exposes, in the order the runtime sees them.
 
@@ -140,13 +168,8 @@ def effective_mask_tokens(raw: Any) -> list[str]:
     """
     out: list[str] = []
     for tok in mask_tokens(raw):
-        if tok in out:
+        if tok in out or _is_negative_ordinal(tok):
             continue
-        try:
-            if int(tok) < 0:
-                continue
-        except ValueError:
-            pass
         out.append(tok)
     return out
 
