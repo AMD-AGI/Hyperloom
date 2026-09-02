@@ -322,6 +322,191 @@ def test_collective_replay_preserves_completed_integration(tmp_path):
     assert state.last_collective["integration_decision"] == "KEEP"
 
 
+# --- record_collective_integration ---------------------------------------------
+
+
+def _seeded_collective_state(tmp_path):
+    """A state whose last_collective/collective_attempts hold one open KEEP campaign."""
+    state = SharedState.load_or_init(tmp_path)
+    campaign = {
+        "collective_attempt_id": "attempt-1",
+        "integration_id": "integration-1",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+    state.record_collective(campaign, tmp_path)
+    return state
+
+
+def test_record_collective_integration_updates_last_collective_and_history(tmp_path):
+    """The verdict must land on both the live pointer and its campaign row."""
+    state = _seeded_collective_state(tmp_path)
+
+    state.record_collective_integration(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "integration_status": "complete",
+            "integration_recovery_action": "",
+            "gain_pct": 12.5,
+            "base_tput": 100.0,
+            "new_tput": 112.5,
+        },
+        tmp_path,
+        integration_id="integration-1",
+    )
+
+    assert state.last_collective["patch_cleanup_status"] == "complete"
+    assert state.last_collective["integration_decision"] == "KEEP"
+    assert state.last_collective["integration_gain_pct"] == 12.5
+
+    history_entry = next(
+        item
+        for item in state.collective_attempts
+        if item["collective_attempt_id"] == "attempt-1"
+    )
+    assert history_entry["patch_cleanup_status"] == "complete"
+    assert history_entry["integration_gain_pct"] == 12.5
+
+
+@pytest.mark.parametrize(
+    "payload,exception,match",
+    [
+        ("not-a-dict", TypeError, "mapping"),
+        (
+            {"decision": "KEEP", "integration_status": "complete"},
+            ValueError,
+            "missing integration_id",
+        ),
+        (
+            {
+                "decision": "MAYBE",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            ValueError,
+            "Invalid collective integration decision",
+        ),
+        (
+            {
+                "decision": "KEEP",
+                "integration_status": "pending",
+                "integration_id": "integration-1",
+            },
+            ValueError,
+            "patch_cleanup_status must be complete",
+        ),
+        (
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+                "integration_recovery_action": "finalize",
+            },
+            ValueError,
+            "cannot require recovery",
+        ),
+        (
+            {
+                "decision": "KEEP",
+                "integration_status": "recovery_required",
+                "integration_id": "integration-1",
+                "integration_recovery_action": "retry",
+            },
+            ValueError,
+            "recovery action must be finalize or revert",
+        ),
+        (
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+                "gain_pct": float("nan"),
+            },
+            ValueError,
+            "invalid gain_pct",
+        ),
+        (
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-99",
+            },
+            ValueError,
+            "does not match last_collective",
+        ),
+    ],
+    ids=[
+        "non_mapping_result",
+        "missing_integration_id",
+        "invalid_decision",
+        "invalid_integration_status",
+        "completed_with_recovery_action",
+        "unrecognized_recovery_action",
+        "non_numeric_gain_pct",
+        "integration_id_mismatch",
+    ],
+)
+def test_record_collective_integration_rejects_invalid_input(tmp_path, payload, exception, match):
+    """Each malformed verdict is rejected before any campaign state is touched."""
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(exception, match=match):
+        state.record_collective_integration(payload, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "mutate_history",
+    [
+        lambda attempts: [],
+        lambda attempts: attempts + [dict(attempts[0])],
+    ],
+    ids=["no_matching_campaign", "ambiguous_campaign"],
+)
+def test_record_collective_integration_rejects_bad_attempt_history(tmp_path, mutate_history):
+    """A history the campaign never wrote to, or one that is ambiguous, must not be guessed at."""
+    state = _seeded_collective_state(tmp_path)
+    state.collective_attempts = mutate_history(state.collective_attempts)
+    with pytest.raises(ValueError, match="exactly one campaign"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+
+def test_record_collective_integration_rolls_back_when_save_fails(tmp_path, monkeypatch):
+    """A failed persist must restore in-memory collective state and leave state.json untouched."""
+    state = _seeded_collective_state(tmp_path)
+    before_last = dict(state.last_collective)
+    before_history = [dict(item) for item in state.collective_attempts]
+    disk_before = (tmp_path / "state.json").read_text(encoding="utf-8")
+
+    def _boom(_session_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", _boom)
+
+    with pytest.raises(OSError, match="disk full"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+    assert state.last_collective == before_last
+    assert state.collective_attempts == before_history
+    assert (tmp_path / "state.json").read_text(encoding="utf-8") == disk_before
+
+
 def test_rejects_a_missing_candidate_artifact(tmp_path):
     state = SimpleNamespace(
         last_trace_analyze={
