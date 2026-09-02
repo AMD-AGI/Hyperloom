@@ -1192,9 +1192,8 @@ def test_internal_sweep_idempotency_key_does_not_collide_with_llm_path():
     assert not internal_key.startswith("approved-")
 
 
-# 6. PolicyGate sweep_phase_singleton rule
-class _SweepSingletonState:
-    """SharedState stand-in carrying just the fields the ``sweep_phase_singleton`` rule reads."""
+class _SweepPhaseState:
+    """SharedState stand-in carrying just the phase rows the gate reads."""
 
     def __init__(self, phase_history=None):
         self.phase_history = list(phase_history or [])
@@ -1224,138 +1223,6 @@ def _make_policy_gate(*, shared_state):
     return PolicyGate(
         role_registry=default_role_registry(),
         shared_state=shared_state,
-    )
-
-
-def test_sweep_singleton_denies_delegate_after_auto_enqueue_stamped():
-    """Once auto conc_sweep is stamped, LLM full sweep is denied."""
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
-
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc123")],
-    )
-    gate = _make_policy_gate(shared_state=state)
-
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_sweep_singleton(
-            payload={"action_name": "sweep", "params": {}},
-            intent_kind="delegate",
-        )
-    assert excinfo.value.rule == "sweep_phase_singleton"
-    # Hint must mention the bypass switch
-    assert "bypass_sweep_singleton" in (excinfo.value.hint or "")
-
-
-def test_sweep_singleton_denies_propose_action_after_auto_enqueue_stamped():
-    """Same shape on the propose_action channel — defense in depth."""
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
-
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-xyz")],
-    )
-    gate = _make_policy_gate(shared_state=state)
-
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate._validate_sweep_singleton(
-            payload={"action_name": "sweep", "params": {}},
-            intent_kind="propose_action",
-        )
-    assert excinfo.value.rule == "sweep_phase_singleton"
-
-
-def test_sweep_singleton_inert_before_auto_enqueue_stamps_evidence():
-    """Race-window: a SWEEP row without auto conc_sweep evidence keeps the rule inert."""
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
-    )
-    gate = _make_policy_gate(shared_state=state)
-
-    # Must NOT raise.
-    gate._validate_sweep_singleton(
-        payload={"action_name": "sweep", "params": {}},
-        intent_kind="delegate",
-    )
-
-
-def test_sweep_singleton_inert_outside_sweep_phase():
-    """When the latest phase row isn't SWEEP, the rule stays silent (``_validate_phase_action`` fires instead)."""
-    explore_row = {
-        "to_phase": "EXPLORE",
-        "from_phase": "PRELUDE",
-        "reason": "prelude_done",
-        "evidence": {"auto_conc_sweep_task_id": "stale"},
-    }
-    state = _SweepSingletonState(phase_history=[explore_row])
-    gate = _make_policy_gate(shared_state=state)
-    # rule keys on phase_history[-1].to_phase=="SWEEP", so the stale id is inert
-    gate._validate_sweep_singleton(
-        payload={"action_name": "sweep"},
-        intent_kind="delegate",
-    )
-
-
-def test_sweep_singleton_inert_when_phase_history_empty():
-    """Defensive: an empty phase_history must not raise."""
-    state = _SweepSingletonState(phase_history=[])
-    gate = _make_policy_gate(shared_state=state)
-    gate._validate_sweep_singleton(
-        payload={"action_name": "sweep"},
-        intent_kind="delegate",
-    )
-
-
-def test_sweep_singleton_inert_when_shared_state_is_none():
-    """PolicyGate without a SharedState reference self-defends with an early return."""
-    from hyperloom.orchestrator.roles.agent_role import (
-        default_role_registry,
-    )
-    from hyperloom.orchestrator.policy.gate import PolicyGate
-
-    gate = PolicyGate(role_registry=default_role_registry())
-    assert gate.shared_state is None
-    gate._validate_sweep_singleton(
-        payload={"action_name": "sweep"},
-        intent_kind="delegate",
-    )
-
-
-def test_sweep_singleton_self_clears_at_sweep_to_close_transition():
-    """Once SWEEP→CLOSE happens, the latest row is CLOSE so the singleton rule stops firing."""
-    state = _SweepSingletonState(
-        phase_history=[
-            _sweep_phase_row(auto_sweep_task_id="auto-sweep-abc"),
-            {
-                "to_phase": "CLOSE",
-                "from_phase": "SWEEP",
-                "reason": "sweep_done",
-                "evidence": {},
-            },
-        ],
-    )
-    gate = _make_policy_gate(shared_state=state)
-    # Must NOT raise — the singleton rule looks at phase_history[-1] (now CLOSE)
-    gate._validate_sweep_singleton(
-        payload={"action_name": "sweep"},
-        intent_kind="delegate",
-    )
-
-
-def test_sweep_singleton_bypass_flag_lets_operator_force_second_sweep():
-    """Operator escape hatch: ``params.bypass_sweep_singleton=True`` silences the rule for a second sweep."""
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
-    )
-    gate = _make_policy_gate(shared_state=state)
-    # Must NOT raise.
-    gate._validate_sweep_singleton(
-        payload={
-            "action_name": "sweep",
-            "params": {
-                "bypass_sweep_singleton": True,
-                "grid": {"conc_values": [128]},
-            },
-        },
-        intent_kind="delegate",
     )
 
 
@@ -1409,51 +1276,58 @@ def test_baseline_singleton_bypass_flag_is_rejected():
         )
 
 
-# 6b. End-to-end through full validate_intent (delegate / propose_action)
-def test_validate_intent_denies_llm_sweep_delegate_in_active_sweep_phase():
-    """Through full ``validate_intent``: a sweep delegate in active SWEEP fires the singleton rule before ``_validate_phase_action``."""
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
-    )
+# 6b. The workload grid action is gone; SWEEP admits the ladder and nothing else
+def _sweep_phase_gate(**kw):
+    class _S:
+        phase = "SWEEP"
+        phase_history = [_sweep_phase_row()]
+
+    from hyperloom.orchestrator.policy.gate import PolicyGate
+    from hyperloom.orchestrator.roles.agent_role import default_role_registry
+
+    return PolicyGate(role_registry=default_role_registry(), shared_state=_S(), **kw)
+
+
+@pytest.mark.parametrize(
+    "intent_kind",
+    ["delegate", "propose_action"],
+)
+def test_an_llm_workload_sweep_is_no_longer_a_proposable_action(intent_kind):
+    """The full (CONC,ISL,OSL) grid is retired; SWEEP runs the CONC ladder only.
+
+    It used to be refused by its own singleton rule once the auto-enqueue had
+    stamped its evidence. The action no longer exists, so the phase contract is
+    what refuses it, and it refuses it at every point in the phase rather than
+    only after the ladder was enqueued.
+    """
+    from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
-    )
-    gate = _make_policy_gate(shared_state=state)
+    gate = _sweep_phase_gate(strict_phase=True)
     intent = Intent(
-        type=IntentType.DELEGATE,
-        payload={
-            "action_name": "sweep",
-            "predicted_gain_pct": 1.0,
-            "params": {"grid": {"conc_values": [64]}},
-        },
+        type=IntentType.DELEGATE if intent_kind == "delegate" else IntentType.PROPOSE_ACTION,
+        payload={"action_name": "sweep", "predicted_gain_pct": 1.0, "params": {}},
     )
     with pytest.raises(PolicyDenied) as excinfo:
         gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "sweep_phase_singleton"
+    assert excinfo.value.rule == "phase_incompatible"
 
 
-def test_validate_intent_denies_llm_sweep_propose_in_active_sweep_phase():
-    """Same shape on propose_action."""
-    from hyperloom.inference_optimizer.protocol.intent import (
-        Intent,
-        IntentType,
+def test_the_retired_action_is_off_every_surface_it_was_on():
+    from hyperloom.inference_optimizer.cli.executors import _REAL_EXECUTORS_FULL
+    from hyperloom.inference_optimizer.protocol.action_surfaces import (
+        ACTION_CATALOGUE,
+        FULL_ENABLED_ACTIONS,
+        NO_KERNEL_AGENT_ENABLED_ACTIONS,
     )
-    from hyperloom.orchestrator.policy.gate import PolicyDenied
+    from hyperloom.orchestrator.phases.machine_state import PHASE_ALLOWED_ACTIONS
 
-    state = _SweepSingletonState(
-        phase_history=[_sweep_phase_row(auto_sweep_task_id="auto-sweep-abc")],
-    )
-    gate = _make_policy_gate(shared_state=state)
-    intent = Intent(
-        type=IntentType.PROPOSE_ACTION,
-        payload={"action_name": "sweep"},
-    )
-    with pytest.raises(PolicyDenied) as excinfo:
-        gate.validate_intent("orchestration", intent)
-    assert excinfo.value.rule == "sweep_phase_singleton"
+    assert "sweep" not in ACTION_CATALOGUE
+    assert "sweep" not in FULL_ENABLED_ACTIONS
+    assert "sweep" not in NO_KERNEL_AGENT_ENABLED_ACTIONS
+    assert "sweep" not in _REAL_EXECUTORS_FULL
+    assert "sweep" not in PHASE_ALLOWED_ACTIONS["SWEEP"]
+    assert "conc_sweep" in PHASE_ALLOWED_ACTIONS["SWEEP"]
 
 
 # 7. conc_sweep is Coordinator-internal — dispatch re-validation must not
@@ -1482,7 +1356,7 @@ def test_validate_dispatched_task_allows_auto_conc_sweep_against_own_evidence():
     a Coordinator-internal action, so it receives path checks only and is not
     re-validated against the singleton guard.
     """
-    state = _SweepSingletonState(
+    state = _SweepPhaseState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="conc-sweep-self-id")],
     )
     gate = _make_policy_gate(shared_state=state)
@@ -1507,7 +1381,7 @@ def test_validate_intent_denies_llm_conc_sweep_propose_as_coordinator_managed():
     )
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
-    state = _SweepSingletonState(
+    state = _SweepPhaseState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
     )
     gate = _make_policy_gate(shared_state=state)
@@ -1528,7 +1402,7 @@ def test_validate_intent_denies_llm_conc_sweep_delegate_as_coordinator_managed()
     )
     from hyperloom.orchestrator.policy.gate import PolicyDenied
 
-    state = _SweepSingletonState(
+    state = _SweepPhaseState(
         phase_history=[_sweep_phase_row(auto_sweep_task_id="")],
     )
     gate = _make_policy_gate(shared_state=state)

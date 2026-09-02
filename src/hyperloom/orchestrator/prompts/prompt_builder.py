@@ -442,8 +442,8 @@ def _format_grid_injection_hint(name: str) -> str | None:
         name: The action name to render a grid-injection hint for.
 
     Returns:
-        The grid-injection hint string for ``explore`` / ``sweep``, or ``None``
-        for any other action.
+        The grid-injection hint string for ``explore``, or ``None`` for any
+        other action.
     """
     if name == "explore":
         return (
@@ -469,12 +469,6 @@ def _format_grid_injection_hint(name: str) -> str | None:
             "beats the median of the four you already have; a grid the round "
             "cannot finish is truncated from the end, dropping whatever you "
             "ranked last rather than whatever is worth least."
-        )
-    if name == "sweep":
-        return (
-            "GRID OVERRIDE: emit `delegate{action_name='sweep', params={grid: "
-            "[{conc, isl, osl}, ...]}}` (or params.conc_values / "
-            "params.isl_osl_values) to override the workload frontier."
         )
     return None
 

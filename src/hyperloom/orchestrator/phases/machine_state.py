@@ -96,8 +96,7 @@ PHASE_ALLOWED_ACTIONS: dict[str, frozenset[str]] = {
     # No specialist below: SWEEP is the validation window and CLOSE only reports.
     PHASE_SWEEP: frozenset(
         {
-            # conc_sweep: Coordinator-internal post-sweep CONC-ladder benchmark.
-            "sweep",
+            # conc_sweep: Coordinator-internal CONC-ladder benchmark.
             "conc_sweep",
             "recover",
         }

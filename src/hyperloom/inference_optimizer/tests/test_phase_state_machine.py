@@ -51,8 +51,8 @@ def test_allowed_actions_disjoint_phases():
     assert "kernel_opt" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "gemm_tuning" in phase_state.PHASE_ALLOWED_ACTIONS["KERNEL_AGENT"]
     assert "gemm_tuning" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
-    assert "sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
-    assert "sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
+    assert "conc_sweep" in phase_state.PHASE_ALLOWED_ACTIONS["SWEEP"]
+    assert "conc_sweep" not in phase_state.PHASE_ALLOWED_ACTIONS["FRAMEWORK_AGENT"]
     assert "report" in phase_state.PHASE_ALLOWED_ACTIONS["CLOSE"]
 
 

@@ -118,7 +118,6 @@ FULL_ENABLED_ACTIONS: tuple[str, ...] = (
     "explore",
     "specialist",
     "integrate_patch",
-    "sweep",
     "kernel_opt",
     "integrate",
     "gemm_tuning",
@@ -134,7 +133,6 @@ NO_KERNEL_AGENT_ENABLED_ACTIONS: tuple[str, ...] = (
     "explore",
     "specialist",
     "integrate_patch",
-    "sweep",
     "report",
 )
 
@@ -392,23 +390,6 @@ ACTION_CATALOGUE: Mapping[str, ActionMetadata] = MappingProxyType(
             description=(
                 "Dispatch an LLM specialist on research_lane; reads KB / PR feed for knowledge-domain tags, may write "
                 "worktree patches, emits one specialist_done intent."
-            ),
-        ),
-        "sweep": ActionMetadata(
-            name="sweep",
-            family="shallow",
-            pipeline_phase="explore",
-            verdict_class="exploration",
-            expected_gain_pct=(3.0, 10.0),
-            accuracy_risk=0.0,
-            crash_risk=0.05,
-            typical_runtime_min=15.0,
-            lease_ttl_sec=7200,
-            requires_lanes=("server_lifecycle", "benchmark_lane"),
-            side_effects=("launches_server", "writes_results"),
-            description=(
-                "Workload sweep over (CONC,ISL,OSL) on top of current best to validate gains beyond smoke workload. "
-                'Override via params.conc_values=[int,...] and params.isl_osl_configs=["<ISL>:<OSL>",...].'
             ),
         ),
         "target_analysis": ActionMetadata(
