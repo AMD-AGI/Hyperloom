@@ -89,6 +89,7 @@ from tracelens_skill_runner import (
     run_tracelens_skill,
 )
 
+from _bypass_report import partition_kernels
 from _io_utils import append_log, atomic_write_json, read_last_lines, safe_float, utc_now
 from _nccl_summary_candidates import extract_collective_candidates
 
@@ -7784,8 +7785,12 @@ def write_reports(
     kernel_candidates_path = run_dir / "kernel_candidates.json"
     # ``hot_kernels`` is always the full ranked set; the reusable dispatch subset
     # is exposed as ``routable_kernels`` and non-routable dicts as ``skipped_kernels``.
-    routable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is True]
-    skipped_kernels = [c for c in candidates if isinstance(c, dict) and c.get("reusable_native_kernel") is not True]
+    # This site's routability is the coarse reusability predicate; the shared
+    # helper guarantees the two lists partition ``candidates`` by construction.
+    routable_candidates, skipped_kernels = partition_kernels(
+        candidates,
+        lambda c: c.get("reusable_native_kernel") is True,
+    )
     atomic_write_json(
         kernel_candidates_path,
         {

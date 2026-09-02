@@ -21,6 +21,7 @@ import csv
 import io
 import re
 from collections import Counter, defaultdict
+from collections.abc import Callable
 from typing import Any
 
 from _bypass_benchmark_resolver import find_benchmark_files, repo_root_from_source
@@ -401,6 +402,41 @@ def _short_name(kernel_name: str) -> str:
     return n[:80] if n else "unknown_kernel"
 
 
+def partition_kernels(
+    hot_kernels: list[dict[str, Any]],
+    is_routable: Callable[[dict[str, Any]], bool],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split a hot-kernel list into ``(routable, skipped)`` one way, everywhere.
+
+    The three ``skipped_kernels`` producers used to each build the list by hand,
+    with subtly different comprehensions; a reader could not trust that
+    ``hot_kernels == routable + skipped`` held. This is the single partition path
+    they now share.
+
+    The ``routability`` test is the *caller's* -- the strict dispatch predicate
+    (reusable + resolved source + dispatch-grade shape) and the coarse
+    reusability predicate mean different things and are contracted separately, so
+    each site passes its own ``is_routable``. What is unified is the *shape* of
+    the split: ``skipped`` is always the exact ``kernel_id`` complement of
+    ``routable`` within ``hot_kernels``, so the two lists partition the input with
+    no overlap and no leakage by construction.
+
+    Args:
+        hot_kernels: The full ranked hotspot set; each row carries ``kernel_id``.
+        is_routable: Predicate deciding whether a row belongs in ``routable``.
+
+    Returns:
+        ``(routable_kernels, skipped_kernels)`` -- a partition of ``hot_kernels``.
+    """
+    routable: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for row in hot_kernels:
+        if not isinstance(row, dict):
+            continue
+        (routable if is_routable(row) else skipped).append(row)
+    return routable, skipped
+
+
 def build_candidates(
     analyze_out: dict[str, Any],
     *,
@@ -647,15 +683,14 @@ def build_candidates(
     # (launch_grid/tile_name) shape is rejected by the kernel-opt gate, so those
     # kernels stay in ``skipped_kernels`` and never re-enter the untried queue.
     # ``hot_kernels`` stays the FULL ranked hotspot set.
-    routable_kernels = [
-        c
-        for c in hot_kernels
-        if c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")
-    ]
-    # Complement within ``hot_kernels`` so the contract
-    # ``hot_kernels == routable_kernels + skipped_kernels`` holds.
-    routable_ids = {c["kernel_id"] for c in routable_kernels}
-    skipped_kernels = [c for c in hot_kernels if c["kernel_id"] not in routable_ids]
+    # Complement within ``hot_kernels`` (via the shared partition helper) so the
+    # contract ``hot_kernels == routable_kernels + skipped_kernels`` holds. This
+    # site's routability is the strict dispatch predicate: reusable + resolved
+    # source + a dispatch-grade operand shape.
+    routable_kernels, skipped_kernels = partition_kernels(
+        hot_kernels,
+        lambda c: bool(c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")),
+    )
     return {
         "source": "bypass",
         "framework": framework,

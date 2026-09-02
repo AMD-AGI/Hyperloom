@@ -328,6 +328,62 @@ def test_build_candidates_partition_covers_reusable_without_source(monkeypatch):
     assert len(cands["hot_kernels"]) == len(cands["routable_kernels"]) + len(cands["skipped_kernels"])
 
 
+def test_partition_kernels_is_the_exact_complement():
+    # The unified partition helper: ``skipped`` is always the kernel_id complement
+    # of ``routable``, so the two lists cover the input with no overlap regardless
+    # of the predicate handed in.
+    hot = [
+        {"kernel_id": "k1", "reusable_native_kernel": True},
+        {"kernel_id": "k2", "reusable_native_kernel": False},
+        {"kernel_id": "k3", "reusable_native_kernel": True},
+    ]
+    routable, skipped = report.partition_kernels(hot, lambda c: c.get("reusable_native_kernel") is True)
+    assert [c["kernel_id"] for c in routable] == ["k1", "k3"]
+    assert [c["kernel_id"] for c in skipped] == ["k2"]
+    routable_ids = {c["kernel_id"] for c in routable}
+    skipped_ids = {c["kernel_id"] for c in skipped}
+    hot_ids = {c["kernel_id"] for c in hot}
+    assert routable_ids | skipped_ids == hot_ids
+    assert routable_ids & skipped_ids == set()
+    assert len(routable) + len(skipped) == len(hot)
+
+
+def test_partition_kernels_honours_the_callers_predicate():
+    # The two live producers pass DIFFERENT routability predicates and must get
+    # DIFFERENT partitions from the same helper -- the strict dispatch predicate
+    # (site A) versus the coarse reusability predicate (site B). A reusable kernel
+    # with no resolved source is routable under B but skipped under A.
+    hot = [
+        {"kernel_id": "k1", "reusable_native_kernel": True, "source_file": "/r/k1.py", "shape_dispatchable": True},
+        {"kernel_id": "k2", "reusable_native_kernel": True, "source_file": "", "shape_dispatchable": False},
+    ]
+    strict = lambda c: bool(  # noqa: E731 - inline predicate mirrors site A
+        c.get("reusable_native_kernel") and c.get("source_file") and c.get("shape_dispatchable")
+    )
+    coarse = lambda c: c.get("reusable_native_kernel") is True  # noqa: E731 - mirrors site B
+
+    strict_routable, strict_skipped = report.partition_kernels(hot, strict)
+    coarse_routable, coarse_skipped = report.partition_kernels(hot, coarse)
+
+    assert [c["kernel_id"] for c in strict_routable] == ["k1"]
+    assert [c["kernel_id"] for c in strict_skipped] == ["k2"]
+    # k2 is reusable, so the coarse predicate keeps it routable.
+    assert [c["kernel_id"] for c in coarse_routable] == ["k1", "k2"]
+    assert coarse_skipped == []
+
+
+def test_partition_kernels_drops_non_dict_rows_and_still_partitions():
+    # A non-dict row is skipped entirely (matches the isinstance guards at the live
+    # sites); every dict row lands in exactly one bucket by its own predicate value,
+    # so the partition holds even without a kernel_id.
+    hot = [{"kernel_id": "k1", "reusable_native_kernel": True}, "not-a-dict", {"reusable_native_kernel": True}]
+    routable, skipped = report.partition_kernels(hot, lambda c: c.get("reusable_native_kernel") is True)
+    assert routable == [{"kernel_id": "k1", "reusable_native_kernel": True}, {"reusable_native_kernel": True}]
+    assert skipped == []
+    # The non-dict row appears in neither bucket -- it is not a kernel.
+    assert len(routable) + len(skipped) == 2
+
+
 def test_build_summary_counts(monkeypatch):
     # summary.json mirrors kernel_candidates.json's routable/skipped partition:
     # tasks == routable, skipped == the rest. Resolve the reusable SDPA kernel's
