@@ -554,8 +554,7 @@ class SpecialistRunner:
         notes: list[str] = []
         if domain.key not in SPECIALIST_DOMAIN_KEYS:
             notes.append(
-                f"domain={domain.key!r} is outside the domain catalogue "
-                f"(available_in={domain.available_in!r}); using generic prompt template"
+                f"domain={domain.key!r} is outside the domain catalogue; using generic prompt template"
             )
 
         # Worktree — created only under subprocess dispatch; surfaced via ``workspace_path``.

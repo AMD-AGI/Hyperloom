@@ -199,7 +199,6 @@ _AGENT_BY_ACTION = {
     "sweep": "coordinator",
     "conc_sweep": "coordinator",
     "validate": "coordinator",
-    "validate_stack": "coordinator",
     "trace_analyze": "coordinator",
     "critic": "critic",
     "robustness": "robustness",

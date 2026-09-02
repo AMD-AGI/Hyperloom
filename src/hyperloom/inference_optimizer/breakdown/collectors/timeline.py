@@ -36,9 +36,6 @@ _AUDIT_ACTIONS = (
     "baseline",
     "profile",
     "explore",
-    "backends",
-    "params",
-    "validate_stack",
     "roofline",
 )
 
@@ -542,31 +539,6 @@ def collect_capability_summary(
         elif geak_cap.get("status") == "not_attempted":
             geak_cap["status"] = "attempted"
 
-    # Legacy capability rows for archived sessions.
-    backends = _capability_for_action(state, "backends")
-    backends_search = state.get("backends_search") or {}
-    if isinstance(backends_search, dict):
-        backends["tested"] = len(backends_search.get("tested") or {})
-        if backends_search.get("accepted"):
-            backends["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0 for v in backends_search["accepted"] if isinstance(v, dict)),
-                default=None,
-            )
-        _fold_search_ledger_keeps(backends, backends_search)
-
-    params = _capability_for_action(state, "params")
-    params_search = state.get("params_search") or {}
-    if isinstance(params_search, dict):
-        params["tested"] = len(params_search.get("tested") or {})
-        if params_search.get("accepted"):
-            params["best_gain_pct"] = max(
-                (_to_float(v.get("gain_pct")) or 0.0 for v in params_search["accepted"] if isinstance(v, dict)),
-                default=None,
-            )
-        _fold_search_ledger_keeps(params, params_search)
-
-    validate = _capability_for_action(state, "validate_stack")
-    validate["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))
 
     # Merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
@@ -597,11 +569,7 @@ def collect_capability_summary(
     return {
         "geak": geak_cap,
         "forge": forge_cap,
-        # Primary post-merge row; backends/params/validate_stack are compat rows.
         "explore": explore,
-        "backends": backends,
-        "params": params,
-        "validate_stack": validate,
         "specialist": specialist_row,
     }
 

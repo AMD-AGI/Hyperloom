@@ -3639,8 +3639,6 @@ class KernelPhase(PhaseHandler):
                 budget_minutes=per_tuner_budget_minutes,
                 extra_server_args=("--moe-runner-backend aiter" if "AITER_CONFIG_FMOE" in stacked_envs else ""),
             )
-            if paired is not None:
-                result["paired_confirmation"] = paired.to_dict()
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,

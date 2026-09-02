@@ -15,15 +15,6 @@ from typing import Any, Literal, TypedDict
 
 from ..session.sbd_v6 import SCHEMA_VERSION_V6
 
-#: Historical collector-only schema retained for archived-reader identification.
-SCHEMA_VERSION_V2 = "hyperloom.session_breakdown.v2"
-
-#: breakdown schema version stamped when the file was assembled from the
-#: author-time recorder fragments. Same wire shape as v2 plus recorder-only
-#: sections; lets consumers tell a recorder-aggregated breakdown apart from a
-#: legacy collector fallback.
-SCHEMA_VERSION_V3 = "hyperloom.session_breakdown.v3.0"
-
 #: Unified optimization schema. This is a breaking wire-shape cutover: adopted
 #: optimizations are emitted only through ``optimizations``, and that section
 #: is built exclusively from recorder fragments -- never reconstructed from
@@ -3245,8 +3236,6 @@ class SessionBreakdown(TypedDict, total=False):
 
 __all__ = [
     "SCHEMA_VERSION",
-    "SCHEMA_VERSION_V2",
-    "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_V5",
     "SCHEMA_VERSION_V6",
     "Adoption",
