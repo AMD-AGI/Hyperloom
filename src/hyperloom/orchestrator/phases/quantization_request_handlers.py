@@ -26,6 +26,7 @@ async def run_quantization_prelude_async(
     prompt: str,
     source_model: str,
     workspace: Path,
+    provider: str = "claude",
 ) -> str:
     """Quantize ``source_model`` per ``prompt``; return the exported dir.
 
@@ -66,6 +67,7 @@ async def run_quantization_prelude_async(
         effective_prompt,
         workspace=workspace,
         interactive=False,
+        provider=provider,
     )
 
     final = result.assessment.final

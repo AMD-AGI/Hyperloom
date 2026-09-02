@@ -908,8 +908,9 @@ def materialize_config_with_envs(
     (so Magpie doesn't fall through to a native script hardcoding
     ``--result-dir /workspace/``); ``benchmark_script`` (pre-sanitized) re-pins
     after that; ``PRECISION`` → ``precision``; ``CONC/ISL/OSL/MAX_MODEL_LEN/TP/
-    RANDOM_RANGE_RATIO`` → ``benchmark.envs``; ``ROCR_VISIBLE_DEVICES``
-    reconciled against TP; ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
+    RANDOM_RANGE_RATIO`` → ``benchmark.envs``; selected ROCm visibility
+    (ROCR by default, HIP when explicitly opted in) reconciled against TP;
+    ``RUN_EVAL`` defaulted; ``NUM_PROMPTS`` /
     ``NUM_WARMUPS`` computed adaptively. ``inferencex_path`` explicitly pins
     ``benchmark.inferencex_path`` for one task (falling back to
     ``$INFERENCEX_PATH`` for existing callers). ``extra_server_args`` routes
@@ -1027,18 +1028,27 @@ def materialize_config_with_envs(
     r_env = os.environ.get("RANDOM_RANGE_RATIO", "").strip()
     if r_env:
         envs["RANDOM_RANGE_RATIO"] = float(r_env)
-    rocr_env = os.environ.get("ROCR_VISIBLE_DEVICES", "").strip()
-    if rocr_env:
-        envs["ROCR_VISIBLE_DEVICES"] = rocr_env
+    prefer_hip = os.environ.get("HYPERLOOM_PREFER_HIP_VISIBLE_DEVICES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    visibility_key = "HIP_VISIBLE_DEVICES" if prefer_hip else "ROCR_VISIBLE_DEVICES"
+    stale_visibility_key = "ROCR_VISIBLE_DEVICES" if prefer_hip else "HIP_VISIBLE_DEVICES"
+    envs.pop(stale_visibility_key, None)
+    visibility_env = os.environ.get(visibility_key, "").strip()
+    if visibility_env:
+        envs[visibility_key] = visibility_env
     tp_from_env = os.environ.get("TP", "").strip()
     tp_from_yaml = envs.get("TP")
-    rocr_yaml = str(envs.get("ROCR_VISIBLE_DEVICES") or "").strip()
-    rocr_devices = [d.strip() for d in rocr_yaml.split(",") if d.strip()]
+    visibility_yaml = str(envs.get(visibility_key) or "").strip()
+    visible_devices = [d.strip() for d in visibility_yaml.split(",") if d.strip()]
     if tp_from_env:
         resolved_tp = int(tp_from_env)
-    elif rocr_yaml and not tp_from_yaml:
+    elif visibility_yaml and not tp_from_yaml:
         # Derive TP from the user-pinned GPU list when the YAML doesn't set TP.
-        resolved_tp = len(rocr_devices)
+        resolved_tp = len(visible_devices)
         envs["TP"] = resolved_tp
     else:
         resolved_tp = int(tp_from_yaml or 1)
@@ -1058,19 +1068,21 @@ def materialize_config_with_envs(
             )
             resolved_tp = visible
     envs["TP"] = resolved_tp
-    if not rocr_yaml or len(rocr_devices) < resolved_tp:
+    if not visibility_yaml or len(visible_devices) < resolved_tp:
         derived = ",".join(str(i) for i in range(resolved_tp))
-        if rocr_yaml and rocr_yaml != derived:
+        if visibility_yaml and visibility_yaml != derived:
             log.warning(
-                "ROCR_VISIBLE_DEVICES=%r has %d devices but TP=%d; "
+                "%s=%r has %d devices but TP=%d; "
                 "expanding to %r so SGLang sees enough GPUs. Set "
-                "ROCR_VISIBLE_DEVICES explicitly to override.",
-                rocr_yaml,
-                len(rocr_devices),
+                "%s explicitly to override.",
+                visibility_key,
+                visibility_yaml,
+                len(visible_devices),
                 resolved_tp,
                 derived,
+                visibility_key,
             )
-        envs["ROCR_VISIBLE_DEVICES"] = derived
+        envs[visibility_key] = derived
 
     # Last-resort fallbacks kept in sync with the CLI workload defaults
     # (parser.DEFAULT_ISL/OSL/CONC); normally the CLI has already projected the

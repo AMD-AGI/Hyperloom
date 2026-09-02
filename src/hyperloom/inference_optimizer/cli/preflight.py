@@ -514,9 +514,17 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
     # through one of them, and a deployment may be Anthropic-only, OpenAI-only, or
     # both. Omitting openai_codex leaves the TraceLens skill runner and the forge
     # kernel backend unable to start on an OpenAI-only gateway.
+    explicit_hermes = os.environ.get("HYPERLOOM_AGENT_BACKEND", "").strip().lower() == "hermes"
+    agent_candidates = (
+        ()
+        if explicit_hermes
+        else (
+            ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
+            ("openai_codex", "openai-codex>=0.144"),
+        )
+    )
     candidates = (
-        ("claude_agent_sdk", "claude-agent-sdk>=0.2.110"),
-        ("openai_codex", "openai-codex>=0.144"),
+        *agent_candidates,
         ("openai", "openai>=1.50"),
         ("httpx", "httpx>=0.27"),
     )
@@ -550,7 +558,13 @@ def _ensure_python_sdks(python_exe: str, pip_extra: list[str]) -> dict[str, Any]
     }
 
 
-_RAY_VERSION = "2.44.1"
+def _ray_version_for_python(version_info: tuple[int, int]) -> str:
+    """Return the pinned Ray line that publishes wheels for this Python."""
+
+    return "2.55.1" if version_info >= (3, 14) else "2.44.1"
+
+
+_RAY_VERSION = _ray_version_for_python((sys.version_info.major, sys.version_info.minor))
 # Ray 2.44.1's CLI currently fails during import with click >= 8.3.0.
 _RAY_CLI_CLICK_MAX_VERSION = "8.3.0"
 _RAY_INSTALL_SPEC = f"ray[default]=={_RAY_VERSION}"
@@ -963,6 +977,9 @@ def _probe_rocm_build(framework: str, python_exe: str) -> _Probe:
             "    from vllm.platforms import current_platform",
             "    ck = getattr(current_platform, 'is_rocm', None)",
             "    ok = bool(ck()) if callable(ck) else 'rocm' in f'{current_platform!r}'.lower()",
+            "    version = str(getattr(vllm, '__version__', '')).lower()",
+            "    unspecified = type(current_platform).__name__ == 'UnspecifiedPlatform'",
+            "    ok = ok or (unspecified and 'rocm' in version)",
             "    return 0 if ok else 1",
         ]
     else:
@@ -1507,13 +1524,29 @@ def _ensure_lm_eval_dep(
 
 
 def _unset_hip_visible_devices() -> None:
-    """Drop ``HIP_VISIBLE_DEVICES`` if ``ROCR_VISIBLE_DEVICES`` is set (SKILL.md §"GPU Runner Type").
+    """Resolve duplicate ROCm visibility variables for the selected runtime epoch.
 
-    ROCm gotcha: both set can make torch.cuda.is_available() false in Magpie; ROCR_VISIBLE_DEVICES is canonical.
+    Older Hyperloom images use ROCR as canonical. Newer Torch/ROCm wheels can
+    instead reject ROCR and require HIP. The launcher opts into that behavior
+    with ``HYPERLOOM_PREFER_HIP_VISIBLE_DEVICES=1``; no implicit global switch
+    is made for existing deployments.
     """
     if "HIP_VISIBLE_DEVICES" not in os.environ:
         return
     if "ROCR_VISIBLE_DEVICES" not in os.environ:
+        return
+    prefer_hip = os.environ.get("HYPERLOOM_PREFER_HIP_VISIBLE_DEVICES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if prefer_hip:
+        value = os.environ.pop("ROCR_VISIBLE_DEVICES")
+        print(
+            f"Preflight: WARNING — unset ROCR_VISIBLE_DEVICES={value!r} "
+            "(explicit HIP visibility selected for this Torch/ROCm epoch)"
+        )
         return
     value = os.environ.pop("HIP_VISIBLE_DEVICES")
     print(

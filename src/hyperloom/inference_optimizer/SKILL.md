@@ -41,6 +41,26 @@ The CLI starts a Python Coordinator that coordinates:
     WARNING; pass `--robustness-mock` explicitly to suppress it. See
     `src/hyperloom/inference_optimizer/multi_node/SKILL.md` (Robustness limitation in multi-node mode).
 
+### Orchestration and specialist agent runtime
+
+`HYPERLOOM_AGENT_BACKEND=auto|claude|codex|hermes` selects the agent runtime used by the original
+Coordinator and Arbor/EXPLORE specialist flow. `auto` preserves upstream credential-based
+Claude/Codex selection. `hermes` uses the same role prompts, intent envelope, specialist worktree,
+patch harvesting, and PolicyGate through:
+
+```bash
+export HYPERLOOM_AGENT_BACKEND=hermes
+export HYPERLOOM_HERMES_PROFILE=hyperloomfaithful
+export HYPERLOOM_HERMES_PROVIDER=openai-codex
+export HYPERLOOM_HERMES_MODEL=gpt-5.6-sol
+export HYPERLOOM_HERMES_EXTERNAL_SANDBOX=1  # only inside a verifiable outer container
+```
+
+Writable Hermes specialists fail closed unless that external-sandbox declaration is present. The
+transport supplies an explicit terminal/file toolset and the selected profile must have an empty fallback
+chain. Provider selection never grants correctness, KEEP/REVERT, integration, or
+promotion authority; those remain in the existing Coordinator, evaluator, and PolicyGate paths.
+
 State lives under a **session directory** (per optimization run).
 The **workspace root** is ``$USER_DATA_PATH`` (default
 ``/workspace/hyperloom``) — it holds shared ``runtime/`` and ``logs/``.
@@ -612,7 +632,7 @@ when the file is absent, invalid, or stale.
 python3 -m hyperloom.inference_optimizer.cli optimize \
   --model "$MODEL_PATH" \
   --framework vllm \           # sglang (default) / vllm / atom / xdit / custom
-  --gpu-type MI300X \          # or omit for rocm-smi auto-detect
+  --gpu-type radeon8060s \     # Radeon 8060S / RDNA3.5 / gfx1151
   --model-class moe_mla \      # dense / moe_mla / moe_swa / moe_mla_nsa; categorical key for atom seed grid + framework gap token + recipe key + prompt label
   --isl 512 --osl 512 \        # workload shape — pass whatever the prompt states; omitting them uses defaults ISL=1024/OSL=1024
   --conc 64 \                  # client concurrency — pass the prompt's value; default 64
@@ -672,6 +692,9 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
   export dir — the adapter folds `--model` + a per-model export dir under the
   workspace root (`<workspace_root>/quantization/<model>/quantized`) into the
   prompt automatically.
+- `--quantize-provider claude|codex|hermes` selects the agent transport for this
+  same skill-driven prelude. Resolution is CLI flag, then
+  `$HYPERLOOM_QUANT_PROVIDER`, then `claude`.
 - **Structured path for UI/backends**: instead of free text, pass
   `--quantize-scheme <enum>` (one of `none` / `fp8` / `ptpc_fp8` / `mxfp4` /
   `mxfp4_fp8`); `mxfp4` / `mxfp4_fp8` are **MI355X-only**. It resolves to a
@@ -694,8 +717,9 @@ python3 -m hyperloom.inference_optimizer.cli optimize \
 - Prerequisites (in addition to the normal Setup): `$QUARK_ROOT` must point at
   a Quark checkout containing `.claude/skills/quark-torch-*`, and the installed
   `amd-quark` package version must match that checkout (install editable from
-  `$QUARK_ROOT` to keep them consistent). Claude SDK auth is the same
-  `ANTHROPIC_*` env the rest of the loop uses.
+  `$QUARK_ROOT` to keep them consistent). Select `claude`, `codex`, or `hermes`
+  through the quantization-agent provider option; every provider receives the
+  same Hyperloom `SKILL.md` and Quark skill registry.
 - After it finishes, the `Quantization prelude: model -> <dir>` line on stdout
   shows the quantized model path that the rest of the run will use; include it
   in status reports.
@@ -1041,13 +1065,18 @@ python3 -m hyperloom.inference_optimizer.cli optimize --gpu-type mi355x --model 
 GPU_TYPE=mi300x python3 -m hyperloom.inference_optimizer.cli optimize --model "$MODEL_PATH" --max-hours 2
 ```
 
-Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`. **`mi308x` and
+Accepted values: `mi300x`, `mi308x`, `mi325x`, `mi355x`, `radeon8060s`. **`mi308x` and
 `mi325x` map to `runner_type=mi300x`** with a warning, since the GPUs share the
 same runner family and Magpie has not shipped `sglang_mi308x.sh` /
 `sglang_mi325x.sh` / `vllm_mi308x.sh` / `vllm_mi325x.sh` yet. If you
 need a true MI308X/MI325X-specific script, uncomment the `benchmark_script:`
 template in the relevant YAML and point it at your script under
 `InferenceX/benchmarks/...`.
+
+`radeon8060s` maps to native `gfx1151` and uses the dedicated
+`radeon8060s` Magpie runner plus the retained Strix Halo vLLM/SGLang images.
+Do not apply MI300/MI355 AITER, CK, MFMA, OCP-FP8, or partition-mode assumptions
+to this RDNA3.5 target; use its wave32/WMMA/UMA hardware knowledge instead.
 
 Do not set `HIP_VISIBLE_DEVICES` on the known ROCm stack unless the user asks;
 it can make `torch.cuda.is_available()` return false. Use

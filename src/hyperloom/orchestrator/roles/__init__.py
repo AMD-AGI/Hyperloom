@@ -6,6 +6,7 @@
 from .base import Backend, BackendError, BackendTurnResult
 from .claude import ClaudeBackend
 from .codex import CodexBackend
+from .hermes import HermesBackend
 from .critic_agent import CriticAgentBackend, RuntimeCall, RuntimeCaller
 from .mcp_context_tools import (
     CONTEXT_TOOL_NAMES,
@@ -43,6 +44,7 @@ __all__ = [
     "CONTEXT_TOOL_QUALIFIED_NAMES",
     "ClaudeBackend",
     "CodexBackend",
+    "HermesBackend",
     "ContextProvider",
     "CriticAgentBackend",
     "EMIT_INTENT_TOOL_NAME",

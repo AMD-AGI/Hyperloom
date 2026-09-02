@@ -125,6 +125,21 @@ def test_framework_script_match_ok(tmp_path):
     assert bench["benchmark_script"] == "vllm_mi300x.sh"
 
 
+def test_materializer_emits_explicit_hip_visibility_epoch(tmp_path, monkeypatch):
+    src = tmp_path / "cfg.yaml"
+    _write_yaml_with_envs(src, "vllm", {"ROCR_VISIBLE_DEVICES": "9"})
+    monkeypatch.setenv("HYPERLOOM_PREFER_HIP_VISIBLE_DEVICES", "1")
+    monkeypatch.setenv("HIP_VISIBLE_DEVICES", "4,5")
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("TP", "2")
+
+    out = materialize_config_with_envs(src, tmp_path / "out")
+    envs = yaml.safe_load(out.read_text())["benchmark"]["envs"]
+
+    assert envs["HIP_VISIBLE_DEVICES"] == "4,5"
+    assert "ROCR_VISIBLE_DEVICES" not in envs
+
+
 def test_single_node_explicit_tp_overrides_stale_env(monkeypatch):
     """`optimize --tp N` must reach YAML materialization on single-node."""
     monkeypatch.setenv("TP", "8")

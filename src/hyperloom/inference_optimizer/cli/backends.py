@@ -22,6 +22,7 @@ from hyperloom.inference_optimizer.session.session_paths import agent_dir
 from hyperloom.orchestrator.roles import (
     ClaudeBackend,
     CodexBackend,
+    HermesBackend,
     CriticAgentBackend,
     MockCriticBackend,
     MockRobustnessBackend,
@@ -231,13 +232,27 @@ def _build_backends(
             options=robustness_options,
         )
 
-    if provider_openai_only:
+    requested_orchestration = os.environ.get("HYPERLOOM_AGENT_BACKEND", "auto").strip().lower() or "auto"
+    if requested_orchestration not in {"auto", "claude", "codex", "hermes"}:
+        raise ValueError("HYPERLOOM_AGENT_BACKEND must be one of: auto, claude, codex, hermes")
+
+    intents = default_role_registry()["orchestration"].allowed_intents
+    if requested_orchestration == "hermes":
+        orchestration_backend: Any = HermesBackend(
+            allowed_intents=intents,
+            model=os.environ.get("HYPERLOOM_HERMES_MODEL", "").strip() or codex_model,
+            profile=os.environ.get("HYPERLOOM_HERMES_PROFILE", "hyperloomfaithful").strip(),
+            inference_provider=os.environ.get("HYPERLOOM_HERMES_PROVIDER", "openai-codex").strip(),
+            hermes_bin=os.environ.get("HYPERLOOM_HERMES_BIN", "").strip(),
+            cwd=agent_dir(session_dir, "orchestration") / "hermes_workspace",
+        )
+    elif requested_orchestration == "codex" or (requested_orchestration == "auto" and provider_openai_only):
         # Official OpenAI has no Claude endpoint; use the Codex backend for
         # Orchestration so an OpenAI-only config can drive the coordinator.
         # The role record supplies the intent set, so the enforced Codex
         # output schema and the Claude emit_intent tool describe one contract.
         orchestration_backend: Any = CodexBackend(
-            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+            allowed_intents=intents,
             model=codex_model,
             # Scratch only. The session directory itself stays outside the
             # sandbox's writable roots so the agent cannot rewrite session state.
@@ -251,7 +266,7 @@ def _build_backends(
             max_turns_default=4,
             conversational=True,
             capture_turn_diagnostics=True,
-            allowed_intents=default_role_registry()["orchestration"].allowed_intents,
+            allowed_intents=intents,
         )
 
     return {

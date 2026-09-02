@@ -26,6 +26,7 @@ _GFX_TO_RUNNER: dict[str, str] = {
     # the arch a runner is reached by is a deliberate choice, not an inverse.
     "gfx942": "mi300x",
     "gfx950": "mi355x",
+    "gfx1151": "radeon8060s",
 }
 
 #: Re-exported from ``hyperloom.common`` so provenance and this module cannot
@@ -59,7 +60,7 @@ def _resolve_gpu_type(
 
 
 def _autodetect_gpu_type() -> str | None:
-    """Return mi300x|mi308x|mi325x|mi355x or None if undetectable."""
+    """Return a known AMD board label, or None if undetectable."""
     import subprocess
 
     try:

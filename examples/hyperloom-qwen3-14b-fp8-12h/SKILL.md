@@ -37,6 +37,8 @@ Suggested Docker images:
 - `vllm`: `docker.io/vllm/vllm-openai-rocm:v0.27.1`
 - `sglang` MI300X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi30x-20260825`
 - `sglang` MI355X: `docker.io/lmsysorg/sglang-rocm:v0.5.18-rocm724-mi35x-20260825`
+- `vllm` Radeon 8060S/gfx1151: `hyperloom-vllm-v027-rocm10:v16-runtime-admission-v1`
+- `sglang` Radeon 8060S/gfx1151: `hyperloom-sglang-v0515-rocm10:v16-async-v7`
 
 In Docker mode, start a long-running container on `HYPERLOOM_DOCKER_TARGET_HOST`
 (or the current host when it is unset) before running setup or optimize:

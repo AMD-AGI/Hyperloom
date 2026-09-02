@@ -20,6 +20,7 @@ AMD_GPU_DISPATCH_IDENTITIES: dict[str, tuple[str, int]] = {
     "mi308x": ("gfx942", 304),
     "mi325x": ("gfx942", 304),
     "mi355x": ("gfx950", 256),
+    "radeon8060s": ("gfx1151", 40),
 }
 
 

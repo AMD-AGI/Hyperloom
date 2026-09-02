@@ -44,6 +44,7 @@ from hyperloom.common.codex_session import (
     resolve_codex_sandbox_mode,
 )
 from hyperloom.common.env import is_truthy
+from hyperloom.common.hermes_runtime import running_in_container
 from hyperloom.common.llm_attribution import inject_env as inject_attribution_env
 from hyperloom.common.env_safety import (
     BLOCKED_CHILD_ENV_NAMES,
@@ -79,6 +80,7 @@ class SpecialistAgentUnavailableError(RuntimeError):
 # The two agent CLIs that can drive the specialist contract (module docstring).
 AGENT_BACKEND_CLAUDE = "claude"
 AGENT_BACKEND_CODEX = "codex"
+AGENT_BACKEND_HERMES = "hermes"
 
 
 def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> str:
@@ -102,6 +104,10 @@ def resolve_specialist_agent_backend(env: Mapping[str, str] | None = None) -> st
         :data:`AGENT_BACKEND_CODEX` for an OpenAI-only deployment, else
         :data:`AGENT_BACKEND_CLAUDE`.
     """
+    source = os.environ if env is None else env
+    explicit = str(source.get("HYPERLOOM_AGENT_BACKEND") or "").strip().lower()
+    if explicit in {AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_HERMES}:
+        return explicit
     from hyperloom.common import llm_config  # local import: keep module import-light
 
     return AGENT_BACKEND_CODEX if llm_config.is_openai_only(env) else AGENT_BACKEND_CLAUDE
@@ -511,7 +517,7 @@ class SpecialistSubprocessConfig:
     """
 
     agent_backend: str = ""
-    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, or ``""``.
+    """Which agent CLI to spawn: ``"claude"``, ``"codex"``, ``"hermes"``, or ``""``.
 
     Empty resolves the deployment's credential shape per dispatch via
     :func:`resolve_specialist_agent_backend`. The CLI pins it explicitly at boot
@@ -525,6 +531,18 @@ class SpecialistSubprocessConfig:
     codex_executable: str = ""
     """Path / name of the codex CLI binary. Empty resolves it per
     :func:`resolve_codex_executable`."""
+
+    hermes_executable: str = "hermes"
+    """Path / name of the Hermes Agent CLI."""
+
+    hermes_profile: str = "hyperloomfaithful"
+    """Hermes profile carrying terminal/file tools and no fallback chain."""
+
+    hermes_provider: str = "openai-codex"
+    """Inference provider selected inside Hermes."""
+
+    hermes_external_sandbox: bool = False
+    """Whether a verifiable outer container confines Hermes terminal/file tools."""
 
     model: str = ""
     """Model id for the selected agent CLI. Empty = that CLI's own default."""
@@ -936,6 +954,13 @@ class SpecialistSubprocessDispatcher:
                     probe_sandbox=True,
                 )
                 env.update(launch_env_additions)
+            elif backend == AGENT_BACKEND_HERMES:
+                prompt_file.write_text(user_prompt, encoding="utf-8")
+                prompt_file.chmod(0o600)
+                cmd = self._build_hermes_cmd(
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                )
             else:
                 prompt_file.write_text(user_prompt, encoding="utf-8")
                 prompt_file.chmod(0o600)
@@ -1147,6 +1172,11 @@ class SpecialistSubprocessDispatcher:
                 outcome["error"] = (
                     f"{prior_error}; codex: {structured_error}" if prior_error else f"codex: {structured_error}"
                 )
+        elif backend == AGENT_BACKEND_HERMES:
+            usage = None
+            response = process_log.read_text(encoding="utf-8", errors="replace") if process_log.is_file() else None
+            tool_calls = []
+            turn_usages = []
         else:
             usage = parse_claude_stream_json_usage(process_log)
             response = parse_claude_stream_json_response(process_log)
@@ -1186,10 +1216,10 @@ class SpecialistSubprocessDispatcher:
         pinned = (self.config.agent_backend or "").strip().lower()
         if not pinned:
             return resolve_specialist_agent_backend()
-        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX):
+        if pinned not in (AGENT_BACKEND_CLAUDE, AGENT_BACKEND_CODEX, AGENT_BACKEND_HERMES):
             raise SpecialistAgentUnavailableError(
                 f"agent_backend={self.config.agent_backend!r} is not one of "
-                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r}"
+                f"{AGENT_BACKEND_CLAUDE!r} / {AGENT_BACKEND_CODEX!r} / {AGENT_BACKEND_HERMES!r}"
             )
         return pinned
 
@@ -1332,6 +1362,40 @@ class SpecialistSubprocessDispatcher:
             cmd.extend(list(cfg.extra_codex_args))
         cmd.append("-")
         return cmd, env_additions
+
+    def _build_hermes_cmd(
+        self,
+        *,
+        system_prompt: str,
+        user_prompt: str,
+    ) -> list[str]:
+        """Assemble a Hermes argv for the unchanged specialist contract."""
+
+        cfg = self.config
+        if not cfg.hermes_external_sandbox or not running_in_container():
+            raise SpecialistAgentUnavailableError(
+                "Hermes specialists require a verifiable outer container; set "
+                "HYPERLOOM_HERMES_EXTERNAL_SANDBOX=1 only inside that boundary"
+            )
+        executable = shutil.which(cfg.hermes_executable) or (
+            cfg.hermes_executable if Path(cfg.hermes_executable).is_file() else ""
+        )
+        if not executable:
+            raise SpecialistAgentUnavailableError(
+                "no Hermes CLI found: set SpecialistSubprocessConfig.hermes_executable or install hermes"
+            )
+        prompt = "\n\n".join(part for part in (system_prompt.strip(), user_prompt) if part)
+        cmd = [
+            executable,
+            "--profile",
+            cfg.hermes_profile,
+            "--provider",
+            cfg.hermes_provider,
+        ]
+        if cfg.model:
+            cmd.extend(["--model", cfg.model])
+        cmd.extend(["--safe-mode", "--toolsets", "terminal,file", "-z", prompt])
+        return cmd
 
     def _build_claude_cmd(
         self,

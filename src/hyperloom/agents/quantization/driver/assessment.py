@@ -128,8 +128,11 @@ _EXPORT_PATTERNS = (
 )
 
 _QUANTIZED_LOAD_PATTERNS = (
-    "vllm",
-    "sglang",
+    "quantized_load",
+    "quantized load",
+    "failed to load quantized",
+    "vllm engine.start failed",
+    "sglang engine.start failed",
     "engine.start",
     "engine startup",
 )

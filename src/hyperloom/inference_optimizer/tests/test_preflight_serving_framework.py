@@ -386,6 +386,26 @@ def test_probe_rocm_build_reports_tri_state(monkeypatch):
         assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is None
 
 
+def test_vllm_probe_accepts_only_rocm_marked_unspecified_build(monkeypatch):
+    scripts = []
+
+    class _Proc:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def _run(cmd, *_args, **_kwargs):
+        scripts.append(cmd[-1])
+        return _Proc()
+
+    monkeypatch.setattr(preflight.subprocess, "run", _run)
+    assert preflight._probe_rocm_build("vllm", "/usr/bin/python3").verdict is True
+    script = scripts[-1]
+    assert "UnspecifiedPlatform" in script
+    assert "'rocm' in version" in script
+    assert "unspecified and 'rocm' in version" in script
+
+
 def _host_rocm_verdict() -> bool | None:
     """What this host says about its own torch, resolved out of process.
 

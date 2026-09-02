@@ -41,6 +41,14 @@ def test_classify_sdk_phase_error() -> None:
     assert cls("nothing matches", "unknown_phase") is None
 
 
+def test_eval_backend_unavailable_is_not_quantized_load_failure(tmp_path) -> None:
+    art = dataclasses.replace(
+        _base_artifacts(tmp_path),
+        eval_skipped_reason="offline host has no Docker daemon, vllm, or sglang installed",
+    )
+    assert A._classify_eval_outcome(art, acceptable_eval_gap=0.03) == OutcomeId.eval_env_unavailable
+
+
 def test_classify_phase_artifact_gap_pyyaml(tmp_path) -> None:
     art = dataclasses.replace(
         _base_artifacts(tmp_path),

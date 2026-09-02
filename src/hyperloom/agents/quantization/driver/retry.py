@@ -244,6 +244,7 @@ async def quantize_via_prompt(
     interactive: bool | None = None,
     acceptable_eval_gap: float | None = None,
     max_requantize_attempts: int = 1,
+    provider: str = "claude",
     model: str | None = None,
     runner_fn: RunOneAttemptFn | None = None,
     log: Callable[[str], None] | None = None,
@@ -300,17 +301,31 @@ async def quantize_via_prompt(
 
     attempt_n = 1
     while True:
-        attempt_result = await run_attempt(
-            user_prompt=prompt,
-            workspace=workspace_path,
-            quark_root=quark_root_path,
-            attempt_number=attempt_n,
-            acceptable_eval_gap=acceptable_eval_gap,
-            interactive=interactive_resolved,
-            previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
-            model=model,
-            log=log,
-        )
+        if provider == "claude":
+            attempt_result = await run_attempt(
+                user_prompt=prompt,
+                workspace=workspace_path,
+                quark_root=quark_root_path,
+                attempt_number=attempt_n,
+                acceptable_eval_gap=acceptable_eval_gap,
+                interactive=interactive_resolved,
+                previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
+                model=model,
+                log=log,
+            )
+        else:
+            attempt_result = await run_attempt(
+                user_prompt=prompt,
+                workspace=workspace_path,
+                quark_root=quark_root_path,
+                attempt_number=attempt_n,
+                acceptable_eval_gap=acceptable_eval_gap,
+                interactive=interactive_resolved,
+                previous_outcome=last_outcome.value if isinstance(last_outcome, OutcomeId) else None,
+                provider=provider,
+                model=model,
+                log=log,
+            )
 
         artifacts = collect_artifacts(workspace_path)
         outcome = classify_attempt(

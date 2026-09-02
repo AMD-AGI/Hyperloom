@@ -116,11 +116,11 @@ There is no JSON sidecar and no built-in source-vs-quantized comparison —
 2. Quantized model: `<workspace>/quantized_eval.md`. Re-run every attempt
    (the quantized model may have changed).
 
-If Docker isn't available, or vLLM/SGLang can't start, or the dataset can't
-be reached: write the reason to `<workspace>/eval_skipped.txt`. Use the
-substrings the classifier recognizes: `oom` (→ #29 eval_oom),
-`vllm` / `sglang` / `quantized_load` (→ #28 quantized_load_failed), or
-anything else (→ #22 eval_env_unavailable).
+If Docker isn't available, no serving backend is installed, or the dataset
+can't be reached: write the reason to `<workspace>/eval_skipped.txt`; that is
+#22 `eval_env_unavailable`. Use `oom` only for #29 `eval_oom`. Use
+`quantized_load` only after a serving backend actually attempted and failed to
+load the exported checkpoint (#28 `quantized_load_failed`).
 
 ### 5.2 Parse the Markdown headlines
 

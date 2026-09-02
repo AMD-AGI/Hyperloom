@@ -5,8 +5,9 @@ natural-language prompt.
 
 ## Scope
 
-**What it is.** A thin Claude-SDK driver. It loads `SKILL.md` as the runtime
-contract and lets the LLM invoke Quark's published skills end-to-end
+**What it is.** A thin agent-runtime driver with selectable Claude, Codex, or
+Hermes transport. Every provider receives the same `SKILL.md` runtime contract
+and invokes Quark's published skills end-to-end
 (`quark-torch-ptq` → `quark-torch-result-validator` → `quark-torch-llm-eval`),
 classifies each attempt's workspace state into a 30-row outcome matrix, and
 exposes one diagnose-fix-retry loop on top.
@@ -22,8 +23,12 @@ All ML work runs inside Quark's skills.
   the same tree).
 - Python deps (`claude-agent-sdk`, `PyYAML`) come from Hyperloom's top-level
   `pyproject.toml` — no separate install script.
-- A working Claude SDK authentication (e.g. `ANTHROPIC_API_KEY` in env, or
-  any auth method the SDK accepts).
+- One selected agent runtime and its authentication: Claude Agent SDK,
+  native Codex CLI/OAuth, or Hermes Agent/profile. Provider fallback is not
+  performed by this package.
+- Hermes terminal/file execution must run inside a verifiable outer container;
+  set `HYPERLOOM_HERMES_EXTERNAL_SANDBOX=1` only inside that boundary. The
+  transport fails closed without it.
 
 ## Usage — prompt is the only input
 
@@ -46,6 +51,7 @@ No human interaction at any point.
 
 ```bash
 python -m hyperloom.agents.quantization.cli \
+    --provider hermes \                         # claude | codex | hermes
     --prompt "$PROMPT" \                       # natural-language request
     --workspace /scratch/run-1/wks \           # per-run scratch dir
     --quark-root /path/to/Quark \              # or $QUARK_ROOT
@@ -78,6 +84,7 @@ async def main():
         interactive=False,
         acceptable_eval_gap=0.05,
         max_requantize_attempts=1,
+        provider="hermes",
     )
     print(result.status)                       # success | partial | failed
     print(result.quantized_model_dir)          # Path | None
@@ -114,7 +121,7 @@ The full 30-outcome enumeration lives in `driver/outcomes.py` (`OutcomeId`,
 The agent writes a small, stable set of files under `--workspace`. Callers
 can read these directly:
 
-- `session_context.json` — handshake payload passed to the SDK at session start.
+- `session_context.json` — handshake payload used by the selected agent runtime.
 - `run_manifest.yaml` — Quark's workflow manifest (inputs, outputs, exec phases).
 - `model_analysis.json`, `quant_plan.json` — intake + plan outputs.
 - `validation_report.md` — validator results (4 steps: auxiliary / md5 /
@@ -136,9 +143,11 @@ can read these directly:
 | ------------------------------------ | ------- | -------------------------------------------------------------------------- |
 | `QUARK_ROOT`                         | —       | Path to amd-quark checkout. Required unless passed as `quark_root=` kwarg. |
 | `HYPERLOOM_QUANT_STRICT_VALIDATION`  | `1`     | When `0`, MUST-validate SKIPPED demotes to `partial` instead of `failed`.  |
+| `HYPERLOOM_CODEX_HOME`               | —       | Dedicated absolute, non-symlink native OAuth home for the Codex CLI. When set, gateway credential variables are stripped from the child. |
 
-Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by
-`claude-agent-sdk` and is not read directly by this package.
+Authentication belongs to the selected runtime: Claude Agent SDK credentials,
+Codex OAuth/config, or the selected Hermes profile. Credentials are not passed
+through the prompt or written to workspace artifacts.
 
 ## Tests
 
@@ -146,8 +155,8 @@ Claude SDK auth (`ANTHROPIC_API_KEY` or equivalent) is handled by
 pytest src/hyperloom/agents/quantization/tests/
 ```
 
-All tests run offline — no network, no GPU, no Claude SDK calls (a fake-SDK
-fixture is injected). The classifier suite covers each of the 30 outcome
+All tests run offline — no network, no GPU, no real agent-runtime calls (fake
+SDK/subprocess fixtures are injected). The classifier suite covers each of the 30 outcome
 IDs; the retry-loop suite covers counter persistence, hypothesis-gate,
 operator promotion, and budget exhaustion.
 

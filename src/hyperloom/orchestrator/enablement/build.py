@@ -30,6 +30,10 @@ def _derive_gpu_arch(gpu_type: str) -> str:
         "mi250x": "gfx90a",
         "mi250": "gfx90a",
         "mi210": "gfx90a",
+        "radeon8060s": "gfx1151",
+        "radeon 8060s": "gfx1151",
+        "strix halo": "gfx1151",
+        "gfx1151": "gfx1151",
     }
     gt = (gpu_type or "").strip().lower()
     for key, arch in _MAP.items():
