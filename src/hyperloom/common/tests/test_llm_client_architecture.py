@@ -100,6 +100,7 @@ _HTTP_ENDPOINT_RULES: tuple[tuple[str, str], ...] = (
 # added here, otherwise the guard silently stops covering it.
 _SCAN_ROOTS: tuple[str, ...] = (
     "src/hyperloom",
+    "src/kernelforge",
     "scripts",
     "docs",
     "examples",
@@ -148,7 +149,15 @@ _ALLOWLISTED_OWNERS = frozenset(
 # Known violations -- see the module docstring. Empty, and shrink only.
 # ---------------------------------------------------------------------------
 
-_KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {}
+_KNOWN_VIOLATIONS: dict[tuple[str, str], int] = {
+    # kernelforge/fusion/discover.py constructs provider clients directly
+    # instead of routing through hyperloom.common.llm_config.  These are
+    # existing violations in the vendored kernelforge tree that are now visible
+    # because _SCAN_ROOTS was extended; they must shrink, not grow.
+    ("src/kernelforge/fusion/discover.py", "LLM001"): 2,
+    ("src/kernelforge/fusion/discover.py", "LLM002"): 2,
+    ("src/kernelforge/fusion/discover.py", "LLM003"): 1,
+}
 
 # ---------------------------------------------------------------------------
 # Detector
@@ -345,6 +354,23 @@ def _ratchet_problems(
 # ---------------------------------------------------------------------------
 # The guard
 # ---------------------------------------------------------------------------
+
+
+def test_scan_covers_a_minimum_number_of_files() -> None:
+    """The scanner must parse at least this many files; zero means it silently skipped everything."""
+    _FLOOR = 400
+    count = sum(
+        1
+        for root_name in _SCAN_ROOTS
+        for root in [(_REPO_ROOT / root_name if _REPO_ROOT else None)]
+        if root is not None and root.is_dir()
+        for path in root.rglob("*.py")
+    )
+    assert count >= _FLOOR, (
+        f"_scan_tree parsed only {count} files, expected >= {_FLOOR}. "
+        "Either a _SCAN_ROOTS entry was removed or the repo changed shape. "
+        "Lower the floor or fix _SCAN_ROOTS."
+    )
 
 
 def test_no_unsanctioned_llm_provider_access() -> None:
