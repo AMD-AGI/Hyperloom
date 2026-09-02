@@ -20,7 +20,18 @@ from typing import Callable, Mapping, Optional
 
 
 class AgentXPreflightError(RuntimeError):
-    """Raised when the aiperf binary is missing or not AgentX-capable."""
+    """Raised when the aiperf binary is missing or not AgentX-capable.
+
+    ``repairable`` separates "this box does not have the build we pin" -- which
+    ``agentx.repair`` can fix by running the packaged installer -- from "the
+    operator asked for something this build will not do", which reinstalling the
+    same pinned build cannot change. Carried as a flag set at each raise site
+    rather than inferred from the message, so the two never drift apart.
+    """
+
+    def __init__(self, *args: object, repairable: bool = False) -> None:
+        super().__init__(*args)
+        self.repairable = repairable
 
 
 def resolve_aiperf_bin(env: Mapping[str, str]) -> Optional[str]:
@@ -151,7 +162,8 @@ def check_aiperf_capability(
         raise AgentXPreflightError(
             "HYPERLOOM_AGENTX is on but aiperf was not found. Install the pinned "
             "SemiAnalysisAI/aiperf build via install.sh (AIPERF_REF), or set "
-            "AIPERF_BIN to an aiperf with AgentX (weka-trace) support."
+            "AIPERF_BIN to an aiperf with AgentX (weka-trace) support.",
+            repairable=True,
         )
 
     runtime_env = os.environ if env is None else env
@@ -180,7 +192,8 @@ def check_aiperf_capability(
                 f"results are not comparable. Note that it carries the same AgentX "
                 f"flags and a scenario of the same name, which is why a flag check "
                 f"passes it. Reinstall the pinned build (AIPERF_REF in install.sh), or "
-                f"point AIPERF_BIN at one."
+                f"point AIPERF_BIN at one.",
+                repairable=True,
             )
         # (2) Will this run's corpus be admitted? Catches a typo or a corpus this
         #     scenario does not permit, before a server boot rather than after.
@@ -218,5 +231,6 @@ def check_aiperf_capability(
         raise AgentXPreflightError(
             f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
             f"{', '.join(missing)}); install the pinned SemiAnalysisAI/aiperf "
-            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
+            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one.",
+            repairable=True,
         )

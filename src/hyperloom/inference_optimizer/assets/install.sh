@@ -256,6 +256,16 @@ INFERENCEX_DEFAULT_DIR="${INFERENCEX_DEFAULT_DIR:-${_open_source_root}/Inference
 DRY_RUN=0
 CHECK_ONLY=0
 SKIP_KERNEL_AGENT=0
+# `--only-aiperf`: run ensure_aiperf and nothing else. The runtime repair path
+# (src/hyperloom/inference_optimizer/agentx/repair.py) needs the pinned aiperf
+# install without re-cloning Magpie/InferenceX or chaining the kernel-agent
+# installer, which is what a full run would do mid-session.
+ONLY_AIPERF=0
+# 1 when the caller explicitly asked for AgentX, which makes a failed aiperf
+# install fatal instead of fail-soft. Set by the opt-in gate and by
+# --only-aiperf; never on a default install, so the synthetic path still grows
+# no AgentX-only dependency it can be blocked by.
+AIPERF_REQUIRED=0
 
 usage() {
   cat <<'EOF'
@@ -277,6 +287,11 @@ Options:
   --check-only           Verify only, do not install
   --dry-run              Print actions without running them
   --skip-kernel-agent    Skip the chained kernel-agent installer
+  --only-aiperf          Install ONLY the pinned aiperf (AgentX client) and
+                         exit. Treats a failed install as fatal. Used by the
+                         runtime AgentX preflight to supply a dependency the
+                         mode declares for itself; also usable by hand to add
+                         AgentX support to a box provisioned without it.
   -h, --help             Show this help
 
 Env overrides:
@@ -306,6 +321,7 @@ while [ "$#" -gt 0 ]; do
     --check-only) CHECK_ONLY=1 ;;
     --dry-run) DRY_RUN=1 ;;
     --skip-kernel-agent) SKIP_KERNEL_AGENT=1 ;;
+    --only-aiperf) ONLY_AIPERF=1; AIPERF_REQUIRED=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "[inference-optimizer] ERROR: unknown option '$1'" >&2; usage >&2; exit 2 ;;
   esac
@@ -1150,12 +1166,23 @@ PY
   fi
 }
 
-# --- 2a. aiperf (AgentX benchmark client) — fail-soft, AgentX-only ---
+# --- 2a. aiperf (AgentX benchmark client) — AgentX-only ---
 # Installs the pinned aiperf for HYPERLOOM_AGENTX; only reached when the caller
-# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site). A
-# failure here is NON-fatal: it only warns and leaves aiperf absent, so the
-# default synthetic path is never blocked by an AgentX-only dependency. Skipped
-# when the operator points AIPERF_BIN at their own build.
+# opts in (see the INSTALL_AIPERF / HYPERLOOM_AGENTX gate at the call site) or
+# via --only-aiperf. Skipped when the operator points AIPERF_BIN at their own
+# build.
+#
+# Failure handling is asymmetric by design, keyed on $AIPERF_REQUIRED:
+#   * default install (nobody asked for AgentX) -> unreachable; the gate below
+#     skips this function entirely.
+#   * explicit request -> FATAL. A dependency the caller asked for by name, with
+#     a pin this repository owns, must not end up absent with only a warning in
+#     a log nobody reads. Measured: the fail-soft warn let a provisioning run
+#     report success while leaving the box unable to run AgentX at all, and the
+#     gap surfaced hours later as a benchmark failure that was then handed to an
+#     enablement specialist as if it were a framework bug.
+# The synthetic path still grows no AgentX-only dependency it can be blocked
+# by, because AIPERF_REQUIRED is only ever set when AgentX was asked for.
 ensure_aiperf() {
   if [ -n "${AIPERF_BIN:-}" ]; then
     log "AIPERF_BIN set (${AIPERF_BIN}); skipping aiperf install"
@@ -1197,6 +1224,8 @@ ensure_aiperf() {
     # state dir costs a redundant reinstall, never a wrong skip.
     mkdir -p "$(dirname "$stamp")" 2>/dev/null && printf '%s\n' "$AIPERF_REF" > "$stamp" 2>/dev/null || \
       warn "could not record the installed aiperf ref at ${stamp}; the next run will reinstall"
+  elif [ "$AIPERF_REQUIRED" -eq 1 ]; then
+    die "aiperf install failed (${AIPERF_PACKAGE_SPEC}). AgentX was explicitly requested (INSTALL_AIPERF / HYPERLOOM_AGENTX / --only-aiperf), and aiperf is the AgentX benchmark client -- there is no usable AgentX install without it. Fix the failure above, or point AIPERF_BIN at an existing pinned build."
   else
     warn "aiperf install failed (${AIPERF_PACKAGE_SPEC}); AgentX mode (HYPERLOOM_AGENTX) stays unavailable until aiperf is installed or AIPERF_BIN is set. Default synthetic path is unaffected."
   fi
@@ -1657,6 +1686,23 @@ chain_kernel_agent() {
   bash "$script" "${args[@]}"
 }
 
+# --- targeted entry point: aiperf only -------------------------------------
+# Placed after every function definition (so ensure_aiperf exists) and before
+# the first heavy step. Everything ensure_aiperf reads is already resolved by
+# here: $PYTHON (resolve_python), $PIP_EXTRA, $AIPERF_PACKAGE_SPEC and the
+# state dir. Nothing between the PIP_EXTRA block and this line executes at top
+# level, so the short-circuit skips no setup ensure_aiperf depends on.
+#
+# The lock is taken for the same reason a full install takes it: two sessions on
+# one node must not pip into the same interpreter concurrently.
+if [ "$ONLY_AIPERF" -eq 1 ]; then
+  log "--only-aiperf: installing just the pinned AgentX client"
+  acquire_install_lock
+  ensure_aiperf
+  log "--only-aiperf: done"
+  exit 0
+fi
+
 ensure_inference_optimizer
 ensure_forge_gemm_tune
 ensure_langfuse_when_enabled
@@ -1704,6 +1750,8 @@ if [ "$HYPERLOOM_BENCHMARK_BACKEND_LC" != "bypass" ]; then
   _agx_sw="$(printf '%s' "${HYPERLOOM_AGENTX:-}" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')"
   case "${_agx_want}:${_agx_sw}" in
     1:*|true:*|yes:*|on:*|*:1|*:true|*:yes|*:on)
+      # Asked for by name => a failed install is fatal, not a warning.
+      AIPERF_REQUIRED=1
       ensure_aiperf ;;
     *)
       log "aiperf (AgentX) skipped: set INSTALL_AIPERF=1 or HYPERLOOM_AGENTX=1 to install it (or point AIPERF_BIN at an existing build)." ;;

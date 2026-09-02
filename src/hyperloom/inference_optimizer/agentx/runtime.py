@@ -47,7 +47,8 @@ def maybe_prepare_agentx(
         the AgentX client.
 
     Raises:
-        AgentXPreflightError: If aiperf is missing or not AgentX-capable.
+        AgentXPreflightError: If aiperf is missing or not AgentX-capable and the
+            packaged installer could not supply it.
     """
     try:
         bench = (yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}).get("benchmark", {}) or {}
@@ -57,13 +58,76 @@ def maybe_prepare_agentx(
         return False
 
     from .deploy import deploy_agentx_assets
-    from .preflight import check_aiperf_capability, resolve_aiperf_bin
+    from .preflight import resolve_aiperf_bin
 
     # Deploy BEFORE preflight so the client is in place regardless of preflight
     # memoization state.
     deploy_agentx_assets(Path(inferencex_path) / "benchmarks")
     aiperf_bin = resolve_aiperf_bin(env)
     if aiperf_bin not in _PREFLIGHTED_BINS:
-        check_aiperf_capability(aiperf_bin)  # raises if missing/incapable
+        aiperf_bin = _preflight_or_repair(aiperf_bin, env=env)
         _PREFLIGHTED_BINS.add(aiperf_bin or "")
     return True
+
+
+def _preflight_or_repair(aiperf_bin: str | None, *, env: Mapping[str, str]) -> str | None:
+    """Capability-check aiperf, installing the pinned build once if it is absent.
+
+    aiperf is a dependency AgentX declares for itself and whose install this
+    repository already owns (``install.sh::ensure_aiperf``, pinned by
+    ``AIPERF_REF``). The preflight was the first place that knew it was missing,
+    and it only said so -- to an operator who is not on this path. Downstream
+    that read as an ordinary benchmark failure and opened an enablement round, so
+    a supply problem was handed to a specialist as if it were a framework bug.
+
+    Repairing here keeps the runtime flag as the single source of truth for "this
+    box needs aiperf". Only a ``repairable`` verdict triggers an install: an
+    operator pinning a corpus the scenario does not admit is not fixed by
+    reinstalling the same build, and spending minutes on pip before saying so
+    would only delay the diagnosis.
+
+    Args:
+        aiperf_bin: The binary resolved from ``env`` (None/empty means absent).
+        env: Environment the benchmark subprocess will run with.
+
+    Returns:
+        The binary that passed the check -- re-resolved after a repair, since the
+        install is what puts it on ``PATH``.
+
+    Raises:
+        AgentXPreflightError: If the build is unusable and could not be repaired.
+            A post-repair failure is marked non-repairable so no caller retries
+            an install that has already been tried and did not help.
+    """
+    from .preflight import AgentXPreflightError, check_aiperf_capability, resolve_aiperf_bin
+
+    try:
+        check_aiperf_capability(aiperf_bin)
+        return aiperf_bin
+    except AgentXPreflightError as exc:
+        if not getattr(exc, "repairable", False):
+            raise
+        from .repair import ensure_aiperf_installed
+
+        repair_error = ensure_aiperf_installed(env=env)
+        if repair_error is not None:
+            raise AgentXPreflightError(
+                f"{exc} Automatic repair was attempted and failed: {repair_error}",
+                repairable=False,
+            ) from exc
+
+    # Re-resolve: the install is what put aiperf on PATH, so the pre-repair
+    # lookup (possibly None) says nothing about what is there now.
+    repaired_bin = resolve_aiperf_bin(env)
+    try:
+        check_aiperf_capability(repaired_bin)
+    except AgentXPreflightError as exc:
+        # The install reported success and the build is still unusable, so this
+        # is no longer a supply gap this process can close. Clear the flag: a
+        # later round would otherwise re-enter the repair branch every time, pay
+        # a capability probe, and get the memoized success back.
+        raise AgentXPreflightError(
+            f"{exc} The pinned build was installed during this run and the check still fails.",
+            repairable=False,
+        ) from exc
+    return repaired_bin
