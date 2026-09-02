@@ -886,8 +886,11 @@ axis upstream reports. It includes TTFT in the denominator, unlike the per-user
 `1/ITL` figure — on a ~114k-prompt replay TTFT is most of what a user waits for,
 so grading on `1/ITL` would let a candidate double TTFT with no visible cost.
 
-Default-on for AgentX runs (`HYPERLOOM_AGENTX=1`), explicit opt-in via
-`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Serving frameworks only:
+Default-on for AgentX runs, explicit opt-in via
+`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Either AgentX signal turns it
+on: the ambient `HYPERLOOM_AGENTX=1`, or the `benchmark_mode=agentx` stamped on
+the session at seed — so a round driven from a subprocess that never inherited
+the env var still grades on the agentic axis. Serving frameworks only:
 scriptable frameworks (xDiT, custom) keep output-throughput grading regardless.
 
 Every KEEP decision — explore, the current_best lift, integrate_patch, the
@@ -905,6 +908,7 @@ degrade is never silent and never one-sided.
 | `HYPERLOOM_PERF_METRIC`        | `composite_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `composite_v1` grades total token throughput under the interactivity veto. An agentic replay is the case this grading exists for, so AgentX runs get it without asking; any other explicit value (including on an AgentX run) keeps output-throughput grading. Reported in the final summary as `grading mode`. |
 | `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
 | `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
+| `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
 ---
 
