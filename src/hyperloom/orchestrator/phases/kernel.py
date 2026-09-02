@@ -21,6 +21,7 @@ from typing import Any, Callable
 from . import geak_rebench as _geak_rebench
 from . import machine_state as _phase_state
 from hyperloom.common.io import atomic_write_json
+from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.inference_optimizer.breakdown.agent_ownership import (
     LEVER_CONFIG,
     LEVER_KERNEL,
@@ -1662,6 +1663,7 @@ class KernelPhase(PhaseHandler):
             "lever_kind": LEVER_KERNEL if kernel_proven else LEVER_CONFIG,
             "ttft_mean_ms": result.get("ttft_ms"),
             "tpot_mean_ms": result.get("tpot_ms"),
+            **graded_axes_of(result),
             "workspace": result.get("eval_dir"),
         }
         if isinstance(measurement_provenance, Mapping):
@@ -1710,6 +1712,7 @@ class KernelPhase(PhaseHandler):
         if base > 0:
             self._update_cumulative_gain_validated(
                 measured,
+                result,
                 source="geak_e2e_promote",
             )
         self.shared_state.resume_pending_revalidation = False
@@ -3596,6 +3599,7 @@ class KernelPhase(PhaseHandler):
                         "candidate_extra_server_args": extra_server_args,
                         "extra_envs": dict(env),
                         "source_phase": "KERNEL_AGENT",
+                        **graded_axes_of(result),
                         "workspace": result.get("workspace"),
                     },
                     entry_extra={
@@ -3640,6 +3644,7 @@ class KernelPhase(PhaseHandler):
             if baseline_tput > 0:
                 self._update_cumulative_gain_validated(
                     running_tput,
+                    result,
                     source="forge_gemm_tuning_e2e",
                     measurement_basis=_paired_measurement_basis(paired),
                 )
@@ -4459,6 +4464,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": envs,
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_collective",
+                **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
             },
             entry_extra={
@@ -4482,6 +4488,7 @@ class KernelPhase(PhaseHandler):
         ts = datetime.now(timezone.utc).isoformat()
         self._update_cumulative_gain_validated(
             new_tput,
+            integrate_result,
             source="collective_promote",
             ts=ts,
         )
@@ -4732,6 +4739,7 @@ class KernelPhase(PhaseHandler):
                 "extra_envs": envs,
                 "source_phase": "KERNEL_AGENT",
                 "provenance": "forge_fusion",
+                **graded_axes_of(integrate_result.get("bench_result") or integrate_result),
                 "workspace": integrate_result.get("workspace"),
             },
             entry_extra={
@@ -4747,6 +4755,7 @@ class KernelPhase(PhaseHandler):
         if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
             self._update_cumulative_gain_validated(
                 new_tput,
+                integrate_result,
                 source="fusion_promote",
             )
 

@@ -507,6 +507,37 @@ def _platform_fingerprint(gpu_type: str | None = None) -> dict[str, Any]:
     return platform_fingerprint(gpu_type, multi_node=multi_node)
 
 
+def _append_composite_perf_section(lines: list[str], summary: dict[str, Any]) -> None:
+    """Render the AgentX graded axes when baseline perf data is available."""
+    from hyperloom.common.gain_math import gain_pct
+    from hyperloom.common.perf_metric import (
+        parse_intvty_noise_pct,
+        perf_snapshot_from_mapping,
+        total_tput_grading_enabled,
+        total_tput_of,
+    )
+
+    baseline = perf_snapshot_from_mapping(summary.get("baseline_perf"))
+    if not baseline:
+        return
+    cb = summary.get("current_best") or {}
+    cb_snap = perf_snapshot_from_mapping(cb) if isinstance(cb, dict) else None
+    lines.append("## AgentX perf (total tok/s objective, intvty p90 gate)")
+    lines.append("")
+    lines.append(f"- baseline total tput : `{total_tput_of(baseline):.1f}` tok/s")
+    lines.append(f"- baseline intvty p90 : `{baseline['intvty_p90']:.1f}` tok/s/user")
+    if cb_snap:
+        lines.append(f"- current_best total  : `{total_tput_of(cb_snap):.1f}` tok/s")
+        lines.append(f"- current_best intvty : `{cb_snap['intvty_p90']:.1f}` tok/s/user")
+        gain = gain_pct(total_tput_of(cb_snap), total_tput_of(baseline))
+        if gain is not None:
+            lines.append(f"- total tput gain     : `{gain:+.2f}%`")
+    if total_tput_grading_enabled(benchmark_mode=str(summary.get("benchmark_mode") or "")):
+        lines.append(f"- grading mode        : `composite_v1` (intvty band `{parse_intvty_noise_pct():.1f}%`)")
+    else:
+        lines.append("- grading mode        : `output_throughput` (AgentX grading not in effect)")
+
+
 def _build_summary_dict(
     state: SharedState,
     ev_counts: dict[str, int],
@@ -545,6 +576,11 @@ def _build_summary_dict(
         "stop_reason": stop_reason,
         "stop_reason_explanation": _explain_stop_reason(stop_reason, state),
         "baseline_tput": state.baseline_tput,
+        "baseline_perf": dict(getattr(state, "baseline_perf", None) or {}),
+        # Read back by the graded-axes section: the persisted AgentX marker
+        # outlives the shell, so a report rendered from a resumed session
+        # still names the mode the run was graded under.
+        "benchmark_mode": str(getattr(state, "benchmark_mode", "") or ""),
         "baseline_accuracy": state.baseline_accuracy,
         "current_best": state.current_best,
         # Validated gain (what the run actually delivered).
@@ -661,6 +697,7 @@ def _format_md(summary: dict[str, Any]) -> str:
         lines.append(f"- ttft_mean      : `{cb.get('ttft_mean_ms'):.1f}` ms")
     if cb.get("e2el_mean_ms") is not None:
         lines.append(f"- e2el_mean      : `{cb.get('e2el_mean_ms'):.1f}` ms")
+    _append_composite_perf_section(lines, summary)
     lines.append("")
     lines.extend(_format_completeness_annotations(summary))
     lines.append("## Run summary")

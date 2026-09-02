@@ -47,7 +47,7 @@ from ..state.optimization_journal import (
 from ..actions.executors._accuracy_gate import ENABLEMENT_REVALIDATION_REASON
 from ..actions.executors._grid_server_args import strip_benchmark_harness_flags
 from ..actions.stop_attribution import stopped_by_the_run_class
-from ..state.shared_state import SharedState, resolve_grading_anchor_tput
+from ..state.shared_state import SharedState, resolve_graded_comparison
 from hyperloom.inference_optimizer.protocol.intent import Intent
 from ..bus.message_bus import Message
 from .coordinator_helpers import (
@@ -124,6 +124,15 @@ _LEVER_BY_TASK_KIND = {
     "framework_agent": LEVER_UPSTREAM_PR,
     _FRAMEWORK_STACK_ACTION: LEVER_UPSTREAM_PR,
 }
+
+
+def _graded_source(measurement: Mapping[str, Any], output_tput: float) -> dict[str, Any]:
+    """*measurement* with the caller's resolved output throughput stamped in.
+
+    A winner record does not always carry its own throughput, so grading must
+    not read back out what the caller already resolved.
+    """
+    return {**measurement, "output_throughput": float(output_tput)}
 
 
 def _lever_for_keep(task_params: Mapping[str, Any], result: Mapping[str, Any]) -> str:
@@ -641,6 +650,7 @@ class WritebackCollaborator:
     def _update_cumulative_gain_validated(
         self,
         new_tput: float,
+        measurement: Mapping[str, Any],
         *,
         source: str = "writeback",
         measurement_basis: str = "e2e_rebench",
@@ -653,8 +663,10 @@ class WritebackCollaborator:
         guard (e.g. ``if self.shared_state.baseline_tput > 0``).
 
         Args:
-            new_tput: The newly measured throughput to promote as the validated
-                gain anchor.
+            new_tput: The newly measured output throughput.
+            measurement: The measurement the promotion came from. Candidate and
+                baseline are read off it as a pair, so a total-graded session
+                cannot divide an output numerator by a total denominator.
             source: Which promotion path produced this figure, recorded so the
                 breakdown can name it.
             measurement_basis: ``e2e_rebench`` when ``new_tput`` came from a
@@ -664,7 +676,14 @@ class WritebackCollaborator:
             ts: Author-time stamp the caller already minted for this
                 promotion; defaults to now.
         """
-        validated_gain = (float(new_tput) - self.shared_state.baseline_tput) / self.shared_state.baseline_tput * 100.0
+        graded = resolve_graded_comparison(
+            self.shared_state, _graded_source(measurement, new_tput), against_baseline=True
+        )
+        if graded.degrade_reason:
+            log.info("cumulative gain graded on output throughput (%s)", graded.degrade_reason)
+        validated_gain = (
+            (graded.candidate - graded.reference) / graded.reference * 100.0 if graded.reference > 0 else 0.0
+        )
         ts = str(ts or datetime.now(timezone.utc).isoformat())
         self.shared_state.cumulative_gain_validated = float(validated_gain)
         self.shared_state.cumulative_gain_validated_ts = ts
@@ -676,8 +695,8 @@ class WritebackCollaborator:
 
             instrument.record_session_validation(
                 self.session_dir,
-                baseline_tput=float(self.shared_state.baseline_tput),
-                validated_tput=float(new_tput),
+                baseline_tput=graded.reference,
+                validated_tput=graded.candidate,
                 validated_gain_pct=float(validated_gain),
                 stack_len=self.shared_state.cumulative_gain_validated_stack_len,
                 source=source,
@@ -707,6 +726,8 @@ class WritebackCollaborator:
         Args:
             result (dict[str, Any]): The integrate-patch executor result.
         """
+        from hyperloom.common.perf_metric import graded_axes_of
+
         new_tput = result.get("new_tput")
         if not isinstance(new_tput, (int, float)) or new_tput <= 0:
             return
@@ -721,6 +742,7 @@ class WritebackCollaborator:
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
+                **graded_axes_of(result),
                 "workspace": result.get("workspace"),
             },
             gap_canonical_id=str(result.get("gap_canonical_id") or "").strip(),
@@ -737,7 +759,7 @@ class WritebackCollaborator:
         )
         if lifted and self.shared_state.baseline_tput > 0:
             # Integrate KEEP is already rebench-validated: promote into cumulative_gain_validated + watermark.
-            self._update_cumulative_gain_validated(new_tput)
+            self._update_cumulative_gain_validated(new_tput, result.get("bench_result") or result)
             await self._maybe_enqueue_watermark_roofline(
                 reason="integrate_keep_watermark",
             )
@@ -2727,13 +2749,26 @@ class WritebackCollaborator:
             ``True`` when the winner was lifted, ``False`` when it was refused
             for not beating the current anchor.
         """
-        anchor = resolve_grading_anchor_tput(self.shared_state)
-        if anchor > 0 and float(best_tput) <= anchor:
+        from hyperloom.common.perf_metric import graded_axes_of
+
+        cand_source = _graded_source(bv if isinstance(bv, dict) else {}, best_tput)
+        graded = resolve_graded_comparison(self.shared_state, cand_source)
+        if graded.degrade_reason:
             log.info(
-                "current_best held at %.1f: %s winner measured %.1f (no lift)",
-                anchor,
+                "lift: total-throughput grading unavailable (%s); grading %s winner on output throughput",
+                graded.degrade_reason,
                 task_kind,
-                float(best_tput),
+            )
+        if graded.vetoed:
+            log.info("current_best held: %s winner failed the interactivity constraint", task_kind)
+            return False
+        if graded.reference > 0 and graded.candidate <= graded.reference:
+            log.info(
+                "current_best held at %.1f %s: %s winner measured %.1f (no lift)",
+                graded.reference,
+                graded.objective,
+                task_kind,
+                graded.candidate,
             )
             return False
         previous = self.shared_state.current_best or {}
@@ -2954,6 +2989,10 @@ class WritebackCollaborator:
             "tpot_mean_ms": bv.get("tpot_mean_ms") if isinstance(bv, dict) else None,
             "workspace": bv.get("workspace") if isinstance(bv, dict) else None,
         }
+        # The axes of the measurement this KEEP was graded on. Without them the
+        # next round's anchor has no snapshot, and the session degrades to
+        # output grading permanently after the first KEEP.
+        current_best.update(graded_axes_of(cand_source))
         if isinstance(bv, dict):
             for _ctrl_key in ("remove_args", "unset_envs", "args_mode"):
                 if bv.get(_ctrl_key):
@@ -3250,7 +3289,7 @@ class WritebackCollaborator:
         # must not reset it back to the bare reference config.
         if anchor_accepted and not (getattr(self.shared_state, "optimization_stack", None) or []):
             anchor_tput = float(self.shared_state.baseline_tput or 0.0)
-            self.shared_state.current_best = {
+            current_best = {
                 "action": "baseline",
                 "tput": (anchor_tput if anchor_tput > 0 else (float(tput) if isinstance(tput, (int, float)) else None)),
                 "hot_tput": (float(tput) if isinstance(tput, (int, float)) else None),
@@ -3260,8 +3299,24 @@ class WritebackCollaborator:
                 "ttft_mean_ms": result.get("ttft_mean_ms"),
                 "e2el_mean_ms": result.get("e2el_mean_ms"),
                 "tpot_mean_ms": result.get("tpot_mean_ms"),
+                "input_throughput": result.get("input_throughput"),
+                "total_throughput": result.get("total_token_throughput"),
+                "tpot_p90_ms": result.get("tpot_p90_ms"),
+                "intvty_p90": result.get("intvty_p90"),
                 "workspace": result.get("workspace"),
             }
+            from hyperloom.common.perf_metric import perf_snapshot_from_mapping
+
+            snap = perf_snapshot_from_mapping(result)
+            if snap:
+                self.shared_state.baseline_perf = dict(snap)
+                current_best["total_throughput"] = snap["total_throughput"]
+                current_best["intvty_p90"] = snap["intvty_p90"]
+                for _axis in ("input_throughput", "tpot_p90_ms"):
+                    if snap.get(_axis) is not None:
+                        current_best[_axis] = snap[_axis]
+            self.shared_state.current_best = current_best
+            # Reads the current_best just assigned, so it has to follow it.
             self._stamp_current_best_measurement(result)
             changed = True
         if anchor_accepted:
@@ -4026,7 +4081,7 @@ class WritebackCollaborator:
                 changed = True
             else:
                 if measured_ok and self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(measured)
+                    self._update_cumulative_gain_validated(measured, result)
                     cb_rec = self.shared_state.current_best if isinstance(self.shared_state.current_best, dict) else {}
                     recorded = cb_rec.get("tput")
                     floor = _DEFAULT_RESUME_DRIFT_FLOOR_PCT
@@ -4110,7 +4165,11 @@ class WritebackCollaborator:
             # An explore round grades a variant on its decision round and reports
             # that, so the basis names the round the number came from.
             if self.shared_state.baseline_tput > 0 and isinstance(best_tput, (int, float)) and best_tput > 0:
-                self._update_cumulative_gain_validated(best_tput, measurement_basis="e2e_decision_round")
+                self._update_cumulative_gain_validated(
+                    best_tput,
+                    best_winner if isinstance(best_winner, dict) else result,
+                    measurement_basis="e2e_decision_round",
+                )
                 # Watermark refresh: enqueue a fresh roofline once projected tput crosses +10%.
                 await self._maybe_enqueue_watermark_roofline(
                     reason="explore_keep_watermark",
@@ -4187,6 +4246,8 @@ class WritebackCollaborator:
                 origin_provenance = f"specialist:{origin_domain}"
             source_phase = str(task_params.get("source_phase") or result.get("source_phase") or "").strip()
             gap_canonical_id = str(task_params.get("gap_canonical_id") or result.get("gap_canonical_id") or "").strip()
+            from hyperloom.common.perf_metric import graded_axes_of
+
             lift = {
                 "name": specialist_task_id or "integrate_patch_keep",
                 "task_id": getattr(task, "task_id", "") if task is not None else "",
@@ -4205,6 +4266,7 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
                 "tput": float(new_tput),
+                **graded_axes_of(result.get("bench_result") or result),
                 "workspace": result.get("workspace"),
                 "provenance": origin_provenance or "integrate_patch",
                 "scope": "source_patch",
@@ -4270,7 +4332,7 @@ class WritebackCollaborator:
                     gap_canonical_id=gap_canonical_id,
                 )
                 if lifted and self.shared_state.baseline_tput > 0:
-                    self._update_cumulative_gain_validated(new_tput)
+                    self._update_cumulative_gain_validated(new_tput, result)
                     self.shared_state.resume_pending_revalidation = False
                     await self._maybe_enqueue_watermark_roofline(
                         reason="integrate_keep_watermark",
@@ -4975,6 +5037,8 @@ class WritebackCollaborator:
             provenance = str(result.get("provenance") or "").strip()
             if domain and not provenance.startswith("specialist:"):
                 provenance = f"specialist:{domain}"
+            from hyperloom.common.perf_metric import graded_axes_of
+
             bv = {
                 "name": sid,
                 "candidate_extra_server_args": str(result.get("extra_server_args_applied") or ""),
@@ -4990,6 +5054,7 @@ class WritebackCollaborator:
                 },
                 "extra_envs": dict(result.get("extra_envs_applied") or result.get("config_changes_applied") or {}),
                 "tput": float(tput),
+                **graded_axes_of(result.get("bench_result") or result),
                 "workspace": result.get("workspace"),
                 "provenance": provenance or "integrate_patch",
                 "scope": "source_patch",

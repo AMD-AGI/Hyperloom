@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any
+from hyperloom.common.perf_metric import graded_axes_of
 from hyperloom.common.timeutil import now_iso
 
 from . import machine_state as _phase_state
@@ -2269,6 +2270,7 @@ class PreludePhase(PhaseHandler):
                 float(single_round_tput),
                 {
                     "name": "warm_replay",
+                    **graded_axes_of(result),
                     "candidate_extra_server_args": warm_args,
                     "candidate_extra_envs": warm_envs,
                     "recipe_delta": {
@@ -2294,7 +2296,7 @@ class PreludePhase(PhaseHandler):
             # and the mirror agree there is nothing adopted.
             state.warm_replay_outcome = outcome
             if baseline_tput > 0:
-                self._update_cumulative_gain_validated(single_round_tput)
+                self._update_cumulative_gain_validated(single_round_tput, result)
             log.info(
                 "warm-replay REPRODUCED: measured=+%.2f%% (expected=+%.2f%%, "
                 "min_required=+%.2f%%); pushed warm_replay onto stack",

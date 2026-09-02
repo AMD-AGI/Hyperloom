@@ -14,6 +14,59 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `PRIMUS_CORTEX_PR_API`, `--pr-monitor-url`, and `--pr-monitor-mcp-url`
   configuration paths are removed.
 
+- **An AgentX run now grades on total token throughput under an interactivity
+  constraint.** The SemiAnalysis CC corpus an agentic replay runs averages ~114k
+  prompt tokens against ~810 output tokens per request, so grading on output
+  throughput alone optimises about 1% of the token budget: a measured Kimi-K3
+  baseline read 25978 tok/s total against 183 tok/s output. Total token
+  throughput is the objective and interactivity p90 (E2E normalized
+  interactivity, `OSL/E2EL`) is a veto rather than a weighted term, which is the
+  shape InferenceX ranks a submission by. It is default-on under
+  `HYPERLOOM_AGENTX=1`; `HYPERLOOM_PERF_METRIC` overrides in both directions
+  (`composite_v1` opts a non-AgentX run in, any other value opts an AgentX run
+  out), and `HYPERLOOM_PERF_NOISE_PCT` (default `5.0`) sets the veto band.
+  Either AgentX signal is enough: the ambient `HYPERLOOM_AGENTX` or the session's
+  persisted `benchmark_mode`, so a re-baseline or integrate round driven from a
+  subprocess that never inherited the env var still grades on the agentic axis.
+  Scriptable frameworks keep output-throughput grading. Candidate and reference
+  are always read off the same axis: a lane whose measurement cannot supply
+  both graded axes degrades to output throughput on both sides and logs the
+  reason. The final report names the grading mode.
+
+- **An AgentX measurement the scenario judged invalid is no longer selectable.**
+  `submission_valid=False` always rejects. An undetermined verdict (`None`)
+  rejects too unless `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` is set. The gate
+  covers every measurement the run accepts -- baseline, explore, kernel, sweep
+  -- not the baseline alone, so an unverified measurement cannot become the
+  denominator of every gain that follows it.
+
+- **The server-boot timeout default is 7200s, up from 2700s.** A 1.56 TB MXFP4
+  MoE checkpoint reads for ~37 minutes before the first aiter JIT, so the
+  baseline died to a timeout unrelated to the workload unless the operator
+  pinned `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` by hand. A genuinely
+  wedged server is still stopped by the per-phase and session budgets.
+
+- **`--extra-env` reaches the benchmark for every framework, and now outranks
+  the config.** The pins were copied into `benchmark.envs` only on the `custom`
+  path; every other framework left them in the orchestrator's own environment,
+  where Magpie -- which forwards `benchmark.envs` and nothing else -- never saw
+  them, so a vLLM Ray worker booted without them.<br/>
+  **Operator note**: on the `custom` path the pins used to be applied with
+  `setdefault`, so a value already present in the YAML won. They are now written
+  last and win outright, which is what an explicit CLI pin should do but is a
+  change in precedence for a `custom` workload whose YAML sets the same key.
+  Names on the untrusted-env denylist (`PATH`, `PYTHONPATH`, `LD_PRELOAD`,
+  credential-shaped names) are still refused on this route and logged.
+
+- **A shell-quoted `--flag=value` operand no longer keeps its wrappers.**
+  Quote-preserving tokenization keeps a JSON blob intact, and a fully-wrapped
+  operand (`--tool-call-parser 'kimi_k3'`) is already unwrapped; the `=` form
+  (`--tool-call-parser='kimi_k3'`) was not, so the quotes survived into Magpie's
+  unquoted `EXTRA_*_ARGS` expansion and reached argv literally. The unwrap is
+  applied to the right-hand side of the first `=` only, so the flag name is never
+  altered and token boundaries cannot shift; a JSON value is left verbatim in
+  both positions.
+
 - **A published Recipe now carries three columns instead of five.**
   `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
   `config`/`patch`/`kernel`, each owned end to end by one SDK facade
