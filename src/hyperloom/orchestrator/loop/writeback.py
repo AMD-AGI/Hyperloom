@@ -616,10 +616,14 @@ class WritebackCollaborator:
         self.shared_state.save(self.session_dir)
 
     def _record_kernel_opt_partial(self, result: dict[str, Any]) -> None:
-        """Streaming callback for ``_run_optimization_batch`` sub-attempts: write each per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate mid-batch.
+        """Retained record-partial hook for the run_optimization calling convention: writes a per-kernel entry to kernel_opt_task_attempts immediately so the next-tick prompt is accurate.
+
+        The which-kernel fan-out that once streamed several sub-attempts now
+        lives in forge nomination, so the surviving single-kernel path invokes
+        this at most once per dispatch.
 
         Args:
-            result: One sub-attempt's per-kernel result dict.
+            result: One per-kernel result dict.
         """
         try:
             self.shared_state.record_kernel_opt(result)

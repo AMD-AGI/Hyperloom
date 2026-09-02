@@ -398,7 +398,7 @@ async def test_on_enter_kernel_skips_gemm_but_still_dispatches_kernel_opt(coord:
 
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
     monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: True)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_nomination", _dispatch)
 
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
@@ -424,7 +424,7 @@ async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: 
 
     monkeypatch.setattr(coord.phase_kernel, "_maybe_reprofile_for_kernel", _skip_reprofile)
     monkeypatch.setattr(coord.phase_kernel, "_kernel_opt_work_remains", lambda: False)
-    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_entry_batch", _dispatch)
+    monkeypatch.setattr(coord.phase_kernel, "_run_kernel_opt_nomination", _dispatch)
 
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 

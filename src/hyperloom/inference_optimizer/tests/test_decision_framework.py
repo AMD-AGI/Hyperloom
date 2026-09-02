@@ -311,7 +311,7 @@ async def test_kernel_entry_continues_to_kernel_opt_after_gemm(
 
         async def fake_kernel(payload, *, session_dir, record_partial=None):
             kernel_calls.append(dict(payload))
-            return {"status": "failed", "batch_mode": True, "batch_results": []}
+            return {"status": "failed"}
 
         monkeypatch.setattr(kernel_request_handlers, "run_gemm_tuning_handler", fake_gemm)
         monkeypatch.setattr(kernel_request_handlers, "run_optimization_handler", fake_kernel)
@@ -449,91 +449,6 @@ async def test_run_optimization_handler_forwards_verification_evidence(
     assert cmd[cmd.index("--accuracy-passed") + 1] == "true"
     assert "--micro-speedup" in cmd
     assert "--e2e-gain-pct" in cmd
-
-
-@pytest.mark.asyncio
-async def test_run_optimization_handler_batches_reusable_kernels_and_selects_best(
-    session_dir,
-    tmp_path,
-    monkeypatch,
-):
-    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
-    from hyperloom.orchestrator.kernel import request_handlers as krh
-
-    # Disable the default min_gpu_pct gate so the test focuses on the batch best-selection.
-    monkeypatch.setenv("HYPERLOOM_KERNEL_OPT_MIN_GPU_PCT", "0.0")
-    candidates = tmp_path / "kernel_candidates.json"
-    candidates.write_text(
-        """
-        {
-          "hot_kernels": [
-            {
-              "kernel_id": "k003",
-              "name": "native_moe_gemm",
-              "source_file": "/sgl-workspace/aiter/csrc/kernels/moe.cu",
-              "reusable_native_kernel": true
-            },
-            {
-              "kernel_id": "k006",
-              "name": "native_quant",
-              "source_file": "/sgl-workspace/aiter/csrc/kernels/quant_kernels.cu",
-              "reusable_native_kernel": true
-            }
-          ],
-          "reusable_native_kernel_ids": ["k003", "k006"]
-        }
-        """,
-        encoding="utf-8",
-    )
-    calls: list[tuple[str, str]] = []
-
-    async def fake_single(payload, *, session_dir, timeout_override_sec=None):
-        kernel_id = payload["kernel_id"]
-        backend = payload["backends"]
-        calls.append((kernel_id, backend))
-        # k006 wins on forge (KEEP); k003 stays PARTIAL so batch best-selection picks k006.
-        keep = kernel_id == "k006" and backend == "forge"
-        speedup = 1.31 if keep else 1.0
-        return {
-            "status": "ok",
-            "kernel_id": kernel_id,
-            "selected_backends": [backend],
-            "best_artifact_path": f"/tmp/{kernel_id}-{backend}.cu",
-            "verification": {
-                "compile_passed": keep,
-                "correctness_passed": keep,
-                "micro_speedup": speedup,
-                "best_artifact_path": f"/tmp/{kernel_id}-{backend}.cu",
-            },
-            "proposal": {
-                "decision": "KEEP" if keep else "PARTIAL",
-                "reasons": [],
-            },
-        }
-
-    monkeypatch.setattr(krh, "_run_optimization_single", fake_single)
-    result = await krh.run_optimization_handler(
-        {
-            "candidates_path": str(candidates),
-            "backend_order": "forge",
-            "budget_minutes": 60,
-            "max_parallel": 2,
-        },
-        session_dir=session_dir,
-    )
-
-    assert result["batch_mode"] is True
-    assert result["batch_kernel_ids"] == ["k003", "k006"]
-    assert result["backend_order"] == ["forge"]
-    assert result["kernel_id"] == "k006"
-    assert result["proposal"]["decision"] == "KEEP"
-    assert result["verification"]["micro_speedup"] == pytest.approx(1.31)
-
-    by_kernel: dict[str, list[str]] = {}
-    for kernel_id, backend in calls:
-        by_kernel.setdefault(kernel_id, []).append(backend)
-    assert by_kernel["k003"] == ["forge"]
-    assert by_kernel["k006"] == ["forge"]
 
 
 # E — record_kernel_opt retires kernels stuck in PARTIAL.

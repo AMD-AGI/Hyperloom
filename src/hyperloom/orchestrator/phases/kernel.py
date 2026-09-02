@@ -3433,12 +3433,12 @@ class KernelPhase(PhaseHandler):
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
         if self._kernel_opt_work_remains():
-            await self._run_kernel_opt_entry_batch()
+            await self._run_kernel_opt_nomination()
 
     def _kernel_opt_work_remains(self) -> bool:
-        """Whether KERNEL entry should dispatch source-level kernel_opt itself.
+        """Whether KERNEL entry should call forge to nominate a kernel itself.
 
-        The switch scopes to this dispatch alone. ``kernel_opt`` stays in the
+        The switch scopes to this entry call alone. ``kernel_opt`` stays in the
         phase's allowed actions either way, so orchestration can still request
         it; opting out only means the phase stops asking on its own.
 
@@ -3450,13 +3450,19 @@ class KernelPhase(PhaseHandler):
             return False
         return bool(self.shared_state.untried_hot_reusable_kernels())
 
-    async def _run_kernel_opt_entry_batch(self) -> None:
-        """Dispatch the source-level kernel optimization batch at KERNEL entry.
+    async def _run_kernel_opt_nomination(self) -> None:
+        """Call forge once at KERNEL entry to nominate and optimize a kernel.
 
-        No ``kernel_id`` is named, so the handler's own filter decides the set:
-        every candidate that clears the dispatch floor and has retries left goes
-        in one batch. Naming one here would put the phase back in the business
-        of picking, which is the part that stalls when nobody picks.
+        The which-kernel selection now lives in forge nomination, so this entry
+        no longer picks a candidate set or fans out across it -- it hands the
+        latest trace context (``candidates_path``) to a single
+        ``run_optimization_handler`` call and lets forge decide what to touch.
+
+        The call is fired for its side effect on the phase-exit latch as much as
+        for the patch it may produce: once forge has looked at the trace and
+        returned -- whether or not it nominated anything -- the pass is complete
+        for this macro cycle (see :func:`mark_kernel_auto_pass_complete`). Skip
+        it only when there is no trace to hand over.
         """
         cached = self.shared_state.last_trace_analyze or {}
         candidates_path = str(cached.get("candidates_path") or "")
@@ -3464,7 +3470,7 @@ class KernelPhase(PhaseHandler):
             log.info("KERNEL entry: skip kernel_opt; no candidates_path")
             return
         log.info(
-            "KERNEL entry: dispatching the source-level kernel_opt batch",
+            "KERNEL entry: calling forge to nominate source-level kernel_opt",
         )
         try:
             from hyperloom.common.inline_step_heartbeat import inline_step_heartbeat
@@ -3495,9 +3501,11 @@ class KernelPhase(PhaseHandler):
                 "error": repr(exc),
             }
         finally:
-            # Recorded even for an empty selection or a failure: the phase-exit
-            # predicate hangs on kernels nobody claimed, and a pass that ran is
-            # the only thing that can answer for them.
+            # Stamped even for an empty nomination or a failure: a hot kernel
+            # forge looked at and passed over leaves no ledger row and stays
+            # "untried" forever, so the phase-exit predicate never goes quiet
+            # unless a completed pass answers for it (design doc s9). This is
+            # the one place that records the pass ran this cycle.
             from .machine_state import mark_kernel_auto_pass_complete
 
             mark_kernel_auto_pass_complete(self.shared_state)
@@ -3516,7 +3524,7 @@ class KernelPhase(PhaseHandler):
                 priority=1,
             )
         )
-        if isinstance(result, dict) and not result.get("batch_mode"):
+        if isinstance(result, dict):
             self.shared_state.record_kernel_opt(result)
         self.shared_state.save(self.session_dir)
 
