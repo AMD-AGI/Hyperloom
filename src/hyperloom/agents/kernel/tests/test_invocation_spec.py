@@ -305,7 +305,6 @@ def test_forge_invoke_persists_and_passes_operator_spec(tmp_path, monkeypatch):
         return {"returncode": 0, "stdout": "ok", "stdout_tail": "ok", "stderr_tail": ""}
 
     monkeypatch.setattr(kernel_optimization, "_forge_output_dir", lambda *_args: out_dir)
-    monkeypatch.setattr(kernel_optimization, "ray_available", lambda: False)
     monkeypatch.setattr(
         kernel_optimization,
         "_import_backend",
