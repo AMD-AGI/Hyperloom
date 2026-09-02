@@ -792,6 +792,18 @@ class KernelPhase(PhaseHandler):
         # two can never disagree (e.g. ROCR=6 with TP=2 ships tp=1, not tp=2).
         _gpu_ids = _resolve_handoff_gpu_ids(gpu_pin=gpu_pin, tp=_tp)
         _tp = _resolve_handoff_tp(gpu_ids=_gpu_ids, tp=_tp)
+        _gpu_ids_space = _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin)
+        if _gpu_ids_space == "none":
+            # Set-but-empty mask: the run has no visible devices, so no id list
+            # in this handoff can be truthful. The payload says so via
+            # gpu_ids_space, but say it in the log too — a GEAK run that dies
+            # on "invalid device ordinal" is otherwise unexplainable.
+            log.error(
+                "geak handoff: %s is set but empty; the run has no visible GPUs. "
+                "gpu_ids=%s is a placeholder (gpu_ids_space=none), not a device set.",
+                gpu_pin.get("var"),
+                _gpu_ids,
+            )
         # Serving-launch fidelity: forward the SAME max-model-len / gpu-mem-util
         # the baseline served with so GEAK launches the identical engine and its
         # baseline matches raw_baseline_tput. Resolver parses these from the raw
@@ -848,11 +860,12 @@ class KernelPhase(PhaseHandler):
             # an inherited ROCR mask, a HIP/CUDA mask as-is, else 0..tp-1.
             "gpu_ids": _gpu_ids,
             # Which coordinate system ``gpu_ids`` is in: "logical" (positions
-            # inside the ROCR mask the child inherits) or "absolute" (whole-
-            # machine device ids). Exporting them as HIP_VISIBLE_DEVICES is
-            # correct either way; a consumer that instead writes ROCR itself
-            # needs to know which it was handed.
-            "gpu_ids_space": _resolve_handoff_gpu_ids_space(gpu_pin=gpu_pin),
+            # inside the ROCR mask the child inherits), "absolute" (whole-
+            # machine device ids), or "none" (the mask is set but empty — the
+            # ids are placeholders and must not be launched on). Exporting them
+            # as HIP_VISIBLE_DEVICES is correct in the first two; a consumer
+            # that instead writes ROCR itself needs to know which it holds.
+            "gpu_ids_space": _gpu_ids_space,
         }
         if gpu_pin:
             # ABSOLUTE ids + the var they came from, so a consumer that writes

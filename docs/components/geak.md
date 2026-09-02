@@ -48,7 +48,7 @@ coordinate systems:
 | Field | Coordinate system | Value |
 |-------|-------------------|-------|
 | `gpu_ids` | HIP-level device list — HIP indexes into the ROCr-visible set | logical positions inside an *inherited* ROCr-level mask, capped at `tp` and at the mask width (`ROCR=6` → `"0"`); a HIP-level mask nested inside that slice is already logical and is forwarded instead (`ROCR=4,5,6,7` + `HIP=2,3` → `"2,3"`, i.e. cards 6 and 7); any other mask passes through uncapped (`HIP=4,5` → `"4,5"`); `0..tp-1` when the run is unpinned. Never empty — a falsy `gpu_ids` sends GEAK back to its own `0..tp-1` fallback |
-| `gpu_ids_space` | — | `"logical"` when `gpu_ids` indexes into an inherited ROCr mask, `"absolute"` otherwise. The one field that makes the two coordinate systems distinguishable from the payload alone |
+| `gpu_ids_space` | — | `"logical"` when `gpu_ids` indexes into an inherited ROCr mask, `"absolute"` when they are whole-machine ids, `"none"` when the mask is set but empty. The one field that makes the coordinate systems distinguishable from the payload alone |
 | `gpu_pin` | absolute device ids | `{"var", "value", "ids", "count", "source"}` for the winning mask, plus `"inner"` (the same shape) when a HIP-level mask is nested inside a ROCr-level one. Omitted entirely only when no mask is set anywhere, which means "whole machine visible", not "pinned to card 0"; a mask that is *set but empty* is reported with `count: 0` (zero devices visible). `value` is the mask as authored, only whitespace-trimmed and (for a YAML sequence) comma-joined, so a UUID mask can be re-exported as-is; `ids` are its numeric ids and `count` how many devices it exposes — both derived from the same effective token list, with duplicate and negative ordinals dropped, so `count >= len(ids)` always and they differ only for a (partly) non-numeric mask |
 
 The mask is resolved variable-major, over the full ROCm precedence chain in
@@ -89,7 +89,15 @@ device set `0..count-1` from the child's point of view, so the inner HIP mask
 is `0..count-1`, **not** `gpu_ids`. Re-applying an absolute `gpu_ids` on top of
 a ROCr mask it also wrote yields out-of-range ordinals (`ROCR=4,5` plus
 `HIP=4,5` indexes positions 4 and 5 of a two-element set). `gpu_ids_space` is
-how a consumer tells the two cases apart without inferring it from `source`.
+how a consumer tells the cases apart without inferring it from `source`.
+
+`gpu_ids_space: "none"` is the third case: the mask is set but empty, so the run
+has no visible devices and no id list can be truthful. `gpu_ids` still carries
+`0..tp-1` — a falsy `gpu_ids` is read as "unset" and falls back to exactly those
+ids anyway (`interface/run_e2e.py`), so an empty string would buy nothing and
+lose the ability to say why. A consumer must treat those ids as placeholders and
+not launch on them; the orchestrator also logs the condition at ERROR, because a
+GEAK run that dies on an invalid device ordinal is otherwise unexplainable.
 
 ## GEAK documentation
 

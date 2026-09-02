@@ -13,8 +13,11 @@ it without dragging in the SQLite connection ``gpu_pool`` owns.
 Two var tuples, deliberately distinct:
 
 * :data:`COUNTING_VISIBLE_DEVICE_VARS` — what ``gpu_pool`` / ``gate`` consult to
-  answer "how many GPUs does this process have". Unchanged from what those
-  layers always used; widening it would change GPU accounting repo-wide.
+  answer "how many GPUs does this process have". Identical to what those layers
+  always used; widening it would change GPU accounting repo-wide. It is DERIVED
+  from the chain below by subtracting an explicit exclusion set, so the two can
+  never drift: a new var is counted unless someone names it as uncounted, and a
+  test asserts every chain member is classified.
 * :data:`VISIBLE_DEVICE_VARS` — the full ROCm pin-resolution chain, used when
   answering "where is this run pinned". ``HSA_VISIBLE_DEVICES`` is ROCr's legacy
   name and ``GPU_DEVICE_ORDINAL`` is the legacy HIP-level filter; a run pinned
@@ -50,12 +53,30 @@ HIP_LEVEL_VARS: tuple[str, ...] = (
 #: spelling before legacy within each level.
 VISIBLE_DEVICE_VARS: tuple[str, ...] = ROCR_LEVEL_VARS + HIP_LEVEL_VARS
 
-#: The subset the capacity-counting layers read. Kept separate from
-#: :data:`VISIBLE_DEVICE_VARS` on purpose — see the module docstring.
-COUNTING_VISIBLE_DEVICE_VARS: tuple[str, ...] = (
-    "ROCR_VISIBLE_DEVICES",
-    "HIP_VISIBLE_DEVICES",
-    "CUDA_VISIBLE_DEVICES",
+#: Vars the capacity-counting layers deliberately do NOT read.
+#:
+#: Both are legacy aliases of a var already in the counting set, and both are
+#: honoured only when their modern spelling is absent — so counting them would
+#: not find a GPU the modern spelling missed, it would only change the answer on
+#: hosts that happen to export the legacy name. That is a repo-wide GPU
+#: accounting change, not a bugfix, so it stays out until someone makes it
+#: deliberately.
+_UNCOUNTED_VISIBLE_DEVICE_VARS: frozenset[str] = frozenset(
+    {
+        "HSA_VISIBLE_DEVICES",
+        "GPU_DEVICE_ORDINAL",
+    }
+)
+
+#: The subset the capacity-counting layers read — ``gpu_pool``, ``policy.gate``,
+#: ``actions.executors._ray_serving``. DERIVED from
+#: :data:`VISIBLE_DEVICE_VARS` rather than re-listed, so a var added to the
+#: precedence chain is counted by default and can only be left out by naming it
+#: in :data:`_UNCOUNTED_VISIBLE_DEVICE_VARS`. The two tuples cannot silently
+#: drift apart: ``test_visible_devices.py`` asserts every chain member is
+#: classified exactly once.
+COUNTING_VISIBLE_DEVICE_VARS: tuple[str, ...] = tuple(
+    var for var in VISIBLE_DEVICE_VARS if var not in _UNCOUNTED_VISIBLE_DEVICE_VARS
 )
 
 #: Every name that selects hardware rather than tuning it (superset of the

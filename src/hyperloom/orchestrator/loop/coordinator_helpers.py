@@ -1851,19 +1851,31 @@ def _resolve_handoff_gpu_ids_space(*, gpu_pin: Mapping[str, Any] | None) -> str:
     the inherited ROCr mask" or "absolute cards 0 and 1", and a consumer that
     guesses wrong re-pins the servers onto physical GPU 0 — issue #1312. This
     field makes the distinction explicit so a consumer that composes masks
-    itself (rather than exporting ``gpu_ids`` verbatim into HIP) can tell which
-    it was handed. Consumers that ignore it keep the old, correct behaviour of
+    itself (rather than exporting ``gpu_ids`` into HIP) can tell which it was
+    handed. Consumers that ignore it keep the old, correct behaviour of
     exporting ``gpu_ids`` as ``HIP_VISIBLE_DEVICES``, which is a HIP-level
     variable in both spaces.
+
+    ``"none"`` is the third case and the reason this is a tri-state rather
+    than a boolean: the mask is SET BUT EMPTY, so the run has no visible
+    devices and NO id list can be truthful. ``gpu_ids`` still carries
+    ``0..tp-1`` because the consumer reads a falsy ``gpu_ids`` as "unset" and
+    falls back to exactly those ids anyway (``interface/run_e2e.py``) — an
+    empty string would buy nothing and lose the ability to say why. The ids are
+    placeholders in that case and a consumer must not launch on them.
 
     Args:
         gpu_pin: The :func:`_resolve_gpu_pin` result (``{}``/``None`` = unpinned).
 
     Returns:
-        ``"logical"`` when the ids index into an inherited ROCr mask,
-        ``"absolute"`` otherwise (including unpinned).
+        ``"none"`` when the pin exposes zero devices, ``"logical"`` when the
+        ids index into an inherited ROCr mask, ``"absolute"`` otherwise
+        (including unpinned).
     """
-    return "logical" if _pin_is_inherited_rocr(gpu_pin) else "absolute"
+    pin = gpu_pin or {}
+    if pin and int(pin.get("count") or 0) <= 0:
+        return "none"
+    return "logical" if _pin_is_inherited_rocr(pin) else "absolute"
 
 
 def _coerce_tp(*args: Any, default: int = 1) -> int:

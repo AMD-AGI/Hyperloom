@@ -366,10 +366,26 @@ def test_an_empty_mask_reports_zero_devices_rather_than_unpinned() -> None:
     assert pin["count"] == 0
     assert pin["ids"] == []
     # gpu_ids still must not be blank: GEAK reads a falsy gpu_ids as "unset" and
-    # falls straight back to 0..tp-1 (interface/run_e2e.py). The zero-device
-    # state is carried by the pin, and the inherited empty mask means the child
-    # sees no cards regardless of what ids we name.
+    # falls straight back to 0..tp-1 (interface/run_e2e.py), so an empty string
+    # buys nothing. The ids are declared placeholders instead — that is what
+    # the third coordinate space exists for.
     assert _resolve_handoff_gpu_ids(gpu_pin=pin, tp=2) == "0,1"
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none"
+
+
+def test_a_mask_with_no_valid_ordinal_is_also_reported_as_zero_devices() -> None:
+    """``ROCR="-1"`` is non-blank but exposes nothing; it must not read as a pin."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "-1"})
+    assert pin["count"] == 0
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "none"
+
+
+def test_a_uuid_mask_is_not_mistaken_for_zero_devices() -> None:
+    """``ids`` is empty for a UUID mask, but it exposes real cards."""
+    pin = _resolve_gpu_pin(recipe_envs={}, environ={"ROCR_VISIBLE_DEVICES": "GPU-a1b2c3,GPU-d4e5f6"})
+    assert pin["ids"] == []
+    assert pin["count"] == 2
+    assert _resolve_handoff_gpu_ids_space(gpu_pin=pin) == "logical"
 
 
 def test_a_real_pin_outranks_an_earlier_empty_mask() -> None:
