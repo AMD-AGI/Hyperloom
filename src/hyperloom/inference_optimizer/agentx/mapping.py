@@ -8,6 +8,9 @@ Emits exactly the keys Magpie's ``ResultParser.parse_inferencex_result`` reads.
 Each aiperf metric is a dict carrying at least ``avg``; latency metrics also
 carry ``p50``/``p99``/``std``. ``stat`` reads a sub-key, falling back to ``avg``
 then a numeric default so a missing metric never raises.
+
+``pct`` is the strict variant: no ``avg`` fallback. Use it for any axis where
+the percentile and the mean differ and grading depends on the result.
 """
 
 from __future__ import annotations
@@ -27,6 +30,15 @@ def stat(m: Mapping[str, Any], key: str, sub: str = "avg", default: float = 0.0)
         av = v.get("avg")
         return av if av is not None else default
     return v if v is not None else default
+
+
+def pct(m: Mapping[str, Any], key: str, sub: str, default: float = 0.0) -> Any:
+    """Read ``m[key][sub]`` with no ``avg`` fallback."""
+    v = m.get(key)
+    if isinstance(v, dict):
+        sv = v.get(sub)
+        return sv if sv is not None else default
+    return default
 
 
 def submission_outcome(export: Mapping[str, Any]) -> tuple[bool | None, list[str]]:
@@ -90,9 +102,18 @@ def map_aiperf(
     rc = int(stat(m, "request_count") or 0)
     isl = stat(m, "input_sequence_length")
 
+    # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports at
+    # p90. ``output_token_throughput_per_user`` is 1/ITL and drops TTFT from the
+    # denominator, which on a ~114k-prompt replay is most of what a user waits
+    # for -- a candidate could double TTFT and leave that number untouched.
+    # pct() is used here (not stat()) because avg and p90 differ by >2x on
+    # this metric and grading against avg would make the veto gate meaningless.
+    intvty_p90 = pct(m, "e2e_output_token_throughput", "p90")
+
     return {
         "request_throughput": stat(m, "request_throughput"),
         "output_throughput": out_tput,
+        "input_throughput": in_tput,
         "total_token_throughput": total_tput,
         "completed": rc,
         "total_input_tokens": int(stat(m, "total_isl") or (isl * max(1, rc)) or 0),
@@ -104,8 +125,10 @@ def map_aiperf(
         "std_ttft_ms": stat(m, "time_to_first_token", "std"),
         "mean_tpot_ms": stat(m, "inter_token_latency", "avg"),
         "median_tpot_ms": stat(m, "inter_token_latency", "p50"),
+        "p90_tpot_ms": stat(m, "inter_token_latency", "p90"),
         "p99_tpot_ms": stat(m, "inter_token_latency", "p99"),
         "std_tpot_ms": stat(m, "inter_token_latency", "std"),
+        "intvty_p90_tok_s_user": intvty_p90,
         "mean_itl_ms": stat(m, "inter_token_latency", "avg"),
         "median_itl_ms": stat(m, "inter_token_latency", "p50"),
         "p99_itl_ms": stat(m, "inter_token_latency", "p99"),
