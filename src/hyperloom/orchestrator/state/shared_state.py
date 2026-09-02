@@ -984,9 +984,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
     last_collective: dict[str, Any] = field(default_factory=dict)
     collective_attempts: list[dict[str, Any]] = field(default_factory=list)
     collective_only_mode: bool = False
-    # Most recent run_optimization dispatch skipped with no eligible kernels;
-    # recorded as a non-failure so the breakdown can surface it.
-    last_kernel_opt_dispatch_skip: dict[str, Any] = field(default_factory=dict)
     # Per-action audit (kernel parity): each ``last_<action>`` is the most recent attempt snapshot; ``<action>_attempts`` is a capped list.
     last_baseline: dict[str, Any] = field(default_factory=dict)
     last_profile: dict[str, Any] = field(default_factory=dict)

@@ -77,17 +77,6 @@ _GEAK_RESIDUAL_MIN_RATIO = 1.001
 # a transient cause plus the original attempt.
 MAX_FUSION_INFRA_RETRIES = 2
 
-# Why KERNEL entry dispatched no kernel_opt at all, recorded on
-# ``last_kernel_opt_dispatch_skip`` and surfaced by the summary as
-# ``dispatch_skip_reason``. A wholesale skip is invisible in the summary's
-# unattempted buckets, which only ever count kernels the candidate table
-# listed: an absent table leaves every bucket at zero, which reads as "this
-# workload had nothing worth optimising" rather than "nothing was ever asked".
-KERNEL_OPT_SKIP_DISABLED = "auto_kernel_opt_disabled"
-KERNEL_OPT_SKIP_NO_CANDIDATE_TABLE = "no_candidate_table"
-KERNEL_OPT_SKIP_NO_UNTRIED_KERNELS = "no_untried_hot_kernels"
-KERNEL_OPT_SKIP_NO_CANDIDATES_PATH = "no_candidates_path"
-
 
 def _as_int(value: object) -> int:
     """Read a counter that round-tripped through JSON, defaulting to 0."""
