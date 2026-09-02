@@ -3998,6 +3998,13 @@ async def test_coordinator_request_handler_exception_recorded(session_dir):
 
 
 # Batch dispatch enablers: batch-parallel sizing + candidates_path injection.
+def test_default_kernel_batch_parallel_matches_full_node():
+    """Default fanout is sized for a single MI300X / MI355X node (8 GPU) so a
+    typical ``run_optimization`` batch does NOT serialize behind an asyncio
+    semaphore tighter than Ray's view of the cluster."""
+    assert krh._DEFAULT_KERNEL_BATCH_PARALLEL == 8
+
+
 @pytest.mark.asyncio
 async def test_coordinator_refuses_a_model_issued_run_optimization(
     session_dir,
@@ -4053,7 +4060,359 @@ async def test_coordinator_refuses_a_model_issued_run_optimization(
             await c.stop()
 
 
-# base_tput auto-injection on integrate.
+# Multi-KEEP integrate queue: streaming record_partial, batch_mode dedup, base_tput auto-injection.
+@pytest.mark.asyncio
+async def test_run_optimization_handler_invokes_record_partial_per_sub_result(
+    session_dir,
+):
+    """Each batch sub-attempt's result must flow through record_partial the
+    moment _run_kernel_backend_sequence returns, NOT only after
+    asyncio.gather() wait-all releases, so one slow GEAK sibling doesn't
+    delay integrate-queue visibility for the fast KEEPs."""
+    candidates = [
+        {"kernel_id": "kA", "source_file": "/p/a.py", "reusable_native_kernel": True},
+        {"kernel_id": "kB", "source_file": "/p/b.py", "reusable_native_kernel": True},
+        {"kernel_id": "kC", "source_file": "/p/c.py", "reusable_native_kernel": True},
+    ]
+
+    completion_log: list[str] = []
+    recorded: list[dict] = []
+
+    # Deterministic completion order kB -> kC -> kA via an explicit gate chain
+    # instead of real sleeps, so the assertion never depends on wall-clock
+    # timing (which is flaky under a loaded parallel test run).
+    _gates = {kid: asyncio.Event() for kid in ("kA", "kB", "kC")}
+    _release_after = {"kB": "kC", "kC": "kA"}  # kB done -> release kC -> release kA
+
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+        kid = str(candidate.get("kernel_id"))
+        if kid != "kB":
+            # kC and kA wait until their predecessor signals completion.
+            await _gates[kid].wait()
+        completion_log.append(kid)
+        nxt = _release_after.get(kid)
+        if nxt:
+            _gates[nxt].set()
+        return {
+            "status": "ok",
+            "kernel_id": kid,
+            "source_file": candidate["source_file"],
+            "proposal": {"decision": "KEEP" if kid in ("kB", "kC") else "REVERT"},
+            "verification": {"micro_speedup": 1.5 if kid == "kB" else 2.0},
+        }
+
+    def record_partial(result: dict) -> None:
+        recorded.append(
+            {
+                "kernel_id": result.get("kernel_id"),
+                "decision": (result.get("proposal") or {}).get("decision"),
+            }
+        )
+
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
+        await krh._run_optimization_batch(
+            payload={
+                "candidates_path": "/dummy",
+                # Synthetic order avoids the forge batch serialization path; the
+                # monkeypatched sequence below is what this test exercises.
+                "backend_order": "synthetic",
+                "max_parallel": 3,
+                "parallel_backends": False,
+            },
+            candidates=candidates,
+            session_dir=session_dir,
+            record_partial=record_partial,
+        )
+
+    # Callback must have fired for every candidate, in completion order
+    # (NOT input order). kB runs ungated first, then releases kC, then kA.
+    assert [r["kernel_id"] for r in recorded] == ["kB", "kC", "kA"], recorded
+    assert completion_log == ["kB", "kC", "kA"]
+
+
+@pytest.mark.asyncio
+async def test_backend_ladder_breaks_on_first_keep(session_dir, monkeypatch):
+    """When forge already KEEPs, the ladder short-circuits."""
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "forge":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {
+                    "micro_speedup": 1.50,
+                    "correctness_passed": True,
+                    "best_artifact_path": "/tmp/forge.py",
+                },
+            }
+        raise AssertionError(f"ladder must NOT run {backend!r} after forge KEEP")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy", "backend_order": "forge"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
+            session_dir=session_dir,
+        )
+
+    assert calls == ["forge"]
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert (best.get("verification") or {}).get("micro_speedup") == 1.50
+
+
+@pytest.mark.asyncio
+async def test_backend_sequence_forge_keep_short_circuits(session_dir, monkeypatch):
+    """Forge runs first and a KEEP short-circuits before GEAK fallback.
+
+    Regression coverage for Bugbot: _kernel_result_rank() returns a tuple, so
+    the short-circuit must inspect the KEEP slot instead of comparing the tuple
+    directly to int 0.
+    """
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    calls: list[str] = []
+
+    async def fake_single(child, *, session_dir, timeout_override_sec=None):
+        backend = child["backends"]
+        calls.append(backend)
+        if backend == "forge":
+            return {
+                "status": "ok",
+                "kernel_id": child["kernel_id"],
+                "proposal": {"decision": "KEEP", "reasons": []},
+                "verification": {"micro_speedup": 1.05, "best_artifact_path": "/tmp/forge.py"},
+            }
+        raise AssertionError(f"forge KEEP must short-circuit before {backend!r}")
+
+    with patch.object(krh, "_run_optimization_single", side_effect=fake_single):
+        best = await krh._run_kernel_backend_sequence(
+            {"candidates_path": "/dummy", "backend_order": "forge"},
+            {"kernel_id": "k004", "source_file": "/p/moe_op.py", "reusable_native_kernel": True},
+            session_dir=session_dir,
+            parallel_backends=True,
+        )
+
+    assert calls == ["forge"]
+    assert (best.get("proposal") or {}).get("decision") == "KEEP"
+    assert best["batch_kernel_id"] == "k004"
+    assert {a["backend"] for a in best["backend_fallback_attempts"]} == {"forge"}
+
+
+@pytest.mark.asyncio
+async def test_batch_serializes_when_forge_in_ladder(session_dir, monkeypatch):
+    """Forge in-place editing is repo-global, so batch concurrency is capped at 1.
+
+    Even when GPU-rich mode says parallel backends are available, multiple
+    kernels must not race forge against other backends in the same live repo.
+    """
+    monkeypatch.setenv("KERNEL_OPT_BACKEND_ORDER", "forge")
+    active = 0
+    max_active = 0
+    seen_flags: list[bool] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+        nonlocal active, max_active
+        seen_flags.append(parallel_backends)
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return {
+            "status": "ok",
+            "kernel_id": candidate["kernel_id"],
+            "proposal": {"decision": "REVERT", "reasons": []},
+            "verification": {"micro_speedup": 1.0},
+        }
+
+    monkeypatch.setattr(krh, "_should_parallelize_backends", lambda payload, n: True)
+    monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fake_sequence)
+
+    out = await krh._run_optimization_batch(
+        {"candidates_path": "/dummy", "backend_order": "forge", "max_parallel": 8},
+        [
+            {"kernel_id": "k001", "source_file": "/p/a.py"},
+            {"kernel_id": "k002", "source_file": "/p/b.py"},
+        ],
+        session_dir=session_dir,
+    )
+
+    assert max_active == 1
+    assert seen_flags == [True, True]
+    assert out["parallel_backends"] is True
+
+
+@pytest.mark.asyncio
+async def test_batch_threads_parallel_backends_flag(session_dir, monkeypatch):
+    """``_run_optimization_batch`` computes the GPU-rich decision once,
+    threads it into every ``_run_kernel_backend_sequence`` call, and
+    surfaces it on the aggregate result for observability."""
+    seen_flags: list[bool] = []
+
+    async def fake_sequence(
+        base_payload,
+        candidate,
+        *,
+        session_dir,
+        parallel_backends=False,
+    ):
+        seen_flags.append(parallel_backends)
+        return {
+            "status": "ok",
+            "kernel_id": candidate["kernel_id"],
+            "source_file": candidate.get("source_file"),
+            "proposal": {"decision": "KEEP"},
+            "verification": {"micro_speedup": 1.3},
+        }
+
+    candidates = [
+        {"kernel_id": "k1", "source_file": "/p/a.py", "reusable_native_kernel": True},
+        {"kernel_id": "k2", "source_file": "/p/b.py", "reusable_native_kernel": True},
+    ]
+    # Force the decision deterministically (no real GPUs under CI); the
+    # env override short-circuits the torch/GPU math in
+    # ``_should_parallelize_backends``.
+    monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
+        out = await krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy", "max_parallel": 2},
+            candidates=candidates,
+            session_dir=session_dir,
+        )
+
+    assert seen_flags == [True, True], seen_flags
+    assert out["parallel_backends"] is True
+
+
+@pytest.mark.asyncio
+async def test_batch_handler_isolates_sub_task_exceptions_from_gather(
+    session_dir,
+):
+    """Sub-task exceptions surface as structured ``failed`` results so ``gather`` stays true wait-all and doesn't unblock the Coordinator mid-batch."""
+    candidates = [
+        {"kernel_id": "kFast", "source_file": "/p/fast.py", "reusable_native_kernel": True},
+        {"kernel_id": "kCrash", "source_file": "/p/crash.py", "reusable_native_kernel": True},
+        {"kernel_id": "kSlow", "source_file": "/p/slow.py", "reusable_native_kernel": True},
+    ]
+
+    recorded: list[dict] = []
+    completion_order: list[str] = []
+
+    async def fake_sequence(base_payload, candidate, *, session_dir, parallel_backends=False):
+        kid = str(candidate.get("kernel_id"))
+        if kid == "kFast":
+            await asyncio.sleep(0.01)
+            completion_order.append(kid)
+            return {
+                "status": "ok",
+                "kernel_id": kid,
+                "source_file": candidate["source_file"],
+                "proposal": {"decision": "KEEP"},
+                "verification": {"micro_speedup": 1.6},
+            }
+        if kid == "kCrash":
+            await asyncio.sleep(0.02)
+            completion_order.append(kid)
+            raise RuntimeError("simulated GEAK crash mid-batch")
+        # kSlow finishes last; gather must wait for it.
+        await asyncio.sleep(0.06)
+        completion_order.append(kid)
+        return {
+            "status": "ok",
+            "kernel_id": kid,
+            "source_file": candidate["source_file"],
+            "proposal": {"decision": "REVERT"},
+            "verification": {"micro_speedup": 0.9},
+        }
+
+    def record_partial(result: dict) -> None:
+        recorded.append(
+            {
+                "kernel_id": result.get("kernel_id"),
+                "status": result.get("status"),
+                "decision": (result.get("proposal") or {}).get("decision"),
+                "error_class": result.get("error_class"),
+            }
+        )
+
+    with patch.object(krh, "_run_kernel_backend_sequence", side_effect=fake_sequence):
+        result = await krh._run_optimization_batch(
+            payload={"candidates_path": "/dummy"},
+            candidates=candidates,
+            session_dir=session_dir,
+            record_partial=record_partial,
+        )
+
+    # Gather MUST have waited for all three (kSlow finishes last).
+    assert completion_order == ["kFast", "kCrash", "kSlow"], completion_order
+
+    # record_partial got one call per candidate; the crash surfaced as a structured failed with kernel_id preserved.
+    assert [r["kernel_id"] for r in recorded] == ["kFast", "kCrash", "kSlow"]
+    crash_record = next(r for r in recorded if r["kernel_id"] == "kCrash")
+    assert crash_record["status"] == "failed"
+    assert crash_record["error_class"] == "subtask_exception"
+
+    # Batch handler still returns the best KEEP (kFast) and tags
+    # batch_mode so Coordinator's post-gather record_kernel_opt dedups.
+    assert isinstance(result, dict)
+    assert result.get("batch_mode") is True
+    assert result.get("kernel_id") == "kFast"
+
+
+@pytest.mark.asyncio
+async def test_coordinator_streams_batch_results_and_dedups_final_record(
+    session_dir,
+):
+    """End-to-end: record_partial records each sub-attempt in flight, and the post-gather record_kernel_opt(best) is skipped in batch_mode (no double-counting)."""
+    c = Coordinator(session_dir, backends=_backends_silent())
+    c.shared_state.baseline_tput = 1234.5
+    c.shared_state.last_profile_trace = "/path/trace/x.json.gz"
+    c.shared_state.last_trace_analyze = {
+        "trace_input": "/path/trace/x.json.gz",
+        "candidates_path": "/path/cached/candidates.json",
+    }
+    # The sequence gate also consults ``last_select_kernels``.
+    c.shared_state.last_select_kernels = dict(c.shared_state.last_trace_analyze)
+    c.shared_state.current_best = {
+        "action": "integrate",
+        "tput": 4500.0,
+        "kernel_id": "k009",
+    }
+
+    captured: dict = {}
+
+    async def fake_handler(payload, *, session_dir, **kwargs):
+        captured["payload"] = dict(payload)
+        return {"status": "ok", "decision": "KEEP", "new_tput": 4620.0, "gain_pct": 2.7, "kernel_id": "k001"}
+
+    with patch.dict(krh.KERNEL_REQUEST_HANDLERS, {"integrate": fake_handler}):
+        try:
+            await c._handle_intent(
+                "orchestration",
+                Intent(
+                    type=IntentType.REQUEST,
+                    payload={
+                        "target_agent": "kernel_agent",
+                        "kind": "integrate",
+                        "params": {
+                            "kernel_id": "k001",
+                            "patch_path": "/tmp/k001.py",
+                            "target_file": "/p/moe_op.py",
+                            # no base_tput intentionally
+                        },
+                    },
+                ),
+            )
+        finally:
+            await c.stop()
+
+    assert captured["payload"].get("base_tput") == 4500.0, (
+        "Coordinator must auto-inject base_tput from current_best.tput"
+    )
+
+
 @pytest.mark.asyncio
 async def test_coordinator_does_not_overwrite_explicit_base_tput_on_integrate(
     session_dir,

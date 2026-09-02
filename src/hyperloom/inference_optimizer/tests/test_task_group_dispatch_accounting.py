@@ -12,6 +12,74 @@ from hyperloom.orchestrator.phases.machine_state import kernel_work_pending
 from hyperloom.orchestrator.state.shared_state import SharedState
 
 
+@pytest.mark.asyncio
+async def test_backend_sequence_stamps_task_group_identity(tmp_path, monkeypatch):
+    candidate = {
+        "kernel_id": "k002",
+        "source_file": "/repo/kernel.py",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k002",
+            "kernel_ids": ["k001", "k002", "k003", "k004"],
+            "rows": [],
+        },
+    }
+
+    async def fake_ladder(*_args, **_kwargs):
+        return (
+            {
+                "status": "ok",
+                "kernel_id": "k002",
+                "proposal": {"decision": "REVERT"},
+                "verification": {"micro_speedup": 0.0},
+            },
+            [],
+        )
+
+    monkeypatch.setattr(krh, "_backend_order", lambda _payload: ["forge"])
+    monkeypatch.setattr(krh, "_run_backend_ladder", fake_ladder)
+
+    result = await krh._run_kernel_backend_sequence(
+        {},
+        candidate,
+        session_dir=tmp_path,
+    )
+
+    assert result["task_group_id"] == "tg001"
+    assert result["task_group_primary_kernel_id"] == "k002"
+    assert result["task_group_kernel_ids"] == ["k001", "k002", "k003", "k004"]
+
+
+@pytest.mark.asyncio
+async def test_batch_exception_preserves_task_group_identity(tmp_path, monkeypatch):
+    candidate = {
+        "kernel_id": "k002",
+        "source_file": "/repo/kernel.py",
+        "task_group": {
+            "task_group_id": "tg001",
+            "primary_kernel_id": "k002",
+            "kernel_ids": ["k001", "k002"],
+            "rows": [],
+        },
+    }
+
+    async def fail_sequence(*_args, **_kwargs):
+        raise RuntimeError("backend crashed")
+
+    monkeypatch.setattr(krh, "_run_kernel_backend_sequence", fail_sequence)
+
+    result = await krh._run_optimization_batch(
+        {},
+        [candidate],
+        session_dir=tmp_path,
+    )
+
+    failed = result["batch_results"][0]
+    assert failed["error_class"] == "subtask_exception"
+    assert failed["task_group_id"] == "tg001"
+    assert failed["task_group_kernel_ids"] == ["k001", "k002"]
+
+
 def test_record_kernel_opt_keeps_one_keyed_group_ledger():
     state = SharedState()
     result = {

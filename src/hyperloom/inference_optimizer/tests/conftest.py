@@ -30,7 +30,7 @@ def _clear_kernel_request_handler_caches():
     """Clear ``lru_cache`` state on env-bound helpers between tests."""
     from hyperloom.orchestrator.kernel import request_handlers as krh
 
-    krh._is_gfx950_rocminfo.cache_clear()
+    krh._default_kernel_batch_parallel.cache_clear()
 
 
 def _bootstrap_kernel_agent_env() -> None:

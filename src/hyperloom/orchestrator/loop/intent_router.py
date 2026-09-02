@@ -964,12 +964,11 @@ class IntentRouter:
                         if isinstance(cb_tput, (int, float)) and cb_tput > 0:
                             merged_payload["base_tput"] = float(cb_tput)
 
+                    # Streaming-record callback for run_optimization batch: each sub-attempt writes immediately.
                     handler_kwargs: dict[str, Any] = {
                         "session_dir": self.session_dir,
                     }
                     if kind == "run_optimization":
-                        # Retained for the handler's calling convention; the
-                        # single-kernel path streams no sub-results.
                         handler_kwargs["record_partial"] = self._record_kernel_opt_partial
                     # Bracket the programmatic kernel step with START / END
                     # lifecycle events. ``kind`` is the machine step name;
@@ -1044,7 +1043,9 @@ class IntentRouter:
                 self.shared_state.save(self.session_dir)
             # Mirror kernel-opt outcomes into SharedState.
             if kind == "run_optimization":
-                self.shared_state.record_kernel_opt(result)
+                # Batch mode already streamed each sub-result; re-recording would double-count.
+                if not bool(isinstance(result, dict) and result.get("batch_mode")):
+                    self.shared_state.record_kernel_opt(result)
                 self.shared_state.save(self.session_dir)
                 # Auto-enqueue integrate for KEEP'd kernels not yet integrated.
                 await self._auto_enqueue_pending_integrations()

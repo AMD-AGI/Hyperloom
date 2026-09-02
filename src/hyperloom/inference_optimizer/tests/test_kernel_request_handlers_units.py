@@ -2760,6 +2760,19 @@ class TestCoerceRuntimeValue:
         assert krh._coerce_runtime_value(value) == expected
 
 
+class TestBackendOrder:
+    def test_kernel_opt_backends_alias_does_not_enable_forge(self, monkeypatch):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+        monkeypatch.delenv("CURSOR_API_KEY", raising=False)
+
+        assert krh._backend_order({}) == []
+
+    def test_kernel_opt_backends_alias_with_mixed_values_stays_geak_only(self, monkeypatch):
+        monkeypatch.delenv("KERNEL_OPT_BACKEND_ORDER", raising=False)
+
+        assert krh._backend_order({}) == []
+
+
 class TestCandidateEnvAllowed:
     @pytest.mark.parametrize("name", ["AWS_SECRET_ACCESS_KEY", "ANTHROPIC_API_KEY"])
     def test_sensitive_env_blocked(self, name):
@@ -5055,6 +5068,174 @@ class TestRunGemmTuningHandler:
 
         assert krh._resolve_forge_shapes(state, session_dir) == str(artifact)
 
+
+# _default_kernel_batch_parallel — adaptive batch fanout scaling with visible GPUs.
+class TestDefaultKernelBatchParallel:
+    @pytest.fixture
+    def patch_torch(self, monkeypatch):
+        """Returns a setter that overrides ``torch.cuda.device_count`` and ``$KERNEL_AGENT_NUM_GPUS``."""
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _set(n_gpus, per_task=None):
+            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
+            if per_task is None:
+                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+            else:
+                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
+
+        return _set
+
+    @pytest.mark.parametrize(
+        "n_gpus, per_task, expected",
+        [
+            # Full-node match: cap kicks in at 8.
+            (8, 1, 8),
+            # Partial node -> floor at the visible-GPU count.
+            (4, 1, 4),
+            # 8-GPU node with 4-GPU reservations -> 2 concurrent.
+            (8, 4, 2),
+            # 4-GPU pod with 2-GPU per task -> 2 concurrent.
+            (4, 2, 2),
+            # Larger-than-cap node -> cap still kicks in.
+            (16, 1, 8),
+            # Per-task larger than visible -> floor at 1.
+            (1, 4, 1),
+        ],
+    )
+    def test_scales_with_visible_gpus(
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        expected,
+    ):
+        patch_torch(n_gpus, per_task=per_task)
+        assert krh._default_kernel_batch_parallel() == expected
+
+    def test_per_task_unset_defaults_to_one(self, patch_torch):
+        patch_torch(4, per_task=None)
+        assert krh._default_kernel_batch_parallel() == 4
+
+    def test_per_task_invalid_falls_back_to_one(self, patch_torch):
+        patch_torch(4, per_task="not-an-int")
+        assert krh._default_kernel_batch_parallel() == 4
+
+    def test_zero_visible_gpus_returns_legacy_fallback(self, patch_torch):
+        patch_torch(0)
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
+
+    def test_torch_failure_returns_legacy_fallback(self, monkeypatch):
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _boom():
+            raise RuntimeError("driver init failed")
+
+        monkeypatch.setattr(torch.cuda, "device_count", _boom)
+        monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+        assert krh._default_kernel_batch_parallel() == krh._DEFAULT_KERNEL_BATCH_PARALLEL
+
+
+# _should_parallelize_backends — backends never auto-parallelize; False unless
+# forced via payload ``parallel_backends`` or env ``KERNEL_OPT_PARALLEL_BACKENDS``.
+
+
+class TestShouldParallelizeBackends:
+    @pytest.fixture
+    def patch_torch(self, monkeypatch):
+        """Override ``torch.cuda.device_count`` + ``$KERNEL_AGENT_NUM_GPUS`` and clear the env override."""
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _set(n_gpus, per_task=None):
+            monkeypatch.setattr(torch.cuda, "device_count", lambda: n_gpus)
+            if per_task is None:
+                monkeypatch.delenv("KERNEL_AGENT_NUM_GPUS", raising=False)
+            else:
+                monkeypatch.setenv("KERNEL_AGENT_NUM_GPUS", str(per_task))
+            monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+
+        return _set
+
+    @pytest.mark.parametrize(
+        "n_gpus, per_task, num_candidates",
+        [
+            # No auto-parallelize regardless of GPU count: without an explicit
+            # override the decision is always sequential (False).
+            (8, 1, 3),
+            (8, 1, 100),
+            (2, 1, 1),
+            (1, 1, 1),
+            (16, 8, 1),
+        ],
+    )
+    def test_no_auto_parallelize_without_override(
+        self,
+        patch_torch,
+        n_gpus,
+        per_task,
+        num_candidates,
+    ):
+        patch_torch(n_gpus, per_task=per_task)
+        assert krh._should_parallelize_backends({}, num_candidates) is False
+
+    def test_non_positive_candidates_is_false(self, patch_torch):
+        patch_torch(64, per_task=1)  # plenty of GPUs
+        assert krh._should_parallelize_backends({}, 0) is False
+        assert krh._should_parallelize_backends({}, -1) is False
+
+    def test_zero_visible_gpus_is_false(self, patch_torch):
+        patch_torch(0, per_task=1)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_torch_unknown_is_false(self, monkeypatch):
+        torch = _ensure_torch_module(monkeypatch)
+
+        def _boom():
+            raise RuntimeError("driver init failed")
+
+        monkeypatch.setattr(torch.cuda, "device_count", _boom)
+        monkeypatch.delenv("KERNEL_OPT_PARALLEL_BACKENDS", raising=False)
+        assert krh._should_parallelize_backends({}, 1) is False
+
+    def test_payload_override_enables_below_threshold(self, patch_torch):
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": True},
+                5,
+            )
+            is True
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "on"},
+                5,
+            )
+            is True
+        )
+
+    def test_payload_override_disables_above_threshold(self, patch_torch):
+        patch_torch(64, per_task=1)  # GPU-aware math would say True
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": False},
+                1,
+            )
+            is False
+        )
+        assert (
+            krh._should_parallelize_backends(
+                {"parallel_backends": "no"},
+                1,
+            )
+            is False
+        )
+
+    def test_env_override(self, patch_torch, monkeypatch):
+        patch_torch(1, per_task=1)  # GPU-aware math is False (1 < 2*1)
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "1")
+        assert krh._should_parallelize_backends({}, 5) is True
+        monkeypatch.setenv("KERNEL_OPT_PARALLEL_BACKENDS", "0")
+        assert krh._should_parallelize_backends({}, 1) is False
 
 
 class TestReconcileKernelId:

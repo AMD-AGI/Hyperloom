@@ -3702,12 +3702,12 @@ class KernelPhase(PhaseHandler):
         return bool(self.shared_state.untried_hot_reusable_kernels())
 
     async def _run_kernel_opt_nomination(self) -> None:
-        """Call forge once at KERNEL entry to nominate and optimize a kernel.
+        """Dispatch the KERNEL entry's source-level kernel_opt pass.
 
-        The which-kernel selection now lives in forge nomination, so this entry
-        no longer picks a candidate set or fans out across it -- it hands the
-        latest trace context (``candidates_path``) to a single
-        ``run_optimization_handler`` call and lets forge decide what to touch.
+        Hands the latest trace context (``candidates_path``) to one
+        ``run_optimization_handler`` call. Which-kernel selection belongs to the
+        handler: under ``auto=true`` it forwards to forge self-nomination, and
+        otherwise it resolves the candidate set itself.
 
         The call is fired for its side effect on the phase-exit latch as much as
         for the patch it may produce: once forge has looked at the trace and
