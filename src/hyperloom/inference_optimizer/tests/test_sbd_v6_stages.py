@@ -2329,6 +2329,44 @@ def test_the_geak_echo_is_still_reported_inside_a_real_visit(tmp_path):
     assert (run["status"], run["outcome"]) == ("failed", "FAILED")
 
 
+@pytest.mark.parametrize(
+    ("geak_status", "expected_status", "expected_outcome"),
+    [
+        # The whole vocabulary GEAK writes, measured over the 2404 production
+        # sessions that carry a geak block: missing 1503, no_gain 212, ok 115,
+        # timeout 95, skipped 67, error 11.
+        ("ok", "succeeded", "NEEDS_REVIEW"),
+        # A completed run that found nothing. Reported as a GEAK fault until
+        # the alias existed, which is 212 sessions of the corpus.
+        ("no_gain", "succeeded", "NEEDS_REVIEW"),
+        ("missing", "failed", "FAILED"),
+        ("no_result_recovered_from_disk", "failed", "FAILED"),
+        ("timeout", "failed", "FAILED"),
+        ("error", "failed", "FAILED"),
+        ("skipped", "skipped", "SKIPPED"),
+    ],
+)
+def test_every_geak_status_maps_without_drift(tmp_path, geak_status, expected_status, expected_outcome):
+    """No GEAK status the runtime writes may reach the normalizer as drift.
+
+    A word this table does not know maps to ``failed``, which is the right
+    default for something genuinely unrecognized and the wrong answer for a
+    status the runtime treats as terminal. Pinning the whole vocabulary makes a
+    new spelling fail here rather than in a report.
+    """
+    warnings: list[str] = []
+    timeline = collect_v6_timeline(
+        tmp_path,
+        warnings,
+        state=_kernel_state() | {"kernel_optimizer": "geak"},
+        geak={"engaged": True, "status": geak_status, "accepted_kernels": []},
+    )
+
+    run = _events(timeline, "kernel")[0]["ext"]["geak_runs"][0]
+    assert (run["status"], run["outcome"]) == (expected_status, expected_outcome)
+    assert not [w for w in warnings if "unrecognized geak_runs status" in w]
+
+
 def test_a_skipped_geak_spelling_does_not_contradict_itself(tmp_path):
     """``not_run`` used to emit ``status: failed`` beside ``outcome: SKIPPED``."""
     warnings: list[str] = []
