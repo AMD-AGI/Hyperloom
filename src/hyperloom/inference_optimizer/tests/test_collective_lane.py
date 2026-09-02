@@ -322,6 +322,209 @@ def test_collective_replay_preserves_completed_integration(tmp_path):
     assert state.last_collective["integration_decision"] == "KEEP"
 
 
+# --- record_collective_integration ---------------------------------------------
+
+
+def _seeded_collective_state(tmp_path):
+    """A state whose last_collective/collective_attempts hold one open KEEP campaign."""
+    state = SharedState.load_or_init(tmp_path)
+    campaign = {
+        "collective_attempt_id": "attempt-1",
+        "integration_id": "integration-1",
+        "status": "ok",
+        "decision": "KEEP",
+        "engine": "forge_collective",
+        "kept": True,
+        "requires_e2e_validation": True,
+    }
+    state.record_collective(campaign, tmp_path)
+    return state
+
+
+def test_record_collective_integration_updates_last_collective_and_history(tmp_path):
+    """The verdict must land on both the live pointer and its campaign row."""
+    state = _seeded_collective_state(tmp_path)
+
+    state.record_collective_integration(
+        {
+            "status": "ok",
+            "decision": "KEEP",
+            "integration_status": "complete",
+            "integration_recovery_action": "",
+            "gain_pct": 12.5,
+            "base_tput": 100.0,
+            "new_tput": 112.5,
+        },
+        tmp_path,
+        integration_id="integration-1",
+    )
+
+    assert state.last_collective["integration_status"] == "complete"
+    assert state.last_collective["integration_decision"] == "KEEP"
+    assert state.last_collective["integration_gain_pct"] == 12.5
+
+    history_entry = next(
+        item
+        for item in state.collective_attempts
+        if item["collective_attempt_id"] == "attempt-1"
+    )
+    assert history_entry["integration_status"] == "complete"
+    assert history_entry["integration_gain_pct"] == 12.5
+
+
+def test_rejects_a_non_mapping_result(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(TypeError, match="mapping"):
+        state.record_collective_integration("not-a-dict", tmp_path)
+
+
+def test_rejects_a_missing_integration_id(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="missing integration_id"):
+        state.record_collective_integration(
+            {"decision": "KEEP", "integration_status": "complete"},
+            tmp_path,
+        )
+
+
+def test_rejects_an_invalid_decision(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="Invalid collective integration decision"):
+        state.record_collective_integration(
+            {
+                "decision": "MAYBE",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_an_invalid_integration_status(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="integration_status must be complete"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "pending",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_a_completed_integration_with_a_recovery_action(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="cannot require recovery"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+                "integration_recovery_action": "finalize",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_an_unrecognized_recovery_action(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="recovery action must be finalize or revert"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "recovery_required",
+                "integration_id": "integration-1",
+                "integration_recovery_action": "retry",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_a_non_numeric_gain_pct(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="invalid gain_pct"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+                "gain_pct": float("nan"),
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_an_integration_id_not_matching_last_collective(tmp_path):
+    state = _seeded_collective_state(tmp_path)
+    with pytest.raises(ValueError, match="does not match last_collective"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-99",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_when_no_campaign_matches_the_attempt_history(tmp_path):
+    """A history the campaign never wrote to must not silently update."""
+    state = _seeded_collective_state(tmp_path)
+    state.collective_attempts = []
+    with pytest.raises(ValueError, match="exactly one campaign"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+
+def test_rejects_an_ambiguous_attempt_history(tmp_path):
+    """Two rows claiming the same attempt/integration pair must not be guessed at."""
+    state = _seeded_collective_state(tmp_path)
+    state.collective_attempts = state.collective_attempts + [
+        dict(state.collective_attempts[0])
+    ]
+    with pytest.raises(ValueError, match="exactly one campaign"):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+
+def test_a_failed_save_rolls_back_last_collective_and_history(tmp_path, monkeypatch):
+    """A durable-save failure must not leave in-memory state ahead of disk."""
+    state = _seeded_collective_state(tmp_path)
+    before_last = dict(state.last_collective)
+    before_history = [dict(item) for item in state.collective_attempts]
+
+    def _boom(_session_dir):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(state, "save", _boom)
+
+    with pytest.raises(OSError):
+        state.record_collective_integration(
+            {
+                "decision": "KEEP",
+                "integration_status": "complete",
+                "integration_id": "integration-1",
+            },
+            tmp_path,
+        )
+
+    assert state.last_collective == before_last
+    assert state.collective_attempts == before_history
+
+
 def test_rejects_a_missing_candidate_artifact(tmp_path):
     state = SimpleNamespace(
         last_trace_analyze={
