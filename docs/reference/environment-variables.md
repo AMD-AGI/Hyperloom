@@ -860,6 +860,53 @@ are tasks. Supporting another gateway means adding a preset in
 
 ---
 
+## AgentX performance metric
+
+Grading defaults to output throughput alone. On an agentic replay that is the
+wrong objective: the canonical corpus averages ~114k prompt tokens against ~810
+output tokens per request, so output-only grading optimises about 1% of the
+token budget and a variant can lift decode tok/s while wrecking prefill and
+still be recorded as a win.
+
+Turning this on adopts the shape InferenceX ranks a submission by. Upstream
+sweeps a concurrency ladder, keeps TTFT and inter-token-latency percentiles
+separately, and compares throughput per chip *at a fixed interactivity target* —
+it never collapses the axes into one weighted number, and trading interactivity
+away for throughput is not a result it can express. So **total token throughput
+is the objective** and **interactivity p90 is a veto**, not a weighted term.
+
+The objective is graded with the same `gain_pct` and the same
+`keep_threshold_pct` as run_grid and integrate_patch: a +1% total-throughput
+lift reads 1.00 and is kept, and the threshold is the only noise filter on the
+graded quantity. A candidate whose interactivity p90 falls past the band below
+the anchor is rejected before its throughput is read.
+
+Interactivity is E2E Normalized Interactivity (`OSL/E2EL`) at p90, which is the
+axis upstream reports. It includes TTFT in the denominator, unlike the per-user
+`1/ITL` figure — on a ~114k-prompt replay TTFT is most of what a user waits for,
+so grading on `1/ITL` would let a candidate double TTFT with no visible cost.
+
+Default-on for AgentX runs (`HYPERLOOM_AGENTX=1`), explicit opt-in via
+`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Serving frameworks only:
+scriptable frameworks (xDiT, custom) keep output-throughput grading regardless.
+
+Every KEEP decision — explore, the current_best lift, integrate_patch, the
+kernel stack, and the cumulative validated gain — resolves what it grades
+through one chokepoint, so the candidate and the figure it must beat are always
+read off the same axis. Total is ~140x output on this corpus, so half-applying
+the objective would not read as a small error: it would refuse every KEEP in the
+affected lane while each individual number it logged still looked plausible.
+When either side cannot supply the graded axes (no `intvty_p90`, no total),
+both degrade to output throughput together and the reason is logged — the
+degrade is never silent and never one-sided.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_PERF_METRIC`        | `composite_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `composite_v1` grades total token throughput under the interactivity veto. An agentic replay is the case this grading exists for, so AgentX runs get it without asking; any other explicit value (including on an AgentX run) keeps output-throughput grading. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
+
+---
+
 ## Phase tuning
 
 | Variable | Required | Default | Description |
