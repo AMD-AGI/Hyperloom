@@ -31,6 +31,7 @@ from ..actions.executors._grid_runner import (
     _kill_stale_servers,
     agentx_variant_timeout_sec,
     run_grid,
+    variant_conc,
 )
 from ..actions.executors._workload_envs import (
     FrameworkScriptMismatchError,
@@ -99,7 +100,7 @@ DEFAULT_TOTAL_BUDGET_SEC = 9000
 _AGENTX_MIN_FUNDED_RUNGS = 2
 
 
-def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None) -> float:
+def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None, conc: Any = None) -> float:
     """What a variant will actually be granted, for budget arithmetic.
 
     Every budget gate in this module used to price a variant at the DECLARED
@@ -124,14 +125,20 @@ def _granted_cap_sec(variant_timeout_sec: int, shared_state: Any = None) -> floa
     two sides disagreeing again, in the direction that admits a rung the budget
     cannot pay for.
 
+    ``conc`` prices the rung about to launch rather than the session. Warmup is
+    linear in concurrency, so a ladder spanning 1..28 costs materially different
+    amounts at each end and one number cannot describe both. Omitted where the
+    gate guards a whole arm rather than a single rung.
+
     Args:
         variant_timeout_sec: The declared per-variant hard timeout, in seconds.
         shared_state: Session state; consulted only when the env var is absent.
+        conc: The rung's concurrency, when the gate guards one rung.
 
     Returns:
         float: The cap the round will actually be granted, in seconds.
     """
-    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state))
+    return float(agentx_variant_timeout_sec(variant_timeout_sec, shared_state=shared_state, conc=conc))
 
 
 def _has_optimization(state: SharedState) -> tuple[bool, str, dict[str, str]]:
@@ -780,7 +787,7 @@ async def _sweep_one_arm_single_server(  # noqa: PLR0913
             if (
                 has_budget
                 and _reuse_remaining is not None
-                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state)
+                and _reuse_remaining < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
             ):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
@@ -946,7 +953,11 @@ async def _sweep_arm_option_b(  # noqa: PLR0913
             arm_results.append(skip_r)
             _all_results_ref.append(skip_r)
             continue
-        if has_budget and _ob_rem is not None and _ob_rem < _granted_cap_sec(variant_timeout_sec, state):
+        if (
+            has_budget
+            and _ob_rem is not None
+            and _ob_rem < _granted_cap_sec(variant_timeout_sec, state, variant_conc(variant))
+        ):
             _budget_state["budget_exhausted"] = True
             _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
             _budget_state["budget_remaining_sec"] = max(0.0, float(_ob_rem))

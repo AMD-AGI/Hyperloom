@@ -25,7 +25,7 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
@@ -157,6 +157,31 @@ def agentx_active(shared_state: Any = None) -> bool:
     return str(getattr(shared_state, "benchmark_mode", "") or "").strip().lower() == "agentx"
 
 
+def agentx_env_for_conc(conc: Any = None) -> "Mapping[str, str]":
+    """The environment the AgentX derivations read, carrying a rung's own CONC.
+
+    Warmup is ``CANON_WARMUP_PER_LANE`` requests per lane across ``CONC`` lanes,
+    so every bound derived from it is linear in the concurrency being measured
+    rather than in whatever the session was launched at. A concurrency sweep
+    walks a ladder past that session value in both directions, and a bound sized
+    at one rung is wrong at every other.
+
+    Args:
+        conc: The rung's concurrency, or ``None`` to read the session's.
+
+    Returns:
+        ``os.environ`` unchanged when no rung concurrency is given, else a copy
+        of it with ``CONC`` replaced.
+    """
+    try:
+        rung = int(conc)
+    except (TypeError, ValueError):
+        return os.environ
+    if rung <= 0:
+        return os.environ
+    return {**os.environ, "CONC": str(rung)}
+
+
 def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     """Whether an agentic measurement must stay out of the cross-session KB.
 
@@ -182,8 +207,15 @@ def agentx_kb_write_blocked(shared_state: Any = None) -> bool:
     return agentx_active(shared_state)
 
 
-def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) -> None:
-    """Switch serving-framework benchmarks to the AgentX aiperf client."""
+def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None, *, conc: Any = None) -> None:
+    """Switch serving-framework benchmarks to the AgentX aiperf client.
+
+    ``conc`` is the concurrency this particular round will run at, when the
+    caller knows it. The inner benchmark cap and the client's warmup grace are
+    both derived from how much warmup has to drain, which is linear in that
+    number -- so a sweep rung has to hand its own, or both bounds describe the
+    session's concurrency instead of the one being measured.
+    """
     if not agentx_enabled():
         return
     from hyperloom.inference_optimizer import framework_registry
@@ -219,7 +251,8 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
         agentx_warmup_grace_sec,
     )
 
-    _derived = agentx_baseline_timeout_sec()
+    _agentx_env = agentx_env_for_conc(conc)
+    _derived = agentx_baseline_timeout_sec(_agentx_env)
     try:
         _declared = int(bench.get("timeout_seconds") or 0)
     except (TypeError, ValueError):
@@ -259,7 +292,7 @@ def apply_agentx_switch(bench: dict[str, Any], model_path: str | None = None) ->
     #
     # AgentX-only by construction: this function returned early when AgentX is
     # off, and AGENTX_* has no meaning on the synthetic path.
-    _grace = agentx_warmup_grace_sec()
+    _grace = agentx_warmup_grace_sec(_agentx_env)
     _raw_grace = (os.environ.get("AGENTX_WARMUP_GRACE_PERIOD") or "").strip()
     envs["AGENTX_WARMUP_GRACE_PERIOD"] = str(_grace)
     if _raw_grace != str(_grace):

@@ -468,26 +468,86 @@ def _variant_envs(monkeypatch, tmp_path, *, session_conc, variant_conc, anchor="
     return cfg["benchmark"]["envs"]
 
 
-def test_a_sweep_variant_keeps_the_session_scaled_grace(monkeypatch, tmp_path):
-    """The variant's grace must stay in step with the caps that bound it.
+def test_a_sweep_variant_is_bounded_by_its_own_concurrency(monkeypatch, tmp_path):
+    """A rung's grace follows the rung, not the concurrency the session started at.
 
-    Re-scaling it from the variant's own CONC is tempting -- the ladder walks
-    256..2 while the session sits at one value -- but ``bench["timeout_seconds"]``
-    and the subprocess cap are both derived from the SESSION concurrency. Raising
-    only the client's grace makes the round wait inside a bound its own caps do
-    not cover: at session CONC=8 with the ladder at 256 the grace becomes 57600s
-    against a 10800s cap, so the round is SIGKILLed mid-warmup. Leaving the grace
-    alone is strictly better until the caps are variant-aware too.
+    Warmup is ten requests per lane across CONC lanes, so a ladder rung at 128
+    has to drain sixteen times the work of a session sitting at 8. Bounding it at
+    the session's number cuts the warmup short and the round reports a
+    prefix-reuse figure taken before the cache filled.
     """
-    envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128)
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=8, variant_conc=128, grace_conc=8)
     assert envs["CONC"] == "128"
+    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 128 // 8)
+
+
+def test_a_lower_rung_is_not_given_the_sessions_larger_grace(monkeypatch, tmp_path):
+    """The scaling only ever raises; at or below the anchor it is the identity."""
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2, grace_conc=8)
     assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "3600"
 
 
-def test_the_session_scaled_grace_still_reaches_a_variant(monkeypatch, tmp_path):
-    """What the switch exported must survive the variant merge untouched."""
-    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2, grace_conc=8)
-    assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 32 // 8)
+def test_the_inner_cap_moves_with_the_grace(monkeypatch, tmp_path):
+    """The two bounds are derived from the same number and must not disagree.
+
+    Raising only the client's grace makes a round wait inside a bound its own
+    cap does not cover, and it is SIGKILLed mid-warmup instead.
+    """
+    import yaml
+
+    from hyperloom.orchestrator.actions.executors._grid_runner import (
+        GridVariant,
+        _build_variant_yaml,
+    )
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", "8")
+
+    base = tmp_path / "base.yaml"
+    base.write_text(
+        yaml.safe_dump({"benchmark": {"framework": "vllm", "model": "/m/x", "timeout_seconds": 7200, "envs": {}}}),
+        encoding="utf-8",
+    )
+
+    def _cap_for(conc: int) -> int:
+        out = tmp_path / f"v{conc}"
+        out.mkdir(exist_ok=True)
+        cfg_path = _build_variant_yaml(
+            base,
+            "",
+            GridVariant(name=f"v{conc}", extra_server_args="", extra_envs={"CONC": str(conc)}),
+            output_subdir=out,
+        )
+        return int(yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["benchmark"]["timeout_seconds"])
+
+    assert _cap_for(64) > _cap_for(8)
+
+
+def test_the_variant_cap_prices_the_rung_it_launches(monkeypatch):
+    """The budget gate has to charge what the round will actually be granted."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
+
+    _on(monkeypatch)
+    monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    monkeypatch.setenv("CONC", "8")
+
+    assert agentx_variant_timeout_sec(1800, conc=64) > agentx_variant_timeout_sec(1800, conc=8)
+    assert agentx_variant_timeout_sec(1800, conc=None) == agentx_variant_timeout_sec(1800, conc=8)
+
+
+def test_a_rung_that_names_no_concurrency_reads_the_session(monkeypatch):
+    from hyperloom.orchestrator.actions.executors._grid_runner import GridVariant, variant_conc
+
+    assert variant_conc(GridVariant(name="v", extra_envs={"CONC": "16"})) == 16
+    assert variant_conc(GridVariant(name="v", extra_envs={})) is None
+    assert variant_conc(GridVariant(name="v", extra_envs={"CONC": "nonsense"})) is None
+    assert variant_conc(GridVariant(name="v", extra_envs={"CONC": "0"})) is None
+    assert variant_conc(None) is None
 
 
 def test_the_default_grid_never_re_derives_a_grace(monkeypatch, tmp_path):

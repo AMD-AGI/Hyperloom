@@ -156,9 +156,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   lives in one function that both consumers call: this process derives the
   subprocess cap from it, and `apply_agentx_switch` exports its result into the
   benchmark env so the client's `--warmup-grace-period` — the thing that
-  actually stops the warmup — cannot disagree with the cap. A sweep variant
-  re-derives from its own `CONC` after the variant envs are merged, since the
-  switch runs before that concurrency exists.<br/>
+  actually stops the warmup — cannot disagree with the cap.<br/>
   **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
   grace was measured at and defaults to 8, so every existing configuration
   derives exactly what it derived before. Declare it when you measured
