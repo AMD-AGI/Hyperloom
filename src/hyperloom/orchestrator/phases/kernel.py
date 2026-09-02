@@ -4656,7 +4656,7 @@ class KernelPhase(PhaseHandler):
                         "kernel_repo": kernel_repo,
                         "snapshot_dir": snapshot_dir,
                         "extra_envs": merged_envs,
-                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
+                        "keep_threshold_pct": 3.0,
                     },
                     session_dir=self.session_dir,
                 )

@@ -150,33 +150,8 @@ def _overlay_provenance_summary(sdk_replay: Mapping[str, Any]) -> dict[str, Any]
 
 
 def _warm_kernel_keep_threshold_pct(state: Any) -> float:
-    """Gain a replayed champion set must clear.
-
-    Follows the shared decaying curve so the bar tracks the session's
-    macro-cycle; ``HYPERLOOM_WARM_KERNEL_KEEP_PCT`` overrides it.
-
-    Args:
-        state: The SharedState the curve reads ``macro_cycle`` from.
-
-    Returns:
-        The KEEP threshold percentage for the warm-kernel replay.
-    """
-    default = _phase_state.resolve_keep_threshold(state)
-    raw = str(os.environ.get("HYPERLOOM_WARM_KERNEL_KEEP_PCT", "") or "").strip()
-    if not raw:
-        return default
-    try:
-        value = float(raw)
-    except ValueError:
-        value = math.nan
-    if math.isfinite(value):
-        return value
-    log.warning(
-        "warm replay: unusable HYPERLOOM_WARM_KERNEL_KEEP_PCT=%r; using %.2f",
-        raw,
-        default,
-    )
-    return default
+    """Gain a replayed champion set must clear (decaying curve based on macro_cycle)."""
+    return _phase_state.resolve_keep_threshold(state)
 
 
 class PreludePhase(PhaseHandler):
