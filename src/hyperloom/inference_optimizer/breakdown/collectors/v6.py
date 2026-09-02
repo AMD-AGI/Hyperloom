@@ -227,9 +227,7 @@ def _grading_projection(state: dict[str, Any], workload: dict[str, Any] | None =
     from hyperloom.common.perf_metric import (
         GRADED_OUTPUT,
         GRADED_TOTAL,
-        parse_intvty_noise_pct,
         perf_snapshot_from_mapping,
-        total_tput_serving_grading_enabled,
     )
 
     from ... import framework_registry
@@ -241,12 +239,14 @@ def _grading_projection(state: dict[str, Any], workload: dict[str, Any] | None =
         on_total = objective == GRADED_TOTAL
         noise_pct = float(recorded.get("intvty_noise_pct") or 0.0)
     else:
+        # Nothing recorded: derive from recorded facts only. Consulting
+        # HYPERLOOM_PERF_METRIC here would let whichever shell happens to run
+        # the export rename the axis of a session that ran days ago, and the
+        # result would look perfectly well-formed. The band was never
+        # recorded either, so it is null rather than the current default.
         framework = (workload or {}).get("framework_name") or state.get("framework")
-        on_total = total_tput_serving_grading_enabled(
-            scriptable=framework_registry.is_scriptable(framework),
-            benchmark_mode=mode,
-        )
-        noise_pct = parse_intvty_noise_pct()
+        on_total = mode == "agentx" and not framework_registry.is_scriptable(framework)
+        noise_pct = None
     # A session that asked for the total axis but never measured it graded on
     # output regardless. Naming that here keeps a degraded run from being read
     # as a comparable AgentX result.

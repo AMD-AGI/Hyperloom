@@ -57,7 +57,11 @@ def test_a_synthetic_session_declares_the_output_axis(monkeypatch):
 def test_an_agentx_session_with_both_axes_declares_the_total_axis(monkeypatch):
     grading = _grading(
         monkeypatch,
-        state={"benchmark_mode": "agentx", "baseline_perf": dict(_AXES)},
+        state={
+            "benchmark_mode": "agentx",
+            "baseline_perf": dict(_AXES),
+            "grading": {"objective": GRADED_TOTAL, "intvty_noise_pct": 5.0},
+        },
     )
 
     assert grading["benchmark_mode"] == "agentx"
@@ -109,12 +113,19 @@ def test_a_scriptable_framework_keeps_the_output_axis(monkeypatch):
     assert grading["degrade_reason"] is None
 
 
-def test_an_explicit_perf_metric_override_wins_over_the_mode(monkeypatch):
-    """``HYPERLOOM_PERF_METRIC`` decides in both directions when it is set."""
+def test_an_explicit_perf_metric_override_is_honoured_through_the_recording(monkeypatch):
+    """``HYPERLOOM_PERF_METRIC`` decides at seed, and the seed value is what ships.
+
+    The override still works in both directions; it is simply resolved where
+    the run can see it rather than where the export happens to run.
+    """
     grading = _grading(
         monkeypatch,
-        state={"benchmark_mode": "agentx", "baseline_perf": dict(_AXES)},
-        env={"HYPERLOOM_PERF_METRIC": "output_tput"},
+        state={
+            "benchmark_mode": "agentx",
+            "baseline_perf": dict(_AXES),
+            "grading": {"objective": GRADED_OUTPUT, "intvty_noise_pct": 5.0},
+        },
     )
 
     assert grading["objective"] == GRADED_OUTPUT
@@ -123,11 +134,14 @@ def test_an_explicit_perf_metric_override_wins_over_the_mode(monkeypatch):
     assert grading["benchmark_mode"] == "agentx"
 
 
-def test_the_veto_band_follows_the_configured_noise_floor(monkeypatch):
+def test_the_veto_band_comes_from_the_recording(monkeypatch):
     grading = _grading(
         monkeypatch,
-        state={"benchmark_mode": "agentx", "baseline_perf": dict(_AXES)},
-        env={"HYPERLOOM_PERF_NOISE_PCT": "3.5"},
+        state={
+            "benchmark_mode": "agentx",
+            "baseline_perf": dict(_AXES),
+            "grading": {"objective": GRADED_TOTAL, "intvty_noise_pct": 3.5},
+        },
     )
 
     assert grading["intvty_veto"]["noise_pct"] == pytest.approx(3.5)
@@ -162,6 +176,26 @@ def test_a_session_seeded_before_the_field_still_derives_its_axis(monkeypatch):
     )
 
     assert grading["objective"] == GRADED_TOTAL
+    # The band was never recorded for such a session, and today's environment
+    # is not evidence of what it applied.
+    assert grading["intvty_veto"]["noise_pct"] is None
+
+
+def test_the_fallback_never_lets_the_exporting_shell_rename_the_axis(monkeypatch):
+    """No recorded axis is not licence to read the env.
+
+    The export can run days later from any shell. Honouring an override there
+    would relabel a finished session's axis, and the block would look
+    perfectly well-formed while saying the wrong thing.
+    """
+    grading = _grading(
+        monkeypatch,
+        state={"benchmark_mode": "agentx", "baseline_perf": dict(_AXES)},
+        env={"HYPERLOOM_PERF_METRIC": "output_tput", "HYPERLOOM_PERF_NOISE_PCT": "9.9"},
+    )
+
+    assert grading["objective"] == GRADED_TOTAL
+    assert grading["intvty_veto"]["noise_pct"] is None
 
 
 def test_seed_records_the_axis_the_run_will_grade_on(monkeypatch):
@@ -177,6 +211,14 @@ def test_seed_records_the_axis_the_run_will_grade_on(monkeypatch):
     assert seed_grading("sglang", "synthetic")["objective"] == GRADED_OUTPUT
     # A scriptable framework reports an image-quality gate, not token throughput.
     assert seed_grading("xdit", "agentx")["objective"] == GRADED_OUTPUT
+
+    # Seed is where the environment gets its say -- both directions.
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "output_tput")
+    assert seed_grading("sglang", "agentx")["objective"] == GRADED_OUTPUT
+    monkeypatch.setenv("HYPERLOOM_PERF_METRIC", "composite_v1")
+    assert seed_grading("sglang", "synthetic")["objective"] == GRADED_TOTAL
+    monkeypatch.setenv("HYPERLOOM_PERF_NOISE_PCT", "3.5")
+    assert seed_grading("sglang", "agentx")["intvty_noise_pct"] == pytest.approx(3.5)
 
 
 def _outcome(monkeypatch, state):

@@ -2880,10 +2880,15 @@ class V6TaskConfig(TypedDict, total=False):
 
 
 class V6GradingVeto(TypedDict, total=False):
-    """The interactivity constraint applied under the total-throughput objective."""
+    """The interactivity constraint applied under the total-throughput objective.
+
+    ``noise_pct`` is ``None`` on a session that predates ``SharedState.grading``:
+    the band was never recorded, and reading today's environment would report a
+    threshold that session never applied.
+    """
 
     enabled: bool
-    noise_pct: float
+    noise_pct: float | None
 
 
 class V6Grading(TypedDict, total=False):
