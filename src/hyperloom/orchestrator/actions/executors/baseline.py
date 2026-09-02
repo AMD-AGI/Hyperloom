@@ -69,6 +69,7 @@ from ._grid_runner import (
     stopped_by_the_run,
 )
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_ERROR_CLASS,
     DETOKENIZER_STALL_RETURNCODE,
     SERVER_DEAD_RETURNCODE,
     clear_server_ready_stamp,
@@ -3364,7 +3365,7 @@ class BaselineExecutor:
         if _agx_err:
             return {
                 "status": "failed",
-                "error_class": "agentx_preflight",
+                "error_class": AGENTX_PREFLIGHT_ERROR_CLASS,
                 "error": _agx_err,
                 "output_dir": str(output_dir),
             }

@@ -43,6 +43,7 @@ from ..stop_attribution import (
 )
 from ._accuracy_gate import materialized_run_eval_disabled
 from ._subprocess_kill import (
+    AGENTX_PREFLIGHT_ERROR_CLASS,
     AGENTX_PREFLIGHT_RETURNCODE,
     DETOKENIZER_STALL_RETURNCODE,
     EVAL_PROBE_UNPATCHABLE_RETURNCODE,
@@ -2741,20 +2742,39 @@ async def run_grid(
             )
         if workspace is None:
             harvest_tags = [f"harvested_leaked_artifact:{src}" for src, _ in harvested]
-            no_ws_error_summary = server_log_death_excerpt(str(server_log)) or (
-                redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
+            # An AgentX preflight abort never reaches Magpie, so of course no
+            # workspace exists -- but calling it ``no_benchmark_workspace`` erases
+            # the one fact that decides what to do next. Measured: with the cause
+            # gone, a missing pinned dependency read as a generic launch failure
+            # and opened an enablement round, where an LLM specialist re-derived
+            # an install this repository already owns. Keep the class the
+            # baseline path already uses for the same abort (``agentx_preflight``)
+            # so both routes classify it identically.
+            no_ws_error_class = (
+                AGENTX_PREFLIGHT_ERROR_CLASS if rc == AGENTX_PREFLIGHT_RETURNCODE else "no_benchmark_workspace"
+            )
+            no_ws_error_summary = (
+                # ``_run_magpie`` returns the preflight diagnosis as stderr, and
+                # there is no server log to excerpt: no server was ever started.
+                redact_secret_values((stderr or "").strip())
+                if rc == AGENTX_PREFLIGHT_RETURNCODE
+                else server_log_death_excerpt(str(server_log))
+                or (
+                    redact_secret_values((stderr or stdout)[-2000:]) if rc != 0 else "no benchmark_* workspace produced"
+                )
             )
             log.warning(
-                "grid_runner: variant %d/%d name=%s aborted: no_benchmark_workspace (rc=%s)",
+                "grid_runner: variant %d/%d name=%s aborted: %s (rc=%s)",
                 i + 1,
                 len(grid),
                 variant.name,
+                no_ws_error_class,
                 rc,
             )
             _write_variant_abort_marker(
                 slot,
                 variant_name=variant.name,
-                error_class="no_benchmark_workspace",
+                error_class=no_ws_error_class,
                 error_summary=no_ws_error_summary,
                 extra_args=variant.extra_server_args,
             )
@@ -2766,7 +2786,7 @@ async def run_grid(
                     status="failed",
                     returncode=rc,
                     error=no_ws_error_summary,
-                    error_class="no_benchmark_workspace",
+                    error_class=no_ws_error_class,
                     server_log_path=_existing_log_path(server_log),
                     nonfatal_warnings=harvest_tags,
                     note=variant.note,

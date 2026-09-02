@@ -281,6 +281,18 @@ DETOKENIZER_STALL_RETURNCODE: int = -911
 # ``error_class="agentx_preflight"`` and surface the guidance instead of crashing.
 AGENTX_PREFLIGHT_RETURNCODE: int = -912
 
+#: The ``error_class`` that sentinel must carry, wherever it is classified. Named
+#: here beside the return code because three call sites decide on it -- the grid
+#: runner, the baseline executor and the writeback stop-reason gate -- and a
+#: string literal repeated across them can drift into a class nobody handles.
+#:
+#: It marks an ENVIRONMENT failure, not a framework one: the AgentX client is
+#: missing or is not the pinned build, and the runtime repair
+#: (``agentx.repair``) could not supply it. Nothing downstream can author its way
+#: out of that, so the writeback gate stops the run and names the fix for an
+#: operator rather than opening an enablement round.
+AGENTX_PREFLIGHT_ERROR_CLASS: str = "agentx_preflight"
+
 # -913 is ``_ray_serving._RAY_ACTOR_DIED_RC``.
 
 # Sentinel ``returncode`` returned by the _run_magpie eval hook when the
@@ -1414,6 +1426,7 @@ def _communicate_with_soft_deadline(
 
 
 __all__ = [
+    "AGENTX_PREFLIGHT_ERROR_CLASS",
     "AGENTX_PREFLIGHT_RETURNCODE",
     "COOPERATIVE_REAP_BUDGET_SEC",
     "DETOKENIZER_STALL_RETURNCODE",

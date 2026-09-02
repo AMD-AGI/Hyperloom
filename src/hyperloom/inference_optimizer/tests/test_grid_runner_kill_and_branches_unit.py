@@ -504,6 +504,40 @@ async def test_run_grid_no_workspace_branch_stops_on_failure(tmp_path, monkeypat
 
 
 @pytest.mark.asyncio
+async def test_agentx_preflight_abort_keeps_its_own_error_class(tmp_path, monkeypatch):
+    """An AgentX preflight abort must not be filed as a missing workspace.
+
+    Of course no workspace exists -- Magpie never ran. But the generic class
+    erases the one fact that decides what to do next: this is an environment
+    gap, not a launch failure. Measured: with the cause gone, a missing pinned
+    dependency read as a framework problem and opened an enablement round that
+    burned the run's budget re-deriving an install this repository owns.
+    """
+    from hyperloom.orchestrator.actions.executors._subprocess_kill import (
+        AGENTX_PREFLIGHT_ERROR_CLASS,
+        AGENTX_PREFLIGHT_RETURNCODE,
+    )
+
+    base = tmp_path / "base.yaml"
+    _write_base_yaml(base)
+    diagnosis = "AgentX preflight failed: HYPERLOOM_AGENTX is on but aiperf was not found."
+
+    monkeypatch.setattr(gr, "_run_magpie", lambda *_a, **_k: (AGENTX_PREFLIGHT_RETURNCODE, "", diagnosis))
+    results = await run_grid(
+        base_yaml_path=base,
+        base_extra_args="",
+        grid=[GridVariant("vA")],
+        output_root=tmp_path / "out",
+        variant_timeout_sec=5,
+        keep_going_on_failure=False,
+    )
+    assert len(results) == 1
+    assert results[0].error_class == AGENTX_PREFLIGHT_ERROR_CLASS
+    # The diagnosis itself has to survive too: it names the fix.
+    assert "aiperf was not found" in (results[0].error or "")
+
+
+@pytest.mark.asyncio
 async def test_run_grid_invalid_measurement_branch(tmp_path, monkeypatch):
     base = tmp_path / "base.yaml"
     _write_base_yaml(base)
