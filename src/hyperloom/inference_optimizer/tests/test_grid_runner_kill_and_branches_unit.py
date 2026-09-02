@@ -42,9 +42,14 @@ def test_kill_stale_servers_noop_in_multi_node(monkeypatch):
     assert slept == []
 
 
-def _proc_open_factory(cmdlines: dict[str, bytes], maps: dict[str, str]):
-    """Build a fake ``open`` that serves /proc cmdline + maps from dicts."""
+def _proc_open_factory(
+    cmdlines: dict[str, bytes],
+    maps: dict[str, str],
+    environs: dict[str, bytes] | None = None,
+):
+    """Build a fake ``open`` that serves /proc cmdline + maps + environ from dicts."""
     real_open = open
+    environs = environs or {}
 
     def _fake_open(path, mode="r", *args, **kwargs):
         p = str(path)
@@ -58,6 +63,11 @@ def _proc_open_factory(cmdlines: dict[str, bytes], maps: dict[str, str]):
             if data is None:
                 raise OSError("no maps")
             return io.StringIO(data)
+        if p.endswith("/environ"):
+            data = environs.get(p)
+            if data is None:
+                raise OSError("no environ")
+            return io.BytesIO(data)
         return real_open(path, mode, *args, **kwargs)
 
     return _fake_open
@@ -93,6 +103,172 @@ def test_kill_stale_servers_kills_pattern_and_orphan_atom(monkeypatch):
     assert set(kill_calls) == {1, 2}
     assert removed  # /dev/shm segments cleared
     assert slept == [8]
+
+
+def _clear_gpu_mask_envs(monkeypatch) -> None:
+    for name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        monkeypatch.delenv(name, raising=False)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GPU-scoped reaping (AMD-AGI/Hyperloom#1354)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_kill_stale_servers_skips_candidate_outside_our_gpu_mask(monkeypatch):
+    """When we have our own visible-GPU mask (an operator carved us a subset
+    of the machine), a matching candidate whose own mask is disjoint from
+    ours must be left alone -- it belongs to someone else's GPU allocation."""
+    _clear_gpu_mask_envs(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    killpg_calls: list[int] = []
+    kill_calls: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00"}
+    environs = {"/proc/1/environ": b"ROCR_VISIBLE_DEVICES=0,1\x00PATH=/bin\x00"}
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, environs))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 50)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append(pgid))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert killpg_calls == []
+    assert kill_calls == []
+
+
+def test_kill_stale_servers_kills_candidate_overlapping_our_gpu_mask(monkeypatch):
+    """A matching candidate whose mask overlaps ours (same GPU allocation)
+    is reaped, same as with no mask at all."""
+    _clear_gpu_mask_envs(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    killpg_calls: list[int] = []
+    kill_calls: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00"}
+    environs = {"/proc/1/environ": b"ROCR_VISIBLE_DEVICES=6,7\x00PATH=/bin\x00"}
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, environs))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 50)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: killpg_calls.append(pgid))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert killpg_calls == [50]
+    assert kill_calls == [1]
+
+
+def test_kill_stale_servers_skips_candidate_with_unreadable_environ(monkeypatch):
+    """A candidate whose /proc/<pid>/environ cannot be read (permission,
+    already exited) is skipped, not reaped -- unknown scope is never treated
+    as safe to kill."""
+    _clear_gpu_mask_envs(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    kill_calls: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00"}
+    # No environ entry for pid 1 -> _proc_open_factory raises OSError on read.
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, {}))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 50)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert kill_calls == []
+
+
+def test_kill_stale_servers_skips_candidate_declaring_no_mask(monkeypatch):
+    """A candidate with a readable but empty environ (no GPU-mask var set at
+    all) is skipped -- its GPU scope is unknown, not "the whole machine"."""
+    _clear_gpu_mask_envs(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    kill_calls: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00"}
+    environs = {"/proc/1/environ": b"PATH=/bin\x00HOME=/root\x00"}
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, environs))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 50)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert kill_calls == []
+
+
+def test_kill_stale_servers_skips_shm_wipe_when_we_have_a_gpu_mask(monkeypatch):
+    """The /dev/shm wipe carries no GPU/owner tag to scope by, so with a mask
+    of our own it must not run at all: it could otherwise crash a correctly
+    spared co-tenant's server by pulling its shared-memory segments out from
+    under it, even though the per-pid reap above left it alone."""
+    _clear_gpu_mask_envs(monkeypatch)
+    monkeypatch.setenv("ROCR_VISIBLE_DEVICES", "4,5,6,7")
+
+    glob_calls: list[str] = []
+    removed: list[str] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: [])  # no candidates to reap
+    monkeypatch.setattr("builtins.open", _proc_open_factory({}, {}, {}))
+    monkeypatch.setattr("glob.glob", lambda pat: (glob_calls.append(pat), [f"{pat}_seg"])[1])
+    monkeypatch.setattr(os, "remove", lambda f: removed.append(f))
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert glob_calls == [], "the /dev/shm wipe must not even glob when we have a GPU mask"
+    assert removed == []
+
+
+def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
+    """With no mask on our own side (whole machine is ours, or nothing is
+    scoping either side), every match is reaped regardless of the
+    candidate's own mask -- this is the pre-existing, unscoped behavior."""
+    _clear_gpu_mask_envs(monkeypatch)
+
+    kill_calls: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"vllm serve\x00--model\x00m\x00"}
+    # No environ served at all; must not matter since we have no mask.
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, {}))
+    monkeypatch.setattr(os, "getpgid", lambda pid: 50)
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(os, "kill", lambda pid, sig: kill_calls.append(pid))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: None)
+
+    gr._kill_stale_servers()
+
+    assert kill_calls == [1]
 
 
 def test_kill_stale_servers_swallows_proc_errors(monkeypatch):

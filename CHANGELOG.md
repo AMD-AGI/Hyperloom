@@ -409,7 +409,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   whose timed-out rounds most often leave one of these orphans -- now also
   reap any lingering server once they themselves finish, shrinking the
   window an orphan can sit on the GPU before the next baseline attempt.
-  (AMD-AGI/Hyperloom#1354)
+  `_kill_stale_servers()` itself is now scoped to our own GPU allocation
+  when one is known (`ROCR_VISIBLE_DEVICES` et al set by an operator that
+  carved us a subset of the machine's cards): a matching process is only
+  reaped when its own visible-GPU mask overlaps ours, and a candidate whose
+  mask cannot be read or declares none at all is left alone rather than
+  reaped, so it can no longer touch a co-tenant's server parked on a
+  different subset of the same machine. (AMD-AGI/Hyperloom#1354)
 - **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
   derived its demand file only when the serving log carried dense tuned-config
   misses, so a MoE-only model -- or one whose dense tables all hit while

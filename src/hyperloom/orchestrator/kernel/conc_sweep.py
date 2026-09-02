@@ -1402,7 +1402,11 @@ async def run_conc_sweep(
                 for v in skip_grid_fn():
                     results.append(_budget_skip_result(v))
                 continue
-            if has_budget and _arm_remaining is not None and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state):
+            if (
+                has_budget
+                and _arm_remaining is not None
+                and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state)
+            ):
                 _budget_state["budget_exhausted"] = True
                 _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
                 _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
