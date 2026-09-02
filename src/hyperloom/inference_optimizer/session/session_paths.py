@@ -478,6 +478,12 @@ def research_hints_json(session_dir: Path) -> Path:
     return Path(session_dir) / "research_hints.json"
 
 
+def forge_handoff_dir(session_dir: Path, macro_cycle: int) -> Path:
+    """Return the handoff directory for one Forge macro cycle."""
+    cycle = max(0, int(macro_cycle))
+    return Path(session_dir) / "kernel-agent" / "forge" / f"cycle-{cycle}" / "handoff"
+
+
 def competitor_target_json(session_dir: Path) -> Path:
     """``<sd>/competitor_target.json`` — LLM-authored competitor target
     numbers (each per-concurrency entry carries its own source).
@@ -895,6 +901,7 @@ __all__ = [
     "manifest_path",
     "patches_dir",
     "failure_evidence_path",
+    "forge_handoff_dir",
     "enablement_dir",
     "enablement_round_dir",
     "reports_dir",

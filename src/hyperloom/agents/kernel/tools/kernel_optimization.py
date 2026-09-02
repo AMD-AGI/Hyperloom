@@ -41,16 +41,6 @@ from _task_group_contract import task_group_shape_cases  # noqa: E402
 
 sys.path.pop(0)
 
-try:
-    from hyperloom.common.kernel_shape_contract import (
-        REVIEW_SHAPE_PROVENANCE as _REVIEW_SHAPE_PROVENANCE,
-    )
-except ImportError:  # pragma: no cover - standalone invocation
-    # Runs as a subprocess against the installed hyperloom, which may predate
-    # the constant. An unrecognised provenance then reads as measured, which is
-    # the pre-existing wording rather than a new claim.
-    _REVIEW_SHAPE_PROVENANCE = frozenset({"review_backfill", "review_derived"})
-
 
 def update_status(
     status_path: Path,
@@ -844,11 +834,7 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
     """Fallback shapes block when no TraceLens ``task_group`` is attached.
 
     Pins the harness to the candidate's argument shapes so the backend does not
-    pick its own. The heading states where the dims came from: a graph replay
-    records no arguments, so the hottest kernels of a captured model can only be
-    given dims the candidate review recovered or computed. Telling the backend
-    those were measured would misrepresent the one thing worth knowing when the
-    tuned kernel later fails to move end-to-end throughput.
+    pick its own.
 
     Args:
         candidate: The kernel candidate dict, possibly carrying captured
@@ -863,27 +849,13 @@ def _build_captured_shapes_block(candidate: dict[str, Any]) -> str:
         return ""
     bound = str(candidate.get("bound_type") or candidate.get("bound") or "").strip()
     bound_line = f" (bound: {bound})" if bound else ""
-    provenance = str(candidate.get("shape_provenance") or "").strip().lower()
-    if provenance in _REVIEW_SHAPE_PROVENANCE:
-        heading = "Benchmark shapes (reconstructed for this serving run)"
-        origin = (
-            "The profiler recorded no arguments for this kernel because it runs\n"
-            "inside a captured graph; these dims were reconstructed from the run's\n"
-            f"own artifacts and serving configuration (provenance: {provenance}).\n"
-            "They are the workload this kernel actually serves, so optimizing\n"
-            "against them is what produces an end-to-end gain -- whereas shapes you\n"
-            "choose yourself cannot account for the serving configuration:\n"
-        )
-    else:
-        heading = "Benchmark shapes (TraceLens-captured from the serving run)"
-        origin = (
-            "They are what the kernel saw during sglang/vLLM serving, so optimizing\n"
-            "against them is what produces an end-to-end gain on the workload:\n"
-        )
     return (
-        f"\n## {heading}\n\n"
+        "\n## Benchmark shapes (TraceLens-captured from the serving run)\n\n"
         "Build your harness shape sweep / `get_inputs()` from EXACTLY these\n"
-        f"argument shapes{bound_line} -- do NOT invent shapes.\n" + origin + f"- args: {rendered}\n"
+        f"argument shapes{bound_line} -- do NOT invent shapes.\n"
+        "They are what the kernel saw during sglang/vLLM serving, so optimizing\n"
+        "against them is what produces an end-to-end gain on the workload:\n"
+        f"- args: {rendered}\n"
         "Correctness golden: the ORIGINAL kernel's output on these shapes "
         "(baseline / `fn=` injection); do not hand-derive a reference from scratch.\n"
         + _build_kernel_contract_block(candidate)
@@ -1895,8 +1867,7 @@ def build_prompt(
             hypothesis_block,
             extra_context_block,
             benchmark_cases_block,
-            # The harnesses the trace resolved, and the only channel by which a
-            # review-verified ``benchmark_files`` reaches this backend at all.
+            # The harnesses resolved from the trace.
             bench_block,
             priority_block,
             "Preserve function name, signature, decorators, and numerical behavior.",

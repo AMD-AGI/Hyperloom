@@ -114,10 +114,8 @@ def test_reason_class_is_a_required_entry_key() -> None:
     assert "reason_class" in ksc.REQUIRED_ENTRY_KEYS
 
 
-def test_schema_minor_was_bumped_not_the_major() -> None:
-    """Additive field: a 1.0.0 reader must still accept the document."""
-    assert ksc.SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0] == "1"
-    assert ksc.SOURCE_RESOLUTION_SCHEMA_VERSION != "1.0.0"
+def test_schema_major_reflects_removed_optional_fields() -> None:
+    assert ksc.SOURCE_RESOLUTION_SCHEMA_VERSION.split(".")[0] == "2"
 
 
 def _entry(kernel_id: str, reason_class: str, gpu_pct: float) -> dict[str, Any]:

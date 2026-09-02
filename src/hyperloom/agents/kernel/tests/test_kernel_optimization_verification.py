@@ -132,24 +132,10 @@ def test_structured_shape_cases_parse_moe_args():
 
 
 def test_captured_shapes_block_claims_measurement_only_for_a_measurement():
-    """The block tells the backend not to invent shapes, so it has to be honest
-    about where these came from: a graph replay records no arguments, and the
-    dims may have been reconstructed by the candidate review. Whether they were
-    measured is exactly what a later reader needs when the tuned kernel turns
-    out not to move end-to-end throughput.
-    """
+    """Measured shapes are identified and passed through without weakening the instruction."""
     measured = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": "torch_trace"})
     assert "TraceLens-captured" in measured
     assert "do NOT invent" in measured
-
-    for provenance in ("review_backfill", "review_derived"):
-        reviewed = ko._build_captured_shapes_block({"shapes": ["(8192,6144) bf16"], "shape_provenance": provenance})
-        assert "TraceLens-captured" not in reviewed
-        assert "reconstructed" in reviewed
-        assert provenance in reviewed
-        # The instruction itself does not soften: choosing its own shapes is
-        # what the backend does when this block is absent.
-        assert "do NOT invent" in reviewed
 
 
 def test_captured_shapes_block_is_empty_without_dims():
@@ -310,9 +296,7 @@ def test_build_prompt_forge_keeps_the_target_arch_and_the_harness_paths(tmp_path
     The comment above ``forge_sections`` lists what it removes and why, and none
     of these were on it. ``hardware_notes`` carries the ROCm arch, so without it
     an agent can emit a gfx942 intrinsic for a gfx950 host and the rewrite does
-    not compile; ``bench_block`` names the harnesses the trace resolved and is
-    the only channel by which a review-verified ``benchmark_files`` reaches this
-    backend at all.
+    not compile; ``bench_block`` names the harnesses the trace resolved.
     """
     bench = tmp_path / "test_gemm.py"
     bench.write_text("def test_gemm(): pass\n", encoding="utf-8")

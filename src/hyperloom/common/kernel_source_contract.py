@@ -14,11 +14,6 @@ what dispatch needs (shapes, ``reusable_native_kernel``, ``skip_reason``,
 ``source_type``, recommended backends, task groups, dispatchability). This
 artifact answers one narrow question and is deliberately not sufficient to
 decide what to optimize.
-
-The review tier revises entries here, but a revision only reaches the pipeline
-because ``apply_resolution_entries_to_candidates()`` folds it back onto the
-candidates and re-runs classification. Editing this file after the fact changes
-nothing downstream.
 """
 
 from __future__ import annotations
@@ -30,20 +25,15 @@ from pathlib import Path
 from typing import Any
 
 #: Bump the major on any field removal or meaning change; consumers gate on it.
-#: 1.1.0 adds ``reason_class`` to every entry (additive; readers of 1.0.0 are
-#: unaffected).
-SOURCE_RESOLUTION_SCHEMA_VERSION = "1.1.0"
+#: 2.0.0 removes obsolete optional history fields.
+SOURCE_RESOLUTION_SCHEMA_VERSION = "2.0.0"
 
 #: Canonical artifact name, relative to the analysis run directory. Mirrored by
 #: ``tracelens_analysis._SOURCE_RESOLUTION_NAME`` for the standalone path.
 SOURCE_RESOLUTION_FILENAME = "kernel_source_resolution.json"
 
-#: How a location was decided, best evidence first. ``llm_review`` outranks the
-#: deterministic tiers only because it runs last and sees their output; it is
-#: not more trusted, which is why the tier it overrode is kept in
-#: ``previous_method``.
-#:
-#: ``active_finder`` runs *before* the curated map: it demangles the device
+#: How a location was decided. ``active_finder`` runs *before* the curated map:
+#: it demangles the device
 #: kernel symbol and looks it up in the currently-installed framework source
 #: tree, so it self-heals across file moves/renames and version drift. The
 #: curated map remains the fallback when the symbol is absent from the live
@@ -54,7 +44,6 @@ METHOD_CURATED = "op_to_source"
 METHOD_TRACE = "trace_python_stack"
 METHOD_GREP = "name_grep"
 METHOD_LLM_FALLBACK = "llm_fallback"
-METHOD_LLM = "llm_review"
 METHOD_REJECTED = "rejected_non_path_sentinel"
 METHOD_UNRESOLVED = "unresolved"
 
@@ -66,7 +55,6 @@ KNOWN_METHODS = frozenset(
         METHOD_TRACE,
         METHOD_GREP,
         METHOD_LLM_FALLBACK,
-        METHOD_LLM,
         METHOD_REJECTED,
         METHOD_UNRESOLVED,
     }
@@ -184,8 +172,6 @@ def make_entry(
     confidence: float | None = None,
     reason: str = "",
     rejected_value: str = "",
-    previous_source_file: str = "",
-    previous_method: str = "",
     reason_class: str = "",
 ) -> dict[str, Any]:
     """Build one resolution entry with every required key present.
@@ -202,8 +188,6 @@ def make_entry(
             tiers, which are either right or silent.
         reason: Human-readable note -- why this path, or why none.
         rejected_value: Placeholder that was zeroed, kept for audit.
-        previous_source_file: Location replaced by a model review.
-        previous_method: Resolution tier replaced by a model review.
 
     Returns:
         The entry dict.
@@ -232,9 +216,6 @@ def make_entry(
             source_file=source_file,
         ),
     }
-    if previous_source_file:
-        entry["previous_source_file"] = str(previous_source_file)
-        entry["previous_method"] = str(previous_method or "")
     return entry
 
 

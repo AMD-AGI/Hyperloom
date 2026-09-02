@@ -27,7 +27,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
 import tracelens_analysis as tl  # noqa: E402
 import tracelens_skill_runner as tsr  # noqa: E402
-from _llm_source_context import build_context_block  # noqa: E402
 
 
 _HEADERS = [
@@ -99,27 +98,6 @@ def test_real_launcher_path_survives():
     assert cand["source_file"] == real.split("(", 1)[0]
     assert cand["source_line"] == 124
     assert cand["source_function"] == "_grouped_gemm_mxfp8"
-
-
-def test_materialized_runtime_args_are_sanitized_before_prompting(tmp_path):
-    """Production YAML selectors reach context without their adjacent secret."""
-    config = tmp_path / "baseline.yaml"
-    config.write_text(
-        "benchmark:\n  envs:\n    EXTRA_SGLANG_ARGS: '--api-key sk-secret --moe-runner-backend triton'\n",
-        encoding="utf-8",
-    )
-    raw = tl._runtime_server_args_from_config(str(config))
-    block = build_context_block(
-        server_args=raw,
-        framework="sglang",
-        precision="fp8",
-        env={},
-    )
-
-    assert "sk-secret" not in block
-    assert "api-key" not in block
-    assert "triton" in block
-    assert '"precision": "fp8"' in block
 
 
 def test_not_found_is_in_shared_placeholder_set():
@@ -566,12 +544,7 @@ def test_unconfirmed_trace_launcher_leaves_the_source_empty(
     monkeypatch,
     tmp_path,
 ):
-    """An unconfirmed launcher is evidence, never an attribution.
-
-    Finalization stops here rather than guessing from the symbol; the
-    whole-table review that follows can weigh the blank against the launcher
-    frame and the rest of the table.
-    """
+    """An unconfirmed launcher is evidence, never an attribution."""
     launcher = "/repo/model/launcher.py"
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
 
@@ -604,12 +577,7 @@ def test_wiring_without_trace_files_falls_back_quietly(tmp_path):
 
 
 def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
-    """Source resolution is wholly deterministic; review is a later stage.
-
-    Nothing under ``_finalize_candidates`` may reach a provider, so the no-LLM
-    guarantee comes from the code rather than from a flag a caller has to
-    remember to pass.
-    """
+    """Source resolution is wholly deterministic."""
     monkeypatch.setattr(tl, "locate_source_via_grep", lambda _name: "")
     artifact = tmp_path / "kernel_source_resolution.json"
     item = {
@@ -622,8 +590,7 @@ def test_finalization_never_calls_a_model(monkeypatch, tmp_path):
     assert got["source_file"] == ""
     assert got["skip_reason"] == "source file not resolved"
     assert artifact.is_file()
-    doc = json.loads(artifact.read_text(encoding="utf-8"))
-    assert "llm_audit" not in doc
+    assert json.loads(artifact.read_text(encoding="utf-8"))["entries"]
 
 
 def test_unreadable_trace_records_a_reason(monkeypatch, tmp_path):

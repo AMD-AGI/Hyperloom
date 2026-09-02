@@ -371,17 +371,7 @@ def test_an_anchor_that_replaces_nothing_leaves_no_breadcrumb(monkeypatch):
 
 
 def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog, tmp_path):
-    """The anchorless entry is kept out of the pipeline, not guarded against.
-
-    Every consumer of a match overrides ``source_file`` with the anchor, so an
-    entry without one substitutes nothing for whatever tier resolved the path
-    and lands the candidate as ``missing_native_source``. Guarding each consumer
-    was tried and went wrong in a way the data never justified: the guard's
-    marker gated on ``source_file``, so a row with neither anchor nor path read
-    as anchor-backed, went into ``protected_ids``, and the row most in need of
-    the review was refused it. Refusing the entry at load makes the shape
-    unreachable instead.
-    """
+    """The registry rejects entries that cannot provide an anchor path."""
     registry = tmp_path / "vendor_operator_playbooks.json"
     registry.write_text(
         json.dumps(
@@ -406,24 +396,6 @@ def test_the_registry_refuses_an_entry_with_no_kernel_anchor(monkeypatch, caplog
     assert [entry["id"] for entry in loaded] == ["with-anchor"]
     assert "no-anchor" in caplog.text
     assert "blank-anchor" in caplog.text
-
-
-def test_a_playbook_candidate_is_not_open_to_review_rewriting():
-    """Protection cannot key on the tier that resolved the replaced path.
-
-    ``source_file`` holds the task bundle's anchor whatever tier ran before, so
-    keying protection on that tier alone leaves the row open: a review proposal
-    could point the field back at framework source, routing the candidate to a
-    backend with nothing to rewrite and losing the playbook route.
-    """
-    resolved_by_grep = {
-        "kernel_id": "k010",
-        "source_resolution_method": "name_grep",
-        "op_to_source_status": "",
-    }
-    assert tla._is_curated_resolution(resolved_by_grep) is False
-
-    assert tla._is_curated_resolution({**resolved_by_grep, "patch_strategy": "vendor_playbook"}) is True
 
 
 # --- 3 & 4. forge_submit.submit() vendor-playbook route + one-session dedup --

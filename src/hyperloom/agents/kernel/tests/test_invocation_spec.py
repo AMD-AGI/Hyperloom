@@ -734,7 +734,7 @@ def _rewrite_candidate(rows: list[dict], **extra) -> dict:
     return candidate
 
 
-# --- dims the candidate review recovered must reach the driver -------------
+# --- missing trace inputs ---------------------------------------------------
 
 
 def test_spec_reports_missing_inputs_when_the_trace_recorded_no_arguments():
@@ -750,47 +750,3 @@ def test_spec_reports_missing_inputs_when_the_trace_recorded_no_arguments():
     # than present and empty.
     assert not spec.get("invocation", {}).get("arguments")
     assert "inputs" in spec["missing_fields"]
-
-
-def test_reviewed_dims_reach_the_invocation_spec():
-    """The spec is what the backend builds its driver from, so dims recovered by
-    the candidate review have to arrive here or the correction changes nothing
-    about what actually gets benchmarked.
-
-    ``shapes`` is the field the review revises; ``build_invocation_spec`` reads
-    it as the fallback for ``input_shapes``, which is what carries it through.
-    """
-    spec = invocation_spec.build_invocation_spec(
-        {
-            "kernel_id": "k001",
-            "name": "kernel_paged_attention_2d",
-            "shapes": ["(8192,6144) bf16", "(6144,1536) fp4"],
-            "input_dtypes": ["bf16", "fp4"],
-            "shape_provenance": "review_derived",
-        },
-        source_file="/repo/attn.py",
-    )
-    arguments = spec["invocation"]["arguments"]
-    assert [record["shape"] for record in arguments] == [[8192, 6144], [6144, 1536]]
-    assert [record["dtype"] for record in arguments] == ["bf16", "fp4"]
-    assert "inputs" not in spec["missing_fields"]
-
-
-def test_only_the_reviewed_table_can_be_resolved_as_the_candidate_source(tmp_path):
-    """The pre-review baseline sits in the same directory under its own name.
-
-    Resolving that instead would hand the backend the dims the review corrected,
-    which is the one outcome the two-artifact split exists to make impossible.
-    """
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-    (run_dir / "kernel_candidates.raw.json").write_text(
-        json.dumps({"hot_kernels": [{"kernel_id": "k001", "shapes": []}]}),
-        encoding="utf-8",
-    )
-    reviewed = {"hot_kernels": [{"kernel_id": "k001", "shapes": ["(8192,6144) bf16"]}]}
-    (run_dir / "kernel_candidates.json").write_text(json.dumps(reviewed), encoding="utf-8")
-
-    resolved = kernel_optimization.resolve_candidates_path(run_dir)
-    assert resolved.name == "kernel_candidates.json"
-    assert kernel_optimization.load_candidates(resolved)[0]["shapes"] == ["(8192,6144) bf16"]

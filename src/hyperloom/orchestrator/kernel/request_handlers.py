@@ -5589,9 +5589,6 @@ def _build_trace_analyze_cmd(
     ).strip()
     if precision:
         cmd += ["--precision", precision]
-    runtime_config = str(payload.get("runtime_config") or getattr(state, "baseline_config_path", "") or "").strip()
-    if runtime_config and not is_bypass:
-        cmd += ["--runtime-config", runtime_config]
 
     if scriptable:
         # --skip-split is TraceLens-only; the bypass backend has its own windowing.

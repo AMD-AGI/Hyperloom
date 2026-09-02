@@ -429,6 +429,14 @@ async def test_kernel_entry_does_not_dispatch_without_untried_candidates(coord: 
     await coord._on_enter_kernel(from_phase="FRAMEWORK_AGENT")
 
     assert dispatched == 0
+    handoff_dir = (
+        coord.session_dir / "kernel-agent" / "forge" / f"cycle-{int(coord.shared_state.macro_cycle or 0)}" / "handoff"
+    )
+    assert {path.name for path in handoff_dir.iterdir()} == {
+        "serving-context.md",
+        "trace-evidence.md",
+        "workload.md",
+    }
 
 
 @pytest.mark.asyncio

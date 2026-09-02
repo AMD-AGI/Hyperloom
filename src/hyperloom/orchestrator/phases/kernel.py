@@ -3972,6 +3972,22 @@ class KernelPhase(PhaseHandler):
         await self._maybe_reprofile_for_kernel()
         await self._maybe_run_forge_fusion_before_kernel_opt()
         await self._maybe_run_collective_before_kernel_opt()
+        try:
+            from ..kernel.forge_handoff import write_forge_handoff
+
+            try:
+                env_spec = self.build_env_spec()
+            except Exception:  # noqa: BLE001
+                log.exception("KERNEL entry: could not build Forge serving environment")
+                env_spec = {}
+            handoff_dir = write_forge_handoff(
+                self.session_dir,
+                self.shared_state,
+                env_spec=env_spec,
+            )
+            log.info("KERNEL entry: wrote Forge handoff to %s", handoff_dir)
+        except Exception:  # noqa: BLE001
+            log.exception("KERNEL entry: Forge handoff generation failed")
         if self._kernel_opt_work_remains():
             await self._run_kernel_opt_entry_batch()
         else:

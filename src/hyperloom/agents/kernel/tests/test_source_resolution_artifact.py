@@ -5,12 +5,12 @@
 # See LICENSE for license information.
 ###############################################################################
 
-"""Contract tests for the kernel source-resolution artifact and its review tier.
+"""Contract tests for the kernel source-resolution artifact.
 
 The artifact exists so that "where does this kernel live, and how do we know"
 has one versioned answer on disk instead of a scatter of candidate fields. That
-only holds if the schema is enforced, so these pin the envelope, the per-entry
-keys, and the guard rails on the tier allowed to rewrite entries.
+only holds if the schema is enforced, so these pin the envelope and per-entry
+keys.
 """
 
 from __future__ import annotations
@@ -40,19 +40,6 @@ def test_entry_always_carries_every_required_key():
     entry = ksc.make_entry(kernel_id="k001", name="k", gpu_pct=1.0)
     for key in ksc.REQUIRED_ENTRY_KEYS:
         assert key in entry, key
-
-
-def test_entry_carries_audit_history_when_supplied():
-    """Optional review history must survive document reconstruction."""
-    entry = ksc.make_entry(
-        kernel_id="k001",
-        name="k",
-        gpu_pct=1.0,
-        previous_source_file="/repo/old.py",
-        previous_method=ksc.METHOD_TRACE,
-    )
-    assert entry["previous_source_file"] == "/repo/old.py"
-    assert entry["previous_method"] == ksc.METHOD_TRACE
 
 
 def test_validate_reports_every_problem_not_just_the_first():
@@ -150,7 +137,6 @@ def test_projection_classifies_each_resolution_tier():
     assert by_id["k4"]["method"] == ksc.METHOD_REJECTED
     assert by_id["k4"]["rejected_value"] == "AITER (vendor)"
     assert by_id["k5"]["method"] == ksc.METHOD_LLM_FALLBACK
-    assert by_id["k5"]["method"] != ksc.METHOD_LLM
 
 
 def test_written_artifact_satisfies_its_own_contract(tmp_path):
@@ -180,24 +166,6 @@ def test_written_artifact_satisfies_its_own_contract(tmp_path):
 # runtime/source-mirrors/). A contract module that predates the method-name
 # constants this script reads must degrade to a fallback method name rather
 # than raise AttributeError and kill the run.
-
-
-def test_active_finder_method_falls_back_without_the_constant(monkeypatch):
-    """A contract module missing METHOD_ACTIVE_FINDER must not crash the reader."""
-
-    class _OldContract:
-        """Stands in for a too-old kernel_source_contract (no new constants)."""
-
-    monkeypatch.setattr(tl, "_KSC", _OldContract())
-    # The module-level literal is the source of truth for the fallback string.
-    assert tl._ACTIVE_FINDER_METHOD == "active_finder"
-    authoritative_item = {
-        "source_resolution_method": "active_finder",
-        "op_to_source_status": tl._ROUTABLE_STATUS,
-    }
-    # _is_curated_resolution reads METHOD_ACTIVE_FINDER/SYMBOL_INDEX/CURATED; it
-    # must resolve them via fallback rather than AttributeError.
-    assert tl._is_curated_resolution(authoritative_item) is True
 
 
 def test_candidate_method_falls_back_without_the_constants(monkeypatch):
