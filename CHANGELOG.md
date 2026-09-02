@@ -185,17 +185,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
   measured at one concurrency under-budgets every higher one (measured on
   Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
-  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
-  lives in one function that both consumers call: this process derives the
-  subprocess cap from it, and `apply_agentx_switch` exports its result into the
-  benchmark env so the client's `--warmup-grace-period` — the thing that
+  The grace can now be scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the
+  scaling lives in one function that both consumers call: this process derives
+  the subprocess cap from it, and `apply_agentx_switch` exports its result into
+  the benchmark env so the client's `--warmup-grace-period` — the thing that
   actually stops the warmup — cannot disagree with the cap.<br/>
-  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
-  grace was measured at and defaults to 8, so every existing configuration
-  derives exactly what it derived before. Declare it when you measured
-  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
-  passed in without the anchor is read as an 8-anchored number and doubled.
-  The floor only ever raises a bound.
+  **Operator note**: the scaling is **opt-in**. `AGENTX_WARMUP_GRACE_CONC`
+  declares the concurrency the grace was measured at, and with no anchor
+  declared the grace is used flat — a ratio needs two numbers, and assuming the
+  second one made the same value mean different things depending on whether it
+  was typed (an explicit `AGENTX_WARMUP_GRACE_PERIOD=1800` yielded a 23400s cap
+  at CONC=64 while leaving it unset yielded 10800s, and the conc sweep then
+  priced every rung against the inflated number). So declare the anchor whenever
+  you run above the concurrency you measured at: without it, a 3600s grace
+  measured at conc=8 stays 3600s at CONC=32, where the warmup needs roughly
+  three times that — and the round does not fail, it reports a prefix-reuse
+  figure taken before the cache filled. When the anchor is declared the scaling
+  only ever raises the bound, and stays identity at or below the anchor.<br/>
+  A conc sweep bounds each rung by **its own** concurrency, not the session's:
+  the grace, the inner Magpie cap and the variant subprocess cap all derive from
+  the rung's `CONC`, and the budget gates that admit a rung price it at the same
+  number, so admission and grant cannot disagree. Raising only the client's
+  grace would be strictly worse than leaving all three alone — the round would
+  wait inside a bound its own caps do not cover and be killed mid-warmup.
 
 - **Budget admission prices a variant at the cap it will actually be granted.**
   Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the
