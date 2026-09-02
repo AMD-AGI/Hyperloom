@@ -494,6 +494,53 @@ async def test_run_invalid_tool_use_input_drops_block_silently():
 
 
 @pytest.mark.asyncio
+async def test_unparsed_tool_wrapper_retries_dedupe_to_one_intent():
+    """Claude Code retries the same wrapped JSON; keep one validated intent."""
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input=dict(wrapped)),
+            ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input=dict(wrapped)),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_QUALIFIED,
+                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
+            ),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+
+
+@pytest.mark.asyncio
+async def test_identical_native_tool_inputs_are_not_deduped():
+    """Native Claude objects keep every emit_intent call, even duplicates."""
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = FakeAssistantMessage(
+        content=[
+            ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input=dict(native)),
+            ToolUseBlock(name=EMIT_INTENT_TOOL_QUALIFIED, input=dict(native)),
+        ]
+    )
+    backend = ClaudeBackend(
+        sdk_query_factory=_make_query_factory([msg]),
+        sdk_options_cls=FakeOptions,
+        enable_mcp_emit_intent=False,
+    )
+    res = await backend.run("p")
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
+
+
+@pytest.mark.asyncio
 async def test_raw_completion_returns_raw_text_without_intent():
     """raw_completion mode: a text-only reply yields raw_text and does NOT raise NoIntentEmitted."""
     action = '{"tool": "read_source", "args": {"path": "/x"}}'

@@ -7,6 +7,7 @@ extraction, and conversation-session accessors."""
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -182,6 +183,98 @@ def test_parse_tool_use_block_valid_and_invalid() -> None:
     # invalid envelope -> None (validation failure swallowed)
     bad = ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input={"intent_type": "not_a_real_type"})
     assert b._parse_tool_use_block(bad) is None
+
+
+def test_parse_tool_use_block_prefers_native_intent_type() -> None:
+    b = _backend()
+    block = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={
+            "intent_type": "send_message",
+            "payload": {"topic": "heartbeat", "body_md": "native"},
+            "__unparsedToolInput": {
+                "raw": '{"intent_type": "alert", "payload": {"severity": "high", "summary": "x"}}',
+                "len": 1,
+            },
+        },
+    )
+    intent = b._parse_tool_use_block(block)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["body_md"] == "native"
+
+
+def test_parse_tool_use_block_unwraps_claude_code_wrapper() -> None:
+    b = _backend()
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": raw, "len": len(raw)}},
+    )
+    intent = b._parse_tool_use_block(wrapped)
+    assert intent is not None
+    assert intent.type.value == "send_message"
+    assert intent.payload["topic"] == "heartbeat"
+
+
+def test_parse_tool_use_block_unparsed_malformed_json_returns_none() -> None:
+    b = _backend()
+    bad = ToolUseBlock(
+        name=EMIT_INTENT_TOOL_NAME,
+        input={"__unparsedToolInput": {"raw": "{not-json", "len": 9}},
+    )
+    assert b._parse_tool_use_block(bad) is None
+
+
+def _query_messages(messages: list[Any]):
+    async def _q(*, prompt, options):
+        for message in messages:
+            yield message
+
+    return _q
+
+
+def test_unparsed_wrapper_retries_dedupe_to_one_intent() -> None:
+    raw = '{"intent_type": "send_message", "payload": {"topic": "heartbeat", "body_md": "ok"}}'
+    wrapped = {"__unparsedToolInput": {"raw": raw, "len": len(raw)}}
+    other = '{"intent_type": "send_message", "payload": {"topic": "status", "body_md": "next"}}'
+    msg = _Msg(
+        content=[
+            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(wrapped)),
+            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(wrapped)),
+            ToolUseBlock(
+                name=EMIT_INTENT_TOOL_NAME,
+                input={"__unparsedToolInput": {"raw": other, "len": len(other)}},
+            ),
+        ]
+    )
+    b = _backend(sdk_query_factory=_query_messages([msg]), enable_mcp_emit_intent=False)
+
+    async def _run():
+        return await b.run("p")
+
+    res = asyncio.run(_run())
+    assert res.metadata["tool_blocks"] == 3
+    assert len(res.intents) == 2
+    assert [intent.payload["topic"] for intent in res.intents] == ["heartbeat", "status"]
+
+
+def test_identical_native_tool_inputs_are_not_deduped() -> None:
+    native = {"intent_type": "send_message", "payload": {"topic": "heartbeat"}}
+    msg = _Msg(
+        content=[
+            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(native)),
+            ToolUseBlock(name=EMIT_INTENT_TOOL_NAME, input=dict(native)),
+        ]
+    )
+    b = _backend(sdk_query_factory=_query_messages([msg]), enable_mcp_emit_intent=False)
+
+    async def _run():
+        return await b.run("p")
+
+    res = asyncio.run(_run())
+    assert res.metadata["tool_blocks"] == 2
+    assert len(res.intents) == 2
 
 
 def test_extract_text_shapes() -> None:
