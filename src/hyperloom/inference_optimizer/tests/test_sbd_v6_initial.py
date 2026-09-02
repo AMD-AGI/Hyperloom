@@ -20,7 +20,7 @@ from hyperloom.inference_optimizer.session.sbd_v6 import (
     SCHEMA_VERSION_V6,
     read_timeline_event,
     read_timeline_events,
-    write_timeline_event,
+    write_timeline_event_at,
 )
 
 
@@ -132,7 +132,7 @@ def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
     _write_json(tmp_path / "manifest.json", manifest)
 
     before = exporter.build(tmp_path)
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "install",
@@ -143,7 +143,7 @@ def test_v6_projection_is_additive_to_v5_breakdown(tmp_path):
             "ext": {"run_kind": "fresh", "hard_fail_step_id": None, "runtime_snapshot": {}, "steps": []},
         },
     )
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "model_gate",
@@ -387,7 +387,7 @@ def test_resume_preflight_failure_uses_isolated_session(tmp_path, monkeypatch):
         "ext": {"run_kind": "fresh", "steps": []},
     }
     original_install_public = json.loads(json.dumps(original_install))
-    write_timeline_event(resume_dir, original_install)
+    write_timeline_event_at(resume_dir, original_install)
     _write_json(resume_dir / "session_breakdown.json", {"sentinel": "active"})
     monkeypatch.setenv("USER_DATA_PATH", str(workspace))
     monkeypatch.delenv("MODEL_PATH", raising=False)
@@ -433,7 +433,7 @@ def test_resume_preflight_failure_does_not_overwrite_completed_outcome(tmp_path,
     state.stop_reason = "target_reached"
     state.save(resume_dir)
     _write_json(resume_dir / "manifest.json", {"schema_version": 4, "session_id": "sbd-v6-test"})
-    write_timeline_event(
+    write_timeline_event_at(
         resume_dir,
         {
             "type": "install",
@@ -539,7 +539,7 @@ def test_invalid_resume_preflight_failure_does_not_mutate_requested_directory(
 def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch):
     from hyperloom.inference_optimizer.cli import model_gate
 
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "install",
@@ -563,7 +563,7 @@ def test_timeline_history_retains_fresh_and_resume_events(tmp_path, monkeypatch)
     fresh_args = _gate_args(tmp_path / "model")
     model_gate._start_model_gate(fresh_args, tmp_path)
     model_gate._finish_model_gate(fresh_args, tmp_path)
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "install",
@@ -650,7 +650,7 @@ def test_timeline_writer_does_not_migrate_flat_files(tmp_path):
         },
     )
 
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "install",
@@ -892,7 +892,7 @@ def test_model_gate_event_write_failure_does_not_change_gate_result(tmp_path, mo
     )
     monkeypatch.setattr(
         sbd_v6,
-        "write_timeline_event",
+        "write_timeline_event_at",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("disk unavailable")),
     )
 
@@ -965,7 +965,7 @@ def test_install_event_write_failure_is_exported_as_v6_warning(tmp_path, monkeyp
     preflight._begin_install_event(args)
     monkeypatch.setattr(
         sbd_v6,
-        "write_timeline_event",
+        "write_timeline_event_at",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("install disk unavailable")),
     )
 

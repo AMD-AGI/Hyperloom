@@ -112,6 +112,7 @@ def assemble_parts(
     session_dir: Path | str,
     *,
     warnings: list[str] | None = None,
+    keep_kernel_events: bool = False,
 ) -> dict[str, Any]:
     """Return ``{section: list | dict}`` assembled from the spool directory.
 
@@ -121,6 +122,10 @@ def assemble_parts(
         session_dir: The session root directory.
         warnings: Optional list to append parse/validation warnings to; a
             fresh list is used when not provided.
+        keep_kernel_events: Retain the :data:`KERNEL_EVENT_SECTIONS`
+            substreams instead of dropping them. Only
+            :func:`kernel_event_parts` sets this; the breakdown envelope never
+            wants them.
 
     Returns:
         A ``{section: list | dict}`` mapping assembled from the spool
@@ -194,6 +199,8 @@ def assemble_parts(
     _normalize_kernel_route_operations(out)
     _compose_critic_robustness(out)
     _compose_kernel_journey(out)
+    if not keep_kernel_events:
+        _compose_kernel_events(out)
     _compose_versions(out)
     return out
 
@@ -459,6 +466,60 @@ def _compose_critic_robustness(out: dict[str, Any]) -> None:
         "robustness_signals": rob_signals,
         "kb_writes_summary": _kb_writes_summary(critic_iters),
     }
+
+
+#: The KERNEL substreams, in the order a reader follows them. They are
+#: consumed by the SBD v6 timeline rather than by the breakdown envelope, so
+#: assembly pops them here to keep them from leaking into the wire shape.
+KERNEL_EVENT_SECTIONS: tuple[str, ...] = (
+    "kernel_event",
+    "kernel_lane_run",
+    "kernel_rebench_attempt",
+    "kernel_trace_analyze",
+    "kernel_geak_attempt",
+    "kernel_geak_discovery",
+    "kernel_geak_acceptance",
+)
+
+
+def kernel_event_parts() -> dict[str, list[dict[str, Any]]]:
+    """Return only the KERNEL substreams of the bound session, keyed by section.
+
+    Assembly pops these sections, so a caller that wants them -- the phase
+    closing an event, or finalize recovering one that never closed -- reads
+    them through here instead.
+
+    Returns:
+        A ``{section: [payload, ...]}`` mapping holding only the sections in
+        :data:`KERNEL_EVENT_SECTIONS`, each defaulting to an empty list.
+
+    Raises:
+        SessionNotBoundError: If no session is bound.
+    """
+    from ...session.session_binding import bound_session  # local: avoid import cycle
+
+    assembled = assemble_parts(bound_session(), warnings=[], keep_kernel_events=True)
+    parts: dict[str, list[dict[str, Any]]] = {}
+    for section in KERNEL_EVENT_SECTIONS:
+        rows = assembled.get(section)
+        parts[section] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return parts
+
+
+def _compose_kernel_events(out: dict[str, Any]) -> None:
+    """Drop the KERNEL substreams from the breakdown envelope.
+
+    These are recorded for the v6 timeline, which assembles them into one
+    ``kernel`` event per phase run when the phase is left. They carry no
+    meaning of their own in ``session_breakdown.json``, and leaving them in
+    would publish seven undocumented sections alongside the event built from
+    them.
+
+    Args:
+        out: The assembled section mapping mutated in place.
+    """
+    for section in KERNEL_EVENT_SECTIONS:
+        out.pop(section, None)
 
 
 def _compose_kernel_journey(out: dict[str, Any]) -> None:

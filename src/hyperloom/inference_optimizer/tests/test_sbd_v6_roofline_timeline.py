@@ -18,6 +18,8 @@ from hyperloom.orchestrator.actions.executors._roofline_timeline import (
     make_roofline_recorder,
 )
 from hyperloom.orchestrator.actions.executors.profile import (
+    CHECK_GRAPH_LAUNCH_COVERAGE,
+    CHECK_RANK_SHAPE,
     CHECK_TRACE_HAS_OPS,
     _build_trace_validate,
 )
@@ -80,6 +82,43 @@ def test_begin_writes_an_in_flight_event(tmp_path: Path) -> None:
     assert event["ext"]["in_flight_substep"] == "profile"
     assert event["ext"]["request"]["arm"] == "baseline"
     assert event["ext"]["profile"]["max_attempts"] == 3
+
+
+def test_shape_capture_dispatch_does_not_claim_a_measured_arm(tmp_path: Path) -> None:
+    """The GEMM shape-capture path reuses this executor but measures no arm.
+
+    It dispatches as ``gemm_shape_capture`` and carries no reason of its own, so
+    defaulting the arm to current_best would state a measurement the run never
+    made -- and a consumer counting roofline dispatches would have nothing in the
+    event to exclude it by.
+    """
+    recorder = make_roofline_recorder(
+        tmp_path,
+        task_id="t-capture-1",
+        task_kind="gemm_shape_capture",
+        framework="vllm",
+    )
+    assert recorder is not None
+    recorder.begin(max_profile_attempts=1)
+
+    request = _roofline_events(tmp_path)[0]["ext"]["request"]
+    assert request["task_kind"] == "gemm_shape_capture"
+    assert request["arm"] == ""
+
+
+def test_roofline_dispatch_without_a_reason_still_names_its_arm(tmp_path: Path) -> None:
+    """A roofline task may carry no reason, and current_best remains its default.
+
+    The arm is withheld by dispatch kind rather than by an absent reason, so this
+    case must not be caught by the shape-capture rule above.
+    """
+    recorder = make_roofline_recorder(tmp_path, task_id="t-2", task_kind="roofline", framework="sglang")
+    assert recorder is not None
+    recorder.begin(max_profile_attempts=3)
+
+    request = _roofline_events(tmp_path)[0]["ext"]["request"]
+    assert request["task_kind"] == "roofline"
+    assert request["arm"] == "current_best"
 
 
 def test_profile_retries_collapse_into_one_event(tmp_path: Path) -> None:
@@ -262,30 +301,118 @@ def test_steady_state_normalizes_across_tools() -> None:
     assert set(bypass) == set(tracelens)
 
 
-def test_trace_validate_verdicts() -> None:
-    healthy = _build_trace_validate(
-        {"checks": [{"check_id": "trace_has_ops", "status": "passed"}]}, trace_dir=Path("/w"), framework="sglang"
-    )
-    assert healthy["verdict"] == "healthy"
-    assert healthy["usable_by_tracelens"] is True
+def _certificate(*, density: dict[str, Any], verdict: dict[str, Any], rank_count: int = 1) -> dict[str, Any]:
+    """A probe record reduced to the fields the validation block reads."""
+    return {
+        "schema_version": 1,
+        "probe_version": "selfcert-1.0.0",
+        "trace_dir_level": {"rank_count": rank_count},
+        "rank_level": [
+            {
+                "rank": 0,
+                "density": density,
+                "split_forecast": {"viable_modes": ["mixed"], "viable_consumer_modes": ["mixed"]},
+            }
+        ],
+        "verdict": {"thresholds_effective": {"graph_launch_coverage_max": 0.5}, **verdict},
+    }
 
-    degraded = _build_trace_validate(
-        {"checks": [{"check_id": "capture_traces_present", "status": "failed"}]},
+
+def test_trace_validate_keeps_the_two_verdict_axes_apart() -> None:
+    """A trace both consumers can route can still carry a false decode answer.
+
+    This is the case a single healthy/degraded/unusable grade cannot express:
+    nothing fails, the analysis completes, and the conclusion is wrong anyway.
+    """
+    out = _build_trace_validate(
+        {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
         trace_dir=Path("/w"),
         framework="sglang",
+        certificate=_certificate(
+            density={
+                "graph_mode": True,
+                "graph_launch_count": 128,
+                "graph_launches_with_kernels": 1,
+                "graph_launch_coverage": 0.0078,
+                "graph_under_recorded": True,
+            },
+            verdict={
+                "usable_by": ["bypass", "tracelens"],
+                "decode_conclusions_valid": False,
+                "silently_wrong": True,
+            },
+        ),
     )
-    # A failed non-blocking check means TraceLens can still route the trace but
-    # the conclusion is suspect -- the two axes a silent wrong answer sits between.
-    assert degraded["verdict"] == "degraded"
-    assert degraded["usable_by_tracelens"] is True
+    assert out["verdict"]["usable_by"] == ["bypass", "tracelens"]
+    assert out["verdict"]["decode_conclusions_valid"] is False
+    assert out["verdict"]["silently_wrong"] is True
+    assert out["probe_status"] == "ok"
+    # Chunks do not exist until the splitter runs, so the profile stage records
+    # the forecast the analysis stage will later be measured against instead.
+    assert out["chunk_level"] == []
+    assert out["steady_state_forecast"]["viable_modes"] == ["mixed"]
 
-    unusable = _build_trace_validate(
-        {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "failed"}]},
+    coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
+    assert coverage["status"] == "failed"
+    # Numerator and denominator are kept apart: a coverage ratio alone cannot
+    # say whether the capture recorded two launches or two hundred.
+    assert coverage["detail"]["graph_launch_count"] == 128
+    assert coverage["detail"]["graph_launches_with_kernels"] == 1
+    assert coverage["detail"]["coverage_max"] == 0.5
+
+
+def test_eager_capture_skips_coverage_instead_of_failing_it() -> None:
+    """No graph launches means no denominator, which is not a failed check."""
+    out = _build_trace_validate(
+        {"checks": []},
         trace_dir=Path("/w"),
         framework="sglang",
+        certificate=_certificate(
+            density={
+                "graph_mode": False,
+                "graph_launch_count": 0,
+                "graph_launches_with_kernels": 0,
+                "graph_launch_coverage": None,
+                "graph_under_recorded": False,
+            },
+            verdict={"usable_by": ["bypass", "tracelens"], "decode_conclusions_valid": True, "silently_wrong": False},
+        ),
     )
-    assert unusable["verdict"] == "unusable"
-    assert unusable["usable_by_tracelens"] is False
+    coverage = next(row for row in out["checks"] if row["check_id"] == CHECK_GRAPH_LAUNCH_COVERAGE)
+    assert coverage["status"] == "skipped"
+    assert "no CUDA graph launches" in coverage["skip_reason"]
+
+
+def test_tensor_parallel_capture_reports_the_uncertified_ranks() -> None:
+    """One certified rank is not a claim about the other seven."""
+    out = _build_trace_validate(
+        {"checks": []},
+        trace_dir=Path("/w"),
+        framework="sglang",
+        certificate=_certificate(
+            density={"graph_mode": True, "graph_under_recorded": False},
+            verdict={"usable_by": ["bypass"], "decode_conclusions_valid": True, "silently_wrong": False},
+            rank_count=8,
+        ),
+    )
+    shape = next(row for row in out["checks"] if row["check_id"] == CHECK_RANK_SHAPE)
+    assert shape["status"] == "skipped"
+    assert shape["detail"]["rank_count"] == 8
+    assert shape["detail"]["certified_rank_count"] == 1
+
+
+def test_probe_failure_is_recorded_rather_than_read_as_a_verdict() -> None:
+    """A probe that could not run must not leave an empty verdict looking clean."""
+    out = _build_trace_validate(
+        {"checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}]},
+        trace_dir=Path("/w"),
+        framework="sglang",
+        probe_error="OSError: trace unreadable",
+    )
+    assert out["probe_status"] == "failed"
+    assert out["probe_error"] == "OSError: trace unreadable"
+    assert out["verdict"] == {}
+    assert [row["check_id"] for row in out["checks"]] == [CHECK_TRACE_HAS_OPS]
 
 
 def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
@@ -301,8 +428,8 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
         disable_cuda_graph=False,
         profile_result=_profile_result(
             trace_validate={
-                "verdict": "unusable",
-                "usable_by_tracelens": False,
+                "verdict": {"usable_by": [], "decode_conclusions_valid": None, "silently_wrong": False},
+                "probe_status": "ok",
                 "checked_at": "2026-01-01T00:00:01+00:00",
                 "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "failed"}],
             }
@@ -318,8 +445,12 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
         disable_cuda_graph=False,
         profile_result=_profile_result(
             trace_validate={
-                "verdict": "healthy",
-                "usable_by_tracelens": True,
+                "verdict": {
+                    "usable_by": ["bypass", "tracelens"],
+                    "decode_conclusions_valid": True,
+                    "silently_wrong": False,
+                },
+                "probe_status": "ok",
                 "checked_at": "2026-01-01T00:01:01+00:00",
                 "checks": [{"check_id": CHECK_TRACE_HAS_OPS, "status": "passed"}],
             }
@@ -328,10 +459,11 @@ def test_validate_lands_per_profile_attempt(tmp_path: Path) -> None:
 
     runs = _roofline_events(tmp_path)[0]["ext"]["profile"]["runs"]
     # Each attempt keeps the verdict computed against the trace it produced, so
-    # "attempt 1 was unusable, attempt 2 was not" stays answerable.
-    assert runs[0]["validate"]["verdict"] == "unusable"
+    # "attempt 1 was unusable by anything, attempt 2 was not" stays answerable.
+    assert runs[0]["validate"]["usable_by"] == []
     assert runs[0]["validate"]["failed_check_ids"] == [CHECK_TRACE_HAS_OPS]
-    assert runs[1]["validate"]["verdict"] == "healthy"
+    assert runs[1]["validate"]["usable_by"] == ["bypass", "tracelens"]
+    assert runs[1]["validate"]["decode_conclusions_valid"] is True
     assert runs[1]["validate"]["failed_check_ids"] == []
 
 
@@ -402,7 +534,7 @@ def test_recorder_write_failure_does_not_raise(tmp_path: Path, monkeypatch) -> N
         raise OSError("disk full")
 
     monkeypatch.setattr(
-        "hyperloom.inference_optimizer.session.sbd_v6.write_timeline_event",
+        "hyperloom.inference_optimizer.session.sbd_v6.write_timeline_event_at",
         _boom,
     )
     # Observability must never change roofline behavior, so a writer failure is

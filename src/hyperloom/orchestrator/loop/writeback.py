@@ -3592,6 +3592,67 @@ class WritebackCollaborator:
         outcome.audit_decision = audit_decision
         outcome.audit_extras = audit_extras
 
+    def _record_geak_rebench_timeline(
+        self,
+        *,
+        task: Any,
+        decision: str,
+        pending_status: str,
+        measured: Any,
+        config_matched: bool | None,
+        overlay_loaded: bool | None,
+        got_hash: str,
+        got_overlay_digest: str,
+    ) -> None:
+        """Record one GEAK rebench attempt on the kernel timeline event.
+
+        The attempt is recorded whatever the verdict, including one the slot
+        ownership check goes on to reject: a measured rebench that was dropped
+        as orphaned or late is exactly the case that is hard to reconstruct
+        afterwards.
+
+        Args:
+            task: The settled rebench task.
+            decision: The final verdict.
+            pending_status: The candidate slot's status.
+            measured: The throughput the attempt measured.
+            config_matched: Whether the config fingerprint survived the run.
+            overlay_loaded: Whether the overlay survived the run.
+            got_hash: The fingerprint the run reported.
+            got_overlay_digest: The overlay digest observed after the run.
+        """
+        recorder = self.phase_kernel._kernel_timeline()
+        if recorder is None:
+            return
+        from ..phases.geak_rebench import MAX_REBENCH_ATTEMPTS_PER_CYCLE
+
+        params = task.params or {}
+        try:
+            recorder.record_geak_rebench_attempt(
+                max_attempts=MAX_REBENCH_ATTEMPTS_PER_CYCLE,
+                attempt_id=str(task.idempotency_key or task.task_id or ""),
+                source_ref=None,
+                idempotency_key=str(task.idempotency_key or ""),
+                task_id=str(task.task_id or ""),
+                dispatched_at=None,
+                settled_at=None,
+                base_tput=params.get("base_tput"),
+                measured_tput=measured,
+                decision=decision,
+                decision_reason=str(params.get("reason") or ""),
+                status=pending_status,
+                engagement={
+                    "config_matched": config_matched,
+                    "overlay_loaded": overlay_loaded,
+                    "expected_cfg_hash": params.get("expected_cfg_hash"),
+                    "observed_cfg_hash": got_hash,
+                    "expected_overlay_digest": params.get("expected_overlay_digest"),
+                    "observed_overlay_digest": got_overlay_digest,
+                },
+            )
+        except Exception:  # noqa: BLE001 — observability cannot change the verdict
+            log.debug("kernel timeline: geak rebench record failed", exc_info=True)
+
     async def _promote_roofline(
         self,
         result: dict,
@@ -3775,6 +3836,7 @@ class WritebackCollaborator:
                 # identity here; a miss is inconclusive, not validated.
                 expected_overlay = str((task.params or {}).get("expected_overlay") or "")
                 overlay_loaded = True
+                got_digest = ""
                 if expected_overlay:
                     expected_digest = str((task.params or {}).get("expected_overlay_digest") or "")
                     got_digest = _geak_overlay_digest(expected_overlay)
@@ -3829,6 +3891,23 @@ class WritebackCollaborator:
 
                 macro_cycle = int(getattr(self.shared_state, "macro_cycle", 0) or 0)
                 pending_status = str(pending.get("status") or "") if isinstance(pending, dict) else ""
+                # Both engagement facts were computed above to choose between
+                # ``validated`` and ``fallback``, and were then discarded: the
+                # V5 attempt row has no field for either, so a reader could see
+                # the verdict but not the evidence that the configuration under
+                # test had actually engaged. Record them with the attempt.
+                self._record_geak_rebench_timeline(
+                    task=task,
+                    decision=decision,
+                    pending_status=pending_status,
+                    measured=measured,
+                    config_matched=(got_hash == str((task.params or {}).get("expected_cfg_hash") or ""))
+                    if str((task.params or {}).get("expected_cfg_hash") or "")
+                    else None,
+                    overlay_loaded=overlay_loaded if expected_overlay else None,
+                    got_hash=got_hash,
+                    got_overlay_digest=got_digest,
+                )
                 if not geak_rebench_should_apply_result(self.shared_state, task, macro_cycle=macro_cycle):
                     # The slot either names another task or already carries a
                     # verdict, so this result is orphaned or late. Record it:

@@ -273,6 +273,7 @@ class RooflineExecutor:
         recorder = make_roofline_recorder(
             self._resolve_session_dir(ctx),
             task_id=str(getattr(ctx.task, "task_id", "") or ""),
+            task_kind=str(getattr(ctx.task, "kind", "") or ""),
             reason=str(params.get("reason") or ""),
             framework=self._resolve_framework(ctx),
             params=params,
@@ -992,10 +993,26 @@ class RooflineExecutor:
                 _attempt_started = _now_iso()
                 _attempt_t0 = time.monotonic()
                 _attempt_eager = disable_cuda_graph
-                cb_profile = await _reported(
-                    "profile_compute_bound",
-                    lambda: profile_executor(cb_ctx),
-                )
+                try:
+                    cb_profile = await _reported(
+                        "profile_compute_bound",
+                        lambda: profile_executor(cb_ctx),
+                    )
+                except Exception as exc:
+                    # Recorded here rather than left to the fail-soft handler
+                    # below: that one only narrates the outcome, and an attempt
+                    # the event never rows is an attempt ``attempt_count`` does
+                    # not count. The main retry loop rows its raising attempts.
+                    _note_profile_run(
+                        status="failed",
+                        result=None,
+                        failure={
+                            "phase": "profile",
+                            "error_class": type(exc).__name__,
+                            "message": f"compute-bound re-profile raised: {exc!r}",
+                        },
+                    )
+                    raise
                 cb_trace = _extract_trace_path(cb_profile) if isinstance(cb_profile, dict) else ""
                 cb_profile_run = _note_profile_run(
                     status="succeeded" if cb_trace else "failed",
@@ -1021,10 +1038,25 @@ class RooflineExecutor:
                         cb_payload["roofline_output_name"] = roofline_output_name
                     _cb_started = _now_iso()
                     _cb_t0 = time.monotonic()
-                    cb_ta = await _reported(
-                        "trace_analyze_compute_bound",
-                        lambda: trace_analyze_handler(cb_payload, session_dir=session_dir),
-                    )
+                    try:
+                        cb_ta = await _reported(
+                            "trace_analyze_compute_bound",
+                            lambda: trace_analyze_handler(cb_payload, session_dir=session_dir),
+                        )
+                    except Exception as exc:
+                        _note_analysis_run(
+                            attempt_reason=ANALYSIS_ATTEMPT_COMPUTE_BOUND,
+                            status="failed",
+                            started_at=_cb_started,
+                            started_monotonic=_cb_t0,
+                            trace_input=str(cb_trace),
+                            failure={
+                                "phase": "trace_analyze",
+                                "error_class": type(exc).__name__,
+                                "message": f"compute-bound re-analysis raised: {exc!r}",
+                            },
+                        )
+                        raise
                     _cb_ok = isinstance(cb_ta, dict) and cb_ta.get("status") == "ok"
                     cb_analysis_run = _note_analysis_run(
                         attempt_reason=ANALYSIS_ATTEMPT_COMPUTE_BOUND,

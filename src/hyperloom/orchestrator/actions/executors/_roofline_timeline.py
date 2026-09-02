@@ -25,25 +25,23 @@ behavior, so failures are logged and parked in the V6 write-warnings sidecar.
 
 from __future__ import annotations
 
-import functools
-import json
 import logging
 import time
 from pathlib import Path
 from typing import Any
 
-from hyperloom.common.timeutil import now_iso
+from ._timeline_fields import (
+    analysis_detail as _analysis_detail,
+    as_dict as _as_dict,
+    as_list as _as_list,
+    clip as _clip,
+    failure_row as _failure_row,
+    flush_event as _flush_event,
+    int_or_none as _int_or_none,
+    now_iso_seconds as _now_iso,
+)
 
 log = logging.getLogger(__name__)
-
-_now_iso = functools.partial(now_iso, "seconds")
-
-# Kept small on purpose. The full candidate list already lives in the
-# ``kernel_candidates`` artifact, so the event carries the ranking head for
-# "what did this roofline actually hand to dispatch", not the payload. p95 is
-# 25 hot kernels and the max observed is 114; 15 matches the ``hot_kernels_top15``
-# slice that the pipeline itself routes on.
-_MAX_HOT_KERNELS = 15
 
 # ``trace_files`` reaches 424 entries on multi-rank xDiT runs (p99 424, p50 2),
 # which would be ~85 KiB of paths per profile run. The rank histogram plus a few
@@ -54,15 +52,6 @@ _MAX_SAMPLE_TRACE_FILES = 4
 # Trace-structure issues are prose written for an operator; a handful is enough
 # to characterize a degraded trace and the count carries the rest.
 _MAX_TRACE_ISSUES = 8
-
-# Warning payloads carry long remediation prose. The code / severity pair is the
-# queryable part, so the message is clipped rather than dropped.
-_MAX_WARNING_MESSAGE_CHARS = 600
-
-# Ceiling for the open-ended blocks a tool fills freely (``route_ext``, per-step
-# ``detail``). Generous enough for the summary dicts both tools produce today,
-# small enough that a verbose one cannot dominate the SBD payload.
-_MAX_EXT_BLOCK_BYTES = 8192
 
 _EVENT_TYPE = "roofline"
 
@@ -80,40 +69,6 @@ PROFILE_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
 ANALYSIS_ATTEMPT_INITIAL = "initial"
 ANALYSIS_ATTEMPT_N26_RETRY = "n26_steady_state_retry"
 ANALYSIS_ATTEMPT_COMPUTE_BOUND = "compute_bound_reprofile"
-
-
-def _clip(value: Any, limit: int = _MAX_WARNING_MESSAGE_CHARS) -> str:
-    """Coerce to str and clip to ``limit`` characters with an elision marker."""
-    text = str(value or "")
-    if len(text) <= limit:
-        return text
-    return text[:limit] + f"... [+{len(text) - limit} chars]"
-
-
-def _as_dict(value: Any) -> dict[str, Any]:
-    """Return ``value`` when it is a dict, else an empty dict."""
-    return value if isinstance(value, dict) else {}
-
-
-def _as_list(value: Any) -> list[Any]:
-    """Return ``value`` when it is a list/tuple, else an empty list."""
-    return list(value) if isinstance(value, (list, tuple)) else []
-
-
-def _int_or_none(value: Any) -> int | None:
-    """Best-effort int coercion that reports ``None`` instead of raising."""
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _float_or_none(value: Any) -> float | None:
-    """Best-effort float coercion that reports ``None`` instead of raising."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _rank_of(path: str) -> str:
@@ -204,114 +159,28 @@ def _summarize_validate(profile_result: dict[str, Any]) -> dict[str, Any]:
     if not validate:
         return {}
     checks = [_as_dict(row) for row in _as_list(validate.get("checks")) if isinstance(row, dict)]
+    verdict = _as_dict(validate.get("verdict"))
+    usable_by = [str(name) for name in _as_list(verdict.get("usable_by"))]
     return {
-        "verdict": str(validate.get("verdict") or ""),
-        "usable_by_tracelens": validate.get("usable_by_tracelens"),
+        # Carried as two independent axes. A trace can be routable and still
+        # yield a false decode conclusion, so a single grade cannot say which of
+        # the two a given attempt failed -- and the silently-wrong case is
+        # exactly the one where the analysis reports no trouble at all.
+        "usable_by": usable_by,
+        "decode_conclusions_valid": verdict.get("decode_conclusions_valid"),
+        "silently_wrong": verdict.get("silently_wrong"),
+        "blocking_reasons": [_clip(row) for row in _as_list(verdict.get("blocking_reasons"))],
+        "warnings": [_clip(row) for row in _as_list(verdict.get("warnings"))],
+        "recommended_steady_state_mode": verdict.get("recommended_steady_state_mode"),
+        "modes_that_would_fail": verdict.get("modes_that_would_fail"),
+        "steady_state_forecast": _as_dict(validate.get("steady_state_forecast")),
+        "hot_kernel_list_would_be_suppressed": verdict.get("hot_kernel_list_would_be_suppressed"),
+        "thresholds_effective": _as_dict(verdict.get("thresholds_effective")),
+        "probe_status": str(validate.get("probe_status") or ""),
+        "probe_error": _clip(validate.get("probe_error") or ""),
         "checked_at": str(validate.get("checked_at") or ""),
         "failed_check_ids": [str(row.get("check_id") or "") for row in checks if row.get("status") == "failed"],
         "checks": checks,
-    }
-
-
-def _summarize_hot_kernels(rows: Any) -> dict[str, Any]:
-    """Project the hot-kernel ranking head into the event.
-
-    Args:
-        rows: The tool's ``hot_kernels`` / ``hot_kernels_top15`` list.
-
-    Returns:
-        A dict with the full count and a bounded, trimmed ranking head.
-    """
-    candidates = [row for row in _as_list(rows) if isinstance(row, dict)]
-    top: list[dict[str, Any]] = []
-    for row in candidates[:_MAX_HOT_KERNELS]:
-        top.append(
-            {
-                "name": _clip(row.get("name"), 200),
-                "op_name": _clip(row.get("op_name"), 200),
-                "category": str(row.get("category") or ""),
-                "gpu_time_us": _float_or_none(row.get("gpu_time_us")),
-                "gpu_pct": _float_or_none(row.get("gpu_pct")),
-                "count": _int_or_none(row.get("count")),
-            }
-        )
-    return {"count": len(candidates), "top": top}
-
-
-def _summarize_warnings(rows: Any) -> list[dict[str, Any]]:
-    """Normalize trace-health warnings into queryable rows.
-
-    ``code`` already carries its own namespace (``bypass_*`` for the TraceLens-free
-    reader, bare names for TraceLens), so one flat list serves every route; the
-    remaining keys are parked under ``detail`` instead of widening the row.
-
-    Args:
-        rows: The tool's ``trace_health_warnings`` list.
-
-    Returns:
-        The normalized warning rows.
-    """
-    out: list[dict[str, Any]] = []
-    for row in _as_list(rows):
-        if not isinstance(row, dict):
-            continue
-        detail = {key: value for key, value in row.items() if key not in {"code", "severity", "message"}}
-        out.append(
-            {
-                "code": str(row.get("code") or ""),
-                "severity": str(row.get("severity") or "warning"),
-                "message": _clip(row.get("message")),
-                "detail": detail,
-            }
-        )
-    return out
-
-
-def _bounded_block(value: Any, *, label: str, limit_bytes: int = _MAX_EXT_BLOCK_BYTES) -> Any:
-    """Drop an open-ended sub-block that would blow up the event payload.
-
-    Every other field here is bounded by construction, but ``route_ext`` and the
-    per-step ``detail`` dicts are deliberately open: a tool can put anything in
-    them, and the TraceLens-free reader in particular parks whole ``attribution``
-    / ``timeline`` / ``graph_coverage`` objects there. Rather than enumerate
-    tool-specific keys -- which would defeat the point of an open block -- this
-    keeps the block when it is small and replaces it with its shape when it is
-    not, so one verbose tool cannot silently multiply the SBD payload.
-
-    Args:
-        value: The block to bound.
-        label: Block name, reported when the block is dropped.
-        limit_bytes: Serialized-size ceiling for the block.
-
-    Returns:
-        The block unchanged, or a descriptor naming what was dropped.
-    """
-    if not isinstance(value, (dict, list)):
-        return value
-    try:
-        size = len(json.dumps(value, ensure_ascii=False, default=str))
-    except (TypeError, ValueError):
-        return {"omitted": True, "reason": f"{label} is not JSON-serializable"}
-    if size <= limit_bytes:
-        return value
-    shape: dict[str, Any] = {
-        "omitted": True,
-        "reason": f"{label} exceeded {limit_bytes} bytes",
-        "bytes": size,
-    }
-    if isinstance(value, dict):
-        shape["keys"] = sorted(str(key) for key in value)[:40]
-    else:
-        shape["length"] = len(value)
-    return shape
-
-
-def _failure_row(*, phase: str, error_class: str = "", message: Any = "") -> dict[str, Any]:
-    """Build the canonical failure row used on runs and on the event."""
-    return {
-        "phase": str(phase or ""),
-        "error_class": str(error_class or ""),
-        "message": _clip(message, 2000),
     }
 
 
@@ -330,6 +199,7 @@ class RooflineTimelineRecorder:
         session_dir: Path | str,
         *,
         task_id: str = "",
+        task_kind: str = "",
         reason: str = "",
         framework: str = "",
         params: dict[str, Any] | None = None,
@@ -339,6 +209,10 @@ class RooflineTimelineRecorder:
         Args:
             session_dir: Session root the timeline lives under.
             task_id: Dispatched roofline task id.
+            task_kind: The dispatched task's kind. The executor is also reused by
+                the GEMM shape-capture path, which is not a roofline dispatch, so
+                the event states which one it was rather than leaving a consumer
+                to infer it from an absent reason.
             reason: Dispatch reason (``prelude_initial`` / ``close_post_opt`` /
                 an LLM-proposed reason), which also selects the profiled arm.
             framework: Resolved serving framework.
@@ -347,6 +221,17 @@ class RooflineTimelineRecorder:
         self._session_dir = Path(session_dir)
         self._t0 = time.monotonic()
         params = _as_dict(params)
+        # ``arm`` names the configuration the run measured, which only a roofline
+        # dispatch does. A roofline task may legitimately carry no reason, so the
+        # claim is withheld by kind rather than by an empty reason -- otherwise
+        # shape capture, which reuses this executor with no reason of its own,
+        # would be recorded as having measured current_best.
+        kind = str(task_kind or "")
+        arm = (
+            ""
+            if kind not in ("", _EVENT_TYPE)
+            else ("baseline" if str(reason or "") == "prelude_initial" else "current_best")
+        )
         self._event: dict[str, Any] = {
             "type": _EVENT_TYPE,
             "kind": _EVENT_TYPE,
@@ -358,8 +243,9 @@ class RooflineTimelineRecorder:
                 "failed_substep": None,
                 "request": {
                     "task_id": str(task_id or ""),
+                    "task_kind": kind,
                     "reason": str(reason or ""),
-                    "arm": "baseline" if str(reason or "") == "prelude_initial" else "current_best",
+                    "arm": arm,
                     "framework": str(framework or ""),
                     "workspace_path": str(params.get("workspace_path") or ""),
                 },
@@ -393,19 +279,7 @@ class RooflineTimelineRecorder:
 
     def _flush(self, component: str) -> None:
         """Persist the event, parking any writer failure for the next export."""
-        from hyperloom.inference_optimizer.session.sbd_v6 import (
-            record_write_warning,
-            write_timeline_event,
-        )
-
-        try:
-            write_timeline_event(self._session_dir, self._event)
-        except Exception as exc:  # noqa: BLE001 — observability cannot change roofline behavior
-            log.debug("roofline timeline: %s flush failed", component, exc_info=True)
-            try:
-                record_write_warning(self._session_dir, component=f"roofline.{component}", exc=exc)
-            except Exception:  # noqa: BLE001 — the warning sidecar is itself best-effort
-                log.debug("roofline timeline: write-warning sidecar failed", exc_info=True)
+        _flush_event(self._session_dir, self._event, component=f"roofline.{component}")
 
     # ---- lifecycle -------------------------------------------------------
 
@@ -570,7 +444,6 @@ class RooflineTimelineRecorder:
             trace_input: The trace the adopted attempt analyzed.
         """
         result = _as_dict(ta_result)
-        meta = _as_dict(result.get("analysis_meta"))
         analysis = self._ext["analysis"]
         analysis["effective_run_index"] = int(run_index)
         for run in analysis["runs"]:
@@ -581,30 +454,9 @@ class RooflineTimelineRecorder:
         analysis["effective_run"] = {
             "run_index": int(run_index),
             "trace_input": str(trace_input or ""),
-            "route": str(meta.get("route") or ""),
-            "tool": str(meta.get("tool") or ""),
             "orchestrator_mode": str(result.get("orchestrator_mode") or ""),
             "orchestrator_error": _clip(result.get("orchestrator_error")),
-            "tool_run_id": str(result.get("run_id") or ""),
-            "steady_state": _bounded_block(_as_dict(meta.get("steady_state")), label="steady_state"),
-            "preflight": _bounded_block(_as_dict(meta.get("preflight")), label="preflight"),
-            "split": _bounded_block(_as_dict(meta.get("split")), label="split"),
-            "selection": _bounded_block(_as_dict(meta.get("selection")), label="selection"),
-            "steps": _bounded_block(
-                [_as_dict(row) for row in _as_list(meta.get("steps")) if isinstance(row, dict)],
-                label="steps",
-            ),
-            "route_ext": _bounded_block(_as_dict(meta.get("route_ext")), label="route_ext"),
-            "hot_kernels": _summarize_hot_kernels(result.get("hot_kernels_top15") or result.get("hot_kernels")),
-            "warnings": _summarize_warnings(result.get("trace_health_warnings")),
-            "artifacts": {
-                "trace_report_path": str(result.get("trace_report_path") or ""),
-                "analysis_report_path": str(result.get("analysis_report_path") or ""),
-                "candidates_path": str(result.get("candidates_path") or ""),
-                "kernel_roofline_path": str(result.get("kernel_roofline_path") or ""),
-                "tracelens_summary_path": str(result.get("tracelens_summary_path") or ""),
-                "cli_log_path": str(result.get("cli_log_path") or ""),
-            },
+            **_analysis_detail(result),
         }
         self._flush("analysis_adopt")
 
@@ -700,6 +552,7 @@ def make_roofline_recorder(
     session_dir: Path | str,
     *,
     task_id: str = "",
+    task_kind: str = "",
     reason: str = "",
     framework: str = "",
     params: dict[str, Any] | None = None,
@@ -717,6 +570,7 @@ def make_roofline_recorder(
     Args:
         session_dir: Session root the timeline lives under.
         task_id: Dispatched roofline task id.
+        task_kind: The dispatched task's kind.
         reason: Dispatch reason.
         framework: Resolved serving framework.
         params: The roofline task params.
@@ -732,6 +586,7 @@ def make_roofline_recorder(
         return RooflineTimelineRecorder(
             session_dir,
             task_id=task_id,
+            task_kind=task_kind,
             reason=reason,
             framework=framework,
             params=params,

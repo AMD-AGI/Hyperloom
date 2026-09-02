@@ -24,7 +24,7 @@ from hyperloom.inference_optimizer.breakdown import exporter, session_package
 from hyperloom.inference_optimizer.breakdown.collectors import v6 as v6_collectors
 from hyperloom.inference_optimizer.breakdown.collectors.v6 import collect_v6_timeline
 from hyperloom.inference_optimizer.breakdown.collectors.v6_close import collect_v6_close
-from hyperloom.inference_optimizer.session.sbd_v6 import write_timeline_event
+from hyperloom.inference_optimizer.session.sbd_v6 import write_timeline_event_at
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -2189,7 +2189,7 @@ def test_outcome_marks_gain_totals_unknown_when_the_canonical_ledger_is_unavaila
 # cross-cutting: ordering and additivity
 # ---------------------------------------------------------------------------
 def test_projected_stages_interleave_with_durable_events_by_time(tmp_path):
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {
             "type": "install",
@@ -2234,7 +2234,7 @@ def test_a_raising_stage_projector_costs_only_its_own_stage(tmp_path, monkeypatc
         {"session_id": "s1", "model_name": "M", "framework": "sglang", "baseline_tput": 100.0, "phase": "CLOSE"},
     )
     _write_json(tmp_path / "manifest.json", {"session_id": "s1", "model_name": "M", "framework": "sglang"})
-    write_timeline_event(
+    write_timeline_event_at(
         tmp_path,
         {"type": "install", "kind": "install", "status": "succeeded", "start_time": "", "end_time": ""},
     )

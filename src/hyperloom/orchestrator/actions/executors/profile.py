@@ -68,6 +68,13 @@ _TRACE_CONFIRM_BYTES = 64_000_000
 # ``capture_traces/`` file (Deval ref 99.97%; gated low to avoid false-positives).
 _INPUT_DIMS_FRACTION_FLOOR = 0.90
 
+# Kineto puts the annotation category in ``cat`` and the label the framework
+# wrote in ``name``, so a marker keyed on ``"name": "user_annotation"`` looks for
+# a label no producer emits. Matching the quoted token on its own is independent
+# of both the field and the separator spacing: across the 62-capture reference
+# corpus its count equals the ``"cat": "user_annotation"`` count in every file.
+_USER_ANNOTATION_MARKER = '"user_annotation"'
+
 
 def _trace_contains(path: Path, substring: str, max_bytes: int | None = None) -> bool:
     """Stream-decompress ``path`` for ``substring``, reading at most
@@ -165,11 +172,10 @@ def _count_substring_occurrences(text: str, substring: str) -> int:
 # the graph recording complete on the attempt we adopted" must be able to name
 # the check without matching prose.
 #
-# ``CHECK_GRAPH_LAUNCH_COVERAGE`` and ``CHECK_RANK_SHAPE`` are reserved for the
-# deeper capture-side probe, which computes launch coverage and per-rank shape
-# from the trace body rather than from substring sampling. They are declared
-# here so the id space is stable before that probe lands; a check that did not
-# run simply produces no row.
+# ``CHECK_GRAPH_LAUNCH_COVERAGE`` and ``CHECK_RANK_SHAPE`` come from the
+# capture-side probe, which reads the trace body and the directory inventory
+# rather than sampling a substring off the file prefix. A check that did not run
+# simply produces no row.
 CHECK_CAPTURE_TRACES_PRESENT = "capture_traces_present"
 CHECK_CAPTURE_INPUT_DIMS = "capture_input_dims"
 CHECK_STEP_ANNOTATIONS = "step_annotations"
@@ -180,11 +186,140 @@ CHECK_TRACE_HAS_OPS = "trace_has_ops"
 CHECK_GRAPH_LAUNCH_COVERAGE = "graph_launch_coverage"
 CHECK_RANK_SHAPE = "rank_shape"
 
-# Failing any of these means TraceLens cannot route the trace at all, as opposed
-# to routing it and reaching a degraded conclusion. The split keeps "can this be
-# analysed" separate from "is the analysis trustworthy", which are the two
-# questions a silent wrong answer sits between.
-_BLOCKING_CHECK_IDS = frozenset({CHECK_TRACE_HAS_OPS})
+
+def _check_row(
+    check_id: str,
+    *,
+    status: str,
+    skip_reason: str | None = None,
+    **detail: Any,
+) -> dict[str, Any]:
+    """Build one structured check row.
+
+    Args:
+        check_id: One of the ``CHECK_*`` ids.
+        status: ``passed`` / ``failed`` / ``skipped``.
+        skip_reason: Why the check did not run, when skipped.
+        **detail: The values the row was reached on.
+
+    Returns:
+        The check row.
+    """
+    return {"check_id": check_id, "status": status, "skip_reason": skip_reason, "detail": detail}
+
+
+def _probe_check_rows(certificate: dict[str, Any]) -> list[dict[str, Any]]:
+    """Express the probe's measurements in the shared check vocabulary.
+
+    Both ids answer questions the substring checks structurally cannot: launch
+    coverage needs the trace body, and rank shape needs the directory inventory.
+
+    Args:
+        certificate: The record ``certify_trace_dir`` returned.
+
+    Returns:
+        Check rows, one graph-coverage row per certified rank plus one rank-shape
+        row for the directory.
+    """
+    inventory = certificate.get("trace_dir_level") or {}
+    thresholds = (certificate.get("verdict") or {}).get("thresholds_effective") or {}
+    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
+    rows: list[dict[str, Any]] = []
+
+    for rank in ranks:
+        density = rank.get("density") or {}
+        measured = {
+            "rank": rank.get("rank"),
+            "graph_mode": density.get("graph_mode"),
+            "graph_launch_count": density.get("graph_launch_count"),
+            "graph_launches_with_kernels": density.get("graph_launches_with_kernels"),
+            "graph_launch_coverage": density.get("graph_launch_coverage"),
+            "coverage_max": thresholds.get("graph_launch_coverage_max"),
+        }
+        under_recorded = density.get("graph_under_recorded")
+        if under_recorded is None:
+            # Nothing was measured, which is not the same as measured and fine.
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="skipped",
+                    skip_reason="the probe reached no coverage measurement for this rank",
+                    **measured,
+                )
+            )
+        elif not density.get("graph_mode"):
+            # An eager capture has no graph launches, so the coverage denominator
+            # is zero. Grading that as a failure would report a healthy trace as
+            # under-recorded, which is the trap the reader's own preconditions
+            # exist to avoid.
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="skipped",
+                    skip_reason="capture recorded no CUDA graph launches",
+                    **measured,
+                )
+            )
+        else:
+            rows.append(
+                _check_row(
+                    CHECK_GRAPH_LAUNCH_COVERAGE,
+                    status="failed" if under_recorded else "passed",
+                    **measured,
+                )
+            )
+
+    rank_count = inventory.get("rank_count")
+    certified = [rank.get("rank") for rank in ranks]
+    shape = {
+        "rank_count": rank_count,
+        "certified_rank_count": len(ranks),
+        "certified_ranks": certified,
+    }
+    if isinstance(rank_count, int) and rank_count > len(ranks):
+        # The probe certifies the file the live resolver would open, so on a
+        # tensor-parallel capture the other ranks are unmeasured rather than
+        # measured and equal. Saying so keeps a single-rank verdict from reading
+        # as a claim about the whole capture.
+        rows.append(
+            _check_row(
+                CHECK_RANK_SHAPE,
+                status="skipped",
+                skip_reason="only the resolved rank was certified; the remaining ranks are unmeasured",
+                **shape,
+            )
+        )
+    else:
+        rows.append(_check_row(CHECK_RANK_SHAPE, status="passed", **shape))
+    return rows
+
+
+def _steady_state_forecast(certificate: dict[str, Any]) -> dict[str, Any]:
+    """Project the modes the splitter would survive, off the resolved rank.
+
+    This is the prediction half of the schema. It is computed from the source
+    trace's annotation tree, so it is available before any chunk exists, and the
+    analysis stage can later record what the split actually produced against it.
+
+    Args:
+        certificate: The record ``certify_trace_dir`` returned.
+
+    Returns:
+        The forecast summary, or an empty dict when no rank was certified.
+    """
+    ranks = [row for row in (certificate.get("rank_level") or []) if isinstance(row, dict)]
+    if not ranks:
+        return {}
+    forecast = ranks[0].get("split_forecast") or {}
+    return {
+        "viable_modes": forecast.get("viable_modes"),
+        "viable_consumer_modes": forecast.get("viable_consumer_modes"),
+        "candidate_window_count": forecast.get("candidate_window_count"),
+        "candidate_windows_with_prefill": forecast.get("candidate_windows_with_prefill"),
+        "step_count": forecast.get("step_count"),
+        "prefill_step_count": forecast.get("prefill_step_count"),
+        "num_steps_effective": forecast.get("num_steps_effective"),
+    }
 
 
 def _build_trace_validate(
@@ -192,35 +327,94 @@ def _build_trace_validate(
     *,
     trace_dir: Path,
     framework: str,
+    certificate: dict[str, Any] | None = None,
+    probe_error: str = "",
 ) -> dict[str, Any]:
-    """Derive the profile-trace validation verdict from the structured checks.
+    """Assemble the profile-stage trace validation block.
+
+    The verdict is two independent axes -- whether a consumer can route the
+    trace at all, and whether a decode conclusion drawn from it would be true --
+    and they are carried separately because a trace can analyse cleanly and
+    still be wrong. Collapsing them into one grade is what hides that case.
+
+    ``chunk_level`` stays empty here: chunks do not exist until the splitter
+    runs. What the profile stage can produce is the forecast the analysis stage
+    later measures against.
 
     Args:
-        health: The ``trace_health`` dict the validator returned.
+        health: The ``trace_health`` dict the structure validator returned.
         trace_dir: The trace directory the checks ran against.
         framework: The framework the checks were gated on.
+        certificate: The ``certify_trace_dir`` record, when the probe ran.
+        probe_error: Why the probe produced no record, when it failed.
 
     Returns:
-        A ``trace_validate`` block naming the verdict, whether TraceLens can
-        route the trace at all, and the per-check rows behind both.
+        A ``trace_validate`` block carrying the two-axis verdict, the probe's
+        directory and rank levels, and the per-check rows behind them.
     """
     checks = [row for row in (health.get("checks") or []) if isinstance(row, dict)]
-    failed = [str(row.get("check_id") or "") for row in checks if row.get("status") == "failed"]
-    blocking = [check_id for check_id in failed if check_id in _BLOCKING_CHECK_IDS]
-    if blocking:
-        verdict = "unusable"
-    elif failed:
-        verdict = "degraded"
+    certificate = certificate or {}
+    if certificate:
+        checks = checks + _probe_check_rows(certificate)
+        probe_status = "ok"
     else:
-        verdict = "healthy"
+        probe_status = "failed" if probe_error else "skipped"
     return {
-        "verdict": verdict,
-        "usable_by_tracelens": not blocking,
+        "schema_version": certificate.get("schema_version"),
+        "probe_version": certificate.get("probe_version"),
+        "probe_status": probe_status,
+        "probe_error": str(probe_error or ""),
         "checked_at": now_iso(timespec="seconds"),
         "trace_dir": str(trace_dir),
         "framework": str(framework or ""),
+        "verdict": certificate.get("verdict") or {},
+        "steady_state_forecast": _steady_state_forecast(certificate),
+        "trace_dir_level": certificate.get("trace_dir_level") or {},
+        "rank_level": certificate.get("rank_level") or [],
+        "chunk_level": [],
         "checks": checks,
     }
+
+
+def _certify_trace_dir(trace_dir: Path, framework: str) -> dict[str, Any]:
+    """Run the capture-time self-certification probe over a profile trace.
+
+    Imported at call time: the probe pulls in the bypass trace reader, which a
+    profile run that never reaches a trace has no reason to load.
+
+    The kernel tools resolve their siblings by bare module name, so the tools
+    directory has to be importable before the probe's own imports run -- the
+    same path insertion the trace_analyze handler does for TraceLens.
+
+    Args:
+        trace_dir: The trace directory the profiler wrote.
+        framework: The framework the capture ran under.
+
+    Returns:
+        The ``certify_trace_dir`` record.
+    """
+    import sys
+
+    from hyperloom.agents.kernel.tools import _capture_shapes
+
+    tools_dir = str(Path(_capture_shapes.__file__).resolve().parent)
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+
+    from hyperloom.agents.kernel.tools import trace_selfcert
+
+    # The workload parameters shape the split forecast, and reading them from the
+    # benchmark config keeps the certificate independent of any analysis having
+    # run -- the point of certifying at capture time.
+    params = trace_selfcert.read_workload_params(trace_dir)
+    return trace_selfcert.certify_trace_dir(
+        trace_dir,
+        framework=framework or str(params.get("framework") or ""),
+        num_steps=params.get("num_steps", trace_selfcert.DEFAULT_NUM_STEPS),
+        conc=params.get("conc"),
+        osl=params.get("osl"),
+        r=params.get("r", trace_selfcert.DEFAULT_R),
+    )
 
 
 def _validate_trace_structure(
@@ -287,14 +481,7 @@ def _validate_trace_structure(
             skip_reason: Why the check did not run, when skipped.
             **detail: The values the verdict was reached on.
         """
-        checks.append(
-            {
-                "check_id": check_id,
-                "status": status,
-                "skip_reason": skip_reason,
-                "detail": detail,
-            }
-        )
+        checks.append(_check_row(check_id, status=status, skip_reason=skip_reason, **detail))
 
     # Scriptable image frameworks (xDiT diffusion) produce a plain torch-
     # profiler trace, so checks 1-6 (LLM/serving-specific) would emit spurious
@@ -408,10 +595,7 @@ def _validate_trace_structure(
     if main_traces:
         main_text = _sample_trace_text(main_traces[0])
         if main_text is not None:
-            user_ann_count = _count_substring_occurrences(
-                main_text,
-                '"name": "user_annotation"',
-            )
+            user_ann_count = _count_substring_occurrences(main_text, _USER_ANNOTATION_MARKER)
             execute_count = _count_substring_occurrences(main_text, '"execute_')
             # ``execute_*`` labels are the real health signal; ``user_annotation``
             # presence is profiler-version-dependent. Only warn when both are
@@ -423,7 +607,7 @@ def _validate_trace_structure(
                 and user_ann_count == 0
                 and not (
                     _trace_contains(main_traces[0], '"execute_')
-                    or _trace_contains(main_traces[0], '"name": "user_annotation"')
+                    or _trace_contains(main_traces[0], _USER_ANNOTATION_MARKER)
                 )
             )
             _note_check(
@@ -1431,6 +1615,20 @@ class ProfileExecutor(BaselineExecutor):
                     health = _validate_trace_structure(selected_trace_dir, framework)
                     if isinstance(health, dict):
                         result["trace_health"] = health
+                        # The probe reads the trace body, so it fails on its own
+                        # terms (an unreadable capture) without that meaning the
+                        # profile failed. Its absence is recorded rather than
+                        # silently producing a verdict with nothing behind it.
+                        certificate: dict[str, Any] = {}
+                        probe_error = ""
+                        try:
+                            certificate = _certify_trace_dir(selected_trace_dir, framework)
+                        except Exception as e:  # noqa: BLE001 - probe is best-effort
+                            probe_error = f"{type(e).__name__}: {e}"
+                            log.debug(
+                                "profile_executor: trace self-certification failed: %s",
+                                probe_error,
+                            )
                         # Structured verdict for the caller's timeline event: the
                         # roofline recorder stores it per profile attempt, so a
                         # retried roofline keeps each attempt's verdict beside the
@@ -1439,6 +1637,8 @@ class ProfileExecutor(BaselineExecutor):
                             health,
                             trace_dir=selected_trace_dir,
                             framework=framework,
+                            certificate=certificate,
+                            probe_error=probe_error,
                         )
                 except Exception as e:  # noqa: BLE001 - validator is best-effort
                     log.debug(
