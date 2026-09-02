@@ -17,6 +17,10 @@ from kernelforge.kernel_rewrite_controller.controller import (
     ControllerRunState,
     run_controller,
 )
+from kernelforge.kernel_rewrite_controller.dispatcher import (
+    SingleTaskResult,
+    dispatch_single_task,
+)
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout
 from kernelforge.kernel_rewrite_controller.state import TaskStateStore
@@ -34,6 +38,7 @@ __all__ = [
     "HandoffBundle",
     "HandoffContractError",
     "KernelRewriteTask",
+    "SingleTaskResult",
     "TaskContractError",
     "TaskLayout",
     "TaskParseResult",
@@ -41,6 +46,7 @@ __all__ = [
     "TaskStateError",
     "TaskStateStore",
     "discover_task_dirs",
+    "dispatch_single_task",
     "load_task",
     "parse_task_payload",
     "read_handoff",

@@ -47,6 +47,7 @@ def test_load_task_parses_identity_and_initializes_ready_state(
         "schema_version",
         "identity",
         "base_commit",
+        "repo_root",
         "kernel_path",
         "operator_name",
         "driver_path",
@@ -92,6 +93,16 @@ def test_base_commit_mismatch_is_recorded_as_skipped(task_dir: Path) -> None:
 
     assert result.ok is False
     assert "base_commit mismatch" in result.reason
+
+
+def test_repo_root_must_be_an_existing_absolute_directory(
+    task_dir: Path,
+    task_payload: dict,
+) -> None:
+    task_payload["repo_root"] = "relative/repo"
+
+    with pytest.raises(ValueError, match="repo_root must be an absolute path"):
+        parse_task_payload(task_payload, task_dir=task_dir)
 
 
 @pytest.mark.parametrize("kernel_path", ["/tmp/kernel.py", "../kernel.py", "a\\kernel.py"])

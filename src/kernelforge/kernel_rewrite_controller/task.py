@@ -36,6 +36,7 @@ _REQUIRED_TASK_FIELDS = frozenset(
         "schema_version",
         "identity",
         "base_commit",
+        "repo_root",
         "kernel_path",
         "operator_name",
         "driver_path",
@@ -123,6 +124,14 @@ def parse_task_payload(
             f"base_commit mismatch: task has {base_commit}, expected {str(expected_base_commit).strip().lower()}"
         )
 
+    repo_root_raw = _required_string(payload, "repo_root")
+    repo_root = Path(repo_root_raw).expanduser()
+    if not repo_root.is_absolute():
+        raise TaskContractError("repo_root must be an absolute path")
+    repo_root = repo_root.resolve()
+    if not repo_root.is_dir():
+        raise TaskContractError(f"repo_root is not a directory: {repo_root}")
+
     kernel_path = safe_relative_path(_required_string(payload, "kernel_path"), field_name="kernel_path")
     driver_path = safe_relative_path(_required_string(payload, "driver_path"), field_name="driver_path")
     driver_file = (root / driver_path).resolve()
@@ -158,6 +167,7 @@ def parse_task_payload(
         identity=identity,
         operator_id=operator_id,
         base_commit=base_commit,
+        repo_root=repo_root,
         kernel_path=kernel_path,
         operator_name=operator_name,
         driver_path=driver_path,

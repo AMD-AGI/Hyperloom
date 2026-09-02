@@ -34,11 +34,14 @@ def operator_id(identity_payload: dict[str, str]) -> str:
 
 
 @pytest.fixture
-def task_payload(identity_payload: dict[str, str]) -> dict:
+def task_payload(identity_payload: dict[str, str], tmp_path: Path) -> dict:
+    repo_root = tmp_path / "contract-repo"
+    repo_root.mkdir()
     return {
         "schema_version": 1,
         "identity": identity_payload,
         "base_commit": BASE_COMMIT,
+        "repo_root": str(repo_root),
         "kernel_path": "sglang/kernels/fused_moe.py",
         "operator_name": "backend::Fused.MoE-Kernel",
         "driver_path": "driver.py",

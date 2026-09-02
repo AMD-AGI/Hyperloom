@@ -74,6 +74,7 @@ class KernelRewriteTask:
     identity: KernelRecipeIdentity
     operator_id: str
     base_commit: str
+    repo_root: Path
     kernel_path: str
     operator_name: str
     driver_path: str
