@@ -22,19 +22,6 @@ from hyperloom.orchestrator.knowledge.remote_recipe.no_run import (
     sharding_whatif,
 )
 
-_CURRENT = {
-    "knowledge_schema_version": 1,
-    "record_kind": "hyperloom_recipe",
-    "optimized_throughput": 130.0,
-    "validated_e2e_gain": 30.0,
-    "value": {
-        "explore": {},
-        "framework": {},
-        "kernel": {},
-        "patch_timeline": [],
-    },
-}
-
 
 def test_percentile_interpolates() -> None:
     assert percentile([10.0, 20.0, 30.0], 50) == 20.0
