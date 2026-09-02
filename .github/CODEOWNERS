@@ -56,6 +56,7 @@
 
 # Post-TraceLens to GEAK processing layer
 /src/hyperloom/agents/kernel/tools/source_resolver.py           @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
+/src/hyperloom/agents/kernel/tools/source_env.py                @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/kernel_source_index.py       @Ahmedhasssan-aig @tsrikris @devalshahamd @AMD-AGI/SaFE
 /src/hyperloom/agents/kernel/tools/kernel_optimization.py       @iraj465 @yueliu14 @chao-xu-spec @tsrikris @devalshahamd @Ahmedhasssan-aig @AMD-AGI/SaFE
 

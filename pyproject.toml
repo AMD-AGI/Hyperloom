@@ -324,7 +324,7 @@ relative_files = true
 source = [
     "src/hyperloom",
     "src/kernelforge",
-    "OOB",  # optional component; not always present in a clone (see CLAUDE.md)
+    "OOB",  # optional component; not always present in a clone
 ]
 # Omitted: tests / package boilerplate, CLI drivers, subprocess wrappers, and
 # live-serving plumbing that is covered end-to-end rather than by unit tests.

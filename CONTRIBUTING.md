@@ -10,7 +10,7 @@ Thank you for helping improve Hyperloom. This guide covers the expected workflow
 
 ## Proposing a new framework or platform
 
-Hyperloom includes external components (GEAK, Magpie, TraceLens, frameworks). Building features for a new framework or **platform** must work bring-up through the components before integration code lands, the owners are named in [`github/CODEOWNERS`](.github/CODEOWNERS).d
+Hyperloom includes external components (GEAK, Magpie, TraceLens, IntelliKit, frameworks). Building for a new framework or platform must work bring-up through the owning-components before integration code lands, and open a tracking issue for it. Owners are named in [`.github/CODEOWNERS`](.github/CODEOWNERS).
 
 ## CI and documentation-only changes
 
@@ -36,7 +36,7 @@ Use this list (or keep it in sync) for any workflow that should skip on document
 - `docs/**`
 - `LICENSE*`
 - `COPYRIGHT`
-- `CODEOWNERS`
+- `**/CODEOWNERS`
 - `.gitattributes`
 
 If **any** changed file falls **outside** these patterns (for example `.py`, `pyproject.toml`, or `.github/workflows/*.yml`), the workflows that declare this list run as usual.

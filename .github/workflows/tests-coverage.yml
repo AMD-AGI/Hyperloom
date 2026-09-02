@@ -38,7 +38,7 @@ on:
       - "docs/**"
       - "LICENSE*"
       - "COPYRIGHT"
-      - "CODEOWNERS"
+      - "**/CODEOWNERS"
       - ".gitattributes"
   pull_request:
     paths-ignore:
@@ -46,7 +46,7 @@ on:
       - "docs/**"
       - "LICENSE*"
       - "COPYRIGHT"
-      - "CODEOWNERS"
+      - "**/CODEOWNERS"
       - ".gitattributes"
 
 # Cancel superseded runs for the same ref (newest push/PR sync wins).

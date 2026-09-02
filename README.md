@@ -83,6 +83,7 @@ feedback on how to improve Hyperloom by completing the
 ## Developer Entry Points
 
 - Runtime package: `src/hyperloom/`
+- Contributor & AI authoring contract: [`AGENTS.md`](AGENTS.md)
 - Main agent instructions: [`src/hyperloom/inference_optimizer/SKILL.md`](src/hyperloom/inference_optimizer/SKILL.md)
 - CLI entry point: `python -m hyperloom.inference_optimizer.cli optimize`
 - Operator tools: `python -m hyperloom.inference_optimizer.tools.*`

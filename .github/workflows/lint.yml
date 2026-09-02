@@ -29,7 +29,7 @@ on:
       - "docs/**"
       - "LICENSE*"
       - "COPYRIGHT"
-      - "CODEOWNERS"
+      - "**/CODEOWNERS"
       - ".gitattributes"
   pull_request:
     paths-ignore:
@@ -37,7 +37,7 @@ on:
       - "docs/**"
       - "LICENSE*"
       - "COPYRIGHT"
-      - "CODEOWNERS"
+      - "**/CODEOWNERS"
       - ".gitattributes"
 
 permissions:
