@@ -395,6 +395,15 @@ def _validate_fallback_provider(ctx, param, value):
     return _validate_agent_provider(ctx, param, value)
 
 
+def _validate_fallback_model(ctx, param, value):
+    """Preserve an explicit fallback model while accepting disablement."""
+    del ctx, param
+    if value is None:
+        return None
+    selected = value.strip()
+    return "" if selected.lower() in {"", "none", "off"} else selected
+
+
 def _validate_optional_agent_provider(ctx, param, value):
     """Validate an optional provider override, empty meaning "inherit"."""
     if value is None or not value.strip():
@@ -440,6 +449,12 @@ def _agent_runtime_options(func):
             help="Fallback provider name, or 'none'",
         ),
         click.option(
+            "--agent-fallback-model",
+            default=None,
+            callback=_validate_fallback_model,
+            help="Same-provider fallback model, or 'none'",
+        ),
+        click.option(
             "--agent-precheck/--no-agent-precheck",
             default=None,
             help="Enable provider preflight and capability probe",
@@ -466,6 +481,7 @@ def _agent_runtime_overrides(
     agent_fallback_provider: str | None,
     agent_precheck: bool | None,
     agent_options_json: str | None,
+    agent_fallback_model: str | None = None,
 ) -> dict:
     """Convert provider-neutral CLI values into Config overrides."""
     values = {
@@ -476,6 +492,7 @@ def _agent_runtime_overrides(
         "agent_reasoning_effort": agent_reasoning_effort,
         "agent_sandbox_mode": agent_sandbox_mode,
         "agent_fallback_provider": agent_fallback_provider,
+        "agent_fallback_model": agent_fallback_model,
         "agent_precheck": agent_precheck,
     }
     overrides = {key: value for key, value in values.items() if value is not None}
@@ -1025,6 +1042,7 @@ def forge_loop(
     agent_reasoning_effort,
     agent_sandbox_mode,
     agent_fallback_provider,
+    agent_fallback_model,
     agent_precheck,
     agent_options_json,
     permission_mode,
@@ -1233,6 +1251,7 @@ def forge_loop(
             agent_reasoning_effort=agent_reasoning_effort,
             agent_sandbox_mode=agent_sandbox_mode,
             agent_fallback_provider=agent_fallback_provider,
+            agent_fallback_model=agent_fallback_model,
             agent_precheck=agent_precheck,
             agent_options_json=agent_options_json,
         )

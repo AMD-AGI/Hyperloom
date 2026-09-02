@@ -113,6 +113,10 @@ class AgentRuntimeConfig:
     precheck: bool = True
     fallback_provider: str = ""
     options: dict[str, Any] = field(default_factory=dict)
+    # Distinguish an explicitly disabled same-provider fallback from an
+    # unspecified fallback_model. Empty strings alone cannot carry that state:
+    # the registry historically filled them from provider metadata.
+    model_fallback_enabled: bool = True
 
     def __post_init__(self) -> None:
         """Validate generic runtime values without imposing provider semantics."""

@@ -99,6 +99,37 @@ export OPENAI_BASE_URL=https://your-gateway.example/api/v1/llm-proxy/v1
 export OPENAI_API_KEY=...
 ```
 
+**Native Codex OAuth.** Keep subscription OAuth separate from gateway mode. Use a dedicated absolute,
+non-symlink `CODEX_HOME` that already contains a successful `codex login`, do not combine it with a
+gateway override, and disable both fallback axes explicitly:
+
+```bash
+kernelforge forge-loop ... \
+  --agent-backend codex \
+  --agent-options-json '{"auth_mode":"native_oauth","home":"/absolute/codex-oauth-home"}' \
+  --agent-fallback-provider none \
+  --agent-fallback-model none
+```
+
+In native-OAuth mode KernelForge strips inherited OpenAI gateway variables and does not force a custom
+model provider; authentication comes only from that `CODEX_HOME`.
+
+**Hermes Agent.** Select Hermes as a peer provider through its existing profile. The profile owns its
+provider/model/tools/authentication; KernelForge still owns validation, benchmarking, and KEEP/REVERT:
+
+```bash
+kernelforge forge-loop ... \
+  --agent-backend hermes \
+  --agent-options-json '{"profile":"hyperloomfaithful","provider":"openai-codex","external_sandbox":true}' \
+  --agent-fallback-provider none \
+  --agent-fallback-model none
+```
+
+Hermes has no native filesystem sandbox. `external_sandbox` is therefore required and must be set only
+when the whole run already executes inside a container with a detectable runtime marker. The backend fails closed otherwise, applies
+the shared WorkspaceGuard, narrows read-only runs to no local tools, and narrows writable runs to the
+terminal/file toolsets. The selected profile should have an empty fallback chain.
+
 That is the whole credential contract. Corporate gateways sometimes demand headers
 on top of it, an APIM subscription key or a caller id. Set those on the line they
 belong to; only that line's headers are sent:

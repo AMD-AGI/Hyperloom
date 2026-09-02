@@ -117,7 +117,8 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--model <name>` | provider default | Selected provider model. |
 | `--agent-reasoning-effort <v>` | provider default | Provider reasoning effort value. |
 | `--agent-sandbox-mode <v>` | provider default | Provider sandbox mode. |
-| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a fallback. |
+| `--agent-fallback-provider <name>` | provider default | Fallback provider name, or `none` to refuse a provider fallback. |
+| `--agent-fallback-model <name>` | provider default | Same-provider fallback model, or `none` to refuse model fallback. |
 | `--agent-precheck` / `--no-agent-precheck` | on | Provider preflight and capability probe. |
 | `--agent-options-json <json>` | none | Provider extension options as a JSON object. |
 | `--permission-mode <v>` | provider default | Provider permission mode, where the provider supports one. |

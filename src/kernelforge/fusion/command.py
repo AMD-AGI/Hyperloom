@@ -514,7 +514,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
 @click.option("--gpu", default="0", help="HIP device id for author + A/B.")
 @click.option(
     "--agent-backend",
-    type=click.Choice(["auto", "claude", "codex"]),
+    type=click.Choice(["auto", "claude", "codex", "hermes"]),
     default="auto",
     show_default=True,
     help="Registered Agent provider for discovery and authoring.",

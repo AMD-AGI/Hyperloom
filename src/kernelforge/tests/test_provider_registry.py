@@ -121,6 +121,26 @@ def test_builtin_providers_are_registered() -> None:
     assert get_agent_provider("codex").capabilities.native_subagents
 
 
+def test_explicit_hermes_runtime_accepts_custom_executable_without_path(tmp_path, monkeypatch) -> None:
+    binary = tmp_path / "custom-hermes"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", "")
+    monkeypatch.setattr("kernelforge.agent_backends.hermes._running_in_container", lambda: True)
+    runtime = resolve_agent_runtime(
+        "hermes",
+        executable=str(binary),
+        sandbox_mode="bypass",
+        fallback_provider="",
+        options={"external_sandbox": True},
+    )
+
+    backend = create_registered_backend(runtime, preflight=True)
+
+    assert getattr(backend, "_executable")() == str(binary)
+    assert backend.capabilities.workspace_guard
+
+
 def test_builtin_providers_declare_the_session_environment_they_apply() -> None:
     """Both built-ins apply AgentRunSpec.env to the session they spawn.
 
