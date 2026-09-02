@@ -96,6 +96,7 @@ def parse_task_payload(
     *,
     task_dir: str | Path,
     expected_base_commit: str | None = None,
+    enforce_directory_identity: bool = True,
 ) -> KernelRewriteTask:
     """Validate one decoded task payload and return its immutable contract."""
     if not isinstance(payload, dict):
@@ -113,7 +114,7 @@ def parse_task_payload(
 
     identity, operator_id = _identity(payload.get("identity"))
     root = Path(task_dir).expanduser().resolve()
-    if root.name != operator_id:
+    if enforce_directory_identity and root.name != operator_id:
         raise TaskContractError(f"task directory {root.name!r} does not match canonical operator id {operator_id!r}")
 
     base_commit = _required_string(payload, "base_commit").lower()
@@ -134,6 +135,8 @@ def parse_task_payload(
 
     kernel_path = safe_relative_path(_required_string(payload, "kernel_path"), field_name="kernel_path")
     driver_path = safe_relative_path(_required_string(payload, "driver_path"), field_name="driver_path")
+    if driver_path != "driver.py":
+        raise TaskContractError("driver_path must be exactly 'driver.py'")
     driver_file = (root / driver_path).resolve()
     try:
         driver_file.relative_to(root)

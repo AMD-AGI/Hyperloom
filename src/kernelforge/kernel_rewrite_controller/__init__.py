@@ -22,6 +22,11 @@ from kernelforge.kernel_rewrite_controller.dispatcher import (
     dispatch_single_task,
 )
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    OpportunityAnalysisAgent,
+    OpportunityAnalysisResult,
+    run_opportunity_analysis,
+)
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout, TaskLayout
 from kernelforge.kernel_rewrite_controller.publisher import (
     OperatorPublication,
@@ -48,6 +53,11 @@ from kernelforge.kernel_rewrite_controller.task import (
     parse_task_payload,
     sort_tasks,
 )
+from kernelforge.kernel_rewrite_controller.task_publisher import (
+    TaskPublicationResult,
+    publish_complete_staged_tasks,
+    publish_staged_task,
+)
 
 __all__ = [
     "ANALYSIS_BUDGET_SEC",
@@ -55,6 +65,8 @@ __all__ = [
     "FORGE_LOOP_BUDGET_SEC",
     "MIN_TASK_START_REMAINING_SEC",
     "OperatorPublication",
+    "OpportunityAnalysisAgent",
+    "OpportunityAnalysisResult",
     "PublicationError",
     "RecoveryResult",
     "ScheduleResult",
@@ -67,6 +79,7 @@ __all__ = [
     "TaskContractError",
     "TaskLayout",
     "TaskParseResult",
+    "TaskPublicationResult",
     "TaskState",
     "TaskStateError",
     "TaskStateStore",
@@ -75,11 +88,14 @@ __all__ = [
     "dispatch_prepared_tasks",
     "load_task",
     "parse_task_payload",
+    "publish_complete_staged_tasks",
     "publish_operator_result",
+    "publish_staged_task",
     "published_operator_dirs",
     "read_handoff",
     "recover_all_task_results",
     "recover_task_result",
     "run_controller",
+    "run_opportunity_analysis",
     "sort_tasks",
 ]

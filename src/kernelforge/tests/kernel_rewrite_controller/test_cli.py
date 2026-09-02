@@ -14,12 +14,26 @@ from click.testing import CliRunner
 from kernelforge import cli
 from kernelforge.kernel_rewrite_controller import ControllerRunError, run_controller
 from kernelforge.kernel_rewrite_controller import controller
-from kernelforge.kernel_rewrite_controller.scheduler import ScheduleResult
 from kernelforge.kernel_rewrite_controller.contracts import (
     SERVING_CONTEXT_FILENAME,
     TRACE_EVIDENCE_FILENAME,
     WORKLOAD_FILENAME,
 )
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    ANALYSIS_STATUS_COMPLETED,
+    ANALYSIS_STATUS_FAILED,
+    OpportunityAnalysisResult,
+)
+from kernelforge.kernel_rewrite_controller.scheduler import ScheduleResult
+
+
+@pytest.fixture(autouse=True)
+def _completed_empty_analysis(monkeypatch):
+    monkeypatch.setattr(
+        controller,
+        "run_opportunity_analysis",
+        lambda **_kwargs: OpportunityAnalysisResult(status=ANALYSIS_STATUS_COMPLETED),
+    )
 
 
 def _handoff(tmp_path: Path, *, omit: str = "") -> Path:
@@ -126,6 +140,61 @@ def test_controller_summary_counts_prepared_task_results(
     assert state.status == "completed"
     assert state.task_count == 2
     assert state.patch_count == 1
+
+
+def test_analysis_failure_without_tasks_fails_the_controller(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        controller,
+        "run_opportunity_analysis",
+        lambda **_kwargs: OpportunityAnalysisResult(
+            status=ANALYSIS_STATUS_FAILED,
+            reason="agent failed",
+        ),
+    )
+
+    state = run_controller(
+        handoff_dir=_handoff(tmp_path),
+        budget_minutes=10,
+        output_dir=tmp_path / "output",
+    )
+
+    assert state.status == "failed"
+    assert state.analysis_status == ANALYSIS_STATUS_FAILED
+    assert state.reason == "agent failed"
+
+
+def test_analysis_failure_with_completed_tasks_is_partial_not_fatal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        controller,
+        "run_opportunity_analysis",
+        lambda **_kwargs: OpportunityAnalysisResult(
+            status=ANALYSIS_STATUS_FAILED,
+            reason="agent failed after publishing tasks",
+        ),
+    )
+    monkeypatch.setattr(
+        controller,
+        "dispatch_prepared_tasks",
+        lambda *_args, **_kwargs: ScheduleResult(
+            task_count=1,
+            results=(SimpleNamespace(status="failed"),),
+        ),
+    )
+
+    state = run_controller(
+        handoff_dir=_handoff(tmp_path),
+        budget_minutes=10,
+        output_dir=tmp_path / "output",
+    )
+
+    assert state.status == "partial"
+    assert state.task_count == 1
 
 
 def test_invalid_handoff_is_persisted_as_failed(tmp_path: Path) -> None:

@@ -118,7 +118,7 @@ def test_unsafe_kernel_path_is_rejected(
 
 
 def test_driver_must_exist_inside_task_directory(task_dir: Path, task_payload: dict) -> None:
-    task_payload["driver_path"] = "missing.py"
+    (task_dir / "driver.py").unlink()
 
     with pytest.raises(ValueError, match="driver_path is not a file"):
         parse_task_payload(task_payload, task_dir=task_dir)

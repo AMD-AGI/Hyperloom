@@ -41,11 +41,11 @@ local/remote environment contract and durable local layout.
 
 ## kernel-rewrite-controller
 
-Initializes one fresh autonomous kernel-rewrite controller run. The current
-skeleton validates the Hyperloom handoff, creates the durable controller/result
-layout, records an absolute deadline, and exposes sequential prepared-task
-dispatch for the analysis stage. It exits cleanly with `no_opportunity` until
-analysis task generation is connected.
+Initializes one fresh autonomous kernel-rewrite controller run. It validates the
+Hyperloom handoff, runs one long-lived opportunity-analysis Agent, atomically
+publishes complete operator tasks, and dispatches them sequentially through
+named-kernel `forge-loop` campaigns. The Agent may inspect existing trace and
+source evidence but cannot run shell commands, profiling, or serving benchmarks.
 
 | Option | Default | Meaning |
 |:--|:--|:--|

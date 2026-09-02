@@ -69,6 +69,14 @@ class ControllerLayout:
         return self.controller_root / "workspaces"
 
     @property
+    def agent_root(self) -> Path:
+        return self.controller_root / "agent"
+
+    @property
+    def agent_staging_root(self) -> Path:
+        return self.agent_root / "staging"
+
+    @property
     def controller_state(self) -> Path:
         return self.controller_root / "state.json"
 

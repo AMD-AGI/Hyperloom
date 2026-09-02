@@ -14,6 +14,10 @@ from pathlib import Path
 
 from kernelforge.durable_io import atomic_write_text
 from kernelforge.kernel_rewrite_controller.handoff import read_handoff
+from kernelforge.kernel_rewrite_controller.opportunity_agent import (
+    ANALYSIS_STATUS_COMPLETED,
+    run_opportunity_analysis,
+)
 from kernelforge.kernel_rewrite_controller.paths import ControllerLayout
 from kernelforge.kernel_rewrite_controller.publisher import published_operator_dirs
 from kernelforge.kernel_rewrite_controller.recovery import recover_all_task_results
@@ -49,6 +53,8 @@ class ControllerRunState:
     started_at: str
     finished_at: str = ""
     reason: str = ""
+    analysis_status: str = ""
+    analysis_reason: str = ""
     task_count: int = 0
     patch_count: int = 0
     schema_version: int = CONTROLLER_STATE_SCHEMA_VERSION
@@ -87,6 +93,8 @@ def _write_summary(layout: ControllerLayout, state: ControllerRunState) -> None:
         f"- **Finished at:** `{state.finished_at or 'not finished'}`",
         f"- **Task count:** `{state.task_count}`",
         f"- **Patch count:** `{state.patch_count}`",
+        f"- **Analysis status:** `{state.analysis_status or 'not started'}`",
+        f"- **Analysis reason:** {state.analysis_reason or 'none'}",
         "",
     ]
     patches = published_operator_dirs(layout)
@@ -134,8 +142,13 @@ def run_controller(
     _write_summary(layout, running)
 
     try:
-        read_handoff(handoff_path)
+        handoff = read_handoff(handoff_path)
         recover_all_task_results(layout)
+        analysis = run_opportunity_analysis(
+            handoff=handoff,
+            layout=layout,
+            controller_deadline_unix=running.deadline_unix,
+        )
         schedule = dispatch_prepared_tasks(
             layout,
             controller_deadline_unix=running.deadline_unix,
@@ -155,7 +168,13 @@ def run_controller(
         _write_summary(layout, failed)
         raise ControllerRunError(failed.reason) from error
 
-    if schedule.task_count == 0 and patch_count == 0:
+    if analysis.status != ANALYSIS_STATUS_COMPLETED and schedule.task_count == 0 and patch_count == 0:
+        status = CONTROLLER_STATUS_FAILED
+        reason = analysis.reason or "opportunity analysis did not complete"
+    elif analysis.status != ANALYSIS_STATUS_COMPLETED:
+        status = CONTROLLER_STATUS_PARTIAL
+        reason = analysis.reason or "opportunity analysis was incomplete"
+    elif schedule.task_count == 0 and patch_count == 0:
         status = CONTROLLER_STATUS_NO_OPPORTUNITY
         reason = "no prepared operator tasks are available"
     elif schedule.stopped_for_budget:
@@ -173,6 +192,8 @@ def run_controller(
             "status": status,
             "finished_at": _now_iso(),
             "reason": reason,
+            "analysis_status": analysis.status,
+            "analysis_reason": analysis.reason,
             "task_count": schedule.task_count,
             "patch_count": patch_count,
         }
