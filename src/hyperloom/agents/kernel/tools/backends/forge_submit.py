@@ -1751,9 +1751,7 @@ def _export_best_artifacts(
     return str(primary), changed
 
 
-def _normalized(
-    returncode: int, stdout: str, stderr: str, elapsed_s: float, gpu_ids: str = "", skipped: bool = False
-) -> dict:
+def _normalized(returncode: int, stdout: str, stderr: str, elapsed_s: float, skipped: bool = False) -> dict:
     """Shape the kernel-backend result dict (``returncode`` / ``skipped`` /
     ``stdout_tail`` / ``stderr_tail`` / ``stdout`` / ``gpu_ids`` / ``elapsed_s``
     / ``cmd``).
@@ -1771,7 +1769,7 @@ def _normalized(
         "stdout_tail": (stdout or "")[-4000:],
         "stderr_tail": (stderr or "")[-4000:],
         "stdout": stdout or "",
-        "gpu_ids": gpu_ids or (os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or ""),
+        "gpu_ids": os.environ.get("HIP_VISIBLE_DEVICES") or os.environ.get("CUDA_VISIBLE_DEVICES") or "",
         "elapsed_s": round(elapsed_s, 2),
         "cmd": ["forge_submit.submit"],
     }
@@ -4508,9 +4506,7 @@ def submit(
     output_dir: Path,
     source_type: str = "unknown",
     candidate: dict | None = None,
-    num_gpus: int = 1,
     timeout_s: int = 1800,
-    prefer_ray: bool = True,
     kernel_repo: str = "",
     invocation_spec_file: str = "",
 ) -> dict:
