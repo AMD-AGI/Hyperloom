@@ -11,6 +11,7 @@ LLM-proposable.
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import json
 import logging
@@ -27,6 +28,7 @@ from hyperloom.inference_optimizer.session.session_paths import reports_dir, run
 from ..actions.executors._grid_runner import (
     GridVariant,
     VariantResult,
+    _kill_stale_servers,
     agentx_variant_timeout_sec,
     run_grid,
 )
@@ -1379,69 +1381,93 @@ async def run_conc_sweep(
         ("optimized", opt_args, dict(opt_envs)),
         ("baseline", "", {}),
     ]
-    for arm_name, arm_args, arm_envs in arms_order:
-        skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
-            _an,
-            concs_desc,
-            isl=isl,
-            osl=osl,
-            num_prompts_factor=num_prompts_factor,
-            arm_args=_aa,
-            arm_envs=_ae,
-        )
+    try:
+        for arm_name, arm_args, arm_envs in arms_order:
+            skip_grid_fn = lambda _an=arm_name, _aa=arm_args, _ae=arm_envs: _build_arm_grid(  # noqa: E731
+                _an,
+                concs_desc,
+                isl=isl,
+                osl=osl,
+                num_prompts_factor=num_prompts_factor,
+                arm_args=_aa,
+                arm_envs=_ae,
+            )
 
-        # Check overall budget before starting each arm.
-        _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
-        if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "total_budget_exhausted"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
-        if has_budget and _arm_remaining is not None and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
-            _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
-        if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
-            _budget_state["budget_exhausted"] = True
-            _budget_state["budget_skip_reason"] = "session_deadline_reserve"
-            _budget_state["budget_remaining_sec"] = 0.0
-            for v in skip_grid_fn():
-                results.append(_budget_skip_result(v))
-            continue
+            # Check overall budget before starting each arm.
+            _arm_remaining = (deadline - time.time()) if has_budget and deadline is not None else None
+            if has_budget and _arm_remaining is not None and _arm_remaining <= 0:
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "total_budget_exhausted"
+                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
+            if (
+                has_budget
+                and _arm_remaining is not None
+                and _arm_remaining < _granted_cap_sec(variant_timeout_sec, state)
+            ):
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "insufficient_remaining_for_variant"
+                _budget_state["budget_remaining_sec"] = max(0.0, float(_arm_remaining))
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
+            if getattr(state, "closing_phase", False) or getattr(state, "stop_reason", ""):
+                _budget_state["budget_exhausted"] = True
+                _budget_state["budget_skip_reason"] = "session_deadline_reserve"
+                _budget_state["budget_remaining_sec"] = 0.0
+                for v in skip_grid_fn():
+                    results.append(_budget_skip_result(v))
+                continue
 
-        await _sweep_one_arm_single_server(
-            arm_name,
-            concs_desc,
-            isl=isl,
-            osl=osl,
-            num_prompts_factor=num_prompts_factor,
-            arm_args=arm_args,
-            arm_envs=arm_envs,
-            base_yaml_path=base_yaml_path,
-            workspace=workspace,
-            model_path=resolved_model,
-            gpu_type=resolved_gpu,
-            variant_timeout_sec=variant_timeout_sec,
-            soft_deadline_sec=_session_soft_dl,
-            deadline=deadline,
-            state=state,
-            session_dir=session_dir,
-            json_path=json_path,
-            csv_path=csv_path,
-            started_at=started_at,
-            total_budget_sec=total_budget_sec,
-            has_budget=has_budget,
-            opt_args=opt_args,
-            opt_envs=opt_envs,
-            _all_results_ref=results,
-            _budget_state=_budget_state,
-        )
-        # Results are added to `results` in place by _all_results_ref.
+            await _sweep_one_arm_single_server(
+                arm_name,
+                concs_desc,
+                isl=isl,
+                osl=osl,
+                num_prompts_factor=num_prompts_factor,
+                arm_args=arm_args,
+                arm_envs=arm_envs,
+                base_yaml_path=base_yaml_path,
+                workspace=workspace,
+                model_path=resolved_model,
+                gpu_type=resolved_gpu,
+                variant_timeout_sec=variant_timeout_sec,
+                soft_deadline_sec=_session_soft_dl,
+                deadline=deadline,
+                state=state,
+                session_dir=session_dir,
+                json_path=json_path,
+                csv_path=csv_path,
+                started_at=started_at,
+                total_budget_sec=total_budget_sec,
+                has_budget=has_budget,
+                opt_args=opt_args,
+                opt_envs=opt_envs,
+                _all_results_ref=results,
+                _budget_state=_budget_state,
+            )
+            # Results are added to `results` in place by _all_results_ref.
+    finally:
+        # Safety net, independent of each arm's own per-variant teardown: by
+        # the time both arms have run (or one raised/was cut short), nothing
+        # this conc_sweep started should still be alive -- each arm's own
+        # server is only ever kept warm *between* its own CONC-ladder rounds,
+        # never past the arm itself. A round that timed out before its
+        # server_lifecycle pidfile was ever written leaves that pidfile-based
+        # teardown nothing to find, so this falls back to the broad /proc
+        # scan (AMD-AGI/Hyperloom#1354). Skipped under pytest (unsafe there),
+        # matching the same guard on the per-launch preclean in
+        # _grid_runner.py. Best-effort; never raises.
+        if not os.environ.get("PYTEST_CURRENT_TEST"):
+            try:
+                await asyncio.to_thread(_kill_stale_servers)
+            except Exception:  # noqa: BLE001 - best-effort safety net
+                log.warning(
+                    "conc_sweep: post-run _kill_stale_servers failed",
+                    exc_info=True,
+                )
 
     budget_exhausted = _budget_state["budget_exhausted"]
     budget_skip_reason = _budget_state["budget_skip_reason"]

@@ -1915,3 +1915,100 @@ def test_the_admission_price_never_lowers_an_operator_raised_cap(
     """An operator who asked for longer than AgentX derives keeps what they asked for."""
     monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
     assert _granted_cap_sec(99_999) == 99_999.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Post-run orphan reap (AMD-AGI/Hyperloom#1354)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_run_conc_sweep_reaps_stale_servers_after_both_arms(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """After both arms finish (happy path), run_conc_sweep must reap any
+    lingering server via the same broad /proc scan used elsewhere: a
+    per-variant timeout that fires before a server_lifecycle pidfile is
+    written leaves nothing for that pidfile-based teardown to find, so this
+    is the safety net that catches it (AMD-AGI/Hyperloom#1354)."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    assert kill_calls["n"] == 1
+
+
+def test_run_conc_sweep_reaps_stale_servers_even_when_an_arm_raises(
+    session_dir: Path,
+    baseline_yaml: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The reap must fire from a ``finally`` -- even when an arm blows up
+    with an exception that escapes its own internal handling, not just on
+    the happy path. ``_sweep_one_arm_single_server`` itself is mocked out
+    (rather than the ``run_grid`` it calls) so its own per-variant error
+    handling can't swallow the exception before it reaches run_conc_sweep."""
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _boom(*_a, **_kw):
+        raise RuntimeError("arm blew up")
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep._sweep_one_arm_single_server", side_effect=_boom),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        with pytest.raises(RuntimeError):
+            asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert kill_calls["n"] == 1
+
+
+def test_run_conc_sweep_skips_reap_under_pytest(
+    session_dir: Path,
+    baseline_yaml: Path,
+):
+    """Direct guard: the reap must NOT fire while ``PYTEST_CURRENT_TEST`` is
+    set (pytest always sets it for a running test), mirroring the guard on
+    the per-launch preclean in ``_grid_runner.py``."""
+    state = _make_state(baseline_config_path=str(baseline_yaml))
+
+    async def _fake_run_grid(*, grid: list[GridVariant], **_kw):
+        return [_fake_variant(v.name, throughput=100.0, envs=v.extra_envs) for v in grid]
+
+    kill_calls = {"n": 0}
+
+    def _fake_kill():
+        kill_calls["n"] += 1
+
+    with (
+        patch("hyperloom.orchestrator.kernel.conc_sweep.run_grid", side_effect=_fake_run_grid),
+        patch("hyperloom.orchestrator.kernel.conc_sweep.materialize_config_with_envs", side_effect=_fake_materialize),
+        patch("hyperloom.orchestrator.kernel.conc_sweep._kill_stale_servers", side_effect=_fake_kill),
+    ):
+        payload = asyncio.run(run_conc_sweep(state, session_dir, concs=[4, 16]))
+
+    assert payload["status"] == "succeeded"
+    assert kill_calls["n"] == 0, "must be a no-op while PYTEST_CURRENT_TEST is set"

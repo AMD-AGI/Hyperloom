@@ -834,6 +834,42 @@ def _run_grid_warmup_enabled() -> bool:
     return (raw if raw is not None else "1").strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _read_pid_gpu_mask(pid: int) -> tuple[list[int], bool] | None:
+    """Resolve ``pid``'s visible-GPU mask from its own environment.
+
+    Mirrors :func:`hyperloom.orchestrator.bus.gpu_pool._visible_device_mask`
+    (``ROCR_VISIBLE_DEVICES``, then ``HIP``/``CUDA``), but reads a foreign
+    process's ``/proc/<pid>/environ`` instead of our own ``os.environ`` --
+    used to scope :func:`_kill_stale_servers` to our own GPU allocation
+    (AMD-AGI/Hyperloom#1354).
+
+    Args:
+        pid: Candidate process id to inspect.
+
+    Returns:
+        ``(ids, present)`` as in ``_visible_device_mask``, or ``None`` when
+        ``/proc/<pid>/environ`` cannot be read (permission, already exited,
+        etc.) -- callers must treat that as "unknown", not "no mask".
+    """
+    from ...bus.gpu_pool import _parse_gpu_list
+
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as fh:
+            raw = fh.read()
+    except (OSError, PermissionError):
+        return None
+    env = {}
+    for entry in raw.split(b"\0"):
+        if b"=" not in entry:
+            continue
+        key, _, value = entry.partition(b"=")
+        env[key.decode("utf-8", "replace")] = value.decode("utf-8", "replace")
+    for env_name in ("ROCR_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "CUDA_VISIBLE_DEVICES"):
+        if env_name in env:
+            return _parse_gpu_list(env[env_name]), True
+    return [], False
+
+
 def _kill_stale_servers() -> None:
     """Deep-clean any lingering inference server processes + shared memory.
 
@@ -842,12 +878,24 @@ def _kill_stale_servers() -> None:
     pgrep) to avoid clashing with test subprocess mocks. No-op in multi-node
     mode (servers live in RayJob pods).
 
+    Scoped to our own GPU allocation when one is known: if our own process
+    has a visible-GPU mask (``ROCR_VISIBLE_DEVICES`` et al, set whenever an
+    operator carved us a subset of the machine's cards rather than handing us
+    the whole box), a candidate process is only reaped when its own mask
+    overlaps ours. A candidate whose mask cannot be read (permission,
+    already exited) or that declares no mask at all is skipped rather than
+    reaped -- unknown scope is treated as "not ours", never as "safe to
+    kill" (AMD-AGI/Hyperloom#1354). With no mask on our own side (the whole
+    machine is ours, or nothing is scoping either side), every match is
+    reaped as before.
+
     Note:
         Side-effecting and best-effort: it sends signals to matching processes
         and unlinks stale shared-memory segments, swallowing errors. Returns
         nothing.
     """
     from ._multi_node_env import is_multi_node
+    from ...bus.gpu_pool import _visible_device_mask
 
     if is_multi_node():
         return
@@ -878,6 +926,25 @@ def _kill_stale_servers() -> None:
         my_pgid = os.getpgrp()
     except OSError:
         my_pgid = -1
+    my_gpu_ids, my_gpu_mask_present = _visible_device_mask()
+    my_gpu_id_set = frozenset(my_gpu_ids)
+
+    def _in_our_gpu_scope(pid: int) -> bool:
+        """Whether ``pid`` overlaps our own visible-GPU mask.
+
+        No-op (always True) when we have no mask ourselves -- nothing to
+        scope against. Otherwise conservative: an unreadable or absent mask
+        on the candidate's side is out of scope, not in it.
+        """
+        if not my_gpu_mask_present:
+            return True
+        candidate = _read_pid_gpu_mask(pid)
+        if candidate is None:
+            return False
+        candidate_ids, candidate_present = candidate
+        if not candidate_present:
+            return False
+        return not my_gpu_id_set.isdisjoint(candidate_ids)
 
     def _is_orphaned_atom_worker(pid: int, cmdline: bytes) -> bool:
         """Detect an orphaned atom ModelRunner worker by its memory maps.
@@ -912,6 +979,7 @@ def _kill_stale_servers() -> None:
         return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
 
     killed_atom = False
+    killed_any = False
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -925,39 +993,54 @@ def _kill_stale_servers() -> None:
             continue
         text = cmdline.replace(b"\0", b" ").decode("utf-8", "replace")
         is_atom_server = "atom.entrypoints" in text
-        if any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline):
-            killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
-            # Kill the whole pgrp so atom children die with the leader.
-            try:
-                pgid = os.getpgid(pid)
-                if pgid not in (my_pgid, 0):
-                    os.killpg(pgid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, OSError):
-                # Group gone or not ours; fall through to per-pid kill.
-                pass
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                # Already exited or owned by another user.
-                pass
+        if not (any(pat in text for pat in _KILL_PATTERNS) or _is_orphaned_atom_worker(pid, cmdline)):
+            continue
+        if not _in_our_gpu_scope(pid):
+            continue
+        killed_any = True
+        killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
+        # Kill the whole pgrp so atom children die with the leader.
+        try:
+            pgid = os.getpgid(pid)
+            if pgid not in (my_pgid, 0):
+                os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            # Group gone or not ours; fall through to per-pid kill.
+            pass
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            # Already exited or owned by another user.
+            pass
 
-    # Clear GPU runtime shared-memory segments that prevent re-binding.
-    for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
-        "/dev/shm/vllm*",
-        "/dev/shm/nccl*",
-        "/dev/shm/cuda*",
-        "/dev/shm/torch*",
-        "/dev/shm/atom*",
-    ):
-        for f in glob.glob(pattern):
-            try:
-                os.remove(f)
-            except OSError:
-                # Already removed or held by another process.
-                pass
+    # Clear GPU runtime shared-memory segments that prevent re-binding. These
+    # files carry no GPU/owner tag we can scope by, so -- unlike the per-pid
+    # reap above -- they are only touched when we have no GPU mask of our own
+    # (whole machine is ours): with a mask set, a co-tenant's otherwise-spared
+    # server could still crash from having its shared-memory segments pulled
+    # out from under it (AMD-AGI/Hyperloom#1354).
+    if not my_gpu_mask_present:
+        for pattern in (  # nosec B108 - intentionally targets known /dev/shm runtime prefixes.
+            "/dev/shm/vllm*",
+            "/dev/shm/nccl*",
+            "/dev/shm/cuda*",
+            "/dev/shm/torch*",
+            "/dev/shm/atom*",
+        ):
+            for f in glob.glob(pattern):
+                try:
+                    os.remove(f)
+                except OSError:
+                    # Already removed or held by another process.
+                    pass
 
-    # Pause for KFD async VRAM release; atom teardown lags past 2s.
-    time.sleep(8 if killed_atom else 2)
+    # Pause for KFD async VRAM release; atom teardown lags past 2s. Skipped
+    # entirely when nothing was actually killed this call -- this function now
+    # runs at 4 call sites (was 1), so paying it unconditionally on the common
+    # "GPU was already clean" case adds up fast (e.g. conc_sweep's own reap
+    # immediately followed by baseline's).
+    if killed_any:
+        time.sleep(8 if killed_atom else 2)
 
 
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:

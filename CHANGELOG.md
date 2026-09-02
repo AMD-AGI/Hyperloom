@@ -442,6 +442,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A baseline round no longer OOMs against a server a prior sweep/explore
+  round's timeout left orphaned.** `BaselineExecutor`'s pre-start cleanup
+  ran only on the double-run path, and only when the reuse port answered
+  `/health` with no matching pid/json metadata (a "zombie" heuristic). That
+  heuristic was unreliable either way: an eligible `server_lifecycle` port
+  is a freshly OS-assigned ephemeral port confirmed free at assignment time,
+  so it always reported unhealthy and the cleanup never fired even when a
+  same-port zombie was in fact present; an ineligible port fell back to a
+  fixed default that could coincide with an unrelated co-tenant's server,
+  risking the opposite failure. Pre-start cleanup now runs unconditionally
+  before every baseline round (double-run and single-round alike -- the
+  latter being the common way the kernel phase re-establishes its
+  baseline), reaping any lingering server via the same `_kill_stale_servers()`
+  `/proc` scan already used elsewhere: Hyperloom's own scheduling
+  (`gpu_research_lane`, capacity 1) guarantees at most one server-holding
+  task runs at a time, so nothing matching should be alive at this point
+  regardless of port health. `conc_sweep` and `explore` -- the two actions
+  whose timed-out rounds most often leave one of these orphans -- now also
+  reap any lingering server once they themselves finish, shrinking the
+  window an orphan can sit on the GPU before the next baseline attempt.
+  `_kill_stale_servers()` itself is now scoped to our own GPU allocation
+  when one is known (`ROCR_VISIBLE_DEVICES` et al set by an operator that
+  carved us a subset of the machine's cards): a matching process is only
+  reaped when its own visible-GPU mask overlaps ours, and a candidate whose
+  mask cannot be read or declares none at all is left alone rather than
+  reaped, so it can no longer touch a co-tenant's server parked on a
+  different subset of the same machine. (AMD-AGI/Hyperloom#1354)
 - **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
   derived its demand file only when the serving log carried dense tuned-config
   misses, so a MoE-only model -- or one whose dense tables all hit while
