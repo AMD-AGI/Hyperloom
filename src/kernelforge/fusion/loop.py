@@ -295,6 +295,12 @@ class RecipePatch:
             strongest-first tiebreak when siblings collide on ``source_file``.
         snapshot_dir: Where the recipe's authored tree was snapshotted, if any.
         base_commit: The pristine base the patch applies onto, if recorded.
+        env_flag: The space-joined env flag(s) that gate this fused path. An
+            authored fusion is env-gated -- with the flag UNSET the patched code
+            stays bit-for-bit the original eager path -- so the flag MUST travel
+            with the patch to the e2e re-baseline, or integrate measures the
+            un-fused path and REVERTs a real win. A self-activating compile-pass
+            sibling carries "" (it flips a default in source, no runtime flag).
     """
 
     kernel_name: str
@@ -303,6 +309,7 @@ class RecipePatch:
     micro_speedup: Optional[float] = None
     snapshot_dir: str = ""
     base_commit: str = ""
+    env_flag: str = ""
 
 
 @dataclass

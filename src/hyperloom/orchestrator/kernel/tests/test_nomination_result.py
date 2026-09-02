@@ -40,6 +40,7 @@ def test_reads_every_declared_field() -> None:
                     base_commit="abc123",
                     micro_speedup=1.4,
                     write_paths=["/repo/a.py", " "],
+                    env_flag="ZAYA_FUSED_A",
                 )
             ]
         )
@@ -53,6 +54,15 @@ def test_reads_every_declared_field() -> None:
     assert patch.base_commit == "abc123"
     assert patch.micro_speedup == 1.4
     assert patch.write_paths == ("/repo/a.py",)
+    # The env flag gates the fused path; it has to survive parsing or the
+    # consumer queues a sibling that integrate measures un-fused.
+    assert patch.env_flag == "ZAYA_FUSED_A"
+
+
+def test_env_flag_defaults_to_empty_for_a_self_activating_sibling() -> None:
+    """A compile-pass sibling flips a default in source and carries no flag."""
+    (patch,) = nres.parse_outcome(_envelope([_entry("a")])).patches
+    assert patch.env_flag == ""
 
 
 def test_source_file_substitutes_for_target_file() -> None:

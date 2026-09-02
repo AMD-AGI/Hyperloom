@@ -41,6 +41,11 @@ class NominatedPatch:
     base_commit: str = ""
     micro_speedup: float = 0.0
     write_paths: tuple[str, ...] = ()
+    #: Space-joined env flag(s) that gate the fused path. An authored fusion is
+    #: env-gated: unset, the patched code is bit-for-bit the eager path, so the
+    #: flag has to reach the e2e re-baseline or integrate measures the un-fused
+    #: path and REVERTs a real win. Empty for a self-activating compile pass.
+    env_flag: str = ""
 
 
 @dataclass(frozen=True)
@@ -149,6 +154,7 @@ def _read_entry(row: Any) -> tuple[NominatedPatch | None, str]:
             base_commit=str(row.get("base_commit") or "").strip(),
             micro_speedup=_finite_float(row.get("micro_speedup")),
             write_paths=_string_tuple(row.get("write_paths")),
+            env_flag=str(row.get("env_flag") or "").strip(),
         ),
         "",
     )

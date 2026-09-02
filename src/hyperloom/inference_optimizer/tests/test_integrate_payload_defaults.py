@@ -123,6 +123,53 @@ class TestFillIntegrateDefaultsFromState:
             "SHARED": "candidate",
         }
 
+    def test_fusion_record_activates_the_env_flag_and_keep_bar(self, session_dir):
+        """A fusion sibling's env flag + keep bar are folded in from its record.
+
+        The drain builds a bare ``{kernel_id, integration_id, ...}`` payload; the
+        fused path is inert until its env flag is set and fusion keeps its own
+        keep bar, so both have to be pulled from the pending record here or
+        integrate measures the un-fused path against the wrong threshold.
+        """
+        from hyperloom.orchestrator.kernel._kernel_decisions import enqueue_nominated_patch
+        from hyperloom.orchestrator.kernel.nomination_result import NominatedPatch
+
+        state = _seed_state(session_dir, current_best_envs={"KEEP_ME": "1"})
+        record = enqueue_nominated_patch(
+            state,
+            patch=NominatedPatch(
+                kernel_name="fuse_a",
+                patch_path="/out/fuse_a.patch",
+                target_file="/repo/a.py",
+                env_flag="ZAYA_FUSED_A",
+            ),
+            keep_threshold_pct=3.0,
+        )
+        state.save(session_dir)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "fuse_a", "integration_id": record["integration_id"]},
+            session_dir=session_dir,
+        )
+
+        # current_best env survives AND the fused path is now active.
+        assert out["extra_envs"] == {"KEEP_ME": "1", "ZAYA_FUSED_A": "1"}
+        assert out["keep_threshold_pct"] == pytest.approx(3.0)
+        assert out["source"] == "forge_fusion"
+        assert out["action_label"] == "fusion"
+
+    def test_a_non_fusion_record_adds_no_fusion_fields(self, session_dir):
+        """The fusion folding is opt-in on ``source='forge_fusion'``."""
+        _seed_state(session_dir, baseline_tput=800.0)
+
+        out = krh._fill_integrate_defaults_from_state(
+            {"kernel_id": "k_abc"},
+            session_dir=session_dir,
+        )
+
+        assert "keep_threshold_pct" not in out
+        assert out.get("source") != "forge_fusion"
+
     def test_empty_state_no_op(self, session_dir):
         _seed_state(session_dir)
 

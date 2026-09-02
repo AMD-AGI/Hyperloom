@@ -1885,6 +1885,61 @@ async def test_integrate_keep_lets_a_tuning_env_delta_win(session_dir):
     assert s.current_best["extra_envs"] == {"KEEP_ME": "1", "TUNED": "new"}
 
 
+async def test_fusion_origin_integrate_keep_lifts_as_fusion(session_dir):
+    """A fusion sibling drained through the shared lane must land as ``fusion``.
+
+    The generic drain calls ``_record_integrate_keep`` for every KEEP; a fusion
+    sibling is marked ``source='forge_fusion'`` on its result so the lift uses
+    ``action='fusion'`` (read by the idempotency short-circuit and the
+    remote-recipe export) and ``last_fusion_integrate`` is set (the export gates
+    on it being a KEEP). Without the marker the same call stays a plain integrate.
+    """
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {}}
+
+    await coord.writeback._record_integrate_keep(
+        {
+            "new_tput": 1300.0,
+            "kernel_id": "fuse_a",
+            "integration_id": "i-fuse",
+            "gain_pct": 30.0,
+            "patch_path": "/out/fuse_a.patch",
+            "extra_envs": {"ZAYA_FUSED_A": "1"},
+            "source": "forge_fusion",
+            "action_label": "fusion",
+        },
+    )
+
+    assert s.current_best["action"] == "fusion"
+    # current_best is a pure config record; the engine label lives on the entry.
+    assert "engine" not in s.current_best
+    entry = s.optimization_stack[-1]
+    assert entry["action"] == "fusion"
+    assert entry["engine"] == "forge_fusion"
+    assert entry["backend"] == "forge"
+    # The remote-recipe fusion export gates on this being a KEEP.
+    assert s.last_fusion_integrate["decision"] == "KEEP"
+    assert s.last_fusion_integrate["kernel_id"] == "fuse_a"
+
+
+async def test_a_plain_integrate_keep_is_not_relabelled_fusion(session_dir):
+    """The fusion branch is opt-in: an un-marked result stays a plain integrate."""
+    coord = _coord(session_dir)
+    s = coord.shared_state
+    s.baseline_tput = 1000.0
+    s.current_best = {"action": "explore", "tput": 1000.0, "extra_envs": {}}
+
+    await coord.writeback._record_integrate_keep(
+        {"new_tput": 1200.0, "kernel_id": "k003", "integration_id": "i3"},
+    )
+
+    assert s.current_best["action"] == "integrate"
+    assert s.last_fusion_integrate == {}
+    assert s.optimization_stack[-1].get("engine") != "forge_fusion"
+
+
 # ── source-layer handles: executor result → stack entry → env_spec ──────────
 
 

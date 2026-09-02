@@ -385,91 +385,103 @@ class TestGemmE2eCandidates:
         )
 
 
-class TestPromoteFusionIntegrateKeep:
-    def test_records_incremental_gain_but_preserves_baseline_total(self, tmp_path):
-        coord = _coord(
-            tmp_path,
-            baseline_tput=100.0,
-            cumulative_gain_validated=20.0,
-            cumulative_gain_validated_stack_len=1,
-            optimization_stack=[
-                {
-                    "action": "replay_warm_recipe",
-                    "tput": 120.0,
-                    "gain_pct": 20.0,
-                }
-            ],
-            gain_per_stack_entry=[20.0],
-            current_best={
-                "action": "replay_warm_recipe",
-                "tput": 120.0,
-                "extra_envs": {"SGLANG_USE_AITER": "1"},
-                "extra_server_args": "--moe-runner-backend aiter",
-            },
-        )
+class TestQueueFusionSiblings:
+    """A KEPT fusion nomination is queued as sibling records, not integrated inline.
 
-        KernelPhase(coord)._promote_fusion_integrate_keep(
-            {
-                "patch": "/tmp/fusion.patch",
-                "source_file": "/repo/model.py",
-                "kernel_speedup": 3.05,
-                "best_pattern": "llm:fused_a+llm:fused_b",
-            },
-            {
-                "status": "ok",
-                "decision": "KEEP",
-                "new_tput": 180.0,
-                # integrate's gain is relative to current_best=120, not the
-                # original baseline=100.
-                "gain_pct": 50.0,
-                "workspace": "/tmp/run",
-                "extra_server_args": "--moe-runner-backend aiter",
-            },
-            extra_envs={"SGLANG_USE_AITER": "1", "ZAYA_FUSED_HYBRID_RESIDUAL": "1"},
-        )
+    Under the nomination contract ``_integrate_fusion`` no longer cold-boots a
+    re-baseline itself: it writes one ``status="pending"`` record per nominated
+    sibling and the SWEEP-entry drain runs them through the shared integrate lane.
+    The fusion-specific facts the generic drain cannot infer -- the env flag that
+    activates the fused path, the fusion keep bar, and the ``fusion`` promotion
+    label -- must ride on each record.
+    """
 
-        stack = coord.shared_state.optimization_stack
-        assert len(stack) == 2
-        assert stack[1]["action"] == "fusion"
-        assert stack[1]["backend"] == "forge"
-        assert stack[1]["engine"] == "forge_fusion"
-        assert stack[1]["patch_path"] == "/tmp/fusion.patch"
-        assert stack[1]["gain_pct"] == pytest.approx(50.0)
-        assert stack[1]["extra_envs"]["SGLANG_USE_AITER"] == "1"
-        assert stack[1]["extra_envs"]["ZAYA_FUSED_HYBRID_RESIDUAL"] == "1"
-        assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.current_best["tput"] == 180.0
-        # current_best is a config record; the forge labels live on the entry.
-        assert "engine" not in coord.shared_state.current_best
-        assert "backend" not in coord.shared_state.current_best
-        assert coord.shared_state.cumulative_gain_validated == 80.0
-        assert coord.shared_state.gain_per_stack_entry == [20.0, 80.0]
-        assert coord.shared_state.cumulative_gain_validated_stack_len == 2
-
-    def test_guard_paths_do_not_promote(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_queues_one_pending_record_per_nominated_sibling(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
         phase = KernelPhase(coord)
 
-        phase._promote_fusion_integrate_keep("bad", {"decision": "KEEP"})  # type: ignore[arg-type]
-        phase._promote_fusion_integrate_keep({}, {"decision": "REVERT"})
-        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": "bad"})
-        phase._promote_fusion_integrate_keep({}, {"decision": "KEEP", "new_tput": 0})
+        await phase._integrate_fusion(
+            {
+                "patches": [
+                    {
+                        "kernel_name": "fuse_a",
+                        "patch_path": "/out/fuse_a.patch",
+                        "target_file": "/repo/a.py",
+                        "kernel_repo": "/repo",
+                        "snapshot_dir": "/snap/a",
+                        "base_commit": "abc",
+                        "micro_speedup": 1.4,
+                        "env_flag": "ZAYA_FUSED_A",
+                        "kind": "fusion",
+                    },
+                    {
+                        "kernel_name": "fuse_b",
+                        "patch_path": "/out/fuse_b.patch",
+                        "target_file": "/repo/b.py",
+                        "kernel_repo": "/repo",
+                        "micro_speedup": 1.2,
+                        "env_flag": "ZAYA_FUSED_B",
+                        "kind": "fusion",
+                    },
+                ],
+                "nomination": {"candidates_seen": 3, "resolved": 2, "selected": 2},
+            }
+        )
 
-        assert coord.shared_state.optimization_stack == []
-        assert coord.shared_state.current_best == {}
+        queue = coord.shared_state.pending_kernel_integrations
+        assert len(queue) == 2
+        by_source = {str(r["source_file"]): r for r in queue.values()}
+        assert set(by_source) == {"/repo/a.py", "/repo/b.py"}
+        rec_a = by_source["/repo/a.py"]
+        assert rec_a["status"] == "pending"
+        assert rec_a["source"] == "forge_fusion"
+        assert rec_a["action_label"] == "fusion"
+        assert rec_a["artifact_path"] == "/out/fuse_a.patch"
+        assert rec_a["fusion_env_flags"] == {"ZAYA_FUSED_A": "1"}
+        # The fusion-specific keep bar (default 3.0%) rides on the record so the
+        # generic drain grades against it rather than the integrate default.
+        assert rec_a["keep_threshold_pct"] == pytest.approx(3.0)
+        assert by_source["/repo/b.py"]["fusion_env_flags"] == {"ZAYA_FUSED_B": "1"}
 
-    def test_dedupes_same_fusion_patch(self, tmp_path):
+    @pytest.mark.asyncio
+    async def test_empty_nomination_is_a_clean_no_op(self, tmp_path):
         coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
         phase = KernelPhase(coord)
-        fusion = {"patch": "/tmp/fusion.patch", "source_file": "/repo/model.py"}
-        integ = {"decision": "KEEP", "new_tput": 150.0, "gain_pct": 50.0}
 
-        phase._promote_fusion_integrate_keep(fusion, integ)
-        phase._promote_fusion_integrate_keep(fusion, integ)
+        # A run that kept nothing: patches present but empty, plus the legacy
+        # singular shape with no patches[] at all -- both queue nothing.
+        await phase._integrate_fusion({"patches": [], "nomination": {"selected": 0}})
+        await phase._integrate_fusion({"kept": True})
 
-        assert len(coord.shared_state.optimization_stack) == 1
-        assert coord.shared_state.optimization_stack[0]["patch_path"] == "/tmp/fusion.patch"
-        assert coord.shared_state.current_best["variant_name"] == "forge_fusion:fusion.patch"
+        assert coord.shared_state.pending_kernel_integrations == {}
+
+    @pytest.mark.asyncio
+    async def test_sibling_missing_patch_or_target_is_dropped(self, tmp_path):
+        coord = _coord(tmp_path, baseline_tput=100.0)
+        coord.bus = _Bus()
+        phase = KernelPhase(coord)
+
+        await phase._integrate_fusion(
+            {
+                "patches": [
+                    {"kernel_name": "no_patch", "patch_path": "", "target_file": "/repo/a.py"},
+                    {"kernel_name": "no_target", "patch_path": "/out/x.patch", "target_file": ""},
+                    {
+                        "kernel_name": "good",
+                        "patch_path": "/out/good.patch",
+                        "target_file": "/repo/g.py",
+                        "micro_speedup": 1.1,
+                    },
+                ]
+            }
+        )
+
+        queue = coord.shared_state.pending_kernel_integrations
+        assert len(queue) == 1
+        assert next(iter(queue.values()))["source_file"] == "/repo/g.py"
 
     @pytest.mark.asyncio
     async def test_handle_fusion_result_posts_and_integrates_kept_candidate(self, tmp_path, monkeypatch):
@@ -509,87 +521,6 @@ class TestPromoteFusionIntegrateKeep:
         await phase._handle_fusion_result("not-dict")  # type: ignore[arg-type]
 
         assert coord.shared_state.last_fusion == {"status": "failed"}
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_builds_payload_and_records_keep(self, tmp_path, monkeypatch):
-        coord = _coord(
-            tmp_path,
-            baseline_tput=100.0,
-            current_best={"extra_envs": {"SGLANG_USE_AITER": "1"}},
-        )
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-        calls: list[dict] = []
-
-        async def _fake_integrate(payload, *, session_dir):
-            assert session_dir == tmp_path
-            calls.append(payload)
-            return {
-                "status": "ok",
-                "decision": "KEEP",
-                "new_tput": 170.0,
-                "gain_pct": 70.0,
-                "workspace": str(tmp_path / "integrate"),
-            }
-
-        monkeypatch.setattr(krh_mod, "integrate_handler", _fake_integrate)
-        monkeypatch.setattr(
-            krh_mod,
-            "materialize_unified_patch_snapshot",
-            lambda **_kwargs: str(tmp_path / "snapshot"),
-        )
-
-        await phase._integrate_fusion(
-            {
-                "patch": str(tmp_path / "fusion.patch"),
-                "source_file": "/repo/model.py",
-                "kernel_repo": "/repo",
-                "env_flags": {"ZAYA_FUSED": "1"},
-                "kernel_speedup": 2.5,
-                "best_pattern": "llm:fused",
-            }
-        )
-
-        assert calls[0]["source"] == "forge_fusion"
-        assert calls[0]["snapshot_dir"] == str(tmp_path / "snapshot")
-        assert calls[0]["extra_envs"] == {"SGLANG_USE_AITER": "1", "ZAYA_FUSED": "1"}
-        assert coord.shared_state.last_fusion_integrate["decision"] == "KEEP"
-        assert coord.shared_state.current_best["action"] == "fusion"
-        assert coord.shared_state.optimization_stack[-1]["engine"] == "forge_fusion"
-        assert coord.bus.messages[-1].payload["kind"] == "fusion_integrate_done"
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_records_snapshot_failure(self, tmp_path, monkeypatch):
-        coord = _coord(tmp_path)
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-
-        def _raise_snapshot(**_kwargs):
-            raise ValueError("bad patch")
-
-        monkeypatch.setattr(krh_mod, "materialize_unified_patch_snapshot", _raise_snapshot)
-
-        await phase._integrate_fusion(
-            {
-                "patch": str(tmp_path / "fusion.patch"),
-                "source_file": "/repo/model.py",
-                "kernel_repo": "/repo",
-            }
-        )
-
-        assert coord.shared_state.last_fusion_integrate["decision"] == "REVERT"
-        assert coord.shared_state.last_fusion_integrate["error_class"] == "ValueError"
-
-    @pytest.mark.asyncio
-    async def test_integrate_fusion_skips_missing_patch_or_target(self, tmp_path):
-        coord = _coord(tmp_path)
-        coord.bus = _Bus()
-        phase = KernelPhase(coord)
-
-        await phase._integrate_fusion({"patch": "", "source_file": "/repo/model.py"})
-        await phase._integrate_fusion({"patch": "/tmp/fusion.patch", "source_file": ""})
-
-        assert coord.shared_state.last_fusion_integrate == {}
 
     @pytest.mark.asyncio
     async def test_run_forge_fusion_handles_handler_exception(self, tmp_path, monkeypatch):

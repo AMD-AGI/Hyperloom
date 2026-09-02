@@ -1349,6 +1349,25 @@ def _fill_integrate_defaults_from_state(
             "integration_validation_status",
             str(pending_record.get("integration_validation_status") or ""),
         )
+        # Fusion siblings carry three facts the generic drain cannot infer. The
+        # env flags gate the fused path (unset => the patch measures as the eager
+        # path and REVERTs a real win); the keep bar is fusion-specific; the
+        # action label routes the promoted stack row. Fold them in HERE, before
+        # the extra_envs merge below, so the fused path is active during e2e.
+        if str(pending_record.get("source") or "") == "forge_fusion":
+            resolved.setdefault("source", "forge_fusion")
+            resolved.setdefault("action_label", str(pending_record.get("action_label") or "fusion"))
+            fusion_env_flags = pending_record.get("fusion_env_flags")
+            if isinstance(fusion_env_flags, dict) and fusion_env_flags:
+                requested = resolved.get("extra_envs")
+                requested = dict(requested) if isinstance(requested, dict) else {}
+                # The sibling's own flags win over anything already requested.
+                resolved["extra_envs"] = {**requested, **{str(k): str(v) for k, v in fusion_env_flags.items()}}
+            if "keep_threshold_pct" not in resolved and pending_record.get("keep_threshold_pct") is not None:
+                try:
+                    resolved["keep_threshold_pct"] = float(pending_record.get("keep_threshold_pct"))
+                except (TypeError, ValueError):
+                    pass
 
     current_best = getattr(state, "current_best", None) or {}
 
@@ -8346,6 +8365,12 @@ async def integrate_handler(
         "identity_route": str(payload.get("identity_route") or ""),
         "integration_id": str(payload.get("integration_id") or ""),
     }
+    # Fusion provenance rides through so the KEEP writeback lifts the stack row as
+    # ``fusion`` (not ``integrate``) and sets ``last_fusion_integrate`` -- both are
+    # read by the idempotency short-circuit and the remote-recipe fusion export.
+    if str(payload.get("source") or "") == "forge_fusion":
+        result["source"] = "forge_fusion"
+        result["action_label"] = str(payload.get("action_label") or "fusion")
     if top_status == "failed":
         result["error_class"] = "patch_revert_incomplete"
         result["error"] = str(revert_result.get("error") or "Kernel patch revert did not complete")

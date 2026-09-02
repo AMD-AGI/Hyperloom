@@ -4243,157 +4243,54 @@ class KernelPhase(PhaseHandler):
             await self._integrate_fusion(result)
 
     async def _integrate_fusion(self, result: dict) -> None:
-        """Hand a KEPT forge-fusion (source patch + env flags) to integrate for e2e adopt.
+        """Queue every KEPT forge-fusion sibling for the shared e2e integrate lane.
 
-        forge-fusion is NOT env-only (``source='forge_fusion'``), so integrate runs the
-        patch-apply path: it applies the fused-kernel source patch, sets the fusion env
-        flags on the re-baseline server, and KEEPs only when measured e2e throughput
-        clears the threshold. ``base_tput`` is filled from state by integrate_handler.
+        Each self-nominated recipe is one independent sibling patch. Rather than
+        integrate inline here (one patch, one blocking cold-boot re-baseline), we
+        write each sibling as a ``status="pending"`` record and let the SWEEP-entry
+        drain (``_drain_pending_keep_integrates``) run them through the same lane
+        the rewrite/gemm lanes use -- so same-file collapse, cross-file
+        independence, and the patch budget all apply for free.
+
+        forge-fusion is env-gated: the fused path is inert until its env flag is
+        set, so ``enqueue_nominated_patch`` stamps the flag onto the record and the
+        drain's resolver merges it into the re-baseline server's envs. The
+        fusion-specific keep bar (``HYPERLOOM_FUSION_KEEP_PCT``, default 3.0) and
+        the ``action="fusion"`` promotion label ride on the record too.
+
+        An empty ``patches`` array (a run that kept nothing) is a valid no-op.
         """
         import os
 
-        from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
+        from ..kernel._kernel_decisions import enqueue_nominated_patch
+        from ..kernel.nomination_result import parse_outcome
 
-        patch = str(result.get("patch") or "").strip()
-        target_file = str(result.get("source_file") or result.get("target_file") or "").strip()
-        kernel_repo = str(result.get("kernel_repo") or "").strip()
-        env_flags = result.get("env_flags") or {}
-        current_envs = {}
-        if isinstance(self.shared_state.current_best, dict):
-            current_envs = dict(self.shared_state.current_best.get("extra_envs") or {})
-        merged_envs = {**current_envs, **{str(k): str(v) for k, v in env_flags.items()}}
-        if not patch or not target_file:
-            log.info("KERNEL entry: fusion KEPT but missing patch/target_file; skip integrate")
-            return
-        integ = None
-        snapshot_dir = str(result.get("snapshot_dir") or "").strip()
-        if not snapshot_dir and patch.endswith(".patch") and kernel_repo:
-            try:
-                snapshot_dir = await asyncio.to_thread(
-                    materialize_unified_patch_snapshot,
-                    patch_path=patch,
-                    repo_root=kernel_repo,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("KERNEL entry fusion snapshot materialization failed")
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                    "patch_path": patch,
-                    "target_file": target_file,
-                }
-        if integ is None:
-            try:
-                integ = await integrate_handler(
-                    {
-                        "task_id": "fusion_e2e",
-                        "kernel_id": "forge_fusion",
-                        "source": "forge_fusion",
-                        "patch_path": patch,
-                        "target_file": target_file,
-                        "kernel_repo": kernel_repo,
-                        "snapshot_dir": snapshot_dir,
-                        "extra_envs": merged_envs,
-                        "keep_threshold_pct": float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0")),
-                    },
-                    session_dir=self.session_dir,
-                )
-            except Exception as exc:  # noqa: BLE001
-                log.exception("KERNEL entry fusion integrate failed")
-                integ = {
-                    "status": "failed",
-                    "decision": "REVERT",
-                    "error_class": exc.__class__.__name__,
-                    "error": repr(exc),
-                }
-        decision = str(integ.get("decision") or "").strip().upper() if isinstance(integ, dict) else "REVERT"
-        gain = integ.get("gain_pct") if isinstance(integ, dict) else None
-        log.info("KERNEL entry: fusion integrate decision=%s gain_pct=%s", decision, gain)
-        self._promote_fusion_integrate_keep(result, integ, extra_envs=merged_envs)
-        try:
-            if isinstance(integ, dict):
-                # The fusion run this verdict adjudicates. Both fields are
-                # last-write-wins singletons, and this one is written only when
-                # integration runs, so the id is what tells a reader whether
-                # the verdict belongs to the fusion sitting in ``last_fusion``.
-                integ = {**integ, "fusion_run_id": str(result.get("fusion_run_id") or "")}
-            self.shared_state.last_fusion_integrate = integ
-            self.shared_state.save(self.session_dir)
-        except Exception:  # noqa: BLE001
-            pass
-        try:
-            await self.bus.append_and_seq(
-                Message.new(
-                    "kernel_agent",
-                    "orchestration",
-                    "response",
-                    {
-                        "in_reply_to": "",
-                        "kind": "fusion_integrate_done",
-                        "status": integ.get("status", "failed") if isinstance(integ, dict) else "failed",
-                        "decision": decision,
-                        "gain_pct": gain,
-                        "result": integ,
-                        "source": "kernel_entry_auto",
-                    },
-                    priority=1,
-                )
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("failed to post fusion_integrate_done bus message")
-
-    def _promote_fusion_integrate_keep(
-        self,
-        fusion_result: dict,
-        integrate_result: dict,
-        *,
-        extra_envs: dict[str, str] | None = None,
-    ) -> None:
-        """Promote a forge-fusion e2e KEEP into the main optimization stack."""
-        if not isinstance(fusion_result, dict) or not isinstance(integrate_result, dict):
-            return
-        if str(integrate_result.get("decision") or "").strip().upper() != "KEEP":
+        outcome = parse_outcome(result)
+        if outcome.is_empty:
+            log.info("KERNEL entry: fusion KEPT but nominated no usable sibling; nothing to queue")
             return
         try:
-            new_tput = float(integrate_result.get("new_tput") or 0.0)
-            incremental_gain = float(integrate_result.get("gain_pct") or 0.0)
+            keep_pct = float(os.environ.get("HYPERLOOM_FUSION_KEEP_PCT", "3.0"))
         except (TypeError, ValueError):
-            return
-        if new_tput <= 0:
-            return
-
-        patch = str(fusion_result.get("patch") or integrate_result.get("patch_path") or "")
-        envs = dict(extra_envs or integrate_result.get("extra_envs") or fusion_result.get("env_flags") or {})
-        extra_args = str(integrate_result.get("extra_server_args") or "")
-        lifted = self._lift_to_current_best(
-            "fusion",
-            new_tput,
-            {
-                # The patch is the identity; the engine that produced it is not.
-                "name": f"forge_fusion:{Path(patch).name}" if patch else "forge_fusion",
-                "candidate_extra_server_args": extra_args,
-                "extra_envs": envs,
-                "source_phase": "KERNEL_AGENT",
-                "provenance": "forge_fusion",
-                "workspace": integrate_result.get("workspace"),
-            },
-            entry_extra={
-                "backend": "forge",
-                "engine": "forge_fusion",
-                "source": "kernel_entry_auto",
-                # integrate's increment is against the active stack, not the
-                # session baseline the headline uses.
-                "gain_pct": incremental_gain,
-                "patch_path": patch,
-            },
-        )
-        if lifted and float(self.shared_state.baseline_tput or 0.0) > 0:
-            self._update_cumulative_gain_validated(
-                new_tput,
-                source="fusion_promote",
+            keep_pct = 3.0
+        queued = 0
+        for patch in outcome.patches:
+            record = enqueue_nominated_patch(
+                self.shared_state,
+                patch=patch,
+                keep_threshold_pct=keep_pct,
             )
+            if record is not None:
+                queued += 1
+        log.info(
+            "KERNEL entry: queued %d/%d fusion sibling(s) for SWEEP-entry integrate",
+            queued,
+            len(outcome.patches),
+        )
+        try:
+            self.shared_state.save(self.session_dir)
+        except Exception:  # noqa: BLE001 - best-effort persist; drain reloads state
+            pass
 
     def _current_tput_from_validated_gain(self) -> float:
         """Project current tput from ``baseline_tput * (1 + cumulative_gain_validated/100)``; 0.0 when baseline unknown (watermark not-yet-armed).

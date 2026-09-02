@@ -267,6 +267,120 @@ def _queue_kernel_keep(
     return queue[integration_id]
 
 
+def enqueue_nominated_patch(state, *, patch, keep_threshold_pct: float = 3.0) -> dict[str, Any] | None:
+    """Queue one self-nominated fusion sibling for the shared integrate lane.
+
+    The fusion lane used to integrate inline (apply + e2e re-baseline + KEEP)
+    right where the run finished. Under the nomination contract each kept recipe
+    is instead written here as one ``status="pending"`` record and drained by the
+    SWEEP-entry integrate loop, so the same-file collapse, cross-file
+    independence, and patch budget the rewrite/gemm lanes already get
+    (``pending_kernel_integration_records``) apply to fusion siblings too.
+
+    Three fusion-specific facts ride on the record because the generic drain and
+    writeback cannot infer them:
+
+    * ``fusion_env_flags`` -- the fused path is env-gated; unset, the patch is the
+      eager path, so ``_fill_integrate_defaults_from_state`` merges these into the
+      re-baseline server's envs or a real win is measured un-fused and REVERTED.
+    * ``keep_threshold_pct`` -- fusion keeps its own e2e bar (default 3.0%),
+      distinct from the generic integrate default, so the KEEP/REVERT verdict is
+      unchanged from the pre-contract inline path.
+    * ``action_label="fusion"`` -- the promoted stack row must read ``fusion`` (not
+      ``integrate``) or the idempotency short-circuit and the remote-recipe fusion
+      export both go blind; ``last_fusion_integrate`` is set off the same signal.
+
+    Eviction-safe: a distinct ``integration_id`` at ``status="pending"`` survives
+    ``_ensure_kernel_task_state`` (evict_terminal keeps non-terminal records; the
+    re-queue loop only ADDS). Idempotent on ``(source_file, artifact_path)``.
+
+    Args:
+        state: SharedState (mutated in place).
+        patch: A ``NominatedPatch`` (duck-typed) from ``parse_outcome``.
+        keep_threshold_pct: The fusion-specific e2e KEEP bar to carry.
+
+    Returns:
+        The queued record, or ``None`` when the patch has no artifact to apply.
+    """
+    if not isinstance(getattr(state, "pending_kernel_integrations", None), dict):
+        state.pending_kernel_integrations = {}
+    kernel_name = str(getattr(patch, "kernel_name", "") or "").strip()
+    artifact_path = str(getattr(patch, "patch_path", "") or "").strip()
+    source_file = str(getattr(patch, "target_file", "") or "").strip()
+    if not artifact_path or not source_file:
+        # Nothing to apply / no same-source key to collapse on: refusing to queue
+        # keeps a malformed sibling off the serial lane rather than dispatching a
+        # patch that can only fail the apply gate.
+        return None
+    env_flag = str(getattr(patch, "env_flag", "") or "").strip()
+    fusion_env_flags = {flag: "1" for flag in env_flag.split() if flag}
+    try:
+        micro_speedup = float(getattr(patch, "micro_speedup", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        micro_speedup = 0.0
+    queue = state.pending_kernel_integrations
+    existing_integration_id = next(
+        (
+            candidate_id
+            for candidate_id, candidate in queue.items()
+            if isinstance(candidate, dict)
+            and str(candidate.get("source_file") or "") == source_file
+            and str(candidate.get("artifact_path") or "") == artifact_path
+        ),
+        "",
+    )
+    task_key = f"forge_fusion:{kernel_name}" if kernel_name else f"forge_fusion:{source_file}"
+    integration_id = existing_integration_id or _kernel_integration_id(
+        task_key=task_key,
+        source_file=source_file,
+        artifact_path=artifact_path,
+        artifact_bundle={},
+    )
+    record = {
+        "integration_id": integration_id,
+        "task_key": task_key,
+        "task_group_key": "",
+        "identity_route": "",
+        "legacy_task_group_keys": [],
+        "kernel_id": kernel_name or "forge_fusion",
+        "source_file": source_file,
+        "artifact_path": artifact_path,
+        "artifact_bundle": {},
+        "snapshot_dir": str(getattr(patch, "snapshot_dir", "") or ""),
+        "deploy_patch_path": artifact_path,
+        "deploy_repo_root": str(getattr(patch, "kernel_repo", "") or ""),
+        "base_commit": str(getattr(patch, "base_commit", "") or ""),
+        "micro_speedup": micro_speedup,
+        "optimization_decision": "KEEP",
+        "trace_gpu_pct": 0.0,
+        "created_at": _now_iso(),
+        "status": "pending",
+        "correctness_source": "",
+        "artifact_kind": "",
+        "integration_validation_status": "",
+        "framework_applyback": {},
+        # Fusion-specific: the generic drain / writeback read these back.
+        "source": "forge_fusion",
+        "action_label": "fusion",
+        "fusion_env_flags": fusion_env_flags,
+        "keep_threshold_pct": float(keep_threshold_pct),
+    }
+    if integration_id not in queue:
+        queue[integration_id] = record
+    else:
+        # Re-enqueue of the same sibling: refresh the fusion-specific fields (the
+        # patch snapshot identity is immutable) so a re-run's env/threshold win.
+        queued = queue[integration_id]
+        if isinstance(queued, dict):
+            queued["status"] = "pending"
+            queued["micro_speedup"] = micro_speedup
+            queued["fusion_env_flags"] = fusion_env_flags
+            queued["keep_threshold_pct"] = float(keep_threshold_pct)
+            queued["source"] = "forge_fusion"
+            queued["action_label"] = "fusion"
+    return queue[integration_id]
+
+
 def _patch_budget_for(state) -> int:
     """How many sibling patches one round may land, env-overridable.
 

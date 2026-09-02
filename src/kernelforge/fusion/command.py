@@ -1091,6 +1091,9 @@ def _recipe_patch_envelope(patch: RecipePatch, *, repo_root: str) -> dict[str, A
         "snapshot_dir": patch.snapshot_dir,
         "base_commit": patch.base_commit,
         "micro_speedup": patch.micro_speedup,
+        # The env flag that activates the fused path; the consumer sets it on the
+        # re-baseline server or the patch is measured un-fused and REVERTED.
+        "env_flag": patch.env_flag,
         "kind": "fusion",
     }
 
@@ -1560,6 +1563,9 @@ def _run_fusion_autoloop(
             micro_speedup=vr.kernel_speedup,
             snapshot_dir=pristine,
             base_commit=shadow.base_commit if shadow is not None else "",
+            # The fused path is env-gated; the flag has to reach the e2e
+            # re-baseline or integrate measures the un-fused path (see RecipePatch).
+            env_flag=recipe.env_flag,
         )
 
     cfg = LoopConfig(
