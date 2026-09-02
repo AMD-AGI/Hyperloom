@@ -28,7 +28,9 @@ from hyperloom.orchestrator.actions.executors.profile import (
     PROFILE_DEFAULT_CONFIG,
     ProfileExecutor,
     _default_profile_config,
+    _preferred_main_trace_path,
     _sanitize_profile_server_args,
+    _trace_rank,
     _trace_files_for_dir,
 )
 from hyperloom.orchestrator.roles import (
@@ -2010,6 +2012,95 @@ async def test_profile_executor_extracts_trace_dir(tmp_path):
     assert len(res.result["trace_files"]) == 2
     assert res.result["main_trace_path"] == str(merged_trace)
     assert res.result["profile_trace_selection_reason"] == "merged_trace_preferred"
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_agentx_profile_executor_passes_rank_zero_not_merged(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("TP", "2")
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_agentx"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        rank_zero = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+        rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
+        merged = trace_dir / "merged-177.trace.json.gz"
+        rank_zero.write_bytes(b"rank-zero")
+        rank_one.write_bytes(b"rank-one")
+        merged.write_bytes(b"merged")
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+            "submission_valid": True,
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-agentx-rank-zero",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    trace_dir = output_dir / "benchmark_sglang_agentx" / "torch_trace"
+    assert res.result["status"] == "succeeded"
+    assert res.result["main_trace_path"] == str(trace_dir / "177-TP-0-DECODE.trace.json.gz")
+    assert res.result["primary_rank"] == 0
+    assert res.result["profile_trace_selection_reason"] == "primary_rank_trace"
+    assert res.result["merged_trace_paths"] == [str(trace_dir / "merged-177.trace.json.gz")]
+    assert sorted(res.result["rank_trace_paths"]) == ["0", "1"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_profile_executor_surfaces_failed_agentx_capture_status(tmp_path):
+    db = SqliteConnection(tmp_path / "x.db")
+    locks = ResourceLockManager(SqliteLeaseBackend(db))
+    tr = TaskRegistry(db)
+    sub = SubAgentRunner(locks, tr)
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    async def _fake_baseline(_self, _ctx):
+        workspace = output_dir / "benchmark_sglang_capture_failed"
+        trace_dir = workspace / "torch_trace"
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "rank-0.trace.json.gz").write_bytes(b"partial")
+        (workspace / "agentx_profile_capture.json").write_text(
+            json.dumps({"status": "failed", "reason": "trace_flush_failed"}),
+            encoding="utf-8",
+        )
+        return {
+            "status": "succeeded",
+            "framework": "sglang",
+            "workspace": str(workspace),
+        }
+
+    pe = ProfileExecutor(session_dir=tmp_path / "ignored_root")
+    task = await tr.create(
+        kind="profile",
+        params={"output_dir": str(output_dir), "config_path": str(PROFILE_DEFAULT_CONFIG)},
+        idempotency_key="prof-capture-failed",
+    )
+    sub.register_executor("profile", pe)
+    with patch.object(BaselineExecutor, "__call__", _fake_baseline):
+        res = await sub.run_task(task)
+
+    assert res.result["status"] == "failed"
+    assert res.result["error_class"] == "profile_capture_failed"
+    assert res.result["trace_capture_status"] == "failed"
+    assert res.result["trace_capture"]["reason"] == "trace_flush_failed"
     db.close()
 
 
@@ -4833,6 +4924,65 @@ def test_trace_files_for_dir_orders_by_size_not_name(tmp_path):
     found = _trace_files_for_dir(trace_dir)
 
     assert found == [large, small]
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "rank"),
+    [
+        ("177-TP-0-DECODE.trace.json.gz", 0),
+        ("worker-rank-3.pt.trace.json.gz", 3),
+        ("rank_5/trace.pt.trace.json.gz", 5),
+        ("merged-177.trace.json.gz", None),
+    ],
+)
+def test_trace_rank_supports_framework_naming(relative_path, rank):
+    assert _trace_rank(Path(relative_path)) == rank
+
+
+def test_agentx_primary_trace_prefers_rank_zero_over_merged(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    merged = trace_dir / "merged-177.trace.json.gz"
+    rank_zero = trace_dir / "177-TP-0-DECODE.trace.json.gz"
+    rank_one = trace_dir / "177-TP-1-DECODE.trace.json.gz"
+
+    selected = _preferred_main_trace_path(
+        trace_dir,
+        [merged, rank_one, rank_zero],
+        require_single_rank=True,
+        tensor_parallel_size=2,
+    )
+
+    assert selected == rank_zero
+
+
+def test_agentx_primary_trace_does_not_fall_back_to_multi_rank_merge(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    merged = trace_dir / "merged-177.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [merged],
+            require_single_rank=True,
+            tensor_parallel_size=8,
+        )
+        is None
+    )
+
+
+def test_agentx_tp1_can_use_single_merged_trace_as_compatibility_fallback(tmp_path):
+    trace_dir = tmp_path / "torch_trace"
+    merged = trace_dir / "merged-177.trace.json.gz"
+
+    assert (
+        _preferred_main_trace_path(
+            trace_dir,
+            [merged],
+            require_single_rank=True,
+            tensor_parallel_size=1,
+        )
+        == merged
+    )
 
 
 def test_trace_files_for_dir_survives_an_ancestor_named_trace_split(tmp_path):

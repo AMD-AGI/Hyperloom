@@ -11,6 +11,7 @@ from FRAMEWORK / AGENTX_SERVER_SCRIPT. POSIX-only (skipped elsewhere).
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -81,6 +82,38 @@ done
 exit 0
 """
 
+_FAKE_PHASE_GATE = r"""#!/usr/bin/env python3
+import os
+import sys
+import json
+
+if sys.argv[1] == "pick-port":
+    print("19090")
+    raise SystemExit(0)
+if sys.argv[1] == "wait-phase":
+    if os.environ.get("FAKE_PHASE_GATE_FAIL") == "1":
+        print("fake phase gate failure", file=sys.stderr)
+        raise SystemExit(1)
+    print("123456789")
+    raise SystemExit(0)
+if sys.argv[1] == "wait-capture-stop":
+    print('{"stop_reason":"request_coverage","requests_completed_delta":2}')
+    raise SystemExit(0)
+if sys.argv[1] == "write-capture-status":
+    def value(name):
+        return sys.argv[sys.argv.index(name) + 1]
+    with open(value("--output"), "w", encoding="utf-8") as handle:
+        json.dump(
+            {
+                "status": value("--status"),
+                "reason": value("--reason"),
+            },
+            handle,
+        )
+    raise SystemExit(0)
+raise SystemExit(2)
+"""
+
 _FAKE_FUSER = "#!/usr/bin/env bash\nexit 0\n"
 
 
@@ -93,6 +126,7 @@ def _sandbox(tmp_path, *, write_pid=True, make_builtin=True):
     res.mkdir()
     shutil.copy2(agentx_asset_dir() / "aiperf_client.sh", bench / "aiperf_client.sh")
     shutil.copy2(agentx_asset_dir() / "map_aiperf.py", bench / "map_aiperf.py")
+    (bench / "aiperf_phase_gate.py").write_text(_FAKE_PHASE_GATE, encoding="utf-8")
     if make_builtin:
         _write_exec(bench / "vllm_mi300x.sh", _fake_builtin(write_pid))
     _write_exec(bind / "aiperf", _FAKE_AIPERF)
@@ -490,7 +524,6 @@ def _run_profile(bench, bind, res, tmp_path, **extra_env):
         res,
         tmp_path,
         PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="1",
         AGENTX_PROFILE_WINDOW_S="0",
         FAKE_AIPERF_SLEEP="6",
         AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
@@ -527,52 +560,40 @@ def test_profile_posts_bare_when_there_are_no_bounds(tmp_path, env):
     assert "-d" not in argv
 
 
-def test_profile_delay_safe_bound_accounts_for_warmup_grace(tmp_path):
-    """The `_pmax` clamp must not treat DURATION as the whole round's clock.
-
-    A large model's warmup drain is bounded by WARMGRACE, not DURATION, and
-    happens *before* the measurement window opens. With WARMGRACE=65,
-    DURATION=5, PWIN=0: the old DURATION-only bound (5 - 0 - 60 = -55, clamped
-    to 0) would force *any* positive PWARM to clamp to 0 and fire immediately
-    -- squarely inside warmup. The WARMGRACE-inclusive bound (65 + 5 - 0 - 60
-    = 10) correctly leaves room for a delay that clears the drain first.
-    """
+def test_profile_enables_the_aiperf_progress_api(tmp_path):
     bench, bind, res = _sandbox(tmp_path)
-    r = _run(
+    r = _run_profile(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    argv = _aiperf_args(res).splitlines()
+    assert argv[argv.index("--api-host") + 1] == "127.0.0.1"
+    assert argv[argv.index("--api-port") + 1] == "19090"
+    assert "AIPerf measured phase started" in (r.stdout + r.stderr)
+    assert '"stop_reason":"request_coverage"' in (r.stdout + r.stderr)
+
+
+def test_legacy_profile_warmup_delay_is_ignored(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run_profile(bench, bind, res, tmp_path, AGENTX_PROFILE_WARMUP_S="not-a-duration")
+    assert r.returncode == 0, r.stderr
+    assert "AGENTX_PROFILE_WARMUP_S is ignored" in (r.stdout + r.stderr)
+
+
+def test_phase_gate_failure_keeps_measurement_but_skips_capture(tmp_path):
+    bench, bind, res = _sandbox(tmp_path)
+    marker = tmp_path / "curl.txt"
+    r = _run_profile(
         bench,
         bind,
         res,
         tmp_path,
-        PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="8",
-        AGENTX_PROFILE_WINDOW_S="0",
-        AGENTX_DURATION="5",
-        AGENTX_WARMUP_GRACE_PERIOD="65",
-        FAKE_AIPERF_SLEEP="0.2",
-        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
+        FAKE_PHASE_GATE_FAIL="1",
     )
     assert r.returncode == 0, r.stderr
-    assert "clamping to" not in (r.stdout + r.stderr)
-
-
-def test_profile_delay_is_still_clamped_when_it_exceeds_the_full_bound(tmp_path):
-    """A PWARM that exceeds even WARMGRACE + DURATION is still clamped early."""
-    bench, bind, res = _sandbox(tmp_path)
-    r = _run(
-        bench,
-        bind,
-        res,
-        tmp_path,
-        PROFILE="1",
-        AGENTX_PROFILE_WARMUP_S="30",
-        AGENTX_PROFILE_WINDOW_S="0",
-        AGENTX_DURATION="5",
-        AGENTX_WARMUP_GRACE_PERIOD="65",
-        FAKE_AIPERF_SLEEP="0.2",
-        AGENTX_CURL_MARKER=str(tmp_path / "curl.txt"),
-    )
-    assert r.returncode == 0, r.stderr
-    assert "clamping to 10s" in (r.stdout + r.stderr)
+    assert (res / "inferencex_result.json").exists()
+    assert not marker.exists()
+    assert "without trace capture" in (r.stdout + r.stderr)
+    capture = json.loads((res / "agentx_profile_capture.json").read_text())
+    assert capture == {"status": "failed", "reason": "profiling_phase_unavailable"}
 
 
 def test_agentx_server_script_override_without_framework(tmp_path):
@@ -964,8 +985,6 @@ def test_a_framework_script_disagreement_is_said_out_loud(tmp_path):
     "knob,value",
     [
         ("AGENTX_PROFILE_WINDOW_S", "20.5"),
-        ("AGENTX_PROFILE_WARMUP_S", "2700s"),
-        ("AGENTX_PROFILE_WARMUP_S", "abc"),
         ("AGENTX_DURATION", "3600.0"),
     ],
 )

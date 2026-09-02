@@ -17,7 +17,10 @@ Result schema (delivered on the bus as ``delegated_result``)::
     trace_dir:     absolute path of the torch_trace dir (or None)
     trace_files:   absolute paths of the selected trace files
     main_trace_path: absolute path of the chosen main trace
+    primary_rank / rank_trace_paths / merged_trace_paths: trace topology
     trace_health:  structure-check dict (see _validate_trace_structure)
+    trace_capture_status: AgentX capture lifecycle status, when available
+    trace_capture: full AgentX capture status sidecar payload
     profile_trace_selection_reason: why that main trace was picked
     report_path:   absolute path of benchmark_report.json
     error_class / error: set on the failure path (e.g. "no_trace_files")
@@ -30,8 +33,10 @@ SharedState promotion works unchanged.
 from __future__ import annotations
 
 import gzip
+import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -496,20 +501,69 @@ def _capture_sidecar_traces_for_dir(trace_dir: Path) -> list[Path]:
     return sorted(p for p in trace_dir.rglob("*.json.gz") if _is_capture_trace(p, trace_dir))
 
 
-def _preferred_main_trace_path(trace_dir: Path, trace_files: list[Path]) -> Path:
+_TRACE_RANK_RE = re.compile(
+    r"(?:^|[-_.])(?:tp|rank)[-_](\d+)(?=[-_.]|$)",
+    re.IGNORECASE,
+)
+
+
+def _trace_rank(path: Path) -> int | None:
+    """Return the rank encoded in a framework trace path, when present."""
+    for part in reversed(path.parts):
+        match = _TRACE_RANK_RE.search(part)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def _record_trace_topology(result: dict[str, Any], trace_files: list[Path]) -> None:
+    """Attach per-rank and merged trace paths to a profile result."""
+    rank_paths: dict[str, list[str]] = {}
+    for path in trace_files:
+        rank = _trace_rank(path)
+        if rank is not None:
+            rank_paths.setdefault(str(rank), []).append(str(path))
+    result["rank_trace_paths"] = rank_paths
+    result["merged_trace_paths"] = [str(path) for path in trace_files if path.name.startswith("merged-")]
+
+
+def _preferred_main_trace_path(
+    trace_dir: Path,
+    trace_files: list[Path],
+    *,
+    require_single_rank: bool = False,
+    preferred_rank: int = 0,
+    tensor_parallel_size: int | None = None,
+) -> Path | None:
     """Trace path to pass downstream to TraceLens.
 
-    Prefer the ``merged-*`` trace (the large annotated trace the splitter
-    wants); otherwise pass the trace dir so kernel-agent picks its own order
-    rather than pinning a tiny single-rank slice.
+    AgentX inference splitting requires one rank timeline, so its path selects
+    the largest raw trace for ``preferred_rank`` and never silently substitutes
+    a multi-rank merge. Other workloads retain the existing merged/directory
+    behavior.
 
     Args:
         trace_dir: The trace directory, returned as the fallback path.
         trace_files: Candidate trace files discovered under ``trace_dir``.
 
     Returns:
-        The preferred ``merged-*`` trace path, else ``trace_dir`` itself.
+        The selected trace path, ``trace_dir`` for the legacy directory path,
+        or ``None`` when AgentX requires a rank trace that is unavailable.
     """
+    if require_single_rank:
+        preferred = [path for path in trace_files if _trace_rank(path) == preferred_rank]
+        if preferred:
+            return preferred[0]
+
+        non_merged = [path for path in trace_files if not path.name.startswith("merged-")]
+        if tensor_parallel_size == 1 and len(non_merged) == 1:
+            return non_merged[0]
+        if tensor_parallel_size == 1 and not non_merged:
+            merged = [path for path in trace_files if path.name.startswith("merged-")]
+            if len(merged) == 1:
+                return merged[0]
+        return None
+
     merged = sorted(p for p in trace_files if p.name.startswith("merged-"))
     return merged[0] if merged else trace_dir
 
@@ -1089,6 +1143,32 @@ class ProfileExecutor(BaselineExecutor):
         # Augment with trace_dir. Multi-node: traces live at the round-scoped
         # wekafs dir we restarted with. Single-node uses workspace/torch_trace.
         workspace_str = result.get("workspace")
+        capture_status: dict[str, Any] | None = None
+        if workspace_str:
+            capture_status_path = Path(workspace_str) / "agentx_profile_capture.json"
+            if capture_status_path.is_file():
+                try:
+                    parsed_capture_status = json.loads(capture_status_path.read_text(encoding="utf-8"))
+                    if isinstance(parsed_capture_status, dict):
+                        capture_status = parsed_capture_status
+                        result["trace_capture_status"] = str(parsed_capture_status.get("status") or "")
+                        result["trace_capture"] = parsed_capture_status
+                        result["trace_capture_status_path"] = str(capture_status_path)
+                except (OSError, ValueError, TypeError) as exc:
+                    capture_status = {
+                        "status": "failed",
+                        "reason": "capture_status_unreadable",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    result["trace_capture_status"] = "failed"
+                    result["trace_capture"] = capture_status
+        from ._workload_envs import agentx_enabled
+
+        agentx_profile = capture_status is not None or "submission_valid" in result or agentx_enabled()
+        try:
+            tensor_parallel_size = int(os.environ.get("TP") or 0) or None
+        except (TypeError, ValueError):
+            tensor_parallel_size = None
         if round_trace_root:
             # Multi-node: traces land at the shared wekafs base dir (not the
             # workspace-local ``_candidate_trace_dirs``). Mtime-gate to files
@@ -1099,11 +1179,8 @@ class ProfileExecutor(BaselineExecutor):
                 trace_files = [p for p in all_files if safe_mtime(p) >= task_started_unix]
                 result["trace_dir"] = str(trace_dir)
                 result["trace_files"] = [str(p) for p in trace_files]
+                _record_trace_topology(result, trace_files)
                 if trace_files:
-                    # Multi-node only: the shared round dir can hold more than
-                    # one profiling batch (a CPU-only warmup capture plus the
-                    # real GPU-rich one). GPU-rich traces are far larger, so
-                    # select the LARGEST file as the main trace.
                     def _safe_size(p: Path) -> int:
                         """Return ``p``'s size in bytes, or 0 on stat() failure.
 
@@ -1119,13 +1196,26 @@ class ProfileExecutor(BaselineExecutor):
                         except OSError:
                             return 0
 
-                    main_trace = max(trace_files, key=_safe_size)
-                    result["main_trace_path"] = str(main_trace)
+                    if agentx_profile:
+                        main_trace = _preferred_main_trace_path(
+                            trace_dir,
+                            trace_files,
+                            require_single_rank=True,
+                            tensor_parallel_size=tensor_parallel_size,
+                        )
+                        if main_trace is not None:
+                            result["main_trace_path"] = str(main_trace)
+                            result["primary_rank"] = _trace_rank(main_trace)
+                            result["profile_trace_selection_reason"] = "primary_rank_trace"
+                    else:
+                        # The shared round dir can contain a small warmup
+                        # capture beside the real GPU-rich trace.
+                        main_trace = max(trace_files, key=_safe_size)
+                        result["main_trace_path"] = str(main_trace)
                     log.info(
-                        "profile_executor: multi-node main trace selected by "
-                        "size: %s (%d bytes; %d candidate traces this round)",
-                        main_trace.name,
-                        _safe_size(main_trace),
+                        "profile_executor: multi-node main trace selected: %s "
+                        "(%d candidate traces this round)",
+                        main_trace.name if main_trace is not None else "<none>",
                         len(trace_files),
                     )
                 elif all_files:
@@ -1189,6 +1279,7 @@ class ProfileExecutor(BaselineExecutor):
             if selected_trace_dir is not None:
                 result["trace_dir"] = str(selected_trace_dir)
                 result["trace_files"] = [str(p) for p in selected_trace_files]
+                _record_trace_topology(result, selected_trace_files)
                 if capture_only:
                     # Pass the dir so TraceLens picks its own ingest order over
                     # the capture sidecars (it accepts *.json.gz).
@@ -1204,11 +1295,21 @@ class ProfileExecutor(BaselineExecutor):
                     main_trace = _preferred_main_trace_path(
                         selected_trace_dir,
                         selected_trace_files,
+                        require_single_rank=agentx_profile,
+                        tensor_parallel_size=tensor_parallel_size,
                     )
-                    result["profile_trace_selection_reason"] = (
-                        "merged_trace_preferred" if main_trace.name.startswith("merged-") else "trace_dir_preferred"
-                    )
-                result["main_trace_path"] = str(main_trace)
+                    if main_trace is not None:
+                        if agentx_profile:
+                            result["primary_rank"] = _trace_rank(main_trace)
+                            result["profile_trace_selection_reason"] = "primary_rank_trace"
+                        else:
+                            result["profile_trace_selection_reason"] = (
+                                "merged_trace_preferred"
+                                if main_trace.name.startswith("merged-")
+                                else "trace_dir_preferred"
+                            )
+                if main_trace is not None:
+                    result["main_trace_path"] = str(main_trace)
                 # Warn if the trace shape suggests PROFILE_EXTRA_BODY leaked /
                 # shape-discovery missing. Read-only; never blocks.
                 try:
@@ -1244,6 +1345,24 @@ class ProfileExecutor(BaselineExecutor):
                         workspace_str,
                         ", ".join(str(p) for p in _candidate_trace_dirs(workspace)),
                     )
+        if result.get("main_trace_path"):
+            result["trace_input_ready"] = True
+        if capture_status is not None and str(capture_status.get("status") or "") != "succeeded":
+            result["trace_input_ready"] = False
+            result["status"] = "failed"
+            result["error_class"] = "profile_capture_failed"
+            result["error"] = (
+                "AgentX trace capture failed: "
+                f"{capture_status.get('reason') or 'unknown capture failure'}"
+            )
+        elif agentx_profile and result.get("trace_files") and not result.get("main_trace_path"):
+            result["trace_input_ready"] = False
+            result["status"] = "failed"
+            result["error_class"] = "primary_rank_trace_missing"
+            result["error"] = (
+                "AgentX profiling produced trace files but no rank-0 raw trace "
+                "could be identified; refusing a merged multi-rank fallback"
+            )
         return result
 
 

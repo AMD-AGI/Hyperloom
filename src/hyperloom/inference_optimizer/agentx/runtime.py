@@ -20,7 +20,7 @@ import yaml
 # aiperf capability preflight is memoized per resolved binary: the probe shells
 # out with a timeout and its result cannot change within a run, so a multi-point
 # grid must not re-probe every round.
-_PREFLIGHTED_BINS: set[str] = set()
+_PREFLIGHTED_BINS: set[tuple[str, bool]] = set()
 
 
 def maybe_prepare_agentx(
@@ -63,7 +63,17 @@ def maybe_prepare_agentx(
     # memoization state.
     deploy_agentx_assets(Path(inferencex_path) / "benchmarks")
     aiperf_bin = resolve_aiperf_bin(env)
-    if aiperf_bin not in _PREFLIGHTED_BINS:
-        check_aiperf_capability(aiperf_bin)  # raises if missing/incapable
-        _PREFLIGHTED_BINS.add(aiperf_bin or "")
+    bench_envs = bench.get("envs") if isinstance(bench.get("envs"), dict) else {}
+    profiler = bench.get("profiler") if isinstance(bench.get("profiler"), dict) else {}
+    torch_profiler = (
+        profiler.get("torch_profiler") if isinstance(profiler.get("torch_profiler"), dict) else {}
+    )
+    require_progress_api = str(bench_envs.get("PROFILE") or "") == "1" or bool(torch_profiler.get("enabled"))
+    preflight_key = (aiperf_bin or "", require_progress_api)
+    if preflight_key not in _PREFLIGHTED_BINS:
+        check_aiperf_capability(
+            aiperf_bin,
+            require_progress_api=require_progress_api,
+        )  # raises if missing/incapable
+        _PREFLIGHTED_BINS.add(preflight_key)
     return True

@@ -114,6 +114,7 @@ def _default_loader_probe(aiperf_bin: str) -> Optional[list[str]]:
 def check_aiperf_capability(
     aiperf_bin: Optional[str],
     *,
+    require_progress_api: bool = False,
     probe: Optional[Callable[[str], str]] = None,
     loader_probe: "Optional[Callable[[str], Optional[list[str]]]]" = None,
     env: Optional[Mapping[str, str]] = None,
@@ -141,6 +142,8 @@ def check_aiperf_capability(
 
     Args:
         aiperf_bin: Resolved aiperf path (None/empty means "not found").
+        require_progress_api: Require the local phase-progress API used by
+            AgentX trace capture.
         probe: Injectable help-text probe, used for the fallback path.
         loader_probe: Injectable allowlist probe; returns the scenario's
             permitted loaders, or None when they cannot be determined.
@@ -152,6 +155,28 @@ def check_aiperf_capability(
             "HYPERLOOM_AGENTX is on but aiperf was not found. Install the pinned "
             "SemiAnalysisAI/aiperf build via install.sh (AIPERF_REF), or set "
             "AIPERF_BIN to an aiperf with AgentX (weka-trace) support."
+        )
+
+    probe = probe or _default_probe
+    try:
+        help_text = probe(aiperf_bin)
+    except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
+        raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
+    scenario_flags = [
+        flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")
+    ]
+    if scenario_flags:
+        raise AgentXPreflightError(
+            f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
+            f"{', '.join(scenario_flags)}); install the pinned SemiAnalysisAI/aiperf "
+            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
+        )
+    api_flags = [flag for flag in ("--api-host", "--api-port") if flag not in (help_text or "")]
+    if require_progress_api and api_flags:
+        raise AgentXPreflightError(
+            f"aiperf at {aiperf_bin!r} cannot expose phase progress "
+            f"(missing: {', '.join(api_flags)}); install the pinned "
+            "SemiAnalysisAI/aiperf build via install.sh."
         )
 
     runtime_env = os.environ if env is None else env
@@ -208,15 +233,3 @@ def check_aiperf_capability(
         + ".",
         file=sys.stderr,
     )
-    probe = probe or _default_probe
-    try:
-        help_text = probe(aiperf_bin)
-    except Exception as exc:  # noqa: BLE001 — surface as a structured preflight error
-        raise AgentXPreflightError(f"aiperf capability probe failed for {aiperf_bin!r}: {exc}") from exc
-    missing = [flag for flag in ("weka-trace", "--scenario", "--benchmark-duration") if flag not in (help_text or "")]
-    if missing:
-        raise AgentXPreflightError(
-            f"aiperf at {aiperf_bin!r} is not AgentX-capable (missing: "
-            f"{', '.join(missing)}); install the pinned SemiAnalysisAI/aiperf "
-            "build via install.sh (AIPERF_REF) or point AIPERF_BIN at one."
-        )

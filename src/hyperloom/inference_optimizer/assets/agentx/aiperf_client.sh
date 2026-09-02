@@ -14,7 +14,7 @@
 # result schema. On single node the client owns profiling: InferenceX's
 # benchmark_serving.py self-triggers /start_profile, and aiperf does not, so
 # when PROFILE=1 this script self-brackets a /start_profile..stop_profile window
-# around aiperf's steady state (see the PROFILE branch below).
+# after AIPerf reports the measured phase through its progress API.
 #
 # Inputs (from Magpie env): MODEL, TP, PORT, MAX_MODEL_LEN, CONC, RESULT_DIR,
 #   RESULT_FILENAME, PROFILE, EXTRA_VLLM_ARGS, FRAMEWORK, GPU_TYPE/RUNNER_TYPE.
@@ -46,7 +46,7 @@
 #     where NO trace file appears at all -- a failed capture, not a slow one;
 #     default 900, clamped to AGENTX_TRACE_FLUSH_TIMEOUT_S. The first rank file
 #     landed at t+350s on that same GLM-5.3 capture),
-#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
+#   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
 
@@ -469,6 +469,7 @@ log "aiperf model=${SERVE_MODEL} corpus=${DS} entries=${NENT} conc=${CONC} durat
 #   --model              upstream uses ${SERVED_MODEL_NAME:-$MODEL}; the probed
 #                        /v1/models id is more robust when a server is reused.
 #   --max-context-length omitted (see the replay-context note above).
+AIPERF_API_ARGS=()
 run_aiperf() {
   "$AIPERF" profile \
     --scenario inferencex-agentx-mvp \
@@ -493,6 +494,7 @@ run_aiperf() {
     --no-gpu-telemetry \
     ${CTX_ARGS[@]+"${CTX_ARGS[@]}"} \
     ${SMOKE_ARGS[@]+"${SMOKE_ARGS[@]}"} \
+    ${AIPERF_API_ARGS[@]+"${AIPERF_API_ARGS[@]}"} \
     --artifact-dir "$ART" --ui simple
 }
 
@@ -500,50 +502,45 @@ AIPERF_RC=0
 if [ "${PROFILE:-0}" = "1" ]; then
   # Single-node trace capture: aiperf (a generic client) never triggers vLLM's
   # /start_profile the way InferenceX's benchmark_serving.py does, so this script
-  # self-brackets a wall-clock profiling window around aiperf's steady state.
+  # self-brackets a bounded profiling window inside aiperf's measured phase.
   # The profiler is already ENABLED on the server (builtin server phase adds the
   # framework's --profiler-config/env when PROFILE=1); /start_profile begins
   # recording and /stop_profile flushes the trace to torch_profiler_dir for
   # TraceLens. Only fires under PROFILE=1, so measurement rounds pay no cost.
-  # Wall-clock delay measured from aiperf launch, so it has to clear everything
-  # that happens before steady state: corpus load/reconstruct (0 on an mmap cache
-  # hit, minutes on a miss), the per-lane cache warmup, and the warmup drain.
-  # 60s used to be enough when the client replayed a handful of short traces; at
-  # the upstream profile it lands squarely inside setup and captures nothing.
-  PWARM="${AGENTX_PROFILE_WARMUP_S:-2700}"
   PWIN="${AGENTX_PROFILE_WINDOW_S:-20}"
-  # Both reach `$(( ))` and `[ -gt ]` below, and neither construct fails the way
-  # you want under `set -euo pipefail`. A non-integer inside `$(( ))` aborts the
-  # whole round (so AGENTX_PROFILE_WINDOW_S="20.5" kills a run that was minutes
-  # from its measurement window); a non-integer in `[ -gt ]` makes test exit 2,
-  # which `set -e` exempts because it is an `if` condition, so the clamp silently
-  # does not fire and the capture lands after the round ended -- no trace, and
-  # the "exceeds the safe bound" line never printed. Those are exactly the two
-  # failure modes the comment above describes, so validate before either runs.
-  _require_uint AGENTX_PROFILE_WARMUP_S "$PWARM"
   _require_uint AGENTX_PROFILE_WINDOW_S "$PWIN"
-  # The delay is a blind wall clock: it does not know which phase aiperf is in,
-  # and the two ways to get it wrong are NOT symmetric. Opening late is fatal --
-  # aiperf exits, the branch below only logs a warning, and the round produces no
-  # trace at all. Opening early merely captures a still-loaded system slightly
-  # before steady state, which TraceLens can still use. Measured: a 743B model
-  # spends ~2.5h in the agentic warmup, so a delay tuned on a 35B round lands
-  # either mid-warmup or past the end depending on which way the estimate erred.
-  #
-  # So clamp toward "early". The round cannot outlast the warmup drain plus the
-  # measurement window that follows it -- WARMGRACE bounds the former, DURATION
-  # the latter -- so cap the delay at WARMGRACE + DURATION - PWIN - margin and
-  # say when the cap bites. Omitting WARMGRACE would treat DURATION as if it
-  # were the whole round's clock instead of just the measurement phase, and
-  # clamp an operator-tuned PWARM (e.g. ~2.5h for a 743B model's warmup) down to
-  # a fraction of that -- forcing the capture to fire mid-warmup, the exact
-  # failure this self-bracketing exists to avoid. A capture inside warmup is a
-  # usable trace; a capture that never happens is not.
-  _pmax=$(( WARMGRACE + DURATION - PWIN - 60 ))
-  [ "$_pmax" -lt 0 ] && _pmax=0
-  if [ "$PWARM" -gt "$_pmax" ]; then
-    log "WARN profile delay ${PWARM}s exceeds the safe bound for a ${DURATION}s window; clamping to ${_pmax}s so the capture cannot land after the round ends"
-    PWARM="$_pmax"
+  PHASE_GATE="${BENCH_DIR}/aiperf_phase_gate.py"
+  PHASE_WAIT_TIMEOUT=$(( WARMGRACE + DURATION ))
+  CAPTURE_STATUS_FILE="${RESULT_DIR}/agentx_profile_capture.json"
+  rm -f "$CAPTURE_STATUS_FILE"
+  AIPERF_API_PORT=""
+  _write_profile_capture_status() {
+    _status="$1"
+    _reason="$2"
+    _phase_start_ns="${3:-0}"
+    _decision="${4:-}"
+    if [ -f "$PHASE_GATE" ]; then
+      python3 "$PHASE_GATE" write-capture-status \
+        --output "$CAPTURE_STATUS_FILE" \
+        --status "$_status" \
+        --reason "$_reason" \
+        --phase-start-ns "$_phase_start_ns" \
+        --requested-window-seconds "$PWIN" \
+        --decision-json "$_decision" \
+        || log "WARN failed to write trace-capture status"
+    fi
+  }
+  if [ -n "${AGENTX_PROFILE_WARMUP_S:-}" ]; then
+    log "WARN AGENTX_PROFILE_WARMUP_S is ignored: profiling now starts from AIPerf's measured-phase signal"
+  fi
+  if [ -f "$PHASE_GATE" ]; then
+    if AIPERF_API_PORT="$(python3 "$PHASE_GATE" pick-port)"; then
+      AIPERF_API_ARGS=(--api-host 127.0.0.1 --api-port "$AIPERF_API_PORT")
+    else
+      log "WARN failed to allocate an AIPerf progress API port; the measurement will run without trace capture"
+    fi
+  else
+    log "WARN missing AIPerf phase gate ${PHASE_GATE}; the measurement will run without trace capture"
   fi
   # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
   # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the
@@ -584,7 +581,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     # that no profiler was configured to write.
     if [ -z "$(_trace_dirs)" ]; then
       log "no profiler output directory is configured; nothing to wait for"
-      return 0
+      return 2
     fi
     _want="${TP:-0}"
     case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
@@ -610,7 +607,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
       fi
       if [ "$_cnt" -eq 0 ] && [ "$_el" -ge "$_first" ]; then
         log "WARN no trace file appeared within ${_first}s of stop_profile; treating the capture as empty. Check that /start_profile was accepted and that the profiler output dir is writable. Not treating this as a round failure -- the measurement itself is unaffected."
-        return 0
+        return 3
       fi
       # Three identical samples AND, when TP is known, one file per rank. The
       # count check matters: ranks appear one at a time, so a set that is merely
@@ -621,15 +618,22 @@ if [ "${PROFILE:-0}" = "1" ]; then
       fi
       if [ "$_el" -ge "$_budget" ]; then
         log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. Not treating this as a round failure -- the measurement itself is unaffected."
-        return 0
+        return 4
       fi
       _prev="$_now"
     done
   }
-  log "PROFILE=1: self-bracketing profile window (delay=${PWARM}s window=${PWIN}s)"
+  log "PROFILE=1: waiting for AIPerf's measured phase before opening a ${PWIN}s profile window"
   run_aiperf & APID=$!
-  sleep "$PWARM"
-  if kill -0 "$APID" 2>/dev/null; then
+  PHASE_START_NS=""
+  if [ -n "$AIPERF_API_PORT" ] && PHASE_START_NS="$(
+    python3 "$PHASE_GATE" wait-phase \
+      --api-url "http://127.0.0.1:${AIPERF_API_PORT}" \
+      --phase profiling \
+      --pid "$APID" \
+      --timeout-seconds "$PHASE_WAIT_TIMEOUT"
+  )"; then
+    log "AIPerf measured phase started (start_ns=${PHASE_START_NS})"
     # SGLang takes its capture bounds in the /start_profile BODY, not on the
     # serve line. Hyperloom computes them into $PROFILE_EXTRA_BODY, but only
     # InferenceX's own client ever posted it -- a bare POST leaves the capture
@@ -646,15 +650,38 @@ if [ "${PROFILE:-0}" = "1" ]; then
     if curl -sf -X POST "${_pstart[@]+"${_pstart[@]}"}" \
          "http://localhost:${PORT}/start_profile" >/dev/null 2>&1; then
       log "start_profile OK"
+      CAPTURE_RESULT="$(
+        python3 "$PHASE_GATE" wait-capture-stop \
+          --api-url "http://127.0.0.1:${AIPERF_API_PORT}" \
+          --phase profiling \
+          --pid "$APID" \
+          --max-window-seconds "$PWIN" \
+          --target-completed-requests "$CONC"
+      )"
+      log "profile capture stop decision: ${CAPTURE_RESULT}"
+      STOP_OK=0
+      if curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1; then
+        STOP_OK=1
+        log "stop_profile OK"
+      else
+        log "WARN stop_profile failed"
+      fi
+      FLUSH_RC=0
+      _wait_for_trace_flush || FLUSH_RC=$?
+      if [ "$STOP_OK" -eq 1 ] && [ "$FLUSH_RC" -eq 0 ]; then
+        _write_profile_capture_status "succeeded" "capture_complete" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      elif [ "$STOP_OK" -ne 1 ]; then
+        _write_profile_capture_status "failed" "stop_profile_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      else
+        _write_profile_capture_status "failed" "trace_flush_failed" "$PHASE_START_NS" "$CAPTURE_RESULT"
+      fi
     else
       log "WARN start_profile failed (trace may be empty)"
+      _write_profile_capture_status "failed" "start_profile_failed" "$PHASE_START_NS"
     fi
-    sleep "$PWIN"
-    curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1 \
-      && log "stop_profile OK" || log "WARN stop_profile failed"
-    _wait_for_trace_flush
   else
-    log "WARN aiperf finished before profile window opened; raise AGENTX_NUM_ENTRIES or lower AGENTX_PROFILE_WARMUP_S"
+    log "WARN AIPerf did not expose a measured phase; the measurement will finish without trace capture"
+    _write_profile_capture_status "failed" "profiling_phase_unavailable"
   fi
   wait "$APID" || AIPERF_RC=$?
 else

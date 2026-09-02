@@ -418,6 +418,15 @@ def test_extract_trace_path_falls_back_to_first_trace_file():
     assert _extract_trace_path(r) == "/first.gz"
 
 
+def test_extract_trace_path_refuses_explicitly_unready_trace():
+    r = {
+        "trace_input_ready": False,
+        "main_trace_path": "/merged.gz",
+        "trace_files": ["/merged.gz"],
+    }
+    assert _extract_trace_path(r) == ""
+
+
 def test_extract_trace_path_empty_when_both_missing():
     assert _extract_trace_path({}) == ""
     assert _extract_trace_path({"trace_files": []}) == ""

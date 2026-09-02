@@ -208,7 +208,7 @@ def _extract_steady_state_retry_mode(
 
 def _extract_trace_path(profile_result: dict[str, Any]) -> str:
     """Pick the trace path like Coordinator's ``_promote_to_shared_state``:
-    prefer ``main_trace_path`` (merged), else ``trace_files[0]``.
+    prefer ``main_trace_path``, else ``trace_files[0]`` for legacy results.
 
     Args:
         profile_result: The profile sub-step result to read the trace from.
@@ -217,6 +217,8 @@ def _extract_trace_path(profile_result: dict[str, Any]) -> str:
         The resolved trace path, or an empty string if none is present.
     """
     if not isinstance(profile_result, dict):
+        return ""
+    if profile_result.get("trace_input_ready") is False:
         return ""
     direct = profile_result.get("main_trace_path")
     if direct:

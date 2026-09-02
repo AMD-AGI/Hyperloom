@@ -3592,7 +3592,11 @@ class WritebackCollaborator:
                 "output_throughput": result.get("output_throughput"),
             }
         # Surface the trace path so Orch passes a real path to trace_analyze.
-        trace_path = result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        trace_path = (
+            None
+            if result.get("trace_input_ready") is False
+            else result.get("main_trace_path") or (result.get("trace_files") or [None])[0]
+        )
         profile_status = str(result.get("status") or "")
         if profile_status == "failed" or result.get("error_class") == "no_trace_files":
             self.shared_state.last_profile_status = "failed"

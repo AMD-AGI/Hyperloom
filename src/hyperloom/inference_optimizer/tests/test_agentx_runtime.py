@@ -67,6 +67,30 @@ def test_preflight_memoized_per_bin(tmp_path, monkeypatch):
     assert n["p"] == 1  # second call reuses the memoized capability result
 
 
+def test_profile_config_requires_progress_api(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(_DEPLOY, lambda d: None)
+    monkeypatch.setattr(_RESOLVE, lambda env: "/b/aiperf")
+    monkeypatch.setattr(_CHECK, lambda b, **k: seen.append(k))
+    cfg = tmp_path / "profile.yaml"
+    cfg.write_text(
+        yaml.safe_dump(
+            {
+                "benchmark": {
+                    "framework": "vllm",
+                    "benchmark_script": "aiperf_client.sh",
+                    "envs": {"PROFILE": "1"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    runtime.maybe_prepare_agentx(env={}, inferencex_path=str(tmp_path), config_path=cfg)
+
+    assert seen == [{"require_progress_api": True}]
+
+
 def test_incapable_bin_not_memoized(tmp_path, monkeypatch):
     n = {"p": 0}
 
