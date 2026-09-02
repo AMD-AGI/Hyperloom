@@ -116,3 +116,14 @@ def test_non_object_request_is_refused(tmp_path: Path) -> None:
     path.write_text("[]", encoding="utf-8")
     with pytest.raises(nr.NominationRequestError, match="must be a JSON object"):
         nr.read_request(path)
+
+
+def test_an_unknown_request_field_is_refused(inputs: dict[str, str], tmp_path: Path) -> None:
+    """An extra field the reader does not understand is a version skew, not a
+    field to swallow silently (defect 5)."""
+    path = nr.write_request(tmp_path, _build(inputs))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["gpu_capability_hint"] = "gfx950"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(nr.NominationRequestError, match="unknown nomination request field"):
+        nr.read_request(path)

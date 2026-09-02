@@ -13,7 +13,7 @@ is the only thing both sides must agree on before reading anything else.
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +50,12 @@ class NominationRequest:
     def to_dict(self) -> dict[str, Any]:
         """Serialize every field, including the protocol version the reader gates on."""
         return asdict(self)
+
+
+#: The complete set of keys a serialized request may carry -- exactly the
+#: dataclass fields. A key outside this set is a field the producer wrote but no
+#: reader understands; swallowing it hides a version skew, so it stops the run.
+_KNOWN_REQUEST_KEYS = frozenset(f.name for f in fields(NominationRequest))
 
 
 def build_request(
@@ -138,7 +144,8 @@ def read_request(path: Path) -> NominationRequest:
         The parsed request.
 
     Raises:
-        NominationRequestError: On unreadable JSON or an unknown protocol version.
+        NominationRequestError: On unreadable JSON, an unknown protocol version,
+            or an unknown request field.
     """
     try:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -146,6 +153,9 @@ def read_request(path: Path) -> NominationRequest:
         raise NominationRequestError(f"could not read nomination request {path}: {error}") from error
     if not isinstance(payload, dict):
         raise NominationRequestError(f"nomination request must be a JSON object: {path}")
+    unknown = set(payload) - _KNOWN_REQUEST_KEYS
+    if unknown:
+        raise NominationRequestError(f"unknown nomination request field(s): {sorted(unknown)}")
     version = payload.get("protocol_version")
     if version != PROTOCOL_VERSION:
         raise NominationRequestError(

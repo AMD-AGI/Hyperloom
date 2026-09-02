@@ -77,6 +77,14 @@ def test_non_positive_scalars_are_refused(tmp_path: Path, field_name: str) -> No
         nom.read_request(path)
 
 
+def test_an_unknown_request_field_is_refused(tmp_path: Path) -> None:
+    """A field Hyperloom writes that this build does not read must not be
+    swallowed: silently dropping it hides a version skew (defect 5)."""
+    path = _write(tmp_path / "req.json", _request_payload(gpu_capability_hint="gfx950"))
+    with pytest.raises(nom.NominationError, match="unknown nomination request field"):
+        nom.read_request(path)
+
+
 def test_unreadable_request_is_refused(tmp_path: Path) -> None:
     path = tmp_path / "req.json"
     path.write_text("not json", encoding="utf-8")

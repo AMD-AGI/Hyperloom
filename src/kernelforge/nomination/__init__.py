@@ -29,6 +29,22 @@ LANE_GEMM = "gemm"
 
 KNOWN_LANES = frozenset({LANE_REWRITE, LANE_FUSION, LANE_GEMM})
 
+#: The complete set of keys a request may carry. Anything outside this set is a
+#: field Hyperloom wrote that this build does not understand -- silently dropping
+#: it hides a version skew (a producer that thinks a field is honoured when it is
+#: not), so an unknown key stops the run rather than being swallowed.
+_KNOWN_REQUEST_KEYS = frozenset(
+    {
+        "protocol_version",
+        "lane",
+        "trace_path",
+        "candidates_path",
+        "lane_budget_sec",
+        "max_kernels",
+        "trace_captured_after",
+    }
+)
+
 
 class NominationError(RuntimeError):
     """A malformed request or an unreadable candidate list stops the run."""
@@ -102,11 +118,15 @@ def read_request(path: str | Path) -> NominationRequest:
 
     Raises:
         NominationError: On unreadable JSON, an unknown protocol version, an
-            unknown lane, or a non-positive budget or ceiling.
+            unknown lane, an unknown request field, or a non-positive budget or
+            ceiling.
     """
     payload = _load_json(path, what="nomination request")
     if not isinstance(payload, dict):
         raise NominationError(f"nomination request must be a JSON object: {path}")
+    unknown = set(payload) - _KNOWN_REQUEST_KEYS
+    if unknown:
+        raise NominationError(f"unknown nomination request field(s): {sorted(unknown)}")
     version = payload.get("protocol_version")
     if version != PROTOCOL_VERSION:
         raise NominationError(f"unsupported nomination protocol {version!r}; this build speaks {PROTOCOL_VERSION}")
