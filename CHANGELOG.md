@@ -14,6 +14,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   `PRIMUS_CORTEX_PR_API`, `--pr-monitor-url`, and `--pr-monitor-mcp-url`
   configuration paths are removed.
 
+- **An AgentX run now grades on total token throughput under an interactivity
+  constraint.** The SemiAnalysis CC corpus an agentic replay runs averages ~114k
+  prompt tokens against ~810 output tokens per request, so grading on output
+  throughput alone optimises about 1% of the token budget: a measured Kimi-K3
+  baseline read 25978 tok/s total against 183 tok/s output. Total token
+  throughput is the objective and interactivity p90 (E2E normalized
+  interactivity, `OSL/E2EL`) is a veto rather than a weighted term, which is the
+  shape InferenceX ranks a submission by. It is default-on under
+  `HYPERLOOM_AGENTX=1`; `HYPERLOOM_PERF_METRIC` overrides in both directions
+  (`composite_v1` opts a non-AgentX run in, any other value opts an AgentX run
+  out), and `HYPERLOOM_PERF_NOISE_PCT` (default `5.0`) sets the veto band.
+  Scriptable frameworks keep output-throughput grading. Candidate and reference
+  are always read off the same axis: a lane whose measurement cannot supply
+  both graded axes degrades to output throughput on both sides and logs the
+  reason. The final report names the grading mode.
+
+- **An AgentX measurement the scenario judged invalid is no longer selectable.**
+  `submission_valid=False` always rejects. An undetermined verdict (`None`)
+  rejects too unless `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` is set. The gate
+  covers every measurement the run accepts -- baseline, explore, kernel, sweep
+  -- not the baseline alone, so an unverified measurement cannot become the
+  denominator of every gain that follows it.
+
+- **The server-boot timeout default is 7200s, up from 2700s.** A 1.56 TB MXFP4
+  MoE checkpoint reads for ~37 minutes before the first aiter JIT, so the
+  baseline died to a timeout unrelated to the workload unless the operator
+  pinned `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` by hand. A genuinely
+  wedged server is still stopped by the per-phase and session budgets.
+
 - **A published Recipe now carries three columns instead of five.**
   `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
   `config`/`patch`/`kernel`, each owned end to end by one SDK facade
