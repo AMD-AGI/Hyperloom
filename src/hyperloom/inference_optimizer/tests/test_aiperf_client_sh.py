@@ -982,3 +982,85 @@ def test_profile_window_knobs_fail_loud_rather_than_two_silent_ways(tmp_path, kn
     r = _run(bench, bind, res, tmp_path, PROFILE="1", **{knob: value})
     assert r.returncode == 2, r.stdout + r.stderr
     assert knob in (r.stdout + r.stderr)
+
+
+# --- the trace has to finish writing before the server is torn down -----------
+
+
+def test_the_client_waits_for_the_trace_to_stop_growing(tmp_path):
+    """A 200 from /stop_profile means "told to stop", not "written to disk".
+
+    MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the first per-rank file
+    appeared 350s after the call returned, all eight were present at 391s, and
+    the set was still growing at 546s on its way to 5.1 GB. ``cleanup`` allows
+    20s before SIGKILL, so every capture before this fix was killed mid-write --
+    eight files of plausible size that all fail ``gzip -t``.
+
+    Here a rank file keeps growing for a few seconds after stop; the client must
+    still be waiting when it settles.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    grower = tmp_path / "grow.sh"
+    grower.write_text(
+        "#!/usr/bin/env bash\n"
+        f"for i in 1 2 3 4 5 6; do printf 'x%.0s' $(seq 1 2000) >> '{trace}/r0.trace.json'; sleep 2; done\n",
+        encoding="utf-8",
+    )
+    grower.chmod(0o755)
+    subprocess.Popen(["bash", str(grower)])
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="1", AGENTX_TRACE_FLUSH_TIMEOUT_S="120")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush complete" in out, out[-1500:]
+    # It must not have declared completion on the first sample, while the file
+    # was still being appended to.
+    assert "waiting for the profiler trace" in out
+
+
+def test_a_stalled_flush_says_the_files_are_probably_truncated(tmp_path):
+    """Timing out must be loud, and must name the knob.
+
+    A truncated trace reported as a trace is worse than no trace: TraceLens will
+    read it and produce a kernel table from a half-written capture.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    # Two ranks expected, only one ever appears -> the count gate never passes.
+    (trace / "r0.trace.json").write_text("partial", encoding="utf-8")
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="2", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush did not settle" in out, out[-1500:]
+    assert "TRUNCATED" in out
+    assert "AGENTX_TRACE_FLUSH_TIMEOUT_S" in out
+
+
+def test_a_missing_rank_is_not_accepted_as_settled(tmp_path):
+    """Ranks serialise one at a time, so "not growing" is not "complete".
+
+    A set that is merely idle between two ranks would otherwise be declared
+    finished with half its files missing.
+    """
+    bench, bind, res = _sandbox(tmp_path)
+    trace = res / "torch_trace"
+    trace.mkdir()
+    (trace / "r0.trace.json").write_text("done", encoding="utf-8")
+
+    r = _run_profile(bench, bind, res, tmp_path, TP="8", AGENTX_TRACE_FLUSH_TIMEOUT_S="20")
+    assert r.returncode == 0, r.stderr
+    out = r.stdout + r.stderr
+    assert "trace flush did not settle" in out, out[-1500:]
+    assert "expected 8 ranks" in out
+
+
+def test_the_wait_is_skipped_when_not_profiling(tmp_path):
+    """Measurement rounds must not pay for a capture they never took."""
+    bench, bind, res = _sandbox(tmp_path)
+    r = _run(bench, bind, res, tmp_path)
+    assert r.returncode == 0, r.stderr
+    assert "waiting for the profiler trace" not in (r.stdout + r.stderr)

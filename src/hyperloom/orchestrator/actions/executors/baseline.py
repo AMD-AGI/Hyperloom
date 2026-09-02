@@ -792,6 +792,19 @@ def agentx_warmup_grace_sec(env: "Mapping[str, str] | None" = None) -> int:
         # this model" warning below do the talking.
         return AGENTX_CANON_WARMUP_GRACE_SEC
     grace = measured
+    # Scaling requires the anchor to be DECLARED, not assumed. A ratio needs two
+    # numbers, and defaulting the second one to 8 turns a grace whose
+    # concurrency nobody stated into a multiplied bound: writing the canonical
+    # AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to yield a 23400s cap at
+    # CONC=64 while leaving it unset yielded 10800s -- the same value meaning two
+    # different things depending on whether it was typed. The conc sweep then
+    # prices every rung against the inflated number and skips most of the ladder.
+    #
+    # So: no anchor, no scaling. An operator who wants the floor says which
+    # concurrency their measurement came from, which is the whole point of
+    # AGENTX_WARMUP_GRACE_CONC and costs them one line.
+    if not _agentx_positive_int(src, "AGENTX_WARMUP_GRACE_CONC"):
+        return grace
     # The client's warmup is linear in CONC by construction (per-lane requests x
     # CONC lanes), but the grace knob is a flat number, so a grace measured at
     # one concurrency under-budgets every higher one. Scale, never shrink, and

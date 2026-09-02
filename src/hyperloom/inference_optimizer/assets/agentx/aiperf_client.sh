@@ -38,6 +38,10 @@
 #   AGENTX_MMAP_CACHE_DIR (dataset mmap cache; defaults under $HF_HUB_CACHE),
 #   AGENTX_MAX_CTX (explicit opt-in client-side context cap; NEVER inferred
 #     from $MAX_MODEL_LEN -- see the replay-context note below),
+#   AGENTX_TRACE_FLUSH_TIMEOUT_S (how long to wait after /stop_profile for the
+#     per-rank trace files to finish writing; default 1800. A 200 from
+#     /stop_profile only means the tracer was told to stop -- measured on
+#     GLM-5.3 TP=8, the 5.1 GB set was still being written 546s later),
 #   AGENTX_KEEP_SERVER, AGENTX_PROFILE_WARMUP_S, AGENTX_PROFILE_WINDOW_S,
 #   AGENTX_SERVER_SCRIPT (override builtin name), AIPERF_BIN.
 set -euo pipefail
@@ -537,6 +541,67 @@ if [ "${PROFILE:-0}" = "1" ]; then
     log "WARN profile delay ${PWARM}s exceeds the safe bound for a ${DURATION}s window; clamping to ${_pmax}s so the capture cannot land after the round ends"
     PWARM="$_pmax"
   fi
+  # A 200 OK from /stop_profile means the tracer was TOLD to stop, not that the
+  # trace is on disk. MEASURED on GLM-5.3 (sglang, TP=8, one 20s window): the
+  # first file appeared 350s after the call returned, all 8 ranks were present
+  # at 391s, and the set was still growing at 546s on its way to 5.1 GB -- the
+  # ranks serialise one after another. ``cleanup`` allows 20s before SIGKILL, so
+  # every previous capture was killed mid-write: 8 files of plausible size that
+  # all fail ``gzip -t``. That is the same corruption seen on a Kimi-K3 capture
+  # and blamed at the time on copying the files too early; it was this.
+  #
+  # So wait for the set to be COMPLETE (one file per rank) and STABLE (total
+  # size unchanged across consecutive samples) before returning and letting the
+  # teardown run. Bounded, and loud on timeout -- a truncated trace that is
+  # reported as a trace is worse than no trace, because TraceLens will read it.
+  _trace_dirs() {
+    printf '%s\n' \
+      "${SGLANG_TORCH_PROFILER_DIR:-}" \
+      "${VLLM_TORCH_PROFILER_DIR:-}" \
+      "${RESULT_DIR}/torch_trace" \
+      | while IFS= read -r d; do [ -n "$d" ] && [ -d "$d" ] && printf '%s\n' "$d"; done
+  }
+  _trace_stat() {  # -> "<count> <total bytes>"
+    _tc=0; _tb=0
+    for _d in $(_trace_dirs); do
+      for _f in "$_d"/*trace*; do
+        [ -f "$_f" ] || continue
+        _tc=$((_tc + 1))
+        _sz=$(wc -c < "$_f" 2>/dev/null || echo 0)
+        _tb=$((_tb + _sz))
+      done
+    done
+    printf '%s %s' "$_tc" "$_tb"
+  }
+  _wait_for_trace_flush() {
+    _want="${TP:-0}"
+    case "$_want" in "" | *[!0-9]*) _want=0 ;; esac
+    _budget="${AGENTX_TRACE_FLUSH_TIMEOUT_S:-1800}"
+    case "$_budget" in "" | *[!0-9]*) _budget=1800 ;; esac
+    log "waiting for the profiler trace to finish writing (expect ${_want:-?} rank files, bound ${_budget}s)"
+    _t0=$(date +%s); _prev=""; _stable=0
+    while :; do
+      sleep 10
+      _now=$(_trace_stat); _cnt="${_now%% *}"; _el=$(( $(date +%s) - _t0 ))
+      if [ "$_cnt" -gt 0 ] && [ "$_now" = "$_prev" ]; then
+        _stable=$((_stable + 1))
+      else
+        _stable=0
+      fi
+      # Three identical samples AND, when TP is known, one file per rank. The
+      # count check matters: ranks appear one at a time, so a set that is merely
+      # "not growing right now" can still be missing half its ranks.
+      if [ "$_stable" -ge 3 ] && { [ "$_want" -eq 0 ] || [ "$_cnt" -ge "$_want" ]; }; then
+        log "trace flush complete after ${_el}s: ${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB"
+        return 0
+      fi
+      if [ "$_el" -ge "$_budget" ]; then
+        log "WARN trace flush did not settle within ${_budget}s (${_cnt} file(s), $(( ${_now##* } / 1048576 )) MiB, expected ${_want} ranks). The files are very likely TRUNCATED and will fail gzip -t; raise AGENTX_TRACE_FLUSH_TIMEOUT_S. Not treating this as a round failure -- the measurement itself is unaffected."
+        return 0
+      fi
+      _prev="$_now"
+    done
+  }
   log "PROFILE=1: self-bracketing profile window (delay=${PWARM}s window=${PWIN}s)"
   run_aiperf & APID=$!
   sleep "$PWARM"
@@ -563,6 +628,7 @@ if [ "${PROFILE:-0}" = "1" ]; then
     sleep "$PWIN"
     curl -sf -X POST "http://localhost:${PORT}/stop_profile" >/dev/null 2>&1 \
       && log "stop_profile OK" || log "WARN stop_profile failed"
+    _wait_for_trace_flush
   else
     log "WARN aiperf finished before profile window opened; raise AGENTX_NUM_ENTRIES or lower AGENTX_PROFILE_WARMUP_S"
   fi

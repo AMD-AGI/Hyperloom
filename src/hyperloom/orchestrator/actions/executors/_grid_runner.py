@@ -1311,7 +1311,7 @@ def stopped_by_the_run(returncode: int | None) -> StoppedByTheRun | None:
     return _STOPPED_BY_THE_RUN.get(int(returncode))
 
 
-def agentx_variant_timeout_sec(cap: int) -> int:
+def agentx_variant_timeout_sec(cap: int, *, shared_state: Any = None) -> int:
     """Raise a variant's hard cap to what an AgentX round actually needs.
 
     Every variant cap in the tree is sized for the synthetic 1024/1024 shape --
@@ -1334,17 +1334,33 @@ def agentx_variant_timeout_sec(cap: int) -> int:
     AgentX is an opt-in benchmark branch: with it disabled this returns ``cap``
     untouched and the default path is unaffected.
 
+    ``shared_state`` is what makes the check survive a lost env var. The
+    original report is exactly that case: a session resumed into a shell without
+    HYPERLOOM_AGENTX, or a variant round driven from a subprocess that did not
+    inherit it, reads as synthetic here and the round is killed by the synthetic
+    cap mid-warmup -- the failure this function exists to prevent, reached by the
+    one route it did not cover. ``benchmark_mode`` is stamped at seed for
+    precisely this, so a caller holding the session state should pass it.
+
+    Known gap: ``run_grid``'s own call sites do not pass it yet. Threading state
+    through nine call sites in six files is a change of its own, and
+    ``agentx_active(None)`` is exactly today's behaviour, so those paths are no
+    worse than before while the sweep -- which already holds the state -- gets
+    the durable signal.
+
     Args:
         cap: The declared hard timeout for the round, in seconds.
+        shared_state: Session state, when the caller has one. Consulted only
+            when the env var is absent.
 
     Returns:
         int: ``cap``, or the AgentX-derived cap when that is larger.
     """
     # Local import: baseline imports from this module, and the rest of the file
     # already resolves _workload_envs this way.
-    from ._workload_envs import agentx_enabled
+    from ._workload_envs import agentx_active
 
-    if not agentx_enabled():
+    if not agentx_active(shared_state):
         return cap
     from .baseline import agentx_baseline_timeout_sec
 

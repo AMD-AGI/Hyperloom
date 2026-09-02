@@ -74,3 +74,39 @@ def test_tracks_the_baseline_derivation(monkeypatch):
 
     monkeypatch.setenv("AGENTX_BASELINE_TIMEOUT_SEC", "50000")
     assert agentx_variant_timeout_sec(7800) == 50000
+
+
+# --- the cap must survive a lost env var ---------------------------------------
+
+
+class _StateWithMode:
+    def __init__(self, mode):
+        self.benchmark_mode = mode
+
+
+def test_persisted_state_raises_the_cap_when_the_env_var_is_gone(monkeypatch):
+    """The original report: a resumed session whose shell lost HYPERLOOM_AGENTX.
+
+    ``benchmark_mode`` is stamped at seed precisely so it survives a restart.
+    Without consulting it the round reads as synthetic here and is killed by the
+    synthetic cap mid-warmup -- the failure this helper exists to prevent,
+    reached by the one route it did not cover.
+    """
+    from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    for k in ("AGENTX_BASELINE_TIMEOUT_SEC", "AGENTX_BASELINE_OVERHEAD_SEC", "AGENTX_WARMUP_GRACE_PERIOD"):
+        monkeypatch.delenv(k, raising=False)
+
+    assert agentx_variant_timeout_sec(1800) == 1800
+    raised = agentx_variant_timeout_sec(1800, shared_state=_StateWithMode("agentx"))
+    assert raised > 1800
+
+
+def test_a_synthetic_session_state_does_not_raise_the_cap(monkeypatch):
+    """Zero effect on the default path: a synthetic benchmark_mode changes nothing."""
+    from hyperloom.orchestrator.actions.executors._grid_runner import agentx_variant_timeout_sec
+
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    assert agentx_variant_timeout_sec(1800, shared_state=_StateWithMode("synthetic")) == 1800
+    assert agentx_variant_timeout_sec(1800, shared_state=None) == 1800

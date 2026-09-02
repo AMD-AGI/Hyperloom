@@ -128,6 +128,7 @@ def test_overhead_tracks_the_warmup_grace_the_operator_set(monkeypatch):
     """
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "14400")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     grown = 14400 - AGENTX_CANON_WARMUP_GRACE_SEC
     assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
 
@@ -185,6 +186,7 @@ def test_the_warmup_share_scales_linearly_with_conc(monkeypatch, conc):
     """Warmup is per-lane requests x CONC lanes, so a MEASURED budget tracks CONC."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
     monkeypatch.setenv("CONC", str(conc))
     grown = (AGENTX_CANON_WARMUP_GRACE_SEC * conc) // AGENTX_CANON_WARMUP_CONC - AGENTX_CANON_WARMUP_GRACE_SEC
     assert agentx_baseline_timeout_sec() == (AGENTX_DEFAULT_DURATION_SEC + AGENTX_BASELINE_OVERHEAD_SEC + grown)
@@ -231,6 +233,7 @@ def test_the_floor_composes_with_an_operator_raised_grace(monkeypatch):
     """
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     monkeypatch.setenv("CONC", "32")
     scaled = (3600 * 32) // AGENTX_CANON_WARMUP_CONC
     grown = scaled - AGENTX_CANON_WARMUP_GRACE_SEC
@@ -277,6 +280,7 @@ def test_the_scaling_is_announced(monkeypatch, caplog):
     """A cap that moved silently is a cap nobody can reconcile against a log."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     monkeypatch.setenv("CONC", "32")
     with caplog.at_level("INFO"):
         agentx_baseline_timeout_sec()
@@ -373,6 +377,7 @@ def test_the_cap_and_the_clients_bound_come_from_one_function(monkeypatch):
     """
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     monkeypatch.setenv("CONC", "32")
     grace = agentx_warmup_grace_sec()
     _NON_WARMUP = AGENTX_BASELINE_OVERHEAD_SEC - AGENTX_CANON_WARMUP_GRACE_SEC
@@ -384,6 +389,7 @@ def test_the_cap_and_the_clients_bound_come_from_one_function(monkeypatch):
 def test_the_grace_is_untouched_at_or_below_the_anchor(monkeypatch, conc):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     monkeypatch.setenv("CONC", conc)
     assert agentx_warmup_grace_sec() == 3600
 
@@ -400,6 +406,7 @@ def test_an_unusable_grace_falls_back_to_canonical(monkeypatch, bad):
 def test_an_unusable_conc_leaves_the_grace_alone(monkeypatch, bad):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     monkeypatch.setenv("CONC", bad)
     assert agentx_warmup_grace_sec() == 3600
 
@@ -407,6 +414,7 @@ def test_an_unusable_conc_leaves_the_grace_alone(monkeypatch, bad):
 def test_the_grace_never_shrinks(monkeypatch):
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     for conc in (1, 2, 4, 8, 9, 16, 32, 64, 128):
         monkeypatch.setenv("CONC", str(conc))
         assert agentx_warmup_grace_sec() >= 3600
@@ -422,14 +430,20 @@ def test_the_anchor_defaults_to_the_repo_measurement(monkeypatch):
 
 
 @pytest.mark.parametrize("bad", ["", "  ", "abc", "0", "-8", "8.5"])
-def test_an_unusable_anchor_falls_back_rather_than_dividing_by_it(monkeypatch, bad):
-    """A zero or garbage anchor must not reach the division."""
+def test_an_unusable_anchor_disables_scaling_rather_than_dividing_by_it(monkeypatch, bad):
+    """A zero or garbage anchor must not reach the division -- and must not be
+    quietly replaced by the default either.
+
+    Scaling is opt-in on a DECLARED anchor. A typo in that declaration is not a
+    declaration, so the grace is passed through unscaled instead of being
+    multiplied against a number the operator never wrote.
+    """
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", bad)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
     monkeypatch.setenv("CONC", "32")
     assert agentx_warmup_grace_conc() == AGENTX_CANON_WARMUP_CONC
-    assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
+    assert agentx_warmup_grace_sec() == 3600
 
 
 def test_a_grace_measured_at_a_higher_conc_is_not_double_counted(monkeypatch):
@@ -465,14 +479,20 @@ def test_below_the_declared_anchor_the_grace_is_untouched(monkeypatch):
         assert agentx_warmup_grace_sec() == 14400
 
 
-def test_declaring_the_default_anchor_changes_nothing(monkeypatch):
-    """Explicit 8 and unset must be the same derivation, not two code paths."""
+def test_declaring_the_default_anchor_is_what_enables_the_floor(monkeypatch):
+    """Declaring 8 is not a no-op: it is the statement that turns scaling on.
+
+    The value is the same number the default would have supplied, but supplying
+    it is the operator saying "my grace was measured at concurrency 8". Without
+    that statement there is no ratio to compute, which is what keeps a typed
+    canonical 1800 from meaning something different than an untyped one.
+    """
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
     monkeypatch.setenv("CONC", "32")
-    implicit = agentx_warmup_grace_sec()
+    assert agentx_warmup_grace_sec() == 3600
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", str(AGENTX_CANON_WARMUP_CONC))
-    assert agentx_warmup_grace_sec() == implicit
+    assert agentx_warmup_grace_sec() == 3600 * 32 // AGENTX_CANON_WARMUP_CONC
 
 
 def test_the_cap_follows_the_declared_anchor_too(monkeypatch):
@@ -533,6 +553,7 @@ def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
     """Deduping on the payload, not on a bare flag: new numbers are new news."""
     _clear(monkeypatch)
     monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
     with caplog.at_level("INFO"):
         monkeypatch.setenv("CONC", "16")
         agentx_warmup_grace_sec()
@@ -540,3 +561,30 @@ def test_a_changed_derivation_still_speaks_up(monkeypatch, caplog):
         agentx_warmup_grace_sec()
     scaled = [r for r in caplog.records if "scaling the warmup share" in r.getMessage()]
     assert len(scaled) == 2, [r.getMessage() for r in scaled]
+
+
+def test_a_grace_without_a_declared_anchor_is_never_scaled(monkeypatch):
+    """A ratio needs two numbers; assuming the second one invents a bound.
+
+    Writing the canonical AGENTX_WARMUP_GRACE_PERIOD=1800 explicitly used to
+    yield a 23400s cap at CONC=64 while leaving it unset yielded 10800s -- the
+    same value meaning two different things depending on whether it was typed.
+    The conc sweep then prices every rung against the inflated number and skips
+    most of the ladder.
+    """
+    for conc in ("8", "16", "64", "256"):
+        _clear(monkeypatch)
+        monkeypatch.setenv("CONC", conc)
+        unset = agentx_baseline_timeout_sec()
+        monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", str(AGENTX_CANON_WARMUP_GRACE_SEC))
+        assert agentx_baseline_timeout_sec() == unset, f"CONC={conc}"
+
+
+def test_declaring_the_anchor_is_what_turns_scaling_on(monkeypatch):
+    """The floor is opt-in, and one line buys it."""
+    _clear(monkeypatch)
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_PERIOD", "3600")
+    monkeypatch.setenv("CONC", "32")
+    assert agentx_warmup_grace_sec() == 3600
+    monkeypatch.setenv("AGENTX_WARMUP_GRACE_CONC", "8")
+    assert agentx_warmup_grace_sec() == 14400

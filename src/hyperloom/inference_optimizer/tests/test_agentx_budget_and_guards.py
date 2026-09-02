@@ -390,7 +390,7 @@ def test_the_client_is_handed_the_conc_scaled_grace(monkeypatch):
     """
     _on(monkeypatch)
     monkeypatch.delenv("AGENTX_BASELINE_TIMEOUT_SEC", raising=False)
-    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", CONC="32")
+    envs = _switched(monkeypatch, AGENTX_WARMUP_GRACE_PERIOD="3600", AGENTX_WARMUP_GRACE_CONC="8", CONC="32")
     assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == "14400"
 
 
@@ -504,7 +504,7 @@ def test_a_sweep_variant_keeps_the_session_scaled_grace(monkeypatch, tmp_path):
 
 def test_the_session_scaled_grace_still_reaches_a_variant(monkeypatch, tmp_path):
     """What the switch exported must survive the variant merge untouched."""
-    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2)
+    envs = _variant_envs(monkeypatch, tmp_path, session_conc=32, variant_conc=2, grace_conc=8)
     assert envs["AGENTX_WARMUP_GRACE_PERIOD"] == str(3600 * 32 // 8)
 
 
