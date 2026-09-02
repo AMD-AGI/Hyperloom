@@ -169,8 +169,98 @@ def collect_v6_metadata(
             },
         },
         "task_config": task_config,
+        "grading": _grading_projection(state, workload),
         "langfuse": _langfuse_projection(langfuse),
         "warnings": list(warnings),
+    }
+
+
+def _perf_axes(source: Any) -> dict[str, Any]:
+    """The AgentX axes *source* carries, as explicit nulls when unmeasured.
+
+    A synthetic run measures none of these, and an absent key would be
+    indistinguishable from an axis the framework failed to report. Zero is
+    worse still -- it reads as "measured, and it was zero".
+
+    Args:
+        source: A measurement or ``current_best``-shaped mapping.
+
+    Returns:
+        The four AgentX axes, each ``None`` when the source did not carry it.
+    """
+    from hyperloom.common.perf_metric import graded_axes_of
+
+    axes = graded_axes_of(source if isinstance(source, dict) else None)
+    return {
+        "total_throughput_tok_s": axes.get("total_throughput"),
+        "input_throughput_tok_s": axes.get("input_throughput"),
+        "intvty_p90": axes.get("intvty_p90"),
+        "tpot_p90_ms": axes.get("tpot_p90_ms"),
+    }
+
+
+def _grading_projection(state: dict[str, Any], workload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Declare the axis this session's gains were graded on.
+
+    An AgentX replay is ranked on total token throughput under an
+    interactivity veto, a synthetic run on output throughput alone. On the
+    canonical corpus the two differ by roughly two orders of magnitude, so a
+    consumer that cannot tell them apart will happily sort one against the
+    other. Nothing else in the breakdown carries that distinction: every
+    throughput field here is the output axis by construction, and the mode
+    reaches ``reports/final.json`` but never this document.
+
+    Prefers what the session recorded at seed over re-deriving it here. The
+    derivation reads ``HYPERLOOM_PERF_METRIC`` / ``HYPERLOOM_PERF_NOISE_PCT``
+    from the environment, and CLOSE drives this export from a subprocess that
+    frequently did not inherit them, so re-reading can name an axis the
+    session never graded on. Sessions seeded before ``SharedState.grading``
+    existed carry nothing, and only those fall back to the derivation.
+
+    Args:
+        state: The session state mapping loaded from ``state.json``.
+        workload: The V5 workload section, for the framework name.
+
+    Returns:
+        The ``metadata.grading`` block.
+    """
+    from hyperloom.common.perf_metric import (
+        GRADED_OUTPUT,
+        GRADED_TOTAL,
+        parse_intvty_noise_pct,
+        perf_snapshot_from_mapping,
+        total_tput_serving_grading_enabled,
+    )
+
+    from ... import framework_registry
+
+    mode = str(state.get("benchmark_mode") or "").strip().lower() or "synthetic"
+    recorded = state.get("grading") if isinstance(state.get("grading"), dict) else {}
+    objective = str(recorded.get("objective") or "").strip()
+    if objective:
+        on_total = objective == GRADED_TOTAL
+        noise_pct = float(recorded.get("intvty_noise_pct") or 0.0)
+    else:
+        framework = (workload or {}).get("framework_name") or state.get("framework")
+        on_total = total_tput_serving_grading_enabled(
+            scriptable=framework_registry.is_scriptable(framework),
+            benchmark_mode=mode,
+        )
+        noise_pct = parse_intvty_noise_pct()
+    # A session that asked for the total axis but never measured it graded on
+    # output regardless. Naming that here keeps a degraded run from being read
+    # as a comparable AgentX result.
+    degrade_reason = None
+    if on_total and perf_snapshot_from_mapping(state.get("baseline_perf")) is None:
+        degrade_reason = "baseline_axes_missing"
+    return {
+        "benchmark_mode": mode,
+        "objective": GRADED_OUTPUT if degrade_reason else (GRADED_TOTAL if on_total else GRADED_OUTPUT),
+        "intvty_veto": {
+            "enabled": bool(on_total and not degrade_reason),
+            "noise_pct": noise_pct,
+        },
+        "degrade_reason": degrade_reason,
     }
 
 
@@ -2139,6 +2229,9 @@ def collect_v6_outcome(
     timeline: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Project V5 result sections into the V6 ``outcome`` shape."""
+    # Resolved through the same helper ``metadata.grading`` uses, so the two
+    # blocks cannot drift into naming different axes for the same session.
+    graded_on = _grading_projection(state)["objective"]
     stop_reason = str(session.get("stop_reason") or "").strip()
     outcome_status = _outcome_status(stop_reason)
     for event in reversed(timeline):
@@ -2197,15 +2290,19 @@ def collect_v6_outcome(
             "accuracy": baseline.get("accuracy"),
             "ttft_mean_ms": baseline.get("ttft_mean_ms"),
             "e2el_mean_ms": baseline.get("e2el_mean_ms"),
+            **_perf_axes(state.get("baseline_perf")),
         },
         "final": {
             "throughput_tok_s_per_gpu": final.get("throughput_tok_s_per_gpu"),
             "gain_pct": final.get("cumulative_gain_pct_validated", 0.0),
+            "graded_on": graded_on,
+            **_perf_axes(state.get("current_best")),
             "action_path": list(final.get("action_path") or []),
             "extra_envs": dict(final.get("extra_envs") or {}),
             "extra_server_args": str(final.get("extra_server_args") or ""),
         },
         "validation": {
+            "graded_on": graded_on,
             "attributed_gain_pct": validation.get("attributed_total_gain_pct", 0.0),
             "unattributed_gain_pct": validation.get("unattributed_gain_pct", 0.0),
             "reconciliation_gap_pct": validation.get("reconciliation_gap_pct"),

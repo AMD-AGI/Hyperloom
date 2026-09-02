@@ -2879,6 +2879,27 @@ class V6TaskConfig(TypedDict, total=False):
     architecture: dict[str, Any]
 
 
+class V6GradingVeto(TypedDict, total=False):
+    """The interactivity constraint applied under the total-throughput objective."""
+
+    enabled: bool
+    noise_pct: float
+
+
+class V6Grading(TypedDict, total=False):
+    """Which axis this session's gains were graded on.
+
+    ``objective`` is what the gains in this document are actually on, not what
+    was requested: a session that asked for the total axis but could not supply
+    it reads ``output_throughput`` here with ``degrade_reason`` naming why.
+    """
+
+    benchmark_mode: str
+    objective: str
+    intvty_veto: V6GradingVeto
+    degrade_reason: str | None
+
+
 class V6Metadata(TypedDict, total=False):
     """V6 task identity, configuration, versions, and trace entrypoint."""
 
@@ -2886,6 +2907,7 @@ class V6Metadata(TypedDict, total=False):
     versions: V6MetadataVersions
     session: V6MetadataSession
     task_config: V6TaskConfig
+    grading: V6Grading
     langfuse: dict[str, Any]
     warnings: list[str]
 
@@ -2920,8 +2942,14 @@ class V6OutcomeAttribution(TypedDict, total=False):
 
 
 class V6OutcomeValidation(TypedDict, total=False):
-    """Reconciliation of final measured gain with canonical KEEP entries."""
+    """Reconciliation of final measured gain with canonical KEEP entries.
 
+    ``graded_on`` names the axis every percentage below shares. The whole
+    reconciliation has to be single-axis: an attributed figure on one axis
+    against an unattributed figure on another makes the gap meaningless.
+    """
+
+    graded_on: str
     attributed_gain_pct: float
     unattributed_gain_pct: float
     reconciliation_gap_pct: float | None
