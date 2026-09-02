@@ -2,12 +2,15 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-# IR-3 — PR Monitor reachability probe.
+# IR-3 — KB Store-hosted PR Monitor reachability probe.
 #
 # Soft-degrade: exit 1 only signals "PR Monitor branch unreachable".
 # The cli decides what to do (auto-enable --degraded-pr and continue;
 # never sys.exit). Opt-out by setting SKIP_PR_PROBE=1 (the cli sets this
 # when the operator passed --degraded-pr).
+#
+# The probe is derived directly from
+# ${KB_STORE_URL}/pr-monitor/v1/healthz.
 #
 # Recipe KB (local + gbrain) has no remote reachability probe; the cli
 # records recipe-KB enablement from --degraded-kb directly.
@@ -22,7 +25,7 @@ kb_reachable="false"
 kb_skipped="true"
 kb_failure_reason=""
 
-: "${PR_MONITOR_URL:=}"
+: "${KB_STORE_URL:=}"
 _user_data_was_set="${USER_DATA_PATH:+1}"
 # Container images ship a writable /workspace; a bare-metal host off root has
 # neither it nor permission to create it, so the mkdir below would abort.
@@ -75,10 +78,10 @@ probe_curl() {
     return 1
 }
 
-if [ -n "${SKIP_PR_PROBE}" ] || [ -z "${PR_MONITOR_URL}" ]; then
+if [ -n "${SKIP_PR_PROBE}" ] || [ -z "${KB_STORE_URL}" ]; then
     pr_skipped="true"
 else
-    probe_curl "${PR_MONITOR_URL%/}/healthz" 5 3 || true
+    probe_curl "${KB_STORE_URL%/}/pr-monitor/v1/healthz" 5 3 || true
 fi
 
 {

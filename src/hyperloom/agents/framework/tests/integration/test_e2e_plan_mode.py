@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Integration test: ``fa explore`` (plan mode) e2e — runs the CLI as a subprocess (argparse + JSON-IO + explorer) against the in-process ``fake_primus`` fixture (no internet)."""
+"""Integration test: ``fa explore`` (plan mode) e2e — runs the CLI as a subprocess (argparse + JSON-IO + explorer) against the in-process ``fake_pr_monitor`` fixture (no internet)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pathlib import Path
 def _write_request(
     tmp_path: Path,
     *,
-    primus_base_url: str,
+    pr_monitor_base_url: str,
     work_dir: Path,
 ) -> Path:
     """Materialise an ExploreRequest JSON for plan-mode integration."""
@@ -25,8 +25,8 @@ def _write_request(
         "baseline": {"throughput": 1.0, "accuracy": 0.9, "completed": "1/1"},
         "search_perf_prs": True,
         "max_search_candidates": 1,
-        "primus_cortex": {"base_url": primus_base_url, "timeout_sec": 5.0},
-        "search_modes": ["primus_cortex"],
+        "pr_monitor": {"base_url": pr_monitor_base_url, "timeout_sec": 5.0},
+        "search_modes": ["pr_monitor"],
         "gap_description": "improve sglang fp8 MoE on MI300X",
         "prepare_candidate_env": False,
         "commands": {},
@@ -36,10 +36,10 @@ def _write_request(
     return path
 
 
-def test_explore_plan_mode_e2e_against_fake_primus(tmp_path: Path, fake_primus: str) -> None:
+def test_explore_plan_mode_e2e_against_fake_pr_monitor(tmp_path: Path, fake_pr_monitor: str) -> None:
     """``fa explore`` (plan) writes pr.patches + pr_files.json + a sane summary."""
     work_dir = tmp_path / "work"
-    req_path = _write_request(tmp_path, primus_base_url=fake_primus, work_dir=work_dir)
+    req_path = _write_request(tmp_path, pr_monitor_base_url=fake_pr_monitor, work_dir=work_dir)
     summary_path = tmp_path / "summary.json"
 
     proc = subprocess.run(

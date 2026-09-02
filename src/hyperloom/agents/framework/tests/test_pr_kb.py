@@ -291,7 +291,7 @@ def test_default_search_modes_stay_legacy():
             "baseline": {"throughput": 1.0},
         }
     )
-    assert req.search_modes == ("primus_cortex", "github")
+    assert req.search_modes == ("pr_monitor", "github")
 
 
 def test_enumerate_candidates_dispatches_gbrain_pr_kb(monkeypatch):

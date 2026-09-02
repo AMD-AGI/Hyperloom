@@ -92,12 +92,18 @@ EXIT_LLM_UNAVAILABLE = 3
 # setup/environment problem from a genuine "nothing to fuse" answer.
 EXIT_INFRASTRUCTURE_FAILURE = 4
 _AGENT_SANDBOX_MODES = frozenset({"workspace-write", "read-only", "bypass"})
-_EXTERNAL_SANDBOX_CONFIRMATION = "HYPERLOOM_CODEX_EXTERNAL_SANDBOX"
 
 
 def _credential_shape() -> tuple[bool, bool]:
-    """Return whether OpenAI-side and Anthropic-side credentials are configured."""
-    openai = any(os.environ.get(name, "").strip() for name in ("OPENAI_API_KEY", "SAFE_API_KEY", "FORGE_API_KEY"))
+    """Return whether OpenAI-side and Anthropic-side credentials are configured.
+
+    Only keys the gateway actually authenticates with count. ``SAFE_API_KEY`` and
+    ``FORGE_API_KEY`` used to be accepted here; they no longer authenticate
+    anything (``resolve_openai_gateway`` ignores them), so counting them meant a
+    stale value routed ``auto`` to codex and failed downstream instead of raising
+    the "no credentials" error below.
+    """
+    openai = bool(os.environ.get("OPENAI_API_KEY", "").strip())
     anthropic = any(os.environ.get(name, "").strip() for name in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")) or any(
         os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
         for name in ("CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX")
@@ -147,10 +153,6 @@ def _resolve_agent_sandbox_mode(explicit: Optional[str]) -> str:
     if mode not in _AGENT_SANDBOX_MODES:
         choices = ", ".join(sorted(_AGENT_SANDBOX_MODES))
         raise click.UsageError(f"unsupported agent sandbox mode {mode!r}; choose one of: {choices}")
-    if mode == "bypass" and os.environ.get(_EXTERNAL_SANDBOX_CONFIRMATION, "").strip() != "1":
-        raise click.UsageError(
-            f"--agent-sandbox-mode bypass requires {_EXTERNAL_SANDBOX_CONFIRMATION}=1 to confirm an external sandbox"
-        )
     return mode
 
 
@@ -523,7 +525,7 @@ def _setup_logging(output_dir: Path, verbose: bool = False) -> None:
     envvar="FORGE_AGENT_SANDBOX_MODE",
     default="workspace-write",
     show_default=True,
-    help="Agent runtime sandbox. Bypass additionally requires HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1.",
+    help="Agent runtime sandbox. Use bypass only when an external boundary already enforces isolation.",
 )
 @click.option(
     "--model",

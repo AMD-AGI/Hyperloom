@@ -59,8 +59,9 @@ class ConcSweepExecutor:
             }
 
         params = ctx.task.params or {}
-        # ``None`` falls back to run_conc_sweep's DEFAULT_CONCS; an empty list
-        # short-circuits (respects an explicit "no concs" choice).
+        # ``None`` falls back to the ladder run_conc_sweep resolves for this
+        # workload; an empty list short-circuits (respects an explicit "no
+        # concs" choice).
         concs_raw = params.get("concs")
         if concs_raw is None:
             concs: list[int] | None = list(state.conc_sweep_concs) if state.conc_sweep_concs else None

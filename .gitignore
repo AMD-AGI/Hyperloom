@@ -112,9 +112,11 @@ skyseg.onnx
 *.plan.md
 # Experiment and repro artefacts
 /prefix_cache_repro/
+kimi-k3-agentx-repro
+inferencex-upstream-recipes
+kimik3-wares
 # Operator analysis output written at the repo root: session/cost/tuning exports
 # and rendered reports. Anchored so the same extensions stay tracked elsewhere.
 /*.csv
 /*.pptx
 /*.html
-kimik3-wares

@@ -656,9 +656,9 @@ PY
     assert result["status"] == "succeeded"
     assert result["grid_size"] == 2
     assert result["source"] == "geak"
-    assert result["best_for_each_conc"]["1"]["output_throughput"] == 321.0
-    assert result["sweep_grid"][1]["status"] == "failed"
-    assert result["sweep_grid"][1]["error"] == "no throughput"
+    assert result["promotion_measurement"]["output_throughput"] == 321.0
+    assert result["points"][1]["status"] == "failed"
+    assert result["points"][1]["error"] == "no throughput"
 
     ok_dir = tmp_path / "sweep" / "variant_0_conc1_isl8192_osl1024"
     env = json.loads((ok_dir / "env.json").read_text(encoding="utf-8"))

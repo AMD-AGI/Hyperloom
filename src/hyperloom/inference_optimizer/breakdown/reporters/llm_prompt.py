@@ -40,7 +40,7 @@ You may NOT:
 - Invent numbers, percentages, kernel names, paths, or GPU types. Every
   numeric or named entity you write MUST appear verbatim in one of:
   ``global_facts``, ``key_facts``, or ``decisions``.
-- Describe a capability (for example ``explore`` / ``sweep`` /
+- Describe a capability (for example ``explore`` / ``conc_sweep`` /
   ``specialist`` / ``geak`` / ``forge`` / ``kernel_opt``) as "ran" /
   "contributed" / "applied" unless its decision is one of: ``kept`` /
   ``attempted`` / ``reverted`` / ``rejected`` / ``partial``. Legacy

@@ -722,3 +722,47 @@ def test_estimate_killed_variant_none_when_no_logs(tmp_path):
     slot = tmp_path / "variant_00_vA"
     slot.mkdir()
     assert br.estimate_killed_variant_throughput(slot) is None
+
+
+def test_explicitly_invalid_agentx_submission_is_always_rejected(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
+    # submission_valid=False means the scenario explicitly rejected it; the
+    # escape hatch must not exempt this case.
+    assert (
+        br.is_valid_measurement(
+            {
+                "output_throughput": 170.0,
+                "completed_requests": 10,
+                "submission_valid": False,
+            }
+        )
+        is False
+    )
+
+
+def test_unverified_submission_accepted_when_hatch_is_set(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", "1")
+    assert br.is_valid_measurement(
+        {
+            "output_throughput": 170.0,
+            "completed_requests": 10,
+            "submission_valid": None,
+        }
+    )
+
+
+def test_unverified_submission_rejected_without_hatch(monkeypatch):
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.delenv("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION", raising=False)
+    assert (
+        br.is_valid_measurement(
+            {
+                "output_throughput": 170.0,
+                "completed_requests": 10,
+                "submission_valid": None,
+            }
+        )
+        is False
+    )

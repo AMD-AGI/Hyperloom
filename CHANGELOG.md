@@ -7,6 +7,71 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- **Codex sandbox bypass uses a single env var.** Set
+  `HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external sandbox already
+  enforces isolation. `HYPERLOOM_CODEX_EXTERNAL_SANDBOX` is removed from
+  Hyperloom and KernelForge.
+
+- **PR Monitor now shares the KB Store endpoint.** Hyperloom derives REST
+  `${KB_STORE_URL}/pr-monitor/v1` and MCP
+  `${KB_STORE_URL}/pr-monitor/mcp/` URLs for Framework discovery,
+  KernelForge priors, IR-3, and specialist tools. The independent
+  `PRIMUS_CORTEX_PR_API`, `--pr-monitor-url`, and `--pr-monitor-mcp-url`
+  configuration paths are removed.
+
+- **An AgentX run now grades on total token throughput under an interactivity
+  constraint.** The SemiAnalysis CC corpus an agentic replay runs averages ~114k
+  prompt tokens against ~810 output tokens per request, so grading on output
+  throughput alone optimises about 1% of the token budget: a measured Kimi-K3
+  baseline read 25978 tok/s total against 183 tok/s output. Total token
+  throughput is the objective and interactivity p90 (E2E normalized
+  interactivity, `OSL/E2EL`) is a veto rather than a weighted term, which is the
+  shape InferenceX ranks a submission by. It is default-on under
+  `HYPERLOOM_AGENTX=1`; `HYPERLOOM_PERF_METRIC` overrides in both directions
+  (`composite_v1` opts a non-AgentX run in, any other value opts an AgentX run
+  out), and `HYPERLOOM_PERF_NOISE_PCT` (default `5.0`) sets the veto band.
+  Either AgentX signal is enough: the ambient `HYPERLOOM_AGENTX` or the session's
+  persisted `benchmark_mode`, so a re-baseline or integrate round driven from a
+  subprocess that never inherited the env var still grades on the agentic axis.
+  Scriptable frameworks keep output-throughput grading. Candidate and reference
+  are always read off the same axis: a lane whose measurement cannot supply
+  both graded axes degrades to output throughput on both sides and logs the
+  reason. The final report names the grading mode.
+
+- **An AgentX measurement the scenario judged invalid is no longer selectable.**
+  `submission_valid=False` always rejects. An undetermined verdict (`None`)
+  rejects too unless `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` is set. The gate
+  covers every measurement the run accepts -- baseline, explore, kernel, sweep
+  -- not the baseline alone, so an unverified measurement cannot become the
+  denominator of every gain that follows it.
+
+- **The server-boot timeout default is 7200s, up from 2700s.** A 1.56 TB MXFP4
+  MoE checkpoint reads for ~37 minutes before the first aiter JIT, so the
+  baseline died to a timeout unrelated to the workload unless the operator
+  pinned `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` by hand. A genuinely
+  wedged server is still stopped by the per-phase and session budgets.
+
+- **`--extra-env` reaches the benchmark for every framework, and now outranks
+  the config.** The pins were copied into `benchmark.envs` only on the `custom`
+  path; every other framework left them in the orchestrator's own environment,
+  where Magpie -- which forwards `benchmark.envs` and nothing else -- never saw
+  them, so a vLLM Ray worker booted without them.<br/>
+  **Operator note**: on the `custom` path the pins used to be applied with
+  `setdefault`, so a value already present in the YAML won. They are now written
+  last and win outright, which is what an explicit CLI pin should do but is a
+  change in precedence for a `custom` workload whose YAML sets the same key.
+  Names on the untrusted-env denylist (`PATH`, `PYTHONPATH`, `LD_PRELOAD`,
+  credential-shaped names) are still refused on this route and logged.
+
+- **A shell-quoted `--flag=value` operand no longer keeps its wrappers.**
+  Quote-preserving tokenization keeps a JSON blob intact, and a fully-wrapped
+  operand (`--tool-call-parser 'kimi_k3'`) is already unwrapped; the `=` form
+  (`--tool-call-parser='kimi_k3'`) was not, so the quotes survived into Magpie's
+  unquoted `EXTRA_*_ARGS` expansion and reached argv literally. The unwrap is
+  applied to the right-hand side of the first `=` only, so the flag name is never
+  altered and token boundaries cannot shift; a JSON value is left verbatim in
+  both positions.
+
 - **A published Recipe now carries three columns instead of five.**
   `config`/`explore`/`framework`/`kernel`/`patch_timeline` collapse to
   `config`/`patch`/`kernel`, each owned end to end by one SDK facade
@@ -24,6 +89,141 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
   is skipped whole rather than applied to a tree the gain was never measured
   on. `host_origin` is the one sanitizer-exempt subtree allowed to carry
   absolute paths (secret-named keys are still dropped there).
+
+### Fixed
+
+- **SWEEP is one concurrency sweep, and it produces the chart a submission is
+  read on.** The workload sweep over `(CONC, ISL, OSL)` is deleted. Two of its
+  three axes carried nothing under an agentic replay — request shapes come from
+  the trace corpus, so ISL and OSL are inert placeholders — and the concurrency
+  axis is what `conc_sweep` already swept. `conc_sweep` is now the only sweep,
+  on by default for both workloads, and every rung carries `intvty_p90`,
+  `input_throughput` and `tpot_p90_ms` alongside the output-axis figures. The
+  chart it renders follows the payload's `benchmark_mode`: an agentic run is
+  plotted on p90 interactivity against token throughput per chip — the pair
+  InferenceX ranks a submission by — and anything else keeps the previous
+  output-throughput pair unchanged.<br/>
+  **Operator note**: the default ladder is now per workload —
+  `256,128,64,32,16,8,4,2` synthetic, `1,4,8,10,14,20,28` under
+  `HYPERLOOM_AGENTX`, where a request carries a measured ISL p50 near 108k
+  tokens and the same card saturates two orders of magnitude lower.
+  `--conc-sweep-concs` still overrides both. The sweep is no longer off by
+  default under AgentX, and its budget default is sized at the ladder it has to
+  fund (seven rungs on each of two arms); `--conc-sweep-total-budget-sec` is
+  still a ceiling the session's own remaining time clamps. The `sweep` action
+  is gone from the LLM catalogue, the executor registry and the phase contract,
+  and the SWEEP exit reasons `conc_sweep_done` / `conc_sweep_failed` collapse
+  into `sweep_done` / `sweep_failed` with no alias for the old spelling — a
+  resumed session carrying one will not map to a clean exit code.
+
+- **Each concurrency-sweep rung is bounded by its own concurrency.** The inner
+  benchmark cap, the client's `--warmup-grace-period` and the variant
+  subprocess cap all derived from the session's `CONC`, so a ladder rung at 64
+  was given the bound of a session sitting at 8 while having to drain eight
+  times the warmup. All three now take the rung's own concurrency, and the five
+  budget gates that admit a rung price it at the same number. Inert unless the
+  operator has declared both `AGENTX_WARMUP_GRACE_PERIOD` and
+  `AGENTX_WARMUP_GRACE_CONC`.
+
+- **The AgentX baseline overhead is derived from the warmup bound instead of a
+  flat constant.** `AGENTX_BASELINE_OVERHEAD_SEC` was a single measured number
+  (7200s, calibrated on GLM-5.2/Qwen3.8) covering setup, corpus load, warmup and
+  first-compile. Warmup is the share that actually varies by model, and it
+  already has an operator-visible bound in the client:
+  `AGENTX_WARMUP_GRACE_PERIOD`. A model whose warmup runs long is therefore a
+  model whose operator has already raised that knob — a raw aiperf run against
+  Kimi-K3 at concurrency 64 measured warmup alone at ~12075s, past the entire
+  flat cap. The overhead is now `5400s non-warmup + AGENTX_WARMUP_GRACE_PERIOD`,
+  and every input is logged at INFO so a field timeout can be read back to the
+  values that produced it.<br/>
+  **Operator note**: at canonical settings the cap is unchanged
+  (5400 + 1800 = 7200), so nothing moves for existing synthetic or GLM-5.2-class
+  runs. Raising `AGENTX_WARMUP_GRACE_PERIOD` now also raises the baseline
+  timeout by the same amount — which is the point, but it means the round's
+  worst-case wall clock grows with that knob. `AGENTX_BASELINE_OVERHEAD_SEC`
+  still overrides the derivation outright, and the "nothing has been tuned for
+  this model" warning now fires only when *neither* knob is set.
+
+- **Overriding `HYPERLOOM_PROFILE_MAX_ITERS` under AgentX no longer lifts the
+  host-RAM capture bound silently.** The AgentX branch clamps captured profile
+  steps to 8 because an agentic step carries orders of magnitude more profiler
+  events than the synthetic shape the normal cap is sized against — at the stock
+  cap a DeepSeek-V4 round was OOM-killed mid-capture three times in a row. The
+  operator override is applied afterwards and wins, which is intended, but the
+  two existing warnings could not report it: `cap` defaults to 128, so the
+  obvious `HYPERLOOM_PROFILE_MAX_ITERS=128` was neither below the steady-state
+  floor nor above the cap and restored the full exposure without printing
+  anything. The override is still honoured verbatim; it now warns.
+
+- **`AIPERF_HTTP_TCP_USER_TIMEOUT` is re-stated after the `AIPERF_*` scrub.**
+  `TCP_USER_TIMEOUT` bounds how long Linux tolerates an established connection
+  making no progress, and an agentic turn against a long-context model makes
+  none for as long as the server is prefill-bound. aiperf's stock 30s therefore
+  aborts otherwise-live connections mid-prefill, surfacing as a warmup failure
+  with no server-side error to match it. Upstream's Kimi-K3 and DSv4 recipes all
+  export `900000` (15 min); Hyperloom scrubs every inherited `AIPERF_*` except
+  `AIPERF_BIN`, so an operator setting it had no effect and the client ran on
+  the stock bound. Now exported after the scrub, tunable via
+  `AGENTX_HTTP_TCP_USER_TIMEOUT`.
+
+- **A loosened `AGENTX_FAILED_REQUEST_THRESHOLD` is flagged as a non-canonical
+  workload.** Raising the abort ratio keeps alive a run that upstream's 0.10
+  would have aborted, and the surviving requests are then mapped as an ordinary
+  measurement. aiperf stamps no scenario marker for it — the threshold is the
+  client's own safety net, not part of the scenario — so the round came back
+  `submission_valid=true`. Only a *larger* ratio is flagged; tightening it
+  measures a strictly cleaner run.<br/>
+  **Operator note**: a run that raises this knob is now stamped
+  `submission_valid=false` with `failed_request_threshold=<v>(canonical 0.10)`
+  in `submission_invalid_reasons`, and `benchmark_result.py` will refuse the
+  measurement. Rounds that previously passed on a raised threshold will now be
+  rejected — which is the intended correction, not a regression.
+
+- **The AgentX warmup bound scales with concurrency, and both layers read the
+  same number.** The client builds warmup as `CANON_WARMUP_PER_LANE` requests
+  per lane across `CONC` lanes, so the work is linear in concurrency by
+  construction, while `AGENTX_WARMUP_GRACE_PERIOD` is one flat number — a grace
+  measured at one concurrency under-budgets every higher one (measured on
+  Kimi-K3: conc=8 → 87 warmup requests ~3000s; conc=16 → 177 requests ~5000s).
+  The grace is now scaled by `CONC / AGENTX_WARMUP_GRACE_CONC`, and the scaling
+  lives in one function that both consumers call: this process derives the
+  subprocess cap from it, and `apply_agentx_switch` exports its result into the
+  benchmark env so the client's `--warmup-grace-period` — the thing that
+  actually stops the warmup — cannot disagree with the cap.<br/>
+  **Operator note**: `AGENTX_WARMUP_GRACE_CONC` declares the concurrency the
+  grace was measured at and defaults to 8, so every existing configuration
+  derives exactly what it derived before. Declare it when you measured
+  elsewhere — the scaling is a ratio, and a 14400s grace measured at conc=16
+  passed in without the anchor is read as an 8-anchored number and doubled.
+  The floor only ever raises a bound.
+
+- **Budget admission prices a variant at the cap it will actually be granted.**
+  Four gates (`_skip_rest_for_budget` and three in the conc sweep) plus the
+  sweep's session soft deadline compared the remaining budget against the
+  *declared* `variant_timeout_sec`. Under AgentX the round is granted the raised
+  cap instead, so a variant was admitted that the budget could not pay for, had
+  its timeout clamped back to the remaining time, and died mid-warmup — the
+  exact failure the cap-raise exists to prevent. All five now use the raised
+  cap; with AgentX off the helper is the identity and the synthetic path prices
+  and paces exactly as before.
+
+- **An AgentX benchmark timeout is never lowered below what the config
+  declared.** The inner-timeout raise was an unconditional assignment, so a
+  config declaring more than the AgentX derivation had its timeout cut
+  (`profile_sglang.yaml`'s 14400s became 10800s). It now takes the maximum and
+  logs when the config's own number wins.
+
+- **The AgentX client holds the server connection open, and validates its
+  numeric knobs.** `AIPERF_HTTP_TCP_USER_TIMEOUT` gave the client a 900s
+  tolerance, but nothing raised the server's keep-alive (vLLM defaults to 5s),
+  so the server closed idle connections mid-warmup and the round failed with
+  `ServerDisconnectedError` after a full weight load. The wrapper now defaults
+  the framework's own knob (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE` /
+  `SGLANG_TIMEOUT_KEEP_ALIVE`) to the same tolerance, overridable via
+  `AGENTX_HTTP_KEEP_ALIVE_S` and never overwriting an explicit setting.
+  Separately, `AGENTX_FAILED_REQUEST_THRESHOLD` was interpolated into an awk
+  program body, making its value executable; the three measurement knobs are now
+  validated as numbers and the comparison passes them through `awk -v`.
 
 ### Added
 
@@ -278,6 +478,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- **A baseline round no longer OOMs against a server a prior sweep/explore
+  round's timeout left orphaned.** `BaselineExecutor`'s pre-start cleanup
+  ran only on the double-run path, and only when the reuse port answered
+  `/health` with no matching pid/json metadata (a "zombie" heuristic). That
+  heuristic was unreliable either way: an eligible `server_lifecycle` port
+  is a freshly OS-assigned ephemeral port confirmed free at assignment time,
+  so it always reported unhealthy and the cleanup never fired even when a
+  same-port zombie was in fact present; an ineligible port fell back to a
+  fixed default that could coincide with an unrelated co-tenant's server,
+  risking the opposite failure. Pre-start cleanup now runs unconditionally
+  before every baseline round (double-run and single-round alike -- the
+  latter being the common way the kernel phase re-establishes its
+  baseline), reaping any lingering server via the same `_kill_stale_servers()`
+  `/proc` scan already used elsewhere: Hyperloom's own scheduling
+  (`gpu_research_lane`, capacity 1) guarantees at most one server-holding
+  task runs at a time, so nothing matching should be alive at this point
+  regardless of port health. `conc_sweep` and `explore` -- the two actions
+  whose timed-out rounds most often leave one of these orphans -- now also
+  reap any lingering server once they themselves finish, shrinking the
+  window an orphan can sit on the GPU before the next baseline attempt.
+  `_kill_stale_servers()` itself is now scoped to our own GPU allocation
+  when one is known (`ROCR_VISIBLE_DEVICES` et al set by an operator that
+  carved us a subset of the machine's cards): a matching process is only
+  reaped when its own visible-GPU mask overlaps ours, and a candidate whose
+  mask cannot be read or declares none at all is left alone rather than
+  reaped, so it can no longer touch a co-tenant's server parked on a
+  different subset of the same machine. (AMD-AGI/Hyperloom#1354)
 - **GEMM tuning no longer discards the MoE dispatch key.** `gemm-tune run`
   derived its demand file only when the serving log carried dense tuned-config
   misses, so a MoE-only model -- or one whose dense tables all hit while

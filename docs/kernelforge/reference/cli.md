@@ -130,7 +130,7 @@ and passing one alongside `--resume` is refused rather than silently ignored.
 | `--kb-warmstart` / `--no-kb-warmstart` | on | Apply the best matching KB solution before iteration 1. Only meaningful with `--experience-kb`. A caller that prepares the workspace itself, such as `forge-fuse`, turns this off to keep publishing while never replaying a stored patch over a tree it already staged. |
 | `--return-after-read-kb` / `--return-after-read-KB` | off | Return before iteration 1 when a KB solution applies cleanly, passes current correctness and improves current performance. |
 | `--producer <name>` | forge-loop's own | System owning the candidate stream these records belong to. A producer has its own index in the KB identity scheme, so a pipeline driving this command as a subprocess keeps its records out of the kernel campaigns' ranking. |
-| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the Primus Cortex PR Monitor as Implementer prior knowledge. Falls back to `PR_KB_ENABLE`. |
+| `--pr-kb` / `--no-pr-kb` | off | Inject upstream pull-request references from the PR Monitor co-hosted at `${KB_STORE_URL}/pr-monitor/v1`. Falls back to `PR_KB_ENABLE`. |
 | `--experience-id <id>` | `''` | Unique KB run identity, independent of the checkpoint experiment ID. |
 
 ### Output
@@ -237,7 +237,7 @@ when no fusion is found.
 | `--author` / `--no-author` | on | Author the fused kernel via the LLM. Non-dry-run only. |
 | `--fuse-all-confirmed` | off | Author ALL source-confirmed patterns together rather than only the top one, and A/B all their flags. A compile-pass candidate cannot be authored with them, so it is claimed alone and the rest wait for a later round. |
 | `--agent-backend <name>` | `auto` | `auto`, `claude` or `codex`, for discovery and authoring. |
-| `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Bypass additionally requires `HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`. |
+| `--agent-sandbox-mode <v>` | `workspace-write` | `workspace-write`, `read-only` or `bypass`. Use `bypass` only when an external sandbox already enforces isolation. |
 | `--model <name>` | provider default | Agent model. An explicit value wins; otherwise `$CODEX_MODEL` / `$CLAUDE_MODEL`, then the registered provider default. |
 | `--max-turns <n>` | `100` | Max authoring turns. |
 | `--gpu <id>` | `0` | HIP device id for authoring and A/B. |

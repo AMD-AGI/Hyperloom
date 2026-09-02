@@ -120,7 +120,7 @@ DEMO_RESUME_NUDGE='Your previous turn ended without leaving a running optimize b
 # Clean terminal stop_reason values (hyperloom.inference_optimizer.cli._SUCCESS_STOP_REASONS).
 is_clean_stop_reason() {
   case "$1" in
-    target_reached|global_converged|time_exhausted|max_ticks|sweep_done|conc_sweep_done)
+    target_reached|global_converged|time_exhausted|max_ticks|sweep_done)
       return 0 ;;
     *) return 1 ;;
   esac

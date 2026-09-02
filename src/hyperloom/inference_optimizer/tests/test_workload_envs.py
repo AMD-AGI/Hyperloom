@@ -414,6 +414,38 @@ def test_profile_max_iters_override(monkeypatch, tmp_path):
     assert "NUM_PROMPTS" in bench["envs"]
 
 
+def test_the_iters_override_keeps_the_delay_an_agentx_run_needs_at_zero(monkeypatch, tmp_path):
+    """Raising the capture bound must not reintroduce an iteration delay.
+
+    AgentX brackets a wall-clock profiling window, so a delay counted in decode
+    iterations is never reached inside it and the trace comes back empty. Both
+    knobs are documented together, so the override path is exactly where an
+    operator reintroduces the delay the AgentX branch just zeroed.
+    """
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
+    assert "--profiler-config.delay_iterations 0" in args
+    assert "--profiler-config.max_iterations 128" in args
+
+
+def test_a_synthetic_run_still_honors_the_delay_override(monkeypatch, tmp_path):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
+    monkeypatch.delenv("HYPERLOOM_AGENTX", raising=False)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_DELAY_ITERS", "64")
+    src = _write(tmp_path / "cfg.yaml", framework="vllm", envs={"PROFILE": "1"})
+    bench = _materialize(src, tmp_path / "out")
+    args = str(bench["envs"]["EXTRA_VLLM_ARGS"])
+    assert "--profiler-config.delay_iterations 64" in args
+
+
 def test_profile_atom_defers(monkeypatch, tmp_path):
     _clear_env(monkeypatch)
     monkeypatch.setenv("INFERENCE_OPTIMIZER_DISABLE_TP_CLAMP", "1")
@@ -676,6 +708,40 @@ def test_quality_ref_zero_config_baseline_writes_session_ref(monkeypatch, tmp_pa
     expected = str(sess / "storage" / "quality_ref" / "baseline.png")
     assert bench["envs"]["XDIT_QUALITY_REF"] == ""
     assert bench["envs"]["XDIT_QUALITY_REF_WRITE"] == expected
+
+
+# ---------------------------------------------------------------------------
+# agentx_active: persisted benchmark_mode as a fallback for a missing env var
+# ---------------------------------------------------------------------------
+
+
+def test_agentx_active_true_from_env_var(monkeypatch):
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert we.agentx_active() is True
+
+
+def test_agentx_active_false_with_neither_signal(monkeypatch):
+    _clear_env(monkeypatch)
+    assert we.agentx_active() is False
+    assert we.agentx_active(SimpleNamespace(benchmark_mode="")) is False
+
+
+def test_agentx_active_true_from_persisted_state_without_env_var(monkeypatch):
+    # A subprocess/SDK caller that never inherited HYPERLOOM_AGENTX must still
+    # be recognized as AgentX-active from the session's persisted mode.
+    _clear_env(monkeypatch)
+    assert we.agentx_active(SimpleNamespace(benchmark_mode="agentx")) is True
+
+
+def test_agentx_kb_write_blocked_matches_agentx_active(monkeypatch):
+    # agentx_kb_write_blocked delegates to agentx_active; both signals still work.
+    _clear_env(monkeypatch)
+    assert we.agentx_kb_write_blocked() is False
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    assert we.agentx_kb_write_blocked() is True
+    _clear_env(monkeypatch)
+    assert we.agentx_kb_write_blocked(SimpleNamespace(benchmark_mode="agentx")) is True
 
 
 # ---------------------------------------------------------------------------

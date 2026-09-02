@@ -74,7 +74,7 @@ def test_silent_when_closing_phase():
 
 
 def test_silent_when_stop_reason_set():
-    ctx = _ctx(rows=[_row(used=99.0)], stop_reason="conc_sweep_done")
+    ctx = _ctx(rows=[_row(used=99.0)], stop_reason="sweep_done")
     assert evaluate_phase_budget_signals(ctx) == []
 
 

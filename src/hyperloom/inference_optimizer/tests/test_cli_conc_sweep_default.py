@@ -66,33 +66,63 @@ def test_cli_rejects_no_baseline_double_run_flag(monkeypatch: pytest.MonkeyPatch
 
 
 _EXPECTED_CONCS = [256, 128, 64, 32, 16, 8, 4, 2]
-_EXPECTED_CONCS_STR = "256,128,64,32,16,8,4,2"
+_EXPECTED_AGENTX_CONCS = [1, 4, 8, 10, 14, 20, 28]
 
 
-def test_shared_state_default_concs():
-    """SharedState default ladder must be high-to-low for single-server arm reuse."""
-    state = SharedState()
-    assert state.conc_sweep_concs == _EXPECTED_CONCS, (
-        f"SharedState.conc_sweep_concs default mismatch. "
-        f"Expected {_EXPECTED_CONCS}, got {state.conc_sweep_concs}. "
-        "Update all three sources: DEFAULT_CONCS, parser.py, shared_state.py."
+def test_the_ladder_has_one_source():
+    """The default ladder used to be restated in four places and hand-synced."""
+    from hyperloom.orchestrator.kernel.conc_sweep import (
+        AGENTX_DEFAULT_CONCS,
+        DEFAULT_CONCS,
+        default_concs_for_mode,
     )
 
-
-def test_cli_default_concs():
-    """CLI --conc-sweep-concs default must match DEFAULT_CONCS."""
-    ns = _parse()
-    assert ns.conc_sweep_concs == _EXPECTED_CONCS_STR
-
-
-def test_conc_sweep_module_default_concs():
-    """conc_sweep.DEFAULT_CONCS must be kept in sync with CLI/state defaults."""
-    from hyperloom.orchestrator.kernel.conc_sweep import DEFAULT_CONCS
-
-    assert DEFAULT_CONCS == _EXPECTED_CONCS, f"DEFAULT_CONCS mismatch: expected {_EXPECTED_CONCS}, got {DEFAULT_CONCS}"
+    assert DEFAULT_CONCS == _EXPECTED_CONCS
+    assert AGENTX_DEFAULT_CONCS == _EXPECTED_AGENTX_CONCS
+    assert default_concs_for_mode("") == _EXPECTED_CONCS
+    assert default_concs_for_mode("synthetic") == _EXPECTED_CONCS
+    assert default_concs_for_mode("agentx") == _EXPECTED_AGENTX_CONCS
+    assert default_concs_for_mode("AgentX") == _EXPECTED_AGENTX_CONCS
 
 
-def test_cli_custom_concs():
-    """Custom --conc-sweep-concs is parsed as a raw string (parsing happens in run_optimize)."""
-    ns = _parse("--conc-sweep-concs", "4,8,16")
-    assert ns.conc_sweep_concs == "4,8,16"
+def test_the_resolved_ladder_is_the_callers_to_keep():
+    """A caller that mutates what it was handed must not move the module default."""
+    from hyperloom.orchestrator.kernel.conc_sweep import DEFAULT_CONCS, default_concs_for_mode
+
+    resolved = default_concs_for_mode("")
+    resolved.append(1)
+    assert DEFAULT_CONCS == _EXPECTED_CONCS
+
+
+def test_an_omitted_flag_is_distinguishable_from_a_typed_ladder():
+    """The flag defaults to None so the mode can pick; a typed value is a string."""
+    assert _parse().conc_sweep_concs is None
+    assert _parse("--conc-sweep-concs", "4,8,16").conc_sweep_concs == "4,8,16"
+
+
+def test_shared_state_seeds_its_ladder_rather_than_restating_one():
+    """A bare state carries no ladder; bootstrap seeds it from the workload."""
+    assert SharedState().conc_sweep_concs == []
+
+
+class TestTheLadderFallsBackToTheWorkload:
+    """An unset flag resolves against the workload the session actually runs."""
+
+    def _parse(self, raw, mode):
+        from argparse import Namespace
+
+        from hyperloom.inference_optimizer.cli import bootstrap as cb
+
+        return cb._parse_conc_sweep_concs(Namespace(conc_sweep_concs=raw), mode)
+
+    def test_synthetic(self):
+        assert self._parse(None, "synthetic") == _EXPECTED_CONCS
+
+    def test_agentx(self):
+        assert self._parse(None, "agentx") == _EXPECTED_AGENTX_CONCS
+
+    def test_a_typed_ladder_outranks_both(self):
+        assert self._parse("4,8,16", "agentx") == [4, 8, 16]
+
+    def test_an_all_garbage_ladder_falls_back_to_the_workload(self):
+        assert self._parse("x,y", "agentx") == _EXPECTED_AGENTX_CONCS

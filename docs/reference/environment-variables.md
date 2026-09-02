@@ -96,6 +96,7 @@ Set with CLI flags, not env vars. Pre-set `ISL` / `OSL` / `CONC` / `PRECISION` /
   `--pd-ib-device`.
 - **Phase toggles:** `--enable-roofline` / `--no-enable-roofline`,
   `--enable-conc-sweep` / `--no-enable-conc-sweep`, `--conc-sweep-concs`,
+  `--conc-sweep-timeout-sec`, `--conc-sweep-total-budget-sec`,
   `--no-framework-agent`, `--no-framework-local-explore`, `--no-kernel`,
   `--no-eval`.
 - **Agent models:** `--claude-model`, `--codex-model`.
@@ -395,20 +396,17 @@ container prevents it from establishing the sandbox, `workspace-write` and
 `read-only` fail closed before the app-server starts. There is no automatic
 fallback to `bypass`.
 
-`bypass` is a deliberate double opt-in. Set both
-`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` and
-`HYPERLOOM_CODEX_EXTERNAL_SANDBOX=1`; the second variable confirms that an
-external container or sandbox already enforces the required isolation. It does
-not create that boundary. A confirmed bypass maps to Codex full access even
-when no writable roots are declared, because the external sandbox is
-authoritative. Under the contained modes, no writable roots remains
-`read-only`. Unknown modes and incomplete bypass configuration fail
+`bypass` is an explicit operator opt-in. Set
+`HYPERLOOM_CODEX_SANDBOX_MODE=bypass` when an external container or sandbox
+already enforces the required isolation. Hyperloom does not create that
+boundary. A confirmed bypass maps to Codex full access even when no writable
+roots are declared, because the external sandbox is authoritative. Under the
+contained modes, no writable roots remains `read-only`. Unknown modes fail
 immediately.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access only when the external-sandbox confirmation below is also set. |
-| `HYPERLOOM_`<br>`CODEX_EXTERNAL_`<br>`SANDBOX` | Unset | Set exactly to `1` only when an external isolation boundary is already active and `HYPERLOOM_CODEX_SANDBOX_MODE=bypass`. Setting this alone has no effect and never weakens the default sandbox. |
+| `HYPERLOOM_`<br>`CODEX_SANDBOX_MODE` | `workspace-write` | `workspace-write` restricts writes to the session directory plus declared output roots; `read-only` forbids writes; `bypass` selects Codex full access when an external sandbox already enforces isolation. |
 
 ---
 
@@ -686,7 +684,7 @@ The following variables configure the Critic, Robustness, and knowledge base com
 | `KNOWLEDGE_LOCAL_ROOT`                | `$USER_DATA_PATH/knowledge`, otherwise `~/.cache/hyperloom/knowledge` | Local Recipe/KG root. It is not used for Recipe data in remote mode. |
 | `HYPERLOOM_`<br>`LOCAL_KB_ROOT`       | Unset                  | Deprecated explicit local Recipe root compatibility input, overridden by `--local-kb-root`; explicit use skips automatic legacy migration. |
 | `INFERENCE_OPTIMIZER_`<br>`FA_KB_PATH` | `$USER_DATA_PATH/framework-kb`, otherwise `/workspace/hyperloom/framework-kb` | Framework-agent KB root, holding the lessons ledger the FRAMEWORK phase reads and writes. The only supported override: the `fa` reader and the orchestrator's writeback both resolve through it, so it moves both halves at once. The withdrawn `FRAMEWORK_AGENT_KB_DIR` is ignored with a warning naming the resolved root. On first start-up an existing partition under the legacy `$USER_DATA_PATH/kb` is copied across once; a copy that fails warns and leaves the phase to cold-start. |
-| `KB_STORE_URL`                        | Unset                  | KB Store endpoint. Required when `KNOWLEDGE_STORE_MODE=remote`; remote Recipe mode selects the current Recipe View, replays its Config column, ordered Patch column overlays, and Kernel column, then writes one final session at CLOSE. |
+| `KB_STORE_URL`                        | Local Recipe mode: `https://global.primus-safe.amd.com/knowledge-base`; remote mode: unset | Unified KB Service endpoint. Local Recipe mode uses the default only for co-hosted PR Monitor access; IR-3 disables PR Monitor without disabling local Recipe storage when the endpoint is unreachable. Remote Recipe mode requires an explicit value, selects the current Recipe View, replays its Config, Patch, and Kernel columns, then writes one final session at CLOSE. PR Monitor is available at `${KB_STORE_URL}/pr-monitor/v1` (REST/IR-3/Framework/KernelForge) and `${KB_STORE_URL}/pr-monitor/mcp/` (specialist MCP). |
 | `KB_STORE_TOKEN`                      | Unset                  | KB Store bearer token. Required when `KNOWLEDGE_STORE_MODE=remote`; transport failures during the final write are non-fatal. |
 | `KB_DRAFT_DIR`                        | Runtime-generated      | Internal remote-mode handoff where each Recipe column (`config`, `patch`, `kernel`) stages its knowledge and files before CLOSE merges them. Hyperloom creates and exports it; operators must not set it. A Recipe cannot be built without it. |
 | `KB_WARM_START_DIR`                   | Runtime-generated      | Internal remote-mode handoff pointing agents at the downloaded `recipe.json + files/` selected Recipe View. Hyperloom creates and exports it; operators must not set it. |
@@ -856,6 +854,58 @@ Fields with per-call cardinality (a task or kernel id) are deliberately not in
 the tag list: one tag per task would give the rollup as many buckets as there
 are tasks. Supporting another gateway means adding a preset in
 `src/hyperloom/common/llm_attribution.py`, not setting a different string here.
+
+---
+
+## AgentX performance metric
+
+Grading defaults to output throughput alone. On an agentic replay that is the
+wrong objective: the canonical corpus averages ~114k prompt tokens against ~810
+output tokens per request, so output-only grading optimises about 1% of the
+token budget and a variant can lift decode tok/s while wrecking prefill and
+still be recorded as a win.
+
+Turning this on adopts the shape InferenceX ranks a submission by. Upstream
+sweeps a concurrency ladder, keeps TTFT and inter-token-latency percentiles
+separately, and compares throughput per chip *at a fixed interactivity target* —
+it never collapses the axes into one weighted number, and trading interactivity
+away for throughput is not a result it can express. So **total token throughput
+is the objective** and **interactivity p90 is a veto**, not a weighted term.
+
+The objective is graded with the same `gain_pct` and the same
+`keep_threshold_pct` as run_grid and integrate_patch: a +1% total-throughput
+lift reads 1.00 and is kept, and the threshold is the only noise filter on the
+graded quantity. A candidate whose interactivity p90 falls past the band below
+the anchor is rejected before its throughput is read.
+
+Interactivity is E2E Normalized Interactivity (`OSL/E2EL`) at p90, which is the
+axis upstream reports. It includes TTFT in the denominator, unlike the per-user
+`1/ITL` figure — on a ~114k-prompt replay TTFT is most of what a user waits for,
+so grading on `1/ITL` would let a candidate double TTFT with no visible cost.
+
+Default-on for AgentX runs, explicit opt-in via
+`HYPERLOOM_PERF_METRIC=composite_v1` otherwise. Either AgentX signal turns it
+on: the ambient `HYPERLOOM_AGENTX=1`, or the `benchmark_mode=agentx` stamped on
+the session at seed — so a round driven from a subprocess that never inherited
+the env var still grades on the agentic axis. Serving frameworks only:
+scriptable frameworks (xDiT, custom) keep output-throughput grading regardless.
+
+Every KEEP decision — explore, the current_best lift, integrate_patch, the
+kernel stack, and the cumulative validated gain — resolves what it grades
+through one chokepoint, so the candidate and the figure it must beat are always
+read off the same axis. Total is ~140x output on this corpus, so half-applying
+the objective would not read as a small error: it would refuse every KEEP in the
+affected lane while each individual number it logged still looked plausible.
+When either side cannot supply the graded axes (no `intvty_p90`, no total),
+both degrade to output throughput together and the reason is logged — the
+degrade is never silent and never one-sided.
+
+| Variable                       | Default                       | Description                                                                                                                                                                                       |
+|--------------------------------|-------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `HYPERLOOM_PERF_METRIC`        | `composite_v1` under `HYPERLOOM_AGENTX=1`, else output tput | `composite_v1` grades total token throughput under the interactivity veto. An agentic replay is the case this grading exists for, so AgentX runs get it without asking; any other explicit value (including on an AgentX run) keeps output-throughput grading. Reported in the final summary as `grading mode`. |
+| `HYPERLOOM_PERF_NOISE_PCT`     | `5.0`                         | Interactivity veto band in percent: a candidate whose intvty p90 sits more than this below the anchor is rejected before it is graded. The default is the top of the 1–5% run-to-run noise upstream records for this workload, so the veto does not fire on movement upstream would call noise. Not subtracted from the objective — that would stack with `keep_threshold_pct` and silently raise the bar. An unparseable value falls back to the default. |
+| `HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION` | Unset (fail closed) | Truthy accepts a measurement whose submission verdict is absent or undetermined (`submission_valid=None`). A measurement the scenario explicitly judged invalid (`submission_valid=False`) is always rejected regardless of this flag. Applies to every measurement the run accepts (baseline, explore, kernel, sweep), not only the baseline — an unverified measurement makes every gain derived from it unverifiable. |
+| `INFERENCE_OPTIMIZER_BASELINE_SERVER_READY_SEC` | `7200` | Server-boot budget for the persistent-server phase: how long a launch may spend before the health endpoint answers. Sized for a TB-scale checkpoint — a 1.56 TB MXFP4 MoE reads for ~37 minutes before the first aiter JIT — so it is not AgentX-gated; a synthetic run on the same weights waits the same. A server that never comes up is still bounded by the per-phase and session budgets. |
 
 ---
 

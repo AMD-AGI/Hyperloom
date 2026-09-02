@@ -35,6 +35,13 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             return v.get(sub, v.get("avg", default))
         return v if v is not None else default
 
+    def _pct(m, key, sub, default=0.0):
+        v = m.get(key)
+        if isinstance(v, dict):
+            sv = v.get(sub)
+            return sv if sv is not None else default
+        return default
+
     def _submission_outcome(export):
         # Tri-state: True / False / None(absent). Absent is NOT valid -- it means
         # no --scenario was requested or the aiperf build predates the field.
@@ -59,9 +66,13 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
         total_tput = _stat(m, "total_token_throughput") or ((in_tput or 0) + (out_tput or 0))
         rc = int(_stat(m, "request_count") or 0)
         isl = _stat(m, "input_sequence_length")
+        # E2E Normalized Interactivity (OSL/E2EL), the axis InferenceX reports
+        # at p90; the per-user variant is 1/ITL and omits TTFT.
+        intvty_p90 = _pct(m, "e2e_output_token_throughput", "p90")
         return {
             "request_throughput": _stat(m, "request_throughput"),
             "output_throughput": out_tput,
+            "input_throughput": in_tput,
             "total_token_throughput": total_tput,
             "completed": rc,
             "total_input_tokens": int(_stat(m, "total_isl") or (isl * max(1, rc)) or 0),
@@ -73,8 +84,10 @@ except Exception:  # noqa: BLE001 — self-sufficient fallback when pkg not on p
             "std_ttft_ms": _stat(m, "time_to_first_token", "std"),
             "mean_tpot_ms": _stat(m, "inter_token_latency", "avg"),
             "median_tpot_ms": _stat(m, "inter_token_latency", "p50"),
+            "p90_tpot_ms": _stat(m, "inter_token_latency", "p90"),
             "p99_tpot_ms": _stat(m, "inter_token_latency", "p99"),
             "std_tpot_ms": _stat(m, "inter_token_latency", "std"),
+            "intvty_p90_tok_s_user": intvty_p90,
             "mean_itl_ms": _stat(m, "inter_token_latency", "avg"),
             "median_itl_ms": _stat(m, "inter_token_latency", "p50"),
             "p99_itl_ms": _stat(m, "inter_token_latency", "p99"),

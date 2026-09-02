@@ -599,8 +599,8 @@ class TestPreDispatchBackstop:
         result = exit_normal_sweep(coord.shared_state)
         assert result is not None
         reason, evidence = result
-        assert reason == "conc_sweep_done"
-        assert evidence["conc_sweep_status"] == "skipped"
+        assert reason == "sweep_done"
+        assert evidence["sweep_status"] == "skipped"
 
     @pytest.mark.asyncio
     async def test_dropping_an_over_budget_conc_sweep_does_not_erase_a_prior_result(

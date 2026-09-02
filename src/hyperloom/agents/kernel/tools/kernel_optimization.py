@@ -1961,20 +1961,6 @@ def build_prompt(
     )
 
 
-def ray_available() -> bool:
-    """Report whether the optional ``ray`` dependency can be imported.
-
-    Returns:
-        bool: True when ``import ray`` succeeds; False on any import error.
-    """
-    try:
-        import ray  # noqa: F401
-
-        return True
-    except Exception:
-        return False
-
-
 def _backends_module_dir() -> Path:
     """Return the directory holding the per-backend submitter modules.
 
@@ -2094,11 +2080,8 @@ def invoke_backend(
     """
     budget_min = float(getattr(args, "budget_minutes", 60) or 60)
     timeout_s = max(60, int(budget_min * 60))
-    prefer_ray = ray_available()
     candidate = candidate or {}
     kernel_repo = str(candidate.get("kernel_repo") or "")
-    # GPU count: CLI override, then candidate hint, then 1.
-    num_gpus = max(1, int(getattr(args, "num_gpus", 0) or 0) or int(candidate.get("num_gpus_recommended") or 1))
 
     try:
         if backend == "forge":
@@ -2126,9 +2109,7 @@ def invoke_backend(
                 output_dir=out_dir,
                 source_type=str((candidate or {}).get("source_type") or "unknown"),
                 candidate=candidate or {},
-                num_gpus=num_gpus,
                 timeout_s=timeout_s,
-                prefer_ray=prefer_ray,
                 kernel_repo=kernel_repo,
                 invocation_spec_file=(str(invocation_spec_path) if invocation_spec_path.is_file() else ""),
             )

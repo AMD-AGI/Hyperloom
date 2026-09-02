@@ -24,6 +24,7 @@ the ``return`` at the end of ``__call__`` for the authoritative field set.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import logging
 import os
@@ -36,6 +37,13 @@ import yaml
 from hyperloom.common.coerce import to_str_list
 from hyperloom.common.gain_math import gain_pct
 from hyperloom.common.model_paths import resolve_session_model_path
+from hyperloom.common.perf_metric import (
+    passes_intvty_gate,
+    perf_snapshot_from_mapping,
+    resolve_grading_anchor_perf,
+    total_tput_of,
+    total_tput_serving_grading_enabled,
+)
 from hyperloom.common.timeutil import now_iso
 from hyperloom.inference_optimizer.session.session_paths import runs_dir
 from ...state.failure_evidence import (
@@ -44,7 +52,12 @@ from ...state.failure_evidence import (
     make_failure_id,
     tail_excerpt,
 )
-from ...state.shared_state import first_positive_tput, resolve_anchor_with_drift, stack_base_params
+from ...state.shared_state import (
+    first_positive_tput,
+    framework_is_scriptable,
+    resolve_anchor_with_drift,
+    stack_base_params,
+)
 from ..stop_attribution import (
     SESSION_TIME_EXHAUSTED_CLASS,
     STOPPED_BY_THE_RUN,
@@ -63,6 +76,7 @@ from ._grid_runner import (
     _MN_BACKENDS_PRIORITY,
     _MN_PARAMS_PRIORITY,
     GridVariant,
+    _kill_stale_servers,
     _num_gpus_for_config,
     _resolve_session_dir,
     apply_aiter_moe_pin_filter,
@@ -674,9 +688,16 @@ class ExploreExecutor:
     async def __call__(self, ctx) -> dict[str, Any]:
         """Run the merged ``explore`` action for one task.
 
-        Resolves the benchmark config and output workspace, builds the
-        candidate grid (programmatic seed and/or LLM/specialist variants),
-        and benchmarks each variant with per-variant KEEP/REVERT gating.
+        Thin wrapper around :meth:`_run_explore` that guarantees a
+        post-round GPU sweep regardless of how the task ends (success,
+        failure, or an early ``return``): every variant this task started is
+        expected to be torn down by its own per-variant finally by the time
+        this returns, but a magpie_timeout that fires before a
+        server_lifecycle variant's pidfile is ever written leaves nothing
+        for that pidfile-based teardown to find, orphaning its server
+        (AMD-AGI/Hyperloom#1354). Skipped under pytest (unsafe there),
+        matching the guard on the per-launch preclean in ``_grid_runner.py``.
+        Best-effort; never raises.
 
         Args:
             ctx: The action runner context carrying the task and params.
@@ -686,6 +707,20 @@ class ExploreExecutor:
             accepted/rejected variants and ledger updates), or a failure
             dict on error.
         """
+        try:
+            return await self._run_explore(ctx)
+        finally:
+            if not os.environ.get("PYTEST_CURRENT_TEST"):
+                try:
+                    await asyncio.to_thread(_kill_stale_servers)
+                except Exception:  # noqa: BLE001 - best-effort safety net
+                    log.warning(
+                        "explore: post-run _kill_stale_servers failed",
+                        exc_info=True,
+                    )
+
+    async def _run_explore(self, ctx) -> dict[str, Any]:
+        """Run body for :meth:`__call__`; see its docstring for the wrapper."""
         params = dict(ctx.task.params or {})
         # ----- Config / output workspace -----------------------------------
         config_path = Path(params.get("config_path") or self.default_config_path or default_baseline_config())
@@ -1066,6 +1101,17 @@ class ExploreExecutor:
         stack_unset_envs = list(dict.fromkeys(base_unset_envs))
         stack_base_args_mode = base_args_mode
         running_base_tput = base_tput
+        grade_on_total = total_tput_serving_grading_enabled(
+            scriptable=framework_is_scriptable(framework),
+            benchmark_mode=str(getattr(ss, "benchmark_mode", "") or ""),
+        )
+        _anchor_perf, _anchor_reason = resolve_grading_anchor_perf(ss) if grade_on_total else (None, "")
+        if grade_on_total and _anchor_reason:
+            log.info(
+                "explore: total-throughput grading unavailable (%s); grading this round on output throughput",
+                _anchor_reason,
+            )
+        running_base_perf = _anchor_perf
 
         # Single-node server_lifecycle eligibility (multi-node / non-builtin
         # script / profiler-on falls back to a cold decision round instead of
@@ -1310,6 +1356,8 @@ class ExploreExecutor:
                                 "reason": "warmup_failed",
                                 "error_class": w.error_class if w is not None else "",
                                 "server_log_path": w.server_log_path if w is not None else None,
+                                "launch_evidence": dict(w.launch_evidence or {}) if w is not None else {},
+                                "launch_evidence_path": w.launch_evidence_path if w is not None else None,
                                 "stage": FAILURE_STAGE_WARMUP,
                                 "error_excerpt": tail_excerpt(w.error) if w is not None else None,
                                 "workspace": w.workspace if w is not None else None,
@@ -1488,16 +1536,48 @@ class ExploreExecutor:
                         continue
 
                     # Decision-round gain is the gate: a variant KEEPs when it
-                    # clears keep_threshold and the accuracy gate.
-                    gain = gain_pct(r.output_throughput, running_base_tput)
+                    # clears keep_threshold and the accuracy gate. Under AgentX
+                    # grading the graded quantity is total token throughput
+                    # rather than output tput alone, and an interactivity
+                    # regression is vetoed before throughput is read.
+                    cand_snap = perf_snapshot_from_mapping(
+                        {
+                            "output_throughput": r.output_throughput,
+                            "input_throughput": r.input_throughput,
+                            "total_throughput": r.total_token_throughput,
+                            "intvty_p90": r.intvty_p90,
+                            "tpot_p90_ms": r.tpot_p90_ms,
+                        }
+                    )
+                    gain: float | None
                     outcome = "FAILED"
                     reason: str = ""
-                    if r.status != "succeeded" or gain is None:
-                        reason = (r.error or "")[-1200:] or "no_measurement"
-                    elif gain < keep_threshold_pct:
-                        outcome = "REVERT"
-                        reason = "gain_below_threshold"
+                    _graded_on_total = False
+                    if grade_on_total and running_base_perf and cand_snap:
+                        _graded_on_total = True
+                        if passes_intvty_gate(cand_snap, running_base_perf):
+                            gain = gain_pct(total_tput_of(cand_snap), total_tput_of(running_base_perf))
+                        else:
+                            gain = None
+                            outcome = "REVERT"
+                            reason = "intvty_regression"
                     else:
+                        if grade_on_total and running_base_perf:
+                            log.info(
+                                "explore: variant %r missing graded axes (intvty_p90=%s total=%s); "
+                                "grading on output throughput",
+                                gv.name,
+                                r.intvty_p90,
+                                r.total_token_throughput,
+                            )
+                        gain = gain_pct(r.output_throughput, running_base_tput)
+                    if not reason:
+                        if r.status != "succeeded" or gain is None:
+                            reason = (r.error or "")[-1200:] or "no_measurement"
+                        elif gain < keep_threshold_pct:
+                            outcome = "REVERT"
+                            reason = "gain_below_threshold"
+                    if outcome == "FAILED" and not reason:
                         # Accuracy gate. Every variant is gated: the round already
                         # ran the eval, so the score is on disk and the flag
                         # catalogue that used to decide whether to read it only
@@ -1554,7 +1634,12 @@ class ExploreExecutor:
                         "status": r.status,
                         "tput": decision_tput,
                         "decision_tput": decision_tput,
+                        "input_throughput": r.input_throughput,
+                        "total_throughput": r.total_token_throughput,
+                        "intvty_p90": r.intvty_p90,
+                        "tpot_p90_ms": r.tpot_p90_ms,
                         "gain_pct": gain,
+                        "graded_objective": "total_throughput" if _graded_on_total else "output_throughput",
                         "base_tput": running_base_tput,
                         "round_id": round_id,
                         "ts": _now_iso(),
@@ -1565,6 +1650,8 @@ class ExploreExecutor:
                         "workspace": r.workspace,
                         "error_class": r.error_class or "",
                         "server_log_path": r.server_log_path,
+                        "launch_evidence": dict(r.launch_evidence or {}),
+                        "launch_evidence_path": r.launch_evidence_path,
                         "stage": FAILURE_STAGE_DECISION,
                     }
                     if gv.name:
@@ -1630,6 +1717,7 @@ class ExploreExecutor:
                             # gain from a gain that also had a kernel running.
                             "accepted_kernels": list(getattr(gv, "accepted_kernels", []) or []),
                             "gain_pct": gain,
+                            "graded_objective": "total_throughput" if _graded_on_total else "output_throughput",
                             # The verdict this KEEP rests on. ``None`` means the
                             # variant was not gated (not high-risk, or no
                             # baseline to compare against) rather than that it
@@ -1638,7 +1726,16 @@ class ExploreExecutor:
                             "accuracy": accuracy_value,
                             "tput": decision_tput,
                             "decision_tput": decision_tput,
+                            # The axes this KEEP was graded on travel with it:
+                            # current_best becomes the next round's anchor, and
+                            # an anchor without them degrades the session.
+                            "input_throughput": r.input_throughput,
+                            "total_throughput": r.total_token_throughput,
+                            "intvty_p90": r.intvty_p90,
+                            "tpot_p90_ms": r.tpot_p90_ms,
                             "single_workspace": r.workspace,
+                            "launch_evidence": dict(r.launch_evidence or {}),
+                            "launch_evidence_path": r.launch_evidence_path,
                             "round_id": round_id,
                             "accepted_at_round": round_id,
                             "ts": _now_iso(),
@@ -1653,6 +1750,15 @@ class ExploreExecutor:
                         stack_base_args_mode = "replace" if persist_effective_args else "append"
                         if decision_tput and decision_tput > 0:
                             running_base_tput = decision_tput
+                        if grade_on_total and cand_snap and _graded_on_total:
+                            running_base_perf = cand_snap
+                        elif grade_on_total and not _graded_on_total:
+                            log.info(
+                                "explore: KEEP %r graded on output throughput; clearing the total anchor "
+                                "so the rest of this round grades on output too",
+                                gv.name,
+                            )
+                            running_base_perf = None
 
                         winners.append(keep_entry)
                         winners_history_update.append(

@@ -957,8 +957,8 @@ def _make_lane_agent_factory(
 @click.option(
     "--pr-kb/--no-pr-kb",
     default=None,
-    help="Inject upstream pull-request references from the Primus Cortex PR "
-    "Monitor as Implementer prior knowledge (default off). Falls back to "
+    help="Inject upstream pull-request references from the PR Monitor "
+    "as Implementer prior knowledge (default off). Falls back to "
     "PR_KB_ENABLE when unset.",
 )
 @click.option(

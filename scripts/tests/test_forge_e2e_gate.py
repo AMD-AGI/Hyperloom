@@ -36,6 +36,26 @@ def test_vendored_forge_changes_trigger() -> None:
         assert gate.requires_forge_e2e([path]), path
 
 
+def test_fusion_and_gemm_only_changes_do_not_trigger() -> None:
+    assert not gate.requires_forge_e2e(
+        [
+            "src/kernelforge/fusion/loop.py",
+            "src/kernelforge/tests/fusion/test_loop.py",
+            "src/kernelforge/gemm_tune/router.py",
+            "src/kernelforge/gemm_tune/tests/test_router.py",
+        ]
+    )
+
+
+def test_shared_or_loop_change_still_triggers_alongside_excluded_changes() -> None:
+    assert gate.requires_forge_e2e(
+        [
+            "src/kernelforge/gemm_tune/router.py",
+            "src/kernelforge/agent_backends/codex.py",
+        ]
+    )
+
+
 def test_forge_e2e_contract_changes_trigger() -> None:
     for path in (
         ".github/workflows/forge-e2e.yml",
@@ -63,7 +83,16 @@ def test_previous_filename_can_trigger_a_rename_out_of_forge() -> None:
     assert gate.requires_forge_e2e(
         [
             "src/hyperloom/unrelated/new_home.py",
-            "src/kernelforge/old_home.py",
+            "src/kernelforge/loop/old_home.py",
+        ]
+    )
+
+
+def test_rename_confined_to_excluded_products_does_not_trigger() -> None:
+    assert not gate.requires_forge_e2e(
+        [
+            "src/kernelforge/fusion/new_home.py",
+            "src/kernelforge/gemm_tune/old_home.py",
         ]
     )
 
@@ -93,7 +122,7 @@ def test_workflow_gates_all_pr_backed_retries_but_not_manual_runs() -> None:
     assert "files?per_page=100&page=$page" in workflow
     assert '[.labels[].name] | index("skip-e2e-test")' in workflow
     assert "path_skipped=true" in workflow
-    assert 'description="skipped: no Forge-related files changed"' in workflow
+    assert 'description="skipped: no Forge loop-related files changed"' in workflow
 
 
 def test_only_resolved_events_can_cancel_an_in_flight_forge_run() -> None:

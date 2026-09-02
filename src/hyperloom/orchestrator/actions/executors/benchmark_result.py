@@ -712,6 +712,12 @@ def _merge_raw_result(
         measurement["ttft_p99_ms"] = to_float(raw.get("p99_ttft_ms"))
     if measurement.get("tpot_mean_ms") is None:
         measurement["tpot_mean_ms"] = to_float(raw.get("mean_tpot_ms"))
+    if measurement.get("input_throughput") is None:
+        measurement["input_throughput"] = to_float(raw.get("input_throughput"))
+    if measurement.get("tpot_p90_ms") is None:
+        measurement["tpot_p90_ms"] = to_float(raw.get("p90_tpot_ms"))
+    if measurement.get("intvty_p90") is None:
+        measurement["intvty_p90"] = to_float(raw.get("intvty_p90_tok_s_user"))
     if measurement.get("e2el_mean_ms") is None:
         measurement["e2el_mean_ms"] = first_float(
             raw.get("mean_e2el_ms"),
@@ -952,13 +958,20 @@ def is_valid_measurement(result: dict[str, Any] | None) -> bool:
     # verdict and must stay selectable.
     from ._workload_envs import agentx_enabled
 
-    if agentx_enabled() and "submission_valid" in result and result.get("submission_valid") is not True:
-        # False = the scenario rejected it. None = the verdict is unknown (no
-        # scenario, or an aiperf too old to stamp one); map_aiperf writes the
-        # key unconditionally, so None still arrives as a present key. Neither
-        # is comparable, and treating "unknown" as valid is exactly how an
-        # incomparable run would reach the leaderboard-comparable set.
-        return False
+    if agentx_enabled() and "submission_valid" in result:
+        verdict = result.get("submission_valid")
+        if verdict is False:
+            return False
+        if verdict is None:
+            # The verdict is unknown: no --scenario was requested or the aiperf
+            # build predates the field. map_aiperf writes the key
+            # unconditionally, so None arrives as a present key. Unknown is not
+            # the same as valid -- treat it as unselectable unless the operator
+            # explicitly accepts unverified submissions.
+            from hyperloom.common.env import env_bool
+
+            if not env_bool("HYPERLOOM_ALLOW_UNVERIFIED_SUBMISSION"):
+                return False
     if _is_scriptable_measurement(result):
         # A scriptable run whose image-quality gate failed is not selectable,
         # regardless of throughput. ``require=False`` keeps a missing/empty gate

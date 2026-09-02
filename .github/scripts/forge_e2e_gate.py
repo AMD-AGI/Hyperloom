@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Advanced Micro Devices, Inc.
 # SPDX-License-Identifier: MIT
 
-"""Return success when changed paths require the Forge end-to-end check."""
+"""Return success when changed paths require the Forge loop end-to-end check."""
 
 from __future__ import annotations
 
@@ -10,9 +10,9 @@ import sys
 from collections.abc import Iterable
 
 
-# This smoke exercises the vendored ``kernelforge`` package directly. Keep the
-# gate narrower than Hyperloom's full kernel-optimization integration surface:
-# changes outside these paths are covered by the normal Hyperloom E2E workflow.
+# This smoke exercises ``kernelforge forge-loop``. Keep shared package surfaces
+# in scope because the loop imports them, but do not spend a GPU run on changes
+# confined to the independent fusion or GEMM-tuning products.
 FORGE_E2E_PATHS = (
     "src/kernelforge/**",
     "pyproject.toml",
@@ -23,13 +23,23 @@ FORGE_E2E_PATHS = (
     ".github/scripts/forge_e2e_report.py",
 )
 
+FORGE_E2E_EXCLUDED_PATHS = (
+    "src/kernelforge/fusion/**",
+    "src/kernelforge/gemm_tune/**",
+    "src/kernelforge/tests/fusion/**",
+)
+
 
 def requires_forge_e2e(paths: Iterable[str]) -> bool:
-    """Whether any normalized repository path affects the Forge smoke test."""
+    """Whether any normalized repository path affects the Forge loop smoke."""
 
     for path in paths:
         normalized = path.strip().replace("\\", "/")
-        if normalized and any(fnmatch.fnmatchcase(normalized, pattern) for pattern in FORGE_E2E_PATHS):
+        if not normalized:
+            continue
+        if any(fnmatch.fnmatchcase(normalized, pattern) for pattern in FORGE_E2E_EXCLUDED_PATHS):
+            continue
+        if any(fnmatch.fnmatchcase(normalized, pattern) for pattern in FORGE_E2E_PATHS):
             return True
     return False
 

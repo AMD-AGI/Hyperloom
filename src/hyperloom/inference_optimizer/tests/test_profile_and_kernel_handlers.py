@@ -866,6 +866,101 @@ def test_materialize_profile_window_sglang_skill_formula(
     assert body["num_steps"] == 128
 
 
+def test_materialize_profile_agentx_clamp_warns_below_steady_floor(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """AgentX's tighter capture cap (8) must warn when it undercuts steady_floor.
+
+    CONC=32/OSL=1024/R=1.0 -> steady_floor=ceil(1024*2/64)=32, far above the
+    AgentX cap of 8. The manual HYPERLOOM_PROFILE_MAX_ITERS override already
+    warns in this situation; the AgentX auto-clamp must match it instead of
+    silently capturing a trace with no steady-state window.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("steady-state floor" in r.message for r in caplog.records)
+
+
+def test_materialize_profile_agentx_clamp_warns_on_explicit_override(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """An explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP must not be silently overridden.
+
+    Without this, an operator who explicitly raised the cap (e.g. to widen the
+    profiler's steady-state window) would see it clamped back to 8 by the
+    AgentX branch with no indication their override had no effect.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_STEPS_CAP", "64")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    assert "--profiler-config.max_iterations 8" in extra, extra
+    assert any("explicit HYPERLOOM_PROFILE_MAX_STEPS_CAP=64" in r.message for r in caplog.records)
+
+
+def test_materialize_profile_max_iters_override_warns_it_undoes_the_agentx_bound(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """Overriding the AgentX capture bound must say so -- 128 warns about nothing else.
+
+    HYPERLOOM_PROFILE_MAX_ITERS is applied after the AgentX clamp and wins, so
+    it restores exactly the host-RAM exposure the clamp exists to remove. The
+    two pre-existing warnings cannot cover this: ``cap`` defaults to
+    _DEFAULT_PROFILE_MAX_STEPS (128), so an override of 128 is neither below
+    steady_floor's band nor above the cap, and the bound would be lifted in
+    silence.
+    """
+    import yaml
+
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_AGENTX", "1")
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        out = _materialize_config_with_envs(src, tmp_path)
+    rendered = yaml.safe_load(out.read_text())
+    extra = rendered["benchmark"]["envs"]["EXTRA_VLLM_ARGS"]
+    # The override is still honored verbatim; this is a visibility fix only.
+    assert "--profiler-config.max_iterations 128" in extra, extra
+    assert any(
+        "HYPERLOOM_PROFILE_MAX_ITERS=128 overrides the AgentX capture bound of 8" in r.message for r in caplog.records
+    ), [r.message for r in caplog.records]
+
+
+def test_materialize_profile_max_iters_override_is_quiet_without_agentx(
+    tmp_path,
+    monkeypatch,
+    caplog,
+):
+    """The new warning is AgentX-only; the synthetic path has no host-RAM bound."""
+    _clear_workload_env(monkeypatch)
+    monkeypatch.setenv("HYPERLOOM_PROFILE_MAX_ITERS", "128")
+    src = _profile_yaml(tmp_path, "vllm", {"CONC": 32, "ISL": 256, "OSL": 1024})
+    with caplog.at_level("WARNING"):
+        _materialize_config_with_envs(src, tmp_path)
+    assert not any("AgentX capture bound" in r.message for r in caplog.records)
+
+
 def test_materialize_persists_inferencex_path_for_magpie(
     tmp_path,
     monkeypatch,

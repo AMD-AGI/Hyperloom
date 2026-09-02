@@ -2,8 +2,10 @@ name: Forge E2E (single-GPU forge-loop smoke)
 
 # Run the same Triton-softmax ``kernelforge forge-loop`` smoke that guarded the
 # standalone KernelForge repository, now against the exact Hyperloom PR commit
-# containing the vendored package. The GPU job is path-gated; the cheap resolve
-# job still handles labels, comments, renames, and manual dispatch consistently.
+# containing the vendored package. The GPU job is path-gated to loop-affecting
+# code; standalone Fusion/GEMM changes use their focused checks instead. The
+# cheap resolve job still handles labels, comments, renames, and manual dispatch
+# consistently.
 
 on:
   pull_request:
@@ -174,7 +176,7 @@ jobs:
               page=$((page + 1))
             done
             if [ "$forge_changed" != true ]; then
-              echo "no Forge package or Forge E2E paths changed; skipping GPU smoke"
+              echo "no Forge loop or Forge E2E paths changed; skipping GPU smoke"
               run=false; path_skipped=true; emit; exit 0
             fi
           fi
@@ -205,7 +207,7 @@ jobs:
           if [ "$OPTED_OUT" = true ]; then
             description="skipped via skip-e2e-test label"
           else
-            description="skipped: no Forge-related files changed"
+            description="skipped: no Forge loop-related files changed"
           fi
           # Fork pull_request jobs get a read-only GITHUB_TOKEN even with
           # permissions.statuses: write, so this POST 403s and used to fail

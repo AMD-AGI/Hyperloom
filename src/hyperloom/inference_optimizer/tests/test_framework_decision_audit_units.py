@@ -5,7 +5,7 @@
 and unified-diff parsing (``_audit_common``).
 
 Both modules are pure over plain dicts / dataclasses, so they are exercised
-directly here without any network, worktree, or gbrain/primus backend.
+directly here without any network, worktree, or gbrain/pr_monitor backend.
 """
 
 from __future__ import annotations

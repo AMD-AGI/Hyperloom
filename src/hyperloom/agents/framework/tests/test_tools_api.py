@@ -22,37 +22,37 @@ def test_find_relevant_prs_smart_empty_repos_returns_empty() -> None:
     assert out2 == []
 
 
-def test_find_relevant_prs_smart_primus_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With primus_cortex_url, only primus is queried; github is skipped."""
+def test_find_relevant_prs_smart_pr_monitor_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With pr_monitor_url, only pr_monitor is queried; github is skipped."""
 
-    def fake_primus(repo_url, *, base_url, limit, state, label, timeout_sec):
+    def fake_pr_monitor(repo_url, *, base_url, limit, state, label, timeout_sec):
         del repo_url, base_url, limit, state, label, timeout_sec
         return [GitHubPr(number=1, title="a", html_url="u1")]
 
     def boom_github(repo_url, *, gap_description, limit):  # noqa: ARG001
         raise AssertionError("github backend must not be called when include_github=False")
 
-    monkeypatch.setattr(tools_api, "list_perf_prs", fake_primus)
+    monkeypatch.setattr(tools_api, "list_perf_prs", fake_pr_monitor)
     monkeypatch.setattr(tools_api.github_backend, "search_perf_prs", boom_github)
 
     out = tools_api.find_relevant_prs_smart(
         "x",
         repos=["https://github.com/sgl-project/sglang.git"],
-        primus_cortex_url="http://primus",
+        pr_monitor_url="http://pr_monitor",
         include_github=False,
     )
     refs = [c.ref for c in out]
     sources = {c.source for c in out}
     assert refs == ["PR:1"]
-    assert sources == {"primus_cortex"}
+    assert sources == {"pr_monitor"}
 
 
-def test_find_relevant_prs_smart_unions_primus_and_github(
+def test_find_relevant_prs_smart_unions_pr_monitor_and_github(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both backends contribute; primus wins ties when dedup-by-(repo,ref)."""
+    """Both backends contribute; pr_monitor wins ties when dedup-by-(repo,ref)."""
 
-    def fake_primus(repo_url, *, base_url, limit, state, label, timeout_sec):  # noqa: ARG001
+    def fake_pr_monitor(repo_url, *, base_url, limit, state, label, timeout_sec):  # noqa: ARG001
         return [
             GitHubPr(number=1, title="a", html_url="u1"),
             GitHubPr(number=2, title="b", html_url="u2"),
@@ -64,33 +64,33 @@ def test_find_relevant_prs_smart_unions_primus_and_github(
             GitHubPr(number=3, title="c", html_url="u3"),
         ]
 
-    monkeypatch.setattr(tools_api, "list_perf_prs", fake_primus)
+    monkeypatch.setattr(tools_api, "list_perf_prs", fake_pr_monitor)
     monkeypatch.setattr(tools_api.github_backend, "search_perf_prs", fake_github)
 
     out = tools_api.find_relevant_prs_smart(
         "x",
         repos=["https://github.com/sgl-project/sglang.git"],
-        primus_cortex_url="http://primus",
+        pr_monitor_url="http://pr_monitor",
     )
     refs = [c.ref for c in out]
     by_ref = {c.ref: c.source for c in out}
     assert refs == ["PR:1", "PR:2", "PR:3"]
-    assert by_ref["PR:2"] == "primus_cortex"
+    assert by_ref["PR:2"] == "pr_monitor"
     assert by_ref["PR:3"] == "github"
 
 
-def test_find_relevant_prs_smart_github_only_when_primus_url_missing(
+def test_find_relevant_prs_smart_github_only_when_pr_monitor_url_missing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Without primus_cortex_url + include_github=True: github is the only source."""
+    """Without pr_monitor_url + include_github=True: github is the only source."""
 
-    def boom_primus(*a, **kw):
-        raise AssertionError("primus must not be called without a URL")
+    def boom_pr_monitor(*a, **kw):
+        raise AssertionError("pr_monitor must not be called without a URL")
 
     def fake_github(repo_url, *, gap_description, limit):  # noqa: ARG001
         return [GitHubPr(number=9, title="g", html_url="u9")]
 
-    monkeypatch.setattr(tools_api, "list_perf_prs", boom_primus)
+    monkeypatch.setattr(tools_api, "list_perf_prs", boom_pr_monitor)
     monkeypatch.setattr(tools_api.github_backend, "search_perf_prs", fake_github)
 
     out = tools_api.find_relevant_prs_smart(

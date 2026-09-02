@@ -403,7 +403,7 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
     assert "no target" in cb._default_target_summary(
         _args(model="/m/foo", target_gain=None, target_tput=None, max_hours=4)
     )
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="")) == [
+    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs=""), "synthetic") == [
         256,
         128,
         64,
@@ -413,7 +413,7 @@ def test_target_summary_and_conc_sweep_parser(caplog) -> None:
         4,
         2,
     ]
-    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,")) == [
+    assert cb._parse_conc_sweep_concs(_args(conc_sweep_concs="bad,"), "synthetic") == [
         256,
         128,
         64,
