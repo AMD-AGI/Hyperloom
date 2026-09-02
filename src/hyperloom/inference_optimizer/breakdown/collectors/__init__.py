@@ -66,7 +66,6 @@ from .sessions import (
     collect_final as collect_final,
     collect_enablement as collect_enablement,
     _runtime_summary as _runtime_summary,
-    _find_latest_validate_stack_report as _find_latest_validate_stack_report,
     _find_current_best_report as _find_current_best_report,
     _find_stack_top_report as _find_stack_top_report,
     _find_matching_action_report as _find_matching_action_report,
