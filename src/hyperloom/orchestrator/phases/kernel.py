@@ -4610,8 +4610,6 @@ class KernelPhase(PhaseHandler):
         flags on the re-baseline server, and KEEPs only when measured e2e throughput
         clears the threshold. ``base_tput`` is filled from state by integrate_handler.
         """
-        import os
-
         from ..kernel.request_handlers import integrate_handler, materialize_unified_patch_snapshot
 
         patch = str(result.get("patch") or "").strip()

@@ -171,16 +171,6 @@ def test_gate_orchestration_propose_action_ok(gate):
     )
 
 
-
-
-
-
-
-
-
-
-
-
 def test_gate_orchestration_delegate_normal_action_ok(gate):
     gate.validate_intent(
         "orchestration",

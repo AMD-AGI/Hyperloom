@@ -242,7 +242,6 @@ def _data_quality_flags(
     if notes:
         for n in notes:
             _push(f"[attribution] {n}")
-    cap = as_dict(breakdown.get("capability_summary"))
     return flags
 
 

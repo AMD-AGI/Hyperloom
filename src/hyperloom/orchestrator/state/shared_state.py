@@ -1560,7 +1560,6 @@ class SharedState(_RenderMixin, _ExploreStateMixin):
             existing=filtered.get("explore_search"),
         )
 
-
         if isinstance(filtered.get("enablement"), dict):
             filtered["enablement"] = EnablementRound.from_dict(filtered["enablement"])
         elif not isinstance(filtered.get("enablement"), EnablementRound):

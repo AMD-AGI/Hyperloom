@@ -230,7 +230,6 @@ from hyperloom.orchestrator.phases.machine_state import (
     PHASE_FRAMEWORK_AGENT,
 )
 from hyperloom.orchestrator.policy.gate import (
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.prompts.prompt_builder import (

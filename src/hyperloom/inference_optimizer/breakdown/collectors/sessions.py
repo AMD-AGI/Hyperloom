@@ -26,7 +26,6 @@ from ._common import (
     _benchmark_report_candidates,
     _benchmark_report_metrics,
     _find_benchmark_report,
-    _latest_benchmark_report,
     _load_json_safe,
     _rel,
     _resolve_under_session,

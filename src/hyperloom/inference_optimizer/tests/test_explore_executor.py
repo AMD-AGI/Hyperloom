@@ -52,9 +52,6 @@ from hyperloom.orchestrator.bus.resource_lock import (
 from hyperloom.orchestrator.loop.sub_agent_runner import SubAgentRunner
 from hyperloom.orchestrator.state.task_registry import TaskRegistry
 from hyperloom.orchestrator.bus.storage import SqliteConnection
-from hyperloom.inference_optimizer.breakdown.collectors import (
-    collect_capability_summary,
-)
 
 
 @pytest.fixture(autouse=True)
@@ -1893,8 +1890,6 @@ async def test_explore_executor_empty_grid_returns_failed(sub_agent_runner, tmp_
     res = await sub.run_task(task)
     assert res.result["status"] == "failed"
     assert res.result["error_class"] == "empty_grid"
-
-
 
 
 def _names(variants):

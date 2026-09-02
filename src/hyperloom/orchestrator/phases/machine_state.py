@@ -18,10 +18,6 @@ import time
 from typing import Any
 
 from hyperloom.common.coerce import to_unix
-from hyperloom.inference_optimizer.protocol.action_surfaces import (
-    COORDINATOR_INTERNAL_ACTIONS,
-    ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
-)
 
 
 log = logging.getLogger(__name__)

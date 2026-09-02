@@ -1058,14 +1058,6 @@ class _BaselineSingletonState:
         self.baseline_tput = baseline_tput
 
 
-
-
-
-
-
-
-
-
 # 6b. The workload grid action is gone; SWEEP admits the ladder and nothing else
 def _sweep_phase_gate(**kw):
     class _S:

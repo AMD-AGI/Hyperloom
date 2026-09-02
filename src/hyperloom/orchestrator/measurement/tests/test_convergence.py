@@ -112,5 +112,3 @@ class TestVerdicts:
         assert d["rounds_used"] == [19373.98, 22424.80]
         assert d["converged"] is False
         assert d["spread_pct"] > 15.0
-
-

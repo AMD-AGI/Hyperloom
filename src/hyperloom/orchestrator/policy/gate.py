@@ -26,13 +26,7 @@ from hyperloom.inference_optimizer.protocol.action_surfaces import (
     COORDINATOR_INTERNAL_ACTIONS,
     INTERNAL_ONLY_ACTION_NAMES,
     KERNEL_AGENT_OWNED_ACTIONS,
-    REQUEST_KIND_TO_OWNED_ACTION,
     ROBUSTNESS_DELEGATE_ONLY_ACTIONS,
-)
-from ..phases.machine_state import (
-    PHASE_KERNEL_AGENT,
-    PHASE_NAMES,
-    is_action_allowed_in_phase,
 )
 from ..specialists.domains import (
     KNOWLEDGE_DOMAIN_TAG_SET,
@@ -1053,7 +1047,6 @@ class PolicyGate:
         kind = str(payload.get("kind", "")).strip()
         if not kind:
             raise PolicyDenied("request missing kind", rule="payload")
-        owned_action = REQUEST_KIND_TO_OWNED_ACTION.get(kind, kind)
         self._validate_gemm_tuning_action(kind, intent_kind="request")
         # R5 — a REQUEST.kind cannot smuggle an external tool either.
         self._validate_tool_whitelist_collision(

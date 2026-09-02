@@ -16,7 +16,6 @@ import pytest
 
 from hyperloom.orchestrator.phases import machine_state as ps
 from hyperloom.orchestrator.state.shared_state import SharedState
-from hyperloom.inference_optimizer.session.paths import make_session_dir
 
 
 def _sweep_state(

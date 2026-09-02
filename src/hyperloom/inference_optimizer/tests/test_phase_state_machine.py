@@ -14,7 +14,6 @@ from hyperloom.orchestrator.phases import machine_state as phase_state
 from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.orchestrator.policy.gate import (
     CORE_STATE_FIELDS,
-    PolicyDenied,
     PolicyGate,
 )
 from hyperloom.orchestrator.state.shared_state import SharedState
@@ -64,10 +63,6 @@ def test_is_action_allowed_in_phase_handles_unknowns():
     assert not phase_state.is_action_allowed_in_phase("baseline", "")
     # Empty action name → deny.
     assert not phase_state.is_action_allowed_in_phase("", "PRELUDE")
-
-
-
-
 
 
 def test_every_reason_an_exit_rule_can_return_is_in_the_vocabulary():
@@ -619,10 +614,6 @@ def _make_role_registry():
     return default_role_registry()
 
 
-
-
-
-
 def test_policy_gate_phase_strict_allows_in_phase_action():
     state = SharedState()
     state.record_phase_transition(
@@ -643,14 +634,6 @@ def test_policy_gate_phase_strict_allows_in_phase_action():
     gate.validate_intent("orchestration", intent)  # no exception
 
 
-
-
-
-
-
-
-
-
 def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
     """A new handler kind cannot arrive silently ungated."""
     from hyperloom.inference_optimizer.protocol.action_surfaces import (
@@ -669,10 +652,6 @@ def test_every_kernel_request_kind_is_gated_or_explicitly_exempt():
         - exempt
     )
     assert ungated == set(), f"request kinds reach no phase gate: {sorted(ungated)}"
-
-
-
-
 
 
 @pytest.fixture

@@ -10,7 +10,6 @@ patch timeline, and enqueues the baseline/roofline internal-analysis tasks.
 from __future__ import annotations
 import logging as _logging
 import math
-import os
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any

@@ -9,7 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from hyperloom.inference_optimizer.protocol.intent import Intent, IntentType
 from hyperloom.inference_optimizer.session import paths
 from hyperloom.orchestrator.bus.resource_lock import ResourceLockManager, SqliteLeaseBackend
 from hyperloom.orchestrator.bus.storage.connection import SqliteConnection
@@ -468,10 +467,6 @@ async def test_dispatched_tracked_enablement_revalidation_bypasses_baseline_sing
 
 
 @pytest.mark.asyncio
-
-
-
-
 @pytest.mark.asyncio
 async def test_dispatched_integrate_patch_with_verdict_passes(tmp_path, monkeypatch):
     sub = _runner_with_policy(tmp_path, monkeypatch)
@@ -684,8 +679,6 @@ async def test_dispatched_internal_framework_agent_passes(tmp_path, monkeypatch)
 
 
 @pytest.mark.asyncio
-
-
 @pytest.mark.asyncio
 async def test_runner_without_policy_skips_dispatch_validation(tmp_path, monkeypatch):
     monkeypatch.setenv(paths.ENV_USER_DATA_PATH, str(tmp_path))
@@ -733,9 +726,3 @@ async def test_killed_running_task_keeps_its_result(tmp_path, monkeypatch):
     assert res.result == {"produced": "work"}
     updated = await sub.tasks.get(task.task_id)
     assert updated.state == "cancelled"
-
-
-
-
-
-

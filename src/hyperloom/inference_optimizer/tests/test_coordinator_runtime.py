@@ -2484,8 +2484,6 @@ async def test_dispatch_audit_logs_task_without_executor(session_dir, caplog):
 
 
 @pytest.mark.asyncio
-
-
 @pytest.mark.asyncio
 async def test_target_reached_routes_through_close_phase(session_dir):
     """A met objective transitions to CLOSE instead of breaking out of the loop.

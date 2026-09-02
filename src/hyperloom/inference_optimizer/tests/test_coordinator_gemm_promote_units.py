@@ -3453,5 +3453,3 @@ class TestForgeGemmE2EApplyGate:
 
         assert result["decision"] == "KEEP"
         assert len(coord.shared_state.optimization_stack) == 1
-
-

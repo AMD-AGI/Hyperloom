@@ -540,7 +540,6 @@ def collect_capability_summary(
         elif geak_cap.get("status") == "not_attempted":
             geak_cap["status"] = "attempted"
 
-
     # Merged explore row carrying the unified explore_search ledger activity.
     explore = _capability_for_action(state, "explore")
     explore["last_validated_gain_pct"] = _to_float(state.get("cumulative_gain_validated"))

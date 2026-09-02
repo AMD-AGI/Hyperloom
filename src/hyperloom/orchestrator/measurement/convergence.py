@@ -161,5 +161,3 @@ def assess_convergence(
         discarded,
         spread_pct=spread,
     )
-
-
