@@ -677,7 +677,7 @@ def parse_eval_results(
     if not result_files:
         return {"accuracy": None, "error": f"no results*.json in {workspace}"}
 
-    latest = sorted(result_files)[-1]
+    latest = max(result_files, key=lambda p: p.stat().st_mtime)
     try:
         data = json.loads(latest.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as exc:

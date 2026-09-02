@@ -241,7 +241,10 @@ class TargetBaselineObjective(_RatioObjective):
         path = Path(self.baseline_dir)
         if not path.exists():
             raise ObjectiveError(f"TargetBaselineObjective: baseline_dir not found: {path}")
-        candidates = sorted(path.rglob("benchmark_report.json"))
+        candidates = sorted(
+            (p for p in path.rglob("benchmark_report.json") if "warmup_round" not in p.parts),
+            key=lambda p: p.stat().st_mtime,
+        )
         if not candidates:
             raise ObjectiveError(f"TargetBaselineObjective: no benchmark_report.json under {path}")
         ref = _read_json(candidates[-1], default={}, require_dict=True)

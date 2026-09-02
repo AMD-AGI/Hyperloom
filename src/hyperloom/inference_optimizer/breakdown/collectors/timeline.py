@@ -19,6 +19,7 @@ from hyperloom.orchestrator.phases.machine_state import (
     is_phase_transition_row as _is_phase_transition_row,
     phase_history_event_name,
 )
+from hyperloom.orchestrator.specialists.domains import SPECIALIST_DOMAINS
 from hyperloom.orchestrator.state.optimization_journal import (
     operation_kind_for,
     proposer_for,
@@ -698,17 +699,7 @@ def _empty_by_specialist_capability() -> dict[str, dict[str, Any]]:
 
 
 # Mirror of the SpecialistDomain.key catalogue (orchestrator/specialists/domains.py),
-# inlined to keep breakdown free of orchestrator deps for offline use. Lags the
-# catalogue: static_recon / enablement / cross_framework_rewrite are not seeded.
-_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = (
-    "serving_specialist",
-    "kernel_switch_specialist",
-    "comm_specialist",
-    "compiler_specialist",
-    "system_specialist",
-    "candidate_discovery_specialist",
-    "research_scout_specialist",
-)
+_SPECIALIST_DOMAIN_KEYS: tuple[str, ...] = tuple(d.key for d in SPECIALIST_DOMAINS)
 
 
 def collect_phase_segments(

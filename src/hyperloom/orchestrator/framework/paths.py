@@ -472,7 +472,11 @@ def resolve_source_file_allowlist() -> tuple[str, ...]:
         tuple[str, ...]: The merged, de-duplicated allowlist roots.
     """
     env = os.environ.get("INFERENCE_OPTIMIZER_FRAMEWORK_SOURCE_ROOTS", "").strip()
-    env_roots = tuple(_normalize_root(p) for p in env.split(":") if p.strip()) if env else ()
+    env_roots = (
+        tuple(_normalize_root(p) for p in env.split(":") if p.strip() and Path(p.strip()).is_absolute())
+        if env
+        else ()
+    )
     return _merge_roots(
         _DEFAULT_SOURCE_ROOTS,
         _discover_installed_package_roots(),

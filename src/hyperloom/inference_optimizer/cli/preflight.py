@@ -375,9 +375,9 @@ def _load_kernel_agent_env_fallback() -> dict[str, Any]:
     """
     candidate = os.environ.get("KERNEL_AGENT_ENV")
     if not candidate:
-        user_data = os.environ.get("USER_DATA_PATH")
+        user_data = (os.environ.get("USER_DATA_PATH") or "").strip()
         if user_data:
-            candidate = str(Path(user_data) / "runtime" / "kernel-agent.env.sh")
+            candidate = str(Path(user_data).expanduser() / "runtime" / "kernel-agent.env.sh")
 
     if os.environ.get("HYPERLOOM_KERNEL_AGENT_ROOT"):
         # Root is set: no bootstrap, but still correct invalid path vars from the
