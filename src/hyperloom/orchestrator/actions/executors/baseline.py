@@ -3397,19 +3397,6 @@ class BaselineExecutor:
             ctx_extra=extra,
         )
         double_run = double_run_requested and lifecycle["eligible"]
-        # Deep-clean any lingering server BEFORE any round boots. Unconditional
-        # (not just double-run): a single-round baseline is the common path
-        # for kernel-phase re-baselining, and it is exactly the server-start
-        # attempt that must not silently OOM against a server a prior
-        # sweep/explore round's timeout left running (setsid'd server
-        # processes escape that round's process-group teardown; see
-        # _grid_runner._kill_stale_servers). Best-effort and idempotent, so
-        # calling it once here up front is safe for both paths.
-        await self._pre_start_cleanup(
-            pid_dir=output_dir,
-            framework=lifecycle["framework"],
-            port=lifecycle["port"],
-        )
         if defer_accuracy_until_after_measure and double_run:
             # Only the lifecycle path can reuse the hot server for a staged
             # accuracy round. A single-round fallback must retain the original
@@ -3612,6 +3599,22 @@ class BaselineExecutor:
         from ._ray_serving import maybe_serving_lease
 
         bench_lease = maybe_serving_lease(num_gpus=_num_gpus_for_config(materialized_config_path))
+
+        # Deep-clean any lingering server right before this round actually
+        # boots -- after every earlier gate that can still bail out without
+        # starting a server (budget, warm-patch failure), so a round that
+        # will not run does not pay for a scan it gets no benefit from.
+        # Unconditional (not just double-run): a single-round baseline is the
+        # common path for kernel-phase re-baselining, and it is exactly the
+        # server-start attempt that must not silently OOM against a server a
+        # prior sweep/explore round's timeout left running (setsid'd server
+        # processes escape that round's process-group teardown; see
+        # _grid_runner._kill_stale_servers). Best-effort and idempotent.
+        await self._pre_start_cleanup(
+            pid_dir=output_dir,
+            framework=lifecycle["framework"],
+            port=lifecycle["port"],
+        )
 
         common = {
             "timeout_sec": timeout_sec,

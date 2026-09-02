@@ -271,6 +271,29 @@ def test_kill_stale_servers_reaps_everything_when_we_have_no_mask(monkeypatch):
     assert kill_calls == [1]
 
 
+def test_kill_stale_servers_skips_sleep_when_nothing_was_killed(monkeypatch):
+    """The KFD-release pause must not be paid on the common case where the
+    /proc scan finds nothing to reap. This function now runs at 4 call sites
+    (was 1) instead of just before every Magpie launch, so paying an
+    unconditional sleep here on the "GPU was already clean" case adds up
+    fast (e.g. conc_sweep's own reap immediately followed by baseline's),
+    per review on AMD-AGI/Hyperloom#1354."""
+    _clear_gpu_mask_envs(monkeypatch)
+    slept: list[int] = []
+
+    monkeypatch.setattr(os, "getpid", lambda: 999)
+    monkeypatch.setattr(os, "getpgrp", lambda: 100)
+    monkeypatch.setattr(os, "listdir", lambda _p: ["1"])
+    cmdlines = {"/proc/1/cmdline": b"python\x00-m\x00something_unrelated\x00"}
+    monkeypatch.setattr("builtins.open", _proc_open_factory(cmdlines, {}, {}))
+    monkeypatch.setattr("glob.glob", lambda pat: [])
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+
+    gr._kill_stale_servers()
+
+    assert slept == []
+
+
 def test_kill_stale_servers_swallows_proc_errors(monkeypatch):
     slept: list[int] = []
 

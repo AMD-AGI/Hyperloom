@@ -979,6 +979,7 @@ def _kill_stale_servers() -> None:
         return any(sig in maps for sig in _ATOM_MAP_SIGNATURES)
 
     killed_atom = False
+    killed_any = False
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
@@ -996,6 +997,7 @@ def _kill_stale_servers() -> None:
             continue
         if not _in_our_gpu_scope(pid):
             continue
+        killed_any = True
         killed_atom = killed_atom or is_atom_server or b"--multiprocessing-fork" in cmdline
         # Kill the whole pgrp so atom children die with the leader.
         try:
@@ -1032,8 +1034,13 @@ def _kill_stale_servers() -> None:
                     # Already removed or held by another process.
                     pass
 
-    # Pause for KFD async VRAM release; atom teardown lags past 2s.
-    time.sleep(8 if killed_atom else 2)
+    # Pause for KFD async VRAM release; atom teardown lags past 2s. Skipped
+    # entirely when nothing was actually killed this call -- this function now
+    # runs at 4 call sites (was 1), so paying it unconditionally on the common
+    # "GPU was already clean" case adds up fast (e.g. conc_sweep's own reap
+    # immediately followed by baseline's).
+    if killed_any:
+        time.sleep(8 if killed_atom else 2)
 
 
 def _prepend_magpie_pythonpath(magpie_dir: str, current_pythonpath: str) -> str:

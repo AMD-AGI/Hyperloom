@@ -2380,6 +2380,44 @@ def test_pre_start_cleanup_failure_does_not_break_double_run(tmp_path, monkeypat
     # No exception propagated past _pre_start_cleanup: that's the assertion.
 
 
+def test_pre_start_cleanup_skipped_when_round_is_not_affordable(tmp_path):
+    """The pre-start cleanup must not pay its cost for a round the budget
+    gate is about to refuse: it now runs right before the round actually
+    boots (after the affordability check and the Ray lease construction),
+    not up front where an unaffordable round would still have paid for a
+    scan it gets no benefit from (review on AMD-AGI/Hyperloom#1354)."""
+    base = tmp_path / "base.yaml"
+    _write_yaml(base, framework="vllm")
+    output_dir = tmp_path / "ws"
+
+    cleanup_calls: list[dict] = []
+
+    async def fake_cleanup(**kwargs):
+        cleanup_calls.append(kwargs)
+
+    executor = _executor(base, tmp_path)
+    ctx = _make_ctx(
+        {
+            "output_dir": str(output_dir),
+            "timeout_sec": 10,
+            "gpu_type": "mi300x",
+        }
+    )
+
+    with (
+        patch.object(type(executor), "_pre_start_cleanup", side_effect=fake_cleanup),
+        patch.object(
+            type(executor),
+            "_round_affordable_before_ignition",
+            return_value=(False, {"expected_cost_sec": 999.0, "affordable_sec": 0.0, "bound": "session"}),
+        ),
+    ):
+        result = _run(executor(ctx))
+
+    assert result["error_class"] == SESSION_TIME_EXHAUSTED_CLASS
+    assert cleanup_calls == []
+
+
 @pytest.mark.parametrize("baseline_double_run", [True, False])
 def test_pre_start_cleanup_called_once_regardless_of_double_run(tmp_path, baseline_double_run):
     """The pre-start deep clean must run exactly once before the round(s)
